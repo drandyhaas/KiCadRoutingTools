@@ -2958,7 +2958,15 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
                                       default=0.0), 4),
             # Past the outline itself, castellated pads excepted: the number
             # the body path's copper conjunct grades (0.0 = on the board).
-            'outside_mm': round(_copper_outside_mm(ctx, ref), 4),
+            # None when a finding came from the sampled (non-rectangular)
+            # path, which carries no gap -- the amount is unknown, not zero.
+            'outside_mm': (None if any(
+                str(f['pad_ref']).startswith(prefix) and f.get('gap_mm') is None
+                for f in copper['findings'])
+                else round(_copper_outside_mm(ctx, ref), 4)),
+            # The pads this grade actually walked: the declared connectors'
+            # only, never the whole board's.
+            'measured_pads': copper['measured_pads'],
             'findings': findings, 'unmeasured': unmeasured,
             'rules_unmeasured': copper['rules_unmeasured'],
             'disposition': copper_disposition,

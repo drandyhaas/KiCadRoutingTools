@@ -134,6 +134,11 @@ class BodyCurrency(_Boards):
                     # Issue acceptance 3: the edge_seating row carries it.
                     rows = [e for e in r.edge_seating if e['ref'] == 'USB1']
                     self.assertEqual(len(rows), 1)
+                    # Assert the key is THERE before reading it: indexing a
+                    # missing key fails as an ERROR, which reads as a crash
+                    # rather than as the enrichment being gone.
+                    self.assertIn('overhang_mm', rows[0])
+                    self.assertIn('overhang_basis', rows[0])
                     self.assertAlmostEqual(rows[0]['overhang_mm'],
                                            ev['overhang_mm'], places=6)
                     self.assertEqual(rows[0]['overhang_basis'], 'body:F.Fab')
@@ -523,6 +528,246 @@ class Round2(_Boards):
         self.assertEqual(len(usb1), 1, res.get('notes'))
         self.assertAlmostEqual(usb1[0]['new_x'], 116.2, places=3)
         self.assertAlmostEqual(usb1[0]['new_y'], 98.25, places=3)
+
+
+class Round3(_Boards):
+    """The round-3 review: the seat predicate's copper, and the branches its
+    own mutations showed nothing pinned."""
+
+    def _state(self, path):
+        return pose_score.make_state(parse_kicad_pcb(str(path)), str(path),
+                                     clearance=.25, board_edge_clearance=.55)
+
+    def test_seat_refuses_a_pose_whose_pad_copper_is_off_the_board(self):
+        """The band reads the body, which carries no copper, so the seat has
+        to: otherwise it accepts a pose `rule_edge_connector` refuses."""
+        path = self.synthetic(
+            'seat_copper.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))', at='1 10 0',
+            pads='(pad "1" smd rect (at -1.5 0) (size .5 .5) (layers "F.Cu"))\n'
+                 '    (pad "2" smd rect (at .5 0) (size .5 .5) (layers "F.Cu"))')
+        st = self._state(path)
+        part = st.parts['J1']
+        reasons = []
+        # Body flush with the west edge (band 0..0.5 accepts it), pad copper
+        # 0.75 mm past that edge.
+        self.assertFalse(seeder.edge_seat_ok(st, part, 1.0, 10.0, 'west',
+                                             0.0, 0.5, reasons))
+        self.assertTrue([r for r in reasons if 'pad copper' in r], reasons)
+        # 1 mm further in, every pad is on the board and the seat holds.
+        self.assertTrue(seeder.edge_seat_ok(st, part, 2.0, 10.0, 'west',
+                                            0.0, 0.5))
+        # ... and the grade agrees with the seat at that pose.
+        out = self.root / 'seat_copper_ok.kicad_pcb'
+        write_placed_output(str(path), str(out), [
+            {'reference': 'J1', 'new_x': 2.0, 'new_y': 10.0,
+             'new_rotation': part.rot}])
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 0.5}),
+            parse_kicad_pcb(str(out)), str(out),
+            clearance=.25, board_edge_clearance=.55)
+        self.assertFalse([v for v in r.violations if v.ref == 'J1'],
+                         [v.message for v in r.violations])
+
+    def test_the_marker_check_is_taken_at_the_footprint_rotation(self):
+        pads = ('(pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))\n'
+                '    (pad "2" smd rect (at 4 0) (size .5 .5) (layers "F.Cu"))')
+        marker = ('(fp_poly (pts (xy -.6 -.6) (xy 0 -.6) (xy -.6 0)) '
+                  '(layer "F.Fab"))')
+        body = ('(fp_poly (pts (xy -1 -1) (xy 6 -1) (xy -1 6)) '
+                '(layer "F.Fab"))')
+        for rot in (0, 90, 180, 270):
+            for drawing, measured in ((marker, False), (body, True)):
+                path = self.synthetic(f'rot{rot}_{measured}.kicad_pcb',
+                                      drawing, at=f'8 9 {rot}', pads=pads)
+                row = ConnectorGeometry(parse_kicad_pcb(str(path)),
+                                        str(path)).measure('J1', 'west')
+                self.assertEqual(row['body_measured'], measured, (rot, drawing))
+
+    def test_pads_that_carry_no_copper_do_not_decide_the_marker_check(self):
+        # An NPTH hole outside the body, a copper pad inside it: the copper
+        # pad is what the envelope must enclose.
+        path = self.synthetic(
+            'npth.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))', at='5 10 0',
+            pads='(pad "" np_thru_hole circle (at 6 0) (size 1 1) (drill 1) '
+                 '(layers "F&B.Cu" "*.Mask"))\n'
+                 '    (pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))')
+        row = ConnectorGeometry(parse_kicad_pcb(str(path)),
+                                str(path)).measure('J1', 'west')
+        self.assertTrue(row['body_measured'], row.get('body_unmeasured_reason'))
+        # A part with no pads at all is not checked.
+        path = self.synthetic(
+            'padless.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))', at='5 10 0',
+            pads='')
+        self.assertTrue(ConnectorGeometry(parse_kicad_pcb(str(path)), str(path))
+                        .measure('J1', 'west')['body_measured'])
+
+    def test_the_copper_conjunct_follows_the_body_path(self):
+        """On the legacy reading the band still carries the pad box, so the
+        conjunct stays off there and that path grades as it did before #961."""
+        path = self.synthetic(
+            'copper_legacy.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.CrtYd"))', at='1 10 0',
+            pads='(pad "1" smd rect (at -1.5 0) (size .5 .5) (layers "F.Cu"))')
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 5.0}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        self.assertTrue(_evidence(r, 'J1')['overhang_basis'].startswith(
+            'legacy_occupancy@'))
+        self.assertAlmostEqual(
+            _evidence(r, 'J1')['pad_copper_edge']['outside_mm'], 0.75, places=4)
+        self.assertFalse([v for v in r.violations
+                          if v.ref == 'J1' and 'pad copper leaves' in v.message])
+
+    def test_two_parts_on_one_board_get_their_own_verdicts(self):
+        path = self.root / 'two_parts.kicad_pcb'
+        pads = ('(pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))\n'
+                '    (pad "2" smd rect (at 4 0) (size .5 .5) (layers "F.Cu"))')
+        path.write_text(
+            '(kicad_pcb (version 20241229) (generator "t961")\n'
+            '  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 8 9 0)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_poly (pts (xy -.6 -.6) (xy 0 -.6) (xy -.6 0)) '
+            '(layer "F.Fab"))\n'
+            f'    {pads})\n'
+            '  (footprint "t" (layer "F.Cu") (at 8 15 0)\n'
+            '    (property "Reference" "J2")\n'
+            '    (fp_poly (pts (xy -1 -1) (xy 6 -1) (xy -1 6)) (layer "F.Fab"))\n'
+            f'    {pads}))\n', encoding='utf-8')
+        geo = ConnectorGeometry(parse_kicad_pcb(str(path)), str(path))
+        self.assertFalse(geo.measure('J1', 'west')['body_measured'])
+        self.assertTrue(geo.measure('J2', 'west')['body_measured'])
+
+    def test_the_enclosure_verdict_is_per_board(self):
+        pads = ('(pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))\n'
+                '    (pad "2" smd rect (at 4 0) (size .5 .5) (layers "F.Cu"))')
+        marker = self.synthetic(
+            'cache_marker.kicad_pcb',
+            '(fp_poly (pts (xy -.6 -.6) (xy 0 -.6) (xy -.6 0)) (layer "F.Fab"))',
+            at='8 9 0', pads=pads)
+        body = self.synthetic(
+            'cache_body.kicad_pcb',
+            '(fp_poly (pts (xy -1 -1) (xy 6 -1) (xy -1 6)) (layer "F.Fab"))',
+            at='8 9 0', pads=pads)
+        for first, second in ((marker, body), (body, marker)):
+            a = ConnectorGeometry(parse_kicad_pcb(str(first)), str(first))
+            b = ConnectorGeometry(parse_kicad_pcb(str(second)), str(second))
+            self.assertEqual(a.measure('J1', 'west')['body_measured'],
+                             first is body)
+            self.assertEqual(b.measure('J1', 'west')['body_measured'],
+                             second is body)
+
+    def test_evidence_reaches_the_json_and_keeps_the_row_it_annotates(self):
+        path = self.usb1_at(-1.45)
+        intent = floorplan.intent_from_dict({
+            'schema': floorplan.SCHEMA_VERSION, 'kind': floorplan.KIND,
+            'units': 'mm', 'edge_connectors': [
+                {'ref': 'USB1', 'edge': 'west',
+                 'overhang_mm': {'min': 0.0, 'max': 2.0},
+                 'center_on_edge': {'tolerance_mm': 0.5}}]})
+        r = floorplan.grade(intent, parse_kicad_pcb(str(path)), str(path),
+                            clearance=.25, board_edge_clearance=.55)
+        doc = floorplan.to_json(r)
+        self.assertEqual([e['ref'] for e in doc['edge_connector_evidence']],
+                         ['USB1'])
+        row = [e for e in r.edge_seating if e['ref'] == 'USB1'][0]
+        # The along-edge row keeps its own keys AND gains the overhang ones.
+        self.assertTrue(row['declared'])
+        self.assertIn('along_edge_offset_pct', row)
+        self.assertIn('span_mm', row)
+        self.assertAlmostEqual(row['overhang_mm'], 1.45, places=4)
+        self.assertAlmostEqual(row['effective_margin_mm'], 0.55, places=6)
+
+    def test_an_entry_with_no_edge_is_unmeasured(self):
+        path = self.usb1_at(-1.45)
+        r = floorplan.grade(
+            _intent(ref='USB1', overhang_mm={'min': 0.0, 'max': 2.0}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        ev = _evidence(r)
+        self.assertTrue(ev['overhang_basis'].startswith('legacy_occupancy@'))
+        self.assertIn('no declared mating edge', ev['body_unmeasured_reason'])
+
+    def test_copper_dispositions_and_the_sampled_outline(self):
+        # No copper pads at all: nothing to measure, and it says so.
+        path = self.synthetic(
+            'npth_only.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))', at='5 10 0',
+            pads='(pad "" np_thru_hole circle (at 0 0) (size 1 1) (drill 1) '
+                 '(layers "F&B.Cu" "*.Mask"))')
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 5.0}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        self.assertEqual(_evidence(r, 'J1')['pad_copper_edge']['disposition'],
+                         'no copper pads measured')
+        # A sampled (non-rectangular) outline: the copper amount is UNKNOWN,
+        # never reported as zero, and the body is unmeasured there anyway.
+        path = self.root / 'sampled.kicad_pcb'
+        path.write_text(
+            '(kicad_pcb (version 20241229) (generator "t961")\n'
+            '  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))\n'
+            '  (gr_circle (center 10 15) (end 11 15) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 0.1 10 0)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))\n'
+            '    (pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))))\n',
+            encoding='utf-8')
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 5.0}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        copper = _evidence(r, 'J1')['pad_copper_edge']
+        # The sampler still FINDS the pad, so the disposition is a fail; what
+        # it cannot say is by how much, and that is reported as unknown
+        # rather than as zero.
+        self.assertEqual(copper['disposition'], 'fail')
+        self.assertIsNone(copper['outside_mm'])
+        self.assertTrue(copper['unmeasured'])
+        self.assertTrue(_evidence(r, 'J1')['overhang_basis'].startswith(
+            'legacy_occupancy@'))
+
+    def test_only_the_declared_connectors_pads_are_walked(self):
+        path = self.usb1_at(0.0)
+        pcb = parse_kicad_pcb(str(path))
+        from placement.legality import _pad_has_no_copper
+        mine = sum(1 for p in pcb.footprints['USB1'].pads
+                   if not _pad_has_no_copper(p))
+        r = floorplan.grade(
+            _intent(ref='USB1', edge='west', overhang_mm={'min': 0.0, 'max': 2.0}),
+            pcb, str(path), clearance=.25, board_edge_clearance=.55)
+        walked = _evidence(r)['pad_copper_edge']['measured_pads']
+        self.assertLessEqual(walked, mine)
+        self.assertLess(walked, sum(
+            1 for fp in pcb.footprints.values() for p in fp.pads
+            if not _pad_has_no_copper(p)))
+
+    def test_per_part_minimum_gap_is_the_smallest_of_its_pads(self):
+        from placement.legality import grade_pad_edge_clearance
+        path = self.synthetic(
+            'gaps.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))', at='5 10 0',
+            pads='(pad "1" smd rect (at -2 0) (size .5 .5) (layers "F.Cu"))\n'
+                 '    (pad "2" smd rect (at 4 0) (size .5 .5) (layers "F.Cu"))')
+        graded = grade_pad_edge_clearance(parse_kicad_pcb(str(path)), 0.25,
+                                          str(path))
+        # pad 1 sits 2.75 mm from the west edge, pad 2 sits 8.75 mm from it.
+        self.assertAlmostEqual(graded['minimum_gap_by_ref_mm']['J1'], 2.75,
+                               places=4)
+
+    def test_the_rung_leaves_an_unmeasured_body_where_the_walk_put_it(self):
+        path = self.synthetic(
+            'rung_courtyard.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.CrtYd"))', at='1 10 0')
+        st = self._state(path)
+        x, y, ok = seeder._body_band_correct(st, 'J1', 'west', 1.0, 10.0,
+                                             0.3, (0.25, 0.35))
+        self.assertTrue(ok)
+        self.assertEqual((x, y), (1.0, 10.0))
 
 
 class LegacyFallback(_Boards):

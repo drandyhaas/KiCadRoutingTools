@@ -48,6 +48,7 @@ TARGETS = {
     'bc': os.path.join(REPO, 'py_tools', 'board_context.py'),
     'sd': os.path.join(REPO, 'py_placer', 'placement', 'seeder.py'),
     'cg': os.path.join(REPO, 'py_placer', 'placement', 'connector_geometry.py'),
+    'lg': os.path.join(REPO, 'py_placer', 'placement', 'legality.py'),
 }
 
 T961 = 'tests/test_961_body_overhang.py'
@@ -233,9 +234,9 @@ ROWS = [
      "                band, _basis, _body = amt, 'legacy', {}",
      (T961,), KILLED),
     ('seat-band-reads-the-occupancy', 'sd',
-     "    amt, _basis, _body = band_amount(\n"
-     "        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,\n"
-     "        amt, state.edge_gate.margin, pose=(x, y, part.rot))",
+     "    amt, _basis, _body = band_amount(geometry, part.ref, edge, amt,\n"
+     "                                     state.edge_gate.margin,\n"
+     "                                     pose=(x, y, part.rot))",
      "    _body = {}",
      (T961,), KILLED),
     ('second-rung-deleted', 'sd',
@@ -258,6 +259,55 @@ ROWS = [
     ('copper-gap-board-wide', 'fp',
      "    gap = (copper.get('minimum_gap_by_ref_mm') or {}).get(ref)",
      "    gap = copper.get('minimum_gap_mm')",
+     (T961,), KILLED),
+    # Round 3 review: the seat predicate's copper, the arc guard nothing
+    # pinned, and the evidence/marker branches its own battery reached.
+    ('poly-arc-measured-as-chord', 'cg',
+     "                if re.search(r'\\(arc\\b', item):",
+     "                if False:",
+     (T961,), KILLED),
+    ('seat-ignores-pad-copper', 'sd',
+     "        off = pad_copper_outside(geometry, zero, part.ref, (x, y, part.rot))",
+     "        off = 0.0",
+     (T961,), KILLED),
+    ('copper-conjunct-not-body-scoped', 'fp',
+     "        copper_out = (_copper_outside_mm(ctx, ref)\n"
+     "                      if body.get('body_measured') else 0.0)",
+     "        copper_out = _copper_outside_mm(ctx, ref)",
+     (T961,), KILLED),
+    ('marker-ignores-rotation', 'cg',
+     "                rot = math.radians(fp.rotation or 0.0)",
+     "                rot = 0.0",
+     (T961,), KILLED),
+    ('marker-counts-npth-pads', 'cg',
+     "            pads = ([p for p in (fp.pads or ())\n"
+     "                     if getattr(p, 'pad_type', '') != 'np_thru_hole']\n"
+     "                    or list(fp.pads or ()))",
+     "            pads = list(fp.pads or ())",
+     (T961,), KILLED),
+    ('marker-verdict-shared-between-parts', 'cg',
+     "        hit = self._encloses.get(ref)",
+     "        hit = next(iter(self._encloses.values()), None)",
+     (T961,), KILLED),
+    ('evidence-missing-from-json', 'fp',
+     "        'edge_connector_evidence': r.edge_connector_evidence,",
+     "        'edge_connector_evidence': [],",
+     (T961,), KILLED),
+    ('evidence-margin-faked', 'fp',
+     "        'effective_margin_mm': ctx.gate.margin,",
+     "        'effective_margin_mm': 0.0,",
+     (T961,), KILLED),
+    ('copper-nocopper-reads-pass', 'fp',
+     "    elif gap is None:\n        copper_disposition = 'no copper pads measured'",
+     "    elif gap is None:\n        copper_disposition = 'pass'",
+     (T961,), KILLED),
+    ('copper-walks-the-whole-board', 'fp',
+     "            subset = copy(self.pcb)\n            subset.footprints = {",
+     "            subset = self.pcb\n            _unused = {",
+     (T961,), KILLED),
+    ('per-part-minimum-last-wins', 'lg',
+     "            minimum_by_ref[ref] = min(minimum_by_ref.get(ref, gap), gap)",
+     "            minimum_by_ref[ref] = gap",
      (T961,), KILLED),
     # Round 3: five branches round 2 covered with a test but no row.
     ('fab-falls-back-to-silk', 'cg',

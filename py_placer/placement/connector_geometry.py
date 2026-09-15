@@ -230,6 +230,7 @@ class ConnectorGeometry:
         self.source = _source(path, self.bounds)
         self.boundary_reason = self.source.boundary_reason
         self._encloses = {}
+        self._pad_boxes = {}
 
     def _encloses_own_pads(self, ref, fp, points):
         """Does the envelope enclose the centroid of the part's own pads?
@@ -314,6 +315,55 @@ class ConnectorGeometry:
                    # whenever the body crosses no second edge.
                    body_outside_mm=max(0.0, signed) + sum(others.values()))
         return row
+
+
+def pad_boxes(geometry, ref):
+    """`(lx, ly, half_x, half_y, tilt)` per copper pad of `ref`, in the
+    footprint's LOCAL frame, so a trial pose only adds its own rotation.
+
+    NPTH pads carry no copper and castellated pads sit on the outline by
+    design; both are skipped. Pose-independent, so it is built once per part.
+    """
+    boxes = geometry._pad_boxes.get(ref)
+    if boxes is None:
+        from .legality import _pad_has_no_copper
+        fp = geometry.pcb.footprints.get(ref)
+        base = (fp.rotation or 0.0) if fp is not None else 0.0
+        boxes = []
+        for pad in (getattr(fp, 'pads', None) or ()):
+            if _pad_has_no_copper(pad) or getattr(pad, 'castellated', False):
+                continue
+            tilt = pad.rect_rotation or 0.0
+            if tilt == 0.0:
+                # The broad phase bakes near-cardinal angles into size_x/y;
+                # recover the rest, exactly as `grade_pad_edge_clearance`.
+                tilt = ((getattr(pad, 'rotation', 0.0) or 0.0) + 45) % 90 - 45
+            boxes.append((pad.local_x, pad.local_y, pad.size_x / 2.0,
+                          pad.size_y / 2.0, tilt - base))
+        geometry._pad_boxes[ref] = boxes
+    return boxes
+
+
+def pad_copper_outside(geometry, gate, ref, pose):
+    """How far `ref`'s pad copper leaves `gate`'s outline at `pose`, 0.0 when
+    none of it does.
+
+    The bounding box of the rotated pad rectangle, so it never UNDER-states a
+    rounded, oval or roundrect pad (their copper is inside that box). Pass a
+    zero-margin gate for containment; a margin gate would be asking the
+    edge-clearance question, which belongs to `check_drc`.
+    """
+    x, y, rot = pose
+    c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+    worst = 0.0
+    for lx, ly, hx, hy, tilt in pad_boxes(geometry, ref):
+        angle = math.radians(tilt + rot)
+        ca, sa = abs(math.cos(angle)), abs(math.sin(angle))
+        ex, ey = hx * ca + hy * sa, hx * sa + hy * ca
+        px, py = x + c * lx + s * ly, y - s * lx + c * ly
+        worst = max(worst, gate.rect_outside_amount(
+            (px - ex, py - ey, px + ex, py + ey)))
+    return worst
 
 
 def geometry_for(holder, pcb_data, pcb_file):

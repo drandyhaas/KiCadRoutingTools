@@ -1460,11 +1460,33 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     # they did before (agreeing up to this check's own +/-0.02 tolerance,
     # which the rule does not share, exactly as upstream).
     from .connector_geometry import band_amount, geometry_for
-    amt, _basis, _body = band_amount(
-        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
-        amt, state.edge_gate.margin, pose=(x, y, part.rot))
+    geometry = geometry_for(state, state.pcb_data, state.pcb_file)
+    amt, _basis, _body = band_amount(geometry, part.ref, edge, amt,
+                                     state.edge_gate.margin,
+                                     pose=(x, y, part.rot))
     if not ((lo - 0.02) <= amt <= (hi + 0.02)):
         return False
+    if _body.get('body_measured'):
+        # The band used to be read off the COURTYARD, which on a connector
+        # that draws none is the pad box itself, so it carried any pad copper
+        # past the outline. The drawn body does not, and the rule now names
+        # that copper (#961 round 3) -- so this predicate must see it too, or
+        # the seat accepts a pose the grade refuses, which is exactly what
+        # the pad conjunct below exists to prevent. Measured before this:
+        # 0.20-0.40mm of copper off the board on three declared bands.
+        # CONTAINMENT only, at zero margin: the edge-clearance floor is
+        # check_drc's question, not this predicate's.
+        from .connector_geometry import pad_copper_outside
+        from .legality import BoardOutlineGate
+        zero = getattr(state, '_zero_edge_gate', None)
+        if zero is None:
+            zero = BoardOutlineGate(state.pcb_data.board_info, 0.0)
+            state._zero_edge_gate = zero
+        off = pad_copper_outside(geometry, zero, part.ref, (x, y, part.rot))
+        if off > 1e-9:
+            if reasons is not None:
+                reasons.append(f'pad copper {off:.3f}mm past the outline')
+            return False
     _blockers = state.keepout_blockers(part.ref, (r, tht))
     if _blockers:
         if reasons is not None:

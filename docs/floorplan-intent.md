@@ -314,7 +314,13 @@ edge, it is exactly that edge's overhang.
 
 When no body can be measured, the band is graded exactly as before, on the
 occupancy reading. Unmeasurable cases include a courtyard-only part, an arc
-in the Fab drawing, a non-rectangular outline, or an entry with no `edge`.
+in the Fab drawing, a non-rectangular outline, an entry with no `edge`, and a
+drawn envelope that does not enclose the centroid of its own pads (a pin-1
+marker is not a body). **The copper rule above follows the body**: on the
+legacy reading the band still carries the pad box itself, so identical
+geometry can be graded two ways — a violation when the library drew a body,
+and the old band arithmetic when it did not. That is deliberate: the legacy
+path must keep grading exactly as it did before #961.
 Nothing is withheld or abstained, and the basis says which reading was used.
 The seat conjunct's "no overhang" gate, the nearest-edge identity, the class
 setback defaults and the `connector_affinity` warning are **unchanged**. The
