@@ -213,7 +213,75 @@ PAGES_WALK_PROBE = int(os.environ.get('PLAN_PAGES_WALK_PROBE', '0') or 0)   # N 
 # the model-feasible plan nearest it) or 'solve' (the recorded loop's FREE
 # first solve, verified: the walk as a REFINEMENT of the big solve's plan,
 # re-keyed there, every step verified by the judge)
-PAGES_WALK_FROM = os.environ.get('PLAN_PAGES_WALK_FROM', 'seed')
+PAGES_WALK_FROM = os.environ.get('PLAN_PAGES_WALK_FROM', 'seed')   # seed | solve | damped (the loop's plan, walked after it)
+# PLAN_PAGES_WALK_FALLBACK=1 (2026-09-15, session 12): the walk (from the
+# seed or the solve) AND the damped loop both run, the judge keeps the
+# better plan. The harness: the walk from the solve wins the crossing-heavy
+# cases (reversed_k28 83 -> 54) and opens reversed_k15 (26/0 -> 18/2, the
+# walk accepted nothing and shipped the raw first solve); the walk from the
+# damped plan ships 0 open and finds none of those wins (341 against 298).
+PAGES_WALK_FALLBACK = int(os.environ.get('PLAN_PAGES_WALK_FALLBACK', '0') or 0)
+# PLAN_PAGES_WALK_RATE=1 (2026-09-15, session 12; THE PLAN's item 2): the
+# walk's PROPOSALS are solved in the rate's units (VIA_MM, with a tooth's
+# wrap round the source box priced) while the reference solve keeps the
+# run's own units -- the rate in the one big solve displaces (jpR/jcR),
+# the walk moves at most r ends. 0 = the run's units throughout.
+PAGES_WALK_RATE = int(os.environ.get('PLAN_PAGES_WALK_RATE', '0') or 0)
+# SRC_CLIMB_END_WALK=1 (2026-09-15, session 12): the end-of-face climbs
+# (fanout_from_plan SRC_CLIMB_END) enter ONLY the walk's proposal solves,
+# never the reference solve. In the one big solve they are just more
+# candidates for a CP-SAT that does not converge at DET 40 (K28: 186 ->
+# 234 tooth candidates, the feasible point obj 727 -> 737, the braid's
+# count 123 -> 133, routed 34 -> 40 -- the s7 climb finding again); a
+# walk proposal that takes one is verified by the judge before it lands.
+# =2: every solve EXCEPT the first big one of a choose() call -- the damped
+# loop's re-solves (the swimmers freed, their berths barred) see them too,
+# where a braid swimmer's tooth can move instead of its berth.
+PAGES_END_WALK = int(os.environ.get('SRC_CLIMB_END_WALK', '0') or 0)
+# PLAN_PAGES_MENU=k / PLAN_PAGES_MENU_TOP=K (2026-09-15, session 12; Andy:
+# "pre-filter down the likely best moves to a reasonable-sized and smart
+# set, to let the solver reach the best solution within budget"): the
+# solve's MENUS trimmed before the model is built -- per net, at most k
+# candidates per (face, layer) class, the cheapest by the objective's own
+# price, then at most K overall; the seed's own choice, a fixed / held /
+# trust-reference move, the tooth as it stands and the end-of-face climbs
+# are always kept. K51 today: 838 berths (~17 per net over 8 classes, the
+# B dog-bone classes 3-5 deep where the F classes are 2), 40706
+# exclusions, and the big solve stops FEASIBLE with a 61% gap at DET 40.
+# 0 = the whole menu, byte-identical.
+PAGES_MENU = int(os.environ.get('PLAN_PAGES_MENU', '0') or 0)
+PAGES_MENU_TOP = int(os.environ.get('PLAN_PAGES_MENU_TOP', '0') or 0)
+# PLAN_PAGES_MENU_STAGE=1: the pre-filtered menu is a FIRST STAGE -- its
+# solve (small, converging) becomes the solution HINT of the full-menu
+# solve, in place of the greedy seed; the full solve then improves from a
+# good point instead of the greedy's. The trimmed menu alone risks cutting
+# the candidate the optimum needs; the two stages keep the whole menu.
+PAGES_MENU_STAGE = int(os.environ.get('PLAN_PAGES_MENU_STAGE', '0') or 0)
+# PLAN_PAGES_MENU_PORTFOLIO=1: the trimmed-menu solve AND the full-menu
+# solve at iteration 0, the JUDGE (the braid's count) picks -- the s9
+# finding is that the model's better objective is not the copper's
+# (more solve time gave a worse route at K41), so a pre-filtered menu is
+# a cheap second candidate plan for the judge, not a replacement.
+PAGES_MENU_PORTFOLIO = int(os.environ.get('PLAN_PAGES_MENU_PORTFOLIO', '0') or 0)
+# PLAN_PAGES_SEEDS=n (2026-09-15, session 12): the first solve n times under
+# different CP-SAT random seeds, every plan verified, the judge keeps the
+# best. The full K28 model at DET 40 stops at obj 727.2 in most runs and
+# 729.7 in some (the workers share solutions on the wall clock), and the
+# 729.7 plan is judged 118.6 against 122.5 and routes 32 against 34: the
+# feasible point the solver happens to stop at is worth as much as the
+# menu, so ask for several and let the judge choose. 0/1 = one solve.
+PAGES_SEEDS = int(os.environ.get('PLAN_PAGES_SEEDS', '0') or 0)
+# PLAN_PAGES_GROUP=m (2026-09-15, session 12): the GROUP end-climb proposal
+# after the damped loop -- for each destination side face and page, the
+# outermost k (k <= m) berths' nets take the k end rows of the launch
+# face in berth order (the outermost berth the outermost row), their
+# climbs enumerated with the group's own teeth removed
+# (fanout_from_plan.group_end_climbs), the composite plan verified ONCE
+# and kept if the judge prefers it. The human's move (ten nets launched
+# north on B in the order of their north-face berths); a single end
+# climb never pays because its page-mates east of it still cross it
+# (cew5x: SA15 climbed and still swam). 0 = off.
+PAGES_GROUP = int(os.environ.get('PLAN_PAGES_GROUP', '0') or 0)
 # PLAN_PAGES_PORTFOLIO=1 (2026-09-15): the FIRST solve of a plan is run under
 # BOTH objectives -- the greedy's units and the rate (VIA_MM, with the source
 # wrap) -- and the JUDGE (pf_key: the braid's count + its planned length)
@@ -686,7 +754,97 @@ def _spearman(xs, ys):
     return num / den if den else float('nan')
 
 
-def _walk(st, board, log, fixed, learned, src_free, seed):
+def _group_climb(st, board, log, best):
+    """PLAN_PAGES_GROUP: see the flag. `best` = (key, dst, src, model,
+    swim, bp) as choose keeps it; returns (best, report lines)."""
+    import fanout_from_plan as F
+    from escape_moves import DIRS, LAYERS
+    rep = []
+    names = [n for n in st['launch'] if st['dmenu'].get(n)]
+    key0, dst, src, model, swim, bp = best
+    dbox = st['dgrid'].bbox
+    fr = Frame({n: st['launch'][n] for n in names}, dbox)
+    sg = st['sgrid']
+    x0, y0, x1, y1 = sg.bbox
+    hx, hy = sg.pitch_x / 2.0, sg.pitch_y / 2.0
+
+    def face_of(pt):
+        d = {'left': abs(pt[0] - (x0 - hx)), 'right': abs(pt[0] - (x1 + hx)),
+             'up': abs(pt[1] - (y0 - hy)), 'down': abs(pt[1] - (y1 + hy))}
+        return min(d, key=d.get)
+    cnt = {}
+    for n in names:
+        cnt[face_of(st['launch'][n])] = cnt.get(face_of(st['launch'][n]), 0) + 1
+    face = max(cnt, key=cnt.get)
+    ax = 1 if face in ('left', 'right') else 0
+    # rows already taken on the launch face: the standing launches, plus
+    # every accepted group's rows (two teeth cannot share one exit point,
+    # whatever their layers -- the smoke's up/F and up/B groups were both
+    # handed rows 57.43-58.73 and the engine degraded half of them)
+    taken_rows = {round(st['launch'][n][ax], 2) for n in names if face_of(st['launch'][n]) == face}
+    tried = 0
+    for dface in [d for d in DIRS if DIRS[d][ax] != 0]:
+        end = 'lo' if DIRS[dface][ax] < 0 else 'hi'
+        for page in LAYERS:
+            members = [n for n in names if n in dst and dst[n].direction == dface
+                       and (bp.get(n, {}).get('page') or dst[n].layer) == page]
+            if len(members) < 2:
+                continue
+            members.sort(key=lambda n: -abs(fr.key(dst[n])))      # outermost first
+            cands = F.group_end_climbs(st, members[:2 * PAGES_GROUP], face, end)
+            rep.append(f'  pages-first: group climb: {dface}/{page[0]} berths outermost first '
+                       + ' '.join(f'{n}:{len(cands.get(n, []))}' for n in members[:2 * PAGES_GROUP]))
+            # the outermost members THAT HAVE a climb (a member without one
+            # keeps its tooth; the judge says whether the rest still pay)
+            climbers = [n for n in members if cands.get(n)]
+            m_max = min(len(climbers), PAGES_GROUP)
+            for m in range(m_max, 1, -1):
+                group = climbers[:m]
+                taken, assigned = set(taken_rows), {}
+                for n in group:
+                    pick = None
+                    for mv in reversed(cands.get(n, [])):        # farthest row first for the outermost
+                        r = round(mv.exit_pt[ax], 2)
+                        if r not in taken:
+                            pick = mv
+                            break
+                    if pick is None:
+                        break
+                    taken.add(round(pick.exit_pt[ax], 2))
+                    assigned[n] = pick
+                if len(assigned) < m:
+                    continue
+                tried += 1
+                src2 = dict(src)
+                src2.update(assigned)
+                swim2, bp2, cost2 = verify(st, board, names, dst, src2)
+                key2 = F.pf_key(dst, bp2, cost2, model.get('vias'))
+                better = F.pf_better(key2, key0)
+                rep.append(f'  pages-first: group climb: {dface}/{page[0]} outermost {m} {group} -> {face} rows '
+                           f'{[round(assigned[n].exit_pt[ax], 2) for n in group]}; the braid swims {len(swim2)}'
+                           + (f', count {cost2:.0f}' if cost2 is not None else '')
+                           + f'; key {key2} vs {key0}: ' + ('ACCEPTED' if better else 'rejected'))
+                if better:
+                    key0, src, swim, bp = key2, src2, swim2, bp2
+                    model = dict(model, count=cost2)
+                    taken_rows |= {round(assigned[n].exit_pt[ax], 2) for n in group}
+                    break
+    if not tried:
+        rep.append('  pages-first: group climb: no group with climbs for every member')
+    return (key0, dst, src, model, swim, bp), rep
+
+
+def _mv_tag(n, k, dst, src):
+    """A moved end in the walk's log, with WHERE it went: face/layer, `^` a
+    climb, `*` an end-of-face climb (SRC_CLIMB_END)."""
+    m = dst.get(n) if k == 'd' else src.get(n)
+    if m is None:
+        return f'{n}:{k}'
+    return (f'{n}:{k}>{m.direction[0]}{m.layer[0]}'
+            + ('*' if getattr(m, 'end_climb', False) else ('^' if getattr(m, 'climb', 0) else '')))
+
+
+def _walk(st, board, log, fixed, learned, src_free, seed, ref=None):
     """THE PLAN item 3: the trust-region walk (PLAN_PAGES_WALK), after the
     solve review of 2026-09-15: the reference is the seed COMPLETED by a
     radius-0 solve (its objective and model swimmers read off that solve,
@@ -717,7 +875,9 @@ def _walk(st, board, log, fixed, learned, src_free, seed):
 
     def solve_at(rr, ref_d, ref_s, plan):
         return _solve(st, board, log, dict(fixed or {}), learned, src_free, plan, ref_s,
-                      trust=(ref_d, ref_s, rr), nogoods=nogoods, hard_fixed=fixed, swim_cap=cap)
+                      trust=(ref_d, ref_s, rr), nogoods=nogoods, hard_fixed=fixed, swim_cap=cap,
+                      rate=(1 if PAGES_WALK_RATE else None),
+                      end_climbs=(rr not in (0, None)))       # a PROPOSAL, not the reference
 
     def fmt(model, swim, cost, key, po):
         return (f'obj {model["obj"]:.1f} {model["status"]}, model swims {model["swim"]}; '
@@ -731,68 +891,77 @@ def _walk(st, board, log, fixed, learned, src_free, seed):
         # exclusions the seed violates (K8: five pairs the engine laid and
         # routed clean at the human's count -- the model's legality is
         # stricter than the engine's, so the seed is not always in the model)
-        ref = dict(seed_d)
-        dbox = st['dgrid'].bbox
-        for n in names:
-            if n not in ref:
-                ref[n] = min(st['dmenu'][n], key=lambda mv: (
-                    VIA_W * (mv.vias + (sm._length(mv) + sm.around_box(st['launch'][n], mv.exit_pt, dbox)) / sm.VIA_MM)
-                    if PAGES_RATE else
-                    VIA_W * mv.vias + CHAN_W * sm._length(mv) + sm.around_box(st['launch'][n], mv.exit_pt, dbox)))
-        ref_sig = {n: sr.move_sig(mv) for n, mv in ref.items()}
-        how = 'the seed'
-        if PAGES_WALK_FROM == 'solve':
-            # the FREE first solve (the recorded loop's, at PLAN_PAGES_DET) is
-            # the reference: the walk refines the big solve's plan
-            PAGES_DET = det0
-            dst0, src0, lines, model0 = _solve(st, board, log, dict(fixed or {}), learned, src_free,
-                                               seed_d, {}, hard_fixed=fixed)
-            PAGES_DET = PAGES_WALK_DET
-            rep += lines
-            solves += 1
-            _WALK_BUDGET['solves'] -= 1
-            if dst0:
-                how = f'the free first solve ({len(src0)} teeth to move)'
-                ref, src_ref = dst0, src0
-                ref_sig = {n: sr.move_sig(mv) for n, mv in ref.items()}
-        else:
-            dst0, src0, lines, model0 = solve_at(0, ref_sig, {}, ref)
-            rep += lines
-            solves += 1
-            _WALK_BUDGET['solves'] -= 1
-        if not dst0:
-            # the seed is not a model solution: the reference is the model-
-            # feasible plan NEAREST it (one proximity solve, radius None)
-            dst0, src0, lines, model0 = solve_at(None, ref_sig, {}, ref)
-            rep += lines
-            solves += 1
-            _WALK_BUDGET['solves'] -= 1
-            if dst0:
-                mv0 = model0.get('moved', [])
-                how = (f'the model-feasible plan nearest the seed ({len(mv0)} end(s) moved: '
-                       + ', '.join(f'{n}:{k}' for n, k, _s in mv0) + ')')
-                ref, src_ref = dst0, src0
-                model0 = dict(model0, obj=(model0['obj'] - len(mv0) * 10000))   # the cost part alone
+        if ref is None:
+            ref = dict(seed_d)
+            dbox = st['dgrid'].bbox
+            for n in names:
+                if n not in ref:
+                    ref[n] = min(st['dmenu'][n], key=lambda mv: (
+                        VIA_W * (mv.vias + (sm._length(mv) + sm.around_box(st['launch'][n], mv.exit_pt, dbox)) / sm.VIA_MM)
+                        if PAGES_RATE else
+                        VIA_W * mv.vias + CHAN_W * sm._length(mv) + sm.around_box(st['launch'][n], mv.exit_pt, dbox)))
+            ref_sig = {n: sr.move_sig(mv) for n, mv in ref.items()}
+            how = 'the seed'
+            if PAGES_WALK_FROM == 'solve':
+                # the FREE first solve (the recorded loop's, at PLAN_PAGES_DET) is
+                # the reference: the walk refines the big solve's plan
+                PAGES_DET = det0
+                dst0, src0, lines, model0 = _solve(st, board, log, dict(fixed or {}), learned, src_free,
+                                                   seed_d, {}, hard_fixed=fixed)
+                PAGES_DET = PAGES_WALK_DET
+                rep += lines
+                solves += 1
+                _WALK_BUDGET['solves'] -= 1
+                if dst0:
+                    how = f'the free first solve ({len(src0)} teeth to move)'
+                    ref, src_ref = dst0, src0
+                    ref_sig = {n: sr.move_sig(mv) for n, mv in ref.items()}
             else:
-                rep.append('  pages-first: walk: the model has NO solution near the seed (proximity solve infeasible)')
+                dst0, src0, lines, model0 = solve_at(0, ref_sig, {}, ref)
+                rep += lines
+                solves += 1
+                _WALK_BUDGET['solves'] -= 1
+            if not dst0:
+                # the seed is not a model solution: the reference is the model-
+                # feasible plan NEAREST it (one proximity solve, radius None)
+                dst0, src0, lines, model0 = solve_at(None, ref_sig, {}, ref)
+                rep += lines
+                solves += 1
+                _WALK_BUDGET['solves'] -= 1
+                if dst0:
+                    mv0 = model0.get('moved', [])
+                    how = (f'the model-feasible plan nearest the seed ({len(mv0)} end(s) moved: '
+                           + ', '.join(f'{n}:{k}' for n, k, _s in mv0) + ')')
+                    ref, src_ref = dst0, src0
+                    model0 = dict(model0, obj=(model0['obj'] - len(mv0) * 10000))   # the cost part alone
+                else:
+                    rep.append('  pages-first: walk: the model has NO solution near the seed (proximity solve infeasible)')
+                    src_ref = {}
+            elif PAGES_WALK_FROM != 'solve':
                 src_ref = {}
-        elif PAGES_WALK_FROM != 'solve':
-            src_ref = {}
-        swim, bp, cost = verify(st, board, names, ref, src_ref)
-        if dst0:
-            model = dict(model0, count=cost)
-            cap = model0['swim']
+            swim, bp, cost = verify(st, board, names, ref, src_ref)
+            if dst0:
+                model = dict(model0, count=cost)
+                cap = model0['swim']
+            else:
+                model = {'vias': cost if cost is not None else 0, 'swim': None, 'obj': None,
+                         'status': 'not a model solution', 'value': {}, 'moved': [], 'count': cost}
+            key = F.pf_key(ref, bp, cost, model0['vias'] if dst0 else None)
+            best = (key, ref, src_ref, model, swim, bp)
+            rep.append(f'  pages-first: walk: reference = {how}'
+                       + (' (unplaced nets completed)' if any(n not in seed_d for n in names) else '')
+                       + (f': obj {model0["obj"]:.1f} {model0["status"]}, model swims {model0["swim"]}' if dst0
+                          else ': NOT a model solution (radius 0 infeasible; its objective is unknown)')
+                       + f'; the braid swims {len(swim)}' + (f', count {cost:.0f}' if cost is not None else '')
+                       + f'; key {key}' + ((lambda po: f'; pairs off {po[0]}/{po[1]}' if po else '')(_pairs_off(names, bp)) if dst0 else ''))
         else:
-            model = {'vias': cost if cost is not None else 0, 'swim': None, 'obj': None,
-                     'status': 'not a model solution', 'value': {}, 'moved': [], 'count': cost}
-        key = F.pf_key(ref, bp, cost, model0['vias'] if dst0 else None)
-        best = (key, ref, src_ref, model, swim, bp)
-        rep.append(f'  pages-first: walk: reference = {how}'
-                   + (' (unplaced nets completed)' if any(n not in seed_d for n in names) else '')
-                   + (f': obj {model0["obj"]:.1f} {model0["status"]}, model swims {model0["swim"]}' if dst0
-                      else ': NOT a model solution (radius 0 infeasible; its objective is unknown)')
-                   + f'; the braid swims {len(swim)}' + (f', count {cost:.0f}' if cost is not None else '')
-                   + f'; key {key}' + ((lambda po: f'; pairs off {po[0]}/{po[1]}' if po else '')(_pairs_off(names, bp)) if dst0 else ''))
+            # the caller's verified plan (choose's damped loop) as the reference
+            best = ref
+            cap = ref[3].get('swim')
+            rep.append(f'  pages-first: walk: reference = the damped loop\'s plan: model swims {cap}; '
+                       f'the braid swims {len(ref[4])}'
+                       + (f', count {ref[3]["count"]:.0f}' if ref[3].get('count') is not None else '')
+                       + f'; key {ref[0]}')
         if _WALK_BUDGET['solves'] <= 0:
             rep.append('  pages-first: walk: the run\'s solve budget is spent -- the reference ships')
         while (steps < PAGES_WALK_STEPS and _WALK_BUDGET['solves'] > 0 and r <= PAGES_WALK_RMAX
@@ -828,7 +997,7 @@ def _walk(st, board, log, fixed, learned, src_free, seed):
             swim, bp, cost = verify(st, board, names, dst, src)
             key = F.pf_key(dst, bp, cost, model['vias'])
             po = _pairs_off(names, bp)
-            what = ', '.join(f'{n}:{k}' for n, k, _s in mv)
+            what = ', '.join(_mv_tag(n, k, dst, src) for n, k, _s in mv)
             if best[3].get('obj') is None:
                 best[3]['obj'] = model['obj']        # the first proposal is the objective's reference
             dobj = model['obj'] - best[3]['obj']
@@ -867,6 +1036,7 @@ def _walk(st, board, log, fixed, learned, src_free, seed):
     rep.append(f'  pages-first: walk done: {steps} accepted step(s), {solves} solve(s) '
                f'({_WALK_BUDGET["solves"]} left in the run), final r={r}'
                + (f'; the braid swims {len(best[4])} {best[4] if best[4] else ""}, key {best[0]}' if best else ''))
+    _walk.last_best = best
     if best is None:
         choose.last = {}
         return {}, {}, rep
@@ -880,9 +1050,13 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
     as it stands is the only source candidate (the destination re-plan
     loop, which realizes no source move). `seed`: the plan the corridors
     are first built on (the greedy's choice)."""
-    if PAGES_WALK:
-        return _walk(st, board, log, fixed, learned, src_free, seed)
-    rep = []
+    walk_best = None
+    if PAGES_WALK and PAGES_WALK_FROM != 'damped':
+        dw, sw, repw = _walk(st, board, log, fixed, learned, src_free, seed)
+        if not PAGES_WALK_FALLBACK:
+            return dw, sw, repw
+        walk_best = getattr(_walk, 'last_best', None)      # the walk's plan; the damped loop runs too
+    rep = list(repw) if walk_best is not None else []
     best = None
     seed_d = dict(seed or {})
     seed_s: Dict[str, Move] = {}
@@ -893,11 +1067,29 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
         fx = dict(fixed or {})
         if hold_d:
             fx.update(hold_d)
+        stage_hint = None
+        stage_menu = None
+        if PAGES_MENU_STAGE and it == 0 and (PAGES_MENU or PAGES_MENU_TOP):
+            # PLAN_PAGES_MENU_STAGE: the trimmed menu first; its plan hints the full solve
+            d1, s1, lines1, m1 = _solve(st, board, log, fx, learned, src_free,
+                                        seed_d if PAGES_KEYS == 'braid' else None, seed_s,
+                                        hold_s, avoid,
+                                        no_climb=bool(PAGES_CLIMB_LATE and it == 0),
+                                        hard_fixed=fixed, priced=priced or None,
+                                        end_climbs=(it > 0) if PAGES_END_WALK == 2 else None)
+            rep += lines1
+            if d1:
+                stage_hint = (d1, s1)
+                rep.append(f'  pages-first: menu stage: the trimmed solve ({m1["status"]} obj {m1["obj"]:.1f}, '
+                           f'model swims {m1["swim"]}) hints the full-menu solve')
+            stage_menu = (0, 0)
         dst_choice, src_choice, lines, model = _solve(st, board, log, fx, learned, src_free,
                                                        seed_d if PAGES_KEYS == 'braid' else None, seed_s,
                                                        hold_s, avoid,
                                                        no_climb=bool(PAGES_CLIMB_LATE and it == 0),
-                                                       hard_fixed=fixed, priced=priced or None)
+                                                       hard_fixed=fixed, priced=priced or None,
+                                                       end_climbs=(it > 0) if PAGES_END_WALK == 2 else None,
+                                                       menu=stage_menu, hint=stage_hint)
         rep += lines
         if PAGES_PORTFOLIO and it == 0 and dst_choice:
             # the same instance under the OTHER objective; the judge picks
@@ -905,7 +1097,8 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
             d2, s2, lines2, m2 = _solve(st, board, log, fx, learned, src_free,
                                         seed_d if PAGES_KEYS == 'braid' else None, seed_s,
                                         hold_s, avoid, no_climb=bool(PAGES_CLIMB_LATE and it == 0),
-                                        hard_fixed=fixed, rate=1 - PAGES_RATE)
+                                        hard_fixed=fixed, rate=1 - PAGES_RATE,
+                                        end_climbs=False if PAGES_END_WALK == 2 else None)
             rep += lines2
             if d2:
                 sw1, bp1, c1 = verify(st, board, list(dst_choice), dst_choice, src_choice)
@@ -920,6 +1113,50 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
                            f'{u2 if pick2 else u1} plan')
                 if pick2:
                     dst_choice, src_choice, model = d2, s2, m2
+        if PAGES_MENU_PORTFOLIO and it == 0 and dst_choice and (PAGES_MENU or PAGES_MENU_TOP) and not PAGES_MENU_STAGE:
+            # the same instance on the FULL menu; the judge picks
+            import fanout_from_plan as F
+            d2, s2, lines2, m2 = _solve(st, board, log, fx, learned, src_free,
+                                        seed_d if PAGES_KEYS == 'braid' else None, seed_s,
+                                        hold_s, avoid, no_climb=bool(PAGES_CLIMB_LATE and it == 0),
+                                        hard_fixed=fixed, priced=priced or None,
+                                        end_climbs=False if PAGES_END_WALK == 2 else None,
+                                        menu=(0, 0))
+            rep += lines2
+            if d2:
+                sw1, bp1, c1 = verify(st, board, list(dst_choice), dst_choice, src_choice)
+                sw2, bp2, c2 = verify(st, board, list(d2), d2, s2)
+                k1 = F.pf_key(dst_choice, bp1, c1, model['vias'])
+                k2 = F.pf_key(d2, bp2, c2, m2['vias'])
+                pick2 = F.pf_better(k2, k1)
+                rep.append(f'  pages-first: menu portfolio: trimmed menu -> key {k1} (braid swims {len(sw1)}, '
+                           f'{model["status"]} obj {model["obj"]:.1f}); full menu -> key {k2} (braid swims {len(sw2)}, '
+                           f'{m2["status"]} obj {m2["obj"]:.1f}): the judge takes the {"full" if pick2 else "trimmed"} plan')
+                if pick2:
+                    dst_choice, src_choice, model = d2, s2, m2
+        if PAGES_SEEDS > 1 and it == 0 and dst_choice:
+            # PLAN_PAGES_SEEDS: the same instance under other random seeds; the judge keeps the best
+            import fanout_from_plan as F
+            sw1, bp1, c1 = verify(st, board, list(dst_choice), dst_choice, src_choice)
+            k1 = F.pf_key(dst_choice, bp1, c1, model['vias'])
+            keys = [f'seed 0: key {k1} ({model["status"]} obj {model["obj"]:.1f}, braid swims {len(sw1)})']
+            pick = 0
+            for k in range(1, PAGES_SEEDS):
+                d2, s2, lines2, m2 = _solve(st, board, log, fx, learned, src_free,
+                                            seed_d if PAGES_KEYS == 'braid' else None, seed_s,
+                                            hold_s, avoid, no_climb=bool(PAGES_CLIMB_LATE and it == 0),
+                                            hard_fixed=fixed, priced=priced or None,
+                                            end_climbs=False if PAGES_END_WALK == 2 else None,
+                                            menu=stage_menu, hint=stage_hint, rseed=k)
+                rep += lines2
+                if not d2:
+                    continue
+                sw2, bp2, c2 = verify(st, board, list(d2), d2, s2)
+                k2 = F.pf_key(d2, bp2, c2, m2['vias'])
+                keys.append(f'seed {k}: key {k2} ({m2["status"]} obj {m2["obj"]:.1f}, braid swims {len(sw2)})')
+                if F.pf_better(k2, k1):
+                    dst_choice, src_choice, model, k1, pick = d2, s2, m2, k2, k
+            rep.append(f'  pages-first: seeds: {"; ".join(keys)}: the judge takes seed {pick}')
         if not dst_choice:
             if best is None:
                 break
@@ -998,16 +1235,35 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
         rep.append(f'  pages-first: re-solving {len(free)} net(s) {sorted(free)} with {len(hold_d)} held'
                    + (' (widened to their crossers)' if widen else ' (the swimmers, each barred from its berth)'))
         seed_d, seed_s = base_d, base_s
+    if walk_best is not None:
+        import fanout_from_plan as F
+        if best is None or F.pf_better(walk_best[0], best[0]):
+            rep.append(f'  pages-first: walk fallback: the walk\'s plan (key {walk_best[0]}) over the loop\'s '
+                       f'({best[0] if best else "none"})')
+            best = walk_best
+        else:
+            rep.append(f'  pages-first: walk fallback: the loop\'s plan (key {best[0]}) over the walk\'s ({walk_best[0]})')
     if best is None:
         choose.last = {}
         return {}, {}, rep
+    if PAGES_GROUP:
+        best, lines_g = _group_climb(st, board, log, best)
+        rep += lines_g
+    if PAGES_WALK and PAGES_WALK_FROM == 'damped':
+        # PLAN_PAGES_WALK_FROM=damped (2026-09-15, session 12): the walk's
+        # reference is the plan the damped loop settled on, so a walk that
+        # accepts nothing ships THAT and not the raw first solve (the
+        # harness: reversed_k15 26 / 0 open -> 18 / 2 open under the walk
+        # from the solve, its every stage 0 steps)
+        d2, s2, rep2 = _walk(st, board, log, fixed, learned, src_free, seed, ref=best)
+        return d2, s2, rep + rep2
     choose.last = best[3]
     return best[1], best[2], rep
 
 
 def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None, avoid=None,
            no_climb=False, hard_fixed=None, trust=None, nogoods=None, swim_cap=None, rate=None,
-           priced=None):
+           priced=None, end_climbs=None, menu=None, hint=None, rseed=None):
     """The pages-first choice on a plan state. Returns (dst_choice,
     src_choice, report): dst_choice {net: Move} for every net with a
     destination menu, src_choice {net: Move} for the nets whose tooth
@@ -1016,6 +1272,12 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     from ortools.sat.python import cp_model
     t0 = time.time()
     rate = PAGES_RATE if rate is None else int(rate)     # the objective's units: the greedy's (0) or VIA_MM (1)
+    # the end-of-face climbs: in every solve unless SRC_CLIMB_END_WALK
+    # confines them to the walk's proposals (the caller says which this is)
+    end_ok = (not PAGES_END_WALK) if end_climbs is None else bool(end_climbs)
+    # the menu pre-filter's caps: the run's (PLAN_PAGES_MENU / _TOP) or the
+    # caller's `menu=(k, K)` (the two-stage solve passes the full menu as (0, 0))
+    menu_k, menu_top = (PAGES_MENU, PAGES_MENU_TOP) if menu is None else (int(menu[0] or 0), int(menu[1] or 0))
     fixed = dict(fixed or {})
     learned = learned or set()
     launch: Dict[str, Pt] = st['launch']
@@ -1027,10 +1289,65 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     # ---- candidates
     D: Dict[str, List[Move]] = {}
     barred: Dict[str, set] = {}          # PAGES_UNBLOCK >= 2: the soft-barred candidates per net
+    dref = ((dbox[0] + dbox[2]) / 2, (dbox[1] + dbox[3]) / 2)
+    sbox = st['sgrid'].bbox
+
+    def price_d(n, mv):
+        # the destination objective's own price of a berth (the cost terms below)
+        if rate:
+            return VIA_W * (mv.vias + (sm._length(mv) + sm.around_box(launch[n], mv.exit_pt, dbox)) / sm.VIA_MM)
+        return VIA_W * mv.vias + CHAN_W * sm._length(mv) + sm.around_box(launch[n], mv.exit_pt, dbox)
+
+    def price_s(mv):
+        # the source objective's own price of a tooth (the cost terms below)
+        if rate:
+            ex = mv.exit_pt
+            straight = math.hypot(dref[0] - ex[0], dref[1] - ex[1])
+            wrap = max(0.0, sm.around_box(ex, dref, sbox) - straight)
+            return VIA_W * (mv.vias + ((sm._length(mv) if mv.legs else 0.0) + wrap) / sm.VIA_MM)
+        return VIA_W * mv.vias + (CHAN_W * sm._length(mv) if mv.legs else 0.0)
+
+    menu_cut = [0, 0, 0, 0]          # berths before / after, teeth before / after
+
+    def prefilter(ms, price, keep_sigs, cls):
+        # PLAN_PAGES_MENU / _TOP: the k cheapest per class, then the K
+        # cheapest overall; `keep_sigs` survive regardless; the menu's own
+        # order is kept (the model is built in it)
+        if not (menu_k or menu_top) or not ms:
+            return ms
+        pr = {id(m): price(m) for m in ms}
+        keep = {id(m) for m in ms if sr.move_sig(m) in keep_sigs}
+        if menu_k:
+            by = {}
+            for m in ms:
+                by.setdefault(cls(m), []).append(m)
+            for lst in by.values():
+                lst.sort(key=lambda m: pr[id(m)])
+                keep |= {id(m) for m in lst[:menu_k]}
+            ms = [m for m in ms if id(m) in keep]
+        if menu_top and len(ms) > menu_top:
+            ranked = sorted(ms, key=lambda m: pr[id(m)])
+            keep |= {id(m) for m in ranked[:menu_top]}
+            ms = [m for m in ms if id(m) in keep]
+        return ms
+
+    def d_keep(n):
+        ks = set()
+        if n in fixed:
+            ks.add(fixed[n])
+        if seed and n in seed and seed[n] is not None:
+            ks.add(sr.move_sig(seed[n]))
+        if trust and trust[0] and n in trust[0]:
+            ks.add(trust[0][n])
+        return ks
     for n in names:
         ms = list(st['dmenu'][n])
         if no_climb:
             ms = [m for m in ms if not getattr(m, 'climb', 0)]   # PAGES_CLIMB_LATE: the plain menu
+        menu_cut[0] += len(ms)
+        ms = prefilter(ms, lambda m, _n=n: price_d(_n, m), d_keep(n),
+                       lambda m: (m.direction, m.layer, bool(getattr(m, 'climb', 0))))
+        menu_cut[1] += len(ms)
         if n in fixed:
             hit = [m for m in ms if sr.move_sig(m) == fixed[n]]
             if hit:
@@ -1084,10 +1401,24 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
             if hold_s[n] is not None and not (PAGES_NOOP and c is not None and same_tooth(hold_s[n], c)):
                 opts = [c, hold_s[n]] if c is not None else [hold_s[n]]
         elif PAGES_SRC and src_free and c is not None:
-            opts += [m for m in st['smenu'].get(n, [])
-                     if not (no_climb and getattr(m, 'climb', 0))     # PAGES_CLIMB_LATE: the plain menu
-                     and not (PAGES_NOOP and same_tooth(m, c))]       # PLAN_PAGES_NOOP: not a move
+            more = [m for m in st['smenu'].get(n, [])
+                    if not (no_climb and getattr(m, 'climb', 0))     # PAGES_CLIMB_LATE: the plain menu
+                    and (end_ok or not getattr(m, 'end_climb', False))   # SRC_CLIMB_END_WALK: proposals only
+                    and not (PAGES_NOOP and same_tooth(m, c))]       # PLAN_PAGES_NOOP: not a move
+            menu_cut[2] += len(more)
+            ks = {sr.move_sig(m) for m in more if getattr(m, 'end_climb', False)}
+            if src_seed and n in src_seed and src_seed[n] is not None:
+                ks.add(sr.move_sig(src_seed[n]))
+            if trust and trust[1] and n in trust[1] and trust[1][n] is not None:
+                ks.add(sr.move_sig(trust[1][n]))
+            more = prefilter(more, price_s, ks,
+                             lambda m: (m.direction, m.layer, bool(getattr(m, 'climb', 0))))
+            menu_cut[3] += len(more)
+            opts += more
         S[n] = opts
+    if menu_k or menu_top:
+        log(f'  pages-first: menu pre-filter (class cap {menu_k or "-"}, top {menu_top or "-"}): '
+            f'berths {menu_cut[0]} -> {menu_cut[1]}, tooth moves {menu_cut[2]} -> {menu_cut[3]}')
     tkey = {n: [int(round(fr.key(m) * 1000)) for m in D[n]] for n in names}
     lkey = {}
     for n in names:
@@ -1341,7 +1672,24 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                         for j, sb in enumerate(sig_d[b]):
                             if {sa, sb} == set(pair):
                                 m.AddBoolOr([xd[a][i].Not(), xd[b][j].Not()]); nconf += 1
-    if PAGES_HINT and seed:
+    if hint is not None and hint[0]:
+        # PLAN_PAGES_MENU_STAGE: the first stage's plan as the hint -- its
+        # berth AND its tooth per net (a net it did not move: the tooth as
+        # it stands)
+        hd, hs = hint
+        for n in names:
+            sig = sr.move_sig(hd[n]) if n in hd and hd[n] is not None else None
+            js_ = [j for j, mv in enumerate(D[n]) if sig is not None and sr.move_sig(mv) == sig]
+            if js_:
+                for j, v in enumerate(xd[n]):
+                    m.AddHint(v, 1 if j == js_[0] else 0)
+            if S[n] and cur.get(n) is not None:
+                ssig = sr.move_sig(hs[n]) if hs and n in hs and hs[n] is not None else None
+                is_ = [i for i, mv in enumerate(S[n]) if ssig is not None and sr.move_sig(mv) == ssig]
+                i0 = is_[0] if is_ else 0
+                for i, v in enumerate(xs[n]):
+                    m.AddHint(v, 1 if i == i0 else 0)
+    elif PAGES_HINT and seed:
         # the seed as a hint: its berth per net (the greedy's, or the cheapest
         # for a net it left unplaced) and the tooth as it stands; the pages
         # and the rest are the solver's to complete
@@ -1437,6 +1785,8 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     solver.parameters.num_workers = PAGES_WORKERS
     solver.parameters.interleave_search = True
     solver.parameters.max_deterministic_time = PAGES_DET
+    if rseed is not None:
+        solver.parameters.random_seed = int(rseed)      # PLAN_PAGES_SEEDS: another feasible point
     status = solver.Solve(m)
     rep = list(cert_lines)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):

@@ -47,6 +47,20 @@ import rules as _rules  # noqa: E402  ONE source for every design rule
 # north riders at K51; escape_moves.enumerate_moves climb=). 0 = off, the
 # menu byte-identical. replan.py runs with 14.
 SRC_CLIMB = int(os.environ.get('SRC_CLIMB', '0'))
+# SRC_CLIMB_END=n (2026-09-15, session 12; Andy: "we don't need a full
+# north source stub to prevent the swimmers -- a stub exiting at a row
+# above the other stubs on the east would suffice"): the source menu also
+# offers the END-OF-FACE climbs -- on the face the bundle launches from,
+# a climb (escape_moves climb=) that leaves BEYOND the span the run's
+# teeth occupy, the n free rows nearest each end, one candidate per
+# (layer, end, row). The launch order along the face is what the model
+# fixes swimmers with; today its only off-order launches are the far
+# face (a 26 mm wrap, K51 SDQ11/SDQ13) and the ONE north-face exit at
+# the corner column (K51: the same point for every east-column ball, so
+# one net at most). The full climb menu (SRC_CLIMB) is six-to-eight-fold
+# and makes the CP-SAT stop worse at K41/K51 (README, the climbs); this
+# is a handful per net. 0 = off, the menu byte-identical.
+SRC_CLIMB_END = int(os.environ.get('SRC_CLIMB_END', '0') or 0)
 # PLAN_PAGES=1 (2026-09-13): the PAGES-FIRST planner (pages_first.py) chooses
 # BOTH ends and the page of every net in one CP-SAT with hard two-page
 # planarity, so no net needs more than two vias by construction. 0 = the
@@ -198,6 +212,138 @@ def dedupe_climbs(moves):
     return [m for m in moves if not getattr(m, 'climb', 0) or id(m) in keep]
 
 
+def end_climbs(smenu, names, src_pad, sref, sgrid, ends, menu, byname, banned):
+    """SRC_CLIMB_END: add to `smenu` the end-of-face climbs (see the flag).
+    The bundle's face is the source face nearest the most launch points;
+    the span is what the run's teeth occupy along it (their launch points
+    as they stand); a candidate is kept when its exit lies beyond the span
+    by half a pitch or more, the n nearest rows per (layer, end), the
+    cheaper start (dog-bone or via-in-pad) per row. Returns report lines."""
+    x0, y0, x1, y1 = sgrid.bbox
+    hx, hy = sgrid.pitch_x / 2.0, sgrid.pitch_y / 2.0
+
+    def face_of(pt):
+        d = {'left': abs(pt[0] - (x0 - hx)), 'right': abs(pt[0] - (x1 + hx)),
+             'up': abs(pt[1] - (y0 - hy)), 'down': abs(pt[1] - (y1 + hy))}
+        return min(d, key=d.get)
+    on = {}
+    for nm in names:
+        p = src_pad.get(nm)
+        if p is None or p.component_ref != sref:
+            continue
+        on.setdefault(face_of(ends[nm][0]), []).append(nm)
+    if not on:
+        return ['  source menu: end-of-face climbs: no launch on the source array']
+    face = max(on, key=lambda f: len(on[f]))
+    ax = 1 if face in ('left', 'right') else 0          # the coordinate ALONG the face
+    pitch = sgrid.pitch_y if ax else sgrid.pitch_x
+    lo = min(ends[nm][0][ax] for nm in on[face])
+    hi = max(ends[nm][0][ax] for nm in on[face])
+    nrows = len(sgrid.ys if ax else sgrid.xs)
+    added, tried = 0, 0
+    for nm in names:
+        p = src_pad.get(nm)
+        if p is None or p.component_ref != sref:
+            continue
+        tried += 1
+        best = {}
+        for m in menu(p, sgrid, byname[nm][0], own_only=True, climb=nrows, dirs=(face,)):
+            if not getattr(m, 'climb', 0) or m.direction != face:
+                continue
+            v = m.exit_pt[ax]
+            if v <= lo - pitch / 2 + 1e-6:
+                end = 'lo'
+            elif v >= hi + pitch / 2 - 1e-6:
+                end = 'hi'
+            else:
+                continue
+            k = (m.layer, end, round(v, 2))
+            c = (m.vias, sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b, _L in m.legs))
+            if k not in best or c < best[k][0]:
+                best[k] = (c, m)
+        by = {}
+        for (layer, end, v), (c, m) in best.items():
+            by.setdefault((layer, end), []).append((abs(v - (lo if end == 'lo' else hi)), c, m))
+        seen = {sr.move_sig(m) for m in smenu.get(nm, ())}
+        for key, lst in sorted(by.items()):
+            lst.sort(key=lambda t: (t[0], t[1]))
+            for _d, _c, m in lst[:SRC_CLIMB_END]:
+                sig = sr.move_sig(m)
+                if sig in seen or (nm, sig) in banned:
+                    continue
+                m.end_climb = True
+                smenu.setdefault(nm, []).append(m)
+                seen.add(sig)
+                added += 1
+    return [f'  source menu: end-of-face climbs (SRC_CLIMB_END={SRC_CLIMB_END}) on the {face} face, '
+            f'span {lo:.2f}..{hi:.2f} ({len(on[face])} teeth): +{added} candidate(s) over {tried} net(s)']
+
+
+def group_end_climbs(st, group, face, end):
+    """The GROUP form of the end-of-face climb (PLAN_PAGES_GROUP): the
+    climbs of `group` on `face` toward `end` ('lo' | 'hi'), enumerated with
+    the group's OWN standing teeth removed from the obstacles -- the joint
+    realize strips them together, so one member's barrel must not wall
+    another's gap (K51: SA15's via-in-pad at R17 walls SBA1's climb from
+    T18) -- against a span that is the OTHER teeth's launches on the face.
+    Returns {net: [Move, ...]}: every exit beyond the span, nearest rows
+    first, one per (layer, row), tagged `end_climb`."""
+    pcb, sgrid, sref = st['pcb'], st['sgrid'], st['sref']
+    byname, src_pad, launch = st['byname'], st['src_pad'], st['launch']
+    x0, y0, x1, y1 = sgrid.bbox
+    hx, hy = sgrid.pitch_x / 2.0, sgrid.pitch_y / 2.0
+    ax = 1 if face in ('left', 'right') else 0
+    pitch = sgrid.pitch_y if ax else sgrid.pitch_x
+
+    def face_of(pt):
+        d = {'left': abs(pt[0] - (x0 - hx)), 'right': abs(pt[0] - (x1 + hx)),
+             'up': abs(pt[1] - (y0 - hy)), 'down': abs(pt[1] - (y1 + hy))}
+        return min(d, key=d.get)
+    others = [n for n in launch if n not in group and src_pad.get(n) is not None
+              and src_pad[n].component_ref == sref and face_of(launch[n]) == face]
+    if not others:
+        return {}
+    lo = min(launch[n][ax] for n in others)
+    hi = max(launch[n][ax] for n in others)
+    edge = lo if end == 'lo' else hi
+    # the obstacles exclude EVERY net of the run, not the group alone: the
+    # walls are the run's own standing teeth of other groups (K51: SA0's
+    # and SRST's F `up` stubs, SA14's B tooth wall SBA1's and SA12's gaps),
+    # and the joint realize frees whichever stands in a laid climb's room
+    # (source_realize's blocker census) and re-lays it with the engine
+    gids = {byname[n][0] for n in launch if n in byname}
+    nrows = len(sgrid.ys if ax else sgrid.xs)
+    out = {}
+    for n in group:
+        p = src_pad.get(n)
+        if p is None or p.component_ref != sref:
+            continue
+        nid = byname[n][0]
+        maps = {L: te.build_obstacles(pcb, nid, gids | {nid}, L) for L in LAYERS}
+        cands = em.enumerate_moves(
+            p, sgrid, LAYERS,
+            lambda a, b, L: maps[L].seg_clear(a, b),
+            lambda a, L: not (maps[L].point_violation(a, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0],
+            climb=nrows, dirs=(face,))
+        best = {}
+        for m in cands:
+            if not getattr(m, 'climb', 0) or m.direction != face:
+                continue
+            v = m.exit_pt[ax]
+            if not ((end == 'lo' and v <= lo - pitch / 2 + 1e-6) or (end == 'hi' and v >= hi + pitch / 2 - 1e-6)):
+                continue
+            k = (m.layer, round(v, 2))
+            c = (m.vias, sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b, _L in m.legs))
+            if k not in best or c < best[k][0]:
+                best[k] = (c, m)
+        ms = []
+        for (_L, v), (_c, m) in sorted(best.items(), key=lambda kv: (abs(kv[0][1] - edge), kv[1][0])):
+            m.end_climb = True
+            ms.append(m)
+        out[n] = ms
+    return out
+
+
 def plan_state(pcb, names, banned=frozenset()):
     """Everything the plan reads off ONE board: the menus of legal escapes
     at both ends, the launch points (the source teeth AS THEY ARE on this
@@ -222,13 +368,14 @@ def plan_state(pcb, names, banned=frozenset()):
                                             layer)
         return cache[key]
 
-    def menu(pad, grid, nid, own_only=False, climb=0, walk=0):
+    def menu(pad, grid, nid, own_only=False, climb=0, walk=0, dirs=None):
         return em.enumerate_moves(
             pad, grid, LAYERS,
             lambda p, q, L, _n=nid: obs(_n, L, own_only).seg_clear(p, q),
             lambda p, L, _n=nid: not (obs(_n, L, own_only).point_violation(
                 p, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0],
-            climb=climb, walk=walk, walk_off=DST_WALK_OFF if walk else 0)
+            climb=climb, walk=walk, walk_off=DST_WALK_OFF if walk else 0,
+            dirs=dirs)
     dmenu, launch, src_pad, dst_pad = {}, {}, {}, {}
     dref = ends[names[0]][2]
     dgrid = em.grid_of(pcb.footprints[dref])
@@ -279,6 +426,9 @@ def plan_state(pcb, names, banned=frozenset()):
             continue
         smenu[nm] = [m for m in dedupe_climbs(menu(p, sgrid, byname[nm][0], own_only=True, climb=SRC_CLIMB))
                      if (nm, sr.move_sig(m)) not in banned]
+    if SRC_CLIMB_END:
+        for line in end_climbs(smenu, names, src_pad, sref, sgrid, ends, menu, byname, banned):
+            print(line)
     tooth0 = {}
     tooth_vias = {}
     for nm in names:

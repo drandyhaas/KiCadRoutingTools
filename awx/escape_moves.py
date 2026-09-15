@@ -71,6 +71,9 @@ class Move:
                                     # (enumerate_moves walk=; the human's DU1)
     off_array: bool = False         # the via site lies OUTSIDE the ball field,
                                     # beside the array (enumerate_moves walk_off=)
+    end_climb: bool = False         # an END-OF-FACE climb (fanout_from_plan
+                                    # SRC_CLIMB_END): leaves beyond the span the
+                                    # run's teeth occupy on the launch face
 
     def __repr__(self) -> str:
         s = (f'{self.kind}/{self.direction}/{self.layer[0]} '
@@ -241,12 +244,16 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     clear: Callable[[Pt, Pt, str], bool],
                     via_clear: Callable[[Pt, str], bool] = None,
                     margin: float = 0.0, climb: int = 0,
-                    walk: int = 0, walk_off: int = 0) -> List[Move]:
+                    walk: int = 0, walk_off: int = 0,
+                    dirs: Optional[Sequence[str]] = None) -> List[Move]:
     """Every escape move this pad has. `clear(p, q, layer)` says whether
     a track from p to q on `layer` is free of foreign copper;
     `via_clear(p, layer)` whether a via barrel fits at p (checked on
     every layer by the caller). Moves whose geometry is blocked are not
-    returned, so an empty list means this pad is boxed in."""
+    returned, so an empty list means this pad is boxed in. `dirs`
+    restricts the CLIMB block to these exit faces (SRC_CLIMB_END asks for
+    one face with `climb` = the whole array, where all four would cost
+    the clearance walk four times over); None = every face."""
     net = getattr(pad, 'net_name', '') or ''
     net = net.split('/')[-1]
     px, py = pad.global_x, pad.global_y
@@ -419,6 +426,8 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
         for kind, site, legs0 in starts:
             for L in others:
                 for d, (dx, dy) in DIRS.items():
+                    if dirs is not None and d not in dirs:
+                        continue
                     e0 = edge(d)
                     # the gaps the run may climb along: a dog-bone's site
                     # is already in one; a via-in-pad steps half a pitch

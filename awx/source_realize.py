@@ -237,7 +237,7 @@ def order_agreement(asked, achieved, nets):
     out = {}
     for face in DIRS:
         ns = [n for n in nets if asked[n].direction == face
-              and achieved[n]['direction'] == face]
+              and achieved.get(n) is not None and achieved[n]['direction'] == face]   # a bare ball has no tooth to order
         if len(ns) < 2:
             continue
         ax = 0 if face in ('up', 'down') else 1   # coordinate ALONG the face
