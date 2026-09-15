@@ -272,6 +272,11 @@ octilinear, so a non-orthogonal pose is outside both models today
 
 ## One source for every routing number
 
+**Superseded in part 2026-09-15: every quantity below is now RESOLVED
+from the board by `rules_of(board)` -- the values here are the bench's,
+i.e. the defaults. See "`rules_of(board)` (agent, 2026-09-15)" at the
+end of this file for the resolved table and the precedence.**
+
 Audited 2026-09-12, after a swimmer was found priced five different ways
 and `collapse_dives` was found re-laying at the wrong track AND the wrong
 via size. Every routing quantity now has exactly one home:
@@ -3501,6 +3506,8 @@ board at a 0.15 clearance would be planned and routed at 0.105. The
 general form is one `rules_of(board)` (netclass + `.kicad_dru` +
 `routing_defaults`) feeding all of them, and D1's strip capacity must
 read it before it becomes a constraint. One session; not this one.
+**[PAID 2026-09-15 -- see "`rules_of(board)` (agent, 2026-09-15)" at the
+end of this file, including what it did NOT fix.]**
 
 **`judge_gate2` (the gate re-graded with the braid's planned lane length
 and the routed length; Andy's rule `vias + mm / 7.5` as the TARGET;
@@ -4153,3 +4160,131 @@ Do not: another per-swimmer via model; optimising the swimmer count;
 geometric hints to a solver. Do: one chain at a time, renders for every
 arm, the routed ladder as the judge, nothing landed unless better at
 every K within about two minutes a K.
+
+## `rules_of(board)` (agent, 2026-09-15)
+
+The generality debt recorded above -- "the braid's and the planner's design
+rules are LITERALS for a 0.1 mm process ... A board at a 0.15 clearance
+would be planned and routed at 0.105" -- is paid. `awx/rules.py` is the one
+resolver; every stage installs it from the board it is running on.
+
+**Two kinds of number, and they resolve differently.** A CONSTRAINT is
+something KiCad or physics grades against -- `min_clearance`, a net class's
+`clearance`, a `.kicad_dru` layer rule, the fab floor. A PREFERENCE is
+something this chain chose -- the 0.127 lane track, the 0.35 lane pitch; no
+grader enforces it. Every quantity is `max(the preference, the constraints
+that bind it)`, so a board that asks for MORE gets more, and a board that
+asks for less does not drag the router down with it.
+
+| quantity | the one source | bench value | resolved from (highest-binding last) |
+|---|---|---|---|
+| spec clearance | `rules.SPEC_CLEARANCE` -> `topo_strings.SPEC_CLEAR`, `braid.SPEC_CLEARANCE` | 0.1 | preference 0.1; Default net class (0 = UNSET, #966); `rules.min_clearance`; largest `.kicad_dru` rule on the two outer layers (tighten-only, as the BGA fanout composes it); `physical_fab_floor` |
+| braid lane track | `rules.TRACK` -> `topo_strings.TRACK` | 0.127 | preference 0.127; `rules.min_track_width`; fab floor. **Not** the class `track_width` -- that is a preference, and the board carries two track widths on purpose |
+| braid hug clearance | `Rules.hug` -> `braid.CLEAR` | 0.105 | **derived**: `clearance + 5 um` |
+| fanout track / clearance | `Rules.fan_track` / `.fan_clear` -> `source_realize.FAN_TRACK` / `FAN_CLEAR` | 0.1 / 0.1 | track as above from preference 0.1; clearance = the spec |
+| via size / drill | `rules.VIA_SIZE` / `VIA_DRILL` -> `braid.VIA_SIZE` / `VIA_DRILL` | 0.25 / 0.15 | preference; `min_via_diameter` / `min_via_drill` + `min_through_hole_diameter`; fab floor; and the ANNULAR ring closes over the pair (`size >= drill + 2*min_via_annular_width`) |
+| lane slice | `Rules.lane_slice` -> `select_moves.NEST_IN`, `cut_ledger.NEED` | 0.232 | **derived**: `track + hug` |
+| lane pitch / exit pitch | `Rules.lane_pitch` / `.exit_pitch` -> `braid.LPITCH` / `MINP`, `select_moves.BAND_LPITCH` | 0.35 / 0.38 | preference, floored at one lane's slice (binds at clearance >= 0.218) |
+| band tip | `Rules.band_tip` -> `select_moves.BAND_TIP` | 0.9 | **derived**: `pitch/2 + exit margin` (DU1's 0.8 pitch + 0.5). A DEAD default -- see below |
+| hole-to-hole / edge | `Rules.hole_to_hole` / `.edge_clearance` | 0.127 / 0.2 | raw `board_constraint` reads; the braid's own tighten-only comparison is unchanged |
+| `BAND_GAP`, `HALF_SEP`, `VIA_NEED`, `END_KEEP`, `MARGIN_OUT` | `Rules` properties | | **derived**, in braid's/topo_strings' own expressions, re-evaluated on install |
+
+**How it is wired.** Each stage is its own process on a board file, so each
+entry point calls `rules.install_for(board)` once: `braid.main`,
+`fanout_from_plan.main`, `make_bench.main`, `pack_board.main`,
+`replan.main`, `cut_ledger.main`, `collapse_dives` (after its argparse).
+`install` writes the resolved values over the module constants the chain
+already reads and re-evaluates the ones derived from them. **The literals
+stay as each module's DEFAULT**, so a module used without an install behaves
+exactly as before -- the flag-off path is byte-identical BY CONSTRUCTION,
+not by measurement. Constants were chosen over functions because the
+consumers read them as module ATTRIBUTES at call time (`te.VIA_SIZE`,
+`br.CLEAR`) in ~30 places, so one install reaches all of them and no hot
+loop grows a call. `chain_k.sh` and `grade_k.py` now grade at the RESOLVED
+clearance and print it (`GRADE ... clr=0.1`), instead of a literal 0.1.
+
+**Float bits are part of the contract.** `0.1 + 0.005` is one ULP ABOVE the
+double `0.105`, and `0.127 + 0.105` one ULP BELOW `0.232`. A 1-ULP
+clearance moves a grid cell, moves a lane, changes the via count. So every
+RESOLVED quantity is rounded to 6 decimals (the writeback's own
+normalization) and lands exactly on the literal it replaced, while the
+already-arithmetic expressions are re-evaluated in their original order and
+not rounded. `tests/test_622_rules_of.py` compares with `.hex()`, not
+`approx`, and `awx/tmp/mutate_rules.py` shows it catches a 1-ULP drift.
+
+**Gate (a), flag-off byte-identity.** `PLAN_PAGES=1 bash chain_k.sh T 15 28`
+before and after: K15 and K28, fanout board AND routed board, **IDENTICAL
+copper** on `copper_same.py` and on `cmp_copper.py` (counters, so a
+duplicated segment cannot hide), and the stamped `.kicad_pro` files
+byte-identical. Ladder unchanged: K15 16 vias, K28 34 vias, 0 open, 0 DRC.
+
+**Gate (b), the positive control -- and read the article before the number.**
+A `copy_board` of the bench with its Default class set to 0.12 resolves
+clearance 0.12 / hug 0.125 (printed), and at K15 routes **0 open, 18 vias,
+and adds ZERO DRC** beyond what the article already had: the fanout board
+reports 102 violations at 0.12 and the routed board still 102, so the braid
+contributed none. Measured on the copper the run ADDED
+(`tmp/new_copper_gap.py`, routed minus its own input), the minimum
+foreign-net gap moves **0.1050 -> 0.1227 mm** against a hug of 0.105 ->
+0.125 -- the first exact, the second one 0.025 grid cell short. The renders
+show the mechanism: at 0.12 more lanes take the southern loop instead of
+packing the middle field.
+
+At **0.15** the same control is NOT clean (2 open, 754 DRC) and that is the
+ARTICLE, not the resolver: `fb_t2q_fresh` already carries its source fanout
+at 0.127 track and ~0.105 clearance, so 735 of those violations are on the
+FANOUT board before the braid runs, and no re-route can move that copper.
+**Do not measure an achieved clearance whole-board on this bench** -- the
+closest foreign pair on both arms is the same pre-existing `SRAS <-> SA7` at
+0.1046, and it is in `fb_t2q_fresh.kicad_pcb` itself. Measure the copper the
+run added.
+
+**Gate (c), the negative control.** A `copy_board` whose Default class
+clearance is explicitly 0.0 -- KiCad's "not configured" -- resolves to the
+same numbers as today (`clearance 0.1 [chain preference]`) and its K15 chain
+produces copper **IDENTICAL** to the baseline, fanout and routed.
+
+**A bug this work introduced and the positive control caught.** The first
+`install` resolved its targets with `sys.modules.get(name)`. A stage runs as
+`python3 braid.py`, so the router's own module is named `__main__` and
+`sys.modules['braid']` does not exist: the install wrote NOTHING into the
+router, silently, while the stage printed the resolved 0.15 it was not
+using. The board came back routed at the 0.1 defaults with a 0.15 line in
+its log -- the "a wiring fix can be INERT" trap exactly. `install` now also
+matches a module running as `__main__` by its `__file__`, every stage prints
+**its own constants** rather than the `Rules` object, and
+`tests/test_622_rules_of.py` runs a stand-in stage as a real subprocess.
+
+**Found and NOT fixed (recorded, as the audit above records its own):**
+
+- **Per-NET-CLASS clearance.** The braid prices ONE scalar for the whole
+  bus, so only the Default class is consumed. The bench's own `DDR3_Signal`
+  class is 0.0889 / 0.1143 -- TIGHTER than the 0.1 / 0.127 we use, so we are
+  conservative there -- but a board whose bus class is WIDER than its
+  Default class would be under-spaced. This is the next step, and D1's strip
+  capacity should read the per-class value when it lands.
+- **The braid does not fully honour a much wider rule.** At hug 0.155 the
+  copper it added came within 0.1163 mm of foreign copper. At 0.125 it is
+  within 2 um of its hug, so the shortfall appears only when the rule is far
+  from the article's own geometry -- but it means a 0.15 mm board is not yet
+  routable by this chain, and the cause (which of the band / comb / rip
+  paths places that copper) is not diagnosed.
+- **`select_moves.BAND_TIP` is a DEAD default.** Its only readers
+  (`band_leg`, `band_capacity`) are on the `SPLIT_BLOCKS=1` path, and that
+  path's caller already overwrites it with a different formula --
+  `max(pitch_x, pitch_y) / 2 + 0.05`, half a pitch plus one occupancy cell,
+  because the under-pad engine ends its stubs at the boundary cell and not
+  at `exit_margin` (measured 0.425 at 0.8 mm pitch). The 0.9 default is
+  reproduced exactly by the formula in its own comment, and is not what runs.
+- **`select_moves.BAND_BLOCK_GAP = 0.30` calls itself "the braid's
+  BAND_GAP", which is `TRACK + CLEAR + 0.07` = 0.302.** A stale hand-copy.
+  Making it follow the formula changes flag-off output, so it is named here
+  instead of changed.
+- **`list_nets.board_constraint` cannot see `min_via_drill`** (it is not in
+  `_CONSTRAINT_FIELDS`), though this repo's own writeback writes that key and
+  the bench carries it. `rules_of` falls back to the project's raw rules for
+  keys the helper does not collect; the helper is the one that should grow.
+- **The 0.025 routing grid in `braid.setup` is still a literal**, justified
+  in its own comment by a rule computation ("the legal minimum, track +
+  clearance = 0.227, plus 23 um") that is no longer true at another
+  clearance.

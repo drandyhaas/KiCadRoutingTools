@@ -27,6 +27,7 @@ from typing import (Callable, Dict, List, Optional, Sequence,
 from escape_moves import Move
 import escape_moves as em
 from schedule import lis_keep, lis_keep_weighted
+import rules as _rules            # ONE source for every design rule
 
 Pt = Tuple[float, float]
 
@@ -168,7 +169,17 @@ def band_of(pt: Pt, bands, tol: float = 0.5) -> Optional[int]:
 # stands off its ball line (half a pitch + the engine's exit margin);
 # the band's capacity per layer is what fits between the tip lines at
 # the block pitch. The caller sets BAND_TIP from the array it plans.
-BAND_TIP = 0.9
+#
+# The default below is a DEAD one, and worth knowing as such: the only
+# readers (band_leg, band_capacity) are on the SPLIT_BLOCKS=1 path, and
+# that path's caller -- fanout_from_plan.plan_state -- already overwrites
+# this with max(pitch_x, pitch_y) / 2 + 0.05 (half a pitch plus one
+# occupancy cell, because the under-pad engine ends its stubs at the
+# boundary cell and not at exit_margin). rules.DEFAULT.band_tip reproduces
+# the 0.9 exactly from the formula in the line above -- half the array
+# pitch plus the engine's exit margin, 0.8 / 2 + 0.5 on the bench -- so
+# the number has a written source; it is not what runs.
+BAND_TIP = _rules.DEFAULT.band_tip
 # BAND_CHAN=0: a band exit's run along the band is NOT priced as a channel
 # (an A/B knob for the selector's cost; 1 = priced)
 BAND_CHAN = int(os.environ.get('BAND_CHAN', '1'))
@@ -220,9 +231,9 @@ SEL_RETRY = int(os.environ.get('SEL_RETRY', '0'))
 # (Corridor.offsets' comb): the nested rider sits a track+clearance inside
 # the tip line and each deeper rider steps by the same, and a band packs
 # at the braid's lane pitch.
-NEST_IN = 0.232                     # TRACK 0.127 + CLEAR 0.105: one lane's slice
+NEST_IN = _rules.DEFAULT.lane_slice  # TRACK 0.127 + CLEAR 0.105: one lane's slice
 NEST_STEP = 0.0                     # no per-depth ramp: the comb is parallel
-BAND_LPITCH = 0.35                  # braid.LPITCH -- the comb's lane pitch
+BAND_LPITCH = _rules.DEFAULT.lane_pitch  # braid.LPITCH -- the comb's lane pitch
 
 
 def band_leg(launch: Pt, pt: Pt, band) -> List[Pt]:

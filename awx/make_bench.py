@@ -61,6 +61,8 @@ from bga_fanout import generate_bga_fanout  # noqa: E402
 from fix_kicad_drc_settings import fix_project_for_output  # noqa: E402
 import braid as te  # noqa: E402
 import fanout_from_plan as fp  # noqa: E402
+import source_realize as sr  # noqa: E402  FAN_TRACK / FAN_CLEAR
+import rules as _rules  # noqa: E402  ONE source for every design rule
 sys.path.insert(0, os.path.join(HERE, '..', 'py_placer'))
 from placement.writer import write_placed_output  # noqa: E402
 
@@ -112,7 +114,7 @@ def fanout_source(board, out, src, names):
     pcb._fanout_all_foreign_immovable = True
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
         pcb.footprints[src], pcb, net_filter=names, layers=list(fp.LAYERS),
-        track_width=0.1, clearance=0.1, via_size=te.VIA_SIZE,
+        track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE,
         via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method='auto',
         plane_drop='off')
     if tracks:
@@ -277,6 +279,13 @@ def main(argv=None):
                 print(f'side must be F or B, not {side}', file=sys.stderr)
                 return 2
             put_on_side(base, ref, side)
+    # THE DESIGN RULES, from the ARTICLE (rules.py) -- not from the corpus
+    # board it came from: --two-layer changes the copper layer count, which
+    # is what the fab floor is resolved against.
+    _r = _rules.install_for(base)
+    print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
+          f'track {te.TRACK}, fanout {sr.FAN_TRACK}/{sr.FAN_CLEAR}, '
+          f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.sources.get("clearance")}]')
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(base)
     print(f'{os.path.basename(base)}: copper layers {pcb.board_info.copper_layers}, '
@@ -287,7 +296,8 @@ def main(argv=None):
     print(f'{src} fanned out: {n_t} tracks, {n_v} vias'
           + (f', refused {failed}' if failed else ''))
     with contextlib.redirect_stdout(sys.stderr):
-        fix_project_for_output(out, clearance=0.1, track_width=0.1,
+        fix_project_for_output(out, clearance=te.SPEC_CLEARANCE,
+                               track_width=sr.FAN_TRACK,
                                via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL,
                                verbose=False)
     if rotate:
