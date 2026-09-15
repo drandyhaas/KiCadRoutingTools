@@ -61,6 +61,7 @@ Pt = Tuple[float, float]
 PAGES_DET = float(os.environ.get('PLAN_PAGES_DET', '40'))     # CP-SAT deterministic time. 40 (2026-09-14): at 20 the K41 solve stops FEASIBLE with 4 swimmers, at 40 with 2-3, 80 adds nothing; on the ladder 20 -> 40 took K41 87 -> 79/81 and K51 125 -> 115 complete, within the time budget (K41 92 s)
 PAGES_WORKERS = int(os.environ.get('PLAN_PAGES_WORKERS', '4'))
 PAGES_SWIM = float(os.environ.get('PLAN_PAGES_SWIM', '100'))  # vias: the price of a net left to swim
+PAGES_ISLAND = float(os.environ.get('PLAN_PAGES_ISLAND', '0') or 0)   # vias per corridor part a page lane's chord crosses on its page (learned from verify; 0 = off)
 PAGES_SRC = int(os.environ.get('PLAN_PAGES_SRC', '1'))        # 0 = the source frozen (destination only)
 PAGES_LOG = int(os.environ.get('PLAN_PAGES_LOG', '0'))        # 1 = per-net choice printed
 PAGES_ITERS = int(os.environ.get('PLAN_PAGES_ITERS', '3'))    # re-key on the chosen plan, at most this often
@@ -622,6 +623,9 @@ def verify(st, board, names, dst_choice, src_choice):
                 bp[nm]['pitch_violation'] = viol[nm]
         verify.last_pitch = viol
     swim = [nm for nm in dst_choice if bp.get(nm, {}).get('page') is None]
+    verify.last_islands = ({nm: bp[nm]['islands'] for nm in dst_choice
+                            if bp.get(nm, {}).get('page') is not None and bp[nm].get('islands')}
+                           if PAGES_ISLAND else {})
     # PLAN_JUDGE: the braid's plan-implied count of this plan (the teeth
     # as chosen, priced on the same planner answer); None as recorded
     cost = F.judge_by_braid(st2, dst_choice, board, bp=bp)[0] if F.PLAN_JUDGE else None
@@ -884,6 +888,7 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
     seed_s: Dict[str, Move] = {}
     hold_d, hold_s, avoid = None, None, None
     widen = False
+    priced: Dict[str, Dict] = {}         # PLAN_PAGES_ISLAND: berth candidates priced by the parts their lane crosses
     for it in range(max(1, PAGES_ITERS)):
         fx = dict(fixed or {})
         if hold_d:
@@ -892,7 +897,7 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
                                                        seed_d if PAGES_KEYS == 'braid' else None, seed_s,
                                                        hold_s, avoid,
                                                        no_climb=bool(PAGES_CLIMB_LATE and it == 0),
-                                                       hard_fixed=fixed)
+                                                       hard_fixed=fixed, priced=priced or None)
         rep += lines
         if PAGES_PORTFOLIO and it == 0 and dst_choice:
             # the same instance under the OTHER objective; the judge picks
@@ -941,6 +946,31 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
                 if not PAGES_WIDEN:
                     break               # no better, and no wider search wanted
                 widen = True            # no better: give the next solve more room
+        hits = getattr(verify, 'last_islands', {}) if (PAGES_ISLAND and dst_choice) else {}
+        if hits:
+            # PLAN_PAGES_ISLAND (2026-09-15): the plan just verified sends
+            # these page lanes' chords through a corridor part on their own
+            # layer (K35+: the DQ group round C5, refused in band every time
+            # and re-laid at last call). Price each such berth by the parts
+            # it crosses and solve again with EVERYTHING free -- the held
+            # re-solve of the damped loop moved the violators onto berths
+            # the held plan could not accommodate (19 swimmers, K35), while
+            # the forced probe with everything free found the head-on plan
+            # the model's own prices already prefer. The prices accumulate
+            # across iterations; the judge (pf_key) keeps the best plan.
+            new_pr = 0
+            for n, isl in hits.items():
+                sig = sr.move_sig(dst_choice[n])
+                if sig not in priced.get(n, {}):
+                    priced.setdefault(n, {})[sig] = PAGES_ISLAND * len(isl)
+                    new_pr += 1
+            rep.append(f'  pages-first: island-crossing lanes {sorted(hits)} '
+                       f'({sum(len(v) for v in hits.values())} crossing(s)); '
+                       f'{new_pr} berth(s) newly priced at {PAGES_ISLAND:g}/part; re-solving everything free')
+            if new_pr:
+                hold_d, hold_s, avoid = None, None, None
+                seed_d, seed_s = best[1], best[2]
+                continue
         if not best[4] or PAGES_KEYS != 'braid':
             break
         # DAMPED re-key: the braid's verdict is exact for the moves it just
@@ -976,7 +1006,8 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
 
 
 def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None, avoid=None,
-           no_climb=False, hard_fixed=None, trust=None, nogoods=None, swim_cap=None, rate=None):
+           no_climb=False, hard_fixed=None, trust=None, nogoods=None, swim_cap=None, rate=None,
+           priced=None):
     """The pages-first choice on a plan state. Returns (dst_choice,
     src_choice, report): dst_choice {net: Move} for every net with a
     destination menu, src_choice {net: Move} for the nets whose tooth
@@ -1208,6 +1239,9 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                 c += VIA_W * PAGES_KIND_VIP
             if j in barred.get(n, ()):
                 c += PAGES_SWIM * VIA_W          # the soft bar: the berth that swam, at a swimmer's price
+            pr_ = (priced or {}).get(n, {}).get(sr.move_sig(mv))
+            if pr_:
+                c += VIA_W * pr_                 # PLAN_PAGES_ISLAND: a berth whose lane crosses a corridor part
             cost_terms.append(int(round(c * SCALE)) * xd[n][j])
         if S[n]:
             for i, mv in enumerate(S[n]):

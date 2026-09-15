@@ -8581,12 +8581,54 @@ def plan_braid(board, names, dest, plan, log=None):
         except Exception as e:
             _log(f'  plan phase: corridor {c.idx} not planned ({e})')
     cross = cross_corridor_vias(corridors)
+
+    def _chord_islands(c, nm, page):
+        """The static islands (corridor parts) on `page` that the lane's
+        region chord -- launch slot at s0 to target slot at s1 -- passes
+        through. The plan-side ISLAND PRICE reads it (pages_first
+        PLAN_PAGES_ISLAND): a berth whose lane must cross a part on its
+        own layer is dearer by what the bend round it costs (2026-09-15,
+        the C5-deflected DQ group refused in band at every K >= 35)."""
+        try:
+            isl = c.static_islands().get(page, ())
+            a = (c.s0, c.launch_o[nm])
+            b = (c.s1, c.target_o[nm])
+        except Exception:
+            return []
+        hit = []
+        own = {ctx.src_ref.get(nm), ctx.ends[nm][2]} if nm in ctx.ends else set()
+        for (s_lo, s_hi, o_lo, o_hi, what) in isl:
+            if what.split('.')[0] in own:
+                continue            # the run's own arrays are not corridor parts (SZQ's chord through U1)
+            # segment a-b against the box, Liang-Barsky
+            t0, t1 = 0.0, 1.0
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            ok = True
+            for pq, qv in ((-dx, a[0] - s_lo), (dx, s_hi - a[0]), (-dy, a[1] - o_lo), (dy, o_hi - a[1])):
+                if abs(pq) < 1e-12:
+                    if qv < 0:
+                        ok = False
+                        break
+                    continue
+                t = qv / pq
+                if pq < 0:
+                    t0 = max(t0, t)
+                else:
+                    t1 = min(t1, t)
+                if t0 > t1:
+                    ok = False
+                    break
+            if ok:
+                hit.append(what)
+        return hit
     for c in corridors:
         sc = getattr(c, 'sched_cur', None)
         li = {nm: i for i, nm in enumerate(getattr(c, 'launch', []))}
         ti = {nm: i for i, nm in enumerate(getattr(c, 'target', []))}
         for nm in c.members:
+            pg_ = sc.page.get(nm) if sc else None
             out[nm] = {'corridor': c.idx,
+                       'islands': (_chord_islands(c, nm, pg_) if pg_ else []),
                        'launch_idx': li.get(nm), 'target_idx': ti.get(nm),
                        'page': (sc.page.get(nm) if sc else ctx.tooth_layer[nm]),
                        'birth_b': bool(sc and nm in sc.birth_b),
