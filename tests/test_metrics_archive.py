@@ -111,7 +111,7 @@ def _render_into(tmp, meta):
         M._save('referrers.json', {'2026-09-15': [{'referrer': 'Google', 'count': 9}]})
         M._save('meta.json', meta)
         M.render('owner/repo')
-        with open(os.path.join(M.SITE, 'index.html')) as f:
+        with open(os.path.join(M.SITE, 'metrics', 'index.html')) as f:
             return ' '.join(f.read().split())
     finally:
         M.DATA, M.SITE = data, site

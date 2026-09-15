@@ -1855,7 +1855,8 @@ KiCad) still grades it correctly. Exit 0 when filled with classes intact,
 
 Snapshots this repository's own GitHub reach — release asset downloads, daily
 views and clones, referrers and popular paths — into `metrics/data/`, and
-renders `docs/metrics/index.html` for GitHub Pages. Run weekly by
+renders `docs/site/` for GitHub Pages — a landing page at the root and the
+metrics page at `/metrics`. Run weekly by
 `.github/workflows/metrics.yml`.
 
 **Why it must be committed and run on a schedule:** GitHub's traffic API is a

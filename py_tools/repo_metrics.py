@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, 'metrics', 'data')
-SITE = os.path.join(ROOT, 'docs', 'metrics')
+SITE = os.path.join(ROOT, 'docs', 'site')
 
 #: The prebuilt router binaries `build_router.py` fetches, by platform label.
 PLATFORMS = (
@@ -285,6 +285,45 @@ def _line_chart(series, width=880, height=200, pad=32):
     return ''.join(out) + f'<div class="legend">{legend}</div>'
 
 
+def _grouped_bars(rows, series, width=880, height=220, pad=34):
+    """Two bars per category, inline SVG. `rows` = [(label, {key: value})].
+
+    Linear, not log, and deliberately: PCM installs concentrate on whichever
+    release PCM points at, so one bar towering over the rest IS the finding.
+    A log axis would flatten it into a tidy picture that hides the shape of how
+    this project is actually installed.
+    """
+    if not rows:
+        return '<p class="muted">no data yet</p>'
+    top = max([v for _, d in rows for v in d.values()] + [1])
+    w, h = width - 2 * pad, height - 2 * pad
+    slot = w / max(1, len(rows))
+    bw = min(14.0, max(2.0, slot / (len(series) + 1)))
+    out = [f'<svg viewBox="0 0 {width} {height}" class="chart chart-tall" '
+           f'preserveAspectRatio="none" role="img">']
+    for frac in (0, 0.5, 1):
+        y = pad + h - h * frac
+        out.append(f'<line x1="{pad}" y1="{y:.1f}" x2="{pad + w}" y2="{y:.1f}" class="grid"/>')
+        out.append(f'<text x="2" y="{y + 4:.1f}" class="tick">{int(top * frac):,}</text>')
+    for i, (label, vals) in enumerate(rows):
+        base = pad + i * slot + (slot - bw * len(series)) / 2
+        for j, (key, colour, sname) in enumerate(series):
+            v = vals.get(key, 0)
+            bh = h * v / top
+            x = base + j * bw
+            out.append(
+                f'<rect x="{x:.1f}" y="{pad + h - bh:.1f}" width="{bw - 1:.1f}" '
+                f'height="{max(bh, 0.6):.1f}" fill="{colour}">'
+                f'<title>{_esc(label)} — {_esc(sname)}: {v:,}</title></rect>')
+    out.append(f'<text x="{pad}" y="{height - 8}" class="tick">{_esc(rows[0][0])}</text>')
+    out.append(f'<text x="{pad + w}" y="{height - 8}" class="tick" '
+               f'text-anchor="end">{_esc(rows[-1][0])}</text>')
+    out.append('</svg>')
+    legend = ' '.join(f'<span class="key"><i style="background:{c}"></i>{_esc(n)}</span>'
+                      for _k, c, n in series)
+    return ''.join(out) + f'<div class="legend">{legend}</div>'
+
+
 def _bars(rows, unit=''):
     if not rows:
         return '<p class="muted">no data yet</p>'
@@ -489,6 +528,12 @@ def render(slug):
                     f'than a quiet week:<ul>{items}</ul>'
                     f'The traffic endpoints need a token with push access.</div>')
 
+    dl_rows = [(r['tag'], {'pcm': r['pcm'], 'bin': sum(r['binaries'].values())})
+               for r in sorted(rows, key=lambda r: r['published'])
+               if r['pcm'] or r['binaries']]
+    dl_chart = _grouped_bars(dl_rows, [('pcm', '#3b82f6', 'PCM zip'),
+                                       ('bin', '#f97316', 'router binaries')])
+
     wk = weekly_rollup(traffic)
     _wk_rows = []
     for r in wk:
@@ -551,12 +596,16 @@ th {{ font-weight:600 }}
 .barcell {{ width:50% }}
 .bar {{ display:block; height:9px; border-radius:3px; background:#3b82f6; min-width:2px }}
 .chart {{ width:100%; height:200px; display:block }}
+.chart-tall {{ height:220px }}
 .grid {{ stroke:var(--line) }}
 .tick {{ fill:var(--muted); font-size:10px }}
 .legend {{ font-size:.82rem; color:var(--muted); margin-top:6px }}
 .key i {{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px }}
 .key {{ margin-right:14px }}
 .muted {{ color:var(--muted) }}
+.up {{ margin:0 0 12px; font-size:.86rem }}
+.up a {{ color:var(--muted); text-decoration:none }}
+.up a:hover {{ color:var(--fg) }}
 .hot {{ color:#c2410c; font-weight:600 }}
 .part {{ font-weight:400; color:var(--muted); font-size:.82em }}
 .note {{ background:var(--card); border:1px solid var(--line); border-left:3px solid var(--muted);
@@ -566,6 +615,7 @@ th {{ font-weight:600 }}
 code {{ font-size:.85em }}
 </style>
 <main>
+<p class="up"><a href="../">← KiCadRoutingTools</a></p>
 <h1>KiCadRoutingTools — reach</h1>
 <p class="sub">{_esc(slug)} · collected {_esc(meta.get('last_collected', 'never'))} ·
 rebuilt weekly from GitHub's API</p>
@@ -575,6 +625,17 @@ rebuilt weekly from GitHub's API</p>
 <div class="cards">
 {''.join(f'<div class="card"><div class="l">{_esc(l)}</div><div class="n">{_esc(n)}</div><div class="h">{_esc(h)}</div></div>' for l, n, h in cards)}
 </div>
+
+<h2>Downloads by release</h2>
+{dl_chart}
+<p class="note">Every release, oldest to newest, with its lifetime download
+counts. The two series are <strong>never added together</strong>: the PCM zip is
+what KiCad's Plugin and Content Manager fetches on install or update, and it
+piles onto whichever release PCM currently points at — which is why a handful of
+releases tower over the rest and most show almost none. That shape is the
+finding, so the axis is linear; a log scale would tidy it away. The
+<code>grid_router-*</code> binaries are fetched by <code>build_router.py</code>
+and track from-source installs instead, including this project's own CI.</p>
 
 <h2>Daily views and clones</h2>
 {chart}
@@ -660,11 +721,84 @@ platform mix, release adoption and trend — and for noticing when a week goes
 unexpectedly quiet.</p>
 </main>
 """
+    out = os.path.join(SITE, 'metrics', 'index.html')
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, 'w') as f:
+        f.write(html)
+    print(f'  wrote {os.path.relpath(out, ROOT)} ({len(html):,} bytes)')
+    land = write_landing(slug)
+    print(f'  wrote {os.path.relpath(land, ROOT)}')
+    return out
+
+
+def write_landing(slug):
+    """The site root: what this project is, and where the sub-pages are.
+
+    Deliberately thin. It exists so that /metrics is a SUBPAGE rather than the
+    whole site, leaving the root free for whatever comes next -- docs, a
+    gallery, a demo -- without having to move a published URL again.
+    """
+    try:
+        with open(os.path.join(ROOT, 'VERSION')) as f:
+            version = f.read().strip()
+    except Exception:
+        version = ''
+    repo = f'https://github.com/{slug}'
+    html = f"""<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KiCadRoutingTools</title>
+<style>
+:root {{ color-scheme: light dark;
+  --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd; --card:#fff; --accent:#2563eb; }}
+@media (prefers-color-scheme: dark) {{ :root {{
+  --bg:#16171a; --fg:#e8e8e4; --muted:#9a9a94; --line:#2c2e33; --card:#1d1e22; --accent:#60a5fa; }} }}
+* {{ box-sizing:border-box }}
+body {{ margin:0; padding:48px 16px 72px; background:var(--bg); color:var(--fg);
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }}
+main {{ max-width:720px; margin:0 auto }}
+h1 {{ font-size:2rem; margin:0 0 6px; letter-spacing:-.02em }}
+.tag {{ color:var(--muted); margin:0 0 8px; font-size:1.05rem }}
+.ver {{ color:var(--muted); font-size:.85rem; margin:0 0 32px }}
+.links {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:0 0 32px }}
+a.card {{ display:block; background:var(--card); border:1px solid var(--line);
+  border-radius:10px; padding:16px 18px; text-decoration:none; color:inherit }}
+a.card:hover {{ border-color:var(--accent) }}
+a.card .t {{ font-weight:600; color:var(--accent) }}
+a.card .d {{ font-size:.86rem; color:var(--muted); margin-top:3px }}
+p {{ margin:0 0 16px }}
+code {{ background:var(--card); border:1px solid var(--line); border-radius:4px;
+  padding:1px 5px; font-size:.86em }}
+.foot {{ color:var(--muted); font-size:.84rem; border-top:1px solid var(--line);
+  padding-top:16px; margin-top:32px }}
+</style>
+<main>
+<h1>KiCadRoutingTools</h1>
+<p class="tag">An autorouter and placement toolkit for KiCad — a Rust grid router
+with a Python engine, usable as CLI scripts or as a KiCad plugin.</p>
+<p class="ver">{('Latest release v' + _esc(version)) if version else ''}</p>
+
+<div class="links">
+  <a class="card" href="{repo}"><div class="t">Source &amp; docs →</div>
+    <div class="d">The repository, issues, and the tool reference</div></a>
+  <a class="card" href="{repo}/releases"><div class="t">Releases →</div>
+    <div class="d">Plugin package and prebuilt router binaries</div></a>
+  <a class="card" href="metrics/"><div class="t">Reach metrics →</div>
+    <div class="d">Installs, downloads and traffic, updated weekly</div></a>
+</div>
+
+<p>Install through KiCad's <strong>Plugin and Content Manager</strong>, or clone
+the repository and run <code>python3 build_router.py</code> to fetch the
+prebuilt router for your platform.</p>
+
+<div class="foot">This site is built from the repository and republished weekly
+by a GitHub Actions workflow.</div>
+</main>
+"""
     os.makedirs(SITE, exist_ok=True)
     out = os.path.join(SITE, 'index.html')
     with open(out, 'w') as f:
         f.write(html)
-    print(f'  wrote {os.path.relpath(out, ROOT)} ({len(html):,} bytes)')
     return out
 
 

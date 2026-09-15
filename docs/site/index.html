@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KiCadRoutingTools</title>
+<style>
+:root { color-scheme: light dark;
+  --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd; --card:#fff; --accent:#2563eb; }
+@media (prefers-color-scheme: dark) { :root {
+  --bg:#16171a; --fg:#e8e8e4; --muted:#9a9a94; --line:#2c2e33; --card:#1d1e22; --accent:#60a5fa; } }
+* { box-sizing:border-box }
+body { margin:0; padding:48px 16px 72px; background:var(--bg); color:var(--fg);
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+main { max-width:720px; margin:0 auto }
+h1 { font-size:2rem; margin:0 0 6px; letter-spacing:-.02em }
+.tag { color:var(--muted); margin:0 0 8px; font-size:1.05rem }
+.ver { color:var(--muted); font-size:.85rem; margin:0 0 32px }
+.links { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:0 0 32px }
+a.card { display:block; background:var(--card); border:1px solid var(--line);
+  border-radius:10px; padding:16px 18px; text-decoration:none; color:inherit }
+a.card:hover { border-color:var(--accent) }
+a.card .t { font-weight:600; color:var(--accent) }
+a.card .d { font-size:.86rem; color:var(--muted); margin-top:3px }
+p { margin:0 0 16px }
+code { background:var(--card); border:1px solid var(--line); border-radius:4px;
+  padding:1px 5px; font-size:.86em }
+.foot { color:var(--muted); font-size:.84rem; border-top:1px solid var(--line);
+  padding-top:16px; margin-top:32px }
+</style>
+<main>
+<h1>KiCadRoutingTools</h1>
+<p class="tag">An autorouter and placement toolkit for KiCad — a Rust grid router
+with a Python engine, usable as CLI scripts or as a KiCad plugin.</p>
+<p class="ver">Latest release v0.22.0</p>
+
+<div class="links">
+  <a class="card" href="https://github.com/drandyhaas/KiCadRoutingTools"><div class="t">Source &amp; docs →</div>
+    <div class="d">The repository, issues, and the tool reference</div></a>
+  <a class="card" href="https://github.com/drandyhaas/KiCadRoutingTools/releases"><div class="t">Releases →</div>
+    <div class="d">Plugin package and prebuilt router binaries</div></a>
+  <a class="card" href="metrics/"><div class="t">Reach metrics →</div>
+    <div class="d">Installs, downloads and traffic, updated weekly</div></a>
+</div>
+
+<p>Install through KiCad's <strong>Plugin and Content Manager</strong>, or clone
+the repository and run <code>python3 build_router.py</code> to fetch the
+prebuilt router for your platform.</p>
+
+<div class="foot">This site is built from the repository and republished weekly
+by a GitHub Actions workflow.</div>
+</main>

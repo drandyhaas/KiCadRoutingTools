@@ -1,7 +1,7 @@
 name: Weekly reach metrics
 
 # Snapshots GitHub's reach data into metrics/data (committed, so it becomes a
-# permanent archive) and republishes docs/metrics/index.html to GitHub Pages.
+# permanent archive) and republishes the docs/site/ pages (landing + /metrics) to GitHub Pages.
 #
 # WHY WEEKLY IS ENOUGH, AND WHY IT CANNOT BE MONTHLY: the traffic API is a
 # ROLLING 14-DAY WINDOW that GitHub does not backfill. Each call returns 14
@@ -58,7 +58,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add metrics/data docs/metrics
+          git add metrics/data docs/site
           if git diff --cached --quiet; then
             echo "no change to commit"
           else
@@ -72,6 +72,6 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/metrics
+          path: docs/site
       - id: deploy
         uses: actions/deploy-pages@v4
