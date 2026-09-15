@@ -994,6 +994,13 @@ B_OUTER = int(os.environ.get('BRAID_B_OUTER', '0'))
 # -- the human slides the leg 1.4 mm along the face and jogs back on B,
 # at 2. At 0.25 the move wins.
 SEC_CAP = float(os.environ.get('BRAID_SEC_CAP', '1e9') or 1e9)
+# In-band fixes from the 2026-09-15 wall census (every first-pass refusal
+# at K35/K41/K51 was a LAUNCH-side wall in the fan-in). Both opt-in, both
+# byte-identical off:
+DEFLECT_SEC = int(os.environ.get('BRAID_DEFLECT_SEC', '0') or 0)   # deflect_islands: 1 = slope-aware stack pitch every pair, 2 = displaced pairs only, 3 = exact bend distance (bisection); region-long bends in all
+DEFLECT_Q = float(os.environ.get('BRAID_DEFLECT_Q', '0') or 0) or (TRACK + CLEAR + 0.01)   # level 3+: the perpendicular room two bent lanes keep. At TRACK+CLEAR+0.01 the plan is feasible on paper and the router's 0.025 grid gets a ONE-CELL thread between the neighbours' virtual lines (K35 SDQ0 under level 4: 0.025-0.1 mm free for 1 mm, refused); MINP's own margin is 0.15
+JOIN_LEG_TOOTH = int(os.environ.get('BRAID_JOIN_LEG_TOOTH', '0') or 0)
+SLOPE_FROM_MID = int(os.environ.get('BRAID_SLOPE_FROM_MID', '0') or 0)   # offsets: slot pitch from the lane's steepest planned piece (island bends included), not its chord   # virtual_of: a join leg on the tooth's (and page's) layer only
 # ^ DIAGNOSTIC (2026-09-10): a cap on the secant SLOPE_PITCH widens a
 # same-page pair's pitch by (pair_floor). The widening feeds itself: a
 # wider exit block makes its outer lanes steeper, the next pass widens it
@@ -1088,6 +1095,47 @@ def cross_reserve(ctx, nm):
 
 
 END_KEEP = TRACK + CLEAR + 0.05    # a virtual stamp keeps this off a free end
+
+
+def clip_round_lines(pieces, lines, keep_r=END_KEEP):
+    """`pieces` [(p, q, layer)] with every stretch within keep_r of any of
+    the segments `lines` [(a, b)] cut out (a point piece a == b is a bare
+    end). Sampled along the piece at 0.05 mm: exact enough for a stamp."""
+    out = []
+    for (p, q, lay) in pieces:
+        L = math.hypot(q[0] - p[0], q[1] - p[1])
+        n = max(2, int(L / 0.05) + 1)
+        keep = []
+        for i in range(n):
+            t = i / (n - 1)
+            x, y = p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])
+            near = False
+            for (a, b) in lines:
+                dx, dy = b[0] - a[0], b[1] - a[1]
+                L2 = dx * dx + dy * dy
+                if L2 < 1e-12:
+                    d = math.hypot(x - a[0], y - a[1])
+                else:
+                    u = max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / L2))
+                    d = math.hypot(x - a[0] - u * dx, y - a[1] - u * dy)
+                if d < keep_r:
+                    near = True
+                    break
+            keep.append(not near)
+        i = 0
+        while i < n:
+            if not keep[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < n and keep[j + 1]:
+                j += 1
+            if j > i:
+                ta, tb = i / (n - 1), j / (n - 1)
+                out.append(((p[0] + ta * (q[0] - p[0]), p[1] + ta * (q[1] - p[1])),
+                            (p[0] + tb * (q[0] - p[0]), p[1] + tb * (q[1] - p[1])), lay))
+            i = j + 1
+    return out
 
 
 def clip_round_ends(pieces, ends, keep_r=END_KEEP):
@@ -4772,6 +4820,21 @@ class Corridor:
             L = max(self.s1 - self.s0, 1e-6)
             self._slope = {nm: (self.target_o[nm] - self.launch_o[nm]) / L
                            for nm in self.members}
+            if SLOPE_FROM_MID and getattr(self, 'mid', None):
+                # BRAID_SLOPE_FROM_MID (2026-09-15): the pitch a pair of
+                # slots needs follows the slope the lane will ACTUALLY run
+                # at -- the steepest piece of its planned polyline inside
+                # the region, island bends included -- not its chord. The
+                # C5-deflected DQ lanes run at 2.2-2.4 where their chord is
+                # 1.44, and slots spaced for the chord left them 0.14 mm of
+                # copper room (wall_probe census, every K >= 35).
+                for nm in self.members:
+                    pts = [q for q in self.mid.get(nm, ())
+                           if self.s0 - 1e-6 <= q[0] <= self.s1 + 1e-6]
+                    m_ = max((abs((b[1] - a[1]) / max(b[0] - a[0], 1e-6))
+                              for a, b in zip(pts, pts[1:])), default=0.0)
+                    self._slope[nm] = math.copysign(max(abs(self._slope[nm]), m_),
+                                                    self._slope[nm] or 1.0)
         else:
             self._slope = {}
         # head-on launches: tooth offsets at the launch pitch floor
@@ -5973,6 +6036,7 @@ class Corridor:
                         v = min(b[2] for b in hit) if sg < 0 else max(b[3] for b in hit)
                     return v
                 want = {}
+                bend_start = {}
                 for sg in (-1, 1):
                     edge = o_lo if sg < 0 else o_hi
                     grp = [(o, nm) for (o, nm) in on_L
@@ -5980,6 +6044,96 @@ class Corridor:
                                else (o <= edge if sg < 0 else o >= edge))]
                     grp.sort(key=lambda t: sg * t[0])
                     prev = None
+                    prev_nm = None
+
+                    def _sec_pitch(nm_, new_):
+                        """BRAID_DEFLECT_SEC: the pitch this bent lane needs
+                        from its inner neighbour -- MINP times the secant of
+                        the steeper of its run-in and run-out. Clearance is
+                        perpendicular to the lane and the stack is measured
+                        across the spine (pair_floor's rule), and a run-in
+                        at slope 2.4 stacked at the flat MINP left the K35+
+                        DQ group 0.14 mm of copper room: refused in-band at
+                        every K, re-laid at last call (wall_probe census,
+                        2026-09-15)."""
+                        if not DEFLECT_SEC or in_tail:
+                            return 0.0
+                        s_a_ = self.s0 + 0.05
+                        s_b_ = self.s1 - 0.05
+                        o_a_, o_b_ = o_at(nm_, s_a_), o_at(nm_, s_b_)
+                        m_ = 0.0
+                        if o_a_ is not None and s_lo - s_a_ > 1e-6:
+                            m_ = max(m_, abs(new_ - o_a_) / (s_lo - s_a_))
+                        if o_b_ is not None and s_b_ - s_hi > 1e-6:
+                            m_ = max(m_, abs(new_ - o_b_) / (s_b_ - s_hi))
+                        return MINP * min(math.sqrt(1.0 + m_ * m_), SEC_CAP)
+                    if DEFLECT_SEC >= 5 and not in_tail:
+                        # LEVEL 5 (2026-09-15): every bend checked against the
+                        # FULL current geometry of the layer's page lanes --
+                        # inner to outer, each lane against every lane except
+                        # the later members of its own side group (they are
+                        # placed against it in turn), so a bend that cuts
+                        # across a head-on neighbour's fan-in piece (level 4's
+                        # K51: 22/45) is refused where the stack-pair check
+                        # never saw it. Search per lane: the smallest outward
+                        # push, then the latest run-in start, that clears
+                        # DEFLECT_Q; a lane the base rule leaves in place and
+                        # whose inner neighbour did not move is not touched.
+                        cur = {om: list(self.mid[om]) for (_o, om) in on_L}
+                        names_grp = [nm_ for (_o, nm_) in grp]
+                        # LEVEL 6: a later member of the group is not absent
+                        # from the check -- its tooth-side path up to the
+                        # earliest point it could bend (first vertex + 0.3) is
+                        # FIXED and must be kept clear (level 5 let SDQ0's
+                        # early bend run over SDQ2's tooth exit); and a second
+                        # sweep re-places every lane against the paths as
+                        # finally bent, so no pair goes unchecked
+                        def _fixed_piece(om):
+                            s_fix = self.mid[om][0][0] + 0.3
+                            pts_ = [q for q in self.mid[om] if q[0] <= s_fix + 1e-9]
+                            oa_ = o_at(om, s_fix)
+                            if oa_ is not None and (not pts_ or pts_[-1][0] < s_fix - 1e-9):
+                                pts_.append((s_fix, oa_))
+                            return pts_ if len(pts_) > 1 else None
+                        sweeps = 2 if DEFLECT_SEC >= 6 else 1
+                        placed = {}
+                        for sweep in range(sweeps):
+                            prev = None
+                            prev_nm = None
+                            for k_, (o, nm) in enumerate(grp):
+                                if prev is None:
+                                    lim = edge
+                                else:
+                                    lim = prev[1] + sg * min(MINP, abs(o - prev[0]))
+                                x0 = off_islands(min(o, lim) if sg < 0 else max(o, lim), sg)
+                                disp_prev = prev is not None and abs(prev[1] - prev[0]) > 1e-9
+                                new = x0
+                                if abs(x0 - o) > 1e-9 or disp_prev:
+                                    later = set(names_grp[k_ + 1:])
+                                    against = {}
+                                    for om, pth in cur.items():
+                                        if om == nm:
+                                            continue
+                                        if om in later and sweep == 0:
+                                            fp_ = _fixed_piece(om) if DEFLECT_SEC >= 6 else None
+                                            if fp_:
+                                                against[om] = fp_
+                                            continue
+                                        against[om] = pth
+                                    new, s_a_, path_ = self._deflect_full(
+                                        nm, x0, sg, s_lo, s_hi, o_at, off_islands, against)
+                                    if abs(new - o) > 1e-9:
+                                        placed[nm] = (new, s_a_)
+                                        cur[nm] = path_
+                                    else:
+                                        placed.pop(nm, None)
+                                        cur[nm] = list(self.mid[nm])
+                                prev = (o, new)
+                                prev_nm = nm
+                        for nm, (new, s_a_) in placed.items():
+                            want[nm] = new
+                            bend_start[nm] = s_a_
+                        continue
                     for (o, nm) in grp:
                         if prev is None:
                             lim = edge
@@ -5987,9 +6141,41 @@ class Corridor:
                             lim = prev[1] + sg * min(MINP, abs(o - prev[0]))
                         new = (min(o, lim) if sg < 0 else max(o, lim))
                         new = off_islands(new, sg)
+                        disp_prev = prev is not None and abs(prev[1] - prev[0]) > 1e-9
+                        if prev is not None and DEFLECT_SEC and (
+                                DEFLECT_SEC == 1 or disp_prev or abs(new - o) > 1e-9):
+                            # the stack pitch follows the bend's own slope
+                            # (two passes: the slope depends on the slot).
+                            # Level 2: only a lane the island displaces, or
+                            # one whose inner neighbour was displaced, is
+                            # held to it -- level 1 held EVERY pair on the
+                            # side and pushed K35's whole north group a
+                            # pitch outward (the ribbon 2 mm wider at C5,
+                            # SDQ13's corridor walled)
+                            if DEFLECT_SEC >= 3:
+                                # Level 3: the EXACT perpendicular distance
+                                # between the two lanes' bends (run-in and
+                                # run-out segments, region-long), pushed by
+                                # bisection until it clears TRACK + CLEAR
+                                # plus a hair. Level 1/2's MINP x sec(slope
+                                # of the pushed bend) was self-referential:
+                                # a lane pushed far bends steeper, demands a
+                                # larger pitch, pushes the next one further
+                                # (K41: SCAS at +59 mm). A bend's separation
+                                # from its inner neighbour is bounded below
+                                # by the two lanes' own lines at the region's
+                                # ends, so the exact distance converges.
+                                new = self._deflect_clear(prev_nm, prev[1], nm, new, o, sg,
+                                                          s_lo, s_hi, o_at, off_islands)
+                            else:
+                                for _ in range(2):
+                                    lim = prev[1] + sg * max(min(MINP, abs(o - prev[0])),
+                                                             _sec_pitch(nm, new))
+                                    new = off_islands(min(o, lim) if sg < 0 else max(o, lim), sg)
                         if abs(new - o) > 1e-9:
                             want[nm] = new
                         prev = (o, new)
+                        prev_nm = nm
                 if not want:
                     continue
                 for nm, new in want.items():
@@ -5999,6 +6185,21 @@ class Corridor:
                         continue
                     d_in = max(0.3, abs(new - o_in))
                     d_out = max(0.3, abs(new - o_out))
+                    if DEFLECT_SEC and not in_tail:
+                        # the run-in from the region's start, the run-out to
+                        # its end: the longest bends the region allows, so
+                        # the slope -- and the stack pitch it sets -- is the
+                        # smallest (a 45-degree bend on top of the line's own
+                        # slope was 2.4 where the whole region gives 2.2)
+                        d_in = max(d_in, s_lo - (self.s0 + 0.05))
+                        d_out = max(d_out, (self.s1 - 0.05) - s_hi)
+                        if DEFLECT_SEC >= 4:
+                            # level 4: a bend may start BEFORE the region --
+                            # as early as the lane's own polyline allows --
+                            # so its slope stays at or under 45 degrees (the
+                            # s-stagger of a bus bend: the outer lanes turn
+                            # first)
+                            d_in = max(d_in, s_lo - self._bend_s_a(nm, new, s_lo, o_at))
                     if in_tail:
                         end = (min(self.exit_leg_s[nm], self.se[nm][0])
                                if nm in self.exit_block else self.se[nm][0])
@@ -6006,6 +6207,10 @@ class Corridor:
                         s_b = min(end - 0.05, s_hi + d_out)
                     else:
                         s_a = max(self.s0 + 0.05, s_lo - d_in)
+                        if DEFLECT_SEC >= 5 and nm in bend_start:
+                            s_a = bend_start[nm]
+                        elif DEFLECT_SEC >= 4:
+                            s_a = max(self.mid[nm][0][0] + 0.3, s_lo - d_in)
                         s_b = min(self.s1 - 0.05, s_hi + d_out)
                     if s_a >= s_lo:
                         continue
@@ -6037,6 +6242,186 @@ class Corridor:
                          + f' ({len(inside)} through it: '
                          + ', '.join(f'{nm}{"N" if side_of[nm] < 0 else "S"}'
                                      for _o, nm in sorted(inside)) + ')')
+
+    def _bend_s_a(self, nm, x, s_lo, o_at):
+        """Where lane `nm`'s run-in to a hold at (s_lo, x) starts: the
+        region's start (level 3), or -- level 4 -- as early as the lane's
+        own polyline allows (its tooth or leg end plus 0.3) so that the
+        run-in's slope is at most 1 where that is possible. Iterated,
+        since the line's o at the start depends on the start."""
+        s_a = self.s0 + 0.05
+        if DEFLECT_SEC < 4:
+            return s_a
+        s_min = self.mid[nm][0][0] + 0.3
+        for _ in range(3):
+            oa = o_at(nm, s_a)
+            if oa is None:
+                return max(s_min, self.s0 + 0.05)
+            s_a = max(s_min, min(self.s0 + 0.05, s_lo - abs(x - oa)))
+        return s_a
+
+    def _bend_path(self, nm, x, s_lo, s_hi, o_at):
+        """The lane's planned path with a hold at (s_lo..s_hi, x): its
+        own polyline before the run-in's start and after the run-out's
+        end, the run-in, the hold, the run-out. In (s, o)."""
+        s_a = self._bend_s_a(nm, x, s_lo, o_at)
+        s_b = self.s1 - 0.05
+        oa, ob = o_at(nm, s_a), o_at(nm, s_b)
+        pts = [q for q in self.mid[nm] if q[0] < s_a - 1e-9]
+        if oa is not None:
+            pts.append((s_a, oa))
+        pts += [(s_lo, x), (s_hi, x)]
+        if ob is not None and s_b > s_hi:
+            pts.append((s_b, ob))
+        pts += [q for q in self.mid[nm] if q[0] > s_b + 1e-9]
+        return pts
+
+    def _bend_path5(self, nm, x, s_a, s_lo, s_hi, o_at):
+        """Lane `nm`'s plan with a hold at (s_lo..s_hi, x), the run-in from
+        (s_a, its own line) and the run-out to the region's end."""
+        s_b = self.s1 - 0.05
+        oa, ob = o_at(nm, s_a), o_at(nm, s_b)
+        pts = [q for q in self.mid[nm] if q[0] < s_a - 1e-9]
+        if oa is not None:
+            pts.append((s_a, oa))
+        pts += [(s_lo, x), (s_hi, x)]
+        if ob is not None and s_b > s_hi:
+            pts.append((s_b, ob))
+        pts += [q for q in self.mid[nm] if q[0] > s_b + 1e-9]
+        return pts
+
+    def _deflect_full(self, nm, x0, sg, s_lo, s_hi, o_at, off_islands, against):
+        """Level 5: (hold offset, run-in start, path) for lane `nm` --
+        the smallest push outward from `x0` (in direction `sg`), and for
+        it the latest run-in start, at which the bent path keeps
+        DEFLECT_Q perpendicular from every path in `against` over the
+        region. Starts tried from the region's start back to the lane's
+        own first vertex + 0.3 in 0.15 mm steps; the push found by
+        bisection (monotone: nothing outward is checked, the outer lanes
+        are placed after this one). No solution within 3 mm: the base
+        rule's offset at the region's start, logged."""
+        def _sd(p, q, a, b):
+            def pd(pt, u, v):
+                dx, dy = v[0] - u[0], v[1] - u[1]
+                L2 = dx * dx + dy * dy
+                if L2 < 1e-12:
+                    return math.hypot(pt[0] - u[0], pt[1] - u[1])
+                t = max(0.0, min(1.0, ((pt[0] - u[0]) * dx + (pt[1] - u[1]) * dy) / L2))
+                return math.hypot(pt[0] - u[0] - t * dx, pt[1] - u[1] - t * dy)
+
+            def cr(o_, a_, b_):
+                return (a_[0] - o_[0]) * (b_[1] - o_[1]) - (a_[1] - o_[1]) * (b_[0] - o_[0])
+            d1, d2, d3, d4 = cr(p, q, a), cr(p, q, b), cr(a, b, p), cr(a, b, q)
+            if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 != 0 and d2 != 0:
+                return 0.0
+            return min(pd(p, a, b), pd(q, a, b), pd(a, p, q), pd(b, p, q))
+        s_end = self.s1 + 0.5
+        s_beg = self.mid[nm][0][0] - 0.5
+        segs_o = []
+        for om, pth in against.items():
+            for a, b in zip(pth, pth[1:]):
+                if b[0] < s_beg or a[0] > s_end:
+                    continue
+                segs_o.append((a, b))
+
+        def clear(path):
+            for p, q in zip(path, path[1:]):
+                if q[0] < s_beg or p[0] > s_end:
+                    continue
+                for a, b in segs_o:
+                    if b[0] < p[0] - 1e-9 or a[0] > q[0] + 1e-9:
+                        continue
+                    if _sd(p, q, a, b) < DEFLECT_Q - 1e-9:
+                        return False
+            return True
+        s_late = self.s0 + 0.05
+        s_min = self.mid[nm][0][0] + 0.3
+        starts = [s_late]
+        v = s_late - 0.15
+        while v >= s_min - 1e-9:
+            starts.append(v)
+            v -= 0.15
+        best = None
+        for s_a in starts:
+            if s_a >= s_lo - 0.05:
+                continue
+            if clear(self._bend_path5(nm, x0, s_a, s_lo, s_hi, o_at)):
+                x = x0
+            else:
+                hi_ = x0 + sg * 3.0
+                if not clear(self._bend_path5(nm, hi_, s_a, s_lo, s_hi, o_at)):
+                    continue
+                lo_ = x0
+                for _ in range(14):
+                    mid_ = (lo_ + hi_) / 2
+                    if clear(self._bend_path5(nm, mid_, s_a, s_lo, s_hi, o_at)):
+                        hi_ = mid_
+                    else:
+                        lo_ = mid_
+                x = hi_
+            if best is None or sg * (x - best[0]) < -1e-6:
+                best = (x, s_a)
+        if best is None:
+            self.log(f'  island stack: {nm} cannot clear within 3 mm at any start; base {x0:+.2f}')
+            return x0, s_late, self._bend_path5(nm, x0, s_late, s_lo, s_hi, o_at)
+        x, s_a = best
+        x = off_islands(x, sg)
+        return x, s_a, self._bend_path5(nm, x, s_a, s_lo, s_hi, o_at)
+
+    def _deflect_clear(self, nm_in, o_in_new, nm, new, o, sg, s_lo, s_hi, o_at, off_islands):
+        """BRAID_DEFLECT_SEC>=3: the smallest hold offset for lane `nm`
+        (pushed outward from `new` in direction `sg`) at which its bent
+        path keeps DEFLECT_Q perpendicular from the inner neighbour
+        `nm_in`'s bent path (hold at o_in_new) over the region, and MINP
+        across the hold. Exact segment distances, bisection; a lane
+        already clear stays where the base rule put it; a lane that
+        cannot clear within 4 mm stays there too and is logged -- pushed
+        to the cap it dragged every outer lane with it (K41: +4.38 per
+        lane, SCAS at +59)."""
+        def _sd(p, q, a, b):
+            def pd(pt, u, v):
+                dx, dy = v[0] - u[0], v[1] - u[1]
+                L2 = dx * dx + dy * dy
+                if L2 < 1e-12:
+                    return math.hypot(pt[0] - u[0], pt[1] - u[1])
+                t = max(0.0, min(1.0, ((pt[0] - u[0]) * dx + (pt[1] - u[1]) * dy) / L2))
+                return math.hypot(pt[0] - u[0] - t * dx, pt[1] - u[1] - t * dy)
+
+            def cr(o_, a_, b_):
+                return (a_[0] - o_[0]) * (b_[1] - o_[1]) - (a_[1] - o_[1]) * (b_[0] - o_[0])
+            d1, d2, d3, d4 = cr(p, q, a), cr(p, q, b), cr(a, b, p), cr(a, b, q)
+            if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 != 0 and d2 != 0:
+                return 0.0
+            return min(pd(p, a, b), pd(q, a, b), pd(a, p, q), pd(b, p, q))
+        path_in = self._bend_path(nm_in, o_in_new, s_lo, s_hi, o_at)
+        s_end = self.s1 + 0.5
+
+        def ok(x):
+            if sg * (x - o_in_new) < MINP - 1e-9:
+                return False
+            path = self._bend_path(nm, x, s_lo, s_hi, o_at)
+            d = 1e9
+            for p, q in zip(path, path[1:]):
+                if q[0] > s_end or p[0] > s_end:
+                    continue
+                for a, b in zip(path_in, path_in[1:]):
+                    if b[0] < p[0] - 1e-9 or a[0] > q[0] + 1e-9 or a[0] > s_end:
+                        continue
+                    d = min(d, _sd(p, q, a, b))
+            return d >= DEFLECT_Q - 1e-9
+        if ok(new):
+            return new
+        lo_, hi_ = new, new + sg * 4.0
+        if not ok(hi_):
+            self.log(f'  island stack: {nm} cannot clear {nm_in} within 4 mm; left at {new:+.2f}')
+            return new
+        for _ in range(24):
+            mid_ = (lo_ + hi_) / 2
+            if ok(mid_):
+                hi_ = mid_
+            else:
+                lo_ = mid_
+        return off_islands(hi_, sg)
 
     def layer_profile(self, nm):
         """The layers the plan requires of one lane along s, as runs
@@ -6399,6 +6784,45 @@ class Corridor:
                         segs.append((sp.xy(s_l, cur_o), sp.xy(s_l, o_c), curL))
                         cur_o, curL = o_c, L_a
                     segs.append((sp.xy(s_l, cur_o), sp.xy(s_l, ob), curL))
+                    continue
+                if JOIN_LEG_TOOTH and i == 0 and om in self.join_block:
+                    # BRAID_JOIN_LEG_TOOTH: a join leg is a promise on the
+                    # layer the lane leaves its tooth on (and its page, if
+                    # that differs) -- not on both. Stamped on both, a
+                    # swimmer joiner's leg at the face line sealed the
+                    # neighbouring tooth of the OTHER layer on the same
+                    # line (K51 SA2 on B under SA6's F leg: a 217-cell
+                    # pocket, refused in-band; wall_probe 2026-09-15). The
+                    # head rule for a head-on tooth says the same.
+                    # Level 2: the other layer's stamp STAYS (level 1 let
+                    # the B swimmers spread into the join block and cost
+                    # SA8 its room, K35) but is clipped wherever it would
+                    # cover another unrouted net's HEAD PIECE on that layer
+                    # -- the tooth and its jog to the leg -- so a same-line
+                    # tooth of the other layer keeps its way out.
+                    Ls = {self.ctx.tooth_layer[om]}
+                    pg_ = sc.page.get(om) if two else None
+                    if pg_:
+                        Ls.add(pg_)
+                    for L in ('F.Cu', 'B.Cu'):
+                        if not self.allowed(om, s_l, L):
+                            continue
+                        if L in Ls or JOIN_LEG_TOOTH < 2:
+                            if L in Ls:
+                                segs.append((a_, b_, L))
+                            continue
+                        heads = []
+                        # every member not yet landed -- INCLUDING the lane
+                        # being routed, which `unrouted` never holds and
+                        # which is exactly the head that must stay open
+                        for on in self.members:
+                            if on == om or on in self.ctx.landed or self.ctx.tooth_layer[on] != L:
+                                continue
+                            for ((sa_, oa2), (sb_, ob2)) in self.jogs.get(on, ()):
+                                if abs(sa_ - self.st[on][0]) < 1e-6:
+                                    heads.append((sp.xy(sa_, oa2), sp.xy(sb_, ob2)))
+                            heads.append((self.teeth[on], self.teeth[on]))
+                        segs.extend(clip_round_lines([(a_, b_, L)], heads))
                     continue
                 for L in ('F.Cu', 'B.Cu'):
                     if self.allowed(om, s_l, L):
@@ -8036,6 +8460,71 @@ def _write_layer_jumps(board_path, names):
     return out
 
 
+def _seg_dist_so(p, q, a, b):
+    """Distance between segments p-q and a-b in the (s, o) plane (an
+    isometric frame of a straight spine)."""
+    def pd(pt, u, v):
+        dx, dy = v[0] - u[0], v[1] - u[1]
+        L2 = dx * dx + dy * dy
+        if L2 < 1e-12:
+            return math.hypot(pt[0] - u[0], pt[1] - u[1])
+        t = max(0.0, min(1.0, ((pt[0] - u[0]) * dx + (pt[1] - u[1]) * dy) / L2))
+        return math.hypot(pt[0] - u[0] - t * dx, pt[1] - u[1] - t * dy)
+
+    def cr(o_, a_, b_):
+        return (a_[0] - o_[0]) * (b_[1] - o_[1]) - (a_[1] - o_[1]) * (b_[0] - o_[0])
+    d1, d2, d3, d4 = cr(p, q, a), cr(p, q, b), cr(a, b, p), cr(a, b, q)
+    if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 != 0 and d2 != 0:
+        return 0.0
+    return min(pd(p, a, b), pd(q, a, b), pd(a, p, q), pd(b, p, q))
+
+
+def pitch_violations(bp, q=None):
+    """The PLAN-SIDE PITCH CHECK (2026-09-15): every pair of page lanes on
+    one page, in one corridor, whose planned centrelines come closer than
+    `q` (TRACK + CLEAR + a router's cell or two) perpendicular somewhere
+    both are on that page. Such a promise cannot be kept -- the braid
+    refuses the lane in band and the last call re-lays it (the K35/K41/K51
+    DQ group round C5, wall_probe census) -- so the planner should treat
+    the lane as it treats a swimmer: re-plan it with that berth barred.
+    Returns {net: [partner, ...]} over the nets of every violating pair."""
+    q = (TRACK + CLEAR + 0.05) if q is None else q
+
+    def on_layer(d, s_, L):
+        for (a, b, RL) in d.get('req', ()):
+            if a <= s_ <= b and RL != L:
+                return False
+        if L == 'B.Cu' and not any(lo <= s_ <= hi for (lo, hi) in d.get('bwin', ())):
+            return False
+        return True
+    out = {}
+    names = [n for n, d in bp.items() if d.get('page') and d.get('mid') and len(d['mid']) > 1]
+    for i, a in enumerate(names):
+        da = bp[a]
+        for b in names[i + 1:]:
+            db = bp[b]
+            if da['page'] != db['page'] or da.get('corridor') != db.get('corridor'):
+                continue
+            L = da['page']
+            worst = None
+            for (p, qq) in zip(da['mid'], da['mid'][1:]):
+                for (u, v) in zip(db['mid'], db['mid'][1:]):
+                    lo, hi = max(p[0], u[0]), min(qq[0], v[0])
+                    if hi < lo:
+                        continue
+                    d = _seg_dist_so(p, qq, u, v)
+                    if d >= q:
+                        continue
+                    s_m = (lo + hi) / 2
+                    if on_layer(da, s_m, L) and on_layer(db, s_m, L):
+                        if worst is None or d < worst:
+                            worst = d
+            if worst is not None:
+                out.setdefault(a, []).append(b)
+                out.setdefault(b, []).append(a)
+    return out
+
+
 def plan_braid(board, names, dest, plan, log=None):
     """THE PLANNER, callable on a plan before any destination copper
     exists: the braid's own setup (corridors as it forms them, spines)
@@ -8114,7 +8603,15 @@ def plan_braid(board, names, dest, plan, log=None):
                        # solve's objective (plain, with the choice)
                        'alt': getattr(c, 'alt_choice', {}).get(nm),
                        'alt_w': getattr(c, 'alt_w', {}).get(nm),
-                       'alt_obj': getattr(c, 'alt_obj', None)}
+                       'alt_obj': getattr(c, 'alt_obj', None),
+                       # the planned (s, o) geometry, for the plan-side
+                       # PITCH CHECK (pitch_violations): the lane's polyline,
+                       # its required-layer stretches and back-layer windows,
+                       # the corridor's region
+                       'mid': [tuple(q) for q in getattr(c, 'mid', {}).get(nm, ())],
+                       'req': [tuple(r) for r in getattr(c, 'req', {}).get(nm, ())],
+                       'bwin': [tuple(b) for b in getattr(c, 'bwin', {}).get(nm, ())],
+                       's0': getattr(c, 's0', None), 's1': getattr(c, 's1', None)}
     if ctx.M is not None:
         for d in out.values():
             for k in ('page', 'exit_leg_layer'):

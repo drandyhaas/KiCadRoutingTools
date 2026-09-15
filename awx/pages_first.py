@@ -182,6 +182,8 @@ PAGES_UNBLOCK = int(os.environ.get('PLAN_PAGES_UNBLOCK', '0'))
 # every length term is priced at VIA_W / VIA_MM per mm -- via units, the
 # judge's rate. 0 = the greedy's weights, byte-identical.
 PAGES_RATE = int(os.environ.get('PLAN_PAGES_RATE', '0')) or int(os.environ.get('PLAN_RATE', '0') or 0)
+PAGES_PITCH = int(os.environ.get('PLAN_PAGES_PITCH', '0') or 0)   # verify: a pitch-infeasible page lane is a swimmer (braid.pitch_violations)
+PAGES_PITCH_Q = float(os.environ.get('PLAN_PAGES_PITCH_Q', '0') or 0)   # its perpendicular room; 0 = TRACK + CLEAR + 0.05
 # PLAN_PAGES_CERT (2026-09-15, THE PLAN item 2): 1 = a phase-A CERTIFICATE
 # of the fewest swimmers (the swimmer count alone, under PLAN_PAGES_CERT_DET
 # of deterministic time) caps the main solve; 2 = and phase A's plan is the
@@ -606,6 +608,19 @@ def verify(st, board, names, dst_choice, src_choice):
     plan = F.braid_plan_of(st2, dst_choice, board)
     plan['pages_first'] = True
     bp = te.plan_braid(board, list(dst_choice), st['dref'], plan)
+    if PAGES_PITCH:
+        # PLAN_PAGES_PITCH (2026-09-15): a page lane whose planned pair is
+        # geometrically infeasible (braid.pitch_violations) is a lane the
+        # braid will refuse in band; it is treated here exactly like a lane
+        # the braid swims -- page None -- so the damped loop re-plans it
+        # with that berth barred, the key counts it, and the judge prices
+        # it as a swimmer
+        viol = te.pitch_violations(bp, PAGES_PITCH_Q or None)
+        for nm in viol:
+            if nm in bp and bp[nm].get('page') is not None:
+                bp[nm]['page'] = None
+                bp[nm]['pitch_violation'] = viol[nm]
+        verify.last_pitch = viol
     swim = [nm for nm in dst_choice if bp.get(nm, {}).get('page') is None]
     # PLAN_JUDGE: the braid's plan-implied count of this plan (the teeth
     # as chosen, priced on the same planner answer); None as recorded
@@ -911,8 +926,10 @@ def choose(st, board, log=print, fixed=None, learned=None, src_free=True, seed=N
             swim, bp = best[4], best[5]
         else:
             swim, bp, cost = verify(st, board, list(dst_choice), dst_choice, src_choice)
+            pv = getattr(verify, 'last_pitch', None) if PAGES_PITCH else None
             rep.append(f'  pages-first: iteration {it}: the braid\'s planner swims {len(swim)} '
                        f'{swim if swim else ""} on this plan (model {model["swim"]})'
+                       + (f'; pitch-infeasible {sorted(pv)}' if pv else '')
                        + (f'; the braid\'s count {cost:.0f}' if cost is not None else ''))
             import fanout_from_plan as F
             # the key: (residue, the model's vias) as recorded; under
