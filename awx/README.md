@@ -4383,3 +4383,224 @@ plan-side and general: a berth is priced by the corridor part its ribbon
 lane must cross on its page, and a swimmer at what the copper pays for
 one, so that the model stops buying a 6 mm shift through an island to
 save a swimmer it could afford.
+## The synthetic harness (agent, 2026-09-15)
+
+Every number above this line comes from **one** bench -- `fb_t2q_fresh`, an
+H3 escaping into a DDR3 -- graded against **one** human layout. That gives a
+ranking (better or worse than 81 vias at K51) but never an *optimum*, so a
+result of "106 vias" carries no information about whether 106 is 30 too many
+or 2. Andy's ask: *"a test harness that gives the planner and router a large
+set of generated test cases with known answers to solve and route, to see
+where it is not optimal."*
+
+Two files, both general -- nothing in either names a board, a net, a face or
+the bench:
+
+* **`synth_bus.py`** writes a case: a 2-layer `.kicad_pcb` + `.kicad_pro` at
+  the bench's 0.1 mm process, two BGA arrays facing across a channel, `K`
+  two-pad nets in a chosen pin pattern, optional foreign parts, and a
+  `<stem>.truth.json` carrying the planted permutation and its answer.
+* **`synth_ladder.py`** runs a batch: generate, `make_bench.py` (source
+  fanout + DRC floor + coherent ladder), `chain_k.sh` (plan + destination
+  fanout + braid), then grade against the answer.
+
+```bash
+python3 synth_bus.py --self-test              # the truth model checks itself
+python3 synth_bus.py out.kicad_pcb --k 15 --pattern interleave
+python3 synth_ladder.py --batch b1            # 23 cases, patterns x K
+python3 synth_ladder.py --batch b3            # the corridor-obstacle ladder
+python3 synth_ladder.py --batch b1 --regrade  # re-grade, no chain
+```
+
+### Three answers, and they bracket
+
+For a peripheral bus (every used ball on the facing column, so both ends of
+every lane are on F) the channel is a permutation and two lanes cross iff
+their order is inverted. Then:
+
+| | what it is | when it exists |
+|---|---|---|
+| `lb` | `2 * (K - LIS(pi))` | always -- and still valid with an obstacle |
+| `opt` | best **whole-lane** solution = the proper 2-colourings of the crossing graph, `2 * sum min(part)` | only when that graph is bipartite |
+| `dp` | best over **all** routings, mid-channel layer changes included, by a DP over the crossing events | K <= `--dp-cap` (22; 0.02 s at K=15, 4.5 s at 22, hopeless at 28) |
+
+`dp` is the number to grade against. It is what turned `reversed` and most
+`shuffle` seeds from "no answer" into an answer: the whole-lane model returns
+nothing for an odd cycle, which is exactly the interesting half of the space.
+`--self-test` asserts `lb <= dp <= opt` on every pattern at K in 4..12 and
+checks the two closed forms, and it reports two facts worth keeping:
+
+* on `sorted`, `blocks`, `interleave` and `riffle` the whole-lane optimum and
+  the exact optimum **agree** -- mid-channel changes buy nothing there, which
+  is what makes those planted cases clean;
+* on `reversed` the LIS bound is **tight** at every K tested, so `2*(K-1)` is
+  the answer even though the crossing graph is a clique.
+
+The DP is exact for **one crossing order** (the straight-line one, with a
+deterministic tie-break) and one homotopy class. That is the honest caveat
+and it is written into `crossing_events`' docstring.
+
+### The gaps
+
+```
+PLANNER gap = the braid's plan-implied count (judge_gate c_sw) - the optimum
+BRAID   gap = the routed vias                                 - that plan count
+DP      gap = the routed vias                                 - the optimum
+DETOUR      = routed copper mm / straight-line mm
+inband/offered = the braid's own `lanes: a/b routed` lines, summed
+```
+
+`inband` is there because "all lanes in band" is the objective the planner is
+actually optimising, and a case can route perfectly while leaving it.
+
+Three columns decide whether a number means anything:
+
+* **`thru`** -- lanes with copper *inside* an array. The optimum is
+  channel-confined, so `thru > 0` means a cheaper topology than the model
+  describes was available and a negative gap is **not a win**. The `b1`/`b2`
+  pair exists to separate this: the same 23 cases, `b2` with the array
+  interiors closed by fattening the unused balls (`--pad-inner 0.6`).
+* **`slot_cap`** -- on an obstacle case, how many lanes can physically pass by
+  counting. Without it `open=4` cannot be read: a router defect if the lanes
+  fit, a correct refusal if they do not.
+* **`k_real` vs `k_asked`** -- `coherent_nets` counts whole *rivers*, so the
+  ladder can hand the chain fewer nets than asked. The truth is re-derived
+  from the prepared board, never trusted from the sidecar.
+
+### What the first batches measured
+
+`b1` (23 cases, open arrays), `b2` (the same, interiors closed), `b3` (14
+corridor-obstacle cases). Summary lines as run:
+
+```
+b1: 18 with an exact answer: routed 206 vs optimum 254; 11 exact, 0 open, 0 DRC.
+    11 channel-confined (thru=0): routed 112 vs 112 -- ALL 11 EXACT.
+    in band 285/310 lanes; 4 cases left the band.
+b2: 17 with an exact answer: routed 228 vs optimum 240; 11 exact, 0 open, 0 DRC.
+    13 channel-confined: routed 130 vs 124, 10 exact.
+    in band 271/311; 4 cases left the band.
+b3: 14 with an exact answer: routed 260 vs optimum 118; 1 exact, 4 with opens.
+    in band 171/580; ALL 14 cases left the band.
+```
+
+**1. On a clear channel the chain is at the optimum.** Every one of the 11
+channel-confined `b1` cases routed exactly its known optimum -- `sorted`,
+`blocks`, `interleave` and `riffle` at K=8, 15 and 28, DRC-clean and with no
+open nets. That is a real result and it is the first time the campaign has
+been able to say it. It also means the corpus bench's remaining gap is not a
+generic "the braid wastes vias" defect.
+
+**2. Two vias on a bus with zero crossings.** `sorted_k15` with the array
+interiors open routes at **0 vias**, every lane straight on F (left). The
+identical permutation with the interiors closed pays **2** (right) -- one
+lane dives to B and back at the destination berth, and no crossing requires
+it. Same for `sorted_k8` and `sorted_k28`. A 15-net, 3-second, known-answer
+reproduction of a berth-side via the plan did not need.
+
+<img src="img/synth_sorted_k15_open.png" alt="sorted K15, open interiors: 0 vias" width="380"> <img src="img/synth_sorted_k15_closed.png" alt="sorted K15, closed interiors: 2 vias" width="380">
+
+**3. The escape field breaks the planner, not the braid.**
+`interleave_k15_dep2` (bus balls drawn two columns deep, so the teeth are a
+real escape field rather than one clean column) is the largest planner gap in
+`b1`: plan-implied **28** against an optimum of **14**, with the braid then
+recovering 10 of them (routed 18). The braid gap is negative and the planner
+gap is +14 -- the plan was the wrong half.
+
+**4. A part in the corridor is where it falls apart.** `b3` walks a
+through-hole blocker up the middle of the channel and grows it, so the bus
+must fan in past it through a shrinking slot at each end. On `sorted`, whose
+clear-channel optimum is **0 vias**:
+
+| obstacle | room each side | `slot_cap` | routed | open |
+|---|---|---|---|---|
+| 2x12 mm | 6.4 mm | 116 | 8 | 0 |
+| 2x18 mm | 3.4 mm | 56 | 14 | 0 |
+| 2x20 mm | 2.4 mm | 36 | 22 | 0 |
+| 2x22 mm | 1.4 mm | 16 | 26 | **4** |
+
+Nothing in this ladder needs a single layer change: the lanes do not cross,
+and a group passing above and a group passing below both stay on F. The
+render (left, the 2x20 row) shows what happens instead -- the bundle wraps to
+the board edge at 2.11x detour with most lanes flipped to B and back, and a
+knot of stacked vias at the destination.
+
+The `open` column is the sharper finding, because `slot_cap` says the lanes
+fit. At 2x22 the counting bound is 16 lanes against K=15 and the chain
+strands 4. The off-centre case is worse (right): the blocker is pushed down
+so every lane must pass over the top, `slot_cap` is **68**, and the chain
+still strands **4 of 15** -- crowding the survivors into a tight bundle
+hugging the obstacle while the top third of the board sits empty. This is
+the session-11 "parallel bends at the lane pitch go infeasible" class,
+reproduced on a generated board with a known answer.
+
+<img src="img/synth_obs_sorted_k15.png" alt="sorted K15 with a 2x20 blocker: 22 vias against an optimum of 0" width="380"> <img src="img/synth_obs_offcentre_k15.png" alt="off-centre blocker: 4 of 15 nets stranded with room for 68" width="380">
+
+**5. The in-band objective collapses under an obstacle.** All 14 `b3` cases
+left the band, 171 of 580 lanes in band on the first attempt, against
+285/310 on the clear-channel `b1`. The band model has no representation for
+"the corridor is obstructed", so the plan it hands the braid is one the braid
+cannot execute, and everything after that is recovery.
+
+**6. A negative control that fired.** `interleave_k8_pi0.6_obs2x18` reports
+`slot_cap = 0`: the K=8 article is shorter, so an 18 mm blocker seals the
+channel. The chain leaves 8 nets open and the harness says that is **correct
+refusal, not a defect**. Keep this case -- it is the proof that `slot_cap`
+discriminates, and without it the 4 opens in the rows above would be
+unreadable.
+
+**7. One case does not build, and it is a real refusal.**
+`interleave_k15_dep2_pi0.6` (depth 2 *and* the interiors closed) fails in
+`make_bench`: with 0.6 mm unused balls there is no escape for a ball in the
+second column. The driver now names it instead of crashing -- the first
+`b2` run died in `print_table` on a `KeyError: 'routed'` because a
+build-failure row carried only a tag.
+
+### What this harness can and cannot see
+
+**Can:**
+
+* price a plan and a routed board against a **real optimum**, not a ranking;
+* separate the **planner** gap from the **braid** gap on the same case;
+* say whether an open net is a router defect or a physical impossibility
+  (`slot_cap`), and whether a *negative* gap is a win or a broken model
+  (`thru`);
+* sweep pin pattern, K, channel width, destination rotation, escape depth,
+  foreign parts, array porosity and a corridor obstruction independently,
+  deterministically and with no clock in any budget;
+* run a case in seconds, so a defect found here is a fixture, not an
+  expedition.
+
+**Cannot:**
+
+* **judge anything about a real board's geometry.** These are two facing
+  rectangular arrays in a straight channel. No corners, no mixed pitches, no
+  irregular ball maps, no power/ground obstruction of the escape field, no
+  more than two layers -- and the bench's K51 defect lives partly in exactly
+  those. A pass here is necessary, not sufficient.
+* **price anything but vias and copper length.** Nothing here scores
+  crosstalk, matched length, or the *quality* of a berth.
+* **claim its optimum outside the model.** The `dp` answer assumes each
+  inverted pair crosses exactly once, in the straight-line order, in the
+  channel. A lane that reaches its ball through the array is outside it --
+  which is why `thru` is printed and why `b2` exists, and why a negative gap
+  must be read as "the model does not apply here", never as "the router beat
+  the optimum".
+* **see the obstacle in its own optimum.** `b3`'s `dp` is the *clear-channel*
+  answer; the excess over it is the price of the obstruction, and no claim is
+  made that the excess is minimal. The `slot_cap` bound is likewise an upper
+  bound that ignores the bends into and out of the slot -- it says "there was
+  room", not "a routing exists".
+* **stand in for the corpus.** It is a microscope, not a regression suite.
+
+### Where to take it next
+
+1. **Case 2 is the cheapest open defect in the repo**: 15 nets, no crossings,
+   3 seconds, 2 vias where 0 is provably right, and it only appears when the
+   array interior is closed. Diagnose the berth.
+2. **Case 3** says the escape-field plan is the thing to fix, and a depth
+   sweep (`depth` 1..4) would say how it degrades.
+3. **Case 4/5** want the band model to know a corridor can be obstructed. The
+   obstacle ladder is the gate: `sorted` with a blocker should cost 0 vias.
+4. A `--pattern shuffle --inversions N` sweep at fixed K would give a
+   dose-response of gap against crossing count, which none of these batches
+   has (the patterns are corners, not a curve).
