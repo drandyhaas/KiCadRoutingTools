@@ -50,18 +50,18 @@ def main():
                     help='census the via DIAMONDS (both-layer-clear via '
                     'spots) along each layer-changing net\'s strip')
     a = ap.parse_args()
-    # THE DESIGN RULES, from the board (rules.py). The locals above are
-    # ALSO re-read explicitly: install does reach a module running as
-    # '__main__' (it matches on __file__), but this file's TRACK / CLEAR /
-    # NEED are its own names copied from braid, and re-reading them here is
-    # the spelling that cannot go stale if that matching ever changes.
+    # THE DESIGN CONSTANTS (rules.py). The locals above are ALSO re-read
+    # explicitly: install does reach a module running as '__main__' (it
+    # matches on __file__), but this file's TRACK / CLEAR / NEED are its own
+    # names copied from braid, and re-reading them here is the spelling that
+    # cannot go stale if that matching ever changes.
     global TRACK, CLEAR, NEED
-    _r = _rules.install_for(a.board)
+    _r = _rules.install_defaults()
     TRACK, CLEAR = te.TRACK, te.CLEAR
     NEED = TRACK + CLEAR
     print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {CLEAR}), '
           f'track {TRACK}, need {NEED}, via {te.VIA_SIZE}/{te.VIA_DRILL}'
-          f'  [{_r.sources.get("clearance")}]')
+          f'  [{_r.source}]')
     nets = subprocess.run([sys.executable,
                            os.path.join(HERE, 'coherent_nets.py'), str(a.k)],
                           capture_output=True, text=True).stdout.strip()

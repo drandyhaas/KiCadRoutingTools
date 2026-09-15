@@ -38,11 +38,10 @@ mkdir -p tmp
 case "$TAG" in */*) ;; *) TAG="tmp/$TAG";; esac
 BASE=${BASE:-fb_t2q_fresh.kicad_pcb}
 DEST=${DEST:-DU1}
-# THE DESIGN RULES, resolved from the board this chain is running on
-# (rules.py) -- the chain used to grade at a literal 0.1, which is right
-# only for a 0.1 mm-process board. Printed, because a grade whose
-# clearance is invisible is a number nobody can check.
-RULES_OUT=$(python3 rules.py "$BASE")
+# THE DESIGN CONSTANTS, from the one place they are defined (rules.py) --
+# this used to be a literal 0.1 repeated here and in grade_k.py. Printed,
+# because a grade whose clearance is invisible is a number nobody can check.
+RULES_OUT=$(python3 rules.py)
 CLR=$(printf '%s\n' "$RULES_OUT" | awk '$1=="clearance"{print $2; exit}')
 CLR=${CLR:-0.1}
 printf '=== %s\n' "$RULES_OUT"

@@ -43,16 +43,16 @@ ap.add_argument('--nets', default=None,
 ap.add_argument('--max-bridge', type=float, default=3.0)
 a = ap.parse_args()
 
-# THE DESIGN RULES, from the board being collapsed (rules.py), BEFORE the
-# braid's numbers are read into this module's locals -- this tool rips a
-# braid lane and re-lays it, so it must use the numbers that lane was laid
-# at. (The locals are bound AFTER the install rather than before it: they
-# are this file's own names copied out of braid, so their order matters
-# even though install also reaches a module running as '__main__'.)
-_r = _rules.install_for(a.board)
+# THE DESIGN CONSTANTS (rules.py), installed BEFORE the braid's numbers are
+# read into this module's locals -- this tool rips a braid lane and re-lays
+# it, so it must use the numbers that lane was laid at. (The locals are
+# bound AFTER the install rather than before it: they are this file's own
+# names copied out of braid, so their order matters even though install also
+# reaches a module running as '__main__'.)
+_r = _rules.install_defaults()
 TRACK, CLEAR, VIA_SIZE, VIA_DRILL = _br.TRACK, _br.CLEAR, _br.VIA_SIZE, _br.VIA_DRILL
 print(f'rules: clearance {_br.SPEC_CLEARANCE} (hug {CLEAR}), track {TRACK}, '
-      f'via {VIA_SIZE}/{VIA_DRILL}  [{_r.sources.get("clearance")}]')
+      f'via {VIA_SIZE}/{VIA_DRILL}  [{_r.source}]')
 
 pcb = parse_kicad_pcb(a.board)
 id2nm = {i: n.name.split('/')[-1] for i, n in pcb.nets.items()}

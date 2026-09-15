@@ -279,13 +279,11 @@ def main(argv=None):
                 print(f'side must be F or B, not {side}', file=sys.stderr)
                 return 2
             put_on_side(base, ref, side)
-    # THE DESIGN RULES, from the ARTICLE (rules.py) -- not from the corpus
-    # board it came from: --two-layer changes the copper layer count, which
-    # is what the fab floor is resolved against.
-    _r = _rules.install_for(base)
+    # THE DESIGN CONSTANTS (rules.py) -- inert today, the seam tomorrow.
+    _r = _rules.install_defaults()
     print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
           f'track {te.TRACK}, fanout {sr.FAN_TRACK}/{sr.FAN_CLEAR}, '
-          f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.sources.get("clearance")}]')
+          f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.source}]')
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(base)
     print(f'{os.path.basename(base)}: copper layers {pcb.board_info.copper_layers}, '
