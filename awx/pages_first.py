@@ -207,6 +207,16 @@ PAGES_WALK_RMAX = int(os.environ.get('PLAN_PAGES_WALK_RMAX', '8') or 8)
 PAGES_WALK_TRIES = int(os.environ.get('PLAN_PAGES_WALK_TRIES', '3') or 3)
 PAGES_WALK_STEPS = int(os.environ.get('PLAN_PAGES_WALK_STEPS', '20') or 20)
 PAGES_WALK_SOLVES = int(os.environ.get('PLAN_PAGES_WALK_SOLVES', '40') or 40)
+# PLAN_PAGES_WALK_STAGE=n (2026-09-15, session 13; THE PLAN item 4): the most
+# solves ONE stage may take out of the run's budget. The budget is run-wide
+# and the first stage is the one with everything to gain, so it spends the
+# lot: measured on the K51 bench, stage 1 takes all 16 and every later stage
+# -- the destination passes, which is where the berths are chosen against the
+# teeth just realized -- prints "the run's solve budget is spent" and ships
+# its reference unwalked. This caps a stage instead of raising the total, so
+# the arm is budget-neutral and the question ("do the later passes move?")
+# is asked without also asking "does more search help?". 0 = no cap.
+PAGES_WALK_STAGE = int(os.environ.get('PLAN_PAGES_WALK_STAGE', '0') or 0)
 PAGES_WALK_DET = float(os.environ.get('PLAN_PAGES_WALK_DET', '10') or 10)
 PAGES_WALK_PROBE = int(os.environ.get('PLAN_PAGES_WALK_PROBE', '0') or 0)   # N proposals, no acceptance: the correlation probe
 # PLAN_PAGES_WALK_FROM: where the walk starts -- 'seed' (the greedy seed, or
@@ -282,6 +292,24 @@ PAGES_SEEDS = int(os.environ.get('PLAN_PAGES_SEEDS', '0') or 0)
 # climb never pays because its page-mates east of it still cross it
 # (cew5x: SA15 climbed and still swam). 0 = off.
 PAGES_GROUP = int(os.environ.get('PLAN_PAGES_GROUP', '0') or 0)
+# PLAN_PAGES_GROUP_FORCE=1 (2026-09-15, session 13): a PROBE. A realized
+# group is kept whatever the round judge says, so the chain can route the
+# board the judge would have thrown away and say whether it was right. The
+# count judge has no resolution at K51 (it cannot separate 115 vias from
+# 129), and a group is exactly the kind of whole-plan change it is worst at
+# pricing. Never a default: it turns the round's accept/revert off.
+PAGES_GROUP_FORCE = int(os.environ.get('PLAN_PAGES_GROUP_FORCE', '0') or 0)
+# PLAN_PAGES_GROUP_DST=1 (2026-09-15, session 13; THE PLAN item 2): the group
+# move at the DESTINATION as well. A group climb fixes its members' launch
+# order by geometry -- the lane order, see _nest_assign -- and a launch order
+# the berths do not follow is a swimmer per inversion, which is the whole
+# reason a single end climb never paid. So the composite also re-berths its
+# members, in the order they now launch. Measured on the K51 bench before it
+# was built: the up/B group taken in BERTH order has no consistent assignment
+# at all from m=3 up, because the berth order and the column order disagree;
+# the forced head-on probe's 100 vias was this move for the DQ group, and no
+# price in the solve could express it. 0 = off.
+PAGES_GROUP_DST = int(os.environ.get('PLAN_PAGES_GROUP_DST', '0') or 0)
 # PLAN_PAGES_PORTFOLIO=1 (2026-09-15): the FIRST solve of a plan is run under
 # BOTH objectives -- the greedy's units and the rate (VIA_MM, with the source
 # wrap) -- and the JUDGE (pf_key: the braid's count + its planned length)
@@ -754,6 +782,122 @@ def _spearman(xs, ys):
     return num / den if den else float('nan')
 
 
+def _nest_assign(group, cands, ax, ed, od, edge, taken_rows, held=(), budget=20000):
+    """PLAN_PAGES_GROUP, the CONSISTENT assignment: one climb per member of
+    `group`, such that
+
+      * the exit rows NEST BY LANE -- the member whose lane runs FURTHEST
+        FROM the face edge exits furthest toward the end of the face, and
+        each next lane out exits one row nearer the bundle;
+      * no two members share an exit row (two teeth at one point is no
+        order at all), and none takes a row a standing tooth or an earlier
+        group already holds (`taken_rows`);
+      * no two members contend for the same room
+        (`source_realize.moves_clash`): distinct lanes, and no run through
+        another member's barrel;
+      * no member contends with a climb an EARLIER group of the same call
+        already holds (`held`). Every accepted group is laid in one engine
+        call, so consistency inside a group is not enough: at K51 three
+        groups accepted in one stage (12 members) collided and six of them
+        were degraded, the same failure one group down.
+
+    **The nesting is geometry, not preference, and it is not the berth
+    order.** A member's leg out to the face crosses every lane beyond it
+    that is still running at that row, so of two members the inner one must
+    leave first; the launch order of a group is therefore fixed by the
+    COLUMNS its balls sit in. Measured on the K51 bench: the up/B group
+    taken in berth order (SA12, SBA1, SA15, ...) has NO consistent
+    assignment at m >= 3, because SA15's lane is west of the other two and
+    its berth is east of them. The berth order is the destination's to
+    give -- that is the re-berth (`PLAN_PAGES_GROUP_DST`), not this.
+
+    The members are enumerated with each other's copper stripped (they are
+    all about to be re-fanned together), so this is the ONLY place their
+    collisions can be seen before the engine meets them -- and meeting them
+    there is what made the K51 smoke lay 9 of 17 climbs in the asked gap.
+
+    DFS in lane order, fewest blockers first, at most `budget` nodes.
+    Returns {net: Move}, or None when the group has no consistent set."""
+    import source_realize as sr
+    import fanout_from_plan as F
+    pos = {n: (sum(F._lane_of(m, ax) for m in cands.get(n, ())) / len(cands[n]))
+           for n in group if cands.get(n)}
+    if len(pos) < len(group):
+        return None
+    seq = sorted(group, key=lambda n: (od * pos[n], group.index(n)))
+    # the candidate order: FEWEST BLOCKERS first (a climb that needs six
+    # other teeth stripped is re-laying six teeth with no hint, and that
+    # scatter is what the count judge then charges the group for), then the
+    # row nearest the bundle, then the innermost lane
+    order = {n: sorted(cands[n], key=lambda m: (max(m.blockers, 0),
+                                                abs(m.exit_pt[ax] - edge),
+                                                od * F._lane_of(m, ax)))
+             for n in seq}
+    seen = [0]
+
+    def rec(i, prev, used, chosen):
+        if i == len(seq):
+            return dict(chosen)
+        for mv in order[seq[i]]:
+            seen[0] += 1
+            if seen[0] > budget:
+                return None
+            v = round(mv.exit_pt[ax], 2)
+            k = -ed * mv.exit_pt[ax]
+            if v in used or (prev is not None and k <= prev + 1e-9):
+                continue
+            if any(sr.moves_clash(mv, m2) for m2 in chosen.values()):
+                continue
+            if any(sr.moves_clash(mv, h) for h in held):
+                continue
+            chosen[seq[i]] = mv
+            got = rec(i + 1, k, used | {v}, chosen)
+            if got is not None:
+                return got
+            del chosen[seq[i]]
+        return None
+    return rec(0, None, set(taken_rows), {})
+
+
+def _regroup_berths(st, dst, group, assigned, fr, page, log):
+    """PLAN_PAGES_GROUP_DST: the group's members re-berthed in the order their
+    climbs now LAUNCH.
+
+    A berth is not a slot that can be handed to another net -- it is an escape
+    of that net's OWN ball -- so this is not a permutation of berths but a
+    small monotone re-choice: each member picks from its own destination menu,
+    taken in the new launch order, so that the frame keys come out
+    non-decreasing (which is exactly "no swimmer among them"). Every candidate
+    is held inside the key BAND the group already occupies, so the re-berth
+    cannot invert the group against a net outside it, and each member's
+    standing berth is always a candidate -- the re-choice can decline.
+
+    Returns {net: Move} for the members whose berth changed."""
+    import sched_first as sf
+    keys = [fr.key(dst[n]) for n in group]
+    lo_k, hi_k = min(keys), max(keys)
+    _names, _fr, _order, cost = sf._setup(st, st['dmenu'])
+    seq = sorted(group, key=lambda n: fr.across(assigned[n].exit_pt))
+    cands = {}
+    for n in seq:
+        here = sr.move_sig(dst[n])
+        ms = [m for m in st['dmenu'].get(n, ())
+              if lo_k - 1e-9 <= fr.key(m) <= hi_k + 1e-9 or sr.move_sig(m) == here]
+        if not any(sr.move_sig(m) == here for m in ms):
+            ms.append(dst[n])
+        cands[n] = [(m, fr.key(m), cost(n, m, page)) for m in ms]
+    choice, skipped, _total = sf.monotone_assign(seq, cands, swim=1e6)
+    if skipped or len(choice) < len(seq):
+        return {}
+    out = {n: m for n, m in choice.items() if sr.move_sig(m) != sr.move_sig(dst[n])}
+    if out:
+        log(f'  pages-first: group climb: re-berth in launch order {seq}: '
+            + ', '.join(f'{n} {dst[n].direction}/{dst[n].layer[0]}'
+                        f'@{fr.key(dst[n]):.2f} -> {out[n].direction}/{out[n].layer[0]}'
+                        f'@{fr.key(out[n]):.2f}' for n in seq if n in out))
+    return out
+
+
 def _group_climb(st, board, log, best):
     """PLAN_PAGES_GROUP: see the flag. `best` = (key, dst, src, model,
     swim, bp) as choose keeps it; returns (best, report lines)."""
@@ -777,14 +921,19 @@ def _group_climb(st, board, log, best):
         cnt[face_of(st['launch'][n])] = cnt.get(face_of(st['launch'][n]), 0) + 1
     face = max(cnt, key=cnt.get)
     ax = 1 if face in ('left', 'right') else 0
+    od = DIRS[face][1 - ax]            # the OUTWARD sign across the face
     # rows already taken on the launch face: the standing launches, plus
     # every accepted group's rows (two teeth cannot share one exit point,
     # whatever their layers -- the smoke's up/F and up/B groups were both
     # handed rows 57.43-58.73 and the engine degraded half of them)
-    taken_rows = {round(st['launch'][n][ax], 2) for n in names if face_of(st['launch'][n]) == face}
+    on_face = [n for n in names if face_of(st['launch'][n]) == face]
+    held_rows = set()       # rows an ACCEPTED group already took this call
+    held_moves = []         # and their climbs: every group is laid in ONE call
     tried = 0
+    gid = 0
     for dface in [d for d in DIRS if DIRS[d][ax] != 0]:
         end = 'lo' if DIRS[dface][ax] < 0 else 'hi'
+        ed = -1 if end == 'lo' else 1      # the sign of "toward the end"
         for page in LAYERS:
             members = [n for n in names if n in dst and dst[n].direction == dface
                        and (bp.get(n, {}).get('page') or dst[n].layer) == page]
@@ -800,35 +949,52 @@ def _group_climb(st, board, log, best):
             m_max = min(len(climbers), PAGES_GROUP)
             for m in range(m_max, 1, -1):
                 group = climbers[:m]
-                taken, assigned = set(taken_rows), {}
-                for n in group:
-                    pick = None
-                    for mv in reversed(cands.get(n, [])):        # farthest row first for the outermost
-                        r = round(mv.exit_pt[ax], 2)
-                        if r not in taken:
-                            pick = mv
-                            break
-                    if pick is None:
-                        break
-                    taken.add(round(pick.exit_pt[ax], 2))
-                    assigned[n] = pick
-                if len(assigned) < m:
+                # the rows this group must avoid: every tooth still
+                # STANDING on the launch face (its own members are about to
+                # be stripped, so their old rows are free) and every row an
+                # accepted group already took
+                standing = [st['launch'][n][ax] for n in on_face if n not in group]
+                if not standing:
+                    continue
+                taken_rows = held_rows | {round(v, 2) for v in standing}
+                edge = min(standing) if end == 'lo' else max(standing)
+                assigned = _nest_assign(group, cands, ax, ed, od, edge, taken_rows,
+                                        held=held_moves)
+                if assigned is None:
+                    rep.append(f'  pages-first: group climb: {dface}/{page[0]} outermost {m} {group}: '
+                               f'no consistent assignment (nested rows, distinct lanes, no shared room)')
                     continue
                 tried += 1
+                gid += 1
+                tag = f'{dface}/{page[0]}/{gid}'
+                for _n, _mv in assigned.items():
+                    _mv.group = tag          # laid all or nothing (fanout_from_plan)
+                    _mv.replaces = src.get(_n)   # what to fall back to if it is dropped
                 src2 = dict(src)
                 src2.update(assigned)
-                swim2, bp2, cost2 = verify(st, board, names, dst, src2)
-                key2 = F.pf_key(dst, bp2, cost2, model.get('vias'))
+                dst2 = dst
+                if PAGES_GROUP_DST:
+                    reb = _regroup_berths(st, dst, group, assigned, fr, page, rep.append)
+                    if reb:
+                        dst2 = dict(dst)
+                        dst2.update(reb)
+                swim2, bp2, cost2 = verify(st, board, names, dst2, src2)
+                key2 = F.pf_key(dst2, bp2, cost2, model.get('vias'))
                 better = F.pf_better(key2, key0)
                 rep.append(f'  pages-first: group climb: {dface}/{page[0]} outermost {m} {group} -> {face} rows '
-                           f'{[round(assigned[n].exit_pt[ax], 2) for n in group]}; the braid swims {len(swim2)}'
+                           f'{[round(assigned[n].exit_pt[ax], 2) for n in group]} '
+                           f'(lane order {[n for n in sorted(assigned, key=lambda q: ed * assigned[q].exit_pt[ax])][::-1]}, '
+                           f'{sum(max(assigned[n].blockers, 0) for n in group)} blocker-slot(s)); the braid swims {len(swim2)}'
                            + (f', count {cost2:.0f}' if cost2 is not None else '')
                            + f'; key {key2} vs {key0}: ' + ('ACCEPTED' if better else 'rejected'))
                 if better:
-                    key0, src, swim, bp = key2, src2, swim2, bp2
+                    key0, dst, src, swim, bp = key2, dst2, src2, swim2, bp2
                     model = dict(model, count=cost2)
-                    taken_rows |= {round(assigned[n].exit_pt[ax], 2) for n in group}
+                    held_rows |= {round(assigned[n].exit_pt[ax], 2) for n in group}
+                    held_moves += [assigned[n] for n in group]
                     break
+                for _mv in assigned.values():
+                    _mv.group = ''          # a rejected proposal is not a group
     if not tried:
         rep.append('  pages-first: group climb: no group with climbs for every member')
     return (key0, dst, src, model, swim, bp), rep
@@ -867,6 +1033,15 @@ def _walk(st, board, log, fixed, learned, src_free, seed, ref=None):
     r = r0
     nogoods = []
     steps = solves = tries = 0
+    # this STAGE's share of the run budget (PLAN_PAGES_WALK_STAGE)
+    stage_left = [PAGES_WALK_STAGE if PAGES_WALK_STAGE else 10 ** 9]
+
+    def spend():
+        _WALK_BUDGET['solves'] -= 1
+        stage_left[0] -= 1
+
+    def budget_left():
+        return min(_WALK_BUDGET['solves'], stage_left[0])
     cap = None
     probe = []
     best = None
@@ -911,7 +1086,7 @@ def _walk(st, board, log, fixed, learned, src_free, seed, ref=None):
                 PAGES_DET = PAGES_WALK_DET
                 rep += lines
                 solves += 1
-                _WALK_BUDGET['solves'] -= 1
+                spend()
                 if dst0:
                     how = f'the free first solve ({len(src0)} teeth to move)'
                     ref, src_ref = dst0, src0
@@ -920,14 +1095,14 @@ def _walk(st, board, log, fixed, learned, src_free, seed, ref=None):
                 dst0, src0, lines, model0 = solve_at(0, ref_sig, {}, ref)
                 rep += lines
                 solves += 1
-                _WALK_BUDGET['solves'] -= 1
+                spend()
             if not dst0:
                 # the seed is not a model solution: the reference is the model-
                 # feasible plan NEAREST it (one proximity solve, radius None)
                 dst0, src0, lines, model0 = solve_at(None, ref_sig, {}, ref)
                 rep += lines
                 solves += 1
-                _WALK_BUDGET['solves'] -= 1
+                spend()
                 if dst0:
                     mv0 = model0.get('moved', [])
                     how = (f'the model-feasible plan nearest the seed ({len(mv0)} end(s) moved: '
@@ -962,16 +1137,18 @@ def _walk(st, board, log, fixed, learned, src_free, seed, ref=None):
                        f'the braid swims {len(ref[4])}'
                        + (f', count {ref[3]["count"]:.0f}' if ref[3].get('count') is not None else '')
                        + f'; key {ref[0]}')
-        if _WALK_BUDGET['solves'] <= 0:
-            rep.append('  pages-first: walk: the run\'s solve budget is spent -- the reference ships')
-        while (steps < PAGES_WALK_STEPS and _WALK_BUDGET['solves'] > 0 and r <= PAGES_WALK_RMAX
+        if budget_left() <= 0:
+            rep.append('  pages-first: walk: the '
+                       + ('stage' if stage_left[0] <= 0 < _WALK_BUDGET['solves'] else 'run')
+                       + '\'s solve budget is spent -- the reference ships')
+        while (steps < PAGES_WALK_STEPS and budget_left() > 0 and r <= PAGES_WALK_RMAX
                and (not PAGES_WALK_PROBE or len(probe) < PAGES_WALK_PROBE)):
             ref_d = {n: sr.move_sig(mv) for n, mv in best[1].items()}
             ref_s = dict(best[2])
             dst, src, lines, model = solve_at(r, ref_d, ref_s, best[1])
             rep += lines
             solves += 1
-            _WALK_BUDGET['solves'] -= 1
+            spend()
             if not dst:
                 if not nogoods and cap is None:
                     # no cut and no cap: the model has NO solution within r for
@@ -1034,7 +1211,9 @@ def _walk(st, board, log, fixed, learned, src_free, seed, ref=None):
         rep.append(f'  pages-first: walk PROBE: {len(probe)} proposal(s) at r={r0}: Spearman(d obj, d count) = {rho:.2f}; '
                    f'd count {[round(p[1]) for p in probe]}; d resid {[p[2] for p in probe]}')
     rep.append(f'  pages-first: walk done: {steps} accepted step(s), {solves} solve(s) '
-               f'({_WALK_BUDGET["solves"]} left in the run), final r={r}'
+               f'({_WALK_BUDGET["solves"]} left in the run'
+               + (f', {max(stage_left[0], 0)} in the stage' if PAGES_WALK_STAGE else '')
+               + f'), final r={r}'
                + (f'; the braid swims {len(best[4])} {best[4] if best[4] else ""}, key {best[0]}' if best else ''))
     _walk.last_best = best
     if best is None:

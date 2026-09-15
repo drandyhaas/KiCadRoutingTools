@@ -78,6 +78,37 @@ def _seg_seg_dist(a, b, c, d, n=12):
     return best
 
 
+def moves_clash(a, b):
+    """Do two menu Moves of DIFFERENT nets contend for the same room?
+
+    Their legs where they share a layer, either one's via site against the
+    other's legs on EVERY layer (a barrel pierces both), and the two sites
+    against each other. `blockers_of` asks the same question of a move and
+    the copper that stands on the board; this asks it of two moves NEITHER
+    of which is on the board yet, which is what a GROUP move needs: the
+    members are enumerated with each other's teeth stripped, so nothing in
+    the obstacle map can see them and the engine meets the collision only
+    when it lays them (K51: ten climbs asked through five column gaps, half
+    of them degraded). Same numbers as `blockers_of`, so the two agree."""
+    d_seg = FAN_TRACK + FAN_CLEAR
+    d_via = te.VIA_SIZE / 2 + FAN_CLEAR + FAN_TRACK / 2
+    d_vv = te.VIA_SIZE + FAN_CLEAR
+    for (p, q, L) in (a.legs or ()):
+        for (r, t, M) in (b.legs or ()):
+            if L == M and _seg_seg_dist(p, q, r, t) < d_seg:
+                return True
+    for m, other in ((a, b), (b, a)):
+        if m.site is None:
+            continue
+        for (p, q, _L) in (other.legs or ()):
+            if _seg_point_dist(m.site[0], m.site[1], p[0], p[1], q[0], q[1]) < d_via:
+                return True
+    if a.site is not None and b.site is not None:
+        if math.hypot(a.site[0] - b.site[0], a.site[1] - b.site[1]) < d_vv:
+            return True
+    return False
+
+
 def blockers_of(pcb, move, nid, byname, pool):
     """The nets whose copper stands in the room `move` needs -- its legs on
     their own layers, and its via site on EVERY layer (a barrel pierces

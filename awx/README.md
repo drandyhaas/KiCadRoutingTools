@@ -5318,6 +5318,385 @@ half-laid and the round judge throws the whole round away. A group
 needs an all-or-nothing lay (or the climbs the engine can actually lay,
 enumerated against what it will strip).
 
+## Session 13 (2026-09-15, 17:40-): the group climb LAYS; and K51 = 98 vias
+
+### The record, found by accident, and confirmed in one line: **K51 = 98 vias, 0 open, 0 DRC (rule 280.5)**
+
+`tmp/s13/nosc2_k51.kicad_pcb`. Previous best clean K51: 107 (this session's
+group arm), 109 (`cew5d`), 107 (the recorded `replan.py` board); the human
+is 81.
+
+It came out of the braid-tier judge below, which fans out a candidate and
+braids it in a scratch stem -- and therefore braids a board that has **no
+`<board>.plan.json` sidecar**, because only `fanout_once` ran and not
+`explain_plan`. Its board read 98 / 0 open where the chain's own answer from
+the identical fanout board read 112 with SDQ11 open. The two fanout boards
+are copper-IDENTICAL (`copper_same.py`: 583 segments, 35 vias, 0 differ), so
+the sidecar is the only difference, and deleting it reproduces the 98 in one
+braid run:
+
+    cp <chain>_fo_k51.kicad_pcb nosc2_fo_k51.kicad_pcb   # and its .kicad_pro
+    python3 braid.py --board nosc2_fo_k51.kicad_pcb --dest DU1 --nets ... \
+            --out nosc2_k51
+    GRADE nosc2_k51 K=48 clr=0.1 open=0 drc=0 vias=98
+
+**It is NOT "delete the sidecar".** On the `dst1` board (`DST_ITERS=1`, no
+group) the sidecar is worth **+7 the other way**: 115 with it, 122 without.
+So the plan the braid is handed helps on one board and costs 14 vias and a
+net on another -- which is the same shape as everything else measured today
+(a proxy overriding the copper), and exactly the kind of pair the braid-tier
+judge exists to decide. `braid-plan-sidecar-is-load-bearing` recorded this
+family at K28 (36 against 38); at K51 it is 14 vias and a completion.
+
+**Next session's first job**: route both arms of the sidecar at every rung,
+and if it is a real coin flip, make the sidecar a TIER decision
+(`PLAN_PAGES_TIER` already routes and grades a candidate -- it needs only to
+be offered the two boards).
+
+## Session 13 (continued): the group climb LAYS, and it routes K51 in 107
+
+### Item 1, the three pieces -- built, and each one was necessary
+
+**Piece 1, LANES (`escape_moves.enumerate_moves(own_line=)`).** The climb
+block ran a via-in-pad's run along the two column-GAP midlines beside the
+ball and nowhere else; a dog-bone has only those, but a via-in-pad starts
+on the ball's own column LINE, and on the run layer that line is empty
+except where another ball has a barrel of its own -- which `clear` already
+decides. One entry (`g = 0`) in the `gaps` list, with no leg to step into
+the gap. It matters because a 0.65 mm pitch gap carries about one 0.33 mm
+track, so five column gaps cannot carry ten climbs and `_follow_plan`
+degrades half of them. Measured on the K51 bench: the group's members go
+from 2 lanes each to 2-3, and the five-member assignment below uses a
+column line for one of them. Off by default (`own_line=False`), so
+`SRC_CLIMB` and `end_climbs` are untouched; `group_end_climbs` asks for it.
+
+**Piece 2, A CONSISTENT ASSIGNMENT (`pages_first._nest_assign`).** The
+greedy handed each member, outermost berth first, the farthest free row.
+The replacement is a DFS with three constraints -- distinct rows (none
+taken by a standing tooth or an earlier group), pairwise room
+(`source_realize.moves_clash`, the same numbers `blockers_of` uses), and
+NESTED exits. **The nesting is geometry and it is NOT the berth order**,
+which is the finding that made the piece work: a member's leg out to the
+face crosses every lane beyond it that is still running at that row, so
+of two members the INNER one must leave first, and the launch order of a
+group is therefore fixed by the COLUMNS its balls sit in. Taken in berth
+order the K51 up/B group has NO consistent assignment from three members
+up (its westernmost lane belongs to its easternmost berth); taken in lane
+order all five assign in 0.00 s. The handoff asked for berth order and the
+board says it cannot be had -- which is exactly what item 2 (the re-berth)
+is for.
+
+**Piece 3, ALL OR NOTHING (`fanout_from_plan._realize_group_first`).** A
+group laid beside the round's other teeth is not laid: the engine's
+plan-follow claims the shallowest balls first, negotiates at most three
+same-call blockers, and rips whatever is in the way of the ball it is
+laying -- measured, it ripped two members of the group to lay two ordinary
+teeth and re-laid them eight millimetres off their asked rows. So the
+group gets an engine call of ITS OWN, before the round's other moves, with
+its own blockers freed; every member exact or the whole group is dropped
+(the missed member banned, the rest free to re-form next round). **Laid
+alone the group is exact: 4 of 4, 4/4 ranks kept, 0 inversions.**
+
+Four more defects had to go with it, each found by running it:
+
+1. The candidate menus are enumerated with EVERY net of the run stripped
+   (they are re-fanned jointly), so a candidate that traverses the whole
+   face reads as free while it in fact needs a dozen teeth out of the way.
+   Every candidate now carries `Move.blockers` (`blockers_of` against the
+   real board) and the assignment orders on it, fewest first.
+2. **The second call was freeing the group's own fresh climbs as
+   "blockers" and re-fanning them with no hint** -- the group undone in
+   the call after it was made. The rest's pool now excludes the laid
+   members.
+3. The round's other moves were chosen against a launch face the group had
+   just rearranged; laid on top of it they put 30 DRC pairs on the board
+   and the whole round was thrown away. A group now takes the whole
+   iteration and the next one re-plans against its copper.
+4. A net whose climb the engine refuses by FACE (`exact move infeasible
+   even alone`) had one of its thirty-odd climbs banned and proposed its
+   neighbour next round, for the same answer and another engine call. One
+   face refusal now takes that net's end climbs on that face out of the
+   run.
+
+### The result: K51 = 107 vias, 0 open, 0 DRC (rule 281.9) -- and the judge said no
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| jcl (reference) | 34 / 121.5 | 60 / 181.4 | 80 / 231.0 | 115 / 300.2 |
+| cew5d (session 12's best) | 34 | 54 / 172.5 | 71 / 224.3 | 109 / 284.7 |
+| **grpF** (the group, kept past the judge) | 36 | 68 | 80 | **107 / 281.9, 0 open** |
+| **grpT2** (the group, the BRAID decides) | -- | -- | -- | **107, copper identical to grpF** |
+| human | 46 | 58 / 186.1 | 70 / 220.6 | 81 / 250.5 |
+
+Every canary matched (K28 727.2/644.5, K35 1028.2/935.3, K41 2308.9/1163.6,
+K51 3983.7/1533.9). **107 is the best clean K51 this chain has produced**
+(cew5d 109, jcl 115, the forced head-on probe 100 with one open). It is
+NOT a default: at K28 and K35 the arm is worse (36 against 34, 68 against
+60), which is edict 3, and it needed `PLAN_PAGES_GROUP_FORCE` to ship at
+all.
+
+**And that is the finding.** The round judge scored the laid group at
+**373 against 302** and reverted it; the same board, carried on by the
+destination passes that follow, shipped at count 306 and ROUTED 107
+against the 115 of the plan the judge preferred. Two things were measured
+about that error, one fixed:
+
+* **A third of it was a destination that could not move.** After a source
+  move is realized the destination is re-chosen with every other berth
+  HELD, which is right for one tooth (it stops the comparison charging
+  that tooth for the greedy's twenty other changes) and wrong for a group,
+  which rearranges the launch order of a whole page: the berths chosen
+  against the old order can only swim on the new one.
+  `PLAN_PAGES_GROUP_FREE=1` re-chooses free, and the count goes 373 ->
+  356.
+* **The rest of it is the count itself.** 356 against 302 is still not a
+  near tie, and the copper says 107 against 115. The count's blindness
+  here is not noise to be tie-broken; it is systematic on a whole-plan
+  change.
+
+### Item 2, the re-berth; item 3, the walk budget; item 5, the harness
+
+* **`PLAN_PAGES_GROUP_DST=1`** (item 2). A berth is not a slot that can be
+  handed to another net -- it is an escape of that net's OWN ball -- so the
+  re-berth is not a permutation but a small monotone re-choice: each member
+  picks from its own destination menu, taken in the order the climbs now
+  launch, so the frame keys come out non-decreasing, every candidate held
+  inside the key BAND the group already occupies (so it cannot invert
+  against a net outside the group) and each member's standing berth always
+  a candidate.
+* **`PLAN_PAGES_WALK_STAGE=n`** (item 3). The walk's solve budget is
+  run-wide and the first stage spends the lot, so every later stage --
+  the destination passes, where the berths are chosen against the teeth
+  just realized -- prints "the run's solve budget is spent" and ships its
+  reference unwalked. The flag caps a STAGE instead of raising the total,
+  so the arm is budget-neutral and asks "do the later passes move?"
+  without also asking "does more search help?".
+* **`synth_bus --row-offset`, and the `b4` batch** (item 5). Every case in
+  b1/b2/b3 fills the facing column from the first non-corner row to the
+  last (`rows` is derived as K + 2), so a launch has NOWHERE along the face
+  to move to: **the end-of-face climb and the group move cannot exist on
+  any case the harness had, and it was inert for them however they were
+  flagged.** `row_offset` leaves free ball rows at each end and changes
+  nothing else, so each b4 pair (offset 3 against offset 0) measures
+  exactly what the room buys on a case whose optimum is known.
+  **What the harness CANNOT plant, and it is worth stating:** a clear
+  two-layer channel cannot make the group move pay. A crossing costs its
+  lane 2 vias (one at each end, both pads on F) and a climb that re-orders
+  a launch costs the same 2 -- it dives to the other layer to run along the
+  face and must come back for its F pad. So on a clear channel the answer
+  with the room is the answer without it, and what the pair grades is that
+  the chain still REACHES the optimum with the extra moves on the menu.
+  The climb's value is congestion relief, which is why b4 carries the
+  obstacle rows too: there the excess over the clear-channel optimum is the
+  measure, and re-ordering the fan-in at the face can move it.
+
+### Item 4: the braid-tier judge -- and it is what makes the group SHIP
+
+`PLAN_PAGES_TIER_GROUP=1` in place of the force flag gives **K51 = 107 / 0
+open, copper IDENTICAL to `grpF`** (`copper_same.py`: 2842 segments, 108
+vias, 0 differ). The tier fired once, routed both candidates, and read
+
+    braid tier: ..._tier0_1a routed 106 via(s), 1 open
+    braid tier: ..._tier0_1b routed 122 via(s), 2 open
+    judged count 302 -> 373 ... KEPT  [braid tier: 106/1 against 122/2 --
+    the copper decides, AGAINST the count]
+
+So the probe flag is retired: a group ships because the copper says so, not
+because the judge was switched off. Two things that came with it:
+
+* **The count is ANTI-correlated at K51 on this decision.** The plan the
+  round kept at floor **358.44** routes **107**; `grpT`'s, kept at floor
+  **335.10**, routes **133**. Not noise, not a tie -- a lower count, 26
+  vias worse.
+* **`PLAN_PAGES_GROUP_FREE` is harmful once the tier decides.** Freeing the
+  destination re-choice improves the COUNT of the group's board (373 ->
+  356) and makes the copper worse (`grpT`, 133 against 107): it hands the
+  tier a different destination plan to measure, and the one it measures is
+  the worse one. Keep it off; it stays in the tree as the attribution for
+  where a third of the count's error lives.
+
+### What a REJECTED group cost the other rungs, and two defects that were mine
+
+`grpT2` (the tier judge, before these two fixes) = **38 / 68 / 91 + 1 open
+/ 107**, and the tier was not the problem: it rejected the group at K28 (38
+against 36 routed) and at K41 (100 against 87), correctly. The regressions
+were in what a DROPPED group left behind.
+
+1. **A group takes the whole iteration, so on rejection the round's other
+   source moves were thrown away with it** (the loop `break`ed). It now bans
+   the group and hands the rest to the next iteration. K28 38 -> 36, K41
+   91 + 1 open -> **80 / 0 open**.
+2. **The order of the realize's ask dict is LOAD-BEARING.** Rebuilding
+   `rest` with the group members' restored moves APPENDED instead of left in
+   place gives `_blockers_for` a different walk order -- and its `free` list
+   is capped -- and the engine a different hint order. Measured at K35: the
+   same eleven asks on the same board, **69 segments different**, judged 198
+   against the control's 181, which is the whole of that rung's regression.
+   `rest` is now built in place.
+3. **A tier verdict and a count baseline cannot be mixed.** With (1) fixed,
+   K51 went 107 -> **131 + 1 open**: after the tier overruled the count to
+   keep the group, `best_key` is a count the braid has just contradicted,
+   and two more count-driven iterations took the plan from floor 359 to
+   floor 336 -- the anti-correlated direction. Measured three ways: carried
+   on unchanged, floor 336 and **131**; STOPPED at the overrule, floor 373
+   and **109 + 1 open**; and the one intermediate step that helped, floor
+   358 and **107**. There is no stopping rule in the count, so what ships is
+   not "stop" but "**change the judge**": every later decision of that round
+   goes to the braid too.
+
+4. **And the tier must route at the CHAIN'S OWN attempts.** At
+   `BRAID_ATTEMPTS=1` it is a cheaper router than the one that will route
+   the board, and its `open` term is then not the chain's: it read a
+   candidate 103 vias / 2 open against an incumbent 106 / 1 and rejected it
+   on completion, where the full chain takes that same plan to **107 and 0
+   open**. A judge that penalises a plan for opens the real router would
+   have closed is worse than the count it replaced. Default is now the
+   chain's own; `PLAN_PAGES_TIER_ATTEMPTS=1` is the fast, wrong one.
+
+And the flag-off control on this code, `ctl13`, is **34 / 60** -- jcl
+exactly.
+
+### The braid-tier judge itself (`PLAN_PAGES_TIER`)
+
+Where the count cannot be trusted, route instead: fan out the candidate's
+destination (`fanout_once`), hand the board to the braid at
+`BRAID_ATTEMPTS=1` (the extra attempts widen the launch pitch -- a repair,
+not a measurement) and grade it. The verdict is `(open, vias)`, completion
+first, as every grade in this chain is. `PLAN_PAGES_TIER=x` fires on a near
+tie within x; `PLAN_PAGES_TIER_GROUP=1` fires on every group decision,
+because the count's error there is not small but systematic;
+`PLAN_PAGES_TIER_MAX` (3) caps the run. It costs a destination fanout plus
+a braid per candidate, ~90 s at K51, and the result is cached per (board,
+plan). Off by default.
+
+## Handoff: the next session (written 2026-09-15, ~18:45, end of session 13; supersedes the session-12 handoff)
+
+**Tree.** `bus622-take5` @ `96de973b` + this session's uncommitted edits.
+New, all opt-in and flag-off inert:
+`escape_moves.py` (`enumerate_moves(own_line=)`, `Move.group`,
+`Move.replaces`, `Move.blockers`); `source_realize.py` (`moves_clash`);
+`fanout_from_plan.py` (`_lane_of`, `_blockers_for`, `_group_pullin`,
+`_realize_group_first`, `_tooth_move`, `_reseat_blockers`, `braid_tier`,
+`PLAN_PAGES_GROUP_FREE`, `SRC_REFAN_RESEAT`, `PLAN_PAGES_TIER` /
+`_TIER_GROUP` / `_TIER_MAX`, `plan_state` carries `banned`);
+`pages_first.py` (`_nest_assign`, `_regroup_berths`, `PLAN_PAGES_GROUP_DST`,
+`PLAN_PAGES_GROUP_FORCE`, `PLAN_PAGES_WALK_STAGE`); `synth_bus.py`
+(`--row-offset`); `synth_ladder.py` (batch `b4`).
+
+**The headline: the group climb LAYS, and the board it makes routes K51 in
+107 vias, 0 open, 0 DRC (rule 281.9)** -- the best clean K51 this chain has
+produced (cew5d 109, jcl 115, the human 81). It ships under
+`PLAN_PAGES_TIER_GROUP=1`, the braid-tier judge, whose copper is IDENTICAL
+to the forced arm's; the round's own count judge scored the same plan 373
+against 302 and reverted it.
+
+**The one number to carry forward: at K51 the count is ANTI-correlated on
+this decision.** Floor 358.44 routes 107; floor 335.10 routes 133.
+
+**Arms (vias / open; canaries matched everywhere):**
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| jcl (reference) | 34 | 60 | 80 | 115 |
+| cew5d (s12 best) | 34 | 54 | 71 | 109 |
+| **`nosc2` -- a chain board braided with NO plan sidecar** | -- | -- | -- | **98 / 0 open** |
+| grpF (group, force) | 36 | 68 | 80 | **107** |
+| grpT2 (group, braid tier; before the three fixes) | 38 | 68 | 91 + 1 open | **107, copper = grpF** |
+| grpT3 (+ fixes 1, 2) | 36 | 68 | **80** | 131 + 1 open |
+| grpT4 (+ fix 3, stop on overrule) | **32** | 68 | **80** | 109 + 1 open |
+| grpT5 (fix 3 as "switch the judge", tier at ATTEMPTS=1) | -- | -- | -- | 109 + 1 open |
+| grpT6 (tier at the chain's own attempts) | -- | -- | -- | 112 + 1 open |
+| grpT (tier + `_GROUP_FREE`) | -- | -- | -- | 133 |
+| grpFree (`_GROUP_FREE`, no tier) | -- | -- | -- | 112 + 1 open |
+| ctl13 (flag-off, THIS code) | 34 | 60 | -- | -- |
+| dst1 (`DST_ITERS=1`, no group) | -- | -- | -- | 115 |
+
+**`grpT4` K28 = 32 is also a record for that rung** (jcl 34, cew5d 34, the
+recorded best 34; the human 46) and it is the arm with all three fixes and
+the tier judge. Its K41 80 ties jcl. K35 68 against 60 is the one rung still
+short and is UNEXPLAINED -- the group there is refused by the engine and the
+round then reverts everything and ships the base board, where the control
+keeps two rounds.
+
+**Not a default yet, and the reason is understood and fixed (unmeasured).**
+grpT2's regressions at K28/K35/K41 are NOT the tier judge making bad calls
+-- it rejected the group at K28 (38 against 36) and K41 (100 against 87),
+correctly. They are two defects of mine in how a DROPPED group leaves the
+round, both fixed at the end of the session and both unmeasured:
+
+1. **A group takes the whole iteration**, so the round's other source moves
+   were not realized; on rejection the loop then `break`ed and threw them
+   away. It now bans the group and hands the rest to the next iteration.
+2. **A group proposal REPLACES an ordinary source move** (`Move.replaces`),
+   and dropping the group used to drop that move with it -- so a net the
+   plan wanted to move kept its standing tooth for a reason that had
+   nothing to do with it. The pre-group move is restored into the rest.
+
+**NEXT, in order:**
+
+1. **THE SIDECAR.** `<board>.plan.json` is worth **-14 vias and a
+   completion** on one K51 board (112 + 1 open with it, **98 / 0** without)
+   and **+7 the other way** on another (115 with, 122 without). Route both
+   arms at every rung; if it is a coin flip, make it a TIER decision --
+   `braid_tier` already fans out and grades a candidate, so it needs only to
+   be handed the two boards. **98 is the record and it is reproducible in
+   one braid run** (`tmp/s13/nosc2_*`).
+2. **`grpT4` = 32 / 68 / 80 / 109 + 1 open** -- the group with the braid-tier
+   judge and all three fixes. **K28 32 is a record for that rung** and K41
+   ties jcl; K35 68 against 60 is the one unexplained rung. Read
+   `tmp/s13/grpT4_fo_k35.log`: the group is refused by the engine, the round
+   reverts everything and ships the BASE board (floor 181.96) where the
+   control (`ctl13_fo_k35.log`) keeps two rounds to floor 172.01. The
+   hair-margin group acceptance (count 183 against 184) is the suspect.
+3. **The flag-off identity gate is only half done.** `ctl13` grades 34 / 60
+   -- jcl exactly -- but the BYTE comparison against a clean checkout of
+   `96de973b` has not been run. A staged tree is at
+   `<scratch>/base` (git archive + the built `grid_router.so`); run
+   `PLAN_PAGES=1 bash chain_k.sh tmp/ctl 28` in both and `copper_same.py`
+   the fanout AND the routed board, canary 727.2.
+4. **Items 2 and 3 are built and UNMEASURED**: `PLAN_PAGES_GROUP_DST=1`
+   (the re-berth in launch order) and `PLAN_PAGES_WALK_STAGE=n` (the walk's
+   per-stage budget). `tmp/s13/queue1.sh` has both arms ready; it was
+   written and then stopped, because it had been started concurrently with
+   another chain and a concurrent run moves the CP-SAT's feasible point.
+5. **`b4` has not been run** (`python3 synth_ladder.py --batch b4`): the
+   first harness batch on which an end-of-face climb can exist at all.
+6. **`PLAN_PAGES_GROUP_FREE` is harmful with the tier and stays off** --
+   it improves the group's COUNT (373 -> 356) and makes the copper worse
+   (133 against 107). It is kept as the attribution for where a third of
+   the count's error lives.
+7. **`SRC_REFAN_RESEAT` is off and has never succeeded.** Asking the
+   displaced blockers back to their own teeth is right, but a refused
+   blocker keeps the copper it had, which can be standing in the tooth
+   another blocker was just re-seated into -- musical chairs, 23 DRC pairs.
+   The fix it needs is to ask only for teeth the group's copper has not
+   taken.
+
+**Rules learned this session:**
+
+* **A group's launch order is fixed by its COLUMNS, not by its berths.** A
+  member's leg out to the face crosses every lane beyond it, so the inner
+  lane must leave first. A berth-ordered group has no consistent assignment
+  at all from three members up.
+* **A group must be laid in an engine call of its own.** Beside the round's
+  other teeth, the plan-follow's negotiation rips its members to lay
+  ordinary ones.
+* **Enumerating against a stripped board over-promises.** The candidates are
+  built with every net of the run removed (they are re-fanned jointly), so
+  a traverse of the whole face reads as free; `Move.blockers` is what makes
+  the difference visible, and the freed blockers are re-laid with NO hint.
+* **The count judge cannot price a whole-plan change.** Not a tie, not
+  noise: anti-correlated, by 26 vias.
+* **A REPLACEMENT judge must measure what the chain will do.** The braid
+  tier at one attempt rejected on an open net the real router closes.
+* **The order of the realize's ask dict is load-bearing** -- it is the order
+  the blocker census walks (and its list is capped) and the order the engine
+  gets its hints in. The same eleven asks, rebuilt in a different order, gave
+  69 different segments.
+* **The braid's plan sidecar is worth up to 14 vias and a completion, in
+  EITHER direction.** It is not a fact about the code, it is a second
+  candidate.
+
 ## Handoff: the next session (written 2026-09-15, ~15:30, end of session 12; supersedes the session-11 handoff)
 
 **Tree.** `bus622-take5` @ a472bd26 + this session's edits (a WIP commit
