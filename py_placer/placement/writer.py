@@ -1142,8 +1142,9 @@ def write_placed_output(input_file: str, output_file: str,
     # a registered engine lever?". Outside an unaided regime it is a no-op and
     # the behaviour is byte-identical; inside one, an undeclared write raises,
     # and the row records the input's and the output's pose digests -- the
-    # links `provenance_audit` walks from the staged board (#972). A lever
-    # that then COPIES or RENAMES this output into place records that too, via
+    # links `provenance_audit` walks from the staged board (#972).
+    # `place_seed` and `place_route_loop`, which copy or rename a board built
+    # elsewhere into place, record that delivery too, via
     # `provenance.recorded_delivery` (#973).
     #
     # It used to raise AFTER `f.write(content)`, which made the refusal

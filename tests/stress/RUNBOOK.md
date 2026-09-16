@@ -1334,25 +1334,39 @@ moving a part. Before this, pose claims came only from rows naming the
 delivered file, and a declared write of a hand-edited board to a NEW path
 graded CLEAN. A board no recorded write produced is compared with the NEAREST
 one the ledger did (the fewest parts differing), and the parts that differ are
-named. The doc's `lineage` key says which case applied: `verified`, `broken`
-(a recorded write read a board nothing recorded), `unrecorded`, `legacy` (a
-claiming row predates the digests: the old per-file reading plus a pose check
-against every recorded pose) or `unlinkable`. A lever that delivers by copy or
-rename records that delivery against the output itself (#973), so the audit
-picks the output rather than an intermediate. What a digest does NOT see: two
-footprints that share a reference swapping places, and a rotation the parser
-cannot read (an exponent-form angle). And a board built from a SUPERSEDED
-staging is compared with the current one, not with the staging it came from.
+named, and a part the lineage expects that is gone (deleted, or renamed) makes
+the board UNPROVEN, while a renamed part that turns up somewhere no lever put
+it is a violation. The doc's `lineage` key says which case applied: `verified`,
+`broken` (a recorded write read a board nothing recorded), `unrecorded`,
+`legacy` (some claiming row predates the digests: the old per-file reading,
+plus a check that a pose with no claim to compare is at least one some row
+MOVED that part to) or `unlinkable` (a digest is missing or of another
+scheme). `place_seed --repair/--reseat`, its polish and re-seat fix, and
+`place_route_loop` record their copy or rename delivery against the output
+itself (#973), so the audit picks the output rather than an intermediate.
+`place_reconstruct`'s staged promote and `place_fanout_clearance`'s no-move
+copy do not: the lineage still links their boards by arrangement, but the
+audit's own pick can land on an earlier board, so pass `--delivered` for
+them. What a digest does NOT see: two footprints that share a reference
+swapping places together with their block order, and a footprint whose own
+`(at ...)` carries an exponent-form angle, which the parser reads from the
+first child `(at ...)` instead (a pre-existing parser limit). And a board
+built from a SUPERSEDED staging is compared with the current one, not with the
+staging it came from. The digests make a forger append rows claiming the hand
+pose -- an affirmative act -- but they are no defence against one: a row
+with no digests at all is read the legacy way.
 
 `5 UNPROVEN` has these live causes, and the `cheats` watcher names them: the
 dir was staged by neither stager; it was MOVED after staging (the manifest
-holds an absolute path); no delivered board sits beside the staged one at the
-top level -- pass `--delivered`; a manifest whose `staged_sha256` no longer
-matches the board it names, which means the baseline every verdict is
-measured against is stale; a recorded write that read a board no recorded
-write produced and re-moved every part that differs, so the change cannot be
-named; or pose digests that cannot link (missing, or of another scheme) while
-some claims have no pose to compare.
+holds an absolute path); a manifest whose `staged_sha256` no longer matches
+the board it names, which means the baseline every verdict is measured
+against is stale; no delivered board sits beside the staged one at the top
+level -- pass `--delivered`; no ledger AND no pose differs from the staged
+board; a part the lineage expects is missing; a recorded write that read a
+board no recorded write produced and re-moved every part that differs, so the
+change cannot be named; pose digests that cannot link while some claims have
+no pose to compare; or the audit itself raised, which the CLI reports as 5
+with the exception on stderr and no VERDICT line.
 
 ### Watching a long run
 

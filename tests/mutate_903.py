@@ -354,12 +354,24 @@ ROWS = [
     # Truncating instead of rounding: 137.253 * 1e4 is 1372529.99..., so an
     # angle the writer emits as `.6g` would digest one step off the same
     # angle read back from another spelling.
-    ('the-pose-digest-truncates', 'pv',
+    # The ROTATION alone truncated: esp_prog's golden cannot see it (every
+    # angle there is a multiple of 90); only the synthetic golden can.
+    ('the-pose-digest-truncates-the-rotation', 'pv',
      "    rows = [[ref, round(x * 1e6), round(y * 1e6),\n"
      "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
-     "    rows = [[ref, int(x * 1e6), int(y * 1e6),\n"
+     "    rows = [[ref, round(x * 1e6), round(y * 1e6),\n"
      "             int(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
      (T_972,), 'KILLED'),
+
+    ('the-pose-digest-escapes-nothing', 'pv',
+     "    blob = json.dumps(rows, separators=(',', ':'), ensure_ascii=True)\n",
+     "    blob = json.dumps(rows, separators=(',', ':'), ensure_ascii=False)\n",
+     (T_972,), 'KILLED'),
+
+    ('the-delivery-commits-by-the-late-path', 'pv',
+     "        commit_write(key)\n",
+     "        commit_write(output_file)\n",
+     (T_973,), 'KILLED'),
 
     # Outside a regime the writer must cost nothing it did not cost before.
     ('the-digest-is-computed-outside-a-regime', 'pv',
@@ -514,11 +526,43 @@ ROWS = [
      "                if _wrote_this and ref in _poses:\n",
      (T_972,), 'KILLED'),
 
+    # The delta round.
+    ('the-replay-invents-a-part-the-board-lacks', 'pa',
+     "        if p is None or old is None:\n",
+     "        if p is None:\n",
+     (T_972,), 'KILLED'),
+
+    ('a-renamed-part-a-lever-moved-is-accused', 'pa',
+     "                if all(_pose_differs(_dp[a], w) for w in _gone)\n"
+     "                and all(_pose_differs(_dp[a], w)\n"
+     "                        for w in _trusted.get(a, []))})\n",
+     "                if all(_pose_differs(_dp[a], w) for w in _gone)})\n",
+     (T_972,), 'KILLED'),
+
+    ('any-expected-pose-explains-an-added-part', 'pa',
+     "            _gone = [lin['expected'][m] for m in lin['missing']]\n",
+     "            _gone = list(lin['expected'].values())\n",
+     (T_972,), 'KILLED'),
+
+    # An unreadable-input row's poses must still keep a ref UNVERIFIABLE:
+    # dropped from the candidates, the hand pose it passed through becomes an
+    # accusation of a part that may be exactly where the lever put it.
+    ('an-unreadable-rows-poses-are-ignored', 'pa',
+     "            _moves.setdefault(ref, []).append(w)\n",
+     "            if not _row_blind:\n"
+     "                _moves.setdefault(ref, []).append(w)\n",
+     (T_972,), 'KILLED'),
+
+    ('the-watcher-drops-the-reason-line', 'rw',
+     "            or (i and lines[i - 1].startswith('VERDICT'))]\n",
+     "            ]\n",
+     (T_972,), 'KILLED'),
+
     ('legacy-counts-pass-through-poses', 'pa',
-     "            for ref in row.get('refs_moved') or ():\n"
-     "                p = _poses.get(ref)\n",
-     "            for ref in _poses:\n"
-     "                p = _poses.get(ref)\n",
+     "        for ref in row.get('refs_moved') or ():\n"
+     "            p = _poses.get(ref)\n",
+     "        for ref in _poses:\n"
+     "            p = _poses.get(ref)\n",
      (T_972,), 'KILLED'),
 
     # ---- #973: a delivery by copy or rename is recorded -------------------

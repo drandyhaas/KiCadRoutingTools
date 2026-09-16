@@ -182,6 +182,25 @@ check('a writer call to the same path inside the body does not swallow the row',
       len(_r) == 2, f'{len(_r)} row(s)')
 settled('nested')
 
+# A RELATIVE output path and a body that changes directory: the row must be
+# committed against the path resolved before the body.
+d, wd, staged = armed(SF)
+src = os.path.join(d, 'staged_elsewhere.kicad_pcb')
+quiet(write_placed_output, staged, src, _move)
+_cwd = os.getcwd()
+os.chdir(wd)
+try:
+    with PV.declare_lever('place_seed.py'):
+        with PV.recorded_delivery(staged, 'rel_out.kicad_pcb', _move):
+            shutil.copyfile(src, 'rel_out.kicad_pcb')
+            os.chdir(d)
+finally:
+    os.chdir(_cwd)
+check('a relative output path survives a directory change in the body',
+      len(rows_naming(wd, os.path.join(wd, 'rel_out.kicad_pcb'))) == 1,
+      f'{len(PV.read_ledger(wd))} row(s)')
+settled('relative')
+
 _calls = []
 _real = PV.pose_footprints
 PV.pose_footprints = lambda p: (_calls.append(p), _real(p))[1]
@@ -266,6 +285,8 @@ for kind, flags, intent_from in (('reseat', ['--reseat'], 'staged'),
           f"summary={sorted(_claimed)} row={_delivery and _delivery[0].get('refs_moved')}")
     grade(f'--{kind}: the run audits CLEAN', wd, OUT, PA.CLEAN, lineage='verified')
     grade(f'--{kind}: ...and so does the board the audit picks itself', wd, None, PA.CLEAN)
+    check(f'--{kind}: the operator is told where the board was delivered',
+          f'Delivered {OUT}' in (r.stdout or ''))
     check(f'--{kind}: no temp board is named by any row',
           all(os.path.dirname(os.path.abspath(x.get('path') or '')) == os.path.abspath(wd)
               for x in PV.read_ledger(wd)),

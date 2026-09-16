@@ -873,5 +873,69 @@ grade('legacy: a write-all pass-through is not a recorded pose', wd, F, PA.VIOLA
 settled('verifier round 2')
 
 
+# --- the delta verifier's findings ----------------------------------------
+print('3c. renames a lever then moved, unreadable rows, and what is relayed')
+
+# A rename the lever then MOVED: the pose is the lever's own, so the renamed
+# part is not a pose no lever wrote. The rename itself still leaves a part
+# missing, which is UNPROVEN.
+wd, st = fresh()
+A, F = os.path.join(wd, 'A.kicad_pcb'), os.path.join(wd, 'final.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+rename_and_move(A, Y, 'R99')
+lever_write(A, F, [mv(A, 'R99', dx=3.0)])
+grade('a renamed part a lever then moved is not accused', wd, F, PA.UNPROVEN,
+      unclaimed_refs=[])
+
+# A rename-and-move ONTO another expected part's pose is still a pose no lever
+# wrote: only the MISSING parts' expected poses can explain an added one.
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+_zp = fp_of(A, Z)
+_yp = fp_of(A, Y)
+rename_and_move(A, Y, 'R98', dx=_zp.x - _yp.x)
+_c, _d = grade('a renamed part moved onto ANOTHER part\'s pose is unclaimed', wd, A,
+               PA.VIOLATION, unclaimed_refs=['R98'])
+
+# A hand edit AFTER a row whose input could not be parsed: that row's poses
+# cannot clear the part, but the delivered pose matches none of them either.
+wd, st = fresh()
+A, F = os.path.join(wd, 'A.kicad_pcb'), os.path.join(wd, 'final.kicad_pcb')
+lever_write(st, A, [mv(st, X), mv(st, Y)])
+_all = [{'reference': r, 'new_x': p[0], 'new_y': p[1], 'new_rotation': p[2]}
+        for r, p in PV.pose_table(A).items()]
+_Aabs = os.path.normcase(os.path.abspath(A))
+PV.pose_footprints = (lambda p: (_ for _ in ()).throw(RuntimeError('unreadable'))
+                      if os.path.normcase(os.path.abspath(p)) == _Aabs else _real(p))
+try:
+    lever_write(A, F, _all)
+finally:
+    PV.pose_footprints = _real
+hand_edit(F, Y, dx=20.0, dy=0.0)
+grade('a hand edit after an unreadable-input row is still a VIOLATION', wd, F,
+      PA.VIOLATION, drifted_refs=[Y], lineage='unlinkable')
+
+# A write naming a ref the board does not carry: the writer warns and skips
+# it, so the replay must not invent that part and then report it missing.
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X), {'reference': 'NOPE9', 'new_x': 1.0, 'new_y': 1.0,
+                                'new_rotation': 0.0}])
+grade('a write naming a ref the board lacks is still CLEAN', wd, A, PA.CLEAN,
+      lineage='verified')
+
+# What run_watch relays: the reason line (the only place drifted parts and the
+# break are named) and the lineage line, not just VERDICT.
+import run_watch as RW                                         # noqa: E402
+_out = ('VERDICT: UNAIDED VIOLATION\n  1 pose(s) are NOT where ... (C1).\n'
+        '  lineage: broken (compared with x; break at y)\n'
+        'JSON_SUMMARY: {"verdict": "UNAIDED VIOLATION"}\n')
+_rel = RW._provenance_lines(_out)
+check('run_watch relays the verdict, the reason naming the part, and the lineage',
+      len(_rel) == 3 and '(C1)' in _rel[1] and _rel[2].startswith('lineage:'), str(_rel))
+settled('delta round')
+
+
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)

@@ -483,6 +483,22 @@ def _is_staging_cmd(toks):
                for t in toks)
 
 
+def _provenance_lines(stdout):
+    """The lines of a `provenance_audit` run worth relaying (#972).
+
+    VERDICT, the unclaimed list, the `lineage:` line -- and the REASON, which
+    is the line after VERDICT. The reason is the only place the audit names
+    drifted parts and the write a broken lineage descends from, and the exit-5
+    text below tells the reader to read it; relaying only VERDICT/unclaimed
+    left that instruction pointing at a line the watcher never printed.
+    """
+    lines = (stdout or '').splitlines()
+    return [ln.strip() for i, ln in enumerate(lines)
+            if ln.startswith('VERDICT') or 'unclaimed' in ln
+            or ln.lstrip().startswith('lineage:')
+            or (i and lines[i - 1].startswith('VERDICT'))]
+
+
 def _ledger_stagings(path):
     """Re-stagings recorded in a pose-provenance ledger (#903).
 
@@ -843,17 +859,9 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                      '--workdir', workdir],
                     capture_output=True, text=True, timeout=900)
                 _said = False
-                _lines = (r.stdout or '').splitlines()
-                for _i, line in enumerate(_lines):
-                    # The REASON is the line after VERDICT, and it is the one
-                    # that names drifted parts and the write a broken lineage
-                    # descends from; the exit-5 text below tells the reader
-                    # to read it, so it has to be relayed.
-                    if (line.startswith('VERDICT') or 'unclaimed' in line
-                            or line.lstrip().startswith('lineage:')
-                            or (_i and _lines[_i - 1].startswith('VERDICT'))):
-                        print(f'PROVENANCE {line.strip()}', flush=True)
-                        _said = True
+                for line in _provenance_lines(r.stdout):
+                    print(f'PROVENANCE {line}', flush=True)
+                    _said = True
                 # 0/4/5 are its verdicts (CLEAN / VIOLATION / UNPROVEN); 2 is
                 # a usage error and anything else is a crash. Silence there
                 # reads as CLEAN.
@@ -888,9 +896,12 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                           'staged one (pass --delivered); NOTHING MOVED -- no '
                           'ledger and no pose differs from the staged board, '
                           'which on a finished run is the interesting one; a '
-                          'recorded write read a board no recorded write '
-                          'produced and re-moved every part that differs '
-                          '(#972); or the pose digests cannot link. Read the '
+                          'part the lineage expects is missing (deleted or '
+                          'renamed); a recorded write read a board no '
+                          'recorded write produced and re-moved every part '
+                          'that differs (#972); the pose digests cannot link; '
+                          'or the audit itself raised (no VERDICT line above, '
+                          'the exception is on its stderr). Read the '
                           'reason line above rather than guessing from this '
                           'list. Not a violation -- but the claim "the engine '
                           'placed this board" is unproven, so it may not be '

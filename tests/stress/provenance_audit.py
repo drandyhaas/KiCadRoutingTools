@@ -37,11 +37,14 @@ Exit codes:
     2  usage / IO
     4  VIOLATION a moved pose has no lever, or a pose is not where the
                  lineage put it
-    5  UNPROVEN  nothing can be concluded -- no manifest, a stale staged
-                 board, no delivered board, no ledger and nothing moved, or a
+    5  UNPROVEN  nothing can be concluded -- no manifest; the staged board
+                 is unreadable or not the one the manifest hashed; no
+                 delivered board; no ledger and nothing moved; a part the
+                 lineage expects is missing (deleted, or renamed in place); a
                  recorded write read a board no recorded write produced and
-                 re-moved every part that differed, so the change cannot be
-                 named
+                 re-moved every part that differed; pose digests that cannot
+                 link while some claims have no pose; or the audit itself
+                 raised (the CLI only)
 
 5 is load-bearing. `fence_audit` collapses "no manifest" into LEAK and warns
 about it in its own text; doing that here would retroactively accuse every run
@@ -149,10 +152,13 @@ def _replay(table, row):
     _sides = row.get('sides_written') or {}
     for ref in row.get('refs_moved') or ():
         p = _poses.get(ref)
-        if p is None:
-            continue
         old = out.get(ref)
-        side = _sides.get(ref) or (old[3] if old is not None else None)
+        # A write moves footprints; it cannot create one. The writer warns
+        # about and skips a ref its input does not carry, so replaying it
+        # would invent a part and then report that part missing.
+        if p is None or old is None:
+            continue
+        side = _sides.get(ref) or old[3]
         out[ref] = (float(p[0]), float(p[1]), float(p[2]), side)
     return out
 
@@ -495,6 +501,26 @@ def audit(workdir, delivered=None):
     # `unverifiable_claims`, so "not checked" cannot be mistaken for "checked".
     unclaimed = sorted(r for r in moved if r not in claimed)
     lin = lineage(rows, _sp, _dp)
+    # Every pose a usable row MOVED each ref to -- moves only, as `_replay`
+    # reads them: a write-all lever records every pose it was handed, a hand
+    # edit included. `_trusted` leaves out rows whose input could not be
+    # parsed, since their "moves" are simply every placement they were given.
+    _moves, _trusted = {}, {}
+    for row in rows:
+        if not _usable(row, PV):
+            continue
+        _row_blind = ('parent_pose_sha256' in row
+                      and row.get('parent_pose_sha256') is None)
+        _sides = row.get('sides_written') or {}
+        _poses = row.get('poses_written') or {}
+        for ref in row.get('refs_moved') or ():
+            p = _poses.get(ref)
+            if p is None:
+                continue
+            w = (p[0], p[1], p[2], _sides.get(ref))
+            _moves.setdefault(ref, []).append(w)
+            if not _row_blind:
+                _trusted.setdefault(ref, []).append(w)
     drifted, unverifiable = [], []
     if lin['status'] in ('legacy', 'unlinkable'):
         for ref in moved:
@@ -516,33 +542,16 @@ def audit(workdir, delivered=None):
                 drifted.append(ref)
         # #972 for a ledger with no lineage to walk: a claim with no pose to
         # compare is still WRONG when the delivered pose is one no row ever
-        # recorded for that ref, and not the staged pose either.
-        # MOVES only, as `_replay` reads them: a write-all lever records every
-        # pose it was handed, a hand edit included, and counting those as
-        # "recorded" let one pre-digest row reopen #972.
-        # A row whose input could not be parsed says nothing either way: its
-        # refs stay unverifiable rather than being accused on its account.
-        _recorded, _unreadable = {}, set()
-        for row in rows:
-            if not _usable(row, PV):
-                continue
-            if ('parent_pose_sha256' in row
-                    and row.get('parent_pose_sha256') is None):
-                _unreadable.update(row.get('refs_moved') or ())
-                continue
-            _sides = row.get('sides_written') or {}
-            _poses = row.get('poses_written') or {}
-            for ref in row.get('refs_moved') or ():
-                p = _poses.get(ref)
-                if p is not None:
-                    _recorded.setdefault(ref, []).append(
-                        (p[0], p[1], p[2], _sides.get(ref)))
+        # MOVED that ref to, and not the staged pose either. A pose a row with
+        # an unreadable input recorded cannot clear a ref (it may be a hand
+        # pose passed through), but it cannot accuse one either, so a ref
+        # sitting at such a pose stays unverifiable.
         for ref in list(unverifiable):
             got = _dp.get(ref)
-            if got is None or ref in _unreadable:
+            if got is None:
                 continue
             if all(_pose_differs(got, w) for w in
-                   _recorded.get(ref, []) + [_sp.get(ref)] if w is not None):
+                   _moves.get(ref, []) + [_sp.get(ref)] if w is not None):
                 unverifiable.remove(ref)
                 drifted.append(ref)
     else:
@@ -555,11 +564,16 @@ def audit(workdir, delivered=None):
         # missing, the new one is "added", and neither is compared -- so
         # renaming a part and moving it graded CLEAN. An added part that is
         # not where a missing part was expected is a pose no lever wrote.
+        # (A part a trusted row itself moved to exactly this pose was placed
+        # by a lever, whatever it is called now; the missing part it was
+        # renamed from still makes the board UNPROVEN below.)
         if lin['missing'] and added:
             _gone = [lin['expected'][m] for m in lin['missing']]
             unclaimed = sorted(set(unclaimed) | {
                 a for a in added
-                if all(_pose_differs(_dp[a], w) for w in _gone)})
+                if all(_pose_differs(_dp[a], w) for w in _gone)
+                and all(_pose_differs(_dp[a], w)
+                        for w in _trusted.get(a, []))})
 
     drifted = sorted(drifted)
     unverifiable = sorted(unverifiable)
@@ -610,7 +624,7 @@ def audit(workdir, delivered=None):
         return VIOLATION, doc
     if lin['missing']:
         doc.update(verdict='UNPROVEN', reason=(
-            f"{len(lin['missing'])} part(s) the recorded writes placed are "
+            f"{len(lin['missing'])} part(s) the ledger's lineage expects are "
             f"not on this board ({', '.join(lin['missing'][:6])}): a deleted "
             f"or renamed part has no pose left to compare. Not a violation, "
             f"and not provably clean.{_how}"))
