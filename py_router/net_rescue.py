@@ -1275,6 +1275,24 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                               + reconnected)
             summary['pads_reconnected'] += reconnected
 
+        # The rescue put copper on the board, so the persistent working map
+        # must be told -- `refresh_net_obstacles` is that contract, spelled
+        # once (#806). Rescue builds its OWN pristine windows (keyed on a
+        # copper epoch), so it sees its own copper fine; what goes stale is
+        # `state.working_obstacles` / `net_obstacles_cache`, which the passes
+        # AFTER rescue use -- the pre-existing-victim restore ladder and the
+        # final reconciliation. Registration is already done above (both
+        # branches put the net in routed_net_ids); only the map was missed.
+        #
+        # Measured on cparti_fpga's retry step with KICAD_STAGE_AUDIT: rescue
+        # was the last remaining source of invariant-E staleness once the
+        # #134 sites were fixed -- 3 stale entries and ~3.4k under-blocked
+        # cells appearing between the casualty and rescue stage audits.
+        from obstacle_cache import refresh_net_obstacles  # #806
+        refresh_net_obstacles(getattr(state, 'working_obstacles', None),
+                              getattr(state, 'net_obstacles_cache', None),
+                              pcb_data, config, [net_id])
+
         record_net_event(state, net_id, "rescue_succeeded",
                          {"fully_connected": fully,
                           "edges_routed": len(edge_results),

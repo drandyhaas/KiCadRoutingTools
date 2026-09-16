@@ -2500,6 +2500,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             pruned['new_vias'] = keep_vias
             pruned['partial_restore_134'] = True
             add_route_to_pcb_data(pcb_data, pruned, debug_lines=config.debug_lines)
+            # The copper is on the board, so the working map must know it --
+            # `refresh_net_obstacles` is that contract, spelled once (#806).
+            # Without it this restore is INVISIBLE to every pass that runs
+            # after it (the later #134 recovery laps, the casualty reconcile,
+            # net_rescue), and they route straight through the copper it just
+            # put back. Measured on cparti_fpga's retry step, which takes this
+            # branch NINE times in one run: SPIs_MISO was restored here, then
+            # SPIs_SCK was rerouted over it, and the two shipped collinear on
+            # F.Cu at y=78.70 for ~11mm -- a dead short, plus 28 further
+            # clearance items. The sibling implementation of this same
+            # piece-level settle in `diff_pair_custody.run_casualty_reconcile`
+            # already refreshes; this one claimed parity with it and did not.
+            from obstacle_cache import refresh_net_obstacles  # #806
+            refresh_net_obstacles(state.working_obstacles,
+                                  state.net_obstacles_cache,
+                                  pcb_data, config, [nid])
             results.append(pruned)
             # #508 finding 8: register the restore as the net's AUTHORITATIVE
             # result, or the #87 superseded-result filter (`_authoritative`,
@@ -2510,6 +2526,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # runs_set14/rusefi_alphax4/step2b_retry.log). The entry
             # condition guarantees the net has no other result.
             routed_results[nid] = pruned
+            # ...and REGISTER the net as carrying copper, or the restore is
+            # invisible to every map built afterwards.
+            # `build_single_ended_obstacles` stamps foreign copper for nets in
+            # `routed_net_ids` (from pcb_data) or `remaining_net_ids` (from the
+            # cache) -- a net in NEITHER list is never stamped at all, however
+            # much copper it owns. The rip took this net out of routed_net_ids
+            # and the failed reroute left it out of both, so its restored
+            # copper was structurally invisible: refreshing its cache entry
+            # does not help, because the cache is only consulted for
+            # remaining_net_ids. Every other commit path does this pair of
+            # updates; this one set routed_results alone.
+            #
+            # Measured on cparti_fpga's retry step: SPIs_MISO was restored
+            # here, stayed in neither list, and SPIs_SCK was then routed
+            # straight over it -- the two shipped collinear on F.Cu at
+            # y=78.70 for ~11mm, a dead short.
+            if nid in remaining_net_ids:
+                remaining_net_ids.remove(nid)
+            if nid not in routed_net_ids:
+                routed_net_ids.append(nid)
             nm = pcb_data.nets[nid].name if nid in pcb_data.nets else nid
             print(f"Issue #134 last resort: {nm} reroute failed; restored "
                   f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of its "
@@ -2975,6 +3011,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # them, presumably by freeing corridor space. --no-smoothing disables it
         # per step; KICAD_SMOOTH_ROUTE=0/1 still overrides either way.
         smooth=smoothing)
+    # The cleanup pipeline MOVES and STRIPS copper -- nudge_grazing_octolinear /
+    # _microshift / _vias re-bend and shift it, the prunes, sweeps and the #536
+    # smoother delete and replace it -- all by mutating pcb_data directly. None
+    # of that goes through the rip/commit choke points, so the working map keeps
+    # blocking the copper's OLD footprint and not its new one.
+    #
+    # That matters because the map is still USED after this point: route.py's
+    # in-run plane finalize calls repair_planes, whose #517 immediate-reconnect
+    # runs a nested batch_route. Measured on kicad_files/flat_hierarchy with
+    # KICAD_STAGE_AUDIT, this pipeline was the single largest source of
+    # invariant-E error in the whole run -- the map goes in CLEAN and comes out
+    # wrong:
+    #
+    #     7a-before-cleanup:  42 cells NOT blocked,     0 via,  0 stale
+    #     7b-after-cleanup:   31456 cells NOT blocked, 30997 via, 15 stale
+    #
+    # Re-derive every scope net's footprint from the board the cleanup left
+    # behind. `refresh_net_obstacles` is the same contract the commit sites use
+    # (#806); doing it once here costs one cache rebuild (~2s on a 333-net
+    # board) rather than one per moved segment.
+    if _cleanup is not None:
+        from obstacle_cache import refresh_net_obstacles  # #806
+        refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,
+                              pcb_data, config, sorted(sweep_scope_ids or []))
     dead_end_input_segments = _cleanup.input_strip_segments if _cleanup is not None else []
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
