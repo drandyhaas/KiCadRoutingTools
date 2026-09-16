@@ -679,6 +679,15 @@ ROWS = [
      "        os.replace(tmp, args.output_file)\n",
      (T_973,), 'KILLED'),
 
+    # The RE-SEAT FIX's rename alone put back: the polish's delivery is still
+    # recorded, so only a case that makes the re-seat fix fire can see it.
+    ('the-reseat-fix-rename-is-unrecorded-again', 'ps',
+     "                    _replace_output(fixes, '.reseat')\n",
+     "                    _tmp = args.output_file + '.reseat'\n"
+     "                    write_placed_output(args.output_file, _tmp, fixes)\n"
+     "                    os.replace(_tmp, args.output_file)\n",
+     (T_973,), 'KILLED'),
+
     # The defect itself, for place_route_loop.
     ('the-loop-delivery-is-a-bare-copy-again', 'rl',
      "    with provenance.recorded_delivery(args.input_file, args.output_file,\n"

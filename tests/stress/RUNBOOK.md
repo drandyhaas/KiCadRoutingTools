@@ -1349,7 +1349,8 @@ copy do not: the lineage still links their boards by arrangement, but the
 audit's own pick can land on an earlier board, so pass `--delivered` for
 them. `place_pose` records its promote only once #970 is in; without it a
 `place_pose` step is an unrecorded change, and the audit of every later write
-names the parts it moved. What a digest does NOT see: two footprints that share a reference
+is at least UNPROVEN -- a VIOLATION naming the parts it moved, unless that
+later write moved them again. What a digest does NOT see: two footprints that share a reference
 swapping places together with their block order, and a footprint whose own
 `(at ...)` carries an exponent-form angle, which the parser reads from the
 first child `(at ...)` instead (a pre-existing parser limit). And a board

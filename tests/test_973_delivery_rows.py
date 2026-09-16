@@ -317,6 +317,61 @@ check('seed+polish: the rename is recorded against the output, same moves',
 grade('seed+polish: CLEAN (main: 34 polished parts named DRIFTED)', wd, OUT, PA.CLEAN,
       lineage='verified', drifted_refs=[])
 
+# The RE-SEAT FIX: a polish that walks a part into a declared keep-out is
+# re-seated against the polished board and renamed onto the output a second
+# time. An emitted intent declares no keep-out and the real quench does not
+# walk into one, so both are supplied: a keep-out in the intent, and a quench
+# that returns its real placements plus one part moved into it.
+import placement.quench as _Q                                   # noqa: E402
+import place_seed                                               # noqa: E402
+d = tempfile.mkdtemp(prefix='t973_fix_')
+wd = os.path.join(d, 'wk')
+os.makedirs(wd)
+os.makedirs(os.path.join(d, 'truth'))
+staged = os.path.join(wd, 'board.kicad_pcb')
+quiet(SU.stage, SF, staged, os.path.join(d, 'truth'))
+_KO = [150.0, 35.0, 162.0, 45.0]
+_doc = emit_intent(parse_kicad_pcb(SF), SF)
+_doc['keepouts'] = [{'name': 'ko_test', 'rect': _KO}]
+intent = os.path.join(d, 'intent.json')
+with open(intent, 'w', encoding='utf-8') as fh:
+    json.dump(_doc, fh)
+OUT = os.path.join(wd, 'seeded.kicad_pcb')
+_real_quench, _walked = _Q.quench, {}
+
+
+def _quench_into_keepout(pcb_data, **kw):
+    pl = list(_real_quench(pcb_data, **kw))
+    taken = {p['reference'] for p in pl}
+    for ref, f in sorted(pcb_data.footprints.items()):
+        if (len(f.pads) == 2 and not getattr(f, 'locked', False) and ref not in taken
+                and not (_KO[0] <= f.x <= _KO[2] and _KO[1] <= f.y <= _KO[3])):
+            _walked['ref'] = ref
+            return pl + [{'reference': ref, 'new_x': (_KO[0] + _KO[2]) / 2,
+                          'new_y': (_KO[1] + _KO[3]) / 2, 'new_rotation': f.rotation or 0.0}]
+    return pl
+
+
+_Q.quench = _quench_into_keepout
+_argv = sys.argv
+sys.argv = ['place_seed.py', staged, OUT, '--intent', intent]
+try:
+    with PV.declare_lever('place_seed.py', sys.argv):
+        quiet(place_seed.main)
+finally:
+    sys.argv, _Q.quench = _argv, _real_quench
+_fix = [x for x in PV.read_ledger(wd) if (x.get('path') or '').endswith('.reseat')]
+_rows = rows_naming(wd, OUT)
+check('re-seat fix: the branch ran (a .reseat write moved the walked part)',
+      len(_fix) == 1 and _walked.get('ref') in (_fix[0].get('refs_moved') or []),
+      f"walked={_walked.get('ref')} reseat rows={len(_fix)}")
+check('re-seat fix: its rename is recorded against the output, same moves',
+      len(_rows) == 3 and _fix and _rows[-1].get('refs_moved') == _fix[0].get('refs_moved')
+      and _rows[-1].get('board_pose_sha256') == PV.file_pose_digest(OUT),
+      f'{len(_rows)} row(s) naming the output')
+grade('re-seat fix: CLEAN', wd, OUT, PA.CLEAN, lineage='verified')
+settled('re-seat fix')
+
 # --dry-run delivers nothing and records nothing.
 src = damaged('repair')
 d, wd, staged = armed(src)

@@ -983,6 +983,23 @@ grade('an unlinkable ledger whose claims are all checkable is CLEAN', wd, A, PA.
       lineage='unlinkable', unverifiable_claims=[])
 settled('pre-push review')
 
+# A hand-ADDED part, then any lever write: the write's parent carries a part
+# no recorded arrangement has, so the chain is broken -- and nothing moved can
+# be named. UNPROVEN (the added part ALONE stays CLEAN, pinned above as D2).
+wd, st = fresh()
+A, F = os.path.join(wd, 'A.kicad_pcb'), os.path.join(wd, 'final.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+with open(A, encoding='utf-8') as fh:
+    _atxt = fh.read()
+_blk = next(bk for bk in iter_footprint_blocks(_atxt) if bk[4] == Y)
+_dup = re.sub(r'"%s"' % re.escape(Y), '"R997"', _blk[2], count=1)
+with open(A, 'w', encoding='utf-8', newline='') as fh:
+    fh.write(_atxt[:_blk[1]] + '\n' + _dup + _atxt[_blk[1]:])
+lever_write(A, F, [mv(A, Z)])
+grade('a hand-added part followed by a lever write is UNPROVEN', wd, F, PA.UNPROVEN,
+      lineage='broken')
+settled('added then write')
+
 
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)
