@@ -126,7 +126,16 @@ KEEP = re.compile(
     r"lanes: \d+/\d+|rescued at x4|last call|kept attempt|rip \[|econ re-lay|"
     r"unplaced|NOT escaped|cannot be reached by the spine|"
     r"destination pass \d+: planner judge|destination re-plan|berth audit|"
-    r"launch order:|target order:|re-lay rungs|dp: |wrote ")
+    r"launch order:|target order:|re-lay rungs|dp: |wrote |"
+    # THE CANARY (2026-09-16). The pages-first solve line carries the
+    # instance size AND the objective+bound the solver stopped at, and it
+    # is THE diagnostic for a cloud arm that disagrees with the laptop:
+    # same instance + different objective is the solver, a different
+    # instance is the menus upstream of it. It was not kept, so a cloud
+    # run could not be bisected against a local one at all -- the only
+    # pages-first line that survived did so by accident, because it
+    # happens to contain the word "unplaced".
+    r"pages-first: \d+ nets, |pages-first: iteration|pages-first: model vias")
 
 
 # memory: REQUEST 1 GB, LIMIT 3 GB (2026-09-12, cut 4x on request).

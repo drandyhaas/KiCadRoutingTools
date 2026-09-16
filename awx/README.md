@@ -5970,8 +5970,37 @@ interpreter did not make the cloud reproduce the bench -- something else
 differs (CPU, the BLAS build, the ortools wheel). **Compare cloud only to
 cloud** still stands, and these numbers speak to the cloud's regime.
 
-PENDING: the vias (the progress lines truncate at 70 characters, the final
-untruncated table comes with the run) and `cport`/K51, the last arm.
+### WHY the cloud differs from the laptop, bisected at K28 (2026-09-16)
+
+K28 is the cheap rung, so it is the one to bisect on. Local jcl is 34 vias
+/ 0 open; cloud `cjcl` is 38 / 2 open (SCKE0, SDQ14). **Three separate
+causes, and the big one is ours, not the platform's:**
+
+| effect | cause | how it was shown |
+|---|---|---|
+| **34 -> 38 vias (all of it)** | **`BASE_ENV`** -- `modal_k.py` imposes the OLD joint-solve arm's seventeen flags (`SF_JUDGE=braid`, `DST_RESIDUE=3`, `SEL_XING=2`, `SF_EQUIV=2`, `DST_WALK=3`, `BRAID_ONE_DIVE=5`, ...) ON TOP of whatever the arms file sets. The local chain runs with NONE of them. | ran the chain locally with `env $(BASE_ENV) PLAN_PAGES=1 ...` -> **38 vias**, the cloud's number exactly |
+| the PLAN is identical | nothing -- parsing, geometry and menu enumeration agree bit for bit | same instance (`1456 berth + 186 tooth, 378 pairs, 175656 exclusions`), same objective **695.4**, same second solve (`OPTIMAL 701.9`) |
+| **2 open nets; fanout 65 tracks/11 vias against 95/9** | the **ROUTER BINARY**: the laptop runs the macOS **arm64** build of `grid_router` 0.22.0, the image installs the published **linux x86_64** build. Same version, same Rust source, different compilation -- so different floating point, and this codebase is known to move copper on numeric changes (`python-version-changes-routing`, math.fsum). | identical plan in, different copper out |
+| bound 613.0 against 610.9, 37.6 s against 74.6 s | CP-SAT's `max_deterministic_time` is NOT portable across architectures -- it proved less in the same nominal budget | did NOT change the chosen plan at K28 |
+
+**So "compare cloud only to cloud" is right, and pinning python does not
+fix it** -- the image already matches the laptop's 3.14. What remains is a
+compiled binary, which cannot be matched without building the crate for
+the laptop's own architecture in the image (or running the laptop on
+x86_64).
+
+**And BASE_ENV is a trap worth removing.** It is documented as "the
+joint-solve arm", but nothing in an arms file says so, and a caller
+writing `{"env": {"PLAN_JUDGE": "count"}}` reasonably believes that is the
+whole configuration. Every cloud number this repo has recorded carries
+those seventeen flags.
+
+Two instrument fixes came out of the bisection: `KEEP` now keeps the
+pages-first solve line (**the canary was not in the returned logs at all**,
+so no cloud arm could be bisected against a local one), and the planner is
+stamped on every grade.
+
+PENDING: `cport`/K51, the last arm of the corrected sweep.
 
 **NEXT, in order:**
 
