@@ -5320,14 +5320,43 @@ enumerated against what it will strip).
 
 ## Session 13 (2026-09-15, 17:40-): the group climb LAYS; and K51 = 98 vias
 
-### The record: **K51 = 98 vias, 0 open, 0 DRC (rule 280.5)** -- and the CHAIN produces it
+### The record: **K51 = 98 vias, 0 open, 0 DRC (rule 280.5)** -- and what is actually in it
 
-`tmp/s13/grpAB_k51.kicad_pcb`, from
-`PLAN_PAGES_GROUP=5 SRC_REFAN_JOINT=1 SRC_REFAN_MAX=20
-PLAN_PAGES_TIER_GROUP=1 CHAIN_BRAID_AB=1` -- the group climb, the
-braid-tier judge, and the braid portfolio, end to end with nothing done by
-hand. Previous best clean K51: 107 (this session's forced group arm), 109
-(`cew5d`), 107 (the recorded `replan.py` board); the human is 81.
+`tmp/s13/joint51_k51.kicad_pcb`, from **`SRC_REFAN_JOINT=1 SRC_REFAN_MAX=20
+CHAIN_BRAID_AB=1`** and nothing else. Previous best clean K51: 109
+(`cew5d`), 115 (jcl), 107 (the recorded `replan.py` board); the human is 81.
+
+**ATTRIBUTED, and the obvious reading is WRONG.** The record was first seen
+on the `grpAB` arm (group climb + braid-tier judge + portfolio) and it is
+tempting to credit the group for it. It earns none of it: in that run the
+group was proposed, laid exactly, and **REJECTED by the tier judge** --
+`braid tier: 106 via(s)/1 open against 98/0` -- so the board that shipped
+carries no group climb at all. Re-run with the group machinery entirely
+off, `joint51` produces **copper IDENTICAL to `grpAB`'s** (2369 segments,
+99 vias, 0 differ) at the same floor 302.25 and the same canary.
+
+Two ingredients, and NEITHER alone is the record:
+
+| arm | K51 |
+|---|---|
+| jcl (the reference) | 115 / 0 open |
+| `SRC_REFAN_JOINT=1 SRC_REFAN_MAX=20` alone (= the portfolio's arm A) | 112 + 1 open |
+| `CHAIN_BRAID_AB=1` alone (`ab13`) | 115 / 0 open |
+| **both** | **98 / 0 open** |
+
+* **The JOINT RE-FAN** (`SRC_REFAN_JOINT`, built 2026-09-11, default off and
+  not in jcl) reaches a different fanout board. Both arms realize the SAME
+  nine source moves at iteration 0; freeing the blockers costs one miss
+  instead of two and the round's floor lands at 302.25 against the
+  control's 315.50.
+* **The PORTFOLIO** then picks the marker-off braid of that board: 98 / 0
+  against 112 with a net open.
+
+So the count judge graded the better board WORSE (302 is its floor, and its
+marker-on braid opens a net), and the second braid is what recovers it.
+That is the same lesson as everything else in this section, and it is why
+the pair is needed: **the joint re-fan alone is a REGRESSION** (an open net
+against jcl's clean 115), and the portfolio alone changes nothing at K51.
 
 It was FOUND by accident (`tmp/s13/nosc2_k51.kicad_pcb`) and the accident
 is worth keeping, because it is what the rest of this section explains.
@@ -5436,6 +5465,7 @@ hack.
 | cew5d (session 12's best) | 34 | **54** | **71** | 109 |
 | **`ab13` = `CHAIN_BRAID_AB=1` alone** | 34 | 60 | **74** | 115 |
 | **`grpAB` = the group + the tier judge + the portfolio** | 34 | 61 | **74** | **98** |
+| `joint51` = joint re-fan + portfolio, NO group | -- | -- | -- | **98** (copper = grpAB) |
 | human | 46 | 58 | 70 | 81 |
 
 All 0 open, 0 DRC; every canary matched (K28 727.2/644.5, K35 1028.2/935.3,
@@ -5447,12 +5477,13 @@ rung. It is the first default candidate since jcl, and it is a portfolio --
 it changes no engine behaviour and cannot regress by construction, it only
 costs a second braid.
 
-**`grpAB` is the K51 record** -- 98 against the reference's 115 and the
-previous best arm's 109 -- and it is one via short at K35 (61 against 60),
-so by edict 3 it is not a default either. It is the arm to carry forward:
-K35 is the single rung, by a single via, and it is the rung whose
-regression is already traced (the group is refused by the engine there and
-the round reverts everything to the base board).
+**`grpAB` reaches the K51 record but does not cause it** (see above:
+`joint51` gets the identical copper with the group machinery off, and the
+tier judge REJECTED the group in that very run). Its K35 61 against 60 is
+one via of damage the group machinery does and the record does not need.
+**So the arm to carry forward is `joint51` + the portfolio, and the group
+climb is a mechanism that WORKS and has not yet PAID** -- its only winning
+board so far, the forced 107, is superseded by this 98.
 
 ### The chain change: a PORTFOLIO, `CHAIN_BRAID_AB=1`
 
@@ -5761,6 +5792,12 @@ round, both fixed at the end of the session and both unmeasured:
 
 **NEXT, in order:**
 
+0. **The K51 record's arm is `SRC_REFAN_JOINT=1 SRC_REFAN_MAX=20
+   CHAIN_BRAID_AB=1`, and the JOINT RE-FAN half of it has only been run at
+   K51.** Run it at K28/K35/K41 before anything else -- it is a
+   pre-existing flag that jcl does not use, it is a REGRESSION on its own
+   at K51 (112 + 1 open against 115 clean), and the pair is only known to
+   pay on one rung. If it holds, that pair is the new reference arm.
 1. **`ab13` (`CHAIN_BRAID_AB=1`) is a DEFAULT CANDIDATE and should be one.**
    34 / 60 / 74 / 115, six vias better than jcl at K41 and worse on no rung,
    every canary matched. It changes no engine behaviour, only routes the
