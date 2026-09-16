@@ -861,19 +861,22 @@ class Round4(_Boards):
                 st = self._state(src)
                 geo = geometry_for(st, st.pcb_data, st.pcb_file)
                 zero = BoardOutlineGate(st.pcb_data.board_info, 0.0)
+                # `y` varies too, and one row sits against the NORTH edge: on
+                # a pose where only x can bite, an error in the pad centre's
+                # y term is invisible.
                 for rot in (0, 37, 90, 180, 270):
-                    for x in (1.0, 1.6, 2.4):
-                        mine = pad_copper_outside(geo, zero, 'J1',
-                                                  (x, 10.0, rot))
+                    for x, y in ((1.0, 10.0), (1.6, 10.0), (2.4, 10.0),
+                                 (1.6, 1.3), (6.0, 1.0), (6.0, 19.2)):
+                        mine = pad_copper_outside(geo, zero, 'J1', (x, y, rot))
                         out = self.root / 'extent_out.kicad_pcb'
                         write_placed_output(str(src), str(out), [
-                            {'reference': 'J1', 'new_x': x, 'new_y': 10.0,
+                            {'reference': 'J1', 'new_x': x, 'new_y': y,
                              'new_rotation': rot}])
                         graded = grade_pad_edge_clearance(
                             parse_kicad_pcb(str(out)), 0.0, str(out))
                         gap = graded['minimum_gap_by_ref_mm'].get('J1')
                         theirs = max(0.0, -gap) if gap is not None else 0.0
-                        where = (name, base, rot, x, mine, theirs)
+                        where = (name, base, rot, x, y, mine, theirs)
                         self.assertGreaterEqual(mine, theirs - 1e-6, where)
                         self.assertLessEqual(mine, theirs + slack + 1e-6, where)
 
