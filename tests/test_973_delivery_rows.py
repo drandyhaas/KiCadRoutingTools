@@ -468,7 +468,11 @@ OUT = os.path.join(wd, 'OUT.kicad_pcb')
 with open(os.path.splitext(staged)[0] + '.kicad_pro', 'w', encoding='utf-8') as f:
     f.write('{}')
 try:
-    run_loop(OUT, staged, rounds=1, quench_moves=[C1a], failures=[2, 1],
+    # The round is REJECTED on purpose: the delivered board is then the
+    # round-0 copy, which carries the project, so a delivery that copied
+    # siblings before refusing would leave one at the output. An accepted
+    # round board is written without siblings and could not show it.
+    run_loop(OUT, staged, rounds=1, quench_moves=[C1a], failures=[2, 2],
              work_dir=os.path.join(d, 'loopwork'), declare=False)
     _err = None
 except PV.UnaidedViolation as e:
