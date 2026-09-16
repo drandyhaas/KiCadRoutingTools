@@ -128,7 +128,7 @@ def _well_formed(row):
             x is None or isinstance(x, str) for x in sw.values())):
         return False
     return all(row.get(k) is None or isinstance(row.get(k), str)
-               for k in ('path', 'lever', 'parent_pose_sha256',
+               for k in ('path', 'lever', 'caller', 'parent_pose_sha256',
                          'board_pose_sha256'))
 
 
@@ -222,7 +222,17 @@ def lineage(rows, staged_table, delivered_table):
         return {'status': status, 'drift': _differing(delivered_table, expected),
                 'missing': missing, 'expected': expected, 'detail': detail}
 
-    if dg in known:
+    # A row that WROTE this very arrangement from an input nothing recorded is
+    # evidence of a change outside the ledger, even when another row's claims
+    # also reach it. place_route_loop's delivery claims the accepted rounds'
+    # moves against the real input, so a hand edit of a round board that the
+    # next round's quench then carried on reached `verified` -- while the
+    # round's own row said its parent was a board nobody produced.
+    rogue = [i for i, r in usable
+             if r.get('board_pose_sha256') == dg
+             and _linkable(r.get('parent_pose_sha256'))
+             and r.get('parent_pose_sha256') not in known]
+    if dg in known and not rogue:
         detail['tip'] = None if made_by[dg] is None else _who(made_by[dg])
         # Verified is not the end: the replay is what the rows CLAIM, and a
         # row whose file disagrees with its own claims is caught here.
@@ -242,6 +252,10 @@ def lineage(rows, staged_table, delivered_table):
     for i, r in usable:
         producer[r['board_pose_sha256']] = i
     chain, cur, seen = [], dg, set()
+    if dg in known:                    # reached here only through a rogue row
+        chain.append(rogue[-1])
+        seen.add(dg)
+        cur = rows[rogue[-1]].get('parent_pose_sha256')
     while cur in producer and cur not in known and cur not in seen:
         seen.add(cur)
         i = producer[cur]
@@ -693,8 +707,16 @@ def main(argv=None):
         print(f"    {ref}: written by {who}, undeclared")
     if doc.get('lineage') not in (None, 'verified'):
         _d = doc.get('lineage_detail') or {}
-        print(f"  lineage: {doc['lineage']} (compared with "
-              f"{_d.get('compared_to')}; break at {_d.get('break')})")
+
+        def _name(w):
+            return (w if isinstance(w, str) or w is None
+                    else f"the {w.get('lever')} write to {w.get('path')}")
+        _brk = _d.get('break')
+        print(f"  lineage: {doc['lineage']} -- compared with "
+              f"{_name(_d.get('compared_to')) or 'nothing'}"
+              + (f"; the chain breaks at {_name(_brk)}" if _brk else '')
+              + (f"; missing {', '.join(_d['missing_refs'][:6])}"
+                 if _d.get('missing_refs') else ''))
     if a.json:
         with open(a.json, 'w', encoding='utf-8') as f:
             json.dump(doc, f, indent=1, sort_keys=True)

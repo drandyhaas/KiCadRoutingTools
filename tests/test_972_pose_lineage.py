@@ -943,5 +943,46 @@ check('run_watch relays the verdict, the reason naming the part, and the lineage
 settled('delta round')
 
 
+# --- the pre-push review's findings ---------------------------------------
+print('3d. the nearest state, malformed callers, a checkable unlinkable ledger')
+
+# The chain's own moves are left out of the nearest-state ranking. Two
+# candidates: B moved Y (older), A moved X (newer). X is hand-moved in a copy
+# of B, and a lever then moves X to exactly A's pose. Counting X in the rank
+# picks A (nearest by one), whose replay names Y -- a part exactly where B's
+# row put it. Leaving the chain's X out picks B, and nothing is left to name.
+wd, st = fresh()
+A, B = os.path.join(wd, 'A.kicad_pcb'), os.path.join(wd, 'B.kicad_pcb')
+lever_write(st, B, [mv(st, Y, dx=3.0)])
+lever_write(st, A, [mv(st, X, dx=2.0)])
+H = os.path.join(wd, 'H.kicad_pcb')
+shutil.copyfile(B, H)
+hand_edit(H, X)
+F = os.path.join(wd, 'final.kicad_pcb')
+_ax = PV.pose_table(A)[X]
+lever_write(H, F, [{'reference': X, 'new_x': _ax[0], 'new_y': _ax[1], 'new_rotation': _ax[2]}])
+grade('the nearest state ignores the parts the chain itself moved (no false accusation)',
+      wd, F, PA.UNPROVEN, lineage='broken', drifted_refs=[])
+
+# A non-string caller is a malformed row, not a crash.
+wd, st, A = s972()
+with open(os.path.join(wd, PV.LEDGER_NAME), 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps({'lever': 'place_optimize.py', 'declared': True, 'refs_moved': [],
+                         'path': 'nowhere', 'caller': 5}) + '\n')
+_c, _d = PA.audit(wd, A)
+check('a row whose caller is not a string is skipped, not a crash',
+      _c == PA.VIOLATION and (_d.get('lineage_detail') or {}).get('malformed_rows') == 1,
+      f"exit {_c} malformed={(_d.get('lineage_detail') or {}).get('malformed_rows')}")
+
+# Unlinkable, but every claim has a pose to compare: nothing is unproven.
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+rewrite_ledger(wd, lambda r: dict(r, board_pose_sha256='p9:' + r['board_pose_sha256'][3:]))
+grade('an unlinkable ledger whose claims are all checkable is CLEAN', wd, A, PA.CLEAN,
+      lineage='unlinkable', unverifiable_claims=[])
+settled('pre-push review')
+
+
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)

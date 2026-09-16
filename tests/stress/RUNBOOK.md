@@ -1347,7 +1347,9 @@ itself (#973), so the audit picks the output rather than an intermediate.
 `place_reconstruct`'s staged promote and `place_fanout_clearance`'s no-move
 copy do not: the lineage still links their boards by arrangement, but the
 audit's own pick can land on an earlier board, so pass `--delivered` for
-them. What a digest does NOT see: two footprints that share a reference
+them. `place_pose` records its promote only once #970 is in; without it a
+`place_pose` step is an unrecorded change, and the audit of every later write
+names the parts it moved. What a digest does NOT see: two footprints that share a reference
 swapping places together with their block order, and a footprint whose own
 `(at ...)` carries an exponent-form angle, which the parser reads from the
 first child `(at ...)` instead (a pre-existing parser limit). And a board

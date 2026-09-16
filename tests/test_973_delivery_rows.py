@@ -484,6 +484,23 @@ run_loop(OUT, staged, rounds=1, quench_moves=[C1a], failures=[2, 1],
 grade('a hand edit of the accepted round board is NOT blessed by the delivery', wd, OUT,
       PA.VIOLATION, unclaimed_refs=['J1'])
 
+
+def _hand_move_j1_round1(pcb_file):
+    if os.path.basename(pcb_file) == 'loop_round1.kicad_pcb':
+        _hand_move_j1(pcb_file)
+
+
+# ...and in the DEFAULT work dir, where the next accepted round's quench then
+# carries the hand-moved part on: the delivery row's claims reach the board,
+# but round 2's own row read a board nothing recorded. That row is evidence.
+J1c = [{'reference': 'J1', 'new_x': 178.2, 'new_y': 100.0, 'new_rotation': 0.0}]
+d, wd, staged = loop_dir()
+OUT = os.path.join(wd, 'OUT.kicad_pcb')
+run_loop(OUT, staged, rounds=2, quench_moves=[C1a, J1c], failures=[2, 1, 0],
+         tamper=_hand_move_j1_round1)
+_c, _d = grade('a hand edit a later round carried on is not CLEAN (default work dir)', wd,
+               OUT, PA.UNPROVEN, lineage='broken')
+
 d, wd, staged = loop_dir()
 OUT = os.path.join(wd, 'OUT.kicad_pcb')
 with open(os.path.splitext(staged)[0] + '.kicad_pro', 'w', encoding='utf-8') as f:

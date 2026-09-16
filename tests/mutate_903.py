@@ -526,6 +526,31 @@ ROWS = [
      "                if _wrote_this and ref in _poses:\n",
      (T_972,), 'KILLED'),
 
+    # The pre-push review.
+    # A row that wrote this arrangement from an input nothing recorded is
+    # ignored as long as another row's claims also reach it: a hand edit of a
+    # round board that the next accepted round carried on grades CLEAN.
+    ('a-rogue-producer-is-ignored', 'pa',
+     "    if dg in known and not rogue:\n",
+     "    if dg in known:\n",
+     (T_973,), 'KILLED'),
+
+    ('the-rank-counts-the-chain-moves', 'pa',
+     "        diff = [r for r in _differing(delivered_table, known[d])\n"
+     "                if r not in moved_by_chain]\n",
+     "        diff = list(_differing(delivered_table, known[d]))\n",
+     (T_972,), 'KILLED'),
+
+    ('a-malformed-caller-crashes-the-audit', 'pa',
+     "               for k in ('path', 'lever', 'caller', 'parent_pose_sha256',\n",
+     "               for k in ('path', 'lever', 'parent_pose_sha256',\n",
+     (T_972,), 'KILLED'),
+
+    ('an-unlinkable-ledger-is-unproven-even-when-checked', 'pa',
+     "    if lin['status'] == 'unlinkable' and unverifiable:\n",
+     "    if lin['status'] == 'unlinkable':\n",
+     (T_972,), 'KILLED'),
+
     # The delta round.
     ('the-replay-invents-a-part-the-board-lacks', 'pa',
      "        if p is None or old is None:\n",

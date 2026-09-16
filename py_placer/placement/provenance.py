@@ -227,9 +227,10 @@ def pose_digest(table: Dict) -> str:
 
     Positions are integer NANOMETRES: the writer emits `:.6f` millimetres and
     KiCad stores integer nm, so any rewrite that keeps the decimal recovers the
-    same integer. Rotation is quantised to 1e-4 degree BEFORE the modulo, so
-    -90 and 270, 360 and 0, and a `-1e-17` that `% 360` turns into 360.0 all
-    land on one integer. Integers and side letters only: a float in the JSON
+    same integer. Rotation is folded into [0, 360), quantised to 1e-4 degree
+    and folded AGAIN as an integer, so -90 and 270, 360 and 0, and a `-1e-17`
+    that the float `% 360` turns into 360.0 all land on one integer. Integers
+    and side letters only: a float in the JSON
     would spell -0.0 differently from 0.0.
 
     Exact on purpose. Two poses that differ by less than a nanometre link;
