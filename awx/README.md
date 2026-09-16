@@ -5704,6 +5704,39 @@ about that error, one fixed:
 
 ### Item 2, the re-berth; item 3, the walk budget; item 5, the harness
 
+**ALL THREE ARE NOW MEASURED (2026-09-16), and items 2 and 3 are REJECTED.**
+The flags stay in the tree, marked with their numbers, because a rejected
+term is still a change detector -- deleting it is how a finding becomes
+folklore.
+
+| pair (one flag apart) | K28 | K35 | K41 | K51 (48 nets) |
+|---|---|---|---|---|
+| `cgrp` (group climb + tier, no re-berth) | 32 | **60** | **79** | 121 |
+| `cgdst` = + `PLAN_PAGES_GROUP_DST=1` | 32 | 68 | 80 | 121 |
+| `cwalk` (the walk) | 34 | 54 | 82 | **150 / 0 open** |
+| `cwstage` = + `PLAN_PAGES_WALK_STAGE=4` | 34 | 54 | 82 | 108 **+ 2 open** |
+
+* **Item 2 REJECTED**: worse at K35 by eight and at K41 by one, better on
+  no rung, and far slower (K41 23 min against 6). Measured on the Modal
+  sweep where every arm's K28 canary read the same 727.2 / 644.7, so the
+  table is one experiment.
+* **Item 3 REJECTED**: three ties and, at K51, two open nets against a
+  complete board. Under `(open, vias)` that is a regression.
+* **Item 5 PASSES as a gate, and reports both items INERT on planted
+  cases.** The `b4` pair is identical on 16 of 16 cases for item 2, and
+  the group arm differs from the control on ONE case, which has an open
+  net in every arm. This is *measured* inert rather than unreached: groups
+  of 18 and 30 members form, and the re-berth arm relocated 14 members --
+  it simply changed no copper, exactly as the harness's own note predicts
+  ("a clear two-layer channel cannot make the group move pay"). Four of
+  four channel-confined cases routed **56 against an optimum of 56**.
+* One real gain did turn up beside them, on the same sweep and at the same
+  canary: the group climb alone gives **K28 32 against 34**, the first
+  time item 1 has paid anything -- while costing at K41 (79 against
+  `cport`'s 76) and K51 (121 against 115). Not a default; worth a look at
+  why it pays small and costs large.
+
+
 * **`PLAN_PAGES_GROUP_DST=1`** (item 2). A berth is not a slot that can be
   handed to another net -- it is an escape of that net's OWN ball -- so the
   re-berth is not a permutation but a small monotone re-choice: each member
@@ -6058,7 +6091,103 @@ Neither board is better on the graded terms: same vias, same completion,
 cloud 8.9 mm shorter overall (647.44 against 656.33) and local much cleaner
 copper (783 segments against 1144).
 
-PENDING: `cport`/K51, the last arm of the corrected sweep.
+### THE OBJECTIVE IS ANTI-CORRELATED WITH THE ROUTE (2026-09-16, proven at the optimum)
+
+**Solving the plan to PROVEN OPTIMALITY makes the board WORSE at K41 and
+K51.** This campaign has said "more solve time = better plan = worse
+route" since session 9; this pins it at the optimum, where there is no
+"it would have improved with more search" left to say.
+
+Three arms at `PLAN_PAGES_DET=5000` (125x the default 40), full chain:
+
+| K | objective at det 40 | at det 5000 | vias det 40 | vias det 5000 | solve |
+|---|---|---|---|---|---|
+| 35 | 1028.2 | 1028.2 **OPTIMAL** | 60 | 60 | 62 s |
+| 41 | 2308.9 | **1759.5 OPTIMAL (-24%)** | 79 | **91 (+12)** | 43 min |
+| 51 | 3983.7 | **2673.3 (-33%)**, still not proven | 126 | **141 + 2 open** | 76 min |
+
+At K41 the planner PROVED the best plan its objective can express, and
+that plan routes twelve vias worse. At K51 a third off the objective
+opens two nets.
+
+**What this means for everything search-side.** The walk, bigger budgets,
+better solvers, a portable solver -- every one of them pushes harder on an
+objective that is pointing the wrong way at the rungs that matter. It also
+means `PLAN_PAGES_DET=40` is not a BUDGET but an accidental REGULARIZER,
+which is fragile in a specific way: the ladder's numbers then depend on
+stopping the solver at the right moment, and "the right moment" is not
+portable -- which is the whole cloud-vs-laptop story below.
+
+The one mechanism here that judges by the real thing is the braid-tier
+judge (`PLAN_PAGES_TIER`), which ROUTES the top candidates and decides on
+`(open, vias)`. That is the direction; it is built and barely measured.
+
+### The K51 record does NOT reproduce on the cloud (2026-09-16)
+
+The record arm had never actually been run there. Run now, twice:
+
+| arm | K51 |
+|---|---|
+| `crec51` = `SRC_REFAN_JOINT=1 CHAIN_BRAID_AB=1` (the record's two flags) | **115 / 0** |
+| `crec51m` = + `SRC_REFAN_MAX=20` | **115 / 0**, copper identical |
+| the same configuration, on the laptop | **98 / 0** |
+
+`SRC_REFAN_MAX=20` is confirmed inert (identical copper, 3094 segments),
+as `jdef51` already showed locally. **The canary says why the record does
+not survive**: the cloud's K51 first solve lands at obj 4317.1 / bound
+1557.7 against the laptop's 3983.7 / 1533.9 -- 8.4% worse BEFORE any
+copper is laid. The braid cannot recover it (arm A 104 vias/3 open, arm B
+115/0, keeping B on completion).
+
+So a cloud sweep can rank arms against each other; it CANNOT validate or
+reproduce a laptop record, because the plan it starts from is a different
+draw. Note also that K51 on this bench is a **48-net** problem on BOTH
+sides (`coherent_nets` counts whole rivers) -- that is not a cloud
+anomaly, and the local record boards grade K=48 too.
+
+### `PLAN_PAGES_CANON` across the ladder: portable, and not shippable
+
+The portable solve (see the flag's own comment for why all three of one
+worker, an integer conflict stop, and `linearization_level=0` are needed)
+measured through the whole chain. Every arm stayed conflict-bounded; none
+fell back to the deterministic backstop.
+
+| | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| CANON 20k (the fast one) | 40 | **60** | 89 | 168 **+7 open** |
+| CANON 200k | 38 | **60** | 93 | 133 **+2 open** |
+| `cjcl` (default, NOT portable) | 34 | 60 | 79 | 126 |
+
+Free at K35 (a tie, and it halves that stage: 2 min against 4), +6 at K28,
++10 at K41, and at K51 it stops completing. **More budget is not
+monotone** -- 200k is WORSE than 20k at K41 (93 against 89), which is the
+anti-correlation above showing up again.
+
+**So CANON is not a production setting; it is an INSTRUMENT.** It is the
+only configuration in which a cloud number and a laptop number are the
+same measurement, which is what makes it worth having: A/B an engine
+change across machines with the plan lottery held still. Portability was
+confirmed beyond its calibration rung -- `cn20k` at K41 returned 89 vias /
+3765 segments from Modal, identical to the laptop.
+
+PENDING: nothing from that sweep -- all 36 arms returned (2026-09-16) and
+the results are in the three sections above and in the items 2/3/5
+verdicts.
+
+**THE RANKED LIST, rewritten 2026-09-16 after the anti-correlation
+measurement above, which reorders it:**
+
+1. **FIX THE JUDGE.** Proving the plan optimal makes K41 twelve vias worse
+   and opens two nets at K51, so every search-side idea is pushing an
+   objective that points the wrong way at the rungs that matter. The lead
+   is `PLAN_PAGES_TIER`, which ROUTES the top candidates and decides on
+   `(open, vias)` -- built, barely measured. Everything below is smaller.
+2. **LAND THE PORTFOLIO.** 34 / 60 / 74 / 98 against jcl's 34 / 60 / 80 /
+   115: better on two rungs, worse on none, an edict-3 pass, and it
+   changes no engine behaviour. A default candidate since session 13 that
+   has never been made the default. The only case against it is TIME.
+3. **K51, the only rung the human still wins** (96 against 81), and the
+   rung where the anti-correlation is worst.
 
 **NEXT, in order:**
 
