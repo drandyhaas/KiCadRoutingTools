@@ -5322,8 +5322,10 @@ enumerated against what it will strip).
 
 ### The record: **K51 = 98 vias, 0 open, 0 DRC (rule 280.5)** -- and what is actually in it
 
-`tmp/s13/joint51_k51.kicad_pcb`, from **`SRC_REFAN_JOINT=1 SRC_REFAN_MAX=20
-CHAIN_BRAID_AB=1`** and nothing else. Previous best clean K51: 109
+`tmp/s13/joint51_k51.kicad_pcb`, from **`SRC_REFAN_JOINT=1
+CHAIN_BRAID_AB=1`** and nothing else -- TWO FLAGS, no tuned number: the arm
+reproduces at the DEFAULT `SRC_REFAN_MAX=6` (`jdef51`, same 98 / 0, same
+canary), so the 20 the group arm needed is not load-bearing here. Previous best clean K51: 109
 (`cew5d`), 115 (jcl), 107 (the recorded `replan.py` board); the human is 81.
 
 **ATTRIBUTED, and the obvious reading is WRONG.** The record was first seen
@@ -5340,7 +5342,7 @@ Two ingredients, and NEITHER alone is the record:
 | arm | K51 |
 |---|---|
 | jcl (the reference) | 115 / 0 open |
-| `SRC_REFAN_JOINT=1 SRC_REFAN_MAX=20` alone (= the portfolio's arm A) | 112 + 1 open |
+| `SRC_REFAN_JOINT=1` alone (= the portfolio's arm A) | 112 + 1 open |
 | `CHAIN_BRAID_AB=1` alone (`ab13`) | 115 / 0 open |
 | **both** | **98 / 0 open** |
 
@@ -5792,8 +5794,9 @@ round, both fixed at the end of the session and both unmeasured:
 
 **NEXT, in order:**
 
-0. **The K51 record's arm is `SRC_REFAN_JOINT=1 SRC_REFAN_MAX=20
-   CHAIN_BRAID_AB=1`, and the JOINT RE-FAN half of it has only been run at
+0. **The K51 record's arm is `SRC_REFAN_JOINT=1 CHAIN_BRAID_AB=1` (two
+   flags, no tuned number -- it reproduces at the default
+   `SRC_REFAN_MAX=6`), and the JOINT RE-FAN half of it has only been run at
    K51.** Run it at K28/K35/K41 before anything else -- it is a
    pre-existing flag that jcl does not use, it is a REGRESSION on its own
    at K51 (112 + 1 open against 115 clean), and the pair is only known to
