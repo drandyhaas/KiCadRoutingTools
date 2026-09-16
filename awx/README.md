@@ -5539,7 +5539,65 @@ only plans that HAVE the rule, the flag for it did nothing. It now honours
 an explicit `0` (and says so), which is what made the A/B arm expressible
 at all.
 
-## Session 13 (continued): the group climb LAYS (its own best board was 107)
+### The portfolio, completed: TWO levels, and `replan.py` on top
+
+The braid portfolio (above) chooses between routing regimes on a fixed
+plan. The other coin flip is one level up -- the JOINT SOURCE RE-FAN
+(`SRC_REFAN_JOINT`, built 2026-09-11, default off and not in jcl), which
+frees the nets whose copper stands in a source move's room so the engine
+can rip and re-lay them around the ask. Measured at every rung it is the
+same shape as the marker: **a coin flip per board, and a REGRESSION on its
+own** (K51 112 + 1 open against jcl's clean 115; a via worse at K35).
+
+So `CHAIN_FANOUT_AB=1` plans and fans out BOTH ways and carries every
+DISTINCT board into the braid portfolio. Three pieces make that cheap and
+honest:
+
+* **`dedupe_boards.py`** compares SEGMENTS and VIAS -- never a file hash,
+  never a whole-file diff, because the uuids and the sibling project
+  differ on every write and say nothing about the copper. The joint re-fan
+  changes the board on only **two of the four rungs**, so at K28 and K41
+  the extra braids cost nothing at all.
+* **`pick_braid.py`** takes N candidates and keeps the best by
+  `(open, vias)`, and REFUSES a board that does not grade -- a missing
+  file must not win with "0 open, 0 vias".
+* The shipped `_fo_` board is the WINNER's, and its sidecar describes the
+  regime that actually routed it (see the two fixes below).
+
+**The two levels together: 34 / 60 / 74 / 98** -- +6 on jcl at K41, +17 at
+K51, worse on NO rung, every canary matched. **It is also what removes the
+via the joint re-fan costs on its own at K35**: offered both, the
+portfolio takes the non-joint board back and lands on 60.
+
+**Then `replan.py` on top of those boards** (`--worst=<the run's net
+count> --probes=2 --rounds=4`) gives **34 / 58 / 68 / 96**. The two
+compose because they work at different granularities: the portfolio
+chooses between regimes on a fixed plan and cannot regress; replan changes
+the PLAN, per net, with the router as its oracle, and LEARNS (`RESIDUAL` =
+real minus predicted). The portfolio hands it a better start and a more
+honest price to learn from.
+
+**Two integration fixes were needed first, and both bite the CONSUMER
+rather than the portfolio run:**
+
+1. **Ship the winner's fanout board.** With two fanout candidates the
+   chain was copying the FIRST, so `_fo_kK` and the routed board would
+   describe different plans -- and replan reads both.
+2. **Strip `pages_first` from the shipped sidecar when the marker-OFF arm
+   wins.** `replan` re-braids F on EVERY round (its step 5), so a sidecar
+   that still claimed the marker would route the arm the portfolio
+   rejected and throw the fourteen vias away each round.
+   `tmp/s13/ship_sidecars.py` also carries the winner's `.pack.json` onto
+   the shipped stem (`_refusals.json` exists only when a net was refused,
+   so its absence on a complete board is correct, not a miss).
+
+**Read replan's speed correctly.** On the K28 portfolio board it finished
+in 9 seconds unchanged, and that is right, not broken: its leverage is
+REFUSED nets and high-via swimmers, and that board had none refused and
+one swimmer, whose two candidates it probed and rejected. `--worst=N` only
+widens a list the verdict has something to put in.
+
+### The group climb: built, it LAYS, and its own best board was 107
 
 ### Item 1, the three pieces -- built, and each one was necessary
 
@@ -5618,8 +5676,12 @@ Every canary matched (K28 727.2/644.5, K35 1028.2/935.3, K41 2308.9/1163.6,
 K51 3983.7/1533.9). **107 is the best clean K51 this chain has produced**
 (cew5d 109, jcl 115, the forced head-on probe 100 with one open). It is
 NOT a default: at K28 and K35 the arm is worse (36 against 34, 68 against
-60), which is edict 3, and it needed `PLAN_PAGES_GROUP_FORCE` to ship at
-all.
+60), which is edict 3, and it only shipped at all behind a probe flag that
+kept a realized group whatever the judge said. That probe is GONE from the
+tree: `PLAN_PAGES_TIER_GROUP` reproduced its board with copper IDENTICAL to
+it, on the copper's say-so rather than by switching the judge off, and a
+flag that disables a safety check has no business outliving the question it
+answered.
 
 **And that is the finding.** The round judge scored the laid group at
 **373 against 302** and reverted it; the same board, carried on by the
@@ -5755,64 +5817,6 @@ because the count's error there is not small but systematic;
 a braid per candidate, ~90 s at K51, and the result is cached per (board,
 plan). Off by default.
 
-### The portfolio, completed: TWO levels, and `replan.py` on top
-
-The braid portfolio (above) chooses between routing regimes on a fixed
-plan. The other coin flip is one level up -- the JOINT SOURCE RE-FAN
-(`SRC_REFAN_JOINT`, built 2026-09-11, default off and not in jcl), which
-frees the nets whose copper stands in a source move's room so the engine
-can rip and re-lay them around the ask. Measured at every rung it is the
-same shape as the marker: **a coin flip per board, and a REGRESSION on its
-own** (K51 112 + 1 open against jcl's clean 115; a via worse at K35).
-
-So `CHAIN_FANOUT_AB=1` plans and fans out BOTH ways and carries every
-DISTINCT board into the braid portfolio. Three pieces make that cheap and
-honest:
-
-* **`dedupe_boards.py`** compares SEGMENTS and VIAS -- never a file hash,
-  never a whole-file diff, because the uuids and the sibling project
-  differ on every write and say nothing about the copper. The joint re-fan
-  changes the board on only **two of the four rungs**, so at K28 and K41
-  the extra braids cost nothing at all.
-* **`pick_braid.py`** takes N candidates and keeps the best by
-  `(open, vias)`, and REFUSES a board that does not grade -- a missing
-  file must not win with "0 open, 0 vias".
-* The shipped `_fo_` board is the WINNER's, and its sidecar describes the
-  regime that actually routed it (see the two fixes below).
-
-**The two levels together: 34 / 60 / 74 / 98** -- +6 on jcl at K41, +17 at
-K51, worse on NO rung, every canary matched. **It is also what removes the
-via the joint re-fan costs on its own at K35**: offered both, the
-portfolio takes the non-joint board back and lands on 60.
-
-**Then `replan.py` on top of those boards** (`--worst=<the run's net
-count> --probes=2 --rounds=4`) gives **34 / 58 / 68 / 96**. The two
-compose because they work at different granularities: the portfolio
-chooses between regimes on a fixed plan and cannot regress; replan changes
-the PLAN, per net, with the router as its oracle, and LEARNS (`RESIDUAL` =
-real minus predicted). The portfolio hands it a better start and a more
-honest price to learn from.
-
-**Two integration fixes were needed first, and both bite the CONSUMER
-rather than the portfolio run:**
-
-1. **Ship the winner's fanout board.** With two fanout candidates the
-   chain was copying the FIRST, so `_fo_kK` and the routed board would
-   describe different plans -- and replan reads both.
-2. **Strip `pages_first` from the shipped sidecar when the marker-OFF arm
-   wins.** `replan` re-braids F on EVERY round (its step 5), so a sidecar
-   that still claimed the marker would route the arm the portfolio
-   rejected and throw the fourteen vias away each round.
-   `tmp/s13/ship_sidecars.py` also carries the winner's `.pack.json` onto
-   the shipped stem (`_refusals.json` exists only when a net was refused,
-   so its absence on a complete board is correct, not a miss).
-
-**Read replan's speed correctly.** On the K28 portfolio board it finished
-in 9 seconds unchanged, and that is right, not broken: its leverage is
-REFUSED nets and high-via swimmers, and that board had none refused and
-one swimmer, whose two candidates it probed and rejected. `--worst=N` only
-widens a list the verdict has something to put in.
-
 ## Handoff: the next session (written 2026-09-15, ~18:45, end of session 13; supersedes the session-12 handoff)
 
 **Tree.** `bus622-take5` @ `96de973b` + this session's uncommitted edits.
@@ -5824,7 +5828,8 @@ New, all opt-in and flag-off inert:
 `PLAN_PAGES_GROUP_FREE`, `SRC_REFAN_RESEAT`, `PLAN_PAGES_TIER` /
 `_TIER_GROUP` / `_TIER_MAX`, `plan_state` carries `banned`);
 `pages_first.py` (`_nest_assign`, `_regroup_berths`, `PLAN_PAGES_GROUP_DST`,
-`PLAN_PAGES_GROUP_FORCE`, `PLAN_PAGES_WALK_STAGE`); `synth_bus.py`
+`PLAN_PAGES_WALK_STAGE`); `chain_k.sh` (`CHAIN_FANOUT_AB`,
+`CHAIN_BRAID_AB`), `pick_braid.py`, `dedupe_boards.py`; `synth_bus.py`
 (`--row-offset`); `synth_ladder.py` (batch `b4`).
 
 **Flag-off identity: DONE and byte-exact.** `PLAN_PAGES=1 PLAN_JUDGE=count

@@ -3165,7 +3165,6 @@ def plan(base, names, work):
                     import pages_first
                     mv2 = getattr(pages_first.choose, 'last', {}).get('vias', f2)
                 key2 = pf_key(ch2, bp2, f2, mv2)
-                _force = bool(g_laid) and int(os.environ.get('PLAN_PAGES_GROUP_FORCE', '0') or 0)
                 _ok = pf_better(key2, best_key)
                 _why = ''
                 # THE BRAID DECIDES (PLAN_PAGES_TIER): where the count cannot
@@ -3173,8 +3172,7 @@ def plan(base, names, work):
                 # both plans and compare the copper
                 _near = (PLAN_PAGES_TIER and key2 and best_key
                          and abs(key2[0] - best_key[0]) <= PLAN_PAGES_TIER)
-                if ((_near or (PLAN_PAGES_TIER_GROUP and g_laid) or tier_round[0])
-                        and not _force):
+                if _near or (PLAN_PAGES_TIER_GROUP and g_laid) or tier_round[0]:
                     # both sides or neither (the `a is not None and b is not
                     # None` below): one routed candidate against an unroutable
                     # other is not a comparison
@@ -3189,10 +3187,8 @@ def plan(base, names, work):
                                 + ('' if _ok == pf_better(key2, best_key)
                                    else ', AGAINST the count') + ']')
                 _overruled = _ok and not pf_better(key2, best_key)
-                if _ok or _force:
-                    print(line + f'; {pf_fmt(best_key, key2)}: KEPT' + _why
-                          + ('  [PLAN_PAGES_GROUP_FORCE: kept whatever the judge says]'
-                             if _force and not pf_better(key2, best_key) else ''))
+                if _ok:
+                    print(line + f'; {pf_fmt(best_key, key2)}: KEPT' + _why)
                     board, st, dst_choice, un, best_key, src_out = new_board, st2, ch2, un2, key2, src2
                     if _overruled and not tier_round[0]:
                         # A TIER VERDICT AND A COUNT BASELINE CANNOT BE MIXED.
