@@ -1387,9 +1387,10 @@ def _body_band_correct(state, ref: str, edge: str, x: float, y: float,
     What that does NOT promise: that every seat is the one upstream chose.
     Where the walk's pose was REFUSED, this rung can make it legal, so a
     ladder that used to fall through to a later rung, rotation or stage can
-    now seat at the earlier one. `test_seat_edge_ladder_seats_on_the_body
-    _band` is that case at its simplest: a body reaching 3 mm west of its
-    only pad seats at x 2.0 here and nowhere at all without this rung.
+    now seat at the earlier one. The Round3 test whose name ends
+    "ladder_seats_on_the_body_band" is that case at its simplest: a body
+    reaching 3 mm west of its only pad seats at x 2.0 here, and nowhere at
+    all without this rung.
     """
     from .connector_geometry import geometry_for
     part = state.parts[ref]

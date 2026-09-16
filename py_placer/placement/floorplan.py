@@ -1742,7 +1742,8 @@ class _Ctx:
                 # outline (`rule_edge_connector`): a part with pads past the
                 # edge stays counted, whatever its body reads.
                 copper_ok = (not _body.get('body_measured')
-                             or _copper_outside_mm(self, ref) <= legality.EPS)
+                             or (_copper_outside_mm(self, ref) <= legality.EPS
+                                 and not _unmodellable_pads(self, ref)))
                 if (amt > legality.EPS and copper_ok
                         and lo - legality.EPS <= band <= hi + legality.EPS):
                     out[ref] = float(band)
@@ -2898,6 +2899,19 @@ def _band_amount(ctx, ref, edge, legacy_amount):
                        legacy_amount, ctx.gate.margin)
 
 
+def _unmodellable_pads(ctx, ref):
+    """Indices of `ref`'s pads `grade_pad_edge_clearance` could not model.
+
+    It records them as unmeasured and produces no finding, so nothing exact
+    is known about where their copper reaches. A part carrying one is never
+    CERTIFIED clean of copper past the outline: it keeps its `oob_count`
+    charge and its evidence row says `certified: false`."""
+    fp = ctx.pcb.footprints.get(ref)
+    return {index for index, pad in enumerate(getattr(fp, 'pads', None) or ())
+            if not legality._pad_has_no_copper(pad)            # noqa: SLF001
+            and not legality.pad_shape_is_modelled(pad)}
+
+
 def _copper_outside_mm(ctx, ref):
     """How far a declared connector's pad copper reaches past the outline, at
     zero margin: the largest `-gap` among its own edge-clearance findings.
@@ -2926,14 +2940,16 @@ def _copper_outside_mm(ctx, ref):
     # parsed primitives -- yields NO finding: it is recorded as unmeasured
     # and skipped, so the loop above reads 0.0 for a pad that may be entirely
     # off the board. Upstream needed no conjunct there, because its band read
-    # the pad box itself. For those pads only, fall back to the same rotated
-    # pad-box reading the seat predicate uses: it covers every shape and
-    # never under-states (round-4 review; the exact extrema above still
-    # decide every pad the grader could model).
-    unsupported = {u['pad_index'] for u in ctx.connector_copper()['unmeasured']
-                   if str(u['pad_ref']).startswith(prefix)
-                   and 'unsupported pad geometry' in str(u.get('reason', ''))
-                   and isinstance(u.get('pad_index'), int)}
+    # the pad box itself. For those pads only, fall back to the rotated
+    # pad-box reading the seat predicate uses. That box is a BEST EFFORT, not
+    # a bound: a trapezoid's copper lies up to its `rect_delta` outside it
+    # (pcbnew measures 1.10 mm where the box says 1.00), and the parser does
+    # not expose `rect_delta`, so nothing here can recover the true extent.
+    # A positive reading therefore still names copper off the board, and a
+    # zero one certifies nothing -- which is why `_unmodellable_pads` also
+    # withholds the part's exemption and marks its row uncertified. The exact
+    # extrema above still decide every pad the grader could model.
+    unsupported = _unmodellable_pads(ctx, ref)
     if unsupported and fp is not None:
         from .connector_geometry import geometry_for, pad_copper_outside
         worst = max(worst, pad_copper_outside(
@@ -2999,6 +3015,11 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
                 str(f['pad_ref']).startswith(prefix) and f.get('gap_mm') is None
                 for f in copper['findings'])
                 else round(_copper_outside_mm(ctx, ref), 4)),
+            # False when a pad's shape defeated the edge grader: `outside_mm`
+            # is then a best-effort box reading, so a zero says "not shown to
+            # be off the board", never "on the board". Such a part is not
+            # exempted from the occupancy census either.
+            'certified': not _unmodellable_pads(ctx, ref),
             # The pads this grade walked: every DECLARED connector's, never
             # the whole board's. One number for the grade, repeated on each
             # row -- not this part's own count.

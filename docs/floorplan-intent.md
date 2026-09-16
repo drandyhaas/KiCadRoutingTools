@@ -325,10 +325,14 @@ the copper — it sees it only when the occupancy rect it measures (the
 courtyard, or the pad box when the part draws no courtyard) happens to
 enclose the pads. The reason is that the legacy path grades **exactly** as it
 did before #961, deliberately, so that this change cannot move a board it
-cannot measure. The gap that leaves is real and measured: ulx3s `AUDIO1`,
-whose Fab outline is open and therefore unmeasured, is seated with 0.135 mm
-of pad copper past the outline on both `main` and this branch, and neither
-names it. `check_drc --check-pad-edge` does.
+cannot measure. The gap that leaves is real: on the legacy reading nothing
+grades pad copper against the outline at all, so a part whose courtyard does
+not enclose its pads can carry copper past the edge unnamed, on `main` and on
+this branch alike. `check_drc --check-pad-edge` is the channel that names it.
+(ulx3s `AUDIO1` is the shape of the first half — an open Fab outline, so its
+body is unmeasured and it takes the legacy path — though its own copper sits
+0.28 mm inside the outline, 0.27 mm short of that board's 0.55 mm floor,
+which is a clearance question rather than a containment one.)
 Nothing is withheld or abstained, and the basis says which reading was used.
 The seat conjunct's "no overhang" gate, the nearest-edge identity, the class
 setback defaults and the `connector_affinity` warning are **unchanged**. The

@@ -3322,6 +3322,20 @@ def format_oob_clause(report, limit: int = 6) -> str:
     return shown + more + "\n" + basis
 
 
+def pad_shape_is_modelled(pad) -> bool:
+    """Can `grade_pad_edge_clearance` compute this pad's copper extrema?
+
+    Parsed polygons, or one of the four analytic shapes. Anything else -- a
+    trapezoid, a custom pad with no primitives -- is recorded as unmeasured
+    and produces no finding, so a consumer that reads findings alone learns
+    nothing about where its copper reaches. Public because #961's connector
+    evidence has to ask the same question, and asking it by matching the
+    grader's free-text reason would break on any wording change.
+    """
+    return (bool(getattr(pad, 'polygons', None))
+            or pad.shape in ('rect', 'roundrect', 'circle', 'oval'))
+
+
 def _segments_cover_rectangle(segments, bounds) -> bool:
     """Every source edge belongs to, and exactly covers, the rectangle."""
     if not segments or not bounds:
@@ -3421,7 +3435,7 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
             identity = {'pad_ref': f'{ref}.{pad.pad_number}', 'pad_index': index,
                         'pad_loc': [pad.global_x, pad.global_y]}
             polygons = getattr(pad, 'polygons', None)
-            supported = bool(polygons) or pad.shape in ('rect', 'roundrect', 'circle', 'oval')
+            supported = pad_shape_is_modelled(pad)
             if not bounds or not supported:
                 unmeasured.append(dict(identity, reason=(
                     'missing board outline' if not bounds else 'unsupported pad geometry')))

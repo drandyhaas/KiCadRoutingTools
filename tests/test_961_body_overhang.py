@@ -834,6 +834,81 @@ class Round4(_Boards):
         self.assertEqual(copper['disposition'], 'unmeasured')
         self.assertAlmostEqual(copper['outside_mm'], 1.0, places=4)
 
+    def test_an_unmodellable_pad_is_never_certified(self):
+        """The size box is a best effort for a shape the grader cannot model:
+        a trapezoid's copper lies up to its `rect_delta` outside it, and the
+        parser does not expose that delta. So a zero reading certifies
+        nothing -- the part keeps its `oob_count` charge and its row says so
+        -- while a positive one still names the copper."""
+        body = '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))'
+        keep = '(pad "2" smd rect (at .5 0) (size .5 .5) (layers "F.Cu"))'
+        # Wholly inside on the size box, but its copper reaches further: this
+        # is the case the box cannot decide.
+        inside = ('(pad "1" smd trapezoid (at -.5 0) (size .5 .5) '
+                  '(rect_delta 0 .2) (layers "F.Cu"))')
+        path = self.synthetic('trap_inside.kicad_pcb', body, at='2 10 0',
+                              pads=inside + '\n    ' + keep)
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 0.5},
+                    _intent={'legality_budget': {'oob_count': 0}}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        copper = _evidence(r, 'J1')['pad_copper_edge']
+        self.assertAlmostEqual(copper['outside_mm'], 0.0, places=6)
+        self.assertFalse(copper['certified'])
+        self.assertEqual(copper['disposition'], 'unmeasured')
+        self.assertFalse([v for v in r.violations
+                          if v.ref == 'J1' and 'pad copper leaves' in v.message])
+        # Not certified means not exempt: the census keeps charging it.
+        self.assertEqual(r.legality.get('oob_count_exempt'), 0)
+
+    def test_the_fallback_never_displaces_an_exact_reading(self):
+        """The box is consulted for unmodellable pads ONLY, and never in
+        place of the exact extrema: it both over-states a tilted rounded pad
+        and can be smaller than another pad's real overhang."""
+        body = '(fp_rect (start -2 -2) (end 2 2) (layer "F.Fab"))'
+        # An unmodellable pad 0.2 mm off the edge, a rect pad 0.8 mm off it:
+        # the exact reading of the rect must win over the box of the other.
+        path = self.synthetic(
+            'fallback_max.kicad_pcb', body, at='2 10 0',
+            pads='(pad "1" smd trapezoid (at -2.05 0) (size .5 .5) '
+                 '(rect_delta .2 0) (layers "F.Cu"))\n'
+                 '    (pad "2" smd rect (at -2.55 1) (size .5 .5) '
+                 '(layers "F.Cu"))')
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 5.0}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        self.assertAlmostEqual(
+            _evidence(r, 'J1')['pad_copper_edge']['outside_mm'], 0.8, places=4)
+        # A tilted OVAL sits inside the board, but its bounding box does not:
+        # measuring it with the box would invent copper off the outline.
+        path = self.synthetic(
+            'fallback_only.kicad_pcb', body, at='2.1 10 0',
+            pads='(pad "1" smd trapezoid (at 1 0) (size .5 .5) '
+                 '(rect_delta .2 0) (layers "F.Cu"))\n'
+                 '    (pad "2" smd oval (at -1.5 0 45) (size 1.4 .5) '
+                 '(layers "F.Cu"))')
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 5.0}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        copper = _evidence(r, 'J1')['pad_copper_edge']
+        self.assertAlmostEqual(copper['outside_mm'], 0.0, places=6)
+        self.assertFalse([v for v in r.violations
+                          if v.ref == 'J1' and 'pad copper leaves' in v.message])
+
+    def test_an_inboard_body_reports_no_overhang(self):
+        """`body_overhang_mm` is the POSITIVE part of the signed position: a
+        body 0.4 mm inside its edge overhangs by 0, not by -0.4."""
+        path = self.usb1_at(0.4)
+        row = ConnectorGeometry(parse_kicad_pcb(str(path)),
+                                str(path)).measure('USB1', 'west')
+        self.assertAlmostEqual(row['body_signed_position_mm'], -0.4, places=4)
+        self.assertAlmostEqual(row['body_overhang_mm'], 0.0, places=6)
+        self.assertAlmostEqual(row['body_setback_mm'], 0.4, places=4)
+        self.assertAlmostEqual(row['body_outside_mm'], 0.0, places=6)
+
     def test_pad_boxes_agree_with_the_edge_grader(self):
         """The seat's rotated pad box against `grade_pad_edge_clearance`'s own
         extrema on the WRITTEN board: equal for rectangles at any angle, and
@@ -851,6 +926,13 @@ class Round4(_Boards):
                       '(layers "F.Cu"))\n'
                       '    (pad "2" smd oval (at .8 -.4 20) (size 1.4 .6) '
                       '(layers "F.Cu"))', 0.45),
+            # A pad within a degree of a cardinal angle: the parser bakes the
+            # turn into size_x/size_y and leaves `rect_rotation` at 0, so
+            # this is the ONLY case that exercises the recovery branch.
+            ('near-cardinal', '(pad "1" smd rect (at -1.5 .6 90.5) '
+                              '(size 1.2 .6) (layers "F.Cu"))\n'
+                              '    (pad "2" smd rect (at .8 -.4 105) '
+                              '(size .6 1.4) (layers "F.Cu"))', 0.0),
         )
         for name, pads, slack in cases:
             for base in (0, 30):
