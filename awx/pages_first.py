@@ -60,6 +60,56 @@ Pt = Tuple[float, float]
 
 PAGES_DET = float(os.environ.get('PLAN_PAGES_DET', '40'))     # CP-SAT deterministic time. 40 (2026-09-14): at 20 the K41 solve stops FEASIBLE with 4 swimmers, at 40 with 2-3, 80 adds nothing; on the ladder 20 -> 40 took K41 87 -> 79/81 and K51 125 -> 115 complete, within the time budget (K41 92 s)
 PAGES_WORKERS = int(os.environ.get('PLAN_PAGES_WORKERS', '4'))
+# PLAN_PAGES_CANON=n (2026-09-16): a solve that gives the SAME ANSWER ON ANY
+# MACHINE, bounded by n CONFLICTS. 0 = off, and off is the default because
+# this changes which plan is chosen, not just how it is reached.
+#
+# Why the default solve is not portable, measured: `max_deterministic_time`
+# is a WORK ACCUMULATOR, not an invariant count -- at det 40 arm64 does 1685
+# conflicts and x86_64 does 1970, so the same budget buys 1.17x the search
+# and the solve stops somewhere else. The stopping point is the answer: at
+# K28 the two platforms reach the SAME objective 727.2 and hand back
+# DIFFERENT solution vectors (pages F18/B10 against F20/B8), which carries
+# into a different exclusion set, a different plan, and 783 against 1144
+# segments of copper. Raising the budget does NOT fix it -- at det 640 both
+# sides PROVE OPTIMAL 727.2 and still disagree, because the optimum is
+# degenerate and proving a VALUE does not pick a SOLUTION.
+#
+# So this changes both halves of the cause:
+#   * num_workers=1 -- ONE search path. The 4-worker portfolio is
+#     deterministic on one machine (interleave_search) but its workers
+#     share bounds and clauses, and which one gets there first is a
+#     function of relative speed.
+#   * max_number_of_conflicts -- an INTEGER COUNT of discrete search
+#     events, which is the same number on any CPU.
+# max_deterministic_time stays as a BACKSTOP, because a conflict count
+# bounds SEARCH and not PRESOLVE: setting a conflict limit ALONE is how a
+# 40 s solve ran 31 minutes and got the earlier attempt at this withdrawn.
+# The backstop is generous and the report says WHICH LIMIT FIRED -- a
+# backstop nobody checks is how that class of bug comes back, and a run
+# stopped by the backstop is NOT portable and must not be read as if it were.
+PAGES_CANON = int(os.environ.get('PLAN_PAGES_CANON', '0') or 0)
+PAGES_CANON_DET = float(os.environ.get('PLAN_PAGES_CANON_DET', '600') or 600)
+# ...and the SECOND channel, which one worker and an integer stop do NOT
+# close: the LP RELAXATION IS FLOATING POINT. Measured at K28 with
+# num_workers=1 and a conflict budget, the two platforms reported bound
+# 557.8 against 557.6 -- a different relaxation bound prunes differently,
+# which moves the search path, which lands on a different conflict count
+# (11641 against 12477) and a different plan (obj 778.3 against 1042.1).
+# linearization_level=0 removes the LP entirely, leaving a purely INTEGER
+# search whose every decision is exact. It costs search strength -- the LP
+# is where good bounds come from -- so a canonical solve needs a bigger
+# budget to reach the same plan. 1 keeps the LP (for measuring that this
+# is really the channel); 0 is the portable arm.
+PAGES_CANON_LP = int(os.environ.get('PLAN_PAGES_CANON_LP', '0') or 0)
+# How many workers a canonical solve may use. 1 is the arm PROVEN portable
+# at K28; >1 is on trial. Without the LP there is no floating point in the
+# integer search, so a deterministic interleave might stay portable at 4x
+# the search -- but CP-SAT's worker portfolio includes FEASIBILITY JUMP,
+# which is a float local search with its OWN linearization level, so the
+# LP is not the only float channel once the portfolio is on. Both are
+# pinned here, and the arm is measured rather than assumed.
+PAGES_CANON_WORKERS = int(os.environ.get('PLAN_PAGES_CANON_WORKERS', '1') or 1)
 PAGES_SWIM = float(os.environ.get('PLAN_PAGES_SWIM', '100'))  # vias: the price of a net left to swim
 PAGES_ISLAND = float(os.environ.get('PLAN_PAGES_ISLAND', '0') or 0)   # vias per corridor part a page lane's chord crosses on its page (learned from verify; 0 = off)
 PAGES_SRC = int(os.environ.get('PLAN_PAGES_SRC', '1'))        # 0 = the source frozen (destination only)
@@ -1960,9 +2010,18 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                         'tooth0_vias': {n: st['tooth_vias'].get(n, 0) for n in names if not S[n]}}, _f, indent=1)
         log(f'  pages-first: instance written to {_stem}.pb')
     solver = cp_model.CpSolver()
-    solver.parameters.num_workers = PAGES_WORKERS
-    solver.parameters.interleave_search = True
-    solver.parameters.max_deterministic_time = PAGES_DET
+    if PAGES_CANON:
+        solver.parameters.num_workers = PAGES_CANON_WORKERS
+        solver.parameters.interleave_search = PAGES_CANON_WORKERS > 1
+        solver.parameters.max_number_of_conflicts = PAGES_CANON
+        solver.parameters.max_deterministic_time = PAGES_CANON_DET   # backstop only
+        solver.parameters.linearization_level = PAGES_CANON_LP
+        # the OTHER float channel: feasibility jump linearizes on its own
+        solver.parameters.feasibility_jump_linearization_level = PAGES_CANON_LP
+    else:
+        solver.parameters.num_workers = PAGES_WORKERS
+        solver.parameters.interleave_search = True
+        solver.parameters.max_deterministic_time = PAGES_DET
     if rseed is not None:
         solver.parameters.random_seed = int(rseed)      # PLAN_PAGES_SEEDS: another feasible point
     status = solver.Solve(m)
@@ -2051,7 +2110,24 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                + (f' (cells: at-most-one over {ncell} memberships)' if PAGES_CELLS else '') + '; '
                f'{solver.StatusName(status)} obj {solver.ObjectiveValue() / SCALE:.1f} '
                f'bound {solver.BestObjectiveBound() / SCALE:.1f} in {time.time() - t0:.1f} s'
-               f' (det {PAGES_DET:g}, {PAGES_WORKERS} workers, ortools {_ortools.__version__})')
+               + (f' (CANON: {solver.NumConflicts()}/{PAGES_CANON} conflicts, {solver.NumBranches()} branches, '
+                  f'det {solver.ResponseProto().deterministic_time:.1f}/{PAGES_CANON_DET:g}'
+                  # WHICH LIMIT FIRED, tested on the BACKSTOP ITSELF. The first
+                  # spelling of this asked whether the conflict count was under
+                  # budget -- which is not the question, and is wrong the moment
+                  # there is more than one worker: NumConflicts() is the SUM over
+                  # workers, so it reads 141824 against a 20000 budget while the
+                  # run was in fact stopped by the deterministic backstop at
+                  # 604.8/600. The warning stayed silent on exactly the run it
+                  # exists to catch. A run stopped by the backstop is bounded by
+                  # a WORK ACCUMULATOR and is therefore NOT portable.
+                  + (' -- STOPPED BY THE DETERMINISTIC BACKSTOP, NOT PORTABLE'
+                     if solver.ResponseProto().deterministic_time >= 0.99 * PAGES_CANON_DET
+                        and solver.StatusName(status) not in ('OPTIMAL', 'INFEASIBLE')
+                     else '')
+                  + f', {PAGES_CANON_WORKERS} worker(s), lin {PAGES_CANON_LP}, ortools {_ortools.__version__})'
+                  if PAGES_CANON else
+                  f' (det {PAGES_DET:g}, {PAGES_WORKERS} workers, ortools {_ortools.__version__})'))
     if strip_load:
         rep.append('  pages-first: strip loads ' + ', '.join(
             f'{sd} {"B" if p else "F"} {sum(solver.Value(v) for v in lits)}/{cap}'
