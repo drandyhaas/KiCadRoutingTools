@@ -2746,8 +2746,9 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # pads off the board grades clean where it used to fail twice
         # (measured: tigard J7 flush with its edge, 0.2 mm of copper off).
         # BODY PATH ONLY, and not because the legacy reading is equivalent:
-        # a courtyard that does not enclose its pads misses the same copper
-        # (ulx3s AUDIO1, 0.135 mm, on this branch and on main alike). It is
+        # a courtyard that does not enclose its pads misses the same copper,
+        # on this branch and on main alike (the suite pins that with a
+        # courtyard-only fixture carrying 0.75 mm of unnamed copper). It is
         # scoped so the path this change cannot measure grades exactly as it
         # did before #961.
         copper_out = (_copper_outside_mm(ctx, ref)
