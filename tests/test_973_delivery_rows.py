@@ -296,6 +296,18 @@ check('seed+polish: the rename is recorded against the output, same moves',
 grade('seed+polish: CLEAN (main: 34 polished parts named DRIFTED)', wd, OUT, PA.CLEAN,
       lineage='verified', drifted_refs=[])
 
+# --dry-run delivers nothing and records nothing.
+src = damaged('repair')
+d, wd, staged = armed(src)
+intent = intent_file(d, SF)
+OUT = os.path.join(wd, 'dry.kicad_pcb')
+r, summ = run_seed(staged, OUT, intent, '--repair', '--dry-run')
+check('--repair --dry-run: no output and no row',
+      r.returncode in (0, 4) and not os.path.exists(OUT) and PV.read_ledger(wd) == []
+      and summ.get('moved_refs'),
+      f"rc={r.returncode} out={os.path.exists(OUT)} rows={len(PV.read_ledger(wd))} "
+      f"moved={summ.get('moved_refs')}")
+
 # Undeclared: `main()` in-process with no lever. The passes stage outside the
 # regime, so the delivery is the first write the regime sees -- and it must
 # refuse before the output or its siblings exist.
@@ -334,9 +346,10 @@ from test_458_loop_steering import _loop_board                 # noqa: E402
 
 
 def run_loop(OUT, staged, *, rounds, quench_moves, failures, work_dir=None,
-             declare=True, tamper=None):
+             declare=True, tamper=None, relocation=None):
     """`quench_moves[i]` is round i+1's quench result; `failures[i]` the
-    failure count round i routes to (round 0 first)."""
+    failure count round i routes to (round 0 first). `relocation` is a canned
+    `Relocation` every round proposes, with `--relocate --group-by decap`."""
     calls = {'q': 0, 'r': 0}
 
     def fake_quench(pcb_data, **kw):
@@ -357,15 +370,19 @@ def run_loop(OUT, staged, *, rounds, quench_moves, failures, work_dir=None,
             '--rounds', str(rounds), '--max-displacement', '3.0', '--no-movie']
     if work_dir:
         argv += ['--work-dir', work_dir]
-    saved = (prl.quench, prl.run_route, sys.argv)
+    if relocation is not None:
+        argv += ['--relocate', '--group-by', 'decap']
+    saved = (prl.quench, prl.run_route, prl.relocate_round, sys.argv)
     prl.quench, prl.run_route, sys.argv = fake_quench, fake_route, argv
+    if relocation is not None:
+        prl.relocate_round = lambda *a, **k: relocation
     try:
         ctx = PV.declare_lever('place_route_loop.py', argv) if declare \
             else contextlib.nullcontext()
         with ctx:
             return quiet(prl.main)
     finally:
-        prl.quench, prl.run_route, sys.argv = saved
+        prl.quench, prl.run_route, prl.relocate_round, sys.argv = saved
 
 
 def loop_dir():
@@ -462,6 +479,60 @@ check('...before the output or its project exist',
       not os.path.exists(OUT) and not os.path.exists(os.path.splitext(OUT)[0] + '.kicad_pro'))
 check('...and records nothing', PV.read_ledger(wd) == [])
 settled('loop')
+
+# --relocate: the round writes the relocation first and quenches over it, and
+# the delivery must claim both, in that order, key by key.
+from test_554_loop_relocate import _board as _reloc_board, _proposal  # noqa: E402
+
+
+def reloc_dir():
+    src, _tmp = _reloc_board()
+    d, wd, staged = armed(src)
+    os.unlink(src)
+    return d, wd, staged
+
+
+R1q = [{'reference': 'R1', 'new_x': 161.0, 'new_y': 100.0, 'new_rotation': 0.0}]
+d, wd, staged = reloc_dir()
+OUT = os.path.join(wd, 'OUT.kicad_pcb')
+run_loop(OUT, staged, rounds=1, quench_moves=[R1q], failures=[2, 1],
+         work_dir=os.path.join(d, 'loopwork'), relocation=_proposal())
+_r = rows_naming(wd, OUT)
+check('--relocate, outside work dir: the delivery claims the relocation AND the quench',
+      len(_r) == 1 and _r[0]['refs_moved'] == ['M1', 'R1'],
+      str([x.get('refs_moved') for x in _r]))
+grade('--relocate: CLEAN', wd, OUT, PA.CLEAN, lineage='verified')
+
+# The quench re-moves the part the relocation moved, and also turns it: the
+# claim is the quench's pose, which only the relocation-then-quench order gives.
+M1q = [{'reference': 'M1', 'new_x': 125.5, 'new_y': 91.0, 'new_rotation': 90.0}]
+d, wd, staged = reloc_dir()
+OUT = os.path.join(wd, 'OUT.kicad_pcb')
+run_loop(OUT, staged, rounds=1, quench_moves=[M1q], failures=[2, 1],
+         work_dir=os.path.join(d, 'loopwork'), relocation=_proposal())
+_r = rows_naming(wd, OUT)
+check('--relocate then a quench of the same part: the claim is the FINAL pose',
+      len(_r) == 1 and _r[0]['poses_written'].get('M1') == [125.5, 91.0, 90.0],
+      str(_r and _r[0]['poses_written']))
+grade('...and CLEAN', wd, OUT, PA.CLEAN, lineage='verified')
+
+# A later move that says `new_side: None` ("keep the current side") must not
+# wipe the earlier move's flip from the claim: the board keeps the flip.
+import dataclasses                                             # noqa: E402
+_flip = dataclasses.replace(_proposal(), moves=(
+    {'reference': 'M1', 'new_x': 124.0, 'new_y': 90.0, 'new_rotation': 0.0,
+     'new_side': 'B'},))
+d, wd, staged = reloc_dir()
+OUT = os.path.join(wd, 'OUT.kicad_pcb')
+run_loop(OUT, staged, rounds=1,
+         quench_moves=[[dict(M1q[0], new_side=None)]], failures=[2, 1],
+         work_dir=os.path.join(d, 'loopwork'), relocation=_flip)
+check('fixture: the relocation flipped M1 and the delivered board keeps it',
+      PV.pose_table(OUT).get('M1', (0, 0, 0, None))[3] == 'B',
+      str(PV.pose_table(OUT).get('M1')))
+grade('a later None side does not wipe an earlier flip from the claim', wd, OUT,
+      PA.CLEAN, lineage='verified')
+settled('relocate')
 
 
 print(f'\n{passed} passed, {failed} failed')

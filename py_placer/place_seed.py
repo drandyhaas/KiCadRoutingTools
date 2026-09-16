@@ -397,9 +397,8 @@ Examples:
             copy_siblings(cur, nxt)
             cur = nxt
             cur_pcb = parse_kicad_pcb(cur)
-            for m in moves:
-                delivered_moves[m['reference']] = dict(
-                    delivered_moves.get(m['reference'], {}), **m)
+            from placement.provenance import accumulate_moves
+            accumulate_moves(delivered_moves, moves)
 
         reseat = None
         if args.reseat is not None:
@@ -639,6 +638,7 @@ Examples:
                     list(delivered_moves.values())):
                 shutil.copyfile(_final, args.output_file)
             copy_siblings(cur, args.output_file)
+            print(f"Delivered {args.output_file}")
             from placement.legality import grade_pad_legality
             pcb_out = parse_kicad_pcb(args.output_file)
             pads_after = grade_pad_legality(pcb_out, args.clearance,

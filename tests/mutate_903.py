@@ -548,9 +548,11 @@ ROWS = [
      "        # A writer call to the same path inside the body keys its own pending\n"
      "        # row on this path and commits it; put this one back before committing.\n"
      "        _PENDING[key] = row\n"
-     "        commit_write(output_file)\n",
+     "        # `key`, not `output_file`: resolved before the body, so a relative\n"
+     "        # path cannot resolve somewhere else after it.\n"
+     "        commit_write(key)\n",
      "        _PENDING[key] = row\n"
-     "        commit_write(output_file)\n"
+     "        commit_write(key)\n"
      "        yield row\n",
      (T_973,), 'KILLED'),
 
@@ -583,8 +585,9 @@ ROWS = [
      (T_973,), 'KILLED'),
 
     ('the-reseat-pass-moves-are-dropped', 'ps',
-     "            for m in moves:\n",
-     "            for m in (moves if tag == 'repair' else []):\n",
+     "            accumulate_moves(delivered_moves, moves)\n",
+     "            accumulate_moves(delivered_moves,\n"
+     "                             moves if tag == 'repair' else [])\n",
      (T_973,), 'KILLED'),
 
     # Recorded against the temp board the passes built: a parent no row
@@ -616,9 +619,34 @@ ROWS = [
      (T_973,), 'KILLED'),
 
     ('the-loop-claims-only-its-last-accepted-round', 'rl',
-     "            for m in ([dict(m) for m in reloc.moves]\n",
+     "            if reloc is not None and not reloc.refusal:\n"
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n",
      "            delivered_moves.clear()\n"
-     "            for m in ([dict(m) for m in reloc.moves]\n",
+     "            if reloc is not None and not reloc.refusal:\n"
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n",
+     (T_973,), 'KILLED'),
+
+    # The third verifier round: both survived test_973 until it ran
+    # --relocate, and on a --relocate run each accuses a clean run.
+    ('the-loop-drops-the-relocation-moves', 'rl',
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n",
+     "                pass\n",
+     (T_973,), 'KILLED'),
+
+    ('the-loop-folds-the-quench-before-the-relocation', 'rl',
+     "            if reloc is not None and not reloc.refusal:\n"
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n"
+     "            provenance.accumulate_moves(delivered_moves, placements or [])\n",
+     "            provenance.accumulate_moves(delivered_moves, placements or [])\n"
+     "            if reloc is not None and not reloc.refusal:\n"
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n",
+     (T_973,), 'KILLED'),
+
+    # `new_side: None` is the writer's "keep the current side"; copied into
+    # the claim it wipes an earlier pass's flip that the board still carries.
+    ('a-later-none-wipes-an-earlier-move', 'pv',
+     "                        **{k: v for k, v in m.items() if v is not None})\n",
+     "                        **m)\n",
      (T_973,), 'KILLED'),
 
     ('a-rejected-round-is-claimed', 'rl',

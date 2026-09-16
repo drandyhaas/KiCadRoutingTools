@@ -516,7 +516,27 @@ def recorded_delivery(input_file: str, output_file: str,
         # A writer call to the same path inside the body keys its own pending
         # row on this path and commits it; put this one back before committing.
         _PENDING[key] = row
-        commit_write(output_file)
+        # `key`, not `output_file`: resolved before the body, so a relative
+        # path cannot resolve somewhere else after it.
+        commit_write(key)
     finally:
         if _PENDING.get(key) is row:
             del _PENDING[key]
+
+
+def accumulate_moves(acc: Dict, moves: Sequence[Dict]) -> Dict:
+    """Fold a pass's moves into `acc` ({ref: placement}), later passes winning
+    KEY BY KEY, for a `recorded_delivery` that claims several passes at once.
+
+    Key by key, so a later move that omits `new_rotation` keeps the earlier
+    pass's; and a None value is skipped rather than copied, because the writer
+    reads `new_side: None` as "keep the current side" -- copying it would wipe
+    an earlier pass's flip from the claim while the board keeps it.
+    """
+    for m in moves:
+        ref = m.get('reference')
+        if not ref:
+            continue
+        acc[ref] = dict(acc.get(ref, {}),
+                        **{k: v for k, v in m.items() if v is not None})
+    return acc

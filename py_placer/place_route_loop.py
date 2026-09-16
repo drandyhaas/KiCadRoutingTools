@@ -1348,11 +1348,9 @@ def main():
             cur_file = cand_file
             # The relocation first, then the quench over it: the candidate was
             # written from `quench_base` in exactly that order.
-            for m in ([dict(m) for m in reloc.moves]
-                      if reloc is not None and not reloc.refusal else []) \
-                    + [dict(p) for p in (placements or [])]:
-                delivered_moves[m['reference']] = dict(
-                    delivered_moves.get(m['reference'], {}), **m)
+            if reloc is not None and not reloc.refusal:
+                provenance.accumulate_moves(delivered_moves, reloc.moves)
+            provenance.accumulate_moves(delivered_moves, placements or [])
             max_disp = args.max_displacement
             accepted_rounds += 1
         else:
