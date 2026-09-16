@@ -1475,11 +1475,11 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
         # copper past the outline. The drawn body never does, and the rule
         # now names that copper (#961 round 3) -- so this predicate must see
         # it too, or the seat accepts a pose the grade refuses, which is
-        # exactly what the pad conjunct below exists to prevent. The case, on
-        # a committed fixture: `test_seat_refuses_a_pose_whose_pad_copper_is
-        # _off_the_board` seats a body flush with the edge while a pad sits
-        # 0.75 mm past it. CONTAINMENT only, at zero margin: the
-        # edge-clearance floor is check_drc's question, not this one's.
+        # exactly what the pad conjunct below exists to prevent. The case is
+        # committed as the Round3 test whose name ends
+        # "refuses_a_pose_whose_pad_copper_is_off_the_board": a body flush
+        # with the edge while a pad sits 0.75 mm past it. CONTAINMENT only,
+        # at zero margin -- the edge-clearance floor is check_drc's question.
         from .connector_geometry import pad_copper_outside
         from .legality import BoardOutlineGate
         zero = getattr(state, '_zero_edge_gate', None)

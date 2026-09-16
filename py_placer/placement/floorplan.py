@@ -1687,6 +1687,7 @@ class _Ctx:
         #: `grade_pad_legality` does. `grade` sets it.
         self.requested_floors = (None, None)
         self._connector_copper = None
+        self._zero_gate = None
 
     def oob_exempt(self) -> Dict[str, float]:
         """`{ref: overhang_mm}` for every declared edge connector the census
@@ -1747,6 +1748,14 @@ class _Ctx:
                     out[ref] = float(band)
             self._oob_exempt = out
         return self._oob_exempt
+
+    def zero_gate(self):
+        """The outline at ZERO margin -- "is this copper ON the board", which
+        `self.gate` cannot answer because it carries the placement margin."""
+        if self._zero_gate is None:
+            self._zero_gate = legality.BoardOutlineGate(
+                self.pcb.board_info, 0.0)
+        return self._zero_gate
 
     def connector_copper(self) -> Dict[str, object]:
         """#961: pad-copper edge clearance of the DECLARED edge connectors,
@@ -2869,10 +2878,12 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                                      ctx.sev('edge_connector'))
         # #961: "the edge_seating row carries the number its clause was graded
         # on". Onto the row the along-edge measurement just appended, when it
-        # appended one -- never a new row (`summary` counts rows) and never
-        # over a key the row already has (`declared` and `abstained` feed
-        # `not_graded`). Every entry, row or not, lands in
-        # `edge_connector_evidence`, so a passing clause is reported too.
+        # appended one -- never a NEW row, because `summary` counts rows.
+        # `setdefault` rather than assignment so a key the row already owns
+        # keeps its own value; today the two dicts share only `ref` and
+        # `edge`, with equal values, so it is a guard rather than a fix.
+        # Every entry, row or not, lands in `edge_connector_evidence`, so a
+        # passing clause is reported too.
         if len(ctx.edge_seating) > rows_before:
             for key, value in evidence.items():
                 ctx.edge_seating[-1].setdefault(key, value)
@@ -2911,6 +2922,23 @@ def _copper_outside_mm(ctx, ref):
                 and getattr(pads[index], 'castellated', False)):
             continue
         worst = max(worst, -float(f['gap_mm']))
+    # A pad the edge grader cannot model -- a trapezoid, a custom pad with no
+    # parsed primitives -- yields NO finding: it is recorded as unmeasured
+    # and skipped, so the loop above reads 0.0 for a pad that may be entirely
+    # off the board. Upstream needed no conjunct there, because its band read
+    # the pad box itself. For those pads only, fall back to the same rotated
+    # pad-box reading the seat predicate uses: it covers every shape and
+    # never under-states (round-4 review; the exact extrema above still
+    # decide every pad the grader could model).
+    unsupported = {u['pad_index'] for u in ctx.connector_copper()['unmeasured']
+                   if str(u['pad_ref']).startswith(prefix)
+                   and 'unsupported pad geometry' in str(u.get('reason', ''))
+                   and isinstance(u.get('pad_index'), int)}
+    if unsupported and fp is not None:
+        from .connector_geometry import geometry_for, pad_copper_outside
+        worst = max(worst, pad_copper_outside(
+            geometry_for(ctx, ctx.pcb, ctx.pcb_file), ctx.zero_gate(), ref,
+            (fp.x, fp.y, fp.rotation or 0.0), only=unsupported))
     return worst
 
 

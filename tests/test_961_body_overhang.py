@@ -793,6 +793,152 @@ class Round3(_Boards):
         self.assertEqual((x, y), (1.0, 10.0))
 
 
+class Round4(_Boards):
+    """The round-4 review: pads the edge grader cannot model, and the
+    pad-extent arithmetic its own battery showed nothing pinned."""
+
+    def _state(self, path):
+        return pose_score.make_state(parse_kicad_pcb(str(path)), str(path),
+                                     clearance=.25, board_edge_clearance=.55)
+
+    def test_a_pad_shape_the_grader_cannot_model_is_still_copper(self):
+        """`grade_pad_edge_clearance` records a trapezoid or a primitive-less
+        custom pad as unmeasured and produces NO finding. Reading only its
+        findings, the conjunct would call such a part clean -- where the old
+        band, which read the pad box, failed it."""
+        from placement.legality import grade_pad_edge_clearance
+        body = '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))'
+        keep = '(pad "2" smd rect (at .5 0) (size .5 .5) (layers "F.Cu"))'
+        # A trapezoid is the shape the grader genuinely cannot model. (A
+        # custom pad is NOT: the parser tessellates it, so it is measured
+        # through its polygons -- which is why this test names one shape.)
+        pad = ('(pad "1" smd trapezoid (at -1.75 0) (size .5 .5) '
+               '(rect_delta .2 0) (layers "F.Cu"))')
+        path = self.synthetic('unmodellable.kicad_pcb', body, at='1 10 0',
+                              pads=pad + '\n    ' + keep)
+        pcb = parse_kicad_pcb(str(path))
+        graded = grade_pad_edge_clearance(pcb, .55, str(path))
+        self.assertEqual([f['pad_ref'] for f in graded['findings']], [])
+        self.assertEqual([u['pad_ref'] for u in graded['unmeasured']], ['J1.1'])
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west',
+                    overhang_mm={'min': 0.0, 'max': 0.5},
+                    _intent={'legality_budget': {'oob_count': 0}}),
+            pcb, str(path), clearance=.25, board_edge_clearance=.55)
+        hits = [v for v in r.violations
+                if v.ref == 'J1' and 'pad copper leaves' in v.message]
+        self.assertEqual(len(hits), 1, [v.message for v in r.violations])
+        self.assertAlmostEqual(hits[0].measured['outside_mm'], 1.0, places=4)
+        self.assertEqual(r.legality.get('oob_count_exempt'), 0)
+        copper = _evidence(r, 'J1')['pad_copper_edge']
+        self.assertEqual(copper['disposition'], 'unmeasured')
+        self.assertAlmostEqual(copper['outside_mm'], 1.0, places=4)
+
+    def test_pad_boxes_agree_with_the_edge_grader(self):
+        """The seat's rotated pad box against `grade_pad_edge_clearance`'s own
+        extrema on the WRITTEN board: equal for rectangles at any angle, and
+        never under-stating a rounded, oval or roundrect pad."""
+        from placement.connector_geometry import (geometry_for,
+                                                  pad_copper_outside)
+        from placement.legality import (BoardOutlineGate,
+                                        grade_pad_edge_clearance)
+        cases = (
+            ('rect', '(pad "1" smd rect (at -1.5 .6 30) (size 1.2 .6) '
+                     '(layers "F.Cu"))\n'
+                     '    (pad "2" smd rect (at .8 -.4) (size .6 1.4) '
+                     '(layers "F.Cu"))', 0.0),
+            ('round', '(pad "1" smd circle (at -1.5 .6) (size .9 .9) '
+                      '(layers "F.Cu"))\n'
+                      '    (pad "2" smd oval (at .8 -.4 20) (size 1.4 .6) '
+                      '(layers "F.Cu"))', 0.45),
+        )
+        for name, pads, slack in cases:
+            for base in (0, 30):
+                src = self.synthetic(f'extent_{name}_{base}.kicad_pcb',
+                                     '(fp_rect (start -2 -2) (end 2 2) '
+                                     '(layer "F.Fab"))',
+                                     at=f'6 10 {base}', pads=pads)
+                st = self._state(src)
+                geo = geometry_for(st, st.pcb_data, st.pcb_file)
+                zero = BoardOutlineGate(st.pcb_data.board_info, 0.0)
+                for rot in (0, 37, 90, 180, 270):
+                    for x in (1.0, 1.6, 2.4):
+                        mine = pad_copper_outside(geo, zero, 'J1',
+                                                  (x, 10.0, rot))
+                        out = self.root / 'extent_out.kicad_pcb'
+                        write_placed_output(str(src), str(out), [
+                            {'reference': 'J1', 'new_x': x, 'new_y': 10.0,
+                             'new_rotation': rot}])
+                        graded = grade_pad_edge_clearance(
+                            parse_kicad_pcb(str(out)), 0.0, str(out))
+                        gap = graded['minimum_gap_by_ref_mm'].get('J1')
+                        theirs = max(0.0, -gap) if gap is not None else 0.0
+                        where = (name, base, rot, x, mine, theirs)
+                        self.assertGreaterEqual(mine, theirs - 1e-6, where)
+                        self.assertLessEqual(mine, theirs + slack + 1e-6, where)
+
+    def test_pad_boxes_skip_what_carries_no_copper_and_are_per_part(self):
+        from placement.connector_geometry import ConnectorGeometry, pad_boxes
+        path = self.root / 'boxes.kicad_pcb'
+        path.write_text(
+            '(kicad_pcb (version 20241229) (generator "t961")\n'
+            '  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 5 10 0)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))\n'
+            '    (pad "" np_thru_hole circle (at 0 .5) (size 1 1) (drill 1) '
+            '(layers "F&B.Cu" "*.Mask"))\n'
+            '    (pad "1" thru_hole circle (at -.5 0) (size .8 .8) (drill .4) '
+            '(layers "*.Cu") (property pad_prop_castellated))\n'
+            '    (pad "2" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))\n'
+            '    (pad "3" smd rect (at .5 0) (size .5 .5) (layers "F.Cu")))\n'
+            '  (footprint "t" (layer "F.Cu") (at 12 10 0)\n'
+            '    (property "Reference" "J2")\n'
+            '    (fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))\n'
+            '    (pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))))\n',
+            encoding='utf-8')
+        geo = ConnectorGeometry(parse_kicad_pcb(str(path)), str(path))
+        j1 = pad_boxes(geo, 'J1')
+        # The NPTH hole and the castellated pad are gone; the indices that
+        # remain are their positions in `fp.pads`, which is how the edge
+        # grader names a pad.
+        self.assertEqual([b[0] for b in j1], [2, 3])
+        self.assertEqual(len(pad_boxes(geo, 'J2')), 1)
+
+    def test_the_seat_refuses_a_small_copper_overhang_too(self):
+        path = self.synthetic(
+            'seat_small.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))', at='1 10 0',
+            pads='(pad "1" smd rect (at -1.1 0) (size .5 .5) (layers "F.Cu"))\n'
+                 '    (pad "2" smd rect (at .5 0) (size .5 .5) (layers "F.Cu"))')
+        st = self._state(path)
+        reasons = []
+        # 0.35 mm of copper past the edge is still copper off the board.
+        self.assertFalse(seeder.edge_seat_ok(st, st.parts['J1'], 1.0, 10.0,
+                                             'west', 0.0, 0.5, reasons))
+        self.assertTrue([r for r in reasons if 'pad copper' in r], reasons)
+
+    def test_the_evidence_reports_the_worst_pad_and_keeps_unmeasured(self):
+        path = self.synthetic(
+            'worst.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))', at='1.5 10 0',
+            # Both pads sit inside the 0.55 mm floor, 0.25 mm and 0.50 mm
+            # from the west edge, so the grade has two findings to choose
+            # between and the row must report the WORSE one.
+            pads='(pad "1" smd rect (at -1.0 0) (size .5 .5) (layers "F.Cu"))\n'
+                 '    (pad "2" smd rect (at -.75 0) (size .5 .5) (layers "F.Cu"))')
+        r = floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 2.0}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        copper = _evidence(r, 'J1')['pad_copper_edge']
+        self.assertEqual(len(copper['findings']), 2)
+        worst = max(f['shortfall_mm'] for f in copper['findings'])
+        self.assertAlmostEqual(copper['shortfall_mm'], worst, places=6)
+        self.assertGreater(copper['shortfall_mm'],
+                           min(f['shortfall_mm'] for f in copper['findings']))
+
+
 class LegacyFallback(_Boards):
     def _legacy(self, path, clr=.25, edge=.55):
         pcb = parse_kicad_pcb(str(path))

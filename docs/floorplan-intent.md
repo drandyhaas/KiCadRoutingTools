@@ -333,7 +333,9 @@ Nothing is withheld or abstained, and the basis says which reading was used.
 The seat conjunct's "no overhang" gate, the nearest-edge identity, the class
 setback defaults and the `connector_affinity` warning are **unchanged**. The
 seeder's `edge_seat_ok` and `_Ctx.oob_exempt` grade the band in the same
-currency as the rule.
+currency as the rule, and `edge_seat_ok` refuses a pose whose pad copper
+leaves the outline for the same reason the rule names it: otherwise the
+search hands the grade a seat it will reject.
 
 Every declared connector on the board gets a row in `edge_connector_evidence`
 (`--json`), including passing ones. Each row carries:

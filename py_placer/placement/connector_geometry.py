@@ -321,8 +321,11 @@ class ConnectorGeometry:
 
 
 def pad_boxes(geometry, ref):
-    """`(lx, ly, half_x, half_y, tilt)` per copper pad of `ref`, in the
-    footprint's LOCAL frame, so a trial pose only adds its own rotation.
+    """`(index, lx, ly, half_x, half_y, tilt)` per copper pad of `ref`, in
+    the footprint's LOCAL frame, so a trial pose only adds its own rotation.
+    `index` is the pad's position in `fp.pads`, which is how
+    `grade_pad_edge_clearance` names a pad, so a caller can ask about the
+    pads that grader could not model.
 
     Pads with no copper are skipped, through `legality._pad_has_no_copper`:
     NPTH holes, and any pad declaring no `.Cu` layer. So are castellated
@@ -335,21 +338,28 @@ def pad_boxes(geometry, ref):
         fp = geometry.pcb.footprints.get(ref)
         base = (fp.rotation or 0.0) if fp is not None else 0.0
         boxes = []
-        for pad in (getattr(fp, 'pads', None) or ()):
+        for index, pad in enumerate(getattr(fp, 'pads', None) or ()):
             if _pad_has_no_copper(pad) or getattr(pad, 'castellated', False):
                 continue
-            tilt = pad.rect_rotation or 0.0
+            # `rect_rotation` is the residual tilt of the rectangle that
+            # `size_x`/`size_y` describe, stored NEGATED with respect to the
+            # pose transform (a pad at 30 degrees parses as -30). Carry it in
+            # the pose convention, and relative to the footprint, so a trial
+            # rotation is a plain addition. Measured against the edge grader
+            # on written boards: keeping the parsed sign put a pad at 30 deg
+            # at 7 deg when the part turned 37, over-stating its extent.
+            tilt = -(pad.rect_rotation or 0.0)
             if tilt == 0.0:
                 # The broad phase bakes near-cardinal angles into size_x/y;
-                # recover the rest, exactly as `grade_pad_edge_clearance`.
+                # recover the rest, as `grade_pad_edge_clearance` does.
                 tilt = ((getattr(pad, 'rotation', 0.0) or 0.0) + 45) % 90 - 45
-            boxes.append((pad.local_x, pad.local_y, pad.size_x / 2.0,
+            boxes.append((index, pad.local_x, pad.local_y, pad.size_x / 2.0,
                           pad.size_y / 2.0, tilt - base))
         geometry._pad_boxes[ref] = boxes
     return boxes
 
 
-def pad_copper_outside(geometry, gate, ref, pose):
+def pad_copper_outside(geometry, gate, ref, pose, only=None):
     """How far `ref`'s pad copper leaves `gate`'s outline at `pose`, 0.0 when
     none of it does.
 
@@ -357,11 +367,17 @@ def pad_copper_outside(geometry, gate, ref, pose):
     rounded, oval or roundrect pad (their copper is inside that box). Pass a
     zero-margin gate for containment; a margin gate would be asking the
     edge-clearance question, which belongs to `check_drc`.
+
+    `only`, a set of pad indices, narrows it to those pads -- how a caller
+    that has exact extrema for the rest asks about just the pads no exact
+    reading covers.
     """
     x, y, rot = pose
     c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
     worst = 0.0
-    for lx, ly, hx, hy, tilt in pad_boxes(geometry, ref):
+    for index, lx, ly, hx, hy, tilt in pad_boxes(geometry, ref):
+        if only is not None and index not in only:
+            continue
         angle = math.radians(tilt + rot)
         ca, sa = abs(math.cos(angle)), abs(math.sin(angle))
         ex, ey = hx * ca + hy * sa, hx * sa + hy * ca
