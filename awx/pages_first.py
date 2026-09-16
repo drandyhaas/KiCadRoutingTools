@@ -292,13 +292,13 @@ PAGES_SEEDS = int(os.environ.get('PLAN_PAGES_SEEDS', '0') or 0)
 # climb never pays because its page-mates east of it still cross it
 # (cew5x: SA15 climbed and still swam). 0 = off.
 PAGES_GROUP = int(os.environ.get('PLAN_PAGES_GROUP', '0') or 0)
-# PLAN_PAGES_GROUP_FORCE=1 (2026-09-15, session 13): a PROBE. A realized
-# group is kept whatever the round judge says, so the chain can route the
-# board the judge would have thrown away and say whether it was right. The
-# count judge has no resolution at K51 (it cannot separate 115 vias from
-# 129), and a group is exactly the kind of whole-plan change it is worst at
-# pricing. Never a default: it turns the round's accept/revert off.
-PAGES_GROUP_FORCE = int(os.environ.get('PLAN_PAGES_GROUP_FORCE', '0') or 0)
+# (PLAN_PAGES_GROUP_FORCE, the probe that kept a realized group whatever the
+# round judge said, is GONE. It did its job -- it proved the count judge
+# wrong about a group by routing the board the judge threw away -- and
+# `PLAN_PAGES_TIER_GROUP` then reproduced its result with copper IDENTICAL
+# to it, on the copper's say-so instead of by switching the judge off. A
+# flag that disables a safety check has no business outliving the question
+# it answered; the measurement is in the README.)
 # PLAN_PAGES_GROUP_DST=1 (2026-09-15, session 13; THE PLAN item 2): the group
 # move at the DESTINATION as well. A group climb fixes its members' launch
 # order by geometry -- the lane order, see _nest_assign -- and a launch order
@@ -818,8 +818,7 @@ def _nest_assign(group, cands, ax, ed, od, edge, taken_rows, held=(), budget=200
 
     DFS in lane order, fewest blockers first, at most `budget` nodes.
     Returns {net: Move}, or None when the group has no consistent set."""
-    import source_realize as sr
-    import fanout_from_plan as F
+    import fanout_from_plan as F   # (`sr` is a module-level import; `F` cannot be)
     pos = {n: (sum(F._lane_of(m, ax) for m in cands.get(n, ())) / len(cands[n]))
            for n in group if cands.get(n)}
     if len(pos) < len(group):

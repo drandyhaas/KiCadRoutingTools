@@ -77,7 +77,7 @@ class Move:
     group: str = ''                 # this move is one member of a GROUP move
                                     # (pages_first PLAN_PAGES_GROUP) laid all or
                                     # nothing: the tag names the group
-    replaces: object = None         # the move this one DISPLACED in the plan
+    replaces: Optional['Move'] = None   # the move this one DISPLACED in the plan
                                     # (a group member's pre-group source move,
                                     # pages_first._group_climb). A group is
                                     # dropped whole, and the net must then fall
