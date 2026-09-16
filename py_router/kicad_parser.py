@@ -1202,6 +1202,13 @@ def _resolve_pad_rect(size_x: float, size_y: float,
     return size_x, size_y, rect_rotation
 
 
+# A quoted KiCad S-expr string body, honoring backslash escapes. `[^"]*` is
+# the wrong spelling everywhere a NET NAME is captured: it ends at the first
+# escaped quote, so the enclosing token stops matching and the object is read
+# with the wrong net -- or, for segments and arcs, is not read AT ALL.
+_ESC_STR = r'((?:[^"\\]|\\.)*)'
+
+
 def _unescape_kicad_string(s: str) -> str:
     """Undo KiCad s-expression string escapes (backslash and quote).
 
@@ -2875,7 +2882,12 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
         # KiCad 10 removes the top-level net table entirely.
         # Discover all net names from their usage in pads, segments, vias, and zones.
         # Match (net "name") anywhere in the file — deduplicate to build the net list.
-        net_pattern = r'\(net\s+"([^"]*)"\)'
+        # `(?:[^"\\]|\\.)*` -- not `[^"]*`, which ENDS at the first escaped
+        # quote, so the whole `(net ...)` failed to match and the net never
+        # entered the table. A net name may legally carry a backslash
+        # (neo6502's `/GPIO22\\I2C1_SDA`) or a quote; both spellings must
+        # round-trip through the same raw key every lookup site uses.
+        net_pattern = r'\(net\s+"%s"\)' % _ESC_STR
         # (net "") is the canonical NO-NET (net 0), not a real net: pcbnew maps
         # it to net code 0, so synthesizing an id for it split no-net copper
         # onto a phantom net (comexpress7's two dangling F.Cu segments).
@@ -2891,7 +2903,7 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
             synthetic_id += 1
     else:
         # KiCad 9: nets are (net <id> "name")
-        net_pattern = r'\(net\s+(\d+)\s+"([^"]*)"\)'
+        net_pattern = r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR
         for m in re.finditer(net_pattern, content):
             net_id = int(m.group(1))
             net_name = m.group(2)
@@ -3362,13 +3374,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 pad_layers = re.findall(r'"([^"]+)"', layers_section.group(1))
 
             # Extract net - try KiCad 9 format first, then KiCad 10
-            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]*)"\)', pad_text)
+            net_match = re.search(r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR, pad_text)
             if net_match:
                 net_id = int(net_match.group(1))
                 net_name = _unescape_kicad_string(net_match.group(2))
             else:
                 # KiCad 10: (net "name") with no numeric ID
-                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', pad_text)
+                net_match_v10 = re.search(r'\(net\s+"%s"\)' % _ESC_STR, pad_text)
                 if net_match_v10 and name_to_id:
                     net_id = name_to_id.get(net_match_v10.group(1), 0)
                     net_name = _unescape_kicad_string(net_match_v10.group(1))
@@ -3666,7 +3678,15 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             # behavior, and parse_kicad_pcb always passes a map.
             if not name_to_id:
                 continue
-            net_id = name_to_id.get(_unescape_kicad_string(net_name), 0)
+            # Key on the RAW file text, exactly like every other name_to_id
+            # lookup (pads 3373, segments 4376, the zone/graphic sites).
+            # name_to_id is BUILT from the raw text -- _unescape_kicad_string's
+            # own docstring says so -- so unescaping first missed every net
+            # whose name carries a backslash. neo6502's `/GPIO22\\I2C1_SDA`
+            # resolved for its 11 segments and for none of its 4 vias, which
+            # then modelled as net 0 and graded as 8 phantom DRC violations
+            # against the net's own copper.
+            net_id = name_to_id.get(net_name, 0)
         u = _VIA_UUID_RE.search(block)
         via = Via(
             x=float(m.group(1)),
@@ -4011,7 +4031,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         # pattern and merge — mixed-style files are legal and each segment
         # matches exactly one pattern (issue #79).
         # uuid OPTIONAL here too (PR #534, the KiCad-10 twin).
-        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
+        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"' + _ESC_STR + r'"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
         for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
             segment = Segment(
@@ -4061,7 +4081,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                     float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
                     int(m.group(9)), m.group(10) or "", '(locked yes)' in m.group(0))
     if name_to_id:
-        for m in re.finditer(arc_fields + r'"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?', content, re.DOTALL):
+        for m in re.finditer(arc_fields + r'"' + _ESC_STR + r'"\)(?:\s+\(uuid\s+"([^"]+)"\))?', content, re.DOTALL):
             _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
                         float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
                         name_to_id.get(m.group(9), 0), m.group(10) or "", '(locked yes)' in m.group(0))
@@ -4366,14 +4386,22 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         if net_match:
             net_id = int(net_match.group(1))
         else:
-            # KiCad 10: (net "name") - first net reference in zone. Unescape
-            # before the lookup: name_to_id is keyed by UNESCAPED Net.name
-            # (#369 A12 -- escaped zone names resolved to net 0).
+            # KiCad 10: (net "name") - first net reference in zone. Look up
+            # the RAW token: name_to_id is keyed by the raw FILE TEXT, not by
+            # the unescaped Net.name -- extract_nets says so and every other
+            # site (pads, segments, vias) reads it that way. This comment used
+            # to claim the opposite and unescape first, which is the same
+            # defect #369 A12 meant to fix: measured, a zone on
+            # `/GPIO22\\I2C1_SDA` resolved to net 0 while the identical
+            # segment token resolved to 4.
             if name_to_id:
-                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', zone_content)
+                net_match_v10 = re.search(r'\(net\s+"%s"\)' % _ESC_STR, zone_content)
             if net_match_v10:
+                net_id = name_to_id.get(net_match_v10.group(1), 0)
+                # The DISPLAY name is unescaped, which is all #369 A12 was
+                # ever about (a raw net_name evaded --nets filters and zone
+                # dedup keys). The LOOKUP above is the half that must stay raw.
                 net_name_v10 = _unescape_kicad_string(net_match_v10.group(1))
-                net_id = name_to_id.get(net_name_v10, 0)
             else:
                 # No net clause at all: a NO-NET copper pour (net 0). It still
                 # pours real copper (nitrokey/vfo_ctrl decorative fills), and
@@ -4383,7 +4411,7 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         # Extract net name. Unescaped like every other net_name in the model
         # (#369 A12: zones kept the RAW file text, so backslash/quote-named
         # plane nets evaded --nets filters and zone dedup keys).
-        net_name_match = re.search(r'\(net_name\s+"((?:[^"\\]|\\.)*)"\)', zone_content)
+        net_name_match = re.search(r'\(net_name\s+"%s"\)' % _ESC_STR, zone_content)
         if net_name_match:
             net_name = _unescape_kicad_string(net_name_match.group(1))
         elif net_match_v10 is not None:

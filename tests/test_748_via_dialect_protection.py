@@ -32,13 +32,27 @@ sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
 sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
-from kicad_parser import extract_vias, parse_kicad_pcb  # noqa: E402
+from kicad_parser import extract_nets, extract_vias, parse_kicad_pcb  # noqa: E402
 from kicad_writer import generate_via_sexpr  # noqa: E402
 
 HDR = '(kicad_pcb (version 20241229) (generator "pcbnew")\n'
 SPEC = {'covering': '(front no) (back no)', 'capping': 'yes'}
 TOKENS = '\t\t(covering (front no) (back no))\n\t\t(capping yes)\n'
-N2I = {'': 0, '/SIG': 5, '/BUS(0)': 6, '/A"B': 7}
+
+# DERIVED from extract_nets, never hand-keyed. extract_nets keys name_to_id on
+# the RAW file text (its own docstring says so, and every other lookup site --
+# pads, segments, zones -- reads it that way), so a hand-written map is free to
+# disagree with the only producer there is. It did: this file used to declare
+# `'/A"B': 7` while the board text spells the name `/A\"B`, and extract_vias
+# was the one site that unescaped before looking up. The two agreed with each
+# other and with nothing else, so the pair passed while neo6502's four
+# `/GPIO22\\I2C1_SDA` vias parsed as net 0 on a real board and graded as 8
+# phantom DRC violations against that net's own copper. Deriving the map is
+# what keeps a fixture from re-inventing a dialect the parser does not speak.
+_NET_TABLE = ('\t(net 0 "")\n\t(net 5 "/SIG")\n\t(net 6 "/BUS(0)")\n'
+              '\t(net 7 "/A\\"B")\n')
+_, N2I = extract_nets(HDR + _NET_TABLE + ')\n', kicad_version=9)
+assert N2I == {'': 0, '/SIG': 5, '/BUS(0)': 6, '/A\\"B': 7}, N2I
 
 
 def via_text(numeric, token_pos='none', free=False, locked=False,
