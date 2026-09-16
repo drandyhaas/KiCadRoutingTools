@@ -5934,7 +5934,44 @@ is the laptop's own, so a cloud number can be compared with a local one at
 all -- the module was written when 3.13 was the nearest available.
 
 **So the generality of session 13's gains is UNTESTED, not refuted.** The
-sweep is re-queued with `PLAN_PAGES=1` on every arm.
+sweep was re-queued with `PLAN_PAGES=1` on every arm and `MODAL_K_PY=3.14`.
+
+### THE CORRECTED SWEEP: the portfolio closes OPEN NETS (35 of 36 arms)
+
+Same nine arms, `PLAN_PAGES=1` throughout, python 3.14 (the laptop's own),
+every grade stamped `[pf]`. **Open nets, which dominate vias:**
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| `cjcl` (baseline) | **2** | 0 | 0 | **3** |
+| `cwalk` / `cwstage` | **2** | 0 | 0 | **3** |
+| `cjoint` | **2** | 0 | 0 | **1** |
+| `cbraid` | 0 | 0 | 0 | 2 |
+| `cport` / `cgrp` / `cgdst` | 0 | 0 | 0 | 2 (`cgdst`) |
+| **`cwport`** (walk + both levels) | 0 | 0 | 0 | **0** |
+
+Two clean pairwise readings, each differing in ONE flag:
+
+* **`cbraid` against `cjcl`: the braid portfolio alone closes two open
+  nets at K28** and one of three at K51. At K28 the partition over all
+  nine arms is perfect -- every arm with `CHAIN_BRAID_AB` ships 0 open,
+  every arm without ships 2 -- which is how it is told apart from the
+  taut-memo two-state artefact.
+* **`cwport` is the only arm that closes K51 completely**, where the
+  baseline ships three broken nets.
+
+**This is the portfolio's `(open, vias)` verdict doing its actual job**, and
+it is a stronger result than any via count: an open net is not a quality
+difference, it is a board that does not work.
+
+**But python 3.14 was NOT the whole cloud/local gap.** `cjcl` K28 leaves 2
+nets open where the laptop's jcl K28 is clean at 34 vias, so matching the
+interpreter did not make the cloud reproduce the bench -- something else
+differs (CPU, the BLAS build, the ortools wheel). **Compare cloud only to
+cloud** still stands, and these numbers speak to the cloud's regime.
+
+PENDING: the vias (the progress lines truncate at 70 characters, the final
+untruncated table comes with the run) and `cport`/K51, the last arm.
 
 **NEXT, in order:**
 
