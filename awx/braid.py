@@ -195,6 +195,19 @@ FLANK_COMB = int(os.environ.get('BRAID_FLANK_COMB', '0') or 0)
 # key could follow it (K28: 26/378 target pairs off). With every side-face
 # stub in its side's comb, the order on a face is a function of position alone.
 PAGES_SIDERS = int(os.environ.get('PLAN_PAGES_SIDERS', '1') or 0)   # default 1: measured best on the K28/K35/K41 ladder (2026-09-14); inert without the plan marker
+# ^ **K51 is not in that ladder, and at K51 it is WRONG**: on one K51 board
+# (2026-09-15, session 13) turning it off took the SAME fanout board from
+# 112 vias to 98. See the README, "the record".
+#
+# BRAID_EXACT_PAGES, and why it is read HERE (2026-09-15, session 13): a
+# pages-first plan sets `schedule.EXACT_PAGES = 1` by assignment, AFTER
+# schedule has read its own env -- so `BRAID_EXACT_PAGES=0` could not turn
+# the rule off on the only plans that have it, and the rule has never been
+# A/B'd. It is the other half of the same K51 finding: with the marker's two
+# rules off the board routes 98 with NOTHING open, with EXACT_PAGES alone it
+# routes 98 and leaves SDQ11 open. None = the plan decides (today's
+# behaviour, byte-identical); '0' forces it off; anything else forces it on.
+EXACT_PAGES_ENV = os.environ.get('BRAID_EXACT_PAGES')
 # ^ arrivals on a face that runs ALONG the spine are a comb ordered along
 # the face (#622, 2026-09-10 evening). 1: a stub standing beside its
 # destination array (outside the ball field across the spine, at an s
@@ -8099,11 +8112,14 @@ def setup(board, names, dest, log, plan=None):
             f'y = {CY:.3f} for the braid (copper mirrored back on write)')
     planned = {nm for nm in names if plan and nm in plan.get('ends', {})}
     ctx.pages_first = bool(plan and plan.get('pages_first'))
-    if ctx.pages_first:
+    if ctx.pages_first and EXACT_PAGES_ENV != '0':
         # a PAGES-FIRST plan (fanout_from_plan PLAN_PAGES): its two chains
         # were chosen to cover every lane, so the schedule pages it exactly
         import schedule as _sch
         _sch.EXACT_PAGES = 1
+    elif ctx.pages_first:
+        log('plan sidecar: pages-first, but BRAID_EXACT_PAGES=0 -- the '
+            'schedule chooses its own pages')
 
     ends = endpoints(pcb, [nm for nm in names if nm not in planned], byname,
                      dest_ref=dest) if len(planned) < len(names) else {}

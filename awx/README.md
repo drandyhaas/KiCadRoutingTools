@@ -5320,11 +5320,17 @@ enumerated against what it will strip).
 
 ## Session 13 (2026-09-15, 17:40-): the group climb LAYS; and K51 = 98 vias
 
-### The record, found by accident, and confirmed in one line: **K51 = 98 vias, 0 open, 0 DRC (rule 280.5)**
+### The record: **K51 = 98 vias, 0 open, 0 DRC (rule 280.5)** -- and the CHAIN produces it
 
-`tmp/s13/nosc2_k51.kicad_pcb`. Previous best clean K51: 107 (this session's
-group arm), 109 (`cew5d`), 107 (the recorded `replan.py` board); the human
-is 81.
+`tmp/s13/grpAB_k51.kicad_pcb`, from
+`PLAN_PAGES_GROUP=5 SRC_REFAN_JOINT=1 SRC_REFAN_MAX=20
+PLAN_PAGES_TIER_GROUP=1 CHAIN_BRAID_AB=1` -- the group climb, the
+braid-tier judge, and the braid portfolio, end to end with nothing done by
+hand. Previous best clean K51: 107 (this session's forced group arm), 109
+(`cew5d`), 107 (the recorded `replan.py` board); the human is 81.
+
+It was FOUND by accident (`tmp/s13/nosc2_k51.kicad_pcb`) and the accident
+is worth keeping, because it is what the rest of this section explains.
 
 It came out of the braid-tier judge below, which fans out a candidate and
 braids it in a scratch stem -- and therefore braids a board that has **no
@@ -5348,10 +5354,121 @@ net on another -- which is the same shape as everything else measured today
 judge exists to decide. `braid-plan-sidecar-is-load-bearing` recorded this
 family at K28 (36 against 38); at K51 it is 14 vias and a completion.
 
-**Next session's first job**: route both arms of the sidecar at every rung,
-and if it is a real coin flip, make the sidecar a TIER decision
-(`PLAN_PAGES_TIER` already routes and grades a candidate -- it needs only to
-be offered the two boards).
+**ATTRIBUTED, in three braid runs on the one board.** It is not the
+sidecar's ends -- those are written from the ACHIEVED copper and cost
+nothing. It is the one-word `pages_first` MARKER in it, which switches on
+two rules:
+
+| the board, braided | vias | open |
+|---|---|---|
+| sidecar as the chain writes it | 112 | SDQ11 |
+| sidecar, `PLAN_PAGES_SIDERS=0` | **98** | SDQ11 |
+| sidecar with `pages_first` STRIPPED (both rules off) | **98** | **0** |
+| no sidecar at all | **98** | **0** |
+
+So **`PLAN_PAGES_SIDERS` costs the 14 vias and `schedule.EXACT_PAGES` costs
+the open net**, and keeping the plan's ends costs nothing at all. Both ride
+on the same marker, neither has ever been measured at K51:
+
+* `PLAN_PAGES_SIDERS` defaults to 1 as "measured best on the K28/K35/K41
+  ladder (2026-09-14)" -- K51 is not in that list.
+* **`EXACT_PAGES` has no flag at all.** `braid.py` assigns
+  `_sch.EXACT_PAGES = 1` whenever the marker is present, which OVERRIDES
+  the `BRAID_EXACT_PAGES` env after import, so there is no way to turn it
+  off from outside except by editing the sidecar. It is the rule nobody
+  could have A/B'd.
+
+### And the general form of it: what else was only validated below K51?
+
+Sixteen ON-by-default knobs cite K values that stop below 51 (the audit is
+a dozen lines of regex over `os.environ.get` defaults and the comment block
+above each one; re-run it whenever a default is added):
+
+`PLAN_PAGES_SIDERS` [28,35,41] -- now measured at K51 and WRONG there;
+`BRAID_RIDE_W` [28], `SEL_EXT` [28], `SEL_XING` [28];
+`BRAID_PROX_TRACK` [35], `BRAID_MAXCH` [35], `BRAID_L5_ALT_PERNET` [35],
+`BRAID_MILP_NODES` [35], `DST_RESIDUE_CANDS` [35], `DST_RESIDUE_POOL` [35],
+`PLAN_JUDGE_LEN` [35];
+`BRAID_TAIL_MAXCH` [41], `BRAID_L5_JUDGE_TIME` [41], `BRAID_ALT_SOLVER`
+[41], `BRAID_L5_ALT_PRUNE_ROUNDS` [41], `DST_RESIDUE_WORKERS` [41],
+`TAUT_SAVE_EVERY_N` [41]; `BRAID_L5_SEED` [15,28,35,41]; `SF_ESC_W` [35,41].
+
+Only four cite K51 at all (`BRAID_L5_NODES`, `BRAID_SEC_CAP`,
+`PLAN_PAGES_DET`, `PLAN_PAGES_HINT`). **The braid-side ones can all be
+laddered on ONE fixed fanout board** -- no re-planning, one braid per arm,
+so the whole ladder is about twenty minutes (`tmp/s13/knob_ab.sh`).
+
+**That ladder is RUN and it is all-inert on the K51 board**: `BRAID_MAXCH`
+3/5/6, `BRAID_TAIL_MAXCH` 4/8, `BRAID_RIDE_W` 1/4, `BRAID_PROX_TRACK`
+0.20/0.30, `BRAID_L5_SEED=0`, `BRAID_L5_ALT_PERNET=0`,
+`BRAID_L5_ALT_PRUNE_ROUNDS=2`, `BRAID_ALT_SOLVER=cpsat` -- every one of the
+thirteen arms gives 98 vias and 2348 segments, byte for byte. That board's
+lanes route in band on the sixth attempt with two nets at last call, so the
+level-5 machinery those knobs govern is never reached. **It is not that the
+defaults are right at K51; it is that they are not consulted.** The two that
+ARE consulted are the two on the marker, and both are wrong there.
+
+### The marker, on and off, at every rung -- it is a COIN FLIP per BOARD
+
+`tmp/s13/marker_ab.sh`, on the flag-off control's own fanout boards. Three
+arms so the marker is separated from the sidecar's ends:
+
+| K | marker on (shipped) | `pages_first` stripped | no sidecar |
+|---|---|---|---|
+| 28 | **34** | 36 | 36 |
+| 35 | 60 | 60 | 60 |
+| 41 | 80 | **74** | 74 |
+| 51 (control board) | **115** | 122 | 122 |
+| 51 (the GROUP board) | 112 + 1 open | **98** | **98** |
+
+**`nomark` and `nosidecar` agree at every rung**, which pins the whole
+effect on the marker and clears the sidecar's ends completely. And the
+marker helps at K28 and on one K51 board, costs six vias at K41 and
+fourteen on another K51 board -- **not K-dependent, BOARD-dependent**, so
+there is no default to flip and a K-keyed one would be a board-specific
+hack.
+
+### The two arms that came out of it, measured end to end
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| jcl (the reference) | 34 | 60 | 80 | 115 |
+| cew5d (session 12's best) | 34 | **54** | **71** | 109 |
+| **`ab13` = `CHAIN_BRAID_AB=1` alone** | 34 | 60 | **74** | 115 |
+| **`grpAB` = the group + the tier judge + the portfolio** | 34 | 61 | **74** | **98** |
+| human | 46 | 58 | 70 | 81 |
+
+All 0 open, 0 DRC; every canary matched (K28 727.2/644.5, K35 1028.2/935.3,
+K41 2308.9/1163.6, K51 3983.7/1533.9). Rule: grpAB 117.9 / 182.2 / 221.1 /
+**280.5**.
+
+**`ab13` passes edict 3**: six vias better than jcl at K41 and worse on no
+rung. It is the first default candidate since jcl, and it is a portfolio --
+it changes no engine behaviour and cannot regress by construction, it only
+costs a second braid.
+
+**`grpAB` is the K51 record** -- 98 against the reference's 115 and the
+previous best arm's 109 -- and it is one via short at K35 (61 against 60),
+so by edict 3 it is not a default either. It is the arm to carry forward:
+K35 is the single rung, by a single via, and it is the rung whose
+regression is already traced (the group is refused by the engine there and
+the round reverts everything to the base board).
+
+### The chain change: a PORTFOLIO, `CHAIN_BRAID_AB=1`
+
+Braid the fanout board both ways -- once as the chain writes it, once with
+`BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=0` -- and keep the better copper by
+`(open, vias)` (`pick_braid.py`; a board that does not GRADE is not a
+candidate, so a missing file cannot win with "0 open, 0 vias"). Sequential,
+never in parallel: two braids at once is what this box cannot do, and a
+concurrent run is also how a deterministic stage stops being one.
+
+**A defect fixed on the way: `BRAID_EXACT_PAGES=0` could not turn the rule
+off.** `braid.py` assigns `schedule.EXACT_PAGES = 1` whenever the marker is
+present, which happens after `schedule` has read its own env -- so on the
+only plans that HAVE the rule, the flag for it did nothing. It now honours
+an explicit `0` (and says so), which is what made the A/B arm expressible
+at all.
 
 ## Session 13 (continued): the group climb LAYS, and it routes K51 in 107
 
@@ -5583,6 +5700,12 @@ New, all opt-in and flag-off inert:
 `PLAN_PAGES_GROUP_FORCE`, `PLAN_PAGES_WALK_STAGE`); `synth_bus.py`
 (`--row-offset`); `synth_ladder.py` (batch `b4`).
 
+**Flag-off identity: DONE and byte-exact.** `PLAN_PAGES=1 PLAN_JUDGE=count
+PLAN_JUDGE_LEN=lane bash chain_k.sh basectl 28` in a clean `git archive` of
+`96de973b` against `ctl13` here: canary 727.2 / 644.5 on both, and
+`copper_same.py` says IDENTICAL on the FANOUT board (518 segments, 22 vias)
+AND the routed board (1002 segments, 40 vias).
+
 **The headline: the group climb LAYS, and the board it makes routes K51 in
 107 vias, 0 open, 0 DRC (rule 281.9)** -- the best clean K51 this chain has
 produced (cew5d 109, jcl 115, the human 81). It ships under
@@ -5611,12 +5734,16 @@ this decision.** Floor 358.44 routes 107; floor 335.10 routes 133.
 | ctl13 (flag-off, THIS code) | 34 | 60 | -- | -- |
 | dst1 (`DST_ITERS=1`, no group) | -- | -- | -- | 115 |
 
-**`grpT4` K28 = 32 is also a record for that rung** (jcl 34, cew5d 34, the
-recorded best 34; the human 46) and it is the arm with all three fixes and
-the tier judge. Its K41 80 ties jcl. K35 68 against 60 is the one rung still
-short and is UNEXPLAINED -- the group there is refused by the engine and the
-round then reverts everything and ships the base board, where the control
-keeps two rounds.
+**`grpT4`'s K28 = 32 is NOT a result -- its canary is off** (729.7 / 643.8
+against 727.2 / 644.5), and 729.7 is the OTHER feasible point of the K28
+model, the one session 12 already measured as routing 32 where 727.2 routes
+34. The arm's real K28, at the right canary, is `grpT3`'s **36**. This is
+the canary rule earning its keep: the number looked like a two-via record on
+the smallest rung and it was the solver's stopping point, not the arm.
+`grpT4`'s K41 80 ties jcl. K35 68 against 60 is the one rung still short and
+is UNEXPLAINED -- the group there is refused by the engine and the round
+then reverts everything and ships the base board, where the control keeps
+two rounds.
 
 **Not a default yet, and the reason is understood and fixed (unmeasured).**
 grpT2's regressions at K28/K35/K41 are NOT the tier judge making bad calls
@@ -5634,38 +5761,34 @@ round, both fixed at the end of the session and both unmeasured:
 
 **NEXT, in order:**
 
-1. **THE SIDECAR.** `<board>.plan.json` is worth **-14 vias and a
-   completion** on one K51 board (112 + 1 open with it, **98 / 0** without)
-   and **+7 the other way** on another (115 with, 122 without). Route both
-   arms at every rung; if it is a coin flip, make it a TIER decision --
-   `braid_tier` already fans out and grades a candidate, so it needs only to
-   be handed the two boards. **98 is the record and it is reproducible in
-   one braid run** (`tmp/s13/nosc2_*`).
-2. **`grpT4` = 32 / 68 / 80 / 109 + 1 open** -- the group with the braid-tier
-   judge and all three fixes. **K28 32 is a record for that rung** and K41
-   ties jcl; K35 68 against 60 is the one unexplained rung. Read
-   `tmp/s13/grpT4_fo_k35.log`: the group is refused by the engine, the round
-   reverts everything and ships the BASE board (floor 181.96) where the
-   control (`ctl13_fo_k35.log`) keeps two rounds to floor 172.01. The
-   hair-margin group acceptance (count 183 against 184) is the suspect.
-3. **The flag-off identity gate is only half done.** `ctl13` grades 34 / 60
-   -- jcl exactly -- but the BYTE comparison against a clean checkout of
-   `96de973b` has not been run. A staged tree is at
-   `<scratch>/base` (git archive + the built `grid_router.so`); run
-   `PLAN_PAGES=1 bash chain_k.sh tmp/ctl 28` in both and `copper_same.py`
-   the fanout AND the routed board, canary 727.2.
-4. **Items 2 and 3 are built and UNMEASURED**: `PLAN_PAGES_GROUP_DST=1`
+1. **`ab13` (`CHAIN_BRAID_AB=1`) is a DEFAULT CANDIDATE and should be one.**
+   34 / 60 / 74 / 115, six vias better than jcl at K41 and worse on no rung,
+   every canary matched. It changes no engine behaviour, only routes the
+   board twice and keeps the better, so the case against it is time (one
+   extra braid a rung) and nothing else. Run it on the synthetic harness
+   (`synth_ladder --batch b1`) and, if it holds, make it the default and
+   retire the flag.
+2. **`grpAB` = 34 / 61 / 74 / 98 is the K51 record and is ONE VIA short at
+   K35.** That rung is the whole of what stands between this and a default.
+   It is already traced: read `tmp/s13/grpT4_fo_k35.log` -- the group is
+   accepted into the plan by a HAIR (count 183 against 184), the engine then
+   refuses to lay it, and the round reverts everything and ships the BASE
+   board (floor 181.96) where the control (`ctl13_fo_k35.log`) keeps two
+   rounds to floor 172.01. A group accepted on a hair that cannot be laid
+   should not have moved the plan; the fix is either a margin on the group's
+   acceptance or laying it before accepting it.
+3. **Items 2 and 3 are built and UNMEASURED**: `PLAN_PAGES_GROUP_DST=1`
    (the re-berth in launch order) and `PLAN_PAGES_WALK_STAGE=n` (the walk's
    per-stage budget). `tmp/s13/queue1.sh` has both arms ready; it was
    written and then stopped, because it had been started concurrently with
    another chain and a concurrent run moves the CP-SAT's feasible point.
-5. **`b4` has not been run** (`python3 synth_ladder.py --batch b4`): the
+4. **`b4` has not been run** (`python3 synth_ladder.py --batch b4`): the
    first harness batch on which an end-of-face climb can exist at all.
-6. **`PLAN_PAGES_GROUP_FREE` is harmful with the tier and stays off** --
+5. **`PLAN_PAGES_GROUP_FREE` is harmful with the tier and stays off** --
    it improves the group's COUNT (373 -> 356) and makes the copper worse
    (133 against 107). It is kept as the attribution for where a third of
    the count's error lives.
-7. **`SRC_REFAN_RESEAT` is off and has never succeeded.** Asking the
+6. **`SRC_REFAN_RESEAT` is off and has never succeeded.** Asking the
    displaced blockers back to their own teeth is right, but a refused
    blocker keeps the copper it had, which can be standing in the tooth
    another blocker was just re-seated into -- musical chairs, 23 DRC pairs.
@@ -5696,6 +5819,19 @@ round, both fixed at the end of the session and both unmeasured:
 * **The braid's plan sidecar is worth up to 14 vias and a completion, in
   EITHER direction.** It is not a fact about the code, it is a second
   candidate.
+* **A flag that is assigned over cannot be A/B'd.** `BRAID_EXACT_PAGES` was
+  read by `schedule` at import and then overwritten by `braid.py` on every
+  plan that had the rule, so the only flag for the rule was dead on exactly
+  the runs where it mattered.
+* **The canary rule earns its keep on the SMALL rungs too.** A K28 = 32
+  looked like a two-via record twice in one session; both times the first
+  solve had stopped at 729.7 instead of 727.2, and 729.7 is a plan that
+  routes 32 whatever the arm. Re-run a rung whose canary differs -- the
+  re-run gave 34.
+* **A default's evidence has a K range, and it should be written down.**
+  Sixteen ON-by-default knobs cite K values that stop below 51; the one that
+  cost 14 vias at K51 says "measured best on the K28/K35/K41 ladder" in its
+  own comment.
 
 ## Handoff: the next session (written 2026-09-15, ~15:30, end of session 12; supersedes the session-11 handoff)
 

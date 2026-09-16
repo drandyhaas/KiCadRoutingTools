@@ -78,9 +78,42 @@ for K in "$@"; do
   echo -n "  fanout board: "
   python3 ../py_router/check_drc.py "${TAG}_fo_k${K}.kicad_pcb" \
     --clearance "$CLR" --clearance-margin 0.1 2>&1 | grep -E "FOUND|NO DRC"
-  python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
-    --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}" \
-    > "${TAG}_k${K}.log" 2>&1
+  # CHAIN_BRAID_AB=1 (2026-09-15, session 13): braid the fanout board BOTH
+  # WAYS and keep the better copper. The two arms differ only in the plan
+  # sidecar's `pages_first` marker, which switches on the side-face comb
+  # (PLAN_PAGES_SIDERS) and the exact page assignment
+  # (schedule.EXACT_PAGES). Measured at K51: the SAME fanout board routes
+  # 112 vias with SDQ11 open under the marker and 98 vias with nothing open
+  # without it -- and on another board the sidecar is worth 7 vias the other
+  # way, so neither arm is "the" answer and a K-dependent default would be a
+  # board-specific hack. Routing both and keeping the better is general, it
+  # cannot regress, and it costs one braid. The verdict is (open, vias):
+  # completion first, as every grade in this chain is.
+  if [ "${CHAIN_BRAID_AB:-0}" != "0" ]; then
+    # ONE AT A TIME: two braids in parallel is the thing this box cannot do
+    # (8 GB), and a concurrent run is also how a deterministic stage stops
+    # being one.
+    rm -f "${TAG}_k${K}_A".* "${TAG}_k${K}_B".*
+    python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
+      --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}_A" \
+      > "${TAG}_k${K}_A.log" 2>&1
+    BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=0 \
+    python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
+      --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}_B" \
+      > "${TAG}_k${K}_B.log" 2>&1
+    win=$(python3 pick_braid.py "$NETS" \
+            "${TAG}_k${K}_A.kicad_pcb" "${TAG}_k${K}_B.kicad_pcb")
+    case "$win" in
+      '') echo "  braid A/B: NO VERDICT -- keeping arm A"; win="${TAG}_k${K}_A.kicad_pcb";;
+    esac
+    cp "$win" "${TAG}_k${K}.kicad_pcb"
+    [ -f "${win%.kicad_pcb}.kicad_pro" ] && cp "${win%.kicad_pcb}.kicad_pro" "${TAG}_k${K}.kicad_pro"
+    cp "${win%.kicad_pcb}.log" "${TAG}_k${K}.log" 2>/dev/null
+  else
+    python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
+      --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}" \
+      > "${TAG}_k${K}.log" 2>&1
+  fi
   echo "  braid stage done $(date +%H:%M:%S)"
   if [ -f "${TAG}_k${K}.kicad_pcb" ] && [ "$RUNBASE" != "$BASE" ]; then
     # back into the board's own frame (the frame board is kept beside it)
