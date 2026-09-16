@@ -7032,9 +7032,46 @@ def find_components_by_type(pcb_data: 'PCBData', package_type: str) -> List[Foot
     return matches
 
 
+#: An adjacent-coordinate gap below this is not spacing -- it is float noise, or
+#: two pads that sit at the same point on that axis. 10um is far under any real
+#: pad pitch (the finest in the corpus is a 0.2mm QFN).
+_PITCH_NOISE_MM = 0.01
+
+
 def detect_bga_pitch(footprint: Footprint) -> float:
     """
     Detect the pitch (pad spacing) of a BGA footprint.
+
+    The MEDIAN adjacent gap per axis, then the smaller of the two axes. On a
+    regular array that is exactly the pitch, and unlike a minimum it is not
+    moved by a few odd pads.
+
+    It used to return `min()` over the adjacent gaps of the unique x and y
+    coordinates, which let a SINGLE anomalous pad pair speak for the whole
+    package. Measured over corpus sets 1-5, that read a pitch of ~1e-6mm for
+    cparti_fpga's 256-ball U1 and zynq_ad9364's 400-ball U1 and U2 (all real
+    1.0mm/0.8mm arrays), 0.0125mm for watchy's U6, and 0.006mm for a 2.54mm
+    header -- 78 of 348 footprints under 0.05mm, which is not a pitch any part
+    has. Two consumers acted on those numbers:
+
+      * `auto_detect_bga_exclusion_zones` (and routing_common's --no-bga-zones
+        branch) set `edge_tolerance = margin + pitch * 1.1`, which feeds
+        `connectivity.is_edge_stub`. That compares a pad CENTRE against a
+        bounding box drawn at pad EDGES, so a collapsed tolerance can never
+        match: is_edge_stub returned False for every pad of those four parts,
+        silently disabling the outer-row test that gates ~10
+        layer_swap_optimization branches -- on the largest arrays on the board.
+      * `route_planes._resolve_zone_clearance_impl` computes
+        `gap = pitch - field_via` and takes a min ACROSS fields, so one bad
+        reading poisons the whole board: it returns early warning "pour cannot
+        thread the densest BGA lattice even at the fab floor" and skips the
+        tightening every other field might have needed. Its `if not pitch`
+        guard does not catch this -- the bad values are ~1e-6, not 0. Seen in
+        the recorded corpus on quickfeather, whose 10-pad U5 read 0.095mm and
+        produced a NEGATIVE requirement (`needs -0.253mm < floor 0.1`).
+
+    `diff_pair_routing._field_at` reports the value in diagnostics and says so
+    ("reported, never acted on"); it is unaffected either way.
 
     Returns:
         Pitch in mm, or 1.0 as default if cannot be detected
@@ -7042,22 +7079,27 @@ def detect_bga_pitch(footprint: Footprint) -> float:
     if not footprint.pads or len(footprint.pads) < 2:
         return 1.0
 
-    # Get unique x and y positions
-    x_positions = sorted(set(p.global_x for p in footprint.pads))
-    y_positions = sorted(set(p.global_y for p in footprint.pads))
+    axis_pitches = []
+    for _coord in (lambda q: q.global_x, lambda q: q.global_y):
+        positions = sorted({_coord(p) for p in footprint.pads})
+        gaps = [b - a for a, b in zip(positions, positions[1:])
+                if (b - a) >= _PITCH_NOISE_MM]
+        if gaps:
+            axis_pitches.append(_median(gaps))
 
-    pitches = []
-    if len(x_positions) > 1:
-        x_diffs = [x_positions[i+1] - x_positions[i] for i in range(len(x_positions)-1)]
-        pitches.extend(x_diffs)
-    if len(y_positions) > 1:
-        y_diffs = [y_positions[i+1] - y_positions[i] for i in range(len(y_positions)-1)]
-        pitches.extend(y_diffs)
-
-    if pitches:
-        # Use minimum pitch (most common spacing)
-        return min(pitches)
+    if axis_pitches:
+        return min(axis_pitches)
     return 1.0
+
+
+def _median(values):
+    """Median without importing statistics into this hot module."""
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
 def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.0) -> List[Tuple[float, float, float, float, float]]:

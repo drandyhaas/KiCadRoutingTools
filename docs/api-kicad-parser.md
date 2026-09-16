@@ -317,6 +317,15 @@ auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.0)
     # (min_x, min_y, max_x, max_y, edge_tolerance) per BGA
 ```
 
+`detect_bga_pitch` is the MEDIAN adjacent pad gap per axis, then the smaller
+axis -- on a regular array that is the pitch, and it is not moved by a few odd
+pads. It is deliberately not a `min()` over adjacent gaps: that let one
+anomalous pad pair speak for the package (cparti_fpga's 256-ball 1.0mm U1 read
+1e-6mm), which collapsed `auto_detect_bga_exclusion_zones`' `edge_tolerance` to
+nothing -- and `connectivity.is_edge_stub` compares a pad CENTRE against a
+pad-EDGE box, so no pad could then be an edge stub. `1.0` still means "could not
+detect"; never 0.0, which callers would read as falsy AND as infinitely fine.
+
 Classification uses the footprint name first, then pad arrangement (grid vs
 perimeter) and pad shapes. Land-grid and chip-scale families are classified as
 `BGA` by name so they get fanout + BGA exclusion zones: `LGA` (land grid array,
