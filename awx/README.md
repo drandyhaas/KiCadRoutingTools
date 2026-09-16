@@ -5891,10 +5891,55 @@ round, both fixed at the end of the session and both unmeasured:
    plan wanted to move kept its standing tooth for a reason that had
    nothing to do with it. The pre-group move is restored into the rest.
 
+### THE CLOUD SWEEP: the gains DO NOT REPRODUCE (2026-09-15, 36 containers)
+
+`modal run awx/modal_k.py --arms awx/arms.s13.json` -- nine arms x four
+rungs, one container each, every arm alone in its own container. Read
+cloud-to-cloud only (`modal_k.py`'s own rule; the stack is python 3.13
+there against 3.14 here, and a python change has moved copper before).
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| `cjcl` (the cloud baseline) | 38 | 70 | 88 | 124 |
+| `cbraid` (the braid portfolio) | 38 | 70 | 88 | 124 |
+| `cjoint` (the joint re-fan) | 38 | **60** | 88 | 124 |
+| `cwalk` / `cwstage` (the walk, and its per-stage budget) | 38 | **60** | 88 | 124 |
+| `cgrp` (group + tier, on the portfolio) | 38 | **60** | 88 | 124 |
+| LOCAL, for contrast | 34 | 60 | **74** | **98** |
+
+**The braid portfolio captures NOTHING in the cloud** -- identical vias AND
+identical segment counts to the baseline at every rung, so the marker-OFF
+arm never won a single comparison. Locally it is worth 6 vias at K41 and 14
+at K51. Its safety property held exactly as designed (never WORSE); there
+was simply nothing to win.
+
+**The one gain is K35, -10, and it is the joint re-fan or the walk** --
+where LOCALLY the joint re-fan COSTS a via at K35. Opposite sign.
+
+**The cloud baseline is worse at every rung** (38/70/88/124 against
+34/60/80/115), which is a real confound and not an excuse: the stack
+difference puts the router in a different regime, possibly one where the
+marker choice is already the right one.
+
+**So item 1 does not proceed on this evidence.** The local boards are real
+-- 0 open, 0 DRC, independently verified -- but the MECHANISM's value is
+stack-dependent and has not generalised. Two questions for the next
+session, in this order:
+
+* **Is it the stack or the bench?** Re-run `cjcl` against a cloud image
+  pinned to python 3.14 if one can be had. If the cloud baseline then
+  matches 34/60/80/115, the divergence is the stack and the local gains
+  may be real-but-narrow; if it still reads 38/70/88/124, something else
+  differs and the cloud numbers are not measuring the same chain.
+* **Does the marker arm ever win in the cloud?** `cbraid`'s per-candidate
+  lines (`braid A/B: ... routed N via(s)`) are in its container log and say
+  directly whether arm B was ever close. If B is never within a via or
+  two, the portfolio has no branch to exploit there at all.
+
 **NEXT, in order:**
 
-1. **The two-level PORTFOLIO should be the DEFAULT, and the case is made
-   except for the harness.** `CHAIN_FANOUT_AB=1 CHAIN_BRAID_AB=1` = 34 /
+1. **The two-level PORTFOLIO is NOT a default candidate any more** -- see
+   the cloud sweep above. What stood before the sweep: `CHAIN_FANOUT_AB=1 CHAIN_BRAID_AB=1` = 34 /
    60 / 74 / 98: six vias better than jcl at K41, seventeen at K51, worse
    on NO rung, every canary matched. It changes no engine behaviour -- it
    routes what the chain already produces and keeps the better -- so it
