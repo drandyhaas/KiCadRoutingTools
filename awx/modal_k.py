@@ -33,12 +33,19 @@ import modal
 REPO = "/opt/krt"
 _src = Path(__file__).resolve().parents[1]
 
-# The LOCAL stack, exactly (python3.14 is not a Modal base yet; 3.13 is the
-# nearest, and the baseline arms are what prove whether that matters).
+# The LOCAL stack, exactly. 3.13 was "the nearest Modal base" when this was
+# written; **Modal now offers 3.14, which is the laptop's own** -- and the
+# baseline arms that were meant to prove whether the difference matters say
+# it DOES: under 3.13 the K-ladder baseline reads 38 / 70 / 88 / 124 where
+# the laptop reads 34 / 60 / 80 / 115 (2026-09-15, 36-container sweep). So
+# the version is a knob now, and `MODAL_K_PY=3.14` is how a cloud sweep is
+# compared with a local number at all. The default stays 3.13 so an old
+# sweep's numbers keep meaning what they meant.
+PY_VERSION = os.environ.get("MODAL_K_PY", "3.13")
 PINS = ("numpy==2.3.3", "scipy==1.16.2", "shapely==2.1.2", "ortools==9.15.6755")
 
 image = (
-    modal.Image.debian_slim(python_version="3.13")
+    modal.Image.debian_slim(python_version=PY_VERSION)
     .apt_install("curl", "procps", "build-essential")
     .pip_install(*PINS)
     # the source-build fallback for grid_router; before add_local_dir so a
@@ -169,6 +176,19 @@ def run_arm(arm: dict) -> dict:
     env = dict(os.environ)
     env.update(BASE_ENV)
     env.update({k: str(v) for k, v in (arm.get("env") or {}).items()})
+    # WHICH PLANNER THIS ARM ACTUALLY RAN (2026-09-15). BASE_ENV above is
+    # the JOINT-SOLVE arm and does not set PLAN_PAGES, while the local
+    # runner exports `PLAN_PAGES=1` -- so an arms file that forgets it
+    # quietly runs a DIFFERENT PLANNER from the laptop and every
+    # PLAN_PAGES_* flag in that arm is inert. It is invisible in the
+    # result, because the chain grades fine and just answers a different
+    # question: a 36-container sweep was read as "the pages-first gains do
+    # not reproduce in the cloud" when not one container had run
+    # pages-first, and the give-away -- every arm bit-identical, because
+    # the braid portfolio's two arms differ only by a `pages_first` marker
+    # that is never written -- read as a finding. The planner now travels
+    # with the grade.
+    planner = "pages-first" if env.get("PLAN_PAGES", "0") not in ("", "0") else "OLD (no PLAN_PAGES)"
     wd = f"{REPO}/awx"
     # ARMS MUST BE INDEPENDENT (2026-09-12). detect_buses keeps a taut-string
     # memo on disk (awx/tmp/taut_memo, 257 shards / 464 MB locally) that is
@@ -194,6 +214,7 @@ def run_arm(arm: dict) -> dict:
             txt = f.read_text(errors="replace").splitlines()
             logs[suffix] = [ln for ln in txt if KEEP.search(ln)][-400:]
     grade = next((ln for ln in reversed(out.splitlines()) if "GRADE" in ln), "")
+    grade = f"[{planner}] {grade}" if grade else grade
     # THE REPLAN ROUND, optional (arm["replan"] = extra argv for replan.py).
     # replan.py reads the chain's own outputs -- tmp/TAG_fo_kK.kicad_pcb and
     # tmp/TAG_kK.kicad_pcb -- so it can only run AFTER the chain, in the same
@@ -270,6 +291,20 @@ def run_arm(arm: dict) -> dict:
 @app.local_entrypoint()
 def main(arms: str = "awx/arms.example.json", out: str = "", dedupe: bool = True):
     spec = json.loads(Path(arms).read_text())
+    # ...and REFUSE a mixed sweep before it costs anything. Arms that run
+    # different planners are not comparable, and the failure mode above was
+    # a whole sweep of them read as one experiment.
+    pf = {bool(str((a.get("env") or {}).get("PLAN_PAGES", "0")) not in ("", "0"))
+          for a in spec}
+    if len(pf) > 1:
+        raise SystemExit(
+            "modal_k: this arms file MIXES planners -- some arms set PLAN_PAGES "
+            "and some do not, and BASE_ENV does not set it. Arms on different "
+            "planners are not comparable; set PLAN_PAGES explicitly on every arm.")
+    if pf == {False}:
+        print("modal_k: WARNING -- no arm sets PLAN_PAGES, so every arm runs the "
+              "OLD planner (BASE_ENV is the joint-solve arm). The local chain "
+              "runs pages-first; these numbers are NOT comparable with it.")
     jobs = [{"tag": a["tag"], "K": k, "env": a.get("env") or {},
              "replan": a.get("replan"), "return_board": a.get("return_board"),
              "return_files": a.get("return_files")}
