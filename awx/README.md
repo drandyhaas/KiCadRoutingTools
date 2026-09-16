@@ -5920,33 +5920,47 @@ round, both fixed at the end of the session and both unmeasured:
    launch-order deficit, and the tier judge now tells the truth about it
    cheaply. The open question is whether a group ever beats the copper it
    displaces.
-5. **SPEED: fork the portfolio LATE, not at the top** (Andy). Both levels
-   currently re-run work they share, and it is exact duplication, not an
-   estimate -- measured on the K51 portfolio run:
+5. **SPEED (Andy: "there is likely duplication of effort and searching
+   that can be reduced"). MEASURED, and the premise does not hold -- the
+   portfolio is not mostly duplication, it is mostly genuinely different
+   work.** The K51 portfolio run, apportioned by file mtimes:
 
-   | duplicated | cost |
-   |---|---|
-   | the two fanout arms' FIRST CP-SAT solve: identical objective AND bound (3983.7 / 1533.9) | 19.8 s + 27.6 s |
-   | ...which is ~60% of that stage's whole CP-SAT budget (37.1 s over 12 solves) | |
-   | the two braid arms share the corridors, the spine and the launch/target orders | ~half a braid each |
-   | `braid_tier`'s candidate board, proved copper-IDENTICAL to the chain's own final fanout board | a whole fanout |
-   | four destination passes, per arm | |
+   | stage | time | share |
+   |---|---|---|
+   | fanout J0 + J1 | 106 s | 23% |
+   | the four braids | 358 s | **77%** |
+   | (of one braid: the blocker-directed RIP) | 48 s of 104 s | **46%** |
 
-   **The arms diverge later than they fork.** `SRC_REFAN_JOINT` changes
-   what the first REALIZE strips, which is after the solve; the sidecar's
-   marker changes the page assignment and the side-face comb, which is
-   after the corridors. Forking at those points instead of at the top
-   turns "2x the chain" into "1x plus the divergent tail", and it attacks
-   the right thing: the recorded profile
-   ([[router-perf-profile-0830]]) is A* ~4% of a route and ~27%
-   rebuilding base obstacle maps -- the PREPARATION, which is exactly
-   what a top-level portfolio duplicates. It would also answer the one
-   argument against making the portfolio a default (item 1's ~8 min at
-   K51 against jcl's ~3).
+   What is REAL duplication: the two fanout arms compute the SAME first
+   CP-SAT solve -- identical objective AND bound (3983.7 / 1533.9), 19.8 s
+   and 27.6 s. **That is 5% of the run**, and forking `fanout_from_plan`
+   internally to share it is a restructure for a twentieth.
 
-   Cheapest first cut, and it needs no restructuring: **`braid_tier`
-   should hand its routed board back** instead of throwing it away. It
-   already fans out and braids the plan the chain is about to ship.
+   What is NOT duplication, though it looks like it:
+   - **The braid's repeated attempts.** Attempts 2, 3 and 4 of corridor 0
+     all sit at the converged pitch (W=3.789) and all score 34/45 with 43
+     vias, which reads as the same answer computed three times. It is
+     not: their refused SETS differ net by net (attempt 2 refuses SCS0,
+     SA10, SDQ5; attempt 3 refuses SCKE1, SCKE0, SA1). They are different
+     routings that happen to tie, the convergence test is right not to
+     fire, and the `stale >= 2` counter stops them. **Do not "fix" this.**
+   - **The rip tail**, the braid's real cost centre at 46%, is 39 s of
+     actual rip-and-re-lay over 9 calls. Only ~2 s is repeated work (two
+     nets get a second census and probe).
+   - **The braid arms of one board** share only the corridors and the
+     spine; they diverge at the schedule, and everything expensive --
+     attempts and rip -- is downstream of that.
+
+   **So the cost is PARALLELISABLE, not deduplicable.** The four braids
+   are independent processes with no shared state; they are serialised
+   here only because this box has 8 GB
+   ([[issue-622-k51-launch-walls-0915-s11]]). On a bigger box or on Modal
+   the portfolio is ~4x faster at ZERO copper change, which is the clean
+   way to buy item 1's default. Anything else on the table -- a cheaper
+   screening braid to rank the candidates -- is a copper trade, not a free
+   win, and this session already measured that trap: the braid tier at
+   `BRAID_ATTEMPTS=1` mis-ranked a candidate by penalising it for an open
+   net the full router closes.
 
 6. **Items 2 and 3 are built and UNMEASURED**: `PLAN_PAGES_GROUP_DST=1`
    (the re-berth in launch order) and `PLAN_PAGES_WALK_STAGE=n` (the
