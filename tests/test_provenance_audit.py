@@ -455,7 +455,8 @@ _st903 = [r for r in PV.read_ledger(_wd903)
           if r.get('lever') == 'stage_unaided.py'][0]
 check("a staging row carries no argv, no parent hash and no poses",
       not {'lever_argv', 'parent_sha256', 'poses_written', 'refs_written',
-           'refs_moved', 'sides_written'} & set(_st903), str(sorted(_st903)))
+           'refs_moved', 'sides_written', 'parent_pose_sha256',
+           'board_pose_sha256'} & set(_st903), str(sorted(_st903)))
 check("...and an ENGINE row still carries them, so redaction is scoped",
       any(r.get('poses_written') for r in PV.read_ledger(_wd903)
           if r.get('lever') == 'place_optimize.py'),

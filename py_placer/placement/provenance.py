@@ -172,6 +172,93 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+# THE POSE DIGEST (#972). The byte hashes above answer "is this the same FILE",
+# and a chain of rows cannot be linked on that: legitimate steps rewrite a board
+# without moving a part -- `seeder.stamp_locked` adds `(locked yes)` after the
+# seed row, route.py writes copper, `beautify_labels` moves silkscreen, a fill
+# or a pcbnew re-save rewrites the text -- and every one of them would read as
+# an unrecorded change. The digest answers "is this the same ARRANGEMENT": a
+# canonical hash of every footprint's (x, y, rotation, side), so a row's
+# `parent_pose_sha256` links to an earlier row's `board_pose_sha256` across any
+# rewrite that moved nothing, and a copy or `os.replace` delivery links by
+# content rather than by path.
+#
+# The scheme id is part of the VALUE, not a separate key: a digest written
+# under a different canonical form must never be compared with this one, and
+# a prefix cannot be separated from the hash it qualifies.
+POSE_DIGEST_SCHEME = 'p1'
+
+
+def pose_footprints(path: str) -> Dict:
+    """{ref: Footprint} through the parser's own footprint extractor.
+
+    `parse_kicad_pcb` takes its footprints from exactly this call and changes
+    no x/y/rotation/layer afterwards, so the keys are the ones the audit and
+    every lever use -- including #726's `TP4~2` ordinals and a reference-less
+    block's `#<uuid>` -- at about a third of the cost, because nets, zones and
+    outline contours are never built.
+    """
+    from kicad_parser import extract_footprints_and_pads
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    return extract_footprints_and_pads(content, {}, {})[0]
+
+
+def pose_table_of(footprints: Dict) -> Dict:
+    """{ref: (x, y, rotation, side)} -- the audit's pose shape since #714."""
+    from placement.legality import footprint_side
+    return {ref: (fp.x, fp.y, fp.rotation or 0.0, footprint_side(fp))
+            for ref, fp in footprints.items()}
+
+
+def pose_table(path: str) -> Dict:
+    return pose_table_of(pose_footprints(path))
+
+
+def pose_digest(table: Dict) -> str:
+    """Canonical digest of a pose table: `"p1:<sha256 hex>"`.
+
+    Positions are integer NANOMETRES: the writer emits `:.6f` millimetres and
+    KiCad stores integer nm, so any rewrite that keeps the decimal recovers the
+    same integer. Rotation is quantised to 1e-4 degree BEFORE the modulo, so
+    -90 and 270, 360 and 0, and a `-1e-17` that `% 360` turns into 360.0 all
+    land on one integer. Integers and side letters only: a float in the JSON
+    would spell -0.0 differently from 0.0.
+
+    Exact on purpose. Two poses that differ by less than a nanometre link;
+    anything else does not, and the audit then compares poses at its own drift
+    tolerance -- so a missed link can hide nothing, it only stops a shortcut.
+    """
+    rows = [[ref, round(x * 1e6), round(y * 1e6),
+             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]
+            for ref, (x, y, rot, side) in sorted(table.items())]
+    blob = json.dumps(rows, separators=(',', ':'), ensure_ascii=True)
+    return (POSE_DIGEST_SCHEME + ':'
+            + hashlib.sha256(blob.encode('ascii')).hexdigest())
+
+
+def file_pose_digest(path: str) -> Optional[str]:
+    """The pose digest of a board file, or None. NEVER raises.
+
+    Called from inside `commit_write`, which runs after the board is already
+    on disk: an exception there would ship a board with no ledger row, which
+    is the defect #960 closed. A digest that cannot be computed is recorded as
+    None and the audit treats that link as unknown.
+    """
+    try:
+        if not os.path.isfile(path):
+            return None
+        return pose_digest(pose_table(path))
+    except Exception:                            # noqa: BLE001
+        return None
+
+
+def _stamp_board_pose(row: Dict, output_file: str) -> None:
+    # A staging row carries no pose content of any kind (FENCE_SENSITIVE_LEVERS).
+    if 'redacted' not in row:
+        row['board_pose_sha256'] = file_pose_digest(output_file)
+
+
 _PENDING: Dict[str, Dict] = {}
 
 
@@ -188,6 +275,7 @@ def commit_write(output_file: str) -> Optional[Dict]:
     root = row.pop('_root')
     row['board_sha256'] = (sha256_file(output_file)
                            if os.path.isfile(output_file) else None)
+    _stamp_board_pose(row, output_file)
     with open(os.path.join(root, LEDGER_NAME), 'a', encoding='utf-8') as f:
         f.write(json.dumps(row, sort_keys=True) + '\n')
     return row
@@ -246,8 +334,7 @@ def record_write(input_file: str, output_file: str,
     moved = []
     before = None
     try:
-        from kicad_parser import parse_kicad_pcb
-        before = parse_kicad_pcb(input_file).footprints
+        before = pose_footprints(input_file)
         for p in placements:
             ref = p.get('reference')
             fp = before.get(ref)
@@ -304,10 +391,21 @@ def record_write(input_file: str, output_file: str,
               for p_ in placements
               if p_.get('reference') and p_.get('new_side') is not None}
 
+    # The INPUT's arrangement, from the same parse `refs_moved` just used and
+    # therefore from before the write -- an in-place write hashes the board it
+    # replaces. None when the input could not be read; never an exception.
+    _parent_pose = None
+    if isinstance(before, dict):
+        try:
+            _parent_pose = pose_digest(pose_table_of(before))
+        except Exception:                        # noqa: BLE001
+            _parent_pose = None
+
     row = {'t': time.time(), 'schema': SCHEMA,
            'path': os.path.abspath(output_file),
            'parent_sha256': (sha256_file(input_file)
                              if os.path.isfile(input_file) else None),
+           'parent_pose_sha256': _parent_pose,
            'lever': lever['lever'], 'lever_argv': lever['lever_argv'],
            'declared': True, 'caller': _caller(),
            'refs_written': sorted(p.get('reference') for p in placements),
@@ -321,7 +419,10 @@ def record_write(input_file: str, output_file: str,
         # of it inside the fence, in a file the run can read (see
         # FENCE_SENSITIVE_LEVERS). `parent_sha256` goes too: a hash is not a
         # path, but it turns "which board is this?" into a test the run can
-        # run against every candidate on disk.
+        # run against every candidate on disk. `parent_pose_sha256` goes for
+        # the same reason, and `_stamp_board_pose` adds no board digest to a
+        # redacted row: the audit's root is the hash-verified staged FILE, so
+        # nothing would read one.
         #
         # Dropping the pose keys is not a loss to the audit, it is more
         # correct: the staged board is the BASELINE the audit compares
@@ -337,6 +438,7 @@ def record_write(input_file: str, output_file: str,
         return row
     row['board_sha256'] = (sha256_file(output_file)
                            if os.path.isfile(output_file) else None)
+    _stamp_board_pose(row, output_file)
     with open(os.path.join(root, LEDGER_NAME), 'a', encoding='utf-8') as f:
         f.write(json.dumps(row, sort_keys=True) + '\n')
     return row

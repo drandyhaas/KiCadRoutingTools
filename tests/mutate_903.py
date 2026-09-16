@@ -55,6 +55,9 @@ TARGETS = {'su': SU, 'sb': SB, 'pv': PV, 'rw': RW, 'pa': PA}
 
 T_903 = os.path.join(TESTS, 'test_903_stagers_arm_the_regime.py')
 T_PROV = os.path.join(TESTS, 'test_provenance_audit.py')
+#: #972's lineage gate. In-process and a few seconds, so rows that it kills
+#: name it ALONE rather than paying for T_PROV's real CLI runs.
+T_972 = os.path.join(TESTS, 'test_972_pose_lineage.py')
 
 #: The cheap gate, run unmutated first. `T_PROV` is the in-process half and
 #: `T_903` the subprocess half; a row is only evidence if both are green
@@ -264,6 +267,71 @@ ROWS = [
      "    if _outer is not None and os.path.abspath(_outer) != _wd:\n",
      "    if False:\n",
      (T_903,), 'KILLED'),
+
+    # ---- #972: the pose digest the lineage links on -----------------------
+    # Every row below keeps the ledger WRITING and the audit RUNNING, so a
+    # suite that only checks for rows and verdicts stays green. What breaks is
+    # the link: a digest that describes the wrong board, or none.
+    ('the-row-records-no-parent-pose', 'pv',
+     "           'parent_pose_sha256': _parent_pose,\n",
+     "",
+     (T_972,), 'KILLED'),
+
+    # Hashing the OUTPUT at record time instead of the parsed input: identical
+    # for an in-place write, None for every write to a new path.
+    ('the-parent-pose-is-read-from-the-output', 'pv',
+     "            _parent_pose = pose_digest(pose_table_of(before))\n",
+     "            _parent_pose = file_pose_digest(output_file)\n",
+     (T_972,), 'KILLED'),
+
+    # A board digest that restates the parent: every write becomes a no-op
+    # link, so any arrangement reaches the root.
+    ('the-board-pose-restates-the-parent', 'pv',
+     "        row['board_pose_sha256'] = file_pose_digest(output_file)\n",
+     "        row['board_pose_sha256'] = row.get('parent_pose_sha256')\n",
+     (T_972,), 'KILLED'),
+
+    ('the-pose-digest-ignores-rotation', 'pv',
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     "             0, side]\n",
+     (T_972,), 'KILLED'),
+
+    ('the-pose-digest-ignores-the-side', 'pv',
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, 'F']\n",
+     (T_972,), 'KILLED'),
+
+    # `% 360` on a float leaves -1e-17 at 360.0; without the integer modulo
+    # after quantising, 0 and 360 are two arrangements and a normalising
+    # rewrite breaks the chain.
+    ('the-rotation-is-not-folded-after-quantising', 'pv',
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     "             round(((rot or 0.0) % 360.0) * 1e4), side]\n",
+     (T_972,), 'KILLED'),
+
+    ('a-staging-row-carries-a-pose-digest', 'pv',
+     "    if 'redacted' not in row:\n",
+     "    if True:\n",
+     (T_972, T_903), 'KILLED'),
+
+    # The digest runs inside `commit_write`, AFTER the board is on disk. A
+    # narrowed except lets a parse failure escape there, and the board ships
+    # with no row -- #960's defect by another road.
+    ('the-board-digest-can-raise-after-the-write', 'pv',
+     "    except Exception:                            # noqa: BLE001\n"
+     "        return None\n",
+     "    except KeyError:\n"
+     "        return None\n",
+     (T_972,), 'KILLED'),
+
+    # Outside a regime the writer must cost nothing it did not cost before.
+    ('the-digest-is-computed-outside-a-regime', 'pv',
+     "    root = regime_for(output_file)\n"
+     "    lever = active_lever()\n",
+     "    file_pose_digest(input_file)\n"
+     "    root = regime_for(output_file)\n"
+     "    lever = active_lever()\n",
+     (T_972,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is
