@@ -15,7 +15,8 @@
   "resources": {
     "homepage": "https://github.com/drandyhaas/KiCadRoutingTools",
     "repository": "https://github.com/drandyhaas/KiCadRoutingTools",
-    "bugtracker": "https://github.com/drandyhaas/KiCadRoutingTools/issues"
+    "bugtracker": "https://github.com/drandyhaas/KiCadRoutingTools/issues",
+    "Donate": "https://ko-fi.com/drandyhaas"
   },
   "tags": [
     "routing",

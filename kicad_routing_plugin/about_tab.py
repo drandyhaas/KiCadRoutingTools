@@ -7,11 +7,20 @@ Displays version info, author, and links.
 import os
 import wx
 import wx.adv
+import wx.lib.buttons
 
 
 # Directory paths
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
+
+# Where the Donate button sends people. Ko-fi is primary because a donor can
+# pay there by card WITHOUT creating an account (PayPal.Me requires the sender
+# to have a PayPal account); PayPal stays as a direct secondary link.
+# The same URLs appear in README.md, .github/FUNDING.yml (GitHub's Sponsor
+# button) and metadata.json's resources -- change them together.
+DONATE_URL = "https://ko-fi.com/drandyhaas"
+PAYPAL_URL = "https://www.paypal.me/DrAndyHaas"
 
 
 class AboutTab(wx.Panel):
@@ -107,6 +116,50 @@ class AboutTab(wx.Panel):
         )
         about_sizer.Add(github_link, 0, wx.ALIGN_CENTER | wx.ALL, 10)
 
+        # Donate button. U+2665 rather than the U+2764 emoji heart: the former
+        # is in the stock UI fonts on all three platforms, the latter is not.
+        # GenButton rather than wx.Button: a native macOS button ignores the
+        # height it is given (the rounded bezel is drawn at a fixed height and
+        # centred), so a native control sized 260x56 still LOOKS small there.
+        # GenButton is custom-drawn, so it fills its box identically on macOS,
+        # Windows and GTK.
+        donate_btn = wx.lib.buttons.GenButton(
+            self, label="\u2665  Donate", size=(260, 56)
+        )
+        donate_font = donate_btn.GetFont()
+        donate_font.SetPointSize(donate_font.GetPointSize() + 5)
+        donate_font.SetWeight(wx.FONTWEIGHT_BOLD)
+        donate_btn.SetFont(donate_font)
+        donate_btn.SetBackgroundColour(wx.Colour(0, 112, 186))
+        donate_btn.SetForegroundColour(wx.Colour(255, 255, 255))
+        donate_btn.SetBezelWidth(2)
+        donate_btn.SetUseFocusIndicator(False)  # no dotted focus rectangle
+        donate_btn.SetToolTip(
+            "Support KiCadRoutingTools.\n\n"
+            "Donations go to what it costs to build this: about $500/month of\n"
+            "cloud computing and AI-assisted development. The compute\n"
+            "regression-tests the router against a corpus of real\n"
+            "open-source boards.\n\n"
+            + DONATE_URL
+        )
+        donate_btn.Bind(wx.EVT_BUTTON, self._on_donate)
+        about_sizer.Add(donate_btn, 0, wx.ALIGN_CENTER | wx.TOP, 10)
+
+        donate_hint = wx.StaticText(
+            self,
+            label=("Free and MIT-licensed. Donations cover the ~$500/month of\n"
+                   "cloud compute and AI development behind the tool."),
+            style=wx.ALIGN_CENTRE_HORIZONTAL
+        )
+        donate_hint.SetForegroundColour(wx.Colour(128, 128, 128))
+        about_sizer.Add(donate_hint, 0, wx.ALIGN_CENTER | wx.TOP, 8)
+
+        # Secondary route for anyone who would rather use PayPal directly.
+        paypal_link = wx.adv.HyperlinkCtrl(
+            self, label="or send directly via PayPal", url=PAYPAL_URL
+        )
+        about_sizer.Add(paypal_link, 0, wx.ALIGN_CENTER | wx.TOP, 4)
+
         # License/copyright
         copyright_text = wx.StaticText(
             self,
@@ -146,6 +199,10 @@ class AboutTab(wx.Panel):
         about_sizer.Add(reset_btn, 0, wx.ALIGN_CENTER | wx.ALL, 20)
 
         self.SetSizer(about_sizer)
+
+    def _on_donate(self, event):
+        """Open the donation page in the user's default browser."""
+        wx.LaunchDefaultBrowser(DONATE_URL)
 
     def _on_validate_pcb_data(self, event):
         """Handle validate PCB data button click."""
