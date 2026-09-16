@@ -5953,14 +5953,18 @@ round, both fixed at the end of the session and both unmeasured:
 
    **So the cost is PARALLELISABLE, not deduplicable.** The four braids
    are independent processes with no shared state; they are serialised
-   here only because this box has 8 GB
-   ([[issue-622-k51-launch-walls-0915-s11]]). On a bigger box or on Modal
-   the portfolio is ~4x faster at ZERO copper change, which is the clean
-   way to buy item 1's default. Anything else on the table -- a cheaper
-   screening braid to rank the candidates -- is a copper trade, not a free
-   win, and this session already measured that trap: the braid tier at
-   `BRAID_ATTEMPTS=1` mis-ranked a candidate by penalising it for an open
-   net the full router closes.
+   here only because this box has 8 GB. On a bigger box or on Modal the
+   portfolio is ~4x faster at ZERO copper change. Anything else on the
+   table -- a cheaper screening braid to rank the candidates -- is a
+   copper trade, not a free win, and this session already measured that
+   trap: the braid tier at `BRAID_ATTEMPTS=1` mis-ranked a candidate by
+   penalising it for an open net the full router closes.
+
+   **DECIDED (Andy, 2026-09-15): leave it SERIAL for now.** The ~8 min at
+   K51 is accepted as the price, so the default question in item 1 turns
+   on the harness alone and not on the clock. Do not spend a session on
+   the 5% solve-sharing either -- it is a restructure for a twentieth.
+   This item is CLOSED until the wall time actually blocks something.
 
 6. **Items 2 and 3 are built and UNMEASURED**: `PLAN_PAGES_GROUP_DST=1`
    (the re-berth in launch order) and `PLAN_PAGES_WALK_STAGE=n` (the
