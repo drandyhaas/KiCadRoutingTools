@@ -468,6 +468,22 @@ def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
         print(f"  (late orphan sweep skipped: {_e})")
 
 
+
+def _seg_ledger_sig_rt(s):
+    """Geometry signature for the strip loop -- deliberately identity-free.
+    Mirrors cleanup_pipeline._seg_ledger_sig (same quantisation), kept here so
+    route.py does not import a private name."""
+    a = (round(s.start_x, 4), round(s.start_y, 4))
+    b = (round(s.end_x, 4), round(s.end_y, 4))
+    return (min(a, b), max(a, b), s.layer, round(float(s.width or 0.0), 4))
+
+
+def _via_ledger_sig_rt(v):
+    return (round(v.x, 4), round(v.y, 4),
+            round(float(getattr(v, 'size', 0) or 0), 4),
+            round(float(getattr(v, 'drill', 0) or 0), 4))
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 # #530: cap every auto-read net class at this clearance (the
@@ -3125,6 +3141,49 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
               f"segment(s) + {len(state.tap_relocation_removed_vias)} via(s) "
               f"removed by committed tap relocations (#508)")
 
+    # ---- CLOSING THE STRIP LOOP (both fronts) --------------------------------
+    # Everything above adds to the strip list by REMEMBERING: each pass reports
+    # the input copper it removed, matched by object id(). That is a coverage
+    # argument, and coverage arguments fail silently. Measured on this board:
+    # the dead-end sweep took SRAM_D0's B.Cu diagonal out of pcb_data AND out of
+    # the write-list -- keeping those two consistent, so every in-memory
+    # invariant held -- but recorded NO strip, because after a rip/restore cycle
+    # the object in pcb_data was no longer the one registered as input copper.
+    # The file kept its copy, octolinear smoothing then legitimately routed
+    # SRAM_A4 through the vacated corridor (its clearance check saw an empty
+    # corridor, correctly), and the two shipped crossing on B.Cu. The
+    # KICAD_BOARD_LEDGER audit reported "8/333 net(s) differ" and the run
+    # shipped anyway.
+    #
+    # So finish the list by DERIVATION instead of recollection: any in-scope
+    # ORIGINAL segment/via whose geometry is not on the final board is stale,
+    # whoever removed it and however deeply nested they were. Geometry, not
+    # identity -- identity is exactly what the rip/restore cycle breaks.
+    #
+    # This is the shared fix: the CLI writer strips these from its input copy,
+    # and the GUI gets them in results_data['segments_to_remove'] (#84) to
+    # delete from the live board, so neither front can ship copper the engine
+    # deleted from its own model.
+    _fin_sig = {_seg_ledger_sig_rt(_s) for _s in pcb_data.segments
+                if not getattr(_s, 'graphic', False)}
+    _fin_vsig = {_via_ledger_sig_rt(_v) for _v in pcb_data.vias}
+    _known_os = {id(_s) for _s in dead_end_input_segments}
+    _known_ov = {id(_v) for _v in stale_input_vias}
+    _derived_s = [_s for _nid in (sweep_scope_ids or ())
+                  for _s in _orig_seg_by_net.get(_nid, ())
+                  if id(_s) not in _known_os
+                  and _seg_ledger_sig_rt(_s) not in _fin_sig]
+    _derived_v = [_v for _nid in (sweep_scope_ids or ())
+                  for _v in _orig_via_by_net.get(_nid, ())
+                  if id(_v) not in _known_ov
+                  and _via_ledger_sig_rt(_v) not in _fin_vsig]
+    if _derived_s or _derived_v:
+        dead_end_input_segments = list(dead_end_input_segments) + _derived_s
+        stale_input_vias = list(stale_input_vias) + _derived_v
+        print(f"Strip loop closed: {len(_derived_s)} original segment(s) and "
+              f"{len(_derived_v)} original via(s) are absent from the final "
+              f"board but no pass reported them -- stripping (geometry-matched)")
+
     # Uniform contract, stale-strip edition: the #284 re-emit clause can strip
     # an original that is STILL on the board (a routed twin reproduced its
     # span, so the file keeps only the emitted copy) -- mirror that removal
@@ -4315,6 +4374,58 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # in-memory contract checked before the write.
             verify_written_file_parity(output_file, pcb_data, sweep_scope_ids,
                                        label=' route')
+            # ...and ACT on it, unconditionally. The audit above is gated on
+            # KICAD_BOARD_LEDGER and only REPORTS -- it printed
+            # "FAILED: 8/333 net(s) differ" on this very board while the run
+            # shipped the file anyway. Copper the engine removed from pcb_data
+            # but never got into a strip list is copper nothing reasoned
+            # about: the cleanup passes, the connectivity sweep and the DRC
+            # route.py reports are all computed from pcb_data, so a file-only
+            # segment is unreviewed by every one of them.
+            #
+            # MEASURED on cparti_fpga step 10: the dead-end sweep removed
+            # SRAM_D0's B.Cu diagonal from pcb_data, smoothing then routed
+            # SRAM_A4 through the freed corridor (correctly -- its clearance
+            # check saw an empty corridor), and the diagonal shipped anyway,
+            # crossing it. Every net in that board's remaining DRC (SRAM_D0,
+            # SRAM_A7, SRAM_WE) is in the diverged set.
+            #
+            # Removing it is the CONSERVATIVE direction: pcb_data is the
+            # engine's final answer, and this only deletes copper that answer
+            # does not contain. keep_input_copper runs are exempt -- there the
+            # difference is deliberate and the strip lists are empty by design.
+            if not keep_input_copper:
+                from cleanup_pipeline import file_only_copper
+                _fo_segs, _fo_vias = file_only_copper(
+                    output_file, pcb_data, sweep_scope_ids)
+                if _fo_segs or _fo_vias:
+                    # Both helpers return (content, count) and need the net
+                    # dialect map on KiCad 10 files -- same call shape as the
+                    # #659 orphan strip above.
+                    from kicad_parser import is_kicad_10 as _k10_rc
+                    from kicad_writer import (
+                        remove_segments_from_content as _rsc_rc,
+                        remove_vias_from_content as _rvc_rc)
+                    with open(output_file, 'r', encoding='utf-8') as _fh:
+                        _content = _fh.read()
+                    _nmap = ({nid: n.name for nid, n in pcb_data.nets.items()}
+                             if _k10_rc(_content) else None)
+                    _ns = _nv_rc = 0
+                    if _fo_segs:
+                        _content, _ns = _rsc_rc(_content, _fo_segs,
+                                                net_id_to_name=_nmap)
+                    if _fo_vias:
+                        _content, _nv_rc = _rvc_rc(_content, _fo_vias,
+                                                   net_id_to_name=_nmap)
+                    with open(output_file, 'w', encoding='utf-8') as _fh:
+                        _fh.write(_content)
+                    print(f"Output reconcile: removed {_ns} segment(s) "
+                          f"and {_nv_rc} via(s) that were in the written "
+                          f"file but NOT on the board pcb_data describes "
+                          f"(no pass accounted for them)")
+                    verify_written_file_parity(output_file, pcb_data,
+                                               sweep_scope_ids,
+                                               label=' route/reconciled')
         if output_file and os.path.isfile(output_file):
             # #650: sync the output's sibling .kicad_pro to the floors this run
             # ROUTED to, BEFORE anything grades the board in-run (the plane
