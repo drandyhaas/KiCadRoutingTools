@@ -497,14 +497,14 @@ large: K35 local 76 vs cloud 60; K41 local 107 vs cloud 88.
    -- `sat_parameters.proto` documents it only as "correlated with the real
    time used by the solver". It buys immunity to machine LOAD, which is what
    this chain needed, and nothing about different CPUs.
-   `BRAID_CPSAT_CONFLICTS` (new, default 0 = unchanged) bounds the solve by
-   `max_number_of_conflicts` instead -- an integer count of discrete search
-   events, identical on any CPU. **2000** matches today's x86_64 depth.
-   CAVEAT: a conflict count bounds SEARCH, not TIME. It does not bound
-   presolve at all, and the conflict rate is instance-specific (~42/s on the
-   K35 alt instance, unmeasured elsewhere). Ship it with a generous
-   deterministic-time backstop AND record which of the two fired -- a
-   backstop nobody checks is how this class of bug returns.
+   `BRAID_CPSAT_CONFLICTS` was built to replace it -- `max_number_of_conflicts`,
+   an integer count of discrete search events, identical on any CPU -- and
+   **it is UNUSABLE and no longer in the tree**: a conflict count bounds
+   SEARCH and not PRESOLVE, setting one means no time budget is set at all,
+   and a 40 s solve had not finished in 31 MINUTES. See the rejected-knobs
+   table. There is no portable budget today; `max_deterministic_time` stays,
+   and the consequence is the section below -- the first solve stops at a
+   DIFFERENT feasible point per architecture at the same objective.
 2. **The second divergence is SOLVED, and it runs through the CP-SAT
    solution VECTOR rather than its budget.** Equalising the budget leaves
    the routed board byte-identical (arm64 DET=40 and DET=80 both give K35
@@ -5980,14 +5980,13 @@ causes, and the big one is ours, not the platform's:**
 |---|---|---|
 | **34 -> 38 vias (all of it)** | **`BASE_ENV`** -- `modal_k.py` imposes the OLD joint-solve arm's seventeen flags (`SF_JUDGE=braid`, `DST_RESIDUE=3`, `SEL_XING=2`, `SF_EQUIV=2`, `DST_WALK=3`, `BRAID_ONE_DIVE=5`, ...) ON TOP of whatever the arms file sets. The local chain runs with NONE of them. | ran the chain locally with `env $(BASE_ENV) PLAN_PAGES=1 ...` -> **38 vias**, the cloud's number exactly |
 | the PLAN is identical | nothing -- parsing, geometry and menu enumeration agree bit for bit | same instance (`1456 berth + 186 tooth, 378 pairs, 175656 exclusions`), same objective **695.4**, same second solve (`OPTIMAL 701.9`) |
-| **2 open nets; fanout 65 tracks/11 vias against 95/9** | the **ROUTER BINARY**: the laptop runs the macOS **arm64** build of `grid_router` 0.22.0, the image installs the published **linux x86_64** build. Same version, same Rust source, different compilation -- so different floating point, and this codebase is known to move copper on numeric changes (`python-version-changes-routing`, math.fsum). | identical plan in, different copper out |
+| **2 open nets; fanout 65 tracks/11 vias against 95/9** | **CP-SAT's solution VECTOR**, the same channel section "Never compare a LOCAL result to a CLOUD one" already names. NOT the router binary -- that guess was written here and is now disproven twice over (see the K28 segment bisect below, and the direct `grid_router` test that section records). | identical plan in, different copper out |
 | bound 613.0 against 610.9, 37.6 s against 74.6 s | CP-SAT's `max_deterministic_time` is NOT portable across architectures -- it proved less in the same nominal budget | did NOT change the chosen plan at K28 |
 
 **So "compare cloud only to cloud" is right, and pinning python does not
-fix it** -- the image already matches the laptop's 3.14. What remains is a
-compiled binary, which cannot be matched without building the crate for
-the laptop's own architecture in the image (or running the laptop on
-x86_64).
+fix it** -- the image already matches the laptop's 3.14. What remains is
+CP-SAT, whose `max_deterministic_time` buys immunity to machine LOAD and
+nothing about different CPUs.
 
 **And BASE_ENV is a trap worth removing.** It is documented as "the
 joint-solve arm", but nothing in an arms file says so, and a caller
@@ -5999,6 +5998,65 @@ Two instrument fixes came out of the bisection: `KEEP` now keeps the
 pages-first solve line (**the canary was not in the returned logs at all**,
 so no cloud arm could be bisected against a local one), and the planner is
 stamped on every grade.
+
+### The segment discrepancy, bisected to one CP-SAT solve (2026-09-16)
+
+With `modal_k` fixed, cloud and local K28 agree on everything that is
+graded -- **34 vias, 0 open, 0 DRC, identical per-net via counts** -- and
+disagree on SEGMENT COUNT: local **783**, cloud **1144**. Four cloud runs
+gave 1144 every time, so both sides are deterministic; they are simply
+different copper.
+
+**The braid is a PURE FUNCTION of the fanout board, and it is
+platform-independent.** Braiding the CLOUD's fanout board ON THE LAPTOP
+reproduces the cloud to the digit, and the control on the local board
+reproduces local:
+
+| braid input | where braided | segs pre -> post | spans | saved |
+|---|---|---|---|---|
+| cloud fanout board | in the cloud | 1415 -> 1144 | 53 | -12.97 mm |
+| cloud fanout board | **on the laptop** | **1415 -> 1144** | **53** | **-12.97 mm** |
+| local fanout board | on the laptop | 1307 -> 783 | 50 | -15.69 mm |
+| local fanout board | in the original run | 1307 -> 783 | 50 | -15.69 mm |
+
+So `grid_router` and the smoother do NOT differ across platforms -- the
+same input gives the same copper. The divergence is entirely upstream.
+
+**Where it enters.** The two fanout boards are the same size (518
+segments, 22 vias) and differ in **7 segments and 1 via**, as SWAPS:
+`SA0` escapes right (x=143.93) locally and left (143.13) in the cloud
+while `SBA1` does the exact opposite, and `SRAS`/`SODT1` trade a via.
+That traces to the FIRST CP-SAT solve, which is FEASIBLE, not proven:
+
+| | first solve | second solve |
+|---|---|---|
+| local | obj 727.2 bound **644.5**, 25.3 s, pages **F18 / B10** | 422 exclusions, OPTIMAL 702.5, F19/B9 |
+| cloud | obj 727.2 bound **644.7**, 50.6 s, pages **F20 / B8** | **423** exclusions, OPTIMAL 702.5, F19/B9 |
+
+Same instance (501 berth + 186 tooth, 378 pairs, 14975 exclusions) and the
+same objective, but a DIFFERENT feasible point. That different first
+solution leaves one different exclusion in the second model, so both sides
+then prove `OPTIMAL 702.5` on models that are not the same. The fanout
+lays the difference, and the braid amplifies it: 45 of 55 nets come out
+identical in segment count, and two nets carry most of the rest -- `SA4`
+is 16 segments / 27.19 mm locally against **179 / 27.29 mm** in the cloud,
+the same span run as one clean 45 degree diagonal locally and as a 0.025 /
+0.0354 staircase at ~22.5 degrees in the cloud.
+
+**Two things worth keeping:**
+
+* **The canary is objective AND BOUND, and the bound is what caught this.**
+  The objective matched exactly (727.2 both) while the plan underneath it
+  differed; only `644.5` against `644.7` said so. Reading the objective
+  alone reports a match on two different plans.
+* **The page split is a stricter canary still**, it is already logged, and
+  `KEEP` already returns it: `pages F 18 / B 10` against `F 20 / B 8` names
+  the divergence directly rather than by proxy. Compare it whenever a cloud
+  arm is set against a local one.
+
+Neither board is better on the graded terms: same vias, same completion,
+cloud 8.9 mm shorter overall (647.44 against 656.33) and local much cleaner
+copper (783 segments against 1144).
 
 PENDING: `cport`/K51, the last arm of the corrected sweep.
 

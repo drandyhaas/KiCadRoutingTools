@@ -157,7 +157,11 @@ KEEP = re.compile(
     # run could not be bisected against a local one at all -- the only
     # pages-first line that survived did so by accident, because it
     # happens to contain the word "unplaced".
-    r"pages-first: \d+ nets, |pages-first: iteration|pages-first: model vias")
+    r"pages-first: \d+ nets, |pages-first: iteration|pages-first: model vias|"
+    # the SMOOTHER's own stats (#536). Two runs agreeing on vias and
+    # completion can still differ in SEGMENT COUNT by a third, and the
+    # only line that says why is this one.
+    r"smooth_octolinear_chains")
 
 
 # memory: REQUEST 1 GB, LIMIT 3 GB (2026-09-12, cut 4x on request).
