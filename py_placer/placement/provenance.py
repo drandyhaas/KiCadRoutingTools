@@ -19,10 +19,11 @@ THIS IS AN ACCOUNTING BOUNDARY, NOT A SECURITY BOUNDARY, and saying so is the
 honest register (`fence_audit.py:84-113` does the same for its own allow-list).
 A determined author can call `declare_lever` from a hand script. What changes
 is that doing so is an affirmative falsification rather than an omission -- and
-because `provenance_audit` reconciles the DELIVERED BOARD's moved poses against
-the ledger rather than reading the log alone, a forger must fabricate a
-consistent `refs_moved` chain, which is a much larger act than skipping a
-disclosure.
+because `provenance_audit` reconciles the DELIVERED BOARD's poses against the
+ledger rather than reading the log alone, a forger must fabricate rows whose
+pose digests chain from the staged board to the delivered one and whose
+recorded moves reproduce it (#972), which is a much larger act than skipping a
+disclosure. It is not a defence against that act: the digest is importable.
 
 Registration is by explicit call, never by sniffing `sys.argv[0]`: sniffing is
 defeated by one assignment, and a boundary that looks stronger than it is, is

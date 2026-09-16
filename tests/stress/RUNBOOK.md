@@ -1301,10 +1301,12 @@ placement either. That is a separate question with a separate instrument:
 
 ```bash
 python3 -X utf8 tests/stress/provenance_audit.py --workdir wk/run12/tigard
-# 0 CLEAN   every moved pose traces to a registered lever, and is where that
-#           lever put it
-# 4 VIOLATION a moved pose has no lever, or drifted after the lever wrote it
-# 5 UNPROVEN  nothing was measured (no regime, or no board)
+# 0 CLEAN   every moved pose traces to a registered lever, and the board is
+#           an arrangement the ledger's lineage produced (or matches the
+#           nearest one it did, pose for pose)
+# 4 VIOLATION a moved pose has no lever, or is not where the recorded writes
+#           put it
+# 5 UNPROVEN  nothing can be concluded (the causes are listed below)
 ```
 
 BOTH STAGERS ARM IT. `stage_unaided.py` and `stage_blind.py` write
@@ -1320,12 +1322,37 @@ A staging row in that ledger is REDACTED to "a staging happened": the ledger
 lives inside the fence, and an unredacted row named the source board and the
 truth dir in its argv and carried the control's own poses.
 
-`5 UNPROVEN` has three live causes now that a staged dir is armed, and the
-`cheats` watcher names them: the dir was staged by neither stager; it was
-MOVED after staging (the manifest holds an absolute path); or no delivered
-board sits beside the staged one at the top level -- pass `--delivered`. A
-fourth is a manifest whose `staged_sha256` no longer matches the board it
-names, which means the baseline every verdict is measured against is stale.
+THE LEDGER IS A LINEAGE, LINKED BY ARRANGEMENT (#972). Every engine row
+records the pose digest of the board it read (`parent_pose_sha256`) and of the
+board it wrote (`board_pose_sha256`): a hash of every footprint's position,
+rotation and side, and nothing else. The audit replays the rows forward from
+the staged board, so the delivered board must be an arrangement the recorded
+writes actually produced, with every pose where they put it. It links by
+arrangement rather than by file bytes or path, because lock stamps, routed
+copper, label moves, fills, copies and renames all rewrite a board without
+moving a part. Before this, pose claims came only from rows naming the
+delivered file, and a declared write of a hand-edited board to a NEW path
+graded CLEAN. A board no recorded write produced is compared with the NEAREST
+one the ledger did (the fewest parts differing), and the parts that differ are
+named. The doc's `lineage` key says which case applied: `verified`, `broken`
+(a recorded write read a board nothing recorded), `unrecorded`, `legacy` (a
+claiming row predates the digests: the old per-file reading plus a pose check
+against every recorded pose) or `unlinkable`. A lever that delivers by copy or
+rename records that delivery against the output itself (#973), so the audit
+picks the output rather than an intermediate. What a digest does NOT see: two
+footprints that share a reference swapping places, and a rotation the parser
+cannot read (an exponent-form angle). And a board built from a SUPERSEDED
+staging is compared with the current one, not with the staging it came from.
+
+`5 UNPROVEN` has these live causes, and the `cheats` watcher names them: the
+dir was staged by neither stager; it was MOVED after staging (the manifest
+holds an absolute path); no delivered board sits beside the staged one at the
+top level -- pass `--delivered`; a manifest whose `staged_sha256` no longer
+matches the board it names, which means the baseline every verdict is
+measured against is stale; a recorded write that read a board no recorded
+write produced and re-moved every part that differs, so the change cannot be
+named; or pose digests that cannot link (missing, or of another scheme) while
+some claims have no pose to compare.
 
 ### Watching a long run
 
