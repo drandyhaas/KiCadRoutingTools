@@ -840,26 +840,34 @@ class Round4(_Boards):
         parser does not expose that delta. So a zero reading certifies
         nothing -- the part keeps its `oob_count` charge and its row says so
         -- while a positive one still names the copper."""
-        body = '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))'
+        # The body overhangs 0.2 mm (inside its band) and the pads sit 0.2 mm
+        # INSIDE the edge, close enough that the occupancy census counts the
+        # part -- so the exemption is genuinely on offer, and only the
+        # certification check withholds it.
+        body = '(fp_rect (start -1.2 -1) (end 1 1) (layer "F.Fab"))'
         keep = '(pad "2" smd rect (at .5 0) (size .5 .5) (layers "F.Cu"))'
         # Wholly inside on the size box, but its copper reaches further: this
         # is the case the box cannot decide.
-        inside = ('(pad "1" smd trapezoid (at -.5 0) (size .5 .5) '
+        inside = ('(pad "1" smd trapezoid (at -.55 0) (size .5 .5) '
                   '(rect_delta 0 .2) (layers "F.Cu"))')
-        path = self.synthetic('trap_inside.kicad_pcb', body, at='2 10 0',
+        path = self.synthetic('trap_inside.kicad_pcb', body, at='1 10 0',
                               pads=inside + '\n    ' + keep)
         r = floorplan.grade(
             _intent(ref='J1', edge='west', overhang_mm={'min': 0.0, 'max': 0.5},
                     _intent={'legality_budget': {'oob_count': 0}}),
             parse_kicad_pcb(str(path)), str(path),
             clearance=.25, board_edge_clearance=.55)
-        copper = _evidence(r, 'J1')['pad_copper_edge']
+        ev = _evidence(r, 'J1')
+        copper = ev['pad_copper_edge']
+        self.assertAlmostEqual(ev['overhang_mm'], 0.2, places=4)
         self.assertAlmostEqual(copper['outside_mm'], 0.0, places=6)
         self.assertFalse(copper['certified'])
         self.assertEqual(copper['disposition'], 'unmeasured')
         self.assertFalse([v for v in r.violations
                           if v.ref == 'J1' and 'pad copper leaves' in v.message])
-        # Not certified means not exempt: the census keeps charging it.
+        # The census DID count it (so the exemption is reachable) ...
+        self.assertGreaterEqual(r.legality.get('oob_count'), 1)
+        # ... and not certified means not exempt: the charge stands.
         self.assertEqual(r.legality.get('oob_count_exempt'), 0)
 
     def test_the_fallback_never_displaces_an_exact_reading(self):
