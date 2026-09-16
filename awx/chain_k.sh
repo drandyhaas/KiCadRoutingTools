@@ -68,16 +68,46 @@ for K in "$@"; do
     if [ ! -f "$RUNBASE" ]; then echo "  FLOW FRAME: turn failed"; continue; fi
     echo "  flow frame: $FK quarter turn(s) about ($FCX, $FCY) -> $(basename "$RUNBASE")"
   fi
-  python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
-    --board="$RUNBASE" > "${TAG}_fo_k${K}.log" 2>&1
+  # CHAIN_FANOUT_AB=1 (2026-09-15, session 13): plan and fan out BOTH ways
+  # -- with and without the JOINT SOURCE RE-FAN (SRC_REFAN_JOINT) -- and
+  # carry every DISTINCT board into the braid portfolio below. The joint
+  # re-fan frees the nets whose copper stands in a source move's room so the
+  # engine can rip and re-lay them around the ask, and measured on the four
+  # rungs it changes the board on only TWO of them: at K51 it reaches the
+  # board that routes 98 (against 115), at K35 a board that routes one via
+  # worse, and at K28/K41 it is inert -- the boards are copper-IDENTICAL, so
+  # the identity check below costs the extra braids nothing there.
+  FOS=""
+  if [ "${CHAIN_FANOUT_AB:-0}" != "0" ]; then
+    for J in 0 1; do
+      rm -f "${TAG}_fo_k${K}_J${J}.kicad_pcb" "${TAG}_fo_k${K}_J${J}.kicad_pro" \
+            "${TAG}_fo_k${K}_J${J}.plan.json"
+      SRC_REFAN_JOINT=$J python3 fanout_from_plan.py "${TAG}_fo_k${K}_J${J}.kicad_pcb" "$K" \
+        --board="$RUNBASE" > "${TAG}_fo_k${K}_J${J}.log" 2>&1
+      [ -f "${TAG}_fo_k${K}_J${J}.kicad_pcb" ] && FOS="$FOS ${TAG}_fo_k${K}_J${J}"
+    done
+    # a board identical to one already in the list is not a candidate
+    FOS=$(python3 dedupe_boards.py $FOS)
+    echo "  fanout A/B: $(echo $FOS | wc -w | tr -d ' ') distinct board(s):$FOS"
+    set -- $FOS
+    [ -n "$1" ] && { cp "$1.kicad_pcb" "${TAG}_fo_k${K}.kicad_pcb"
+                     cp "$1.kicad_pro" "${TAG}_fo_k${K}.kicad_pro" 2>/dev/null
+                     cp "$1.log" "${TAG}_fo_k${K}.log" 2>/dev/null; }
+  else
+    python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
+      --board="$RUNBASE" > "${TAG}_fo_k${K}.log" 2>&1
+    FOS="${TAG}_fo_k${K}"
+  fi
   grep -E "^plan|^wrote|^  round|^  kept|^  destination|source realize:|audit:|ORDER|plan model total" "${TAG}_fo_k${K}.log" | sed 's/^/  /'
   if [ ! -f "${TAG}_fo_k${K}.kicad_pcb" ]; then
     echo "  NO FANOUT BOARD"; continue
   fi
   echo "  fanout stage done $(date +%H:%M:%S)"
-  echo -n "  fanout board: "
-  python3 ../py_router/check_drc.py "${TAG}_fo_k${K}.kicad_pcb" \
-    --clearance "$CLR" --clearance-margin 0.1 2>&1 | grep -E "FOUND|NO DRC"
+  for FO in $FOS; do
+    echo -n "  fanout board $(basename "$FO"): "
+    python3 ../py_router/check_drc.py "$FO.kicad_pcb" \
+      --clearance "$CLR" --clearance-margin 0.1 2>&1 | grep -E "FOUND|NO DRC"
+  done
   # CHAIN_BRAID_AB=1 (2026-09-15, session 13): braid the fanout board BOTH
   # WAYS and keep the better copper. The two arms differ only in the plan
   # sidecar's `pages_first` marker, which switches on the side-face comb
@@ -93,22 +123,53 @@ for K in "$@"; do
     # ONE AT A TIME: two braids in parallel is the thing this box cannot do
     # (8 GB), and a concurrent run is also how a deterministic stage stops
     # being one.
-    rm -f "${TAG}_k${K}_A".* "${TAG}_k${K}_B".*
-    python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
-      --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}_A" \
-      > "${TAG}_k${K}_A.log" 2>&1
-    BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=0 \
-    python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
-      --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}_B" \
-      > "${TAG}_k${K}_B.log" 2>&1
-    win=$(python3 pick_braid.py "$NETS" \
-            "${TAG}_k${K}_A.kicad_pcb" "${TAG}_k${K}_B.kicad_pcb")
+    CANDS=""
+    i=0
+    for FO in $FOS; do
+      i=$((i + 1))
+      rm -f "${TAG}_k${K}_${i}A".* "${TAG}_k${K}_${i}B".*
+      python3 -u braid.py --board "$FO.kicad_pcb" \
+        --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}_${i}A" \
+        > "${TAG}_k${K}_${i}A.log" 2>&1
+      BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=0 \
+      python3 -u braid.py --board "$FO.kicad_pcb" \
+        --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}_${i}B" \
+        > "${TAG}_k${K}_${i}B.log" 2>&1
+      CANDS="$CANDS ${TAG}_k${K}_${i}A.kicad_pcb ${TAG}_k${K}_${i}B.kicad_pcb"
+    done
+    win=$(python3 pick_braid.py "$NETS" $CANDS)
     case "$win" in
-      '') echo "  braid A/B: NO VERDICT -- keeping arm A"; win="${TAG}_k${K}_A.kicad_pcb";;
+      '') echo "  braid A/B: NO VERDICT -- keeping the first arm"
+          win="${TAG}_k${K}_1A.kicad_pcb";;
     esac
     cp "$win" "${TAG}_k${K}.kicad_pcb"
     [ -f "${win%.kicad_pcb}.kicad_pro" ] && cp "${win%.kicad_pcb}.kicad_pro" "${TAG}_k${K}.kicad_pro"
     cp "${win%.kicad_pcb}.log" "${TAG}_k${K}.log" 2>/dev/null
+    # THE SHIPPED FANOUT BOARD IS THE WINNER'S, AND ITS SIDECAR DESCRIBES
+    # THE REGIME THAT ROUTED IT. Two things go wrong otherwise, and both
+    # bite the next consumer rather than this run: shipping the FIRST
+    # fanout board leaves `_fo_` and the routed board describing different
+    # plans, and shipping a sidecar that still says `pages_first` when the
+    # marker-OFF arm won means every later braid of that board -- a
+    # re-braid by hand, or `replan.py`, which re-braids F on every round --
+    # routes the arm the portfolio rejected and throws the gain away.
+    wbase=$(basename "$win" .kicad_pcb)
+    widx=${wbase##*_k${K}_}; warm=${widx#${widx%?}}; widx=${widx%?}
+    set -- $FOS
+    eval "WFO=\${$widx}"
+    cp "$WFO.kicad_pcb" "${TAG}_fo_k${K}.kicad_pcb"
+    cp "$WFO.kicad_pro" "${TAG}_fo_k${K}.kicad_pro" 2>/dev/null
+    cp "$WFO.log" "${TAG}_fo_k${K}.log" 2>/dev/null
+    if [ "$warm" = "B" ]; then
+      python3 -c "
+import json
+d = json.load(open('$WFO.plan.json')); d.pop('pages_first', None)
+json.dump(d, open('${TAG}_fo_k${K}.plan.json', 'w'))"
+      echo "  braid A/B: the marker-OFF arm won -- the shipped sidecar has"\
+           "\`pages_first\` removed, so a re-braid (or replan) reproduces it"
+    else
+      cp "$WFO.plan.json" "${TAG}_fo_k${K}.plan.json" 2>/dev/null
+    fi
   else
     python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
       --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}" \
