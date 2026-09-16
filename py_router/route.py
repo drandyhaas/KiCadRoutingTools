@@ -2810,19 +2810,33 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _fr_new_copper.add(_s.net_id)
             for _v in _r.get('new_vias') or []:
                 _fr_new_copper.add(_v.net_id)
-        _fr_restored = []
-        for _nid, (_segs, _vias) in force_ripped.items():
-            if _nid in _fr_new_copper:
-                continue
-            pcb_data.segments = list(pcb_data.segments) + _segs
-            pcb_data.vias = list(pcb_data.vias) + _vias
-            _fr_restored.append(pcb_data.nets[_nid].name
-                                if _nid in pcb_data.nets else str(_nid))
+        # The saved copper is STALE the moment another net routes while this one
+        # is ripped, which is the NORMAL case here: --force-reroute strips every
+        # named net up front and they contend for one corridor. #134's restore
+        # has always refused a stale restore that would short; this site did
+        # not. partition_force_restores applies the same predicate and keeps the
+        # intent -- every non-colliding net is still restored.
+        from rip_up_reroute import partition_force_restores
+        _fr_ids, _fr_refused_ids = partition_force_restores(
+            force_ripped, pcb_data, config.clearance,
+            skip_net_ids=_fr_new_copper)
+
+        def _fr_name(_nid):
+            return (pcb_data.nets[_nid].name
+                    if _nid in pcb_data.nets else str(_nid))
+        _fr_restored = [_fr_name(_n) for _n in _fr_ids]
+        _fr_refused = [_fr_name(_n) for _n in _fr_refused_ids]
         if _fr_restored:
             print(f"--force-reroute: replan produced no copper for "
                   f"{len(_fr_restored)} net(s); ORIGINAL copper restored: "
                   f"{', '.join(_fr_restored[:6])}"
                   f"{', ...' if len(_fr_restored) > 6 else ''}")
+        if _fr_refused:
+            print(f"--force-reroute: restore SKIPPED for {len(_fr_refused)} "
+                  f"net(s) -- the saved copper would short copper routed into "
+                  f"its corridor this run; left unrouted (#134): "
+                  f"{', '.join(_fr_refused[:6])}"
+                  f"{', ...' if len(_fr_refused) > 6 else ''}")
 
     # ---- Issue #209 fix C: catch cleanup passes that disconnect a completed route ----
     # Snapshot each in-scope multi-pad net's connectivity on the WRITE-LIST copper
