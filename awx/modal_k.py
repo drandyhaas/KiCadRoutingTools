@@ -188,7 +188,10 @@ def run_arm(arm: dict) -> dict:
     # the braid portfolio's two arms differ only by a `pages_first` marker
     # that is never written -- read as a finding. The planner now travels
     # with the grade.
-    planner = "pages-first" if env.get("PLAN_PAGES", "0") not in ("", "0") else "OLD (no PLAN_PAGES)"
+    # SHORT, because the progress line truncates the grade at 70 characters
+    # and a long stamp pushes `vias=` off the end -- which is the number the
+    # sweep exists to report.
+    planner = "pf" if env.get("PLAN_PAGES", "0") not in ("", "0") else "OLD-PLANNER"
     wd = f"{REPO}/awx"
     # ARMS MUST BE INDEPENDENT (2026-09-12). detect_buses keeps a taut-string
     # memo on disk (awx/tmp/taut_memo, 257 shards / 464 MB locally) that is
@@ -380,7 +383,7 @@ def main(arms: str = "awx/arms.example.json", out: str = "", dedupe: bool = True
             Path(out).write_text(json.dumps(
                 sorted(res, key=lambda r: (r["tag"], r["K"])), indent=1))
         print(f'  [{len(res)}/{len(jobs)}] {r["tag"]:9s} K{r["K"]:<3d} '
-              f'{r["secs"]:5d}s {(r["grade"] or "NO GRADE rc=%s" % r["rc"])[:70]}',
+              f'{r["secs"]:5d}s {(r["grade"] or "NO GRADE rc=%s" % r["rc"])[:96]}',
               flush=True)
     res.sort(key=lambda r: (r["tag"], r["K"]))
     print(f"\n=== {len(res)} arm(s) in {round(time.time()-t0)}s wall clock\n")
