@@ -1224,7 +1224,7 @@ _PAREN_OR_QUOTE = re.compile(r'["()]')
 #: `1.421085472e-14`), and this repo's writer uses `:.6g`, so both emit
 #: exponent form for |angle| < 1e-4.
 AT_NUM = r'[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?'
-AT_NODE_RE = re.compile(r'\(at\s+(' + AT_NUM + r')\s+(' + AT_NUM + r')'
+AT_NODE_RE = re.compile(r'\(\s*at\s+(' + AT_NUM + r')\s+(' + AT_NUM + r')'
                         r'(?:\s+(' + AT_NUM + r'))?\s*\)')
 
 
@@ -1247,9 +1247,14 @@ def _footprint_at_start(fp_text: str) -> int:
         c = fp_text[j]
         if c == '(':
             depth += 1
-            if (depth == 2 and fp_text.startswith('(at', j)
-                    and fp_text[j + 3:j + 4] in (' ', '\t', '\n', '\r')):
-                return j
+            if depth == 2:
+                # `( at ...)` is the same node to KiCad's reader.
+                k = j + 1
+                while fp_text[k:k + 1] in (' ', '\t', '\n', '\r'):
+                    k += 1
+                if (fp_text.startswith('at', k)
+                        and fp_text[k + 2:k + 3] in (' ', '\t', '\n', '\r')):
+                    return j
             i = j + 1
         elif c == ')':
             depth -= 1
@@ -3215,6 +3220,11 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
         # the first one in the block, in any number spelling KiCad writes.
         _pose = footprint_pose(fp_text)
         if _pose is None:
+            # KiCad refuses to load such a file; the part is dropped with its
+            # pads, and that must not happen in silence.
+            print("WARNING: footprint %s has an (at ...) that does not parse; "
+                  "the footprint and its pads are skipped" % _block_key,
+                  file=sys.stderr)
             continue
         fp_x, fp_y, fp_rotation = _pose
         if _footprint_at_start(fp_text) < 0:

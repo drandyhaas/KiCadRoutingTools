@@ -222,8 +222,46 @@ ROWS = [
     # Any depth instead of the footprint's direct child: a property's (at ...)
     # listed first becomes the pose again.
     ('the-pose-is-any-at-in-the-block-again', 'p',
-     "            if (depth == 2 and fp_text.startswith('(at', j)",
-     "            if (depth >= 2 and fp_text.startswith('(at', j)",
+     "            if depth == 2:\n"
+     "                # `( at ...)` is the same node to KiCad's reader.",
+     "            if depth >= 2:\n"
+     "                # `( at ...)` is the same node to KiCad's reader.",
+     (T_AT,), 'KILLED'),
+
+    ('a-spaced-at-is-not-the-node', 'p',
+     "                while fp_text[k:k + 1] in (' ', '\\t', '\\n', '\\r'):\n"
+     "                    k += 1\n",
+     "",
+     (T_AT,), 'KILLED'),
+
+    ('a-footprint-whose-at-does-not-parse-is-dropped-silently', 'p',
+     "            print(\"WARNING: footprint %s has an (at ...) that does not parse; \"\n",
+     "            print(\"\" and \"WARNING: footprint %s has an (at ...) that does not parse; \"\n",
+     (T_AT,), 'KILLED'),
+
+    ('the-edge-points-read-the-first-at-again', 'p',
+     "        _pose = footprint_pose(fp_text)\n"
+     "        if _pose is None:\n"
+     "            continue\n"
+     "        fx, fy, frot = _pose\n",
+     "        _m = re.search(r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)"
+     "(?:\\s+([\\d.-]+))?\\)', fp_text)\n"
+     "        if _m is None:\n"
+     "            continue\n"
+     "        fx, fy, frot = (float(_m.group(1)), float(_m.group(2)),"
+     " float(_m.group(3) or 0))\n",
+     (T_AT,), 'KILLED'),
+
+    # The pad-angle rotation when a footprint turns: an exponent pad angle
+    # was skipped, so the pads kept their old angle.
+    ('the-pad-angle-rotation-reads-no-exponent-again', 'w',
+     "        r'\\(at\\s+(' + AT_NUM + r')\\s+(' + AT_NUM + r')(?:\\s+(' + AT_NUM + r'))?\\)',",
+     "        r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)(?:\\s+([\\d.-]+))?\\)',",
+     (T_AT,), 'KILLED'),
+
+    ('the-label-editor-reads-no-exponent-again', 'w',
+     "    at_m = re.search(r'\\(at\\s+' + AT_NUM + r'\\s+' + AT_NUM + r'(?:\\s+' + AT_NUM + r')?\\)', node)",
+     "    at_m = re.search(r'\\(at\\s+[\\d.-]+\\s+[\\d.-]+(?:\\s+[\\d.-]+)?\\)', node)",
      (T_AT,), 'KILLED'),
 
     # Numbers spelled without an exponent: `1e-05`, which the writer's `:.6g`

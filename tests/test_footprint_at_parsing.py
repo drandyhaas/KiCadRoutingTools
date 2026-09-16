@@ -149,6 +149,34 @@ pcb2, _e = parse(p2)
 check('...and the part reads back where it was put',
       pose(pcb2.footprints['C3']) == (120.0, 40.0, 90.0), str(pose(pcb2.footprints['C3'])))
 
+# ...and its pads turned WITH it. `_rotate_pad_angles` reads each pad's own
+# angle: spelled `1e-05` it was skipped, and the pads kept their old angle.
+pref = os.path.join(tempfile.mkdtemp(prefix='fpat_ref_'), 'ref.kicad_pcb')
+quiet(write_placed_output, SF, pref, [{'reference': 'C3', 'new_x': 120.0,
+                                       'new_y': 40.0, 'new_rotation': 90.0}])
+_pref, _e = parse(pref)
+
+
+def _pads(fp):
+    return sorted((p.pad_number, round(p.global_x, 3), round(p.global_y, 3),
+                   round(p.size_x, 3), round(p.size_y, 3)) for p in fp.pads)
+
+
+check('...and its pads turned with it, as a direct write to that pose turns them',
+      _pads(pcb2.footprints['C3']) == _pads(_pref.footprints['C3']),
+      f"{_pads(pcb2.footprints['C3'])} vs {_pads(_pref.footprints['C3'])}")
+
+# The label editor (beautify_labels' writer) finds a Reference node whose
+# angle is in exponent form, instead of silently leaving the label as it was.
+from types import SimpleNamespace                             # noqa: E402
+from placement.writer import _edit_reference_node             # noqa: E402
+_node = ('(property "Reference" "C3" (at 5.08 3.175 1.421085472e-14) '
+         '(layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))')
+_edited = _edit_reference_node(_node, SimpleNamespace(
+    at_x=1.25, at_y=-2.5, file_rotation=90.0, size=0.8, thickness=0.12))
+check('a Reference label at an exponent angle is edited, not skipped',
+      '(at 1.25 -2.5 90)' in _edited and '(size 0.8 0.8)' in _edited, _edited)
+
 # A pad angle and a label angle in exponent form (pcbnew writes both as float
 # noise, e.g. 2.842170943e-14, after a rotate-and-back in the GUI).
 _pad = re.search(r'\(pad\s+"1"[^\n]*\n\s*\(at\s+(\S+)\s+(\S+)(?:\s+(\S+))?\)', C3_BLOCK)
@@ -196,6 +224,13 @@ def _flat(seg):
 
 check('footprint Edge.Cuts land where the part is, at an exponent angle',
       _close(seg_e, seg_z), f'{seg_e} vs {seg_z}')
+# The OTHER collector, which feeds the board bounds and #829's owner decision.
+pts_e = K._footprint_edge_points_by_ref_uncached(with_block(BASE, blk_e)).get('C3')
+pts_z = K._footprint_edge_points_by_ref_uncached(with_block(BASE, blk_z)).get('C3')
+check('...and so do the edge POINTS the board bounds are built from',
+      pts_e is not None and pts_z is not None and len(pts_e) == len(pts_z) > 0
+      and all(abs(a - b) < 1e-6 for pa, pb in zip(pts_e, pts_z) for a, b in zip(pa, pb)),
+      f'{pts_e} vs {pts_z}')
 
 
 # ==========================================================================
@@ -239,6 +274,17 @@ check('...and says so', 'C3 has no (at x y) of its own' in err7, err7[-200:])
 
 check('a pose that does not parse is not invented',
       K.footprint_pose('(footprint "x" (at 1 two))') is None)
+p8 = save(with_block(BASE, C3_BLOCK.replace('(at 144.78 31.75 -90)', '(at 144.78)', 1)))
+pcb8, err8 = parse(p8)
+check('...and the part it drops is named, not dropped in silence',
+      'C3' not in pcb8.footprints and 'C3 has an (at ...) that does not parse' in err8,
+      err8[-200:])
+
+p9 = save(with_block(BASE, C3_BLOCK.replace('(at 144.78 31.75 -90)', '( at 144.78 31.75 -90)', 1)))
+pcb9, err9 = parse(p9)
+check('`( at ...)` with a space is the same node, as KiCad reads it',
+      pose(pcb9.footprints['C3']) == (144.78, 31.75, -90.0) and 'WARNING' not in err9,
+      str(pose(pcb9.footprints['C3'])))
 
 # ==========================================================================
 # 3. nothing else moved
