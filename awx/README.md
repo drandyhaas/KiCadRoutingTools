@@ -6122,6 +6122,41 @@ The one mechanism here that judges by the real thing is the braid-tier
 judge (`PLAN_PAGES_TIER`), which ROUTES the top candidates and decides on
 `(open, vias)`. That is the direction; it is built and barely measured.
 
+### The braid-tier judge MEASURED, and it does not fix the judge (2026-09-16)
+
+The anti-correlation above puts "judge by routing, not by the model's
+objective" first, and `PLAN_PAGES_TIER` is the mechanism that does it.
+Measured across the ladder at three near-tie widths, `TIER_MAX=8`:
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| `ctier3` | 34 | 68 | 79 | 126 |
+| `ctier10` | 34 | 68 | 99 | 150 |
+| `ctier30` | 34 | 68 | 79 | 150 |
+| `cjcl` | 34 | **60** | **79** | **126** |
+
+**Never better, worse at K35 on every width.** So the tier judge is not
+the answer either, and the diagnosis is the interesting part -- it is a
+PROXY TOO, one level up. At K35 it fires once and reads its two
+candidates correctly:
+
+    braid tier: ..._tier0_0a routed 70 via(s), 1 open
+    braid tier: ..._tier0_0b routed 61 via(s), 0 open   <- picked, rightly
+
+...and the chain then ships **68**. The candidate that routes better AS AN
+INTERMEDIATE routes worse after the remaining stages, exactly as a plan
+with a better objective does. **Routing a mid-chain board is not measuring
+the board that ships.** Any judge worth having has to be evaluated on the
+final artefact, which is what `replan.py` does per net with the router as
+an oracle -- and `replan` is the one mechanism that has actually paid
+(74 -> 68 at K41, 98 -> 96 at K51).
+
+**Instrument note:** the first reading of this sweep showed zero tier
+lines and nearly became "the judge never fired" -- `braid tier` was not in
+`modal_k`'s `KEEP`, so the verdicts were filtered out of the returned
+logs. The boards had plainly moved. Same trap as the canary and the
+smoother, third time; `KEEP` now keeps it.
+
 ### The K51 record does NOT reproduce on the cloud (2026-09-16)
 
 The record arm had never actually been run there. Run now, twice:
@@ -6182,10 +6217,12 @@ measurement above, which reorders it:**
    objective that points the wrong way at the rungs that matter. The lead
    is `PLAN_PAGES_TIER`, which ROUTES the top candidates and decides on
    `(open, vias)` -- built, barely measured. Everything below is smaller.
-2. **LAND THE PORTFOLIO.** 34 / 60 / 74 / 98 against jcl's 34 / 60 / 80 /
-   115: better on two rungs, worse on none, an edict-3 pass, and it
-   changes no engine behaviour. A default candidate since session 13 that
-   has never been made the default. The only case against it is TIME.
+2. **THE PORTFOLIO IS NOW THE DEFAULT** (2026-09-16), having passed the
+   gate this file asked for: `synth_ladder --batch b1`, 23
+   planted-optimum cases, better on 5, WORSE ON 0, identical on 18, 331 ->
+   319 total vias at unchanged completion. `CHAIN_FANOUT_AB` and
+   `CHAIN_BRAID_AB` default to 1; set either to 0 for the single-shot
+   chain. The only cost is TIME (K51 ~3 min -> ~8).
 3. **K51, the only rung the human still wins** (96 against 81), and the
    rung where the anti-correlation is worst.
 
