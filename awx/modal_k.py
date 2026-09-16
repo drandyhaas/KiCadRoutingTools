@@ -70,20 +70,42 @@ image = (
 
 app = modal.App("bus622-kladder", image=image)
 
-# the chain environment every arm shares (the item-5 joint solve)
-BASE_ENV = {
+# DETERMINISM HYGIENE, always applied -- exactly what `chain_k.sh` exports
+# for itself. One BLAS thread: a pool sized from the machine makes a
+# reduction's summation order machine-dependent. This is not an arm and
+# has no opinion about routing.
+DETERMINISM_ENV = {
+    "OMP_NUM_THREADS": "1", "VECLIB_MAXIMUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+
+# THE JOINT-SOLVE ARM -- seventeen chain flags, and **OPT-IN since
+# 2026-09-16**. It used to be applied to every arm unconditionally, under
+# the name BASE_ENV, ON TOP of whatever the arms file set. Nothing in an
+# arms file said so, and a caller writing {"env": {"PLAN_JUDGE": "count"}}
+# reasonably believed that was the whole configuration -- so every cloud
+# number this repo has recorded is the joint-solve arm, and NO cloud run
+# had ever executed the arm the laptop runs.
+#
+# It cost a whole 36-container sweep: cloud K28 came back 38 vias where the
+# laptop's jcl is 34, and that was read as a PLATFORM difference. It is
+# not. Running the chain LOCALLY under these flags gives 38 vias exactly
+# (2026-09-16, `baseenv28`), so the flags are the entire via difference.
+#
+# `--base joint-solve` (or MODAL_K_BASE=joint-solve) brings it back for a
+# deliberate comparison with the older recorded numbers; the DEFAULT is
+# now "nothing", i.e. the cloud runs what the laptop runs.
+JOINT_SOLVE_ARM = {
     "SRC_ROUNDS": "0", "SEL_RETRY": "6", "EXACT_LANE": "1", "DST_FACE_ASK": "1",
     "DST_WALK": "3", "SF_SWIM": "30", "BRAID_EXIT_GUARD": "1",
     "BRAID_SWIM_HOLD": "1", "SEL_XING": "2", "SF_EQUIV": "2",
     "SF_JUDGE": "braid", "BRAID_ONE_DIVE": "5", "DST_RESIDUE": "3",
     "DST_RESIDUE_POOL": "displaced", "DST_RESIDUE_CANDS": "4",
     "BRAID_ALT_SOLVER": "cpsat", "BRAID_CPSAT_DET": "40",
-    # one BLAS thread, as chain_k.sh does: a pool sized from the machine
-    # makes a reduction's summation order machine-dependent
-    "OMP_NUM_THREADS": "1", "VECLIB_MAXIMUM_THREADS": "1",
-    "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
-    "NUMEXPR_NUM_THREADS": "1",
 }
+BASES = {"none": {}, "joint-solve": JOINT_SOLVE_ARM}
+BASE_NAME = os.environ.get("MODAL_K_BASE", "none")
 # Nothing here raises a time budget any more: there are none. Every loop
 # is capped in JUDGE CALLS and every solve in nodes or deterministic
 # time, so a container answers exactly what the laptop answers, however
@@ -183,13 +205,13 @@ def run_arm(arm: dict) -> dict:
     """One (tag, K) chain, graded, with the lines worth reading back."""
     tag, K = arm["tag"], int(arm["K"])
     env = dict(os.environ)
-    env.update(BASE_ENV)
+    env.update(DETERMINISM_ENV)
+    env.update(BASES[arm.get("base", BASE_NAME)])
     env.update({k: str(v) for k, v in (arm.get("env") or {}).items()})
-    # WHICH PLANNER THIS ARM ACTUALLY RAN (2026-09-15). BASE_ENV above is
-    # the JOINT-SOLVE arm and does not set PLAN_PAGES, while the local
-    # runner exports `PLAN_PAGES=1` -- so an arms file that forgets it
-    # quietly runs a DIFFERENT PLANNER from the laptop and every
-    # PLAN_PAGES_* flag in that arm is inert. It is invisible in the
+    # WHICH PLANNER THIS ARM ACTUALLY RAN (2026-09-15). Nothing sets
+    # PLAN_PAGES for you, while the local runner exports `PLAN_PAGES=1` --
+    # so an arms file that forgets it quietly runs a DIFFERENT PLANNER from
+    # the laptop and every PLAN_PAGES_* flag in that arm is inert. It is invisible in the
     # result, because the chain grades fine and just answers a different
     # question: a 36-container sweep was read as "the pages-first gains do
     # not reproduce in the cloud" when not one container had run
@@ -201,6 +223,9 @@ def run_arm(arm: dict) -> dict:
     # and a long stamp pushes `vias=` off the end -- which is the number the
     # sweep exists to report.
     planner = "pf" if env.get("PLAN_PAGES", "0") not in ("", "0") else "OLD-PLANNER"
+    base = arm.get("base", BASE_NAME)
+    if base != "none":
+        planner += "+" + base
     wd = f"{REPO}/awx"
     # ARMS MUST BE INDEPENDENT (2026-09-12). detect_buses keeps a taut-string
     # memo on disk (awx/tmp/taut_memo, 257 shards / 464 MB locally) that is
@@ -311,12 +336,15 @@ def main(arms: str = "awx/arms.example.json", out: str = "", dedupe: bool = True
     if len(pf) > 1:
         raise SystemExit(
             "modal_k: this arms file MIXES planners -- some arms set PLAN_PAGES "
-            "and some do not, and BASE_ENV does not set it. Arms on different "
+            "and some do not, and nothing sets it for them. Arms on different "
             "planners are not comparable; set PLAN_PAGES explicitly on every arm.")
+    bases = {a.get("base", BASE_NAME) for a in spec}
+    print(f"modal_k: image python {PY_VERSION}; base arm(s) {sorted(bases)} "
+          f"({'the LAPTOP configuration' if bases == {'none'} else 'NOT the laptop configuration'})")
     if pf == {False}:
         print("modal_k: WARNING -- no arm sets PLAN_PAGES, so every arm runs the "
-              "OLD planner (BASE_ENV is the joint-solve arm). The local chain "
-              "runs pages-first; these numbers are NOT comparable with it.")
+              "OLD planner. The local chain runs pages-first; these numbers "
+              "are NOT comparable with it.")
     jobs = [{"tag": a["tag"], "K": k, "env": a.get("env") or {},
              "replan": a.get("replan"), "return_board": a.get("return_board"),
              "return_files": a.get("return_files")}
