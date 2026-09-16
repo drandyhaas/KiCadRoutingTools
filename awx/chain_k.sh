@@ -68,6 +68,17 @@ for K in "$@"; do
     if [ ! -f "$RUNBASE" ]; then echo "  FLOW FRAME: turn failed"; continue; fi
     echo "  flow frame: $FK quarter turn(s) about ($FCX, $FCY) -> $(basename "$RUNBASE")"
   fi
+  # CHAIN_FANOUT_AB / CHAIN_BRAID_AB are ON BY DEFAULT since 2026-09-16.
+  # THE GATE THEY PASSED, which is the one this file's own note asked for:
+  # `synth_ladder --batch b1`, 23 planted-optimum cases, control against
+  # both flags -- better on 5, WORSE ON 0, identical on 18; 331 -> 319
+  # total vias at unchanged completion (2 open either way). On the bench
+  # ladder: 34 / 60 / 74 / 98 against jcl's 34 / 60 / 80 / 115, better on
+  # two rungs and worse on none. It cannot regress by construction -- it
+  # routes what the chain already produces and keeps the better by
+  # (open, vias) -- so the ONLY case against it is TIME: K51 goes ~3 min
+  # to ~8 (two fanouts, four braids), K28/K41 about 2x (the dedupe drops
+  # the duplicate fanout). Set either to 0 for the single-shot chain.
   # CHAIN_FANOUT_AB=1 (2026-09-15, session 13): plan and fan out BOTH ways
   # -- with and without the JOINT SOURCE RE-FAN (SRC_REFAN_JOINT) -- and
   # carry every DISTINCT board into the braid portfolio below. The joint
@@ -78,7 +89,7 @@ for K in "$@"; do
   # worse, and at K28/K41 it is inert -- the boards are copper-IDENTICAL, so
   # the identity check below costs the extra braids nothing there.
   FOS=""
-  if [ "${CHAIN_FANOUT_AB:-0}" != "0" ]; then
+  if [ "${CHAIN_FANOUT_AB:-1}" != "0" ]; then
     for J in 0 1; do
       rm -f "${TAG}_fo_k${K}_J${J}.kicad_pcb" "${TAG}_fo_k${K}_J${J}.kicad_pro" \
             "${TAG}_fo_k${K}_J${J}.plan.json"
@@ -121,7 +132,7 @@ for K in "$@"; do
   # board-specific hack. Routing both and keeping the better is general, it
   # cannot regress, and it costs one braid. The verdict is (open, vias):
   # completion first, as every grade in this chain is.
-  if [ "${CHAIN_BRAID_AB:-0}" != "0" ]; then
+  if [ "${CHAIN_BRAID_AB:-1}" != "0" ]; then
     # ONE AT A TIME: two braids in parallel is the thing this box cannot do
     # (8 GB), and a concurrent run is also how a deterministic stage stops
     # being one. Each candidate is named after the fanout board it came

@@ -161,7 +161,12 @@ KEEP = re.compile(
     # the SMOOTHER's own stats (#536). Two runs agreeing on vias and
     # completion can still differ in SEGMENT COUNT by a third, and the
     # only line that says why is this one.
-    r"smooth_octolinear_chains")
+    r"smooth_octolinear_chains|"
+    # THE BRAID-TIER JUDGE's own verdicts (PLAN_PAGES_TIER). Without these
+    # a tier arm is a black box: the boards move and nothing says whether
+    # the judge fired, how often, or which way it decided -- and an absent
+    # line reads as "it never ran", which is a FILTER artifact, not a fact.
+    r"braid tier|tier round|tier: ")
 
 
 # memory: REQUEST 1 GB, LIMIT 3 GB (2026-09-12, cut 4x on request).
