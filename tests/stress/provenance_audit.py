@@ -13,17 +13,35 @@ in the repo asked the other question.
 THE AUDIT IS A POSE RECONCILIATION, NOT A LOG READ, and that is what makes it
 worth having. It computes which refs actually MOVED between the staged board
 and the delivered one, then requires every one of them to be claimed by a row
-in the ledger's parent-chain with a registered lever. A hand script that edits
-`(at ...)` as raw text appears in no row, so bypassing the instrument does not
-bypass the check -- the board's own geometry is the anchor.
+with a registered lever. A hand script that edits `(at ...)` as raw text
+appears in no row, so bypassing the instrument does not bypass the check --
+the board's own geometry is the anchor.
+
+AND THE CLAIMS MUST FORM A LINEAGE (#972). Every engine row carries the pose
+digest of the board it read and of the board it wrote. Starting from the
+staged board, a row whose input arrangement is already accounted for accounts
+for its output, replayed from the poses it recorded; the delivered board must
+be one of those arrangements, and every pose in it must be where that replay
+puts it. The link is the ARRANGEMENT, not the file bytes or the path, so a
+lock stamp, routed copper, a copy or an `os.replace` delivery all keep it. A
+board no recorded write produced is compared with the nearest recorded one,
+and the parts that differ are named. Before this, pose claims came only from
+rows naming the delivered file, so a declared write of a hand-edited board to
+a NEW path left the edit `unverifiable` and graded CLEAN.
 
 Exit codes:
 
-    0  CLEAN     every moved pose traces to a registered lever
+    0  CLEAN     every moved pose traces to a registered lever, and the board
+                 is one the ledger's lineage produced (or matches the nearest
+                 one it produced, pose for pose)
     2  usage / IO
-    4  VIOLATION a moved pose has no lever, or a row says declared: false
-    5  UNPROVEN  the chain is broken, not violated -- no ledger, unreadable,
-                 or a sha appearing nowhere
+    4  VIOLATION a moved pose has no lever, or a pose is not where the
+                 lineage put it
+    5  UNPROVEN  nothing can be concluded -- no manifest, a stale staged
+                 board, no delivered board, no ledger and nothing moved, or a
+                 recorded write read a board no recorded write produced and
+                 re-moved every part that differed, so the change cannot be
+                 named
 
 5 is load-bearing. `fence_audit` collapses "no manifest" into LEAK and warns
 about it in its own text; doing that here would retroactively accuse every run
@@ -46,6 +64,10 @@ for _p in (ROOT, os.path.join(ROOT, 'py_router'),
 CLEAN, USAGE, VIOLATION, UNPROVEN = 0, 2, 4, 5
 POSE_TOL_MM = 1e-6
 POSE_TOL_DEG = 1e-3
+#: How far a delivered pose may sit from the pose a lever recorded. Looser
+#: than POSE_TOL_* because a row stores rotation to 4 decimals and the board
+#: holds the writer's `.6g`.
+DRIFT_TOL_MM, DRIFT_TOL_DEG = 1e-3, 1e-2
 
 
 def poses(path):
@@ -57,12 +79,188 @@ def poses(path):
     this audit -- and this audit's whole job is to reconcile what changed
     against what a declared lever claimed. `perturb`'s `layer_flip` produces
     exactly that board.
+
+    CALLS the table the ledger's pose digests are computed from rather than
+    re-deriving it: a second copy is a second thing to disagree about which
+    footprint a key names.
     """
-    from kicad_parser import parse_kicad_pcb
-    from placement.legality import footprint_side
-    pcb = parse_kicad_pcb(path)
-    return {r: (f.x, f.y, f.rotation or 0.0, footprint_side(f))
-            for r, f in pcb.footprints.items()}
+    from placement import provenance as PV
+    return PV.pose_table(path)
+
+
+def _pose_differs(got, want):
+    """Beyond DRIFT_TOL? `want[3]` None says nothing about the side."""
+    return (abs(got[0] - want[0]) > DRIFT_TOL_MM
+            or abs(got[1] - want[1]) > DRIFT_TOL_MM
+            or abs(((got[2] or 0.0) - (want[2] or 0.0) + 180.0) % 360.0
+                   - 180.0) > DRIFT_TOL_DEG
+            or (want[3] is not None and got[3] != want[3]))
+
+
+def _well_formed(row):
+    """A row the audit can read without guessing. Anything else is COUNTED
+    and skipped: one malformed line used to raise a TypeError deep in the
+    claims loop, and the CLI turned that into UNPROVEN -- so appending
+    garbage to a ledger demoted a VIOLATION to "cannot conclude"."""
+    if not isinstance(row, dict):
+        return False
+
+    def _names(v):
+        return v is None or (isinstance(v, (list, tuple))
+                             and all(isinstance(x, str) for x in v))
+
+    if not (_names(row.get('refs_moved')) and _names(row.get('refs_written'))):
+        return False
+    pw = row.get('poses_written')
+    if pw is not None:
+        if not isinstance(pw, dict):
+            return False
+        for v in pw.values():
+            if not (isinstance(v, (list, tuple)) and len(v) >= 3
+                    and all(isinstance(x, (int, float))
+                            and not isinstance(x, bool) for x in v[:3])):
+                return False
+    sw = row.get('sides_written')
+    if sw is not None and not (isinstance(sw, dict) and all(
+            x is None or isinstance(x, str) for x in sw.values())):
+        return False
+    return all(row.get(k) is None or isinstance(row.get(k), str)
+               for k in ('path', 'lever', 'parent_pose_sha256',
+                         'board_pose_sha256'))
+
+
+def _usable(row, PV):
+    """A row that can CLAIM: declared, registered, and not a staging row.
+    A staging row is never a link -- it is redacted, and the baseline is the
+    hash-verified staged FILE, not anything a row says about it."""
+    return (bool(row.get('declared'))
+            and row.get('lever') in PV.LEVER_REGISTRY
+            and row.get('lever') not in PV.FENCE_SENSITIVE_LEVERS
+            and 'redacted' not in row)
+
+
+def _replay(table, row):
+    """`table` with this row's MOVES applied. `refs_moved` only, never every
+    `poses_written` entry: place_seed and perturb hand the writer every part,
+    so replaying all of them would record whatever pose a part HAD -- a hand
+    edit passed through a write-all lever would become a recorded pose."""
+    out = dict(table)
+    _poses = row.get('poses_written') or {}
+    _sides = row.get('sides_written') or {}
+    for ref in row.get('refs_moved') or ():
+        p = _poses.get(ref)
+        if p is None:
+            continue
+        old = out.get(ref)
+        side = _sides.get(ref) or (old[3] if old is not None else None)
+        out[ref] = (float(p[0]), float(p[1]), float(p[2]), side)
+    return out
+
+
+def _differing(delivered, expected):
+    return sorted(r for r, got in delivered.items()
+                  if r in expected and _pose_differs(got, expected[r]))
+
+
+def lineage(rows, staged_table, delivered_table):
+    """Which recorded arrangement is the delivered board, and what differs.
+
+    Returns a dict: `status` is `verified` (the lineage produced exactly this
+    arrangement), `broken` (a recorded write produced it from an input nothing
+    recorded), `unrecorded` (no recorded write produced it), `legacy` (some
+    claiming row predates the pose digests), or `unlinkable` (a digest is None
+    or of an unknown scheme). `drift` names refs present in both the delivered
+    board and the expected one whose poses differ beyond DRIFT_TOL.
+    """
+    from placement import provenance as PV
+    usable = [(i, r) for i, r in enumerate(rows) if _usable(r, PV)]
+    root = PV.pose_digest(staged_table)
+    dg = PV.pose_digest(delivered_table)
+    _pfx = PV.POSE_DIGEST_SCHEME + ':'
+
+    def _linkable(d):
+        return isinstance(d, str) and d.startswith(_pfx)
+
+    # FORWARD, from the root only. "Some row produced my parent" is not
+    # enough: two no-op writes of a hand-edited board would vouch for each
+    # other. Repeated to a fixed point because ledger order is append-at-
+    # COMMIT order, which need not be the order the boards were read in.
+    known, made_by = {root: staged_table}, {root: None}
+    grew = True
+    while grew:
+        grew = False
+        for i, r in usable:
+            b, p = r.get('board_pose_sha256'), r.get('parent_pose_sha256')
+            if _linkable(b) and _linkable(p) and p in known and b not in known:
+                known[b] = _replay(known[p], r)
+                made_by[b] = i
+                grew = True
+
+    def _who(i):
+        if i is None:
+            return 'staged'
+        return {'lever': rows[i].get('lever'),
+                'path': os.path.basename(rows[i].get('path') or '')}
+
+    detail = {'staged_pose_sha256': root, 'delivered_pose_sha256': dg,
+              'states': len(known), 'tip': None, 'break': None,
+              'compared_to': None, 'missing_refs': []}
+
+    def _done(status, expected, compared_to):
+        detail['compared_to'] = compared_to
+        if expected is None:
+            return {'status': status, 'drift': [], 'detail': detail}
+        detail['missing_refs'] = sorted(r for r in expected
+                                        if r not in delivered_table)[:40]
+        return {'status': status, 'drift': _differing(delivered_table, expected),
+                'detail': detail}
+
+    if dg in known:
+        detail['tip'] = None if made_by[dg] is None else _who(made_by[dg])
+        # Verified is not the end: the replay is what the rows CLAIM, and a
+        # row whose file disagrees with its own claims is caught here.
+        return _done('verified', known[dg], _who(made_by[dg]))
+
+    if any('board_pose_sha256' not in r or 'parent_pose_sha256' not in r
+           for _i, r in usable):
+        return _done('legacy', None, None)
+    if any(not (_linkable(r.get('board_pose_sha256'))
+                and _linkable(r.get('parent_pose_sha256')))
+           for _i, r in usable):
+        return _done('unlinkable', None, None)
+
+    # Walk BACK from the delivered arrangement through the newest row that
+    # produced each digest, to the input nothing accounts for.
+    producer = {}
+    for i, r in usable:
+        producer[r['board_pose_sha256']] = i
+    chain, cur, seen = [], dg, set()
+    while cur in producer and cur not in known and cur not in seen:
+        seen.add(cur)
+        i = producer[cur]
+        chain.append(i)
+        cur = rows[i].get('parent_pose_sha256')
+    chain.reverse()                                    # oldest first
+    if chain:
+        detail['tip'] = _who(chain[-1])
+        detail['break'] = dict(_who(chain[0]), parent_pose_sha256=rows[
+            chain[0]].get('parent_pose_sha256'))
+    moved_by_chain = {ref for i in chain for ref in rows[i].get('refs_moved') or ()}
+
+    # The NEAREST recorded arrangement: the fewest parts that must have been
+    # changed outside the ledger. Ties go to the most recent state, the staged
+    # board last, so the choice never depends on dict order.
+    def _rank(d):
+        diff = [r for r in _differing(delivered_table, known[d])
+                if r not in moved_by_chain]
+        return (len(diff), -(made_by[d] if made_by[d] is not None else -1))
+
+    nearest = min(known, key=_rank)
+    expected = known[nearest]
+    for i in chain:
+        expected = _replay(expected, rows[i])
+    return _done('broken' if chain else 'unrecorded', expected,
+                 _who(made_by[nearest]))
 
 
 def added_refs(a, b):
@@ -171,7 +369,8 @@ def audit(workdir, delivered=None):
         # stderr NOTE; a note hours earlier is not a defence against the
         # audit reading the wrong file.
         by_ledger = None
-        for r in reversed(PV.read_ledger(workdir)):
+        for r in reversed([x for x in PV.read_ledger(workdir)
+                           if _well_formed(x)]):
             p = r.get('path')
             if r.get('lever') in PV.FENCE_SENSITIVE_LEVERS:
                 continue
@@ -181,7 +380,9 @@ def audit(workdir, delivered=None):
                 break
         delivered = by_ledger or max(cands, key=os.path.getmtime)
 
-    rows = PV.read_ledger(workdir)
+    _read = PV.read_ledger(workdir)
+    rows = [r for r in _read if _well_formed(r)]
+    malformed = len(_read) - len(rows)
     _sp, _dp = poses(staged), poses(delivered)
     moved = moved_refs(_sp, _dp)
     added = added_refs(_sp, _dp)
@@ -233,15 +434,21 @@ def audit(workdir, delivered=None):
     # nothing hand-edited. An instrument that cries wolf on the normal path is
     # worse than no instrument.
     # ... but scoping ALONE goes blind on a board the ledger never names.
-    # `place_route_loop.py:737` delivers by `shutil.copy(cur_file,
-    # args.output_file)`, so no row's `path` is the delivered file and EVERY
-    # ref falls to `unverifiable_claims` -- measured: a hand-move of C1 by
+    # `place_route_loop` delivered by `shutil.copy(cur_file,
+    # args.output_file)`, so no row's `path` was the delivered file and EVERY
+    # ref fell to `unverifiable_claims` -- measured: a hand-move of C1 by
     # +37/+21 mm in that board graded CLEAN, which is the laundering this
     # check exists to catch, on the rig's own main output. So: scope only
     # when the ledger DOES name the delivered file; when it names it nowhere,
-    # fall back to the whole ledger and check the poses anyway. The two
-    # failure modes are asymmetric -- crying wolf on the normal path costs a
-    # false accusation, going blind costs the finding.
+    # fall back to the whole ledger and check the poses anyway.
+    #
+    # AND SCOPING BY PATH WAS ITSELF A LAUNDERING CHANNEL (#972): once any row
+    # named the delivered file, an earlier hand edit carried into it by a
+    # declared write to a NEW path had no pose to compare, fell to
+    # `unverifiable`, and graded CLEAN. Since the rows carry pose digests the
+    # LINEAGE below decides instead -- by arrangement, not by path -- and this
+    # per-file claim is read only for a ledger whose claiming rows predate the
+    # digests (`legacy`).
     delivered_abs = os.path.normcase(os.path.abspath(delivered))
 
     def _same_file(rp):
@@ -279,30 +486,53 @@ def audit(workdir, delivered=None):
     # claiming rows targeted a DIFFERENT file (a board copied into place, or
     # a delivered board this ledger never names). Both are named in the doc as
     # `unverifiable_claims`, so "not checked" cannot be mistaken for "checked".
-    _TOL_MM, _TOL_DEG = 1e-3, 1e-2
-    drifted, unverifiable = [], []
-    for ref in moved:
-        if ref not in claimed:
-            continue
-        want = claim_pose.get(ref)
-        if want is None:
-            unverifiable.append(ref)
-            continue
-        got = _dp.get(ref)            # poses() -> (x, y, rotation, side)
-        if got is None:
-            continue
-        # `want[3]` is None on a claim that named no side -- every pre-#714
-        # row, and every write that did not flip. A None claim is not a
-        # mismatch; it simply says nothing about the side, which is the same
-        # thing `unverifiable_claims` already says about a missing pose.
-        if (abs(got[0] - want[0]) > _TOL_MM
-                or abs(got[1] - want[1]) > _TOL_MM
-                or abs(((got[2] or 0.0) - want[2] + 180.0) % 360.0 - 180.0)
-                > _TOL_DEG
-                or (want[3] is not None and got[3] != want[3])):
-            drifted.append(ref)
-
     unclaimed = sorted(r for r in moved if r not in claimed)
+    lin = lineage(rows, _sp, _dp)
+    drifted, unverifiable = [], []
+    if lin['status'] in ('legacy', 'unlinkable'):
+        for ref in moved:
+            if ref not in claimed:
+                continue
+            want = claim_pose.get(ref)
+            if want is None:
+                unverifiable.append(ref)
+                continue
+            got = _dp.get(ref)        # poses() -> (x, y, rotation, side)
+            if got is None:
+                continue
+            # `want[3]` is None on a claim that named no side -- every
+            # pre-#714 row, and every write that did not flip. A None claim is
+            # not a mismatch; it simply says nothing about the side, which is
+            # the same thing `unverifiable_claims` already says about a
+            # missing pose.
+            if _pose_differs(got, want):
+                drifted.append(ref)
+        # #972 for a ledger with no lineage to walk: a claim with no pose to
+        # compare is still WRONG when the delivered pose is one no row ever
+        # recorded for that ref, and not the staged pose either.
+        _recorded = {}
+        for row in rows:
+            if not _usable(row, PV):
+                continue
+            _sides = row.get('sides_written') or {}
+            for ref, p in (row.get('poses_written') or {}).items():
+                _recorded.setdefault(ref, []).append(
+                    (p[0], p[1], p[2], _sides.get(ref)))
+        for ref in list(unverifiable):
+            got = _dp.get(ref)
+            if got is None:
+                continue
+            if all(_pose_differs(got, w) for w in
+                   _recorded.get(ref, []) + [_sp.get(ref)] if w is not None):
+                unverifiable.remove(ref)
+                drifted.append(ref)
+    else:
+        # The lineage names every part whose pose is not where the recorded
+        # writes put it, moved relative to the staged board or not: a hand
+        # REVERT of an engine move is a hand placement too. A ref with no
+        # claim at all is already `unclaimed`, which says more.
+        drifted = [r for r in lin['drift'] if r not in unclaimed]
+
     drifted = sorted(drifted)
     unverifiable = sorted(unverifiable)
     bad = sorted(r for r in moved if r in undeclared and r not in claimed)
@@ -316,13 +546,30 @@ def audit(workdir, delivered=None):
            'undeclared_refs': {r: undeclared[r] for r in bad[:40]},
            'levers': sorted({r.get('lever') for r in rows if r.get('lever')}),
            'callers': sorted({r.get('caller') for r in rows
-                              if r.get('caller')})[:10]}
+                              if r.get('caller')})[:10],
+           'lineage': lin['status'],
+           'lineage_detail': dict(lin['detail'], malformed_rows=malformed)}
+    _det = lin['detail']
+    _brk = _det.get('break')
+    _cmp = _det.get('compared_to')
+    _cmp_s = (_cmp if isinstance(_cmp, str)
+              else f"the {_cmp['lever']} write to {_cmp['path']}" if _cmp
+              else 'nothing')
+    if lin['status'] == 'broken':
+        _how = (f" The board descends from a {_brk['lever']} write to "
+                f"{_brk['path']} whose input matches no board the ledger "
+                f"recorded; compared with {_cmp_s}.")
+    elif lin['status'] == 'unrecorded':
+        _how = (f" No recorded write produced this board; compared with the "
+                f"nearest one the ledger did, {_cmp_s}.")
+    else:
+        _how = ''
     if unclaimed:
         doc.update(verdict='UNAIDED VIOLATION', reason=(
             f"{len(unclaimed)} moved pose(s) trace to no registered lever. "
             f"A hand-authored pose reaches the board without a ledger row "
             f"whatever tool it bypassed, because this compares the BOARD, "
-            f"not the log."))
+            f"not the log.{_how}"))
         return VIOLATION, doc
     if drifted:
         doc.update(verdict='UNAIDED VIOLATION', reason=(
@@ -331,8 +578,25 @@ def audit(workdir, delivered=None):
             f"POSE is not: something moved it after the engine wrote it. A "
             f"claim keyed on the ref alone would have graded this CLEAN, "
             f"which is how a hand edit of a part the engine legitimately "
-            f"touched becomes invisible."))
+            f"touched becomes invisible.{_how}"))
         return VIOLATION, doc
+    if lin['status'] == 'broken':
+        # Something moved outside the ledger -- the write's input is no board
+        # any recorded write produced -- but that write moved again every
+        # part that differs, so there is no pose left to name. Not a finding
+        # (4) and not a pass (0).
+        doc.update(verdict='UNPROVEN', reason=(
+            f"a {_brk['lever']} write to {_brk['path']} read a board no "
+            f"recorded write produced, and re-moved every part that differs "
+            f"from {_cmp_s}, so what changed outside the ledger cannot be "
+            f"named. Not a violation, and not provably clean."))
+        return UNPROVEN, doc
+    if lin['status'] == 'unlinkable' and unverifiable:
+        doc.update(verdict='UNPROVEN', reason=(
+            f"the ledger's pose digests do not link (a digest is missing or "
+            f"of an unknown scheme), and {len(unverifiable)} claim(s) have no "
+            f"pose to compare ({', '.join(unverifiable[:6])})."))
+        return UNPROVEN, doc
     # Name BOTH causes. Saying "predate `poses_written`" about a ledger this
     # run wrote seconds ago sends the reader looking for an old ledger that
     # does not exist; the usual cause now is a claiming row that wrote a
@@ -340,10 +604,13 @@ def audit(workdir, delivered=None):
     _unv = (f" ({len(unverifiable)} claim(s) matched by ref only: the "
             f"claiming row wrote a different file, or predates "
             f"`poses_written`)" if unverifiable else '')
+    _clean_how = (f" No recorded write produced exactly this board, and every "
+                  f"shared part matches {_cmp_s} pose for pose."
+                  if lin['status'] == 'unrecorded' else '')
     doc.update(verdict='CLEAN', reason=(
         f"all {len(moved)} moved pose(s) trace to "
         f"{', '.join(doc['levers']) or 'no lever (nothing moved)'}"
-        f", and each is where its lever put it{_unv}"))
+        f", and each is where its lever put it{_unv}.{_clean_how}"))
     return CLEAN, doc
 
 
@@ -375,6 +642,10 @@ def main(argv=None):
         print(f"  unclaimed: {', '.join(doc['unclaimed_refs'][:12])}")
     for ref, who in (doc.get('undeclared_refs') or {}).items():
         print(f"    {ref}: written by {who}, undeclared")
+    if doc.get('lineage') not in (None, 'verified'):
+        _d = doc.get('lineage_detail') or {}
+        print(f"  lineage: {doc['lineage']} (compared with "
+              f"{_d.get('compared_to')}; break at {_d.get('break')})")
     if a.json:
         with open(a.json, 'w', encoding='utf-8') as f:
             json.dump(doc, f, indent=1, sort_keys=True)
@@ -384,7 +655,7 @@ def main(argv=None):
          # scrapes only VERDICT/unclaimed lines: without it a board whose
          # poses were never checked prints an unqualified CLEAN.
          ('verdict', 'moved', 'claimed', 'ledger_rows', 'levers',
-          'unverifiable_claims')},
+          'unverifiable_claims', 'lineage')},
         sort_keys=True))
     return code
 

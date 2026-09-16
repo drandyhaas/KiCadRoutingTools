@@ -12,6 +12,18 @@ staged board. This file pins both halves:
      what it MUST see (a rotation, a side flip, a padless footprint's move),
      plus the row keys, the redaction, and that it never raises and never runs
      outside a regime;
+  2. the lineage `provenance_audit` walks with it: every laundering shape a
+     review could build (a write to a new path, in place, a no-op, two no-ops
+     vouching for each other, a write-all pass-through, a splice of two
+     candidates, a revert, a row whose file disagrees with its claims, a
+     staging lever, malformed rows, an old staging epoch) must NOT grade
+     CLEAN, and the legitimate flows beside them (routed copper and an
+     in-place cap move, a lock stamp, a flip, place_seed's `.polish` rename, a
+     hand-added part) must -- plus the pre-digest (`legacy`) and unlinkable
+     readings.
+
+The literal #972 sequence on esp_prog, and its clean control, live in
+`test_provenance_audit.py` as the issue asks.
 
 It is a separate file from `test_provenance_audit.py` on purpose: that file
 runs route.py's `__main__` through `runpy`, which leaves `route.py` DECLARED
@@ -341,6 +353,346 @@ finally:
 check('outside a regime the writer parses nothing for provenance', _calls == [],
       f'{len(_calls)} call(s)')
 settled('outside')
+
+
+# ==========================================================================
+# 3. the lineage: laundering attempts, and the legitimate flows beside them
+# ==========================================================================
+print('3. the lineage')
+import json                                                    # noqa: E402
+import subprocess                                              # noqa: E402
+import provenance_audit as PA                                  # noqa: E402
+
+_REFS = sorted(parse_kicad_pcb(SF).footprints)
+X, Y, Z = _REFS[0], _REFS[1], _REFS[2]
+
+
+def mv(board, ref, dx=2.0, dy=0.0, rot=None, side=None):
+    fp = fp_of(board, ref)
+    p = {'reference': ref, 'new_x': fp.x + dx, 'new_y': fp.y + dy,
+         'new_rotation': fp.rotation if rot is None else rot}
+    if side is not None:
+        p['new_side'] = side
+    return p
+
+
+def lever_write(inp, out, placements, lever='place_optimize.py'):
+    with PV.declare_lever(lever):
+        quiet(write_placed_output, inp, out, placements)
+
+
+def grade(tag, wd, board, want_code, **want):
+    code, doc = PA.audit(wd, board)
+    ok = code == want_code and all(doc.get(k) == v for k, v in want.items())
+    check(tag, ok, f"exit {code} {doc.get('verdict')} lineage={doc.get('lineage')} "
+                   f"drifted={doc.get('drifted_refs')} unclaimed={doc.get('unclaimed_refs')} "
+                   f"unverifiable={doc.get('unverifiable_claims')}")
+    return code, doc
+
+
+def rewrite_ledger(wd, fn):
+    path = os.path.join(wd, PV.LEDGER_NAME)
+    rs = PV.read_ledger(wd)
+    with open(path, 'w', encoding='utf-8') as f:
+        for r in rs:
+            r = fn(r)
+            if r is not None:
+                f.write(json.dumps(r, sort_keys=True) + '\n')
+
+
+def s972():
+    """The #972 shape on splitflap: E1 moves X into A, X is hand-edited in A.
+    Returns (wd, staged, A)."""
+    wd, st = fresh()
+    A = os.path.join(wd, 'A.kicad_pcb')
+    lever_write(st, A, [mv(st, X)])
+    hand_edit(A, X)
+    return wd, st, A
+
+
+# --- laundering attempts: none may grade CLEAN ----------------------------
+wd, st, A = s972()
+F = os.path.join(wd, 'final.kicad_pcb')
+lever_write(A, F, [mv(A, Y)])
+grade('V1 #972 on splitflap: write to a new path names X', wd, F, PA.VIOLATION,
+      drifted_refs=[X], lineage='broken', unverifiable_claims=[])
+
+wd, st, A = s972()
+lever_write(A, A, [mv(A, Y)])
+grade('V2 the same write IN PLACE names X, not the ref it moved', wd, A, PA.VIOLATION,
+      drifted_refs=[X], lineage='broken')
+
+wd, st = fresh()
+a, b = os.path.join(wd, 'a.kicad_pcb'), os.path.join(wd, 'b.kicad_pcb')
+lever_write(st, a, [mv(st, X)])
+lever_write(st, b, [mv(st, Y)])
+S = os.path.join(wd, 'S.kicad_pcb')
+_t = os.path.join(outside(), 's.kicad_pcb')
+quiet(write_placed_output, st, _t, [mv(st, X), mv(st, Y)])
+shutil.copyfile(_t, S)
+# Both candidates differ from the splice by one part; the tie goes to the most
+# recent state (b), so the part taken from a is the one named. Deterministic.
+grade('V4 a hand splice of two recorded candidates is a VIOLATION', wd, S, PA.VIOLATION,
+      drifted_refs=[X], lineage='unrecorded')
+
+wd, st, A = s972()
+F = os.path.join(wd, 'final.kicad_pcb')
+lever_write(A, F, [])
+grade('V5 a declared no-op write of the edited board names X', wd, F, PA.VIOLATION,
+      drifted_refs=[X], lineage='broken')
+
+wd, st, A = s972()
+H2, H3 = os.path.join(wd, 'H2.kicad_pcb'), os.path.join(wd, 'H3.kicad_pcb')
+lever_write(A, H2, [])
+lever_write(A, H3, [])
+grade('V6 two no-op writes cannot vouch for each other', wd, H3, PA.VIOLATION,
+      drifted_refs=[X], lineage='broken')
+
+wd, st, A = s972()
+F = os.path.join(wd, 'final.kicad_pcb')
+_all = [{'reference': r, 'new_x': p[0], 'new_y': p[1], 'new_rotation': p[2]}
+        for r, p in PV.pose_table(A).items() if r != Y] + [mv(A, Y)]
+lever_write(A, F, _all)
+_r = rows(wd)[-1]
+check('V7 fixture: the write-all row records X at the HAND pose but does not move it',
+      X in _r['poses_written'] and X not in _r['refs_moved'])
+grade('V7 a write-all lever passing the hand pose through does not bless it', wd, F,
+      PA.VIOLATION, drifted_refs=[X], lineage='broken')
+
+wd, st, A = s972()
+F = os.path.join(wd, 'final.kicad_pcb')
+lever_write(A, F, [mv(A, X, dx=-4.0, dy=3.0)])
+grade('V8 a lever that re-moves the edited part leaves nothing to name: UNPROVEN', wd, F,
+      PA.UNPROVEN, lineage='broken', drifted_refs=[], unclaimed_refs=[])
+
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+H = os.path.join(outside(), 'H.kicad_pcb')
+_yv = mv(A, Y)
+quiet(write_placed_output, A, H, [_yv])        # exactly what the row will claim...
+hand_edit(H, X)                                # ...plus a hand edit it does not
+F = os.path.join(wd, 'final.kicad_pcb')
+with PV.declare_lever('place_optimize.py'):
+    PV.record_write(A, F, [_yv], pending=True)
+    shutil.copyfile(H, F)
+    PV.commit_write(F)
+grade('V9 a row whose delivered file disagrees with its own claims is caught', wd, F,
+      PA.VIOLATION, drifted_refs=[X], lineage='verified')
+
+wd, st, A = s972()
+F = os.path.join(wd, 'final.kicad_pcb')
+lever_write(A, F, [mv(A, Y)])
+with open(os.path.join(wd, PV.LEDGER_NAME), 'a', encoding='utf-8') as f:
+    f.write(json.dumps({'schema': 1, 'lever': 'place_seed.py', 'declared': True,
+                        'path': os.path.join(wd, 'elsewhere.kicad_pcb'),
+                        'refs_moved': [], 'poses_written': {}}) + '\n')
+grade('V10 one pre-digest row elsewhere in the ledger does not reopen #972', wd, F,
+      PA.VIOLATION, drifted_refs=[X], lineage='legacy')
+
+wd, st = fresh()
+lever_write(st, st, [], lever='stage_unaided.py')             # a restage: redacted row
+PV.start_regime(wd, st)
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+hand_edit(A, X)
+F = os.path.join(wd, 'final.kicad_pcb')
+lever_write(A, F, [mv(A, Y)])
+grade('V11 a restaging row is neither a link nor a reason to fall back', wd, F,
+      PA.VIOLATION, drifted_refs=[X], lineage='broken')
+
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+hand_edit(A, Z)                                                # a part NO row claims
+F = os.path.join(wd, 'final.kicad_pcb')
+lever_write(A, F, [mv(A, Y)])
+_c, _d = grade('V12 an unclaimed hand edit carried to a new path is unclaimed', wd, F,
+               PA.VIOLATION, unclaimed_refs=[Z], lineage='broken')
+check('...and the reason is still the board-not-log one', 'compares the BOARD' in (_d.get('reason') or ''))
+
+wd, st = fresh()
+H = os.path.join(outside(), 'H.kicad_pcb')
+shutil.copyfile(st, H)
+hand_edit(H, X)
+F = os.path.join(wd, 'final.kicad_pcb')
+lever_write(H, F, [], lever='perturb.py')
+grade('V12b a staging lever cannot mint a hand edit', wd, F, PA.VIOLATION, unclaimed_refs=[X])
+
+wd, st, A = s972()
+with open(os.path.join(wd, PV.LEDGER_NAME), 'a', encoding='utf-8') as f:
+    f.write(json.dumps({'lever': 'place_optimize.py', 'declared': True,
+                        'refs_moved': 5, 'path': 'x'}) + '\n')
+    f.write('[1, 2, 3]\n')
+_p = subprocess.run([sys.executable, '-X', 'utf8', '-B',
+                     os.path.join(REPO, 'tests', 'stress', 'provenance_audit.py'),
+                     '--workdir', wd, '--delivered', A],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace')
+check('V13 malformed rows do not turn a VIOLATION into UNPROVEN',
+      _p.returncode == 4 and 'VERDICT: UNAIDED VIOLATION' in _p.stdout
+      and 'Traceback' not in (_p.stdout + _p.stderr),
+      f'exit {_p.returncode}' if _p.returncode == 4
+      else f'exit {_p.returncode}: {(_p.stdout + _p.stderr)[-300:]}')
+_c, _d = PA.audit(wd, A)
+check('...and they are counted, not silently dropped',
+      (_d.get('lineage_detail') or {}).get('malformed_rows') == 2, str(_d.get('lineage_detail')))
+
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+_fx = fp_of(A, X)
+_t = os.path.join(outside(), 'f.kicad_pcb')
+quiet(write_placed_output, A, _t, [{'reference': X, 'new_x': _fx.x, 'new_y': _fx.y,
+                                    'new_rotation': _fx.rotation, 'new_side': 'B'}])
+shutil.copyfile(_t, A)
+grade('V16 a hand FLIP in place of a claimed part is caught', wd, A, PA.VIOLATION,
+      drifted_refs=[X])
+
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X), mv(st, Y)])
+_sx = fp_of(st, X)
+_t = os.path.join(outside(), 'r.kicad_pcb')
+quiet(write_placed_output, A, _t, [{'reference': X, 'new_x': _sx.x, 'new_y': _sx.y,
+                                    'new_rotation': _sx.rotation}])
+shutil.copyfile(_t, A)
+grade('V17 a hand REVERT of one engine move is caught', wd, A, PA.VIOLATION,
+      drifted_refs=[X], lineage='unrecorded')
+
+# The nearest state, not the newest row. Two candidates move the same three
+# refs to different places; a hand edit of ONE ref in a copy of the first names
+# that ref, where "compare with the newest row" would name all three.
+wd, st = fresh()
+a, b = os.path.join(wd, 'a.kicad_pcb'), os.path.join(wd, 'b.kicad_pcb')
+lever_write(st, a, [mv(st, r) for r in (X, Y, Z)])
+lever_write(st, b, [mv(st, r, dx=6.0, dy=4.0) for r in (X, Y, Z)])
+Ah = os.path.join(wd, 'a_hand.kicad_pcb')
+shutil.copyfile(a, Ah)
+hand_edit(Ah, X)
+grade('lap: a hand edit in a copy of candidate a names that one part', wd, Ah,
+      PA.VIOLATION, drifted_refs=[X])
+
+# A PADLESS footprint on esp_prog, moved by hand after a recorded write.
+wd, st = fresh(EP)
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, 'C3')])
+with open(A, encoding='utf-8') as f:
+    _atxt = f.read()
+_blk = next(bk for bk in iter_footprint_blocks(_atxt) if bk[4] == _padless)
+_am = re.search(r'\(at\s+([\d.-]+)', _blk[2])
+_nb = _blk[2][:_am.start(1)] + f'{float(_am.group(1)) + 3.0:.6f}' + _blk[2][_am.end(1):]
+with open(A, 'w', encoding='utf-8', newline='') as f:
+    f.write(_atxt[:_blk[0]] + _nb + _atxt[_blk[1]:])
+grade('V16b a padless footprint moved by hand is unclaimed', wd, A, PA.VIOLATION,
+      unclaimed_refs=[_padless])
+
+# --- legitimate flows: all CLEAN -----------------------------------------
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+with open(A, encoding='utf-8') as f:
+    _atxt = f.read()
+_cut = _atxt.rstrip().rfind(')')
+with open(A, 'w', encoding='utf-8', newline='') as f:            # routed copper
+    f.write(_atxt[:_cut] + '\t(segment (start 1 1) (end 2 2) (width 0.2) '
+            '(layer "F.Cu") (net 0))\n' + _atxt[_cut:])
+lever_write(A, A, [mv(A, Y)], lever='route.py')               # #666's cap move
+grade('C5 routed copper then an in-place cap move is CLEAN', wd, A, PA.CLEAN,
+      lineage='verified', drifted_refs=[])
+
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+stamp_locked(A, [X, Y])
+grade('C6 a lock stamp after the write is CLEAN', wd, A, PA.CLEAN, lineage='verified')
+
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+_fx = fp_of(st, X)
+lever_write(st, A, [{'reference': X, 'new_x': _fx.x, 'new_y': _fx.y,
+                     'new_rotation': _fx.rotation, 'new_side': 'B'}])
+grade('C13 a lever flip is CLEAN', wd, A, PA.CLEAN, lineage='verified')
+
+# place_seed's polish shape: the row names OUT.polish, and os.replace puts the
+# board at OUT. Linked by arrangement, the path does not matter.
+wd, st = fresh()
+OUT = os.path.join(wd, 'seeded.kicad_pcb')
+lever_write(st, OUT, [mv(st, r) for r in (X, Y, Z)], lever='place_seed.py')
+stamp_locked(OUT, [Z])
+lever_write(OUT, OUT + '.polish', [mv(OUT, X, dx=1.0), mv(OUT, Y, dx=-1.0)],
+            lever='place_seed.py')
+os.replace(OUT + '.polish', OUT)
+grade('C4 a polish written beside the output and renamed onto it is CLEAN', wd, OUT,
+      PA.CLEAN, lineage='verified', drifted_refs=[])
+
+wd, st = fresh()
+D2b = os.path.join(wd, 'added.kicad_pcb')
+lever_write(st, D2b, [mv(st, X)])
+with open(D2b, encoding='utf-8') as f:
+    _dtxt = f.read()
+_blk = next(bk for bk in iter_footprint_blocks(_dtxt) if bk[4] == Y)
+_dup = re.sub(r'"%s"' % re.escape(Y), '"R999"', _blk[2], count=1)
+with open(D2b, 'w', encoding='utf-8', newline='') as f:
+    f.write(_dtxt[:_blk[1]] + '\n' + _dup + _dtxt[_blk[1]:])
+_c, _d = grade('D2 a hand-ADDED part alone stays CLEAN, disclosed', wd, D2b, PA.CLEAN,
+               lineage='unrecorded')
+check('...and the addition is named', 'R999' in (_d.get('added_refs') or []), str(_d.get('added_refs')))
+
+
+# --- a ledger with no lineage to walk, and links that cannot be computed ---
+def _strip(r):
+    if 'redacted' not in r:
+        r.pop('parent_pose_sha256', None)
+        r.pop('board_pose_sha256', None)
+    return r
+
+
+wd, st, A = s972()
+F = os.path.join(wd, 'final.kicad_pcb')
+lever_write(A, F, [mv(A, Y)])
+rewrite_ledger(wd, _strip)
+grade('C15 #972 on a pre-digest ledger is still caught (the any-pose check)', wd, F,
+      PA.VIOLATION, drifted_refs=[X], lineage='legacy')
+
+wd, st = fresh()
+A, F = os.path.join(wd, 'A.kicad_pcb'), os.path.join(wd, 'final.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+lever_write(A, F, [mv(A, Y)])
+rewrite_ledger(wd, _strip)
+grade('C15 an honest pre-digest ledger keeps its old reading, unverifiable named', wd, F,
+      PA.CLEAN, lineage='legacy', unverifiable_claims=[X])
+
+
+def _breaks_last(value):
+    def fn(r, _n=[0]):
+        _n[0] += 1
+        if _n[0] == 2:
+            r['board_pose_sha256'] = value(r.get('board_pose_sha256'))
+        return r
+    return fn
+
+
+for tag, value, word in (('U5 an unknown digest scheme', lambda d: 'p9:' + d.split(':', 1)[1], 'scheme'),
+                         ('U6 a digest that could not be computed', lambda d: None, 'missing')):
+    wd, st = fresh()
+    A, F = os.path.join(wd, 'A.kicad_pcb'), os.path.join(wd, 'final.kicad_pcb')
+    lever_write(st, A, [mv(st, X)])
+    lever_write(A, F, [mv(A, Y)])
+    rewrite_ledger(wd, _breaks_last(value))
+    _c, _d = grade(f'{tag} is UNPROVEN, never a violation', wd, F, PA.UNPROVEN,
+                   lineage='unlinkable')
+    check('...and says why', word in (_d.get('reason') or ''), _d.get('reason'))
+
+# An old staging epoch: the regime was re-armed over a DIFFERENT board, and a
+# board built from the previous baseline is delivered.
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+lever_write(st, st, [mv(st, Z, dx=7.0)], lever='stage_blind.py')
+PV.start_regime(wd, st)
+_c, _d = grade('U7 a board from a superseded staging is not CLEAN', wd, A, PA.VIOLATION,
+               lineage='broken')
+settled('lineage')
 
 
 print(f'\n{passed} passed, {failed} failed')

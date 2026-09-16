@@ -588,13 +588,13 @@ with PV.declare_lever('place_optimize.py', ['place_optimize.py', staged3]):
 _copy = os.path.join(wd3, 'shipped.kicad_pcb')
 _sh.copyfile(_orig, _copy)
 code, doc = PA.audit(wd3, _copy)
-# THE STRONGER PROPERTY. `place_route_loop.py:737` delivers by
-# `shutil.copy(cur_file, args.output_file)`, so the ledger names the delivered
+# THE STRONGER PROPERTY. `place_route_loop` delivered by
+# `shutil.copy(cur_file, args.output_file)`, so the ledger named the delivered
 # board NOWHERE -- and scoping the pose claim to rows that wrote it turned the
 # check OFF for the rig's own main output. Measured before the fallback: a
 # hand-move of C1 by +37/+21 mm in that board graded CLEAN. So a board the
-# ledger does not name must still have its poses checked, against the whole
-# ledger.
+# ledger does not name must still have its poses checked. Since #972 the
+# lineage finds the copy by its ARRANGEMENT, which no path has to name.
 check('a copied board the ledger names nowhere is CLEAN when honest',
       code == PA.CLEAN, f"{doc.get('verdict')} {doc.get('reason')}")
 _hand = os.path.join(wd3, 'shipped_edited.kicad_pcb')
@@ -624,6 +624,75 @@ else:
     check('and a HAND EDIT to that same copied board is still caught', False,
           'could not locate a footprint (at x y) to move; the fixture is '
           'not exercising the path it claims to')
+
+
+# --------------------------------------------------------------------------
+# #972: A DECLARED WRITE TO A NEW PATH DOES NOT LAUNDER AN EARLIER HAND EDIT
+#
+# Pose claims used to come only from rows naming the delivered file. So:
+# place_optimize moves C3 into A, C3 is hand-edited in A (the audit of A says
+# VIOLATION), and a declared write A -> final moving only R1 left C3 with a
+# ref-level claim and no pose -- `unverifiable`, CLEAN, exit 0. The issue's own
+# sequence, on its own board, and the case the scoping was added for beside it.
+# --------------------------------------------------------------------------
+_EP = os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb')
+if os.path.isfile(_EP):
+    _d972 = tempfile.mkdtemp()
+    _out972 = tempfile.mkdtemp()
+    _b972 = os.path.join(_d972, 'b.kicad_pcb')
+    _sh.copyfile(_EP, _b972)
+    PV.start_regime(_d972, _b972)
+    _fps972 = parse_kicad_pcb(_b972).footprints
+    _c3, _r1 = _fps972['C3'], _fps972['R1']
+    _A972 = os.path.join(_d972, 'A.kicad_pcb')
+    with PV.declare_lever('place_optimize.py'):
+        write_placed_output(_b972, _A972, [{'reference': 'C3', 'new_x': _c3.x + 2,
+                                            'new_y': _c3.y, 'new_rotation': _c3.rotation}])
+    _h972 = os.path.join(_out972, 'h.kicad_pcb')
+    write_placed_output(_A972, _h972, [{'reference': 'C3', 'new_x': _c3.x + 9,
+                                        'new_y': _c3.y + 5, 'new_rotation': _c3.rotation}])
+    _sh.copyfile(_h972, _A972)                                   # the hand edit
+    code, doc = PA.audit(_d972, _A972)
+    check('#972: the hand-edited A is a VIOLATION naming C3',
+          code == PA.VIOLATION and doc.get('drifted_refs') == ['C3'],
+          f"{code} {doc.get('verdict')} drifted={doc.get('drifted_refs')}")
+    _F972 = os.path.join(_d972, 'final.kicad_pcb')
+    with PV.declare_lever('place_optimize.py'):
+        write_placed_output(_A972, _F972, [{'reference': 'R1', 'new_x': _r1.x,
+                                            'new_y': _r1.y, 'new_rotation': 0.0}])
+    code, doc = PA.audit(_d972, _F972)
+    check('#972: a declared write of it to a NEW path is still a VIOLATION naming C3',
+          code == PA.VIOLATION and doc.get('drifted_refs') == ['C3']
+          and not doc.get('unverifiable_claims') and doc.get('lineage') == 'broken',
+          f"{code} {doc.get('verdict')} drifted={doc.get('drifted_refs')} "
+          f"unverifiable={doc.get('unverifiable_claims')} lineage={doc.get('lineage')}")
+    code, doc = PA.audit(_d972)
+    check('#972: ...and so is the board the audit picks on its own',
+          code == PA.VIOLATION and os.path.basename(doc.get('delivered') or '') == 'final.kicad_pcb',
+          f"{code} {doc.get('delivered')}")
+
+    # The control: the SAME two writes with no hand edit between them. The
+    # kept board descends from recorded writes, so it is CLEAN -- and every
+    # claim is CHECKED, which the old per-file scoping could not say about C3.
+    _d972c = tempfile.mkdtemp()
+    _b972c = os.path.join(_d972c, 'b.kicad_pcb')
+    _sh.copyfile(_EP, _b972c)
+    PV.start_regime(_d972c, _b972c)
+    _A972c = os.path.join(_d972c, 'A.kicad_pcb')
+    _F972c = os.path.join(_d972c, 'final.kicad_pcb')
+    with PV.declare_lever('place_optimize.py'):
+        write_placed_output(_b972c, _A972c, [{'reference': 'C3', 'new_x': _c3.x + 2,
+                                              'new_y': _c3.y, 'new_rotation': _c3.rotation}])
+        write_placed_output(_A972c, _F972c, [{'reference': 'R1', 'new_x': _r1.x,
+                                              'new_y': _r1.y, 'new_rotation': 0.0}])
+    code, doc = PA.audit(_d972c, _F972c)
+    check('#972 control: recorded writes to a new path are CLEAN, every claim checked',
+          code == PA.CLEAN and doc.get('lineage') == 'verified'
+          and doc.get('unverifiable_claims') == [] and doc.get('claimed') == 2,
+          f"{code} {doc.get('verdict')} lineage={doc.get('lineage')} "
+          f"unverifiable={doc.get('unverifiable_claims')} claimed={doc.get('claimed')}")
+else:
+    check('#972: esp_prog fixture present', False, _EP)
 
 
 # --------------------------------------------------------------------------

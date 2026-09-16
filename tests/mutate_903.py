@@ -332,6 +332,103 @@ ROWS = [
      "    root = regime_for(output_file)\n"
      "    lever = active_lever()\n",
      (T_972,), 'KILLED'),
+
+    # ---- #972: the lineage the audit walks --------------------------------
+    # The finding itself, put back: the lineage is computed and then ignored,
+    # which is the per-file scoping's blindness by another road.
+    ('the-lineage-names-nothing', 'pa',
+     "        drifted = [r for r in lin['drift'] if r not in unclaimed]\n",
+     "        drifted = []\n",
+     (T_972,), 'KILLED'),
+
+    # "Some row produced my parent" instead of "my parent is reachable from
+    # the staged board": two no-op writes of a hand-edited board vouch for
+    # each other. The drift check still names the part, so what dies is the
+    # lineage status the tests pin.
+    ('reachability-becomes-membership', 'pa',
+     "            if _linkable(b) and _linkable(p) and p in known and b not in known:\n"
+     "                known[b] = _replay(known[p], r)\n",
+     "            if _linkable(b) and b not in known:\n"
+     "                known[b] = _replay(known.get(p, staged_table), r)\n",
+     (T_972,), 'KILLED'),
+
+    # A verified arrangement short-circuits to "nothing drifted": a row whose
+    # delivered file carries a pose its claims do not is blessed.
+    ('a-verified-board-skips-the-replay', 'pa',
+     "        return _done('verified', known[dg], _who(made_by[dg]))\n",
+     "        return _done('verified', None, _who(made_by[dg]))\n",
+     (T_972,), 'KILLED'),
+
+    # Replaying every written pose instead of every MOVE re-blesses a hand
+    # edit that a write-all lever (place_seed, perturb) passed through.
+    ('the-replay-applies-every-written-pose', 'pa',
+     "    _sides = row.get('sides_written') or {}\n"
+     "    for ref in row.get('refs_moved') or ():\n",
+     "    _sides = row.get('sides_written') or {}\n"
+     "    for ref in _poses:\n",
+     (T_972,), 'KILLED'),
+
+    # A redacted staging row has no digests by design; counting it as a
+    # pre-digest row sends every restaged work dir back to the #972 path.
+    ('a-staging-row-makes-the-ledger-legacy', 'pa',
+     "    if any('board_pose_sha256' not in r or 'parent_pose_sha256' not in r\n"
+     "           for _i, r in usable):\n",
+     "    if any('board_pose_sha256' not in r or 'parent_pose_sha256' not in r\n"
+     "           for r in rows):\n",
+     (T_972,), 'KILLED'),
+
+    ('a-staging-row-can-claim', 'pa',
+     "            and row.get('lever') not in PV.FENCE_SENSITIVE_LEVERS\n"
+     "            and 'redacted' not in row)\n",
+     "            )\n",
+     (T_972,), 'KILLED'),
+
+    ('an-unknown-digest-scheme-links', 'pa',
+     "        return isinstance(d, str) and d.startswith(_pfx)\n",
+     "        return isinstance(d, str)\n",
+     (T_972,), 'KILLED'),
+
+    ('a-malformed-row-crashes-the-audit', 'pa',
+     "    rows = [r for r in _read if _well_formed(r)]\n",
+     "    rows = list(_read)\n",
+     (T_972,), 'KILLED'),
+
+    # The newest row is not the nearest arrangement: a hand edit in a copy of
+    # the FIRST candidate would name every part the second one moved.
+    ('the-nearest-state-is-the-newest', 'pa',
+     "        return (len(diff), -(made_by[d] if made_by[d] is not None else -1))\n",
+     "        return (0, -(made_by[d] if made_by[d] is not None else -1))\n",
+     (T_972,), 'KILLED'),
+
+    ('a-broken-lineage-outranks-unclaimed', 'pa',
+     "    if unclaimed:\n",
+     "    if unclaimed and lin['status'] != 'broken':\n",
+     (T_972,), 'KILLED'),
+
+    ('legacy-skips-the-any-pose-check', 'pa',
+     "            if all(_pose_differs(got, w) for w in\n",
+     "            if False and all(_pose_differs(got, w) for w in\n",
+     (T_972,), 'KILLED'),
+
+    ('a-broken-lineage-with-nothing-named-is-clean', 'pa',
+     "    if lin['status'] == 'broken':\n"
+     "        # Something moved outside the ledger",
+     "    if False:\n"
+     "        # Something moved outside the ledger",
+     (T_972,), 'KILLED'),
+
+    # Compared with the nearest state WITHOUT the chain's own recorded moves:
+    # the write that broke the chain gets its legitimate parts named too.
+    ('the-chain-is-not-replayed', 'pa',
+     "    for i in chain:\n"
+     "        expected = _replay(expected, rows[i])\n",
+     "",
+     (T_972,), 'KILLED'),
+
+    ('an-unlinkable-ledger-is-clean', 'pa',
+     "    if lin['status'] == 'unlinkable' and unverifiable:\n",
+     "    if False:\n",
+     (T_972,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is
