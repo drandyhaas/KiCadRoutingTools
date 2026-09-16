@@ -1219,6 +1219,75 @@ def _unescape_kicad_string(s: str) -> str:
 _PAREN_OR_QUOTE = re.compile(r'["()]')
 
 
+#: A KiCad number as the file may spell it. KiCad writes ANGLES with a
+#: significant-digit format (probed on pcbnew 10.0.0: `1e-14`,
+#: `1.421085472e-14`), and this repo's writer uses `:.6g`, so both emit
+#: exponent form for |angle| < 1e-4.
+AT_NUM = r'[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?'
+AT_NODE_RE = re.compile(r'\(at\s+(' + AT_NUM + r')\s+(' + AT_NUM + r')'
+                        r'(?:\s+(' + AT_NUM + r'))?\s*\)')
+
+
+def _footprint_at_start(fp_text: str) -> int:
+    """Index of the footprint's OWN `(at` -- its direct child -- or -1.
+
+    String-aware (a `(descr "(at 9 9)")` is not markup) and depth-scoped (a
+    property's or pad's `(at ...)` is not the footprint's, whatever order the
+    file lists them in).
+    """
+    depth = 0
+    i = 0
+    search = _PAREN_OR_QUOTE.search
+    find_quote = fp_text.find
+    while True:
+        m = search(fp_text, i)
+        if m is None:
+            return -1
+        j = m.start()
+        c = fp_text[j]
+        if c == '(':
+            depth += 1
+            if (depth == 2 and fp_text.startswith('(at', j)
+                    and fp_text[j + 3:j + 4] in (' ', '\t', '\n', '\r')):
+                return j
+            i = j + 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return -1
+            i = j + 1
+        else:
+            i = j + 1
+            while True:
+                k = find_quote('"', i)
+                if k == -1:
+                    return -1
+                b = k - 1
+                while b >= i and fp_text[b] == '\\':
+                    b -= 1
+                i = k + 1
+                if (k - 1 - b) % 2 == 0:
+                    break
+
+
+def footprint_at_match(fp_text: str):
+    """The footprint's OWN `(at ...)` as a re.Match, or None.
+
+    Groups 1..3 are x, y and the optional angle; `.start()`/`.end()` are the
+    node's span inside `fp_text`, which is what a writer needs to rewrite it.
+    None when the block has no `(at ...)` of its own or it does not parse.
+
+    Two ways the textually-first `(at` was wrong, both fixed here: a child's
+    `(at ...)` placed before the footprint's own was read as the footprint's
+    pose, and an angle in exponent form (`1e-05`, which the writer's `:.6g`
+    emits and pcbnew 10 writes as `1e-14`) did not match the old digits, dots
+    and minus class at all, so the FIRST CHILD's `(at ...)` was read instead
+    -- or the footprint was dropped with its pads.
+    """
+    j = _footprint_at_start(fp_text)
+    return None if j < 0 else AT_NODE_RE.match(fp_text, j)
+
+
 def find_matching_paren(content: str, open_idx: int) -> int:
     """Return the index just past the ``)`` matching the ``(`` at ``open_idx``.
 
@@ -1615,6 +1684,9 @@ def iter_footprint_shapes(fp_text: str, tags=_FP_SHAPE_TAGS):
 def footprint_pose(fp_text: str):
     """`(x, y, rotation_deg)` of one footprint block, or None.
 
+    `(0, 0, 0)` -- KiCad's default -- when the block has no `(at ...)` of its
+    own; None only when it has one that does not parse.
+
     The footprint's own `(at ...)` is the one at the block's TOP LEVEL. Taking
     the textually first one instead is wrong twice over, and #908 raised the
     stakes from a bounds point to a copper obstacle at the wrong place:
@@ -1631,33 +1703,16 @@ def footprint_pose(fp_text: str):
     `GetPosition()`/`GetOrientationDegrees()` on all 1349 corpus footprints --
     so both are latent. They are also free to rule out.
     """
-    depth = 0
-    i, n = 0, len(fp_text)
-    while i < n:
-        c = fp_text[i]
-        if c == '"':                        # skip the whole string literal
-            i += 1
-            while i < n:
-                if fp_text[i] == '\\':
-                    i += 2
-                    continue
-                if fp_text[i] == '"':
-                    break
-                i += 1
-            i += 1
-            continue
-        if c == '(':
-            depth += 1
-            if depth == 2 and fp_text.startswith('(at', i):
-                m = re.match(r'\(at\s+([\d.-]+)\s+([\d.-]+)'
-                             r'(?:\s+([\d.-]+))?\s*\)', fp_text[i:])
-                if m:
-                    return (float(m.group(1)), float(m.group(2)),
-                            float(m.group(3)) if m.group(3) else 0.0)
-        elif c == ')':
-            depth -= 1
-        i += 1
-    return None
+    j = _footprint_at_start(fp_text)
+    if j < 0:
+        # KiCad's own reader leaves a footprint with no `(at ...)` at its
+        # default pose, the origin; taking a child's instead was the bug.
+        return (0.0, 0.0, 0.0)
+    m = AT_NODE_RE.match(fp_text, j)
+    if m is None:
+        return None
+    return (float(m.group(1)), float(m.group(2)),
+            float(m.group(3)) if m.group(3) else 0.0)
 
 
 _FP_PAD_RE = re.compile(r'\(pad\s+("(?:[^"\\]|\\.)*"|\S+)\s+(\w+)')
@@ -1773,11 +1828,10 @@ def _footprint_edge_points_by_ref_uncached(
         if '"Edge.Cuts"' not in fp_text:
             continue
         pts: List[Tuple[float, float]] = []
-        at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
-        if not at_match:
+        _pose = footprint_pose(fp_text)
+        if _pose is None:
             continue
-        fx, fy = float(at_match.group(1)), float(at_match.group(2))
-        frot = float(at_match.group(3)) if at_match.group(3) else 0.0
+        fx, fy, frot = _pose
         local: List[Tuple[float, float]] = []
         for sm in re.finditer(
                 r'\(fp_(line|rect)\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
@@ -2239,11 +2293,10 @@ def _collect_footprint_edge_segments_by_ref(content: str):
         if '"Edge.Cuts"' not in block:
             continue
         out = out_by_ref.setdefault(_key, [])
-        at = re.search(r'\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)', block)
-        if not at:
+        _pose = footprint_pose(block)
+        if _pose is None:
             continue
-        fx, fy = float(at.group(1)), float(at.group(2))
-        rot = float(at.group(3)) if at.group(3) else 0.0
+        fx, fy, rot = _pose
         rad = math.radians(-rot)
         cos_r, sin_r = math.cos(rad), math.sin(rad)
 
@@ -2914,8 +2967,7 @@ def _parse_ref_label(fp_text: str, ref_start: int,
     (size 1.0, thickness 0.15).
     """
     ref_text = fp_text[ref_start:find_matching_paren(fp_text, ref_start)]
-    at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)',
-                         ref_text)
+    at_match = AT_NODE_RE.search(ref_text)
     if not at_match:
         return None
     layer_match = re.search(r'\(layer\s+"([^"]+)"\)', ref_text)
@@ -3159,14 +3211,17 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             continue
         fp_name = fp_name_match.group(1)
 
-        # Extract position and rotation
-        at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
-        if not at_match:
+        # Extract position and rotation: the footprint's OWN `(at ...)`, not
+        # the first one in the block, in any number spelling KiCad writes.
+        _pose = footprint_pose(fp_text)
+        if _pose is None:
             continue
-
-        fp_x = float(at_match.group(1))
-        fp_y = float(at_match.group(2))
-        fp_rotation = float(at_match.group(3)) if at_match.group(3) else 0.0
+        fp_x, fp_y, fp_rotation = _pose
+        if _footprint_at_start(fp_text) < 0:
+            # Said, not silent: a footprint with no pose of its own is not
+            # something KiCad writes, and the origin is only its default.
+            print("WARNING: footprint %s has no (at x y) of its own; placed at "
+                  "the origin, as KiCad places it" % _block_key, file=sys.stderr)
 
         # Extract layer
         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', fp_text)
@@ -3291,7 +3346,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             pad_shape = pad_match.group(3)  # circle, rect, roundrect, etc.
 
             # Extract pad local position and rotation
-            pad_at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', pad_text)
+            pad_at_match = AT_NODE_RE.search(pad_text)
             if not pad_at_match:
                 continue
 
