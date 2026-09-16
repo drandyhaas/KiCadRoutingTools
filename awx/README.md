@@ -5891,55 +5891,56 @@ round, both fixed at the end of the session and both unmeasured:
    plan wanted to move kept its standing tooth for a reason that had
    nothing to do with it. The pre-group move is restored into the rest.
 
-### THE CLOUD SWEEP: the gains DO NOT REPRODUCE (2026-09-15, 36 containers)
+### THE CLOUD SWEEP THAT MEASURED NOTHING (2026-09-15) -- RETRACTED, and why
 
-`modal run awx/modal_k.py --arms awx/arms.s13.json` -- nine arms x four
-rungs, one container each, every arm alone in its own container. Read
-cloud-to-cloud only (`modal_k.py`'s own rule; the stack is python 3.13
-there against 3.14 here, and a python change has moved copper before).
+A 36-container Modal sweep (nine arms x four rungs) came back with every
+arm bit-identical at K28, K41 and K51, and it was written up here as **"the
+gains do not reproduce off the local stack"**. **That conclusion is
+WITHDRAWN. Not one container ran the pages-first planner.**
 
-| arm | K28 | K35 | K41 | K51 |
-|---|---|---|---|---|
-| `cjcl` (the cloud baseline) | 38 | 70 | 88 | 124 |
-| `cbraid` (the braid portfolio) | 38 | 70 | 88 | 124 |
-| `cjoint` (the joint re-fan) | 38 | **60** | 88 | 124 |
-| `cwalk` / `cwstage` (the walk, and its per-stage budget) | 38 | **60** | 88 | 124 |
-| `cgrp` (group + tier, on the portfolio) | 38 | **60** | 88 | 124 |
-| LOCAL, for contrast | 34 | 60 | **74** | **98** |
+`modal_k.py`'s `BASE_ENV` is the OLD **joint-solve arm** and does not set
+`PLAN_PAGES`; the local runner exports `PLAN_PAGES=1`; the arms file did
+not. So every `PLAN_PAGES_*` flag in the sweep -- the walk, the group, the
+tier, and the sidecar's `pages_first` marker -- was inert, and the chain
+graded perfectly while answering a different question.
 
-**The braid portfolio captures NOTHING in the cloud** -- identical vias AND
-identical segment counts to the baseline at every rung, so the marker-OFF
-arm never won a single comparison. Locally it is worth 6 vias at K41 and 14
-at K51. Its safety property held exactly as designed (never WORSE); there
-was simply nothing to win.
+**Every observation is explained by it, which is what makes the failure
+worth recording:**
 
-**The one gain is K35, -10, and it is the joint re-fan or the walk** --
-where LOCALLY the joint re-fan COSTS a via at K35. Opposite sign.
+* **Every arm identical at K28/K41/K51.** The braid portfolio's two arms
+  differ ONLY by the `pages_first` marker, which is never written when
+  PLAN_PAGES is off -- so arm A and arm B were the same braid. `cbraid`
+  matched `cjcl` in vias AND segments, and that bit-identity read as
+  "the portfolio captures nothing" when it was "the portfolio had no
+  branch".
+* **The K35 split (70 against 60) is the two flags that are NOT
+  pages-first-gated**: `SRC_REFAN_JOINT` and `SRC_CLIMB_END`. Seven arms
+  carry one or the other and all seven gave 60/1583; the two that carry
+  neither (`cjcl`, `cbraid`) gave 70/1555. A perfect partition -- no
+  exceptions -- which is how it was told apart from the taut-memo
+  contamination `run_arm` warns about, whose documented states are the
+  same two numbers.
+* **The baseline itself.** Cloud 38 / 70 / 88 sits on the README's own
+  recorded REFERENCE arm (the old planner) 36 / 69 / 86, not on jcl's
+  34 / 60 / 80.
 
-**The cloud baseline is worse at every rung** (38/70/88/124 against
-34/60/80/115), which is a real confound and not an excuse: the stack
-difference puts the router in a different regime, possibly one where the
-marker choice is already the right one.
+**Fixed in the driver, not just in the arms file** -- a wrong arms file
+should not be able to do this again. `run_arm` now stamps every grade with
+the planner it actually ran (`[pages-first]` / `[OLD (no PLAN_PAGES)]`),
+the entrypoint REFUSES an arms file that mixes planners (arms on different
+planners are not comparable), and warns when no arm sets it at all.
+`MODAL_K_PY` also exists now: Modal offers a python-3.14 base today, which
+is the laptop's own, so a cloud number can be compared with a local one at
+all -- the module was written when 3.13 was the nearest available.
 
-**So item 1 does not proceed on this evidence.** The local boards are real
--- 0 open, 0 DRC, independently verified -- but the MECHANISM's value is
-stack-dependent and has not generalised. Two questions for the next
-session, in this order:
-
-* **Is it the stack or the bench?** Re-run `cjcl` against a cloud image
-  pinned to python 3.14 if one can be had. If the cloud baseline then
-  matches 34/60/80/115, the divergence is the stack and the local gains
-  may be real-but-narrow; if it still reads 38/70/88/124, something else
-  differs and the cloud numbers are not measuring the same chain.
-* **Does the marker arm ever win in the cloud?** `cbraid`'s per-candidate
-  lines (`braid A/B: ... routed N via(s)`) are in its container log and say
-  directly whether arm B was ever close. If B is never within a via or
-  two, the portfolio has no branch to exploit there at all.
+**So the generality of session 13's gains is UNTESTED, not refuted.** The
+sweep is re-queued with `PLAN_PAGES=1` on every arm.
 
 **NEXT, in order:**
 
-1. **The two-level PORTFOLIO is NOT a default candidate any more** -- see
-   the cloud sweep above. What stood before the sweep: `CHAIN_FANOUT_AB=1 CHAIN_BRAID_AB=1` = 34 /
+1. **The two-level PORTFOLIO is a default candidate whose generality is
+   UNTESTED** (the sweep that seemed to refute it measured the old
+   planner -- see above). What stands: `CHAIN_FANOUT_AB=1 CHAIN_BRAID_AB=1` = 34 /
    60 / 74 / 98: six vias better than jcl at K41, seventeen at K51, worse
    on NO rung, every canary matched. It changes no engine behaviour -- it
    routes what the chain already produces and keeps the better -- so it
