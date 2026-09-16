@@ -200,8 +200,8 @@ def pose_footprints(path: str) -> Dict:
     `parse_kicad_pcb` takes its footprints from exactly this call and changes
     no x/y/rotation/layer afterwards, so the keys are the ones the audit and
     every lever use -- including #726's `TP4~2` ordinals and a reference-less
-    block's `#<uuid>` -- at about a third of the cost, because nets, zones and
-    outline contours are never built.
+    block's `#<uuid>` -- at a third to a half of the cost, because nets,
+    zones and outline contours are never built.
     """
     from kicad_parser import extract_footprints_and_pads
     with open(path, 'r', encoding='utf-8') as f:

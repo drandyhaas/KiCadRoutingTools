@@ -329,6 +329,38 @@ ROWS = [
      "        return None\n",
      (T_972,), 'KILLED'),
 
+    # The PARENT digest's own guard. Reached only when the input parsed and
+    # digesting it failed; a narrowed except there raises out of
+    # `record_write` and the lever's write never happens.
+    ('the-parent-digest-can-raise', 'pv',
+     "        except Exception:                        # noqa: BLE001\n"
+     "            _parent_pose = None\n",
+     "        except KeyError:\n"
+     "            _parent_pose = None\n",
+     (T_972,), 'KILLED'),
+
+    # The non-pending path: no production lever takes it today, which is
+    # exactly why nothing else would notice its rows stop linking.
+    ('a-direct-row-carries-no-board-pose', 'pv',
+     "        return row\n"
+     "    row['board_sha256'] = (sha256_file(output_file)\n"
+     "                           if os.path.isfile(output_file) else None)\n"
+     "    _stamp_board_pose(row, output_file)\n",
+     "        return row\n"
+     "    row['board_sha256'] = (sha256_file(output_file)\n"
+     "                           if os.path.isfile(output_file) else None)\n",
+     (T_972,), 'KILLED'),
+
+    # Truncating instead of rounding: 137.253 * 1e4 is 1372529.99..., so an
+    # angle the writer emits as `.6g` would digest one step off the same
+    # angle read back from another spelling.
+    ('the-pose-digest-truncates', 'pv',
+     "    rows = [[ref, round(x * 1e6), round(y * 1e6),\n"
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     "    rows = [[ref, int(x * 1e6), int(y * 1e6),\n"
+     "             int(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     (T_972,), 'KILLED'),
+
     # Outside a regime the writer must cost nothing it did not cost before.
     ('the-digest-is-computed-outside-a-regime', 'pv',
      "    root = regime_for(output_file)\n"

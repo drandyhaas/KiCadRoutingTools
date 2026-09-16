@@ -168,6 +168,14 @@ check('esp_prog digest is the golden literal',
       str(_ep_digest))
 check('...and an independent derivation from parse_kicad_pcb agrees',
       _ep_digest == independent_digest(EP))
+# esp_prog's angles are all multiples of 90 and its refs are ASCII, so the
+# literal above cannot see the rounding step or the escaping. This one can:
+# 137.253 * 1e4 is 1372529.99..., which `int()` would truncate, and a non-ASCII
+# ref spells differently with `ensure_ascii=False`.
+check('a synthetic table with a .6g angle and a non-ASCII ref is its golden literal',
+      D({'C1': (1.5, -2.25, 137.253, 'F'), 'Ω1': (0.0, 0.0, -90.0, 'B'),
+         'R2': (10.0000004, 3.3333333, 0.00005, 'F')})
+      == 'p1:ee01be11cb4a0ddf021b5633c5b9bc90192d5888a27cfa2d1a607279dbd1793d')
 _pt, _pk = PV.pose_table(EP), parse_kicad_pcb(EP).footprints
 check('pose_table keys are parse_kicad_pcb keys (Ref*~2, #uuid included)',
       set(_pt) == set(_pk) and any('~' in r for r in _pt)
@@ -208,15 +216,22 @@ with open(_sp, 'w', encoding='utf-8', newline='') as _f:
 check('a respelt `(at ...)` (implicit 0, or -360 offset) has the same digest',
       _spelt != _txt and PV.file_pose_digest(_sp) == PV.file_pose_digest(SF))
 
-# A `.6g` rotation: the writer emits 137.253 for 137.253491, and a later
-# identity write re-reads and re-emits that text.
+# A `.6g` rotation: the writer emits 137.253 for 137.253491, and a later write
+# that RE-EMITS every part at the pose it parsed must land on the same digest.
+# (An empty write is byte-identical, which would make this check unable to
+# fail.)
 _r6a = os.path.join(_o, 'r6a.kicad_pcb')
 _r6b = os.path.join(_o, 'r6b.kicad_pcb')
 _fp0 = fp_of(SF, _lk_ref)
 quiet(write_placed_output, SF, _r6a, [{'reference': _lk_ref, 'new_x': _fp0.x,
                                        'new_y': _fp0.y, 'new_rotation': 137.253491}])
-quiet(write_placed_output, _r6a, _r6b, [])
-check('a .6g rotation survives an identity rewrite', PV.file_pose_digest(_r6a) == PV.file_pose_digest(_r6b))
+quiet(write_placed_output, _r6a, _r6b,
+      [{'reference': r, 'new_x': p[0], 'new_y': p[1], 'new_rotation': p[2]}
+       for r, p in PV.pose_table(_r6a).items()])
+check('a .6g rotation survives a rewrite of every part at its parsed pose',
+      PV.sha256_file(_r6a) != PV.sha256_file(_r6b)
+      and PV.file_pose_digest(_r6a) == PV.file_pose_digest(_r6b),
+      f'bytes differ: {PV.sha256_file(_r6a) != PV.sha256_file(_r6b)}')
 
 # --- rewrites that DO move something -------------------------------------
 _rot = os.path.join(_o, 'rot.kicad_pcb')
@@ -334,6 +349,46 @@ check('...and records the digests as unknown, not as a value',
       _r and _r[0].get('parent_pose_sha256') is None and _r[0].get('board_pose_sha256') is None
       and 'parent_pose_sha256' in _r[0] and 'board_pose_sha256' in _r[0])
 settled('parse failure')
+
+# The input PARSED, but digesting it failed. That is the parent digest's own
+# guard, which the injection above never reaches (a failed parse leaves no
+# footprints to digest).
+wd3, staged3 = fresh()
+_real_of = PV.pose_table_of
+
+
+def _boom_of(fps):
+    raise RuntimeError('injected digest failure')
+
+
+PV.pose_table_of = _boom_of
+try:
+    with PV.declare_lever('place_optimize.py'):
+        quiet(write_placed_output, staged3, os.path.join(wd3, 'Y.kicad_pcb'), _mv)
+    _raised = None
+except Exception as e:                                         # noqa: BLE001
+    _raised = e
+finally:
+    PV.pose_table_of = _real_of
+_r = rows(wd3)
+check('a digest failure after a good parse does not stop the write or the row',
+      _raised is None and len(_r) == 1 and _r[0].get('parent_pose_sha256') is None
+      and _r[0].get('refs_moved') == sorted(m['reference'] for m in _mv),
+      repr(_raised))
+settled('digest failure')
+
+# The NON-pending path stamps the board digest too. No production lever calls
+# it today; a future one must not get rows the lineage cannot link.
+wd4, staged4 = fresh()
+_B4 = os.path.join(wd4, 'B.kicad_pcb')
+shutil.copyfile(staged4, _B4)
+with PV.declare_lever('place_optimize.py'):
+    _row4 = PV.record_write(staged4, _B4, [])
+check('a direct (non-pending) row carries the written board\'s digest',
+      _row4 is not None and _row4.get('board_pose_sha256') == PV.file_pose_digest(_B4)
+      and rows(wd4) and rows(wd4)[0].get('board_pose_sha256') == PV.file_pose_digest(_B4),
+      str(_row4 and _row4.get('board_pose_sha256')))
+settled('direct row')
 
 # --- no digest work outside a regime -------------------------------------
 _calls = []
