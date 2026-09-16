@@ -776,8 +776,9 @@ hand_edit(A, X, dx=0.0, dy=0.0, rot=(fp_of(A, X).rotation or 0.0) + 2.0)
 grade('a 2 degree hand rotation alone is caught', wd, A, PA.VIOLATION, drifted_refs=[X])
 
 
-def rename_and_move(board, ref, new_ref, dx=0.0):
-    """Rename `ref` in raw text, optionally moving it -- no writer, no row."""
+def rename_and_move(board, ref, new_ref, dx=0.0, to=None):
+    """Rename `ref` in raw text, optionally moving it by `dx` or TO an exact
+    (x, y, rot) -- no writer, no row."""
     with open(board, encoding='utf-8') as fh:
         txt = fh.read()
     blk = next(bk for bk in iter_footprint_blocks(txt) if bk[4] == ref)
@@ -786,6 +787,10 @@ def rename_and_move(board, ref, new_ref, dx=0.0):
     if dx:
         am = re.search(r'\(at\s+([\d.-]+)', body)
         body = body[:am.start(1)] + f'{float(am.group(1)) + dx:.6f}' + body[am.end(1):]
+    if to is not None:
+        am = re.search(r'\(at\s+[\d.-]+\s+[\d.-]+(?:\s+[\d.-]+)?\)', body)
+        body = (body[:am.start()] + f'(at {to[0]:.6f} {to[1]:.6f} {to[2]:.6g})'
+                + body[am.end():])
     with open(board, 'w', encoding='utf-8', newline='') as fh:
         fh.write(txt[:blk[0]] + body + txt[blk[1]:])
 
@@ -892,9 +897,10 @@ grade('a renamed part a lever then moved is not accused', wd, F, PA.UNPROVEN,
 wd, st = fresh()
 A = os.path.join(wd, 'A.kicad_pcb')
 lever_write(st, A, [mv(st, X)])
-_zp = fp_of(A, Z)
-_yp = fp_of(A, Y)
-rename_and_move(A, Y, 'R98', dx=_zp.x - _yp.x)
+_zp = PV.pose_table(A)[Z]
+rename_and_move(A, Y, 'R98', to=_zp[:3])
+check('fixture: the renamed part sits EXACTLY on the other part\'s pose',
+      not PA._pose_differs(PV.pose_table(A)['R98'], _zp), str(PV.pose_table(A).get('R98')))
 _c, _d = grade('a renamed part moved onto ANOTHER part\'s pose is unclaimed', wd, A,
                PA.VIOLATION, unclaimed_refs=['R98'])
 
