@@ -588,6 +588,14 @@ check('V13 malformed rows do not turn a VIOLATION into UNPROVEN',
       and 'Traceback' not in (_p.stdout + _p.stderr),
       f'exit {_p.returncode}' if _p.returncode == 4
       else f'exit {_p.returncode}: {(_p.stdout + _p.stderr)[-300:]}')
+_p = subprocess.run([sys.executable, '-X', 'utf8', '-B',
+                     os.path.join(REPO, 'tests', 'stress', 'provenance_audit.py'),
+                     '--workdir', wd],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace')
+check('V13 ...including when the audit picks the board itself (the newest row is malformed)',
+      _p.returncode == 4 and 'VERDICT: UNAIDED VIOLATION' in _p.stdout,
+      f'exit {_p.returncode}' if _p.returncode == 4
+      else f'exit {_p.returncode}: {(_p.stdout + _p.stderr)[-300:]}')
 _c, _d = PA.audit(wd, A)
 check('...and they are counted, not silently dropped',
       (_d.get('lineage_detail') or {}).get('malformed_rows') == 2, str(_d.get('lineage_detail')))
@@ -748,6 +756,121 @@ PV.start_regime(wd, st)
 _c, _d = grade('U7 a board from a superseded staging is not CLEAN', wd, A, PA.VIOLATION,
                lineage='broken')
 settled('lineage')
+
+
+# --- the second verifier round's findings ---------------------------------
+print('3b. small edits, renames, order, and unreadable inputs')
+
+# Small edits. Every hand edit above moves 9/5 mm, so a drift tolerance of a
+# millimetre -- or one that ignored rotation -- passed them all.
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+hand_edit(A, X, dx=0.5, dy=0.0)
+grade('a 0.5 mm hand nudge of an engine-moved part is caught', wd, A, PA.VIOLATION,
+      drifted_refs=[X])
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+hand_edit(A, X, dx=0.0, dy=0.0, rot=(fp_of(A, X).rotation or 0.0) + 2.0)
+grade('a 2 degree hand rotation alone is caught', wd, A, PA.VIOLATION, drifted_refs=[X])
+
+
+def rename_and_move(board, ref, new_ref, dx=0.0):
+    """Rename `ref` in raw text, optionally moving it -- no writer, no row."""
+    with open(board, encoding='utf-8') as fh:
+        txt = fh.read()
+    blk = next(bk for bk in iter_footprint_blocks(txt) if bk[4] == ref)
+    body = re.sub(r'(\(property\s+"Reference"\s+)"%s"' % re.escape(ref),
+                  r'\1"%s"' % new_ref, blk[2], count=1)
+    if dx:
+        am = re.search(r'\(at\s+([\d.-]+)', body)
+        body = body[:am.start(1)] + f'{float(am.group(1)) + dx:.6f}' + body[am.end(1):]
+    with open(board, 'w', encoding='utf-8', newline='') as fh:
+        fh.write(txt[:blk[0]] + body + txt[blk[1]:])
+
+
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+rename_and_move(A, X, X + 'X', dx=15.0)
+_c, _d = grade('a renamed AND moved part is a pose no lever wrote', wd, A, PA.VIOLATION,
+               unclaimed_refs=[X + 'X'])
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+rename_and_move(A, X, X + 'X')
+grade('a pure rename (same pose) is UNPROVEN, not an accusation', wd, A, PA.UNPROVEN,
+      lineage='unrecorded')
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+with open(A, encoding='utf-8') as fh:
+    _txt = fh.read()
+_blk = next(bk for bk in iter_footprint_blocks(_txt) if bk[4] == Y)
+with open(A, 'w', encoding='utf-8', newline='') as fh:
+    fh.write(_txt[:_blk[0]] + _txt[_blk[1]:])
+_c, _d = grade('a deleted part is UNPROVEN, and named', wd, A, PA.UNPROVEN)
+check('...named', Y in ((_d.get('lineage_detail') or {}).get('missing_refs') or []))
+
+# Ledger order is COMMIT order. An honest two-step chain whose rows landed in
+# the other order must still link: the fixpoint repeats until nothing grows.
+wd, st = fresh()
+A, F = os.path.join(wd, 'A.kicad_pcb'), os.path.join(wd, 'final.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+lever_write(A, F, [mv(A, Y)])
+_lines = open(os.path.join(wd, PV.LEDGER_NAME), encoding='utf-8').read().splitlines()
+with open(os.path.join(wd, PV.LEDGER_NAME), 'w', encoding='utf-8') as fh:
+    fh.write('\n'.join(reversed(_lines)) + '\n')
+grade('an honest chain whose rows were committed out of order is CLEAN', wd, F,
+      PA.CLEAN, lineage='verified')
+
+# The chain is replayed OLDEST first: two writes that each re-move the edited
+# part leave the NEWER pose on the board, which is what the replay must expect.
+wd, st, A = s972()
+B, F = os.path.join(wd, 'B.kicad_pcb'), os.path.join(wd, 'final.kicad_pcb')
+lever_write(A, B, [mv(A, X, dx=-4.0, dy=3.0)])
+lever_write(B, F, [mv(B, X, dx=2.0, dy=-6.0)])
+grade('two writes re-moving the edited part leave it unnameable: UNPROVEN', wd, F,
+      PA.UNPROVEN, lineage='broken')
+
+# A write-all lever whose input could not be parsed records EVERY placement as
+# moved, at the pose it was handed -- the hand edit included.
+wd, st = fresh()
+A = os.path.join(wd, 'A.kicad_pcb')
+lever_write(st, A, [mv(st, X)])
+_fpa = PV.pose_table(st)
+hand_edit(A, X)
+F = os.path.join(wd, 'final.kicad_pcb')
+_all = [{'reference': r, 'new_x': p[0], 'new_y': p[1], 'new_rotation': p[2]}
+        for r, p in PV.pose_table(A).items()]
+_real = PV.pose_footprints
+_Aabs = os.path.normcase(os.path.abspath(A))
+PV.pose_footprints = (lambda p: (_ for _ in ()).throw(RuntimeError('unreadable'))
+                      if os.path.normcase(os.path.abspath(p)) == _Aabs else _real(p))
+try:
+    lever_write(A, F, _all)
+finally:
+    PV.pose_footprints = _real
+check('fixture: that row has no parent digest and claims the hand pose',
+      rows(wd)[-1].get('parent_pose_sha256') is None and X in rows(wd)[-1]['refs_moved'])
+grade('an unreadable input does not let a write-all row vouch for a hand edit', wd, F,
+      PA.UNPROVEN, lineage='unlinkable')
+
+# #972 through a write-all lever, plus one pre-digest row: the legacy reading
+# must not count a pass-through pose as recorded.
+wd, st, A = s972()
+F = os.path.join(wd, 'final.kicad_pcb')
+_all = [{'reference': r, 'new_x': p[0], 'new_y': p[1], 'new_rotation': p[2]}
+        for r, p in PV.pose_table(A).items() if r != Y] + [mv(A, Y)]
+lever_write(A, F, _all)
+with open(os.path.join(wd, PV.LEDGER_NAME), 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps({'schema': 1, 'lever': 'place_seed.py', 'declared': True,
+                         'path': os.path.join(wd, 'elsewhere.kicad_pcb'),
+                         'refs_moved': [], 'poses_written': {}}) + '\n')
+grade('legacy: a write-all pass-through is not a recorded pose', wd, F, PA.VIOLATION,
+      drifted_refs=[X], lineage='legacy')
+settled('verifier round 2')
 
 
 print(f'\n{passed} passed, {failed} failed')

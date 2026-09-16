@@ -467,6 +467,60 @@ ROWS = [
      "    if False:\n",
      (T_972,), 'KILLED'),
 
+    # The second verifier round: each of these survived every gate at the
+    # commit it reviewed, with a named witness that changed verdict.
+    ('the-drift-tolerance-is-a-millimetre', 'pa',
+     "DRIFT_TOL_MM, DRIFT_TOL_DEG = 1e-3, 1e-2\n",
+     "DRIFT_TOL_MM, DRIFT_TOL_DEG = 1.0, 5.0\n",
+     (T_972,), 'KILLED'),
+
+    ('the-drift-ignores-rotation', 'pa',
+     "            or abs(((got[2] or 0.0) - (want[2] or 0.0) + 180.0) % 360.0\n"
+     "                   - 180.0) > DRIFT_TOL_DEG\n",
+     "            or False\n",
+     (T_972,), 'KILLED'),
+
+    ('the-fixpoint-runs-one-pass', 'pa',
+     "                made_by[b] = i\n"
+     "                grew = True\n",
+     "                made_by[b] = i\n",
+     (T_972,), 'KILLED'),
+
+    ('the-chain-is-replayed-newest-first', 'pa',
+     "    chain.reverse()                                    # oldest first\n",
+     "",
+     (T_972,), 'KILLED'),
+
+    ('the-auto-pick-reads-malformed-rows', 'pa',
+     "        for r in reversed([x for x in PV.read_ledger(workdir)\n"
+     "                           if _well_formed(x)]):\n",
+     "        for r in reversed(PV.read_ledger(workdir)):\n",
+     (T_972,), 'KILLED'),
+
+    # Rename a part and move it: the old ref is missing, the new one is
+    # "added", and a per-ref comparison compares neither.
+    ('a-renamed-part-is-compared-by-nothing', 'pa',
+     "        if lin['missing'] and added:\n",
+     "        if False:\n",
+     (T_972,), 'KILLED'),
+
+    ('a-deleted-part-is-clean', 'pa',
+     "    if lin['missing']:\n",
+     "    if False:\n",
+     (T_972,), 'KILLED'),
+
+    ('an-unreadable-row-vouches-for-its-poses', 'pa',
+     "                if _wrote_this and ref in _poses and not _blind:\n",
+     "                if _wrote_this and ref in _poses:\n",
+     (T_972,), 'KILLED'),
+
+    ('legacy-counts-pass-through-poses', 'pa',
+     "            for ref in row.get('refs_moved') or ():\n"
+     "                p = _poses.get(ref)\n",
+     "            for ref in _poses:\n"
+     "                p = _poses.get(ref)\n",
+     (T_972,), 'KILLED'),
+
     # ---- #973: a delivery by copy or rename is recorded -------------------
     # Recorded AFTER the body: an undeclared caller is still refused, but only
     # once the output is already on disk -- the refusal made decorative.

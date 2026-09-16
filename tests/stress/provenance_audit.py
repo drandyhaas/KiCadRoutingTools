@@ -209,11 +209,12 @@ def lineage(rows, staged_table, delivered_table):
     def _done(status, expected, compared_to):
         detail['compared_to'] = compared_to
         if expected is None:
-            return {'status': status, 'drift': [], 'detail': detail}
-        detail['missing_refs'] = sorted(r for r in expected
-                                        if r not in delivered_table)[:40]
+            return {'status': status, 'drift': [], 'missing': [],
+                    'expected': None, 'detail': detail}
+        missing = sorted(r for r in expected if r not in delivered_table)
+        detail['missing_refs'] = missing[:40]
         return {'status': status, 'drift': _differing(delivered_table, expected),
-                'detail': detail}
+                'missing': missing, 'expected': expected, 'detail': detail}
 
     if dg in known:
         detail['tip'] = None if made_by[dg] is None else _who(made_by[dg])
@@ -471,10 +472,16 @@ def audit(workdir, delivered=None):
         # `unverifiable` for the side rather than a mismatch.
         _sides = row.get('sides_written') or {}
         _wrote_this = (not _names_delivered) or _same_file(row.get('path'))
+        # A digest-era row whose INPUT could not be parsed: `record_write`
+        # then counts every placement it was handed as moved, at whatever
+        # pose it was handed, so its poses vouch for nothing -- a write-all
+        # lever would record a hand edit as its own claim.
+        _blind = ('parent_pose_sha256' in row
+                  and row.get('parent_pose_sha256') is None)
         for ref in row.get('refs_moved') or ():
             if ok:
                 claimed[ref] = lever or row.get('caller', '<unknown>')
-                if _wrote_this and ref in _poses:
+                if _wrote_this and ref in _poses and not _blind:
                     claim_pose[ref] = tuple(_poses[ref]) + (_sides.get(ref),)
             else:
                 undeclared.setdefault(ref, lever or row.get(
@@ -510,17 +517,29 @@ def audit(workdir, delivered=None):
         # #972 for a ledger with no lineage to walk: a claim with no pose to
         # compare is still WRONG when the delivered pose is one no row ever
         # recorded for that ref, and not the staged pose either.
-        _recorded = {}
+        # MOVES only, as `_replay` reads them: a write-all lever records every
+        # pose it was handed, a hand edit included, and counting those as
+        # "recorded" let one pre-digest row reopen #972.
+        # A row whose input could not be parsed says nothing either way: its
+        # refs stay unverifiable rather than being accused on its account.
+        _recorded, _unreadable = {}, set()
         for row in rows:
             if not _usable(row, PV):
                 continue
+            if ('parent_pose_sha256' in row
+                    and row.get('parent_pose_sha256') is None):
+                _unreadable.update(row.get('refs_moved') or ())
+                continue
             _sides = row.get('sides_written') or {}
-            for ref, p in (row.get('poses_written') or {}).items():
-                _recorded.setdefault(ref, []).append(
-                    (p[0], p[1], p[2], _sides.get(ref)))
+            _poses = row.get('poses_written') or {}
+            for ref in row.get('refs_moved') or ():
+                p = _poses.get(ref)
+                if p is not None:
+                    _recorded.setdefault(ref, []).append(
+                        (p[0], p[1], p[2], _sides.get(ref)))
         for ref in list(unverifiable):
             got = _dp.get(ref)
-            if got is None:
+            if got is None or ref in _unreadable:
                 continue
             if all(_pose_differs(got, w) for w in
                    _recorded.get(ref, []) + [_sp.get(ref)] if w is not None):
@@ -532,6 +551,15 @@ def audit(workdir, delivered=None):
         # REVERT of an engine move is a hand placement too. A ref with no
         # claim at all is already `unclaimed`, which says more.
         drifted = [r for r in lin['drift'] if r not in unclaimed]
+        # A RENAME is invisible to a per-ref comparison: the old ref is
+        # missing, the new one is "added", and neither is compared -- so
+        # renaming a part and moving it graded CLEAN. An added part that is
+        # not where a missing part was expected is a pose no lever wrote.
+        if lin['missing'] and added:
+            _gone = [lin['expected'][m] for m in lin['missing']]
+            unclaimed = sorted(set(unclaimed) | {
+                a for a in added
+                if all(_pose_differs(_dp[a], w) for w in _gone)})
 
     drifted = sorted(drifted)
     unverifiable = sorted(unverifiable)
@@ -580,6 +608,13 @@ def audit(workdir, delivered=None):
             f"which is how a hand edit of a part the engine legitimately "
             f"touched becomes invisible.{_how}"))
         return VIOLATION, doc
+    if lin['missing']:
+        doc.update(verdict='UNPROVEN', reason=(
+            f"{len(lin['missing'])} part(s) the recorded writes placed are "
+            f"not on this board ({', '.join(lin['missing'][:6])}): a deleted "
+            f"or renamed part has no pose left to compare. Not a violation, "
+            f"and not provably clean.{_how}"))
+        return UNPROVEN, doc
     if lin['status'] == 'broken':
         # Something moved outside the ledger -- the write's input is no board
         # any recorded write produced -- but that write moved again every
