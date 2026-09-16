@@ -51,13 +51,18 @@ SB = os.path.join(ROOT, 'tests', 'stress', 'stage_blind.py')
 PV = os.path.join(ROOT, 'py_placer', 'placement', 'provenance.py')
 RW = os.path.join(ROOT, 'tests', 'stress', 'run_watch.py')
 PA = os.path.join(ROOT, 'tests', 'stress', 'provenance_audit.py')
-TARGETS = {'su': SU, 'sb': SB, 'pv': PV, 'rw': RW, 'pa': PA}
+PS = os.path.join(ROOT, 'py_placer', 'place_seed.py')
+RL = os.path.join(ROOT, 'py_placer', 'place_route_loop.py')
+TARGETS = {'su': SU, 'sb': SB, 'pv': PV, 'rw': RW, 'pa': PA, 'ps': PS,
+           'rl': RL}
 
 T_903 = os.path.join(TESTS, 'test_903_stagers_arm_the_regime.py')
 T_PROV = os.path.join(TESTS, 'test_provenance_audit.py')
 #: #972's lineage gate. In-process and a few seconds, so rows that it kills
 #: name it ALONE rather than paying for T_PROV's real CLI runs.
 T_972 = os.path.join(TESTS, 'test_972_pose_lineage.py')
+#: #973's delivery gate: the real place_seed CLI and place_route_loop's main().
+T_973 = os.path.join(TESTS, 'test_973_delivery_rows.py')
 
 #: The cheap gate, run unmutated first. `T_PROV` is the in-process half and
 #: `T_903` the subprocess half; a row is only evidence if both are green
@@ -429,6 +434,124 @@ ROWS = [
      "    if lin['status'] == 'unlinkable' and unverifiable:\n",
      "    if False:\n",
      (T_972,), 'KILLED'),
+
+    # ---- #973: a delivery by copy or rename is recorded -------------------
+    # Recorded AFTER the body: an undeclared caller is still refused, but only
+    # once the output is already on disk -- the refusal made decorative.
+    ('the-delivery-records-after-the-body', 'pv',
+     "    row = record_write(input_file, output_file, placements, pending=True)\n"
+     "    if row is None:\n"
+     "        yield None\n"
+     "        return\n"
+     "    key = os.path.abspath(output_file)\n"
+     "    try:\n"
+     "        yield row\n",
+     "    yield None\n"
+     "    row = record_write(input_file, output_file, placements, pending=True)\n"
+     "    if row is None:\n"
+     "        return\n"
+     "    key = os.path.abspath(output_file)\n"
+     "    try:\n"
+     "        pass\n",
+     (T_973,), 'KILLED'),
+
+    # Committed BEFORE the body: the row's board digest describes whatever
+    # the output held before the copy.
+    ('the-delivery-commits-before-the-body', 'pv',
+     "        yield row\n"
+     "        # A writer call to the same path inside the body keys its own pending\n"
+     "        # row on this path and commits it; put this one back before committing.\n"
+     "        _PENDING[key] = row\n"
+     "        commit_write(output_file)\n",
+     "        _PENDING[key] = row\n"
+     "        commit_write(output_file)\n"
+     "        yield row\n",
+     (T_973,), 'KILLED'),
+
+    ('a-writer-call-in-the-body-swallows-the-delivery-row', 'pv',
+     "        _PENDING[key] = row\n",
+     "",
+     (T_973,), 'KILLED'),
+
+    ('a-failed-delivery-leaves-its-row-pending', 'pv',
+     "    finally:\n"
+     "        if _PENDING.get(key) is row:\n"
+     "            del _PENDING[key]\n",
+     "    finally:\n"
+     "        pass\n",
+     (T_973,), 'KILLED'),
+
+    # The defect itself, for place_seed --repair/--reseat.
+    ('the-repair-delivery-is-an-empty-write-again', 'ps',
+     "            write_placed_output(cur, _final, [])\n"
+     "            with provenance.recorded_delivery(\n"
+     "                    args.input_file, args.output_file,\n"
+     "                    list(delivered_moves.values())):\n"
+     "                shutil.copyfile(_final, args.output_file)\n",
+     "            write_placed_output(cur, args.output_file, [])\n",
+     (T_973,), 'KILLED'),
+
+    ('the-repair-delivery-claims-nothing', 'ps',
+     "                    list(delivered_moves.values())):\n",
+     "                    []):\n",
+     (T_973,), 'KILLED'),
+
+    ('the-reseat-pass-moves-are-dropped', 'ps',
+     "            for m in moves:\n",
+     "            for m in (moves if tag == 'repair' else []):\n",
+     (T_973,), 'KILLED'),
+
+    # Recorded against the temp board the passes built: a parent no row
+    # produced, so the lineage breaks on every legitimate repair.
+    ('the-repair-delivery-reads-the-staged-board', 'ps',
+     "                    args.input_file, args.output_file,\n",
+     "                    cur, args.output_file,\n",
+     (T_973,), 'KILLED'),
+
+    ('siblings-reach-the-output-before-the-refusal', 'ps',
+     "            write_placed_output(cur, _final, [])\n",
+     "            write_placed_output(cur, _final, [])\n"
+     "            copy_siblings(cur, args.output_file)\n",
+     (T_973,), 'KILLED'),
+
+    ('the-polish-rename-is-unrecorded-again', 'ps',
+     "        with provenance.recorded_delivery(args.output_file, args.output_file,\n"
+     "                                          moves):\n"
+     "            os.replace(tmp, args.output_file)\n",
+     "        os.replace(tmp, args.output_file)\n",
+     (T_973,), 'KILLED'),
+
+    # The defect itself, for place_route_loop.
+    ('the-loop-delivery-is-a-bare-copy-again', 'rl',
+     "    with provenance.recorded_delivery(args.input_file, args.output_file,\n"
+     "                                      list(delivered_moves.values())):\n"
+     "        shutil.copy(cur_file, args.output_file)\n",
+     "    shutil.copy(cur_file, args.output_file)\n",
+     (T_973,), 'KILLED'),
+
+    ('the-loop-claims-only-its-last-accepted-round', 'rl',
+     "            for m in ([dict(m) for m in reloc.moves]\n",
+     "            delivered_moves.clear()\n"
+     "            for m in ([dict(m) for m in reloc.moves]\n",
+     (T_973,), 'KILLED'),
+
+    ('a-rejected-round-is-claimed', 'rl',
+     "            print(f\"  REJECTED - reverting, widening the nudge cap\"\n",
+     "            delivered_moves.update({p['reference']: dict(p)\n"
+     "                                    for p in (placements or [])})\n"
+     "            print(f\"  REJECTED - reverting, widening the nudge cap\"\n",
+     (T_973,), 'KILLED'),
+
+    ('the-loop-delivery-reads-the-round-board', 'rl',
+     "    with provenance.recorded_delivery(args.input_file, args.output_file,\n",
+     "    with provenance.recorded_delivery(cur_file, args.output_file,\n",
+     (T_973,), 'KILLED'),
+
+    ('siblings-reach-the-loop-output-before-the-refusal', 'rl',
+     "    with provenance.recorded_delivery(args.input_file, args.output_file,\n",
+     "    copy_siblings(cur_file, args.output_file)\n"
+     "    with provenance.recorded_delivery(args.input_file, args.output_file,\n",
+     (T_973,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is

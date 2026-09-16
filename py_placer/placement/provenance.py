@@ -142,6 +142,11 @@ def _caller() -> str:
             fn = fr.filename.replace('\\', '/')
             if '/py_placer/placement/' in fn or fn.endswith('provenance.py'):
                 continue
+            # `recorded_delivery` is a context manager, so the frame between
+            # it and the lever is contextlib's `__enter__`; without this every
+            # delivery row names `contextlib.py` as its author.
+            if fn.endswith('/contextlib.py'):
+                continue
             if fn.startswith('<'):               # <frozen runpy>, <string>
                 continue
             return f"{os.path.basename(fr.filename)}:{fr.lineno} in {fr.function}"
@@ -473,3 +478,44 @@ def start_regime(workdir: str, staged_board: str, **extra) -> str:
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(doc, f, indent=1, sort_keys=True)
     return path
+
+
+@contextlib.contextmanager
+def recorded_delivery(input_file: str, output_file: str,
+                      placements: Sequence[Dict]):
+    """Record a delivery that is not a writer call -- a copy or a rename (#973).
+
+    A lever that builds its board somewhere else and then `shutil.copy`s or
+    `os.replace`s it onto the output leaves either no row at all or a row
+    naming the intermediate: place_seed's `--repair`/`--reseat` staged in a
+    temp dir and delivered with an EMPTY writer call, its polish wrote
+    `<out>.polish` and renamed it, and place_route_loop copied its last round.
+    Wrap the copy:
+
+        with provenance.recorded_delivery(real_input, out, moves):
+            shutil.copyfile(staged_board, out)
+
+    `placements` are the moves the LEVER made, relative to `input_file` --
+    never a diff of the two files, which would record whatever else the staged
+    board carries as the lever's own work. If the delivered file disagrees
+    with them, the audit's replay names the difference.
+
+    The row is recorded BEFORE the body, so an undeclared caller is refused
+    while the output is untouched; it is committed after the body, so its
+    board digest is the delivered file's. A body that raises leaves no row.
+    Outside a regime this does nothing and parses nothing.
+    """
+    row = record_write(input_file, output_file, placements, pending=True)
+    if row is None:
+        yield None
+        return
+    key = os.path.abspath(output_file)
+    try:
+        yield row
+        # A writer call to the same path inside the body keys its own pending
+        # row on this path and commits it; put this one back before committing.
+        _PENDING[key] = row
+        commit_write(output_file)
+    finally:
+        if _PENDING.get(key) is row:
+            del _PENDING[key]

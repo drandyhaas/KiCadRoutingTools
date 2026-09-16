@@ -382,6 +382,10 @@ Examples:
         _stage = tempfile.TemporaryDirectory()
         cur, cur_pcb = args.input_file, pcb
         exit_rc = 0
+        # Every move either pass applied, keyed by ref, later passes winning
+        # key by key. The staged writes happen outside any regime, so this --
+        # not the temp files -- is what the delivery row claims (#973).
+        delivered_moves = {}
 
         def _advance(moves, tag):
             """Apply `moves` onto a fresh staged board; advances cur/cur_pcb."""
@@ -393,6 +397,9 @@ Examples:
             copy_siblings(cur, nxt)
             cur = nxt
             cur_pcb = parse_kicad_pcb(cur)
+            for m in moves:
+                delivered_moves[m['reference']] = dict(
+                    delivered_moves.get(m['reference'], {}), **m)
 
         reseat = None
         if args.reseat is not None:
@@ -617,7 +624,20 @@ Examples:
             # A no-op still writes a board: the next step in a chain is handed
             # a path, and "nothing needed doing" must not look like "the tool
             # produced nothing".
-            write_placed_output(cur, args.output_file, [])
+            #
+            # Written in the stage, then COPIED onto the output inside a
+            # recorded delivery (#973). An empty writer call straight to the
+            # output recorded a row that claimed nothing and read a temp board
+            # no row produced, so every part the passes moved came back
+            # unclaimed under an armed regime.
+            import shutil
+            from placement import provenance
+            _final = os.path.join(_stage.name, 'delivered.kicad_pcb')
+            write_placed_output(cur, _final, [])
+            with provenance.recorded_delivery(
+                    args.input_file, args.output_file,
+                    list(delivered_moves.values())):
+                shutil.copyfile(_final, args.output_file)
             copy_siblings(cur, args.output_file)
             from placement.legality import grade_pad_legality
             pcb_out = parse_kicad_pcb(args.output_file)
@@ -743,6 +763,20 @@ Examples:
     copy_siblings(args.input_file, args.output_file)
     print(f"Stamped (locked yes) on {n_locked} part(s)")
 
+    def _replace_output(moves, suffix):
+        """Write `moves` beside the output, then rename it into place.
+
+        The staged write records a row naming `<out><suffix>`, a file that is
+        gone a moment later; the rename is what delivers, so the rename is
+        recorded against the output itself (#973), before it happens.
+        """
+        from placement import provenance
+        tmp = args.output_file + suffix
+        write_placed_output(args.output_file, tmp, moves)
+        with provenance.recorded_delivery(args.output_file, args.output_file,
+                                          moves):
+            os.replace(tmp, args.output_file)
+
     ratsnest = {}
     if not args.no_polish:
         from placement.quench import quench
@@ -774,9 +808,7 @@ Examples:
             corridor_specs=list((intent.health or {}).get('bus_corridors')
                                 or ()) or None)
         if placements:
-            tmp = args.output_file + '.polish'
-            write_placed_output(args.output_file, tmp, placements)
-            os.replace(tmp, args.output_file)
+            _replace_output(placements, '.polish')
 
     # ---- self-check: the seed must grade clean against its own intent ------
     def _grade():
@@ -895,9 +927,7 @@ Examples:
                           f"{', '.join(f['reference'] for f in fixes)} out of "
                           f"a declared {' / '.join(_rules)}; re-seated "
                           f"against the polished board")
-                    tmp = args.output_file + '.reseat'
-                    write_placed_output(args.output_file, tmp, fixes)
-                    os.replace(tmp, args.output_file)
+                    _replace_output(fixes, '.reseat')
                     graded = _grade()
     except floorplan.UntrustworthyOutline as exc:
         print(f"place_seed: outline cannot be trusted for grading: {exc}",
