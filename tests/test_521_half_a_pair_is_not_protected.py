@@ -1,28 +1,32 @@
-"""Half a pair is not a protected pair (#521/#906).
+"""Half a pair is not a protected pair -- but a PARTIAL pair is (#521/#906).
 
 #521 protects coupled-pair copper because a later chain step cannot reproduce
-it -- P/N geometry, gap, polarity. That reasoning needs BOTH members: if one
-failed or ended disconnected, the survivor's copper is ordinary single-ended
-routing the next step can redo, and freezing it only takes a rip candidate away
-from whatever still has to get through.
+it -- P/N geometry, gap, polarity. That reasoning needs BOTH members to have
+laid pair copper: if one failed or self-grazed, the survivor's copper is
+ordinary single-ended routing the next step can redo, and freezing it only takes
+a rip candidate away from whatever still has to get through.
 
-`protection_candidates` decided per NET, off each member's own result dict. Its
-docstring asserts the hybrid is "admitted only when both members connect
-terminal to terminal" -- but that is a property of the CONSTRUCTOR, never
-checked here, and the `is_diff_pair` path never looked at the partner at all.
-So a pair reported 'coupled' whose MEMBER AUDIT then finds disconnected pads
-(ecp5_mini's /PA26 and /PH15 ship exactly that shape) had its survivor
-protected.
+`protection_candidates` decided per NET, off each member's own result dict, so a
+survivor was protected on its own and the `is_diff_pair` path never looked at
+the partner at all. The decision is now per PAIR: both members must be admitted.
 
-The decision is now per PAIR, using `_member_connected` -- the SAME predicate
-the post-route cleanup scope uses to decide a pair's copper is safe to sweep, so
-the two agree about what "this pair landed" means.
+IT DOES NOT REQUIRE THE PAIR TO END CONNECTED, and that is the point of this
+file. An earlier cut added `_member_connected` on both members. It could not
+tell a pair that FAILED from one that handed a leg off BY DESIGN, and it cost
+cparti_fpga its coupled USB copper: /USB/USB_D+ /USB/USB_D- is a 3-terminal
+multi-point pair whose route_diff step lays a coupled middle on F.Cu and then
+reports "electrically short (< 3.0mm coupled) - deferring leg to single-ended".
+The pair is not terminal-to-terminal, so both members lost protection and the
+chain's later rip-up passes were free to tear the coupled middle out -- while
+the manifest's very next step routes those two nets single-ended, which is the
+handoff the engine intended. Coupled copper that exists on the board is exactly
+what a later step cannot reproduce, whether or not the pair finished.
 
-SCOPE, measured: this is a strict NARROWING of protection and it is inert where
-both members land. On picodvi -- the board that raised the question, where
-protecting /uC_DVI_CK boxes /uC_DVI_D1+ out entirely -- all three protected
-pairs are fully connected, so the protected set is IDENTICAL with and without
-this check and the board still grades 1/37 incomplete. That board's loss is a
+SCOPE: what remains is a strict narrowing versus the per-net rule, and only for
+a pair with a FAILED or result-less partner. On picodvi -- the board that raised
+the question, where protecting /uC_DVI_CK boxes /uC_DVI_D1+ out entirely -- all
+three protected pairs are fully connected, so the protected set is IDENTICAL
+either way and the board still grades 1/37 incomplete. That board's loss is a
 consequence of protecting a pair that DID land, which is #906 working as
 designed; it is not this bug.
 """
@@ -109,16 +113,34 @@ def t_a_landed_pair_is_protected():
           f'both members protected: {sorted(got)}')
 
 
-def t_a_pair_with_a_disconnected_member_is_not_protected():
-    """THE regression this closes: 'coupled' but the audit finds open pads."""
-    got = _candidates('t_a_pair_with_a_disconnected_member_is_not_protected',
+def t_a_partially_routed_pair_is_still_protected():
+    """A pair that laid coupled copper keeps protection even if it is not yet
+    connected terminal to terminal.
+
+    An earlier cut of the per-pair rule required BOTH members to end CONNECTED,
+    and that could not tell a pair that failed from one that handed a leg off BY
+    DESIGN. cparti_fpga's /USB/USB_D+ /USB/USB_D- is a 3-terminal multi-point
+    pair whose route_diff step reports:
+
+        DIRECT HYBRID: coupled middle on F.Cu + 14 leg seg(s)
+        Leg 1 via hybrid (coupled middle + single-ended escapes)
+          electrically short (< 3.0mm coupled) - deferring leg to single-ended
+
+    The coupled middle is on the board; only the short leg was deferred, and the
+    manifest's next step routes those two nets single-ended. Under the
+    connectivity requirement both members lost protection and the chain's later
+    rip-up passes were free to tear the coupled middle out. Coupled copper is
+    exactly what a later step cannot reproduce, so it stays protected.
+    """
+    got = _candidates('t_a_partially_routed_pair_is_still_protected',
                       {1: COUPLED, 2: COUPLED}, _pcb({1}),
                       [('/D', _Pair(1, 2))])
     if got is None:
         return
-    check('t_a_pair_with_a_disconnected_member_is_not_protected',
-          got == {},
-          f'nothing protected when /D- never landed (got {sorted(got)})')
+    check('t_a_partially_routed_pair_is_still_protected',
+          sorted(got) == ['/D+', '/D-'],
+          f'both members protected though /D- is not fully connected '
+          f'(got {sorted(got)})')
 
 
 def t_a_pair_whose_partner_failed_is_not_protected():
@@ -139,19 +161,24 @@ def t_a_pair_whose_partner_failed_is_not_protected():
           got2 == {}, f'nothing protected (got {sorted(got2)})')
 
 
-def t_the_survivor_alone_would_have_been_protected_before():
-    """The change detector, as behaviour rather than as source shape.
+def t_the_legacy_per_net_path_is_unchanged():
+    """The compatibility contract for a caller with no pair list (#906's gate).
 
-    Without the pair list the function keeps its old per-net decision, so this
-    row shows exactly what the pair check now prevents -- and it is also the
-    compatibility contract for a caller that has no pair list.
+    It is also the change detector: on a FAILED partner the per-net rule
+    protects the survivor alone and the per-pair rule protects neither, which is
+    the whole of what the pair check now narrows.
     """
     from route_diff import protection_candidates
     legacy = protection_candidates({1: COUPLED, 2: COUPLED}, _pcb({1}))
-    check('t_the_survivor_alone_would_have_been_protected_before',
+    check('t_the_legacy_per_net_path_is_unchanged',
           legacy == {'/D+': 'diff-pair', '/D-': 'diff-pair'},
-          'per-net decision protects both even though /D- never landed -- '
-          'which is what the pair check overrides')
+          'per-net decision protects both members')
+    survivor = protection_candidates({1: COUPLED, 2: dict(COUPLED, failed=True)},
+                                     _pcb({1, 2}))
+    check('t_the_per_net_path_protects_a_failed_partners_survivor',
+          survivor == {'/D+': 'diff-pair'},
+          f'per-net protects the survivor alone (got {sorted(survivor)}) -- the '
+          f'per-pair rule protects neither, which is the narrowing')
 
 
 def t_the_caller_passes_the_pair_list():
@@ -170,29 +197,34 @@ def t_the_caller_passes_the_pair_list():
           'batch_route_diff_pairs calls protection_candidates(pairs=...)')
 
 
-def t_it_uses_the_cleanup_scope_predicate():
-    """Detection and repair must agree on 'this pair landed'."""
+def t_it_does_not_require_terminal_connectivity():
+    """Asked of the CALL GRAPH, not the text: `_member_connected` still appears
+    in a comment explaining why it is not used, so a substring test would read
+    that comment as the defect it warns about."""
     import ast
     src = open(os.path.join(os.path.dirname(__file__), '..',
                             'py_router', 'route_diff.py')).read()
-    lines = src.splitlines()
-    body = None
+    called = set()
     for fn in ast.walk(ast.parse(src)):
         if isinstance(fn, ast.FunctionDef) and fn.name == 'protection_candidates':
-            body = "\n".join(lines[fn.lineno - 1:getattr(fn, 'end_lineno', fn.lineno)])
-    check('t_it_uses_the_cleanup_scope_predicate',
-          body is not None and '_member_connected' in body,
-          'protection_candidates consults _member_connected, the same predicate '
-          'the post-route cleanup scope uses')
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    called.add(node.func.id)
+                if isinstance(node, ast.ImportFrom):
+                    called.update(a.name for a in node.names)
+    check('t_it_does_not_require_terminal_connectivity',
+          '_member_connected' not in called,
+          'protection_candidates does not gate on _member_connected -- a '
+          'partially routed pair still carries coupled copper')
 
 
 def main():
     t_a_landed_pair_is_protected()
-    t_a_pair_with_a_disconnected_member_is_not_protected()
+    t_a_partially_routed_pair_is_still_protected()
     t_a_pair_whose_partner_failed_is_not_protected()
-    t_the_survivor_alone_would_have_been_protected_before()
+    t_the_legacy_per_net_path_is_unchanged()
     t_the_caller_passes_the_pair_list()
-    t_it_uses_the_cleanup_scope_predicate()
+    t_it_does_not_require_terminal_connectivity()
     print()
     if FAILS:
         print(f"{len(FAILS)} FAILURE(S): {', '.join(FAILS)}")

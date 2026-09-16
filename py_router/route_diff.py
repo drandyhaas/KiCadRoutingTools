@@ -123,9 +123,13 @@ def protection_candidates(routed_results, pcb_data, pairs=None):
     """{net name -> 'diff-pair'} for every pair member this run really routed.
 
     `pairs` is the run's [(name, DiffPair)] list. With it, protection is decided
-    PER PAIR: both members must be admitted AND both must end CONNECTED. Without
-    it the decision stays per-net (the pre-#521-pair-check behaviour, kept so a
-    caller that has no pair list -- and #906's own gate -- is unchanged).
+    PER PAIR: BOTH members must be admitted, so half a pair is never protected
+    on its own. It does NOT require the pair to end terminal to terminal -- a
+    partially routed pair still laid coupled copper, and that is precisely what
+    a later step cannot reproduce (see the loop below for the cparti_fpga
+    measurement). Without `pairs` the decision stays per-net (the
+    pre-#521-pair-check behaviour, kept so a caller that has no pair list -- and
+    #906's own gate -- is unchanged).
 
     #521 protects coupled-pair copper because a later chain step cannot
     reproduce it -- P/N geometry, gap, polarity. #906 is which results count.
@@ -179,30 +183,40 @@ def protection_candidates(routed_results, pcb_data, pairs=None):
                 out[_name(_nid)] = 'diff-pair'
         return out
 
-    # PER PAIR, and both members must have LANDED. Protection is for copper a
-    # later step cannot reproduce -- a coupled P/N geometry. Half a pair is not
-    # that: if one member failed or ended disconnected, the survivor's copper is
-    # ordinary single-ended routing the next step can redo, and freezing it only
-    # takes a rip candidate away from whatever still has to get through. This
-    # function used to decide per NET off each member's own result dict, so a
-    # survivor was protected on its own; the docstring above asserts the hybrid
-    # is "admitted only when both members connect terminal to terminal", but
-    # that is a property of the CONSTRUCTOR and was never checked here, and the
-    # `is_diff_pair` path never looked at the partner at all. A pair reported
-    # 'coupled' whose MEMBER AUDIT then finds disconnected pads (ecp5_mini's
-    # /PA26, /PH15) is exactly the shape that slipped through.
+    # PER PAIR, and BOTH members must carry pair-produced copper. Protection is
+    # for copper a later step cannot reproduce -- a coupled P/N geometry. Half a
+    # pair is not that: if one member failed or self-grazed, the survivor's
+    # copper is ordinary single-ended routing the next step can redo, and
+    # freezing it only takes a rip candidate away from whatever still has to get
+    # through. This function used to decide per NET off each member's own result
+    # dict, so a survivor was protected on its own, and the `is_diff_pair` path
+    # never looked at the partner at all.
     #
-    # `_member_connected` is the same predicate the post-route cleanup scope
-    # below already uses to decide a pair's copper is safe to sweep, so the two
-    # agree about what "this pair landed" means.
-    from diff_pair_custody import _member_connected
+    # WHAT THIS DELIBERATELY DOES *NOT* REQUIRE: that the pair ends terminal to
+    # terminal. A PARTIALLY routed pair still laid coupled copper, and coupled
+    # copper is exactly what a later step cannot redo. An earlier cut of this
+    # function added `_member_connected` on both members and that was wrong --
+    # it cannot tell a pair that failed from one that handed a leg off BY
+    # DESIGN. Measured on cparti_fpga, whose /USB/USB_D+ /USB/USB_D- is a
+    # 3-terminal multi-point pair:
+    #
+    #     DIRECT HYBRID: coupled middle on F.Cu + 14 leg seg(s)
+    #     Leg 1 via hybrid (coupled middle + single-ended escapes)
+    #       electrically short (< 3.0mm coupled) - deferring leg to single-ended
+    #
+    # The coupled middle is real and on the board; only the short leg was
+    # deferred, which is the engine working as intended (the manifest's very
+    # next step routes those two nets single-ended). `_member_connected`
+    # reported "not connected", both members lost protection, and the chain's
+    # later rip-up passes were free to tear out the coupled middle.
+    #
+    # The failed-partner case that motivated the per-pair rule is already
+    # handled above: `_admitted` is False for a member whose result is missing,
+    # `failed` or `selfgraze`, so such a pair never reaches this loop.
     out = {}
     for _pn, _pair in pairs:
         p_id, n_id = _pair.p_net_id, _pair.n_net_id
         if not (_admitted(p_id) and _admitted(n_id)):
-            continue
-        if not (_member_connected(pcb_data, p_id)
-                and _member_connected(pcb_data, n_id)):
             continue
         for _nid in (p_id, n_id):
             if _name(_nid):
