@@ -5339,15 +5339,22 @@ half-laid and the round judge throws the whole round away. A group
 needs an all-or-nothing lay (or the climbs the engine can actually lay,
 enumerated against what it will strip).
 
-## Session 13 (2026-09-15, 17:40-): the group climb LAYS; and K51 = 98 vias
+## Session 13 (2026-09-15, 17:40-): the ladder to 34 / 58 / 68 / 96
 
-### The record: **K51 = 98 vias, 0 open, 0 DRC (rule 280.5)** -- and what is actually in it
+### The K51 record, in two steps: **98 from the portfolio, 96 with replan on top**
 
-`tmp/s13/joint51_k51.kicad_pcb`, from **`SRC_REFAN_JOINT=1
-CHAIN_BRAID_AB=1`** and nothing else -- TWO FLAGS, no tuned number: the arm
-reproduces at the DEFAULT `SRC_REFAN_MAX=6` (`jdef51`, same 98 / 0, same
-canary), so the 20 the group arm needed is not load-bearing here. Previous best clean K51: 109
-(`cew5d`), 115 (jcl), 107 (the recorded `replan.py` board); the human is 81.
+The ladder this session ends at **34 / 58 / 68 / 96**, 0 open and 0 DRC on
+every rung -- the table at the top of this file is the canonical one. K41
+68 and K51 96 replace the recorded 76 and 107; K35 58 ties the human and
+K41 68 beats it; K51 is the only rung the human still wins.
+
+This section is about the FIRST step, the 98, because that is the one that
+needed explaining. `tmp/s13/joint51_k51.kicad_pcb`, from
+**`SRC_REFAN_JOINT=1 CHAIN_BRAID_AB=1`** and nothing else -- TWO FLAGS, no
+tuned number: the arm reproduces at the DEFAULT `SRC_REFAN_MAX=6`
+(`jdef51`, same 98 / 0, same canary), so the 20 the group arm needed is not
+load-bearing here. Previous best clean K51: 109 (`cew5d`), 115 (jcl), 107
+(the recorded `replan.py` board); the human is 81.
 
 **ATTRIBUTED, and the obvious reading is WRONG.** The record was first seen
 on the `grpAB` arm (group climb + braid-tier judge + portfolio) and it is
@@ -5487,8 +5494,10 @@ hack.
 | jcl (the reference) | 34 | 60 | 80 | 115 |
 | cew5d (session 12's best) | 34 | **54** | **71** | 109 |
 | **`ab13` = `CHAIN_BRAID_AB=1` alone** | 34 | 60 | **74** | 115 |
-| **`grpAB` = the group + the tier judge + the portfolio** | 34 | 61 | **74** | **98** |
-| `joint51` = joint re-fan + portfolio, NO group | -- | -- | -- | **98** (copper = grpAB) |
+| `grpAB` = the group + the tier judge + the braid portfolio | 34 | 61 | **74** | **98** |
+| `joint51` = joint re-fan + braid portfolio, NO group | -- | -- | -- | **98** (copper = grpAB) |
+| **`port` = the TWO-LEVEL portfolio** | 34 | 60 | **74** | **98** |
+| **`rp` = replan.py on top of `port`** | 34 | **58** | **68** | **96** |
 | human | 46 | 58 | 70 | 81 |
 
 All 0 open, 0 DRC; every canary matched (K28 727.2/644.5, K35 1028.2/935.3,
@@ -5502,11 +5511,17 @@ costs a second braid.
 
 **`grpAB` reaches the K51 record but does not cause it** (see above:
 `joint51` gets the identical copper with the group machinery off, and the
-tier judge REJECTED the group in that very run). Its K35 61 against 60 is
-one via of damage the group machinery does and the record does not need.
-**So the arm to carry forward is `joint51` + the portfolio, and the group
-climb is a mechanism that WORKS and has not yet PAID** -- its only winning
-board so far, the forced 107, is superseded by this 98.
+tier judge REJECTED the group in that very run). **Nor is its K35 61 the
+group's doing** -- `joint` and `grpAB` are copper-IDENTICAL at K35 and at
+K41, so that via is the JOINT RE-FAN's, and the second portfolio level is
+what takes it back (`port` K35 = 60). The group machinery contributes
+nothing, good or bad, to any board that shipped.
+
+**So the group climb is a mechanism that WORKS and has not yet PAID** --
+it lays exactly, the tier judge rejects it on every rung measured, and its
+only winning board, the forced 107, is superseded by the 96. Keep it: it
+is the only mechanism aimed at K51's launch-order deficit, and the tier
+judge now prices it cheaply and honestly.
 
 ### The chain change: a PORTFOLIO, `CHAIN_BRAID_AB=1`
 
@@ -5524,7 +5539,7 @@ only plans that HAVE the rule, the flag for it did nothing. It now honours
 an explicit `0` (and says so), which is what made the A/B arm expressible
 at all.
 
-## Session 13 (continued): the group climb LAYS, and it routes K51 in 107
+## Session 13 (continued): the group climb LAYS (its own best board was 107)
 
 ### Item 1, the three pieces -- built, and each one was necessary
 
@@ -5740,6 +5755,64 @@ because the count's error there is not small but systematic;
 a braid per candidate, ~90 s at K51, and the result is cached per (board,
 plan). Off by default.
 
+### The portfolio, completed: TWO levels, and `replan.py` on top
+
+The braid portfolio (above) chooses between routing regimes on a fixed
+plan. The other coin flip is one level up -- the JOINT SOURCE RE-FAN
+(`SRC_REFAN_JOINT`, built 2026-09-11, default off and not in jcl), which
+frees the nets whose copper stands in a source move's room so the engine
+can rip and re-lay them around the ask. Measured at every rung it is the
+same shape as the marker: **a coin flip per board, and a REGRESSION on its
+own** (K51 112 + 1 open against jcl's clean 115; a via worse at K35).
+
+So `CHAIN_FANOUT_AB=1` plans and fans out BOTH ways and carries every
+DISTINCT board into the braid portfolio. Three pieces make that cheap and
+honest:
+
+* **`dedupe_boards.py`** compares SEGMENTS and VIAS -- never a file hash,
+  never a whole-file diff, because the uuids and the sibling project
+  differ on every write and say nothing about the copper. The joint re-fan
+  changes the board on only **two of the four rungs**, so at K28 and K41
+  the extra braids cost nothing at all.
+* **`pick_braid.py`** takes N candidates and keeps the best by
+  `(open, vias)`, and REFUSES a board that does not grade -- a missing
+  file must not win with "0 open, 0 vias".
+* The shipped `_fo_` board is the WINNER's, and its sidecar describes the
+  regime that actually routed it (see the two fixes below).
+
+**The two levels together: 34 / 60 / 74 / 98** -- +6 on jcl at K41, +17 at
+K51, worse on NO rung, every canary matched. **It is also what removes the
+via the joint re-fan costs on its own at K35**: offered both, the
+portfolio takes the non-joint board back and lands on 60.
+
+**Then `replan.py` on top of those boards** (`--worst=<the run's net
+count> --probes=2 --rounds=4`) gives **34 / 58 / 68 / 96**. The two
+compose because they work at different granularities: the portfolio
+chooses between regimes on a fixed plan and cannot regress; replan changes
+the PLAN, per net, with the router as its oracle, and LEARNS (`RESIDUAL` =
+real minus predicted). The portfolio hands it a better start and a more
+honest price to learn from.
+
+**Two integration fixes were needed first, and both bite the CONSUMER
+rather than the portfolio run:**
+
+1. **Ship the winner's fanout board.** With two fanout candidates the
+   chain was copying the FIRST, so `_fo_kK` and the routed board would
+   describe different plans -- and replan reads both.
+2. **Strip `pages_first` from the shipped sidecar when the marker-OFF arm
+   wins.** `replan` re-braids F on EVERY round (its step 5), so a sidecar
+   that still claimed the marker would route the arm the portfolio
+   rejected and throw the fourteen vias away each round.
+   `tmp/s13/ship_sidecars.py` also carries the winner's `.pack.json` onto
+   the shipped stem (`_refusals.json` exists only when a net was refused,
+   so its absence on a complete board is correct, not a miss).
+
+**Read replan's speed correctly.** On the K28 portfolio board it finished
+in 9 seconds unchanged, and that is right, not broken: its leverage is
+REFUSED nets and high-via swimmers, and that board had none refused and
+one swimmer, whose two candidates it probed and rejected. `--worst=N` only
+widens a list the verdict has something to put in.
+
 ## Handoff: the next session (written 2026-09-15, ~18:45, end of session 13; supersedes the session-12 handoff)
 
 **Tree.** `bus622-take5` @ `96de973b` + this session's uncommitted edits.
@@ -5815,46 +5888,47 @@ round, both fixed at the end of the session and both unmeasured:
 
 **NEXT, in order:**
 
-0. **The K51 record's arm is `SRC_REFAN_JOINT=1 CHAIN_BRAID_AB=1` (two
-   flags, no tuned number -- it reproduces at the default
-   `SRC_REFAN_MAX=6`), and the JOINT RE-FAN half of it has only been run at
-   K51.** Run it at K28/K35/K41 before anything else -- it is a
-   pre-existing flag that jcl does not use, it is a REGRESSION on its own
-   at K51 (112 + 1 open against 115 clean), and the pair is only known to
-   pay on one rung. If it holds, that pair is the new reference arm.
-1. **`ab13` (`CHAIN_BRAID_AB=1`) is a DEFAULT CANDIDATE and should be one.**
-   34 / 60 / 74 / 115, six vias better than jcl at K41 and worse on no rung,
-   every canary matched. It changes no engine behaviour, only routes the
-   board twice and keeps the better, so the case against it is time (one
-   extra braid a rung) and nothing else. Run it on the synthetic harness
-   (`synth_ladder --batch b1`) and, if it holds, make it the default and
-   retire the flag.
-2. **`grpAB` = 34 / 61 / 74 / 98 is the K51 record and is ONE VIA short at
-   K35.** That rung is the whole of what stands between this and a default.
-   It is already traced: read `tmp/s13/grpT4_fo_k35.log` -- the group is
-   accepted into the plan by a HAIR (count 183 against 184), the engine then
-   refuses to lay it, and the round reverts everything and ships the BASE
-   board (floor 181.96) where the control (`ctl13_fo_k35.log`) keeps two
-   rounds to floor 172.01. A group accepted on a hair that cannot be laid
-   should not have moved the plan; the fix is either a margin on the group's
-   acceptance or laying it before accepting it.
-3. **Items 2 and 3 are built and UNMEASURED**: `PLAN_PAGES_GROUP_DST=1`
-   (the re-berth in launch order) and `PLAN_PAGES_WALK_STAGE=n` (the walk's
-   per-stage budget). `tmp/s13/queue1.sh` has both arms ready; it was
-   written and then stopped, because it had been started concurrently with
-   another chain and a concurrent run moves the CP-SAT's feasible point.
-4. **`b4` has not been run** (`python3 synth_ladder.py --batch b4`): the
+1. **The two-level PORTFOLIO should be the DEFAULT, and the case is made
+   except for the harness.** `CHAIN_FANOUT_AB=1 CHAIN_BRAID_AB=1` = 34 /
+   60 / 74 / 98: six vias better than jcl at K41, seventeen at K51, worse
+   on NO rung, every canary matched. It changes no engine behaviour -- it
+   routes what the chain already produces and keeps the better -- so it
+   cannot regress by construction and the only case against it is TIME.
+   Run `synth_ladder --batch b1` (23 planted-optimum cases) on it; if it
+   holds there, make both flags default and retire them.
+   **Cost, measured:** K51 21:20:31 -> 21:28:44 (~8 min) against jcl's
+   ~3, because K51 needs two fanouts and four braids; K41 and K28 need
+   two fanouts and TWO braids (the dedupe drops the duplicate), so they
+   are ~2x. That is over the "~2 min at K41" edict and is the one thing
+   to weigh.
+2. **The K51 deficit is now 15 vias (96 against the human's 81)** and it
+   is the only rung the human still wins. Everything else on the ladder
+   beats or ties it. That is the problem to point the next mechanism at.
+3. **replan wider.** This session ran `--rounds=4 --probes=2`; the
+   recorded 46 at K35 came from a much wider sweep. K35 58 against that
+   46 says the width matters more than anything else tried today. It is
+   hours, not minutes, so it wants the cloud or an overnight.
+4. **The GROUP CLIMB works and has not PAID.** It lays exactly (4 of 4,
+   0 inversions) and the braid-tier judge correctly REJECTS it on every
+   rung measured -- its only winning board, the forced 107, is superseded
+   by the 96. Do not delete it: it is the only mechanism aimed at the K51
+   launch-order deficit, and the tier judge now tells the truth about it
+   cheaply. The open question is whether a group ever beats the copper it
+   displaces.
+5. **Items 2 and 3 are built and UNMEASURED**: `PLAN_PAGES_GROUP_DST=1`
+   (the re-berth in launch order) and `PLAN_PAGES_WALK_STAGE=n` (the
+   walk's per-stage budget). `tmp/s13/queue1.sh` has both arms ready.
+6. **`b4` has not been run** (`python3 synth_ladder.py --batch b4`): the
    first harness batch on which an end-of-face climb can exist at all.
-5. **`PLAN_PAGES_GROUP_FREE` is harmful with the tier and stays off** --
-   it improves the group's COUNT (373 -> 356) and makes the copper worse
-   (133 against 107). It is kept as the attribution for where a third of
-   the count's error lives.
-6. **`SRC_REFAN_RESEAT` is off and has never succeeded.** Asking the
+7. **`PLAN_PAGES_GROUP_FREE` stays off** -- it improves the group's COUNT
+   (373 -> 356) and makes the copper worse (133 against 107). It is kept
+   as the attribution for where a third of the count's error lives.
+8. **`SRC_REFAN_RESEAT` is off and has never succeeded.** Asking the
    displaced blockers back to their own teeth is right, but a refused
    blocker keeps the copper it had, which can be standing in the tooth
-   another blocker was just re-seated into -- musical chairs, 23 DRC pairs.
-   The fix it needs is to ask only for teeth the group's copper has not
-   taken.
+   another blocker was just re-seated into -- musical chairs, 23 DRC
+   pairs. The fix it needs is to ask only for teeth the group's copper
+   has not taken.
 
 **Rules learned this session:**
 
