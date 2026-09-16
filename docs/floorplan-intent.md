@@ -316,11 +316,19 @@ When no body can be measured, the band is graded exactly as before, on the
 occupancy reading. Unmeasurable cases include a courtyard-only part, an arc
 in the Fab drawing, a non-rectangular outline, an entry with no `edge`, and a
 drawn envelope that does not enclose the centroid of its own pads (a pin-1
-marker is not a body). **The copper rule above follows the body**: on the
-legacy reading the band still carries the pad box itself, so identical
-geometry can be graded two ways — a violation when the library drew a body,
-and the old band arithmetic when it did not. That is deliberate: the legacy
-path must keep grading exactly as it did before #961.
+marker is not a body).
+
+**The copper rule above follows the body**, so identical geometry can be
+graded two ways: a violation when the library drew a body, and the old band
+arithmetic when it did not. The reason is not that the legacy reading sees
+the copper — it sees it only when the occupancy rect it measures (the
+courtyard, or the pad box when the part draws no courtyard) happens to
+enclose the pads. The reason is that the legacy path grades **exactly** as it
+did before #961, deliberately, so that this change cannot move a board it
+cannot measure. The gap that leaves is real and measured: ulx3s `AUDIO1`,
+whose Fab outline is open and therefore unmeasured, is seated with 0.135 mm
+of pad copper past the outline on both `main` and this branch, and neither
+names it. `check_drc --check-pad-edge` does.
 Nothing is withheld or abstained, and the basis says which reading was used.
 The seat conjunct's "no overhang" gate, the nearest-edge identity, the class
 setback defaults and the `connector_affinity` warning are **unchanged**. The

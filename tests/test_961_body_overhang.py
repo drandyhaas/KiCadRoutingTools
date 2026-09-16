@@ -605,8 +605,10 @@ class Round3(_Boards):
                         .measure('J1', 'west')['body_measured'])
 
     def test_the_copper_conjunct_follows_the_body_path(self):
-        """On the legacy reading the band still carries the pad box, so the
-        conjunct stays off there and that path grades as it did before #961."""
+        """The conjunct is body-scoped, so the legacy path grades exactly as
+        it did before #961 -- even here, where that path's own reading (a
+        courtyard that does not enclose its pads) cannot see the copper
+        either. Pinning the gap, not endorsing it: `check_drc` names it."""
         path = self.synthetic(
             'copper_legacy.kicad_pcb',
             '(fp_rect (start -1 -1) (end 1 1) (layer "F.CrtYd"))', at='1 10 0',
@@ -732,9 +734,13 @@ class Round3(_Boards):
             'legacy_occupancy@'))
 
     def test_only_the_declared_connectors_pads_are_walked(self):
+        """`measured_pads` is the grade's own count over the DECLARED
+        connectors -- one number, repeated on every row, never the board's."""
         path = self.usb1_at(0.0)
         pcb = parse_kicad_pcb(str(path))
         from placement.legality import _pad_has_no_copper
+        board = sum(1 for fp in pcb.footprints.values() for p in fp.pads
+                    if not _pad_has_no_copper(p))
         mine = sum(1 for p in pcb.footprints['USB1'].pads
                    if not _pad_has_no_copper(p))
         r = floorplan.grade(
@@ -742,9 +748,26 @@ class Round3(_Boards):
             pcb, str(path), clearance=.25, board_edge_clearance=.55)
         walked = _evidence(r)['pad_copper_edge']['measured_pads']
         self.assertLessEqual(walked, mine)
-        self.assertLess(walked, sum(
-            1 for fp in pcb.footprints.values() for p in fp.pads
-            if not _pad_has_no_copper(p)))
+        self.assertLess(walked, board)
+        # A second declared connector raises that one count, and BOTH rows
+        # carry it: a per-part reading would differ between them.
+        other = next(ref for ref in sorted(pcb.footprints)
+                     if ref != 'USB1' and pcb.footprints[ref].pads
+                     and not ref.startswith(('Ref', 'REF', '#')))
+        two = floorplan.grade(floorplan.intent_from_dict({
+            'schema': floorplan.SCHEMA_VERSION, 'kind': floorplan.KIND,
+            'units': 'mm', 'edge_connectors': [
+                {'ref': 'USB1', 'edge': 'west',
+                 'overhang_mm': {'min': 0.0, 'max': 2.0}},
+                {'ref': other, 'edge': 'east',
+                 'overhang_mm': {'min': 0.0, 'max': 99.0}}]}),
+            pcb, str(path), clearance=.25, board_edge_clearance=.55)
+        counts = {e['ref']: e['pad_copper_edge']['measured_pads']
+                  for e in two.edge_connector_evidence}
+        self.assertEqual(set(counts), {'USB1', other})
+        self.assertEqual(counts['USB1'], counts[other])
+        self.assertGreater(counts['USB1'], walked)
+        self.assertLess(counts['USB1'], board)
 
     def test_per_part_minimum_gap_is_the_smallest_of_its_pads(self):
         from placement.legality import grade_pad_edge_clearance

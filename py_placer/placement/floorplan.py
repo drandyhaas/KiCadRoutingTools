@@ -2729,10 +2729,17 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                           'overhang_basis': overhang_basis},
                 expected={'min': lo, 'max': float(hi)})
         # A band licenses the BODY, never copper. The occupancy reading this
-        # replaced carried any pad copper in front of the body (a courtyard,
-        # often the pad box itself); the body reading does not, so on the body
-        # path copper past the outline is named here, or a part with its pads
-        # off the board would grade clean where it used to fail.
+        # replaced often carried pad copper in front of the body -- it
+        # measures the courtyard, which is the PAD BOX itself on a part that
+        # draws none -- and the body reading never does, so on the body path
+        # copper past the outline is named here. Without it a part with its
+        # pads off the board grades clean where it used to fail twice
+        # (measured: tigard J7 flush with its edge, 0.2 mm of copper off).
+        # BODY PATH ONLY, and not because the legacy reading is equivalent:
+        # a courtyard that does not enclose its pads misses the same copper
+        # (ulx3s AUDIO1, 0.135 mm, on this branch and on main alike). It is
+        # scoped so the path this change cannot measure grades exactly as it
+        # did before #961.
         copper_out = (_copper_outside_mm(ctx, ref)
                       if body.get('body_measured') else 0.0)
         if copper_out > legality.EPS:
@@ -2964,8 +2971,9 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
                 str(f['pad_ref']).startswith(prefix) and f.get('gap_mm') is None
                 for f in copper['findings'])
                 else round(_copper_outside_mm(ctx, ref), 4)),
-            # The pads this grade actually walked: the declared connectors'
-            # only, never the whole board's.
+            # The pads this grade walked: every DECLARED connector's, never
+            # the whole board's. One number for the grade, repeated on each
+            # row -- not this part's own count.
             'measured_pads': copper['measured_pads'],
             'findings': findings, 'unmeasured': unmeasured,
             'rules_unmeasured': copper['rules_unmeasured'],

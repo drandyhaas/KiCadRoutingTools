@@ -237,8 +237,11 @@ class ConnectorGeometry:
 
         A closed convex drawing is not necessarily a body: a Fab layer that
         carries only a pin-1 triangle is closed and convex, and reading it as
-        the body graded a part 1.25 mm over its edge as flush (round-2
-        review). Measured over the 22 tracked boards: 1079 envelopes are
+        the body reported a part whose courtyard crossed the edge as flush
+        (round-2 review's probe). The committed shape is in
+        `test_a_marker_is_not_a_body`: a 0.6 mm triangle beside pin 1, which
+        says nothing about where the part's two pads (1.0 mm and 5.0 mm from
+        that edge) actually are. Measured over the 22 tracked boards: 1079 envelopes are
         measurable, 1078 of them on parts with pads, and every one of those
         encloses its pads' centroid -- so this refuses markers without
         refusing a body on the corpus. A padless part is not checked.
@@ -321,8 +324,10 @@ def pad_boxes(geometry, ref):
     """`(lx, ly, half_x, half_y, tilt)` per copper pad of `ref`, in the
     footprint's LOCAL frame, so a trial pose only adds its own rotation.
 
-    NPTH pads carry no copper and castellated pads sit on the outline by
-    design; both are skipped. Pose-independent, so it is built once per part.
+    Pads with no copper are skipped, through `legality._pad_has_no_copper`:
+    NPTH holes, and any pad declaring no `.Cu` layer. So are castellated
+    pads, which sit on the outline by design. Pose-independent, so it is
+    built once per part.
     """
     boxes = geometry._pad_boxes.get(ref)
     if boxes is None:

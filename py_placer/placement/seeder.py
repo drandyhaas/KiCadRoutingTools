@@ -1378,8 +1378,11 @@ def _body_band_correct(state, ref: str, edge: str, x: float, y: float,
     inboard of a body flush with the west edge. A pose the walk converged on
     and the body band accepts is returned UNCHANGED, so every seat upstream
     produced that is still legal is bit-identical. Only a pose the band would
-    refuse is moved, analytically, to put the body's summed overhang on
-    `target`; a body that cannot be measured leaves the walk's pose alone.
+    refuse is moved, analytically, along the declared edge's normal, to put
+    that edge's signed position on `target`; a body that cannot be measured
+    leaves the walk's pose alone. The convergence check is on the SUMMED
+    overhang, so a corner part -- whose second edge one normal cannot fix --
+    is reported unconverged rather than seated.
 
     What that does NOT promise: that every seat is the one upstream chose.
     Where the walk's pose was REFUSED, this rung can make it legal, so a
@@ -1468,14 +1471,15 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
         return False
     if _body.get('body_measured'):
         # The band used to be read off the COURTYARD, which on a connector
-        # that draws none is the pad box itself, so it carried any pad copper
-        # past the outline. The drawn body does not, and the rule now names
-        # that copper (#961 round 3) -- so this predicate must see it too, or
-        # the seat accepts a pose the grade refuses, which is exactly what
-        # the pad conjunct below exists to prevent. Measured before this:
-        # 0.20-0.40mm of copper off the board on three declared bands.
-        # CONTAINMENT only, at zero margin: the edge-clearance floor is
-        # check_drc's question, not this predicate's.
+        # that draws none is the pad box itself, so it usually carried pad
+        # copper past the outline. The drawn body never does, and the rule
+        # now names that copper (#961 round 3) -- so this predicate must see
+        # it too, or the seat accepts a pose the grade refuses, which is
+        # exactly what the pad conjunct below exists to prevent. The case, on
+        # a committed fixture: `test_seat_refuses_a_pose_whose_pad_copper_is
+        # _off_the_board` seats a body flush with the edge while a pad sits
+        # 0.75 mm past it. CONTAINMENT only, at zero margin: the
+        # edge-clearance floor is check_drc's question, not this one's.
         from .connector_geometry import pad_copper_outside
         from .legality import BoardOutlineGate
         zero = getattr(state, '_zero_edge_gate', None)
