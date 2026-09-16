@@ -26,16 +26,37 @@ Two arms are current, and **a number is meaningless without its arm**:
 |---|---|---|---|---|---|
 | reference arm (one-pass plan) | 14 | 36 | 69 | 86 | -- |
 | joint-solve arm | -- | -- | 58 | 80 | 137 |
-| **BEST MEASURED** (`replan.py`, opt-in) | 14 | 36 | **46** | **76** | **107** |
+| **BEST MEASURED** (`replan.py`, opt-in) | 14 | **34** | **46** | **68** | **96** |
 | **human** | 22 | 46 | 58 | 70 | **81** (48 nets; 85 over 51) |
 
 **The best row is the one to beat, and it is not the arm the chain runs by
-default.** Every number in it is a real board in `awx/tmp/`, re-graded
-2026-09-12 at 0 open / 0 DRC: `rw35e_rp_k35` **46**, `c3b_k41` **76**,
-`rp6b_rp_k51` **107** (also `rw41e_rp_k41` 91, `rw35d_rp_k35_r1` 51).
-**At K35 we BEAT the human by 12 vias.** The deficit is real at K41 (+6)
-and K51 (+26), and it grows with congestion -- that is the shape of the
-problem, not "we match at K35".
+default.** Every number in it is a real board in `awx/tmp/`, re-graded at
+0 open / 0 DRC. K35's **46** is `rw35e_rp_k35` (2026-09-12; also
+`rw41e_rp_k41` 91, `rw35d_rp_k35_r1` 51).
+
+**K41 68 and K51 96 are new (2026-09-15, session 13)** -- `tmp/s13/rp_rp_k41`
+and `tmp/s13/rp_rp_k51`, from **`replan.py` on top of the two-level
+PORTFOLIO** (`CHAIN_FANOUT_AB=1 CHAIN_BRAID_AB=1`, then
+`replan --worst=<net count> --probes=2 --rounds=4`). They replace 76 and
+107. The whole line is **34 / 58 / 68 / 96**, every board 0 open and 0 DRC,
+verified independently with `check_drc` and with the same out-of-run nets
+as the reference boards, so the comparison is on equal terms:
+
+| | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| jcl (the chain's reference arm) | 34 | 60 | 80 | 115 |
+| the portfolio | 34 | 60 | **74** | **98** |
+| **+ replan on top** | 34 | **58** | **68** | **96** |
+| human | 46 | 58 | 70 | 81 |
+| rule (vias + mm/7.5) | 121.5 | 175.3 | 218.9 | 281.1 |
+
+**At K35 we now TIE the human (58) and at K41 we BEAT it (68 against 70).**
+K28 has beaten it throughout. K51 is the remaining deficit, 96 against 81 --
+down from 107, but still the shape of the problem.
+The deficit still grows with congestion -- that is the shape of the
+problem -- but it has moved: **+15 at K51, and NEGATIVE at K28, K35 and
+K41** (34 against 46, 58 against 58, 68 against 70). As of session 13 K51
+is the only rung the human still wins.
 
 **2026-09-13, LOCAL, and the K51 line moved a long way -- but read the open
 column.** `BRAID_LAY_ORDER=xing` then `replan.py`. **Its arm is NEITHER of
