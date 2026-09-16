@@ -40,6 +40,21 @@ SF = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 passed = failed = 0
 
 
+_TEMP_DIRS = []
+
+
+def scratch(prefix):
+    """A temp dir this run removes on exit (the loop's and converge's own
+    work dirs live inside the ones it hands them, or are removed with them)."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    _TEMP_DIRS.append(d)
+    return d
+
+
+import atexit                                                 # noqa: E402
+atexit.register(lambda: [shutil.rmtree(d, ignore_errors=True) for d in _TEMP_DIRS])
+
+
 def check(name, ok, detail=''):
     global passed, failed
     passed += bool(ok)
@@ -97,7 +112,7 @@ def siblings_of(board):
 # 1. the helper
 # ==========================================================================
 print('1. copy_siblings')
-d = tempfile.mkdtemp(prefix='sib_')
+d = scratch('sib_')
 X = with_siblings(SF, d)
 before = siblings_of(X)
 try:
@@ -119,8 +134,35 @@ if os.path.exists(swapped):               # a case-insensitive disk
         err = e
     check('a case-only respelling of the same board is in place too', err is None,
           repr(err))
+else:
+    print('  SKIP a case-only respelling: this disk is case-sensitive, so the '
+          'respelling is a different file')
 
-Y = os.path.join(tempfile.mkdtemp(prefix='sib_y_'), 'other.kicad_pcb')
+# The same FILE under a different NAME: a hardlinked sibling. A path compare
+# (abspath / normcase) calls these two files different, copyfile then raises
+# SameFileError, and so do an 8.3 short name, a junction and a symlink --
+# which is why the guard asks the filesystem.
+Z = os.path.join(os.path.dirname(X), 'linked.kicad_pcb')
+shutil.copyfile(X, Z)
+try:
+    for _ext in ('.kicad_pro', '.kicad_dru'):
+        os.link(os.path.splitext(X)[0] + _ext, os.path.splitext(Z)[0] + _ext)
+    _linked = True
+except OSError:
+    _linked = False
+if _linked:
+    try:
+        copy_siblings(X, Z)
+        err = None
+    except Exception as e:                                    # noqa: BLE001
+        err = e
+    check('a destination sibling that is the same file under another name is '
+          'not an error', err is None, repr(err))
+    check('...and it is left intact', siblings_of(Z) == before)
+else:
+    print('  SKIP the hardlinked sibling: this filesystem refuses hardlinks')
+
+Y = os.path.join(scratch('sib_y_'), 'other.kicad_pcb')
 shutil.copyfile(X, Y)
 copy_siblings(X, Y)
 check('to another board it still carries every sibling',
@@ -138,7 +180,7 @@ PY = [sys.executable, '-X', 'utf8', '-B']
 
 
 def in_place(tag, script, extra, want_codes=(0,)):
-    d = tempfile.mkdtemp(prefix='sib_cli_')
+    d = scratch('sib_cli_')
     X = with_siblings(EP, d)
     intent = os.path.join(d, 'intent.json')
     with open(intent, 'w', encoding='utf-8') as f:
@@ -178,7 +220,8 @@ from test_554_loop_relocate import _board as _reloc_board, _proposal  # noqa: E4
 
 def run_loop(relocate):
     src, _w = _reloc_board()
-    d = tempfile.mkdtemp(prefix='sib_loop_')
+    _TEMP_DIRS.append(_w)
+    d = scratch('sib_loop_')
     board = with_siblings(src, d)
     os.unlink(src)
     want = siblings_of(board)
@@ -246,7 +289,7 @@ for relocate in (False, True):
 print('4. converge poses --route')
 import converge                                               # noqa: E402
 
-d = tempfile.mkdtemp(prefix='sib_conv_')
+d = scratch('sib_conv_')
 board = with_siblings(SF, d)
 want = siblings_of(board)
 probed = []
