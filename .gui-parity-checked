@@ -1,3 +1,77 @@
+a633f898 2026-09-17 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit f4fb38ed..a633f898 on main (58 commits: the rest of the v0.22.0 -> HEAD
+routing-regression campaign, the parser/grader work, and PRs #978/#979/#970/
+#971/#976). NO GAP FOUND. Eight gates green, run live on this machine.
+
+READ THE RANGE IN TWO HALVES, because only the first half can move parity.
+
+HALF 1, f4fb38ed..dfa7ddbe (28 commits) -- routing engine, parser and grader.
+This is where a gap could hide, and the eight gates below ran at dfa7ddbe.
+HALF 2, dfa7ddbe..a633f898 (3 merges: #970, #971, #976) -- PLACEMENT ONLY. Checked
+mechanically, not assumed: the diff over those merges touches py_placer (11
+files), tests (12), docs (1) and .claude (1), and ZERO files under py_router/
+or kicad_routing_plugin/. Nothing in half 2 is on the parity surface, so the
+gates were not re-run for it.
+
+THE SURFACE, checked mechanically:
+
+  * NEW CLI FLAGS on the routing/placement CLIs: ZERO. The add_argument diff
+    over route.py, route_diff.py, route_planes.py, bga_fanout.py,
+    qfn_fanout.py and place_fanout_clearance.py across the whole range is
+    EMPTY. So FLAG_PARAMS needs no entry and the plan-parity gate is unmoved.
+  * ENGINE KWARGS at the front-end boundary: ZERO drift, compared by AST on
+    the parameter lists themselves (posonly + args + kwonly), old vs new:
+        batch_route                101 params   SAME
+        batch_route_diff_pairs      89 params   SAME
+        create_plane                46 params   SAME
+        generate_qfn_fanout         16 params   SAME
+  * CLASS-2 DRIFT (a post-pass added to a CLI main() only): NONE. route.py
+    gained 185 lines in this range and every changed hunk lands in
+    batch_route or its helper _late_orphan_sweep659 -- main() is untouched,
+    mapped by walking the diff hunks to their enclosing def.
+
+THE ONE THING THAT NEEDED THINKING: kicad_parser.py, +281 lines (PR #979).
+Parser fixes reach both fronts EXCEPT file-text-parsing ones, because the GUI
+builds PCBData from pcbnew instead. Every changed function here is in the TEXT
+parser (footprint_pose, extract_footprints_and_pads, extract_segments/vias/
+zones/nets, _parse_ref_label, detect_bga_pitch, _resolve_pad_rect, ...), and
+build_pcb_data_from_board is NOT among them. That is the right side of the
+line, and the change NARROWS the gap rather than widening it: #979's whole
+point is that the text parser now reads a footprint's own (at ...) the way
+pcbnew does (splitflap re-saved by pcbnew: 11 diffs against pcbnew's own
+PCBData -> 0). test_ref_label_pcbnew_parity confirms it directly on two boards.
+
+Also verified independently before merging #979: ZERO of the 30 tracked and
+ZERO of the 456 unrouted stress boards carry an exponent-form number in any
+(at ...), so the widened numbers cannot fire on anything we route; a full
+structured parse of all 30 tracked boards is IDENTICAL main vs branch, and the
+same dump over 40 stress boards is byte-identical.
+
+EIGHT GATES, all run live on this machine at dfa7ddbe:
+
+  test_manifest_plan_parity              PASS  (no wx)
+  test_cli_postpass_coverage             PASS  (no wx)
+  test_settings_roundtrip                PASS  (KiCad python)
+  test_ref_label_pcbnew_parity           PASS  65 + 272 labels field-identical
+  test_714_mirror_pcbnew_parity          PASS  matches pcbnew's flip node for node
+  test_fanout_rotated_gui                PASS  10/10; 104 escapes outward both fronts
+  test_gui_livechain_rp2350              PASS  GUI and CLI clean at every stage
+  test_gui_engine_parity                 PARITY -- copper sets IDENTICAL:
+      segments CLI=1078 GUI=1078 common=1078 cli-only=0 gui-only=0
+      vias     CLI=128  GUI=128  common=128  cli-only=0 gui-only=0
+
+Prerequisites were CHECKED, not assumed (this file has carried "pending a
+KiCad-python session" while pcbnew worked): pcbnew 10.0.0-103-gacbf1898e0,
+wx 4.2.2a1 osx-cocoa, and ApplePersistenceIgnoreState = 1.
+
+One diagnostic worth keeping: test_gui_livechain_rp2350 ran ~25 minutes with
+no stdout, which looks exactly like the macOS restore-alert hang this file's
+siblings warn about. It was not -- 65.7% CPU, state R, and
+    sample <pid> 2 -mayDie | grep -cE "NSAlert|PersistentUI"
+returned 0. The alert hang sits at ~0 CPU in state SN, accruing a fraction of
+a second over many minutes. Check CPU state and that grep before concluding a
+wx gate is stuck; this one was routing a real rp2350 chain for ~25 minutes.
+
 f4fb38ed 2026-09-16 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit c44f623f..f4fb38ed on main (71 commits: the v0.22.0 -> HEAD routing
 regression campaign, plus the upstream #966/#967 clearance work). NO GAP FOUND.
