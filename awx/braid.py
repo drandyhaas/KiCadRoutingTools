@@ -8117,9 +8117,20 @@ def setup(board, names, dest, log, plan=None):
         # were chosen to cover every lane, so the schedule pages it exactly
         import schedule as _sch
         _sch.EXACT_PAGES = 1
-    elif ctx.pages_first:
-        log('plan sidecar: pages-first, but BRAID_EXACT_PAGES=0 -- the '
-            'schedule chooses its own pages')
+    else:
+        # RESET IT, do not merely decline to set it (review, 2026-09-17).
+        # There was no else-branch, so the flag was sticky: `plan_braid`
+        # is called in a LOOP in-process (judge_gate, pinch_gate,
+        # fanout_from_plan's judge), and a job whose plan carries the
+        # marker left EXACT_PAGES=1 behind for every job after it. Under
+        # judge_gate's Pool + imap_unordered, WHICH jobs inherit it
+        # depends on which worker takes which job -- a wall-clock race
+        # deciding how a board is scored.
+        import schedule as _sch
+        _sch.EXACT_PAGES = 0
+        if ctx.pages_first:
+            log('plan sidecar: pages-first, but BRAID_EXACT_PAGES=0 -- the '
+                'schedule chooses its own pages')
 
     ends = endpoints(pcb, [nm for nm in names if nm not in planned], byname,
                      dest_ref=dest) if len(planned) < len(names) else {}
