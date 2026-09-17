@@ -120,6 +120,18 @@ REGISTRY = {
     'py_placer/placement/provenance.py': ('record', 'provenance row timestamp'),
     'py_router/redo_record.py': (
         'record', 'wall seconds recorded into the redo manifest row'),
+    'py_tools/repo_metrics.py': (
+        'record',
+        'the COLLECTION DATE of a metrics snapshot: `_today()` keys the '
+        'snapshot and defaults `meta.last_collected`. It does reach two '
+        'decisions -- which snapshots `thin_snapshots` keeps and which ISO '
+        'week `spread_downloads` buckets a release into -- but both take '
+        '`today` as a parameter and only fall back to the clock when the '
+        'caller passes none, so the arithmetic is testable without one. '
+        'Nothing measures a DURATION: the file declares no timeout or '
+        'threshold constant and never compares an elapsed time to a limit '
+        '(the date maths at :494 and :631 reads stamps out of the collected '
+        'DATA, not off the clock).'),
     'py_router/cmd_timing.py': (
         'record',
         'reads back the clock tee_cmd already recorded, and formats it -- a '
