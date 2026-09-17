@@ -1601,18 +1601,78 @@ def bundle_layer_of(tooth_layer):
     return 'B.Cu' if 2 * n_b > len(tooth_layer) else 'F.Cu'
 
 
+# BRAID_PITCH_EXACT=1 (2026-09-17): solve the lane-pitch projection EXACTLY
+# instead of the 60-sweep relaxation below. OFF BY DEFAULT, and the reason is
+# worth reading before turning it on -- it is a case where the correct
+# algorithm loses.
+#
+# The relaxation is capped at 60 sweeps and returns with no convergence check,
+# and a fix propagates only one position per sweep, so real combs never
+# converge. Measured slack against the floor the caller asked for:
+#
+#     12 stubs 0.40 apart, floor 0.55   -0.0032   (278 sweeps to converge)
+#     20 stubs                          -0.0442   (773)
+#     30 stubs                          -0.0996   (1736)
+#     40 coincident,       floor 0.38   -0.3297   (3229)
+#
+# So `offsets()` hands back lane slots TIGHTER than the pitch floor. That
+# reads like a bug, and the exact answer is easy: substituting
+# `z[i] = y[i] - cumsum(floor)` turns `y[i+1]-y[i] >= f[i]` into `z`
+# non-decreasing, i.e. isotonic regression, solved by pool-adjacent-violators
+# in one O(n) pass. It agrees with this loop run to full convergence to
+# 1.7e-08 over 400 random cases, with zero floor violations.
+#
+# AND IT COSTS 8 VIAS AT K41. Measured by braiding ONE fixed fanout board
+# (tmp/s13/joint_fo_k41) both ways, so the plan is held still:
+#
+#     60-sweep relaxation   80 vias, 0 open, 0 DRC, 1526 segments
+#     exact projection      88 vias, 0 open, 0 DRC, 1568 segments
+#
+# BOTH DRC-CLEAN -- which is the whole point. `pair_floor` is a PLANNING
+# heuristic for lane room, not a clearance rule; the router enforces real
+# clearance itself. So the under-relaxed comb was never illegal, and the
+# 60-sweep cap was in effect relaxing an over-conservative heuristic: tighter
+# lanes, more of them in band, fewer vias. Honouring the floor makes the
+# planner more conservative and the board worse.
+#
+# Keep the exact form available (the relaxation is still wrong about what it
+# claims to compute, and a future pair_floor that IS a real constraint would
+# need it), but do not ship it. K28 is inert either way -- the comb is small
+# enough to converge -- so measure any change to this at K41 or K51.
+PITCH_EXACT = os.environ.get('BRAID_PITCH_EXACT', '0') != '0'
+
+
 def _relax_pitch(vals, floor):
     """Push a sorted list of offsets apart to at least `floor` (one
-    value, or one per adjacent pair), symmetrically."""
+    value, or one per adjacent pair), symmetrically. See BRAID_PITCH_EXACT
+    above: the default 60-sweep relaxation does NOT reach the floor on a
+    long comb, and that is measured as BETTER copper, not worse."""
     py = list(vals)
-    fl = list(floor) if isinstance(floor, (list, tuple)) else [floor] * max(len(py) - 1, 0)
+    if len(py) < 2:
+        return py
+    fl = list(floor) if isinstance(floor, (list, tuple)) else [floor] * (len(py) - 1)
+    if PITCH_EXACT:
+        cum = [0.0]
+        for f in fl:
+            cum.append(cum[-1] + f)
+        st = []
+        for i, v in enumerate(py):
+            st.append([v - cum[i], 1.0])
+            while len(st) > 1 and st[-2][0] / st[-2][1] > st[-1][0] / st[-1][1] + 1e-15:
+                s_, k_ = st.pop()
+                st[-1][0] += s_
+                st[-1][1] += k_
+        out = []
+        for s_, k_ in st:
+            out.extend([s_ / k_] * int(k_))
+        return [out[i] + cum[i] for i in range(len(py))]
     for _ in range(60):
         moved = False
         for i in range(len(py) - 1):
             g_ = py[i + 1] - py[i]
-            floor = fl[i]
-            if g_ < floor - 1e-9:
-                push = (floor - g_) / 2
+            fl_i = fl[i]
+            if g_ < fl_i - 1e-9:
+                push = (fl_i - g_) / 2
                 py[i] -= push
                 py[i + 1] += push
                 moved = True
