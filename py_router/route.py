@@ -469,21 +469,6 @@ def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
 
 
 
-def _seg_ledger_sig_rt(s):
-    """Geometry signature for the strip loop -- deliberately identity-free.
-    Mirrors cleanup_pipeline._seg_ledger_sig (same quantisation), kept here so
-    route.py does not import a private name."""
-    a = (round(s.start_x, 4), round(s.start_y, 4))
-    b = (round(s.end_x, 4), round(s.end_y, 4))
-    return (min(a, b), max(a, b), s.layer, round(float(s.width or 0.0), 4))
-
-
-def _via_ledger_sig_rt(v):
-    return (round(v.x, 4), round(v.y, 4),
-            round(float(getattr(v, 'size', 0) or 0), 4),
-            round(float(getattr(v, 'drill', 0) or 0), 4))
-
-
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 # #530: cap every auto-read net class at this clearance (the
@@ -3164,19 +3149,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # and the GUI gets them in results_data['segments_to_remove'] (#84) to
     # delete from the live board, so neither front can ship copper the engine
     # deleted from its own model.
-    _fin_sig = {_seg_ledger_sig_rt(_s) for _s in pcb_data.segments
-                if not getattr(_s, 'graphic', False)}
-    _fin_vsig = {_via_ledger_sig_rt(_v) for _v in pcb_data.vias}
-    _known_os = {id(_s) for _s in dead_end_input_segments}
-    _known_ov = {id(_v) for _v in stale_input_vias}
-    _derived_s = [_s for _nid in (sweep_scope_ids or ())
-                  for _s in _orig_seg_by_net.get(_nid, ())
-                  if id(_s) not in _known_os
-                  and _seg_ledger_sig_rt(_s) not in _fin_sig]
-    _derived_v = [_v for _nid in (sweep_scope_ids or ())
-                  for _v in _orig_via_by_net.get(_nid, ())
-                  if id(_v) not in _known_ov
-                  and _via_ledger_sig_rt(_v) not in _fin_vsig]
+    # Derived by the shared core (cleanup_pipeline.unreported_input_strips), so
+    # the GUI front gets the identical rule and the graphic-exclusion asymmetry
+    # is stated in one place rather than re-derived per caller.
+    from cleanup_pipeline import unreported_input_strips as _uis
+    _wl_segs = [x for _r in results for x in (_r.get('new_segments') or [])]
+    _wl_vias = [x for _r in results for x in (_r.get('new_vias') or [])]
+    _derived_s, _derived_v = _uis(
+        _orig_seg_by_net, _orig_via_by_net, sweep_scope_ids,
+        {id(x) for x in dead_end_input_segments},
+        {id(x) for x in stale_input_vias},
+        pcb_data.segments, pcb_data.vias,
+        extra_segments=_wl_segs, extra_vias=_wl_vias)
     if _derived_s or _derived_v:
         dead_end_input_segments = list(dead_end_input_segments) + _derived_s
         stale_input_vias = list(stale_input_vias) + _derived_v

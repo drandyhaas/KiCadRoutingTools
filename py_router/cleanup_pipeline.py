@@ -618,6 +618,61 @@ def file_only_copper(output_file, pcb_data, scope_net_ids):
     return segs, vias
 
 
+def unreported_input_strips(orig_seg_by_net, orig_via_by_net, scope_net_ids,
+                            known_seg_ids, known_via_ids, board_segments,
+                            board_vias, extra_segments=(), extra_vias=()):
+    """Input copper that is gone from the engine's model but that no pass put on
+    a strip list -- derived by GEOMETRY, returned as (segments, vias).
+
+    Every pass reports the input copper it removed by object id(). That is a
+    coverage argument, and a rip -> restore -> cleanup cycle breaks identity, so
+    a removal can go unrecorded and the input file's copy ships. Deriving the
+    remainder closes that loop whoever missed it and however deeply nested.
+
+    NEITHER GRAPHIC NOR LOCKED COPPER IS EVER A CANDIDATE. Graphic is the
+    asymmetry that motivated this function (below). LOCKED copper is the same
+    class for the same reason: KiCad's `(locked yes)` is user-pinned, every
+    prune site refuses it (`pcb_modification` 1645/2056/2072/2080/5156) and
+    #521 makes its net never-rippable with no override -- so a locked original
+    missing from the model is not something this pass may finish by deleting
+    the user's copper from the output.
+
+    GRAPHIC COPPER IS NEVER A CANDIDATE, and that asymmetry is the whole reason
+    this is a named function instead of a comprehension. The "still present" set
+    is built from non-graphic copper (graphics are not tracks; the writer has no
+    `(segment)` block to strip and no pass may prune them -- #337/#908), so a
+    graphic original is absent from it BY CONSTRUCTION. Filtering the reference
+    but not the candidates therefore strips every graphic in scope. Measured on
+    zynq_ad9364: 10 net-tagged graphics on VCC_1V8/VCC_3V3 stripped, the first
+    behavioural divergence in a 64k-line log, cascading to rip candidates
+    196 -> 195, six nets left unrouted, and ETH_RXD0 routed across VCC_3V3's
+    art (an `ETH_RXD0 <-> VCC_3V3 [Graphic]` short).
+
+    `extra_segments`/`extra_vias` are the write-list's new copper: the #284
+    re-emit clause lets a result reproduce an original's span, so that span is
+    still on the board even when the original object is not in `board_*`.
+    """
+    present_s = {_seg_ledger_sig(x) for x in board_segments
+                 if not getattr(x, 'graphic', False)}
+    present_v = {_via_ledger_sig(x) for x in board_vias}
+    for x in extra_segments:
+        present_s.add(_seg_ledger_sig(x))
+    for x in extra_vias:
+        present_v.add(_via_ledger_sig(x))
+    segs = [x for nid in (scope_net_ids or ())
+            for x in orig_seg_by_net.get(nid, ())
+            if id(x) not in known_seg_ids
+            and not getattr(x, 'graphic', False)
+            and not getattr(x, 'locked', False)
+            and _seg_ledger_sig(x) not in present_s]
+    vias = [x for nid in (scope_net_ids or ())
+            for x in orig_via_by_net.get(nid, ())
+            if id(x) not in known_via_ids
+            and not getattr(x, 'locked', False)
+            and _via_ledger_sig(x) not in present_v]
+    return segs, vias
+
+
 def verify_written_file_parity(output_file, pcb_data, scope_net_ids,
                                label: str = '') -> bool:
     """KICAD_BOARD_LEDGER=1 post-write audit: re-parse the WRITTEN file and

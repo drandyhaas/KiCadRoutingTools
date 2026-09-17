@@ -214,6 +214,38 @@ def t_an_unreadable_target_is_not_a_strip_list():
           f'missing file reported {len(segs)} seg / {len(vias)} via')
 
 
+def t_immutable_copper_is_never_a_strip_candidate():
+    """Graphic and LOCKED originals must never be derived as stale.
+
+    The reference set is built from non-graphic copper, so a graphic original
+    is absent from it BY CONSTRUCTION -- filtering the reference but not the
+    candidates strips every graphic in scope. Measured on zynq_ad9364: 10
+    net-tagged graphics on VCC_1V8/VCC_3V3, the first behavioural divergence in
+    a 64k-line log, cascading to six unrouted nets and a track laid across
+    VCC_3V3's art.
+
+    LOCKED copper is the same class for a different reason: `(locked yes)` is
+    user-pinned, every prune site refuses it and #521 makes its net
+    never-rippable with NO override. Deleting it from the output because the
+    model no longer holds it would be this pass overriding the user.
+    """
+    from cleanup_pipeline import unreported_input_strips
+    graphic = _seg(30.0, 30.0, 34.0, 30.0, 7)
+    graphic.graphic = True
+    locked = _seg(40.0, 40.0, 44.0, 40.0, 7)
+    locked.locked = True
+    plain = _seg(50.0, 50.0, 54.0, 50.0, 7)          # the non-vacuity control
+    lv = _via(60.0, 60.0, 7)
+    lv.locked = True
+    segs, vias = unreported_input_strips(
+        {7: [graphic, locked, plain]}, {7: [lv]}, (7,), set(), set(),
+        board_segments=[], board_vias=[])            # model holds NOTHING
+    check('t_immutable_copper_is_never_a_strip_candidate',
+          segs == [plain] and vias == [],
+          f'only the ordinary segment is derived stale '
+          f'(got {len(segs)} seg / {len(vias)} via)')
+
+
 def t_route_py_acts_on_it():
     """Wiring. The audit printed 'FAILED: 8/333 net(s) differ' on cparti while
     the run shipped the file anyway; reporting is not fixing."""
@@ -234,6 +266,7 @@ def main():
     t_identity_is_not_used()
     t_out_of_scope_nets_are_untouched()
     t_an_unreadable_target_is_not_a_strip_list()
+    t_immutable_copper_is_never_a_strip_candidate()
     t_route_py_acts_on_it()
     print()
     if FAILS:
