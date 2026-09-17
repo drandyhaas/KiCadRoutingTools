@@ -62,8 +62,10 @@ and the expected survivor itself.
 
 That run predates the SECOND rebase, which moved `place_seed.py` under three of
 these rows (#982 re-partitioned its pad-conflict counters). Every anchor still
-matches at this head -- `preflight` passes, 81 of 81 -- and those three rows
-were re-run here afterwards: see the line below.
+matches at this head -- `preflight` passes, 81 of 81 -- and the three rows that
+target that file (`ps-fresh-key-dropped`, `ps-repair-record-not-merged`,
+`ps-written-pose-filter-dropped`) were re-run on the rebased tree: 1 KILLED
+each, 0 broken.
 """
 from __future__ import annotations
 
