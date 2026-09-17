@@ -1252,6 +1252,7 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `../render_placement.py` | Headless PNG stills of placement status (#431) |
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
 | `body.py` | THE body model (#896): courtyard -> fab -> silk U pads -> pad bbox, with the occupancy rect and the source that answered |
+| `connector_geometry.py` | The DRAWN connector envelope against a declared compass edge (#961): the number an `overhang_mm` band is graded on, at zero margin, and the legacy occupancy reading named as the basis wherever no body can be measured |
 | `parser.py` | Courtyard, fab, silk and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation). Resolves blocks through `kicad_parser.iter_footprint_blocks`, so one placement moves ONE block even when two share a reference (#726) |
 | `board_grid.py` | The pitch a board was laid out on, inferred from its footprint origins (#708). Pure; no engine imports |

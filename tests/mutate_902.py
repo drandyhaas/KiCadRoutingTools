@@ -46,8 +46,12 @@ TARGETS = {
     'db': os.path.join(REPO, 'py_placer', 'placement', 'design_brief.py'),
     'cf': os.path.join(REPO, 'py_tools', 'check_floorplan.py'),
     'bc': os.path.join(REPO, 'py_tools', 'board_context.py'),
+    'sd': os.path.join(REPO, 'py_placer', 'placement', 'seeder.py'),
+    'cg': os.path.join(REPO, 'py_placer', 'placement', 'connector_geometry.py'),
+    'lg': os.path.join(REPO, 'py_placer', 'placement', 'legality.py'),
 }
 
+T961 = 'tests/test_961_body_overhang.py'
 T902 = 'tests/test_902_proximity.py'
 T895 = 'tests/test_895_boundary_criteria.py'
 T891 = 'tests/test_891_board_context.py'
@@ -188,6 +192,295 @@ ROWS = [
      "        if worst is None or near > worst:",
      "        if worst is None or near < worst:",
      (T891, T895), KILLED),
+
+    # ---- #961: the overhang band's currency ---------------------------------
+    # Rows that put back a piece of the pre-#961 reading (the occupancy
+    # number where a body is measured, the declared edge alone instead of the
+    # sum), plus one per branch the change added: the setback gate it left on
+    # the old reading, the seeder's second rung, the emitter widening, the
+    # per-part copper evidence, side and layer-token selection, the source
+    # memo and the text block.
+    ('layer-token-must-be-quoted', 'cg',
+     "        lm = re.search(r'\\(layer\\s+\"?([FB]\\.(?:Fab|SilkS))\"?\\)', item)",
+     "        lm = re.search(r'\\(layer\\s+\"([FB]\\.(?:Fab|SilkS))\"\\)', item)",
+     (T961,), KILLED),
+    ('format-text-evidence-deleted', 'fp',
+     "    if r.edge_connector_evidence:\n"
+     "        # #961: the number each band was graded on and its CURRENCY, printed",
+     "    if False:\n"
+     "        # #961: the number each band was graded on and its CURRENCY, printed",
+     (T961,), KILLED),
+    ('band-reads-the-occupancy', 'fp',
+     "        band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),\n"
+     "                                                  amount)",
+     # `body_measured: False`, not `{}`: an empty dict made the row KILL by a
+     # KeyError in the evidence builder before any currency assertion ran.
+     "        band, overhang_basis, body = amount, 'legacy', {'body_measured': False}",
+     (T961,), KILLED),
+    # The graded number is summed over every side, as the occupancy reading
+    # was; reading the declared edge alone lets a corner overhang escape.
+    ('band-drops-the-other-sides', 'cg',
+     "        return row['body_outside_mm'], 'body:' + row['body_layer'], row",
+     "        return row['body_overhang_mm'], 'body:' + row['body_layer'], row",
+     (T961,), KILLED),
+    # The one gate #961 deliberately leaves on the occupancy reading.
+    ('setback-gate-reads-the-body', 'fp',
+     "        if setback is not None and amount <= legality.EPS:",
+     "        if setback is not None and band <= legality.EPS:",
+     (T961,), KILLED),
+    ('exempt-reads-the-occupancy', 'fp',
+     "                band, _basis, _body = _band_amount(self, ref, c.get('edge'),\n"
+     "                                                   amt)",
+     "                band, _basis, _body = amt, 'legacy', {}",
+     (T961,), KILLED),
+    ('seat-band-reads-the-occupancy', 'sd',
+     "    amt, _basis, _body = band_amount(geometry, part.ref, edge, amt,\n"
+     "                                     state.edge_gate.margin,\n"
+     "                                     pose=(x, y, part.rot))",
+     "    _body = {}",
+     (T961,), KILLED),
+    ('second-rung-deleted', 'sd',
+     "    if band is not None and converged:\n"
+     "        return _body_band_correct(state, ref, edge, x, y, target, band)",
+     "    if False:\n"
+     "        return _body_band_correct(state, ref, edge, x, y, target, band)",
+     (T961,), KILLED),
+    ('emitter-widening-deleted', 'fp',
+     "                if (body['body_measured']\n"
+     "                        and body['body_outside_mm'] > amt + legality.EPS):",
+     "                if (False\n"
+     "                        and body['body_outside_mm'] > amt + legality.EPS):",
+     (T961,), KILLED),
+    ('copper-findings-unsliced', 'fp',
+     "    findings = [f for f in copper['findings']\n"
+     "                if str(f['pad_ref']).startswith(prefix)]",
+     "    findings = list(copper['findings'])",
+     (T961,), KILLED),
+    ('copper-gap-board-wide', 'fp',
+     "    gap = (copper.get('minimum_gap_by_ref_mm') or {}).get(ref)",
+     "    gap = copper.get('minimum_gap_mm')",
+     (T961,), KILLED),
+    # Round 4 review: the pad-extent arithmetic behind the seat's copper
+    # check and the conjunct's fallback for pads the edge grader cannot
+    # model. Every row below was a live survivor of the reviewer's battery.
+    ('exempt-certifies-an-unmodellable-pad', 'fp',
+     "                             or (_copper_outside_mm(self, ref) <= legality.EPS\n"
+     "                                 and not _unmodellable_pads(self, ref)))",
+     "                             or _copper_outside_mm(self, ref) <= legality.EPS)",
+     (T961,), KILLED),
+    ('copper-ignores-unmodellable-pads', 'fp',
+     "    if unsupported and fp is not None:",
+     "    if False and fp is not None:",
+     (T961,), KILLED),
+    ('pb-tilt-keeps-the-footprint-rotation', 'cg',
+     "                          pad.size_y / 2.0, tilt - base))",
+     "                          pad.size_y / 2.0, tilt))",
+     (T961,), KILLED),
+    ('pb-tilt-taken-absolute', 'cg',
+     "            tilt = -(pad.rect_rotation or 0.0)\n            if tilt == 0.0:",
+     "            tilt = abs(pad.rect_rotation or 0.0)\n            if tilt == 0.0:",
+     (T961,), KILLED),
+    ('pb-recovery-branch-deleted', 'cg',
+     "            if tilt == 0.0:\n                # The broad phase bakes",
+     "            if False:\n                # The broad phase bakes",
+     (T961,), KILLED),
+    ('pb-recovery-sign-flipped', 'cg',
+     "                tilt = ((getattr(pad, 'rotation', 0.0) or 0.0) + 45) % 90 - 45",
+     "                tilt = -(((getattr(pad, 'rotation', 0.0) or 0.0) + 45) % 90 - 45)",
+     (T961,), KILLED),
+    ('copper-fallback-clobbers-the-exact-reading', 'fp',
+     "        worst = max(worst, pad_copper_outside(",
+     "        worst = 0.0 + (pad_copper_outside(",
+     (T961,), KILLED),
+    ('copper-fallback-measures-every-pad', 'fp',
+     "            (fp.x, fp.y, fp.rotation or 0.0), only=unsupported))",
+     "            (fp.x, fp.y, fp.rotation or 0.0), only=None))",
+     (T961,), KILLED),
+    ('unmodelled-predicate-ignored', 'fp',
+     "            and not legality.pad_shape_is_modelled(pad)}",
+     "            and False}",
+     (T961,), KILLED),
+    ('body-overhang-is-the-signed-value', 'cg',
+     "                   body_overhang_mm=max(0.0, signed),",
+     "                   body_overhang_mm=signed,",
+     (T961,), KILLED),
+    ('pb-tilt-keeps-the-parsed-sign', 'cg',
+     "            tilt = -(pad.rect_rotation or 0.0)",
+     "            tilt = pad.rect_rotation or 0.0",
+     (T961,), KILLED),
+    ('pb-half-extents-halved-again', 'cg',
+     "            boxes.append((index, pad.local_x, pad.local_y, pad.size_x / 2.0,",
+     "            boxes.append((index, pad.local_x, pad.local_y, pad.size_x / 4.0,",
+     (T961,), KILLED),
+    ('pb-no-copper-or-castellated-pads-are-kept', 'cg',
+     "            if _pad_has_no_copper(pad) or getattr(pad, 'castellated', False):",
+     "            if False:",
+     (T961,), KILLED),
+    ('pco-x-extent-drops-the-y-term', 'cg',
+     "        ex, ey = hx * ca + hy * sa, hx * sa + hy * ca",
+     "        ex, ey = hx * ca, hx * sa + hy * ca",
+     (T961,), KILLED),
+    ('pco-pad-transform-sign-flipped', 'cg',
+     "        px, py = x + c * lx + s * ly, y - s * lx + c * ly",
+     "        px, py = x + c * lx + s * ly, y + s * lx + c * ly",
+     (T961,), KILLED),
+    ('pco-trial-rotation-ignored', 'cg',
+     "        angle = math.radians(tilt + rot)",
+     "        angle = math.radians(tilt)",
+     (T961,), KILLED),
+    ('seat-copper-tolerated-to-half-a-mm', 'sd',
+     "        if off > 1e-9:",
+     "        if off > 0.5:",
+     (T961,), KILLED),
+    ('ev-shortfall-is-the-smallest', 'fp',
+     "            'shortfall_mm': round(max((f['shortfall_mm'] for f in findings),",
+     "            'shortfall_mm': round(min((f['shortfall_mm'] for f in findings),",
+     (T961,), KILLED),
+    ('ev-unmeasured-disposition-dropped', 'fp',
+     "    elif unmeasured or copper['rules_unmeasured']:",
+     "    elif copper['rules_unmeasured']:",
+     (T961,), KILLED),
+    # Round 3 review: the seat predicate's copper, the arc guard nothing
+    # pinned, and the evidence/marker branches its own battery reached.
+    ('poly-arc-measured-as-chord', 'cg',
+     "                if re.search(r'\\(arc\\b', item):",
+     "                if False:",
+     (T961,), KILLED),
+    ('seat-ignores-pad-copper', 'sd',
+     "        off = pad_copper_outside(geometry, zero, part.ref, (x, y, part.rot))",
+     "        off = 0.0",
+     (T961,), KILLED),
+    ('copper-conjunct-not-body-scoped', 'fp',
+     "        copper_out = (_copper_outside_mm(ctx, ref)\n"
+     "                      if body.get('body_measured') else 0.0)",
+     "        copper_out = _copper_outside_mm(ctx, ref)",
+     (T961,), KILLED),
+    ('marker-refuses-a-padless-part', 'cg',
+     "            if not pads:\n                hit = True",
+     "            if not pads:\n                hit = False",
+     (T961,), KILLED),
+    ('marker-ignores-rotation', 'cg',
+     "                rot = math.radians(fp.rotation or 0.0)",
+     "                rot = 0.0",
+     (T961,), KILLED),
+    ('marker-counts-npth-pads', 'cg',
+     "            pads = ([p for p in (fp.pads or ())\n"
+     "                     if getattr(p, 'pad_type', '') != 'np_thru_hole']\n"
+     "                    or list(fp.pads or ()))",
+     "            pads = list(fp.pads or ())",
+     (T961,), KILLED),
+    ('marker-verdict-shared-between-parts', 'cg',
+     "        hit = self._encloses.get(ref)",
+     "        hit = next(iter(self._encloses.values()), None)",
+     (T961,), KILLED),
+    ('evidence-missing-from-json', 'fp',
+     "        'edge_connector_evidence': r.edge_connector_evidence,",
+     "        'edge_connector_evidence': [],",
+     (T961,), KILLED),
+    ('evidence-margin-faked', 'fp',
+     "        'effective_margin_mm': ctx.gate.margin,",
+     "        'effective_margin_mm': 0.0,",
+     (T961,), KILLED),
+    ('copper-nocopper-reads-pass', 'fp',
+     "    elif gap is None:\n        copper_disposition = 'no copper pads measured'",
+     "    elif gap is None:\n        copper_disposition = 'pass'",
+     (T961,), KILLED),
+    ('copper-walks-the-whole-board', 'fp',
+     "            subset = copy(self.pcb)\n            subset.footprints = {",
+     "            subset = self.pcb\n            _unused = {",
+     (T961,), KILLED),
+    ('per-part-minimum-last-wins', 'lg',
+     "            minimum_by_ref[ref] = min(minimum_by_ref.get(ref, gap), gap)",
+     "            minimum_by_ref[ref] = gap",
+     (T961,), KILLED),
+    # Round 3: five branches round 2 covered with a test but no row.
+    ('fab-falls-back-to-silk', 'cg',
+     "    layer = next((side + suffix for suffix in ('.Fab', '.SilkS')",
+     "    layer = next((side + suffix for suffix in ('.SilkS', '.Fab')",
+     (T961,), KILLED),
+    ('any-outline-is-rectangular', 'cg',
+     "            rectangular = bool(bounds) and _segments_cover_rectangle(",
+     "            rectangular = bool(bounds) or _segments_cover_rectangle(",
+     (T961,), KILLED),
+    ('text-box-is-body-geometry', 'cg',
+     "        if kind in ('text', 'text_box'):",
+     "        if kind in ('text',):",
+     (T961,), KILLED),
+    ('exempt-count-gate-reads-the-band', 'fp',
+     "                if (amt > legality.EPS and copper_ok",
+     "                if (band > legality.EPS and copper_ok",
+     (T961,), KILLED),
+    ('emitter-widens-on-the-declared-edge', 'fp',
+     "                if (body['body_measured']\n"
+     "                        and body['body_outside_mm'] > amt + legality.EPS):",
+     "                if (body['body_measured']\n"
+     "                        and body['body_overhang_mm'] > amt + legality.EPS):",
+     (T961,), KILLED),
+    # Round 2: the three seeder call sites that hand the band to
+    # `_edge_correct`, and the second rung's own arithmetic. Each survived the
+    # round-2 review's mutations with every test green.
+    ('seat-ladder-drops-the-band', 'sd',
+     "                x, y, converged = _edge_correct(state, ref, edge, x, y,\n"
+     "                                                overhang, band=(lo, hi_eff))",
+     "                x, y, converged = _edge_correct(state, ref, edge, x, y,\n"
+     "                                                overhang, band=None)",
+     (T961,), KILLED),
+    ('stage-one-slide-drops-the-band', 'sd',
+     "                _x, _y, _conv = _edge_correct(\n"
+     "                    state, ref, edge, _x, _y, overhang,\n"
+     "                    band=(lo, float(hi) if hi is not None\n"
+     "                          else max(2.0 * overhang, lo + 1.0)))",
+     "                _x, _y, _conv = _edge_correct(\n"
+     "                    state, ref, edge, _x, _y, overhang, band=None)",
+     (T961,), KILLED),
+    ('stage-one-final-drops-the-band', 'sd',
+     "            x, y, converged = _edge_correct(\n"
+     "                state, ref, edge, x, y, overhang,\n"
+     "                band=(lo, float(hi) if hi is not None\n"
+     "                      else max(2.0 * overhang, lo + 1.0)))",
+     "            x, y, converged = _edge_correct(\n"
+     "                state, ref, edge, x, y, overhang, band=None)",
+     (T961,), KILLED),
+    ('rung-north-sign-flipped', 'sd',
+     "    if edge == 'north':\n        y -= err",
+     "    if edge == 'north':\n        y += err",
+     (T961,), KILLED),
+    ('rung-lo-dropped', 'sd',
+     "            or (lo - 0.02) <= row['body_outside_mm'] <= (hi + 0.02)):",
+     "            or row['body_outside_mm'] <= (hi + 0.02)):",
+     (T961,), KILLED),
+    ('rung-always-converged', 'sd',
+     "                  and abs(target - row['body_outside_mm']) < 0.02)",
+     "                  or True)",
+     (T961,), KILLED),
+    # Round 2: a band on the body must still see copper off the outline.
+    ('copper-off-outline-licensed', 'fp',
+     "        if copper_out > legality.EPS:\n            yield Violation(",
+     "        if False:\n            yield Violation(",
+     (T961,), KILLED),
+    ('exempt-ignores-copper', 'fp',
+     "                copper_ok = (not _body.get('body_measured')\n"
+     "                             or (_copper_outside_mm(self, ref) <= legality.EPS\n"
+     "                                 and not _unmodellable_pads(self, ref)))",
+     "                copper_ok = True",
+     (T961,), KILLED),
+    ('castellated-copper-counted', 'fp',
+     "                and getattr(pads[index], 'castellated', False)):",
+     "                and False):",
+     (T961,), KILLED),
+    ('marker-accepted-as-body', 'cg',
+     "        if not self._encloses_own_pads(ref, fp, points):",
+     "        if False:",
+     (T961,), KILLED),
+    ('bside-reads-front', 'cg',
+     "        points, layer, reason = self.source.envelope(ref, footprint_side(fp))",
+     "        points, layer, reason = self.source.envelope(ref, 'F')",
+     (T961,), KILLED),
+    # A board rewritten in place must not be answered from its old text.
+    ('source-cache-ignores-content', 'cg',
+     "           hashlib.blake2b(raw, digest_size=16).digest(),",
+     "           b'',",
+     (T961,), KILLED),
 ]
 
 

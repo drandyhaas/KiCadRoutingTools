@@ -3322,6 +3322,20 @@ def format_oob_clause(report, limit: int = 6) -> str:
     return shown + more + "\n" + basis
 
 
+def pad_shape_is_modelled(pad) -> bool:
+    """Can `grade_pad_edge_clearance` compute this pad's copper extrema?
+
+    Parsed polygons, or one of the four analytic shapes. Anything else -- a
+    trapezoid, a custom pad with no primitives -- is recorded as unmeasured
+    and produces no finding, so a consumer that reads findings alone learns
+    nothing about where its copper reaches. Public because #961's connector
+    evidence has to ask the same question, and asking it by matching the
+    grader's free-text reason would break on any wording change.
+    """
+    return (bool(getattr(pad, 'polygons', None))
+            or pad.shape in ('rect', 'roundrect', 'circle', 'oval'))
+
+
 def _segments_cover_rectangle(segments, bounds) -> bool:
     """Every source edge belongs to, and exactly covers, the rectangle."""
     if not segments or not bounds:
@@ -3410,6 +3424,10 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
     findings, unmeasured = [], []
     measured = 0
     minimum = None
+    # #961: the same minimum per part, so a consumer reporting ONE part's
+    # copper (an edge connector's evidence row) reads it rather than running
+    # this whole function once per part.
+    minimum_by_ref: Dict[str, float] = {}
     for ref, fp in sorted(pcb_data.footprints.items()):
         for index, pad in enumerate(fp.pads):
             if _pad_has_no_copper(pad):
@@ -3417,7 +3435,7 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
             identity = {'pad_ref': f'{ref}.{pad.pad_number}', 'pad_index': index,
                         'pad_loc': [pad.global_x, pad.global_y]}
             polygons = getattr(pad, 'polygons', None)
-            supported = bool(polygons) or pad.shape in ('rect', 'roundrect', 'circle', 'oval')
+            supported = pad_shape_is_modelled(pad)
             if not bounds or not supported:
                 unmeasured.append(dict(identity, reason=(
                     'missing board outline' if not bounds else 'unsupported pad geometry')))
@@ -3469,12 +3487,14 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
                             (y0-bounds[1], 'bottom'), (bounds[3]-y1, 'top'))
             measured += 1
             minimum = gap if minimum is None else min(minimum, gap)
+            minimum_by_ref[ref] = min(minimum_by_ref.get(ref, gap), gap)
             amount = required - gap
             if amount > EPS:
                 findings.append(dict(identity, required_mm=required, gap_mm=gap,
                                      shortfall_mm=amount, edge=edge))
     return {'required_mm': required, 'tolerance_mm': EPS, 'units': 'mm',
             'minimum_gap_mm': minimum, 'measured_pads': measured,
+            'minimum_gap_by_ref_mm': minimum_by_ref,
             'complete': rectangular and not unmeasured and not rules_unmeasured,
             'rules_unmeasured': rules_unmeasured,
             'unmeasured': unmeasured, 'findings': findings,
