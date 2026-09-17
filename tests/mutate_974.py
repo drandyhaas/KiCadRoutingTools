@@ -28,7 +28,11 @@ are same-size edits, and CPython trusts a `.pyc` on (mtime seconds, size).
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
 
-MEASURED: (filled in from the run)
+MEASURED on the tree of `#974: overhang_evidence is a projection` (2026-09-17,
+Windows, the three killer tests first run unmutated and green): 54 rows, 54
+KILLED, 0 survived, 0 broken. Earlier runs on this branch are why the table is
+what it is: 44/44 before the verifier rounds added rows, then one SURVIVED --
+the `edge is not None` guard, measured inert and removed rather than waived.
 """
 from __future__ import annotations
 
