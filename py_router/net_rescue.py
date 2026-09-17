@@ -325,7 +325,20 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
     in the key. Bounded LRU (escalation maps are board-global at fine
     grids); build cfg fields beyond the rung-varying five are constant
     within a pass by construction (_rescue_rungs / the escalation ladder
-    vary exactly grid/clearance/track/via geometry)."""
+    vary exactly grid/clearance/track/via geometry).
+
+    The clone it returns carries the #908 own-pad lift, applied here. The
+    rescue is the one routing path that never reaches
+    `prepare_obstacles_inplace` or `build_single_ended_obstacles`, so nothing
+    else would take a footprint's own copper back off the pad it was drawn
+    around, and the rescue -- the last chance a failed net gets -- would route
+    against a sealed pad. The base build used to do it, because this map is
+    built for a single net; it no longer lifts for anybody (#977), so the
+    lift moved to the map that is actually routed on.
+    (The rows are cached WITH the map rather than re-read from `board`: the
+    build writes them onto the board object it was given, and a later build on
+    another board object -- or another rung's, at a different via size -- would
+    answer for the wrong map on a cache hit.)"""
     from collections import OrderedDict
     from obstacle_map import build_base_obstacle_map
 
@@ -335,19 +348,29 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
     epoch = getattr(parent_pcb, '_copper_epoch', 0)
     key = (net_id, scope_key, epoch, cfg.grid_step, cfg.clearance,
            cfg.track_width, cfg.via_size, cfg.via_drill)
-    pristine = cache.get(key)
-    if pristine is None:
+    entry = cache.get(key)
+    if entry is None:
         pristine = build_base_obstacle_map(board, cfg, [net_id],
                                            net_clearances=net_clearances)
+        entry = (pristine,
+                 (getattr(board, '_graphic_own_pad_lift', None) or {}).get(net_id),
+                 (getattr(board, '_graphic_own_pad_via_lift', None) or {}).get(net_id))
         # Stale-epoch entries can never hit again; drop them first, then LRU.
         for k in [k for k in cache if k[2] != epoch]:
             del cache[k]
-        cache[key] = pristine
+        cache[key] = entry
         while len(cache) > 4:
             cache.popitem(last=False)
     else:
         cache.move_to_end(key)
-    return pristine.clone_fresh()
+    pristine, _op_cells, _op_vias = entry
+    obstacles = pristine.clone_fresh()
+    # No restore: the clone is this attempt's own map and is discarded with it.
+    if _op_cells is not None and len(_op_cells):
+        obstacles.remove_blocked_cell_spans_batch(_op_cells)
+    if _op_vias is not None and len(_op_vias):
+        obstacles.remove_blocked_via_spans_batch(_op_vias)
+    return obstacles
 
 
 def _choose_grid(config, half_size):
