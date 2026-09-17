@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""REPRODUCTION of an OPEN, MERGE-BLOCKING bug (#622 review, 2026-09-17).
-
-NOT under tests/ on purpose: `run_all.py` globs `test_*.py`, and this
-FAILS today. It is a reproduction, not a gate, until the semantics below
-are decided by someone who owns them.
-
-A back-side BGA must honour the layer NAMES its caller passed.
+"""A back-side BGA must honour the layer NAMES its caller passed (#622).
 
 `to_front_frame` renames F.Cu<->B.Cu across the whole board, so every
 argument that NAMES a layer has to travel with it. Forwarded unmapped, a
@@ -24,9 +18,8 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.join(HERE, '..', '..')
-sys.path.insert(0, os.path.join(ROOT, 'py_router'))
-sys.path.insert(0, os.path.join(ROOT, 'tests'))
+sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+sys.path.insert(0, HERE)
 
 from kicad_parser import BoardInfo            # noqa: E402
 from bga_fanout import generate_bga_fanout    # noqa: E402

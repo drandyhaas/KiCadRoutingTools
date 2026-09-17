@@ -2800,7 +2800,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
         clearance = _mx_498
 
     from bga_fanout.flip_frame import (is_back_side, to_front_frame, flip_hints,
-                                       flip_results)
+                                       flip_results, other_layer)
     if is_back_side(footprint):
         # a part on the BACK fans out as the mirror of the same part on
         # the front: the board turned over in memory, the core run again
@@ -2813,6 +2813,40 @@ def _generate_bga_fanout_core(footprint: Footprint,
         _args['footprint'] = rp.footprints[footprint.reference]
         _args['pcb_data'] = rp
         _args['escape_dir_hints'] = flip_hints(escape_dir_hints, footprint, rp, back)
+        # ...AND EVERY ARGUMENT THAT NAMES A LAYER (2026-09-17). The frame
+        # renames F.Cu<->B.Cu on every pad, segment, via, zone and
+        # footprint, so a name the caller passed still means the side it
+        # meant on the REAL board -- which inside the frame is the other
+        # one. Forwarded unmapped, a back part told to avoid F.Cu laid 14
+        # tracks ON F.Cu and none on its own B.Cu (4-layer fixture,
+        # awx/repro/repro_flip_layer_args.py).
+        #
+        # TWO STEPS, and the second is why a plain rename is not enough.
+        # `layer_costs` is POSITIONAL (aligned with `layers`, #519), so the
+        # rename alone keeps costs on the right layers -- but the engine
+        # ALSO reads `layers[0]` as "the top escape layer" (:3236 refuses
+        # to have it forbidden) while underpad instead resolves
+        # `layers.index(footprint.layer)`. Under the symmetric default
+        # ['F.Cu','B.Cu'] the rename REORDERS the pair and moves layers[0]
+        # off the face the part is on, which broke the back==mirror(front)
+        # guarantee (test_fanout_flip_frame 16/16 -> 15/16). So after
+        # renaming, bring the part's own (turned) layer back to the front,
+        # permuting `layer_costs` by the SAME permutation so costs stay on
+        # their layers. A caller who already leads with the part's layer
+        # (the 4-layer case) is unaffected -- it is already at index 0.
+        if layers:
+            _m = [other_layer(_L) for _L in layers]
+            _c = list(layer_costs) if layer_costs else None
+            _own = str(_args['footprint'].layer or '')
+            if _own in _m and _m.index(_own) != 0:
+                _i = _m.index(_own)
+                _perm = [_i] + [_j for _j in range(len(_m)) if _j != _i]
+                _m = [_m[_j] for _j in _perm]
+                if _c is not None and len(_c) == len(_perm):
+                    _c = [_c[_j] for _j in _perm]
+            _args['layers'] = _m
+            if _c is not None:
+                _args['layer_costs'] = _c
         for _a in ('_fanout_all_foreign_immovable',):
             if hasattr(pcb_data, _a):
                 setattr(rp, _a, getattr(pcb_data, _a))
@@ -4252,7 +4286,8 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
                 layers=v.get('layers') or ['F.Cu', 'B.Cu'],
                 net_id=v['net_id']))
-        from bga_fanout.flip_frame import is_back_side, to_front_frame, flip_results
+        from bga_fanout.flip_frame import (is_back_side, to_front_frame,
+                                           flip_results, other_layer)
         if is_back_side(footprint):
             # RECURSE, do not call generate_plane_drops directly: the
             # rotation frame (#137) is applied by the block BELOW this one,
@@ -4265,10 +4300,29 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
             # materialised into pcb_data travels into the turned frame with
             # it, so the drops still see the signal escape.)
             rp, back = to_front_frame(pcb_data, footprint.reference)
+            # the layer NAMES travel with the frame, exactly as the signal
+            # path above: inside the turned board a caller's 'B.Cu' is the
+            # real F.Cu. Unmapped, a DECLARED PLANE was modelled on the
+            # wrong face, and a ball could skip its drop via on the
+            # strength of fill that is on the other side of the board --
+            # a #678 pour-served promise the post-route audit would then
+            # fail on the real board.
+            _rpf = rp.footprints[footprint.reference]
+            _lay_f = layers
+            if layers:
+                _lay_f = [other_layer(_L) for _L in layers]
+                _own = str(_rpf.layer or '')
+                if _own in _lay_f and _lay_f.index(_own) != 0:
+                    _i = _lay_f.index(_own)
+                    _lay_f = [_lay_f[_i]] + [_lay_f[_j]
+                                             for _j in range(len(_lay_f)) if _j != _i]
+            _pnl_f = ({_n: [other_layer(_L) for _L in _ls]
+                       for _n, _ls in plane_net_layers.items()}
+                      if plane_net_layers else plane_net_layers)
             d_tracks, d_vias, rep = _plane_drop_pass(
-                rp.footprints[footprint.reference], rp, [], [], net_filter,
-                layers, track_width, clearance, via_size, via_drill,
-                grid_step, plane_net_layers=plane_net_layers,
+                _rpf, rp, [], [], net_filter,
+                _lay_f, track_width, clearance, via_size, via_drill,
+                grid_step, plane_net_layers=_pnl_f,
                 no_via_in_pad=no_via_in_pad)
             flip_results(d_tracks, d_vias, [], back)
             return d_tracks, d_vias, rep
