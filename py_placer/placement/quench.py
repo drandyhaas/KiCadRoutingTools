@@ -797,6 +797,10 @@ class QuenchState:
         # usable ring at all -- in which case behaviour is unchanged.
         self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin)
         self.clearance = clearance
+        # #975: the edge floor ITSELF. `edge_gate.margin` is the max of the two
+        # floors, so the pad-copper edge check an edge seat makes (a floor, not
+        # a copper clearance) cannot be recovered from it.
+        self.board_edge_clearance = board_edge_clearance
         self.crossing_penalty = crossing_penalty
         self.length_weight = length_weight
         self.net_weights = net_weights or {}

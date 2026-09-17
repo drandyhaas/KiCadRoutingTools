@@ -43,6 +43,13 @@ came in with, so whether anything lands on it is incidental to the seed;
 and only when nothing is unseated -- an unseated part already fails it for a
 better reason. All three are named on the console, because every one of them
 is copper a fab will see.
+
+It also carries `edge_floor_fallback` (#975): the declared edge connectors whose
+seat leaves pad copper inside the board-edge floor because no in-band seat
+clears it, by ref, with the pads and why the seat could not move. An edge seat
+prefers a pose that clears the floor and otherwise keeps the one the pad-centre
+test accepts, since an unseated connector is an unrouted one. Like
+`connector_requirements`, it never changes an exit code.
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -458,7 +465,9 @@ Examples:
                   "one is unplaced -- seed it instead).", file=sys.stderr)
             return UNPLACED_EXIT
         summary = {'dry_run': args.dry_run,
-                   'output': None if args.dry_run else args.output_file}
+                   'output': None if args.dry_run else args.output_file,
+                   # #975: filled by whichever pass seats an edge part below.
+                   'edge_floor_fallback': {}}
 
         # Both passes stage into a temp dir and the finished board is copied
         # to the output path once, at the end. That keeps --dry-run honest
@@ -658,6 +667,8 @@ Examples:
                 'reseat_min_gain': args.reseat_min_gain,
                 'reseat_max_move_mm': round(_rmax, 3),
             })
+            summary['edge_floor_fallback'].update(
+                reseat.get('edge_floor_fallback') or {})
             _advance(reseat['moves'], 'reseat')
             if reseat['edge_bands_dropped']:
                 # Grade against what the pass actually honoured. Keeping the
@@ -699,6 +710,8 @@ Examples:
                 'moved_refs': [m['reference'] for m in result['moves']],
                 'max_move_mm': round(max_move, 3),
             })
+            summary['edge_floor_fallback'].update(
+                result.get('edge_floor_fallback') or {})
             summary.update({f'{k}_before': v
                             for k, v in result['pad_report_before'].items()})
             _advance(result['moves'], 'repair')
@@ -1117,6 +1130,11 @@ Examples:
                # sees only `unseated_refs` cannot tell a declaration it must
                # revisit from a board that is simply full.
                'rotation_unseated': result.get('rotation_unseated') or {},
+               # #975: declared edge connectors seated with pad copper inside
+               # the board-edge floor because no in-band seat clears it -- the
+               # alternative was not seating them. `pad_edge_after` grades the
+               # copper; this says which seats chose it, and why.
+               'edge_floor_fallback': result.get('edge_floor_fallback') or {},
                'no_pose_blockers': result.get('no_pose_blockers') or {},
                # WHY each of them has no pose, not just who is nearby (#699).
                # "nothing is near it" and "everything near it is locked" were
