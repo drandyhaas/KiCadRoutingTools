@@ -5505,7 +5505,7 @@ def summary(r: GradeResult) -> Dict:
 
 #: What an `overhang_evidence` row keeps of the grade's evidence row: the
 #: band's number, currency, limit and verdict, and the copper conjunct's
-#: verdict and amounts -- with the per-pad lists as COUNTS. JSON_SUMMARY is
+#: verdict and amounts -- with the grade's lists as COUNTS. JSON_SUMMARY is
 #: one stdout line, and the whole rows (body position, grade-wide basis
 #: strings repeated per row, per-pad lists) measured 26.7 KB for 28 declared
 #: connectors on kit-dev-coldfire's emitted intent. They stay in

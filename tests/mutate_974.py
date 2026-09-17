@@ -36,6 +36,9 @@ Windows, the three killer tests first run unmutated and green): 54 rows, 54
 KILLED, 0 survived, 0 broken. Earlier runs on this branch are why the table is
 what it is: 44/44 before the verifier rounds added rows, then one SURVIVED --
 the `edge is not None` guard, measured inert and removed rather than waived.
+Re-run after `run()` gained its unmutated gate: the three killers pass unmutated,
+54/54 KILLED; with `tests/run_utils.py` moved aside the battery exits 2,
+naming test_923 as BROKEN.
 """
 from __future__ import annotations
 
