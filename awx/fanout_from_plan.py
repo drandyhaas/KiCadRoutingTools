@@ -22,6 +22,7 @@ usage: fanout_from_plan.py OUT.kicad_pcb K --board=BASE.kicad_pcb
 import math
 import collections
 import contextlib
+import io
 import os
 import re
 import shutil
@@ -2790,6 +2791,24 @@ def braid_tier(board, choice, st, names, stem, log=print):
         log('    braid tier: no fanout board for this candidate')
         _TIER['cache'][key] = None
         return None
+    # THE SIDECAR, or the tier judges a board nobody will build (review,
+    # 2026-09-17). `fanout_once` does not write `<board>.plan.json` --
+    # only `explain_plan` does, and only the two real destination passes
+    # call it. Without it braid.py falls back to `plan = None`: no
+    # `pages_first` marker, so `schedule.EXACT_PAGES` and
+    # `PLAN_PAGES_SIDERS` are both OFF and the candidate is routed in a
+    # THIRD regime that neither shipped arm uses -- and this chain's own
+    # portfolio measures those two arms 14 vias apart at K51. The tier's
+    # verdict was therefore a number about a board that would never be
+    # built, which is enough on its own to explain its K35 regression.
+    # Guarded: a candidate that cannot be explained must not take the run
+    # down, it just goes back to being judged without the marker.
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            explain_plan(choice, st, names, fo, fo)
+    except Exception as e:                       # noqa: BLE001
+        log(f'    braid tier: no plan sidecar for this candidate ({e}) -- '
+            f'it will be routed WITHOUT the pages-first marker')
     out = f'{stem}_t'
     for ext in ('.kicad_pcb', '.kicad_pro'):
         with contextlib.suppress(FileNotFoundError):
