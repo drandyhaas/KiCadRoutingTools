@@ -1,0 +1,453 @@
+{
+ "assembly": {
+  "sides": "F",
+  "why": "observed: 18 pad-bearing part(s) on F and 0 on B, 1 reflow pass(es). every footprint BLOCK (#726): blocks sharing one reference are keyed with an ordinal suffix and counted separately. `pad_bearing` restricts that to blocks carrying at least one pad, and it is the count the populated-side verdict is taken from -- a zero-pad graphic on the back does not make a board double-sided."
+ },
+ "blocks": [
+  {
+   "name": "ldo",
+   "refs": [
+    "U2",
+    "C1",
+    "C3"
+   ],
+   "zone": [
+    114.3,
+    91.3,
+    123.0,
+    96.2
+   ],
+   "note": "brief power_chain: USB1 VBUS -> C1 -> U2 -> /+3.3V -> C3 -> U1. The strip north of USB1 shell pads and west of U1, so the regulator sits between the USB end and the bridge and off the USB pair path (run 26 measured the same strip). Widened after seed 1 measured a C3/U2 courtyard overlap of 2.5 mm2 inside the first 8.1 x 4.4 mm strip."
+  },
+  {
+   "name": "bridge",
+   "refs": [
+    "U1"
+   ],
+   "zone": [
+    122.5,
+    96.3,
+    131.5,
+    102.3
+   ],
+   "note": "the SSOP-20 bridge, centre-west: its USB pair comes straight in from USB1 on the west, its UART leaves east toward CON1/CON2."
+  },
+  {
+   "name": "xtal",
+   "refs": [
+    "Y1",
+    "C2",
+    "C4"
+   ],
+   "zone": [
+    123.0,
+    91.3,
+    129.5,
+    96.0
+   ],
+   "note": "the oscillator loop Y1+C2+C4, on the north edge of the bridge zone next to U1 and away from the USB pair (which runs along y~100)."
+  },
+  {
+   "name": "reset",
+   "refs": [
+    "Q1",
+    "Q2",
+    "R1",
+    "R2"
+   ],
+   "zone": [
+    130.0,
+    91.3,
+    139.4,
+    96.2
+   ],
+   "note": "the auto-reset pair with its base resistors, north-east of U1 and west of the east fiducial keepout (x 139.7)."
+  },
+  {
+   "name": "series",
+   "refs": [
+    "R3",
+    "R4"
+   ],
+   "zone": [
+    131.5,
+    96.5,
+    135.5,
+    102.3
+   ],
+   "note": "series termination on U0TXD/U0RXD between U1 and CON1, at the driver end, on the path east (zone pulled 3.5 mm west after seed 0 measured R3 6.15 mm from U1 pad 15 against the 4 mm clause)."
+  }
+ ],
+ "board": "board.kicad_pcb",
+ "context": {
+  "brief": {
+   "absent": [],
+   "contradictions": [],
+   "counts": {
+    "fixed": 3,
+    "interfaces": 3,
+    "keepouts": 2,
+    "proximity": 7,
+    "proximity_claims": 11,
+    "proximity_dropped": 0,
+    "proximity_expanded": 4
+   },
+   "declared": [
+    "interfaces[CON1].along_edge",
+    "interfaces[CON1].cable_entry",
+    "interfaces[CON1].edge",
+    "interfaces[CON1].mount_mode",
+    "interfaces[CON1].overhang_mm",
+    "interfaces[CON1].user_facing",
+    "interfaces[CON2].along_edge",
+    "interfaces[CON2].cable_entry",
+    "interfaces[CON2].edge",
+    "interfaces[CON2].mount_mode",
+    "interfaces[CON2].overhang_mm",
+    "interfaces[CON2].user_facing",
+    "interfaces[USB1].along_edge",
+    "interfaces[USB1].cable_entry",
+    "interfaces[USB1].edge",
+    "interfaces[USB1].mount_mode",
+    "interfaces[USB1].overhang_mm",
+    "interfaces[USB1].user_facing",
+    "keepouts[fiducial east]",
+    "keepouts[fiducial west]",
+    "product.form_factor",
+    "product.held_by",
+    "product.primary_axis",
+    "product.user_top_side",
+    "proximity[0:C2~Y1].max_mm",
+    "proximity[0:C4~Y1].max_mm",
+    "proximity[1:Y1~U1].max_mm",
+    "proximity[2:C1~U2].max_mm",
+    "proximity[2:C3~U2].max_mm",
+    "proximity[3:R1~Q1].max_mm",
+    "proximity[4:R2~Q2].max_mm",
+    "proximity[5:Q1~U1].max_mm",
+    "proximity[5:Q2~U1].max_mm",
+    "proximity[6:R3~U1].max_mm",
+    "proximity[6:R4~U1].max_mm"
+   ],
+   "fixed": [
+    {
+     "ref": "USB1",
+     "why": "edge receptacle; its pose is a mechanical fact, carried by stage_unaided"
+    },
+    {
+     "ref": "Ref*",
+     "why": "fiducial; an assembly datum, not a placement choice"
+    },
+    {
+     "ref": "Ref*~2",
+     "why": "the second fiducial block, keyed ~2 because both spell the same reference (#726)"
+    }
+   ],
+   "not_graded": [
+    "interfaces[CON1].cable_entry",
+    "interfaces[CON1].mount_mode",
+    "interfaces[CON2].cable_entry",
+    "interfaces[CON2].mount_mode",
+    "interfaces[USB1].cable_entry",
+    "interfaces[USB1].mount_mode",
+    "product.form_factor",
+    "product.user_top_side"
+   ],
+   "path": "wk/run27/esp_prog/board.design-brief.json",
+   "product": {
+    "form_factor": "usb_stick",
+    "held_by": "hand; a micro-USB cable plugs into the west end, the target cable leaves the east end",
+    "primary_axis": "east-west",
+    "user_top_side": "F"
+   },
+   "unknown": [
+    "enclosure",
+    "mounting_datum",
+    "panel"
+   ],
+   "unmatched": [],
+   "unmatched_checked": true
+  },
+  "budget_withheld": {
+   "overlap_area": "83 blocking body pair(s) on the emitting board (run-6)"
+  },
+  "cutouts": [],
+  "decap_census": {
+   "beyond_radius": 1,
+   "beyond_radius_refs": [
+    "C1"
+   ],
+   "ics": 1,
+   "max_mm": 0.0,
+   "max_mm_display": 0.0,
+   "median_mm": 0.0,
+   "metric": "cap footprint centroid to IC bounding box, clamped to 0 inside (placement.groups.decap_tethers)",
+   "no_rail_chip": 0,
+   "no_rail_chip_refs": [],
+   "population": 4,
+   "search_radius_mm": 5.0,
+   "seeder_pin_scope": 4,
+   "source": "auto-tethers",
+   "tethers": 3,
+   "unaccounted": 0,
+   "worst_beyond_mm": 8.655
+  },
+  "edge_contours": 0,
+  "file_locked": [],
+  "keepouts_note": "2 keep-out(s) DECLARED by the design brief board.design-brief.json. A keep-out is a mechanical fact and cannot be read off a board, so the emitter writes none; these came from the one channel that can state one. Since #701 the seat search honours them, not only the grade.",
+  "note": "read-only, describing the board as it is. The outline is not editable by this toolchain: size, cutouts and slots are mechanical decisions the user owns",
+  "proximity_note": "11 proximity claim(s) DECLARED by the design brief board.design-brief.json. \"These two named parts, this far apart\" is a SPEC fact: the board supplies the distance but never the claim, so the emitter writes none and these came from the one channel that can state one. They are graded from the intent, not by any seat search, so a violation is a finding to act on rather than a pose the engine will refuse.",
+  "zone_plan": "authored by hand for run 27 from the brief context; every movable part not must_lock and not a declared edge connector is in a zoned block. CON1 (east) and CON2 (south) are seeded on their declared edge bands."
+ },
+ "decaps": {},
+ "defaults": {
+  "zone_tolerance_mm": 0.5
+ },
+ "edge_connectors": [
+  {
+   "center_on_edge": {
+    "tolerance_mm": 0.6
+   },
+   "class": "edge_receptacle",
+   "context": {
+    "brief_row": 0,
+    "cable_entry": "in_plane",
+    "mount_mode": "edge_mount",
+    "why": "a micro-USB cable plugs INTO this socket, so its opening must meet the board edge; a socket set inboard leaves the cable shell fouling the board"
+   },
+   "edge": "west",
+   "overhang_mm": {
+    "max": 0.65,
+    "min": 0.0
+   },
+   "ref": "USB1",
+   "source": "brief"
+  },
+  {
+   "center_on_edge": {
+    "tolerance_mm": 1.0
+   },
+   "class": "edge_receptacle",
+   "context": {
+    "brief_row": 1,
+    "cable_entry": "in_plane",
+    "mount_mode": "edge_mount",
+    "why": "the target cable leaves here, at the opposite end from the host cable, so the two never contend for the same hand"
+   },
+   "edge": "east",
+   "overhang_mm": {
+    "max": 0.5,
+    "min": 0.0
+   },
+   "ref": "CON1",
+   "source": "brief"
+  },
+  {
+   "along_edge_band": {
+    "from": 0.25,
+    "to": 0.75
+   },
+   "class": "edge_receptacle",
+   "context": {
+    "brief_row": 2,
+    "cable_entry": "perpendicular_top",
+    "mount_mode": "through_edge",
+    "why": "a 1x7 header for jumper wires, carrying the same signals as CON1; it needs a long edge so wires clear the two end connectors"
+   },
+   "edge": "south",
+   "overhang_mm": {
+    "max": 0.0,
+    "min": 0.0
+   },
+   "ref": "CON2",
+   "source": "brief"
+  }
+ ],
+ "envelope": {
+  "rect": [
+   114.0,
+   91.0,
+   145.75,
+   105.5
+  ],
+  "tolerance_mm": 0.5
+ },
+ "keepouts": [
+  {
+   "allow": [
+    "Ref*"
+   ],
+   "context": {
+    "kind": "assembly_vision",
+    "source": "brief",
+    "why": "a placement machine's camera needs the fiducial clear of neighbouring bodies to find it"
+   },
+   "name": "fiducial east",
+   "rect": [
+    139.7,
+    94.4,
+    142.7,
+    97.4
+   ],
+   "sides": [
+    "F"
+   ]
+  },
+  {
+   "allow": [
+    "Ref*~2",
+    "USB1"
+   ],
+   "context": {
+    "kind": "assembly_vision",
+    "source": "brief",
+    "why": "same requirement; USB1 is allowed because the source board already places the socket across this area and its pose is fixed"
+   },
+   "name": "fiducial west",
+   "rect": [
+    116.6,
+    98.4,
+    119.6,
+    101.4
+   ],
+   "sides": [
+    "F"
+   ]
+  }
+ ],
+ "kind": "floorplan-intent",
+ "legality_budget": {
+  "oob_count": 0
+ },
+ "min_reader": 4,
+ "must_lock": [
+  "USB1",
+  "Ref*",
+  "Ref*~2"
+ ],
+ "proximity": [
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 0,
+    "why": "C2 and C4 are the crystal's LOAD capacitors, one per pin (Y1.2 to Net-(C2-Pad1), Y1.1 to Net-(C4-Pad1)). The oscillator loop is Y1+C2+C4 and has to be tiny; this is the tightest constraint on the board"
+   },
+   "max_mm": 1.5,
+   "near": "Y1",
+   "ref": "C2",
+   "source": "brief"
+  },
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 0,
+    "why": "C2 and C4 are the crystal's LOAD capacitors, one per pin (Y1.2 to Net-(C2-Pad1), Y1.1 to Net-(C4-Pad1)). The oscillator loop is Y1+C2+C4 and has to be tiny; this is the tightest constraint on the board"
+   },
+   "max_mm": 1.5,
+   "near": "Y1",
+   "ref": "C4",
+   "source": "brief"
+  },
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 1,
+    "why": "the crystal drives U1 and must stay clear of the USB pair; short beats convenient"
+   },
+   "max_mm": 3.0,
+   "near": "U1",
+   "ref": "Y1",
+   "source": "brief"
+  },
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 2,
+    "why": "C1 is the LDO's input cap on VBUS, C3 its output cap on /+3.3V; both loops are the regulator's stability"
+   },
+   "max_mm": 2.5,
+   "near": "U2",
+   "ref": "C1",
+   "source": "brief"
+  },
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 2,
+    "why": "C1 is the LDO's input cap on VBUS, C3 its output cap on /+3.3V; both loops are the regulator's stability"
+   },
+   "max_mm": 2.5,
+   "near": "U2",
+   "ref": "C3",
+   "source": "brief"
+  },
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 3,
+    "why": "R1 is Q1's base resistor in the auto-reset pair"
+   },
+   "max_mm": 2.5,
+   "near": "Q1",
+   "ref": "R1",
+   "source": "brief"
+  },
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 4,
+    "why": "R2 is Q2's base resistor in the auto-reset pair"
+   },
+   "max_mm": 2.5,
+   "near": "Q2",
+   "ref": "R2",
+   "source": "brief"
+  },
+  {
+   "basis": "body",
+   "context": {
+    "brief_row": 5,
+    "why": "the auto-reset pair drives /EN from /DTR and /RTS and belongs with the bridge it resets"
+   },
+   "max_mm": 6.0,
+   "near": "U1",
+   "ref": "Q1",
+   "source": "brief"
+  },
+  {
+   "basis": "body",
+   "context": {
+    "brief_row": 5,
+    "why": "the auto-reset pair drives /EN from /DTR and /RTS and belongs with the bridge it resets"
+   },
+   "max_mm": 6.0,
+   "near": "U1",
+   "ref": "Q2",
+   "source": "brief"
+  },
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 6,
+    "why": "series resistors on /U0TXD and /U0RXD between U1 and the connectors; series termination belongs at the driver, not mid-track"
+   },
+   "max_mm": 4.0,
+   "near": "U1",
+   "ref": "R3",
+   "source": "brief"
+  },
+  {
+   "basis": "pad_edge",
+   "context": {
+    "brief_row": 6,
+    "why": "series resistors on /U0TXD and /U0RXD between U1 and the connectors; series termination belongs at the driver, not mid-track"
+   },
+   "max_mm": 4.0,
+   "near": "U1",
+   "ref": "R4",
+   "source": "brief"
+  }
+ ],
+ "schema": 1,
+ "units": "mm"
+}
