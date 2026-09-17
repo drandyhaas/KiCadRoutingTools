@@ -294,6 +294,176 @@ def lower_bound(order_src, order_dst):
     return 2 * (len(seq) - lis_len(seq)), lis_len(seq)
 
 
+# --- the PLANNER'S OWN model, solved exactly ---------------------------------
+#
+# The three answers above price the PROBLEM. This prices the MODEL: the best
+# plan `pages_first.py` is able to express at all. Its variables are a page
+# per net and an end per net, and its one hard rule is that two nets on the
+# same page are never inverted; a net that fits neither page is left to SWIM
+# at a fixed price (`PLAN_PAGES_SWIM`, 100 vias as shipped).
+#
+# Two lanes are inverted exactly when they cross, so "a page" is a
+# crossing-free set is an INCREASING SUBSEQUENCE of the destination ranks in
+# source order. The model's optimum is therefore: cover the lanes with two
+# increasing subsequences, pay each lane its page's end-mismatch price, and
+# pay `swim` for every lane left over. That is an exact O(K^3) DP -- state is
+# the last destination rank placed on each page, because nothing earlier can
+# constrain a later lane -- so it answers at K=51 in milliseconds where
+# `exact_dp` stops at 22.
+#
+# Why it is worth a column. `planner gap = plan - optimum` cannot say WHY the
+# plan is off, and the two causes want opposite work:
+#
+#     MODEL error  = the best plan the model can express  - the true optimum
+#     SEARCH error = the plan the planner found           - that best plan
+#
+# If the model error dominates, more solving is wasted (and, at a swim price
+# of 100 vias against a swimmer's true cost of 2, actively harmful -- the
+# solve will distort every other choice to page one more lane). If the search
+# error dominates, a better solver pays. The campaign has been buying search.
+
+def pages_model(order_src, order_dst, tooth_layer=None, berth_layer=None,
+                swim=100.0, mismatch=1.0):
+    """The exact optimum of the two-page model, in the model's own units.
+
+    `swim` is the model's price for a lane it cannot page (vias);
+    `mismatch` the price of one end whose layer differs from its page --
+    both as `pages_first` spells them. Returns a dict:
+
+        cost      the model's objective at its optimum (vias)
+        page      lane id -> 'F.Cu' | 'B.Cu' | 'swim'
+        n_f/n_b   lanes on each page, n_swim lanes left over
+        paged     n_f + n_b -- and with a swim price above the span of the
+                  end prices this is MAXIMAL, so it equals the Greene
+                  number lambda1 + lambda2 (the self-test checks that)
+        true_lb   a LOWER bound on what a routing of this plan can cost in
+                  real vias: the paged lanes at their end prices, plus 2 a
+                  swimmer (a lane whose ends share a layer must leave it
+                  and come back). NOT the model's `cost`, which counts a
+                  swimmer at `swim`.
+    """
+    rd = {n: i + 1 for i, n in enumerate(order_dst)}     # 1-based; 0 = empty
+    tl, bl = tooth_layer or {}, berth_layer or {}
+    # `swim` may be a per-lane mapping as well as a scalar. That is what
+    # turns this function into a LOWER BOUND (see channel_lower_bound):
+    # price each unpaged lane at the least it could possibly cost, and the
+    # DP's answer is below every routing's.
+    swim_of = (swim.get if hasattr(swim, 'get') else (lambda n, _d=None: swim))
+
+    def price(n, page):
+        return mismatch * ((0 if tl.get(n, 'F.Cu') == page else 1) +
+                           (0 if bl.get(n, 'F.Cu') == page else 1))
+
+    def c_min(n):
+        """The least a lane that does NOT hold one page can cost: it makes
+        at least one layer change, and an even number of them when its two
+        ends share a layer."""
+        return 2.0 if tl.get(n, 'F.Cu') == bl.get(n, 'F.Cu') else 1.0
+
+    # state (a, b) -> (cost, true, choices): the highest destination rank
+    # already placed on page F and on page B. A later lane is legal on a
+    # page iff its rank is above that page's last, so the two numbers are
+    # the whole of the state.
+    cur = {(0, 0): (0.0, 0.0, ())}
+    for n in order_src:
+        v = rd[n]
+        pf, pb = price(n, 'F.Cu'), price(n, 'B.Cu')
+        nxt = {}
+        for (a, b), (c, t, ch) in cur.items():
+            # the CHARGED price (what the model pays) and the TRUE floor
+            # (what such a lane cannot cost less than) are different
+            # numbers: a lane that leaves its tooth's layer and must come
+            # back to the same one pays 2, and 1 when its ends differ.
+            opts = [((a, b), swim_of(n, 0.0), c_min(n), 'swim')]
+            if v > a:
+                opts.append(((v, b), pf, pf, 'F.Cu'))
+            if v > b:
+                opts.append(((a, v), pb, pb, 'B.Cu'))
+            for key, dc, dt, tag in opts:
+                cc = c + dc
+                old = nxt.get(key)
+                if old is None or cc < old[0] - 1e-12:
+                    nxt[key] = (cc, t + dt, ch + ((n, tag),))
+        cur = nxt
+    (cost, true_lb, ch) = min(cur.values(), key=lambda v: v[0])
+    page = dict(ch)
+    n_f = sum(1 for p in page.values() if p == 'F.Cu')
+    n_b = sum(1 for p in page.values() if p == 'B.Cu')
+    n_s = sum(1 for p in page.values() if p == 'swim')
+    return dict(cost=cost, page=page, n_f=n_f, n_b=n_b, n_swim=n_s,
+                paged=n_f + n_b, true_lb=true_lb)
+
+
+def channel_lower_bound(order_src, order_dst, tooth_layer=None,
+                        berth_layer=None):
+    """A LOWER BOUND on the channel's exact optimum, at ANY K.
+
+    `exact_dp` is exact but costs 2**(free lanes), so at K=41 or 51 --
+    the rungs that matter -- there has never been a number to compare the
+    routed board against. This gives one, in milliseconds, and it is a
+    bound rather than an estimate:
+
+    THE ARGUMENT. Any routing splits the lanes into three sets: A, the
+    lanes that hold layer F for the whole channel; B, those that hold
+    layer B; and S, the rest. Then
+
+      * A is crossing-free and so is B -- two lanes that share a layer
+        everywhere cannot cross -- so each is an increasing subsequence of
+        the destination ranks in source order;
+      * a lane in A costs exactly `price(n, F)` and one in B exactly
+        `price(n, B)`, its end mismatches and nothing else;
+      * a lane in S changes layer at least once, so it costs at least 1,
+        and at least 2 when its two ends share a layer (an odd number of
+        changes could not return it).
+
+    So the routing's cost is at least the minimum, over all valid (A, B),
+    of that sum -- which is exactly `pages_model` with every lane's swim
+    price set to its own floor. The O(K^3) DP computes that minimum
+    exactly, so the number is a true bound and not a heuristic.
+
+    WHAT IT IS A BOUND FOR, said plainly: the channel-confined homotopy
+    class, where every inverted pair crosses once and no other pair
+    crosses. A lane that reaches its pad THROUGH or AROUND an array is
+    outside it and can legitimately beat this -- which is what the
+    ladder's `thru` column counts. On a board with `thru > 0` read it as
+    the bound for the lanes that stayed in the channel.
+
+    Returns the `pages_model` dict; `cost` is the bound.
+    """
+    tl, bl = tooth_layer or {}, berth_layer or {}
+    floor = {n: (2.0 if tl.get(n, 'F.Cu') == bl.get(n, 'F.Cu') else 1.0)
+             for n in order_src}
+    return pages_model(order_src, order_dst, tooth_layer, berth_layer,
+                       swim=floor)
+
+
+def rsk_shape(seq):
+    """The first two rows of the RSK insertion tableau's shape.
+
+    Greene's theorem: the largest union of k increasing subsequences of a
+    sequence is the sum of the k largest parts of that shape. So
+    `lambda1 + lambda2` is, independently of the DP above, the most lanes
+    two pages can hold -- and lambda1 alone is the LIS. Used only by the
+    self-test, as a second opinion computed a different way."""
+    import bisect
+    # NOTE bisect_left and bisect_right agree on a permutation (all values
+    # distinct), so a mutation between them is equivalent and the self-test
+    # cannot tell them apart -- recorded rather than papered over.
+    rows = []
+    for v in seq:
+        cur = v
+        for r in rows:
+            k = bisect.bisect_left(r, cur)
+            if k == len(r):
+                r.append(cur)
+                cur = None
+                break
+            r[k], cur = cur, r[k]
+        if cur is not None:
+            rows.append([cur])
+    return [len(r) for r in rows]
+
+
 # --- the EXACT optimum, over pages AND mid-channel layer changes -----------
 #
 # The whole-lane model above prices only solutions where a lane keeps one
@@ -362,7 +532,7 @@ def _relax_hamming(cost, K):
     return cost
 
 
-def exact_dp(ids, s, d, tooth_layer=None, berth_layer=None, cap=22):
+def exact_dp(ids, s, d, tooth_layer=None, berth_layer=None, cap=22, fixed=None):
     """The minimum via count over ALL two-layer routings of this channel
     whose inverted pairs each cross once, in `crossing_events`' order --
     mid-channel layer changes included.
@@ -380,53 +550,233 @@ def exact_dp(ids, s, d, tooth_layer=None, berth_layer=None, cap=22):
     homotopy class (every inverted pair crosses exactly once, no
     non-inverted pair crosses at all). A router that takes a lane the long
     way round an array is outside the model and can beat it -- which is
-    what the harness's `thru` column exists to catch."""
+    what the harness's `thru` column exists to catch.
+
+    `fixed` (lane id -> 'F.Cu' | 'B.Cu') PINS those lanes to one layer for
+    the whole channel. That is what a whole-lane PLAN is, so
+    `exact_dp(fixed=the model's pages) - exact_dp()` is the exact price of
+    planning in whole lanes -- the MODEL error, measured in the same units
+    and the same homotopy class as the optimum it is compared to. A pinned
+    lane is not a variable, so the walk runs over the FREE lanes only and
+    the cap applies to those: a plan that pages most of a K=41 bus is
+    answered even though the free problem at K=41 is not.
+    """
     K = len(ids)
     if K == 0:
         return 0, 'exact (no lanes)'
-    if K > cap:
-        return None, f'not computed (K {K} > the 2**K cap of {cap})'
+    tl = tooth_layer or {}
+    bl = berth_layer or {}
+    fx = {n: l for n, l in (fixed or {}).items() if l in ('F.Cu', 'B.Cu')}
+    free = [n for n in ids if n not in fx]
+    F = len(free)
+    if F > cap:
+        return None, (f'not computed ({F} free lane(s) > the 2**n cap of {cap}'
+                      + (f'; {K - F} of {K} were pinned)' if fx else ')'))
     try:
         import numpy as np
     except ImportError:
         np = None
-    if np is None and K > 12:
-        return None, f'not computed (no numpy, and K {K} > 12 in pure python)'
-    tl = tooth_layer or {}
-    bl = berth_layer or {}
-    start = sum(1 << b for b, n in enumerate(ids) if tl.get(n, 'F.Cu') != 'F.Cu')
-    goal = sum(1 << b for b, n in enumerate(ids) if bl.get(n, 'F.Cu') != 'F.Cu')
+    if np is None and F > 12:
+        return None, f'not computed (no numpy, and {F} free lanes > 12 in pure python)'
+    bit = {n: i for i, n in enumerate(free)}
+    pin = {n: (1 if fx[n] == 'B.Cu' else 0) for n in fx}
+    # the pinned lanes' own cost is fixed: one via for each end whose layer
+    # is not the page they are held on
+    base = 0
+    for n, p in fx.items():
+        base += (0 if tl.get(n, 'F.Cu') == p else 1)
+        base += (0 if bl.get(n, 'F.Cu') == p else 1)
+    start = sum(1 << bit[n] for n in free if tl.get(n, 'F.Cu') != 'F.Cu')
+    goal = sum(1 << bit[n] for n in free if bl.get(n, 'F.Cu') != 'F.Cu')
     events = crossing_events(ids, s, d)
-    N = 1 << K
+    N = 1 << F
+    how = ('exact over pages AND mid-channel changes, for the '
+           'straight-line crossing order')
+    if fx:
+        how = (f'exact for the {F} free lane(s), with {K - F} pinned to their '
+               'page for the whole channel')
+    # each event is one of three kinds once the pins are known
+    plan_events = []
+    for (a, b) in events:
+        na, nb = ids[a], ids[b]
+        pa, pb = pin.get(na), pin.get(nb)
+        if pa is not None and pb is not None:
+            if pa == pb:
+                return None, ('two lanes pinned to the same page cross: the '
+                              'plan is not a plan')
+            continue                      # different pages: always legal
+        if pa is not None:
+            plan_events.append(('one', bit[nb], pa))
+        elif pb is not None:
+            plan_events.append(('one', bit[na], pb))
+        else:
+            plan_events.append(('two', bit[na], bit[nb]))
+    if F == 0:
+        return base, how
     if np is not None:
         x = np.arange(N, dtype=np.int32)
         cost = np.zeros(N, dtype=np.int32)
-        for b in range(K):                     # hamming(x, start)
-            cost += ((x >> b) & 1) ^ ((start >> b) & 1)
-        for (a, b) in events:
-            same = (((x >> a) & 1) == ((x >> b) & 1))
-            cost = np.where(same, DP_INF, cost)
+        for i in range(F):
+            cost += ((x >> i) & 1) ^ ((start >> i) & 1)
+        for kind, i, j in plan_events:
+            if kind == 'two':
+                bad = (((x >> i) & 1) == ((x >> j) & 1))
+            else:
+                bad = (((x >> i) & 1) == j)     # j is the pinned layer bit
+            cost = np.where(bad, DP_INF, cost)
             if cost.min() >= DP_INF:
                 return None, 'no two-layer routing of this crossing order exists'
-            cost = _relax_hamming(cost, K)
-        for b in range(K):                     # + hamming(x, goal), read at goal
-            cost += ((x >> b) & 1) ^ ((goal >> b) & 1)
+            cost = _relax_hamming(cost, F)
+        for i in range(F):
+            cost += ((x >> i) & 1) ^ ((goal >> i) & 1)
         best = int(cost.min())
     else:
         cost = [bin(v ^ start).count('1') for v in range(N)]
-        for (a, b) in events:
-            ba, bb = 1 << a, 1 << b
+        for kind, i, j in plan_events:
+            bi = 1 << i
             for v in range(N):
-                if bool(v & ba) == bool(v & bb):
+                if (bool(v & bi) == bool(v & (1 << j))) if kind == 'two' \
+                        else (bool(v & bi) == bool(j)):
                     cost[v] = DP_INF
             if min(cost) >= DP_INF:
                 return None, 'no two-layer routing of this crossing order exists'
-            _relax_hamming(cost, K)
+            _relax_hamming(cost, F)
         best = min(c + bin(v ^ goal).count('1') for v, c in enumerate(cost))
     if best >= DP_INF:
         return None, 'no two-layer routing of this crossing order exists'
-    return best, ('exact over pages AND mid-channel changes, for the '
-                  'straight-line crossing order')
+    return best + base, how
+
+
+# --- is the objective pointing the right way? -------------------------------
+#
+# `pages_model` answers "what is the best plan this model can express". This
+# answers the question behind it: **does the model's objective RANK plans the
+# way the truth does?** A solver can only ever find the best point of the
+# objective it is given, so an objective that ranks wrongly cannot be fixed
+# by more search -- and the campaign's headline finding (solving the K41 plan
+# to proven optimality routes twelve vias WORSE) is exactly that shape.
+#
+# The measurement: build a pool of plans the model considers feasible, score
+# each one both ways -- the model's own objective, and the exact via count of
+# the best routing consistent with it -- and correlate. No routing, no chain,
+# milliseconds. On a case with a known optimum the pool also brackets it.
+
+def plan_pool(order_src, order_dst, tooth_layer=None, berth_layer=None,
+              n=400, seed=0, swims=(2.0, 3.0, 6.0, 20.0, 100.0)):
+    """Distinct model-feasible plans: lane id -> 'F.Cu' | 'B.Cu' | 'swim'.
+
+    Random walks in source order (each lane takes a uniformly random legal
+    option) give the spread; the model's optimum at each price in `swims`
+    is added so the pool always contains the points a solver would actually
+    reach. Deterministic in `seed`."""
+    import random
+    rng = random.Random(seed * 104729 + len(order_src))
+    rd = {nm: i + 1 for i, nm in enumerate(order_dst)}
+    out = {}
+    for _ in range(n):
+        a = b = 0
+        plan = {}
+        for nm in order_src:
+            v = rd[nm]
+            opts = ['swim'] + (['F.Cu'] if v > a else []) + (['B.Cu'] if v > b else [])
+            pick = rng.choice(opts)
+            if pick == 'F.Cu':
+                a = v
+            elif pick == 'B.Cu':
+                b = v
+            plan[nm] = pick
+        out[tuple(sorted(plan.items()))] = plan
+    for sp in swims:
+        m = pages_model(order_src, order_dst, tooth_layer, berth_layer, swim=sp)
+        out[tuple(sorted(m['page'].items()))] = m['page']
+    return list(out.values())
+
+
+def plan_objective(plan, tooth_layer=None, berth_layer=None,
+                   swim=100.0, mismatch=1.0):
+    """`pages_first`'s objective for one plan, in vias, with the ends fixed.
+
+    That is the whole of it on a peripheral bus: the per-net berth and tooth
+    terms are constant when the ends cannot move, so what the solver is
+    ranking by is the end-mismatch price plus the swimmers."""
+    tl, bl = tooth_layer or {}, berth_layer or {}
+    tot = 0.0
+    for nm, page in plan.items():
+        if page == 'swim':
+            tot += swim
+            continue
+        tot += mismatch * ((0 if tl.get(nm, 'F.Cu') == page else 1) +
+                           (0 if bl.get(nm, 'F.Cu') == page else 1))
+    return tot
+
+
+def spearman(xs, ys):
+    """Rank correlation, average ranks for ties. None when either side is
+    constant -- a constant column has no ranking to agree with, and
+    reporting 0 for it would read as "uncorrelated" when it is "undefined"."""
+    def ranks(v):
+        order = sorted(range(len(v)), key=lambda i: v[i])
+        r = [0.0] * len(v)
+        i = 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+                j += 1
+            avg = (i + j) / 2.0 + 1
+            for k in range(i, j + 1):
+                r[order[k]] = avg
+            i = j + 1
+        return r
+    if len(xs) < 2 or len(set(xs)) < 2 or len(set(ys)) < 2:
+        return None
+    rx, ry = ranks(xs), ranks(ys)
+    mx, my = sum(rx) / len(rx), sum(ry) / len(ry)
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    dx = sum((a - mx) ** 2 for a in rx) ** 0.5
+    dy = sum((b - my) ** 2 for b in ry) ** 0.5
+    return None if not dx or not dy else num / (dx * dy)
+
+
+def judge_report(ids, s, d, order_src, order_dst, tooth_layer=None,
+                 berth_layer=None, n=400, seed=0, swims=(2.0, 3.0, 6.0, 20.0, 100.0),
+                 cap=22):
+    """For each candidate swim price: how well does the objective at that
+    price rank the pool against the TRUE cost of each plan, and what does
+    the plan it would choose really cost?"""
+    pool = plan_pool(order_src, order_dst, tooth_layer, berth_layer,
+                     n=n, seed=seed, swims=swims)
+    truth, keep = [], []
+    for plan in pool:
+        fixed = {nm: l for nm, l in plan.items() if l != 'swim'}
+        v, _how = exact_dp(ids, s, d, tooth_layer=tooth_layer,
+                           berth_layer=berth_layer, fixed=fixed, cap=cap)
+        if v is not None:
+            truth.append(v)
+            keep.append(plan)
+    if not keep:
+        return None
+    best_true = min(truth)
+    rows = []
+    for sp in swims:
+        objs = [plan_objective(p, tooth_layer, berth_layer, swim=sp) for p in keep]
+        # the plan the objective would choose, and what it really costs --
+        # ties broken by the WORST truth, because a solver picking among
+        # equal-objective plans gives no guarantee about which it returns
+        lo = min(objs)
+        tied = [t for o, t in zip(objs, truth) if o == lo]
+        chosen = max(tied)
+        rows.append({'swim': sp, 'rho': spearman(objs, truth),
+                     'chosen': chosen, 'regret': chosen - best_true,
+                     'ties': len(tied),
+                     # THE number: among the plans this objective cannot
+                     # tell apart, how far apart are they really? A solver
+                     # returns one of them and no search can prefer the
+                     # right one, so this is the floor on what solving this
+                     # objective can guarantee -- and it is why proving
+                     # optimality moved the routed board by twelve vias.
+                     'tie_spread': max(tied) - min(tied),
+                     'tie_best': min(tied)})
+    return {'pool': len(keep), 'best_true': best_true, 'rows': rows}
 
 
 # --- the board --------------------------------------------------------------
@@ -833,11 +1183,36 @@ def main(argv=None):
                          '12 s at 23 -- and K=28 is out of reach, so the big '
                          'cases are graded on the other two answers')
     ap.add_argument('--self-test', action='store_true',
-                    help='check the three truth sources against each other on '
+                    help='check the truth sources against each other on '
                          'every pattern and exit')
+    ap.add_argument('--judge', action='store_true',
+                    help='score the PLANNER\'S OBJECTIVE against the truth on '
+                         'generated cases and exit -- no board, no chain, '
+                         'seconds. For each candidate swim price: the rank '
+                         'correlation between the objective and the real cost '
+                         'of the plan, and the REGRET and DEGENERACY of the '
+                         'plan that objective would choose')
+    ap.add_argument('--judge-k', default='10,12,15,18',
+                    help='bus widths for --judge')
+    ap.add_argument('--judge-swims', default='2,3,6,20,100',
+                    help='swim prices to score, in vias')
+    ap.add_argument('--judge-pool', type=int, default=250,
+                    help='plans sampled per case')
+    ap.add_argument('--judge-jitter', type=float, default=0.30,
+                    help='perturb the end positions by this much (in lane '
+                         'pitches) before scoring, so no two pairs cross at '
+                         'the same point. 0 uses the article exactly as drawn '
+                         '-- which on a REGULAR one is degenerate: `reversed` '
+                         'crosses every pair at the midpoint, so the crossing '
+                         'ORDER is crossing_events\' tie-break rather than a '
+                         'fact, and a spread read off it is partly an artifact '
+                         '(measured at K=10: 14 vias degenerate, 6..12 across '
+                         'jitter seeds). Non-zero is the honest default')
     a = ap.parse_args(argv)
     if a.self_test:
         return self_test()
+    if a.judge:
+        return judge_main(a)
     if not a.out:
         ap.error('an output path is required (or use --self-test)')
     out = a.out if a.out.endswith('.kicad_pcb') else a.out + '.kicad_pcb'
@@ -858,6 +1233,164 @@ def main(argv=None):
              f' -- OBSTACLE {truth["obstacle"]["w"]}x{truth["obstacle"]["h"]} mm, '
              f'{truth["obstacle"]["room_above"]}/{truth["obstacle"]["room_below"]} mm '
              f'of room past it'))
+    return 0
+
+
+def judge_blind(ids, s, d, order_src, order_dst, tooth_layer=None,
+                berth_layer=None, n=300, seed=0, swim=100.0, cap=22):
+    """How much of the answer is INVISIBLE to the objective, with the swim
+    price taken out of the comparison.
+
+    Plans are grouped by how many lanes they swim; inside one group every
+    plan pays the same swim total, so the price cancels and what is left is
+    the objective's opinion about WHICH lanes to page. Reports the largest
+    group: the span of the objective over it, the span of the TRUE cost,
+    and their rank correlation.
+
+    This is the arm that does not rest on a swimmer being free: whatever a
+    swimmer really costs, it costs the same in every plan here."""
+    pool = plan_pool(order_src, order_dst, tooth_layer, berth_layer,
+                     n=n, seed=seed)
+    groups = {}
+    for plan in pool:
+        fixed = {nm: l for nm, l in plan.items() if l != 'swim'}
+        v, _how = exact_dp(ids, s, d, tooth_layer=tooth_layer,
+                           berth_layer=berth_layer, fixed=fixed, cap=cap)
+        if v is None:
+            continue
+        ns = sum(1 for l in plan.values() if l == 'swim')
+        groups.setdefault(ns, []).append(
+            (plan_objective(plan, tooth_layer, berth_layer, swim=swim), v))
+    if not groups:
+        return None
+    ns, g = max(groups.items(), key=lambda kv: len(kv[1]))
+    if len(g) < 5:
+        return None
+    objs = [o for o, _ in g]
+    tr = [t for _, t in g]
+    return {'n': len(g), 'swimmers': ns, 'rho': spearman(objs, tr),
+            'true_lo': min(tr), 'true_hi': max(tr),
+            'obj_lo': min(objs), 'obj_hi': max(objs),
+            'blind': max(tr) - min(tr) if min(objs) == max(objs) else 0}
+
+
+def judge_main(a):
+    """Is the objective pointing the right way? -- printed.
+
+    THE ONE CAVEAT, and it decides how far this can be read: in the model
+    below a SWIMMER is free, because `exact_dp` routes the unpinned lanes
+    optimally. The real braid routes a swimmer outside its page chains and
+    may pay far more, or fail. So this measures whether the objective
+    RANKS plans the way the truth does, and it measures the DEGENERACY of
+    its optimum -- both of which are properties of the objective alone.
+    It does NOT set the swim price: an objective that prefers swimmers
+    scores well here by construction, and only a chain run can say what a
+    swimmer really costs.
+    """
+    import random
+    swims = tuple(float(x) for x in a.judge_swims.split(','))
+    Ks = [int(x) for x in a.judge_k.split(',')]
+    kinds = ('blocks', 'interleave', 'riffle', 'reversed', 'shuffle')
+    jit = float(a.judge_jitter)
+
+    def ends(ids, pi, seed):
+        """The lane ends, perturbed. The PERMUTATION is untouched -- only the
+        positions move, and by less than half a pitch, so no pair's order
+        changes and the crossing GRAPH is identical. What changes is that
+        each crossing gets its own place along the channel."""
+        rng = random.Random(seed * 2654435761 + len(ids))
+        j = (lambda: rng.uniform(-jit, jit)) if jit else (lambda: 0.0)
+        return ({i: i + j() for i in ids}, {i: pi[i] + j() for i in ids})
+    if jit:
+        print(f'(ends jittered by +-{jit:g} of a pitch, so a regular article '
+              f'does not answer from a tie-break -- --judge-jitter 0 to '
+              f'disable)\n')
+    print('Spearman(the planner objective, the TRUE cost of that plan) over a '
+          'pool of model-feasible\nplans, the REGRET of the plan the objective '
+          'would choose (ties broken pessimistically,\nbecause nothing in the '
+          'objective prefers one tied plan over another), and the SPREAD of\n'
+          'true cost inside the objective\'s own optimum set.\n')
+    print(f'{"case":20} {"pool":>5} {"opt":>4} | '
+          + '  '.join(f'{"swim=" + f"{p:g}":>20}' for p in swims))
+    print(f'{"":20} {"":5} {"":4} | '
+          + '  '.join(f'{"rho  regret  ties":>20}' for p in swims))
+    agg = {p: [0.0, 0, 0, 0, 0] for p in swims}
+    for K in Ks:
+        for kind in kinds:
+            for seed in (0, 1, 2):
+                pi = pattern_perm(kind, K, seed=seed)
+                ids = list(range(K))
+                o_s, o_d = ids, sorted(ids, key=lambda i: pi[i])
+                s, d = ends(ids, pi, seed)
+                r = judge_report(ids, s, d, o_s, o_d, n=a.judge_pool,
+                                 seed=seed, swims=swims, cap=a.dp_cap)
+                if r is None:
+                    continue
+                cells = []
+                for row in r['rows']:
+                    g = agg[row['swim']]
+                    if row['rho'] is not None:
+                        g[0] += row['rho']
+                        g[1] += 1
+                    g[2] += row['regret']
+                    g[3] += row['tie_spread']
+                    g[4] += 1
+                    rho = f"{row['rho']:+.2f}" if row['rho'] is not None else ' -- '
+                    cells.append(f'{rho} {row["regret"]:+5d} {row["ties"]:5}')
+                if seed == 0:
+                    print(f'{kind + "_k" + str(K):20} {r["pool"]:5} '
+                          f'{r["best_true"]:4} | '
+                          + '  '.join(f'{c:>20}' for c in cells))
+    print(f'\nover every case ({agg[swims[0]][4]} of them):')
+    for p in swims:
+        g = agg[p]
+        print(f'   swim={p:6g}: mean rho {g[0] / max(g[1], 1):+.3f}   '
+              f'total regret {g[2]:+5d} vias   mean spread inside the optimum '
+              f'{g[3] / max(g[4], 1):.1f}')
+    print('\nRead the regret as a STEP, not a curve: a swimmer that routes '
+          'freely costs 2, so\nevery price below 2 buys the same plan and '
+          'every price above it buys the other one.\nAnd read nothing here as '
+          'the right price -- see judge_main\'s docstring.')
+    # ---- the arm the blind spot cannot reach
+    print('\nAnd with the swim price taken OUT of the comparison -- only plans '
+          'that swim the same\nnumber of lanes, so whatever a swimmer really '
+          'costs it costs the same in all of them:\n')
+    print(f'{"case":20} {"plans":>6} {"swims":>6} {"rho":>7} '
+          f'{"TRUE spans":>12} {"objective spans":>16}')
+    rows, blind = [], []
+    for K in Ks:
+        for kind in kinds:
+            for seed in (0, 1, 2):
+                pi = pattern_perm(kind, K, seed=seed)
+                ids = list(range(K))
+                o_s, o_d = ids, sorted(ids, key=lambda i: pi[i])
+                s, d = ends(ids, pi, seed)
+                b = judge_blind(ids, s, d, o_s, o_d, n=a.judge_pool, seed=seed,
+                                swim=max(swims), cap=a.dp_cap)
+                if b is None:
+                    continue
+                rows.append(b)
+                if b['blind']:
+                    blind.append((f'{kind}_k{K}_s{seed}', b['blind']))
+                if seed == 0:
+                    r = f'{b["rho"]:+.2f}' if b['rho'] is not None else '  -- '
+                    print(f'{kind + "_k" + str(K):20} {b["n"]:6} {b["swimmers"]:6} '
+                          f'{r:>7} {str(b["true_lo"]) + ".." + str(b["true_hi"]):>12} '
+                          f'{str(int(b["obj_lo"])) + ".." + str(int(b["obj_hi"])):>16}')
+    if rows:
+        rho = [b['rho'] for b in rows if b['rho'] is not None]
+        print(f'\nmean rho inside a fixed swimmer count: '
+              f'{sum(rho) / max(len(rho), 1):+.3f} over {len(rho)} group(s) '
+              f'({len(rows) - len(rho)} where the objective is CONSTANT and has '
+              f'no ranking at all); mean true span inside a group '
+              f'{sum(b["true_hi"] - b["true_lo"] for b in rows) / len(rows):.1f} '
+              f'vias.')
+        if blind:
+            worst = max(b for _t, b in blind)
+            print(f'{len(blind)} case(s) where the objective gives ONE value to '
+                  f'plans whose real costs differ by up to {worst} vias. No '
+                  f'budget, solver or tie-break inside this model can choose '
+                  f'between them.')
     return 0
 
 
@@ -907,11 +1440,263 @@ def self_test():
                     print(f'  note {tag}: LIS bound {lb}, exact {dp}'
                           + ('  (the bound is TIGHT)' if dp == lb else
                              '  (the bound is NOT tight)'))
+                # The planted-bipartite families agree with the exact
+                # answer AT THESE SEEDS -- and that is all it is. `riffle`
+                # K=8 seed=4 is a counter-example (whole-lane 8, exact 6),
+                # so this is an empirical agreement over the tested range
+                # and NOT the property the README once implied. The
+                # witnesses below pin the counter-example so it stays true.
                 if kind in ('sorted', 'blocks', 'interleave', 'riffle') \
                         and opt != dp:
                     print(f'FAIL {tag}: planted-bipartite whole-lane {opt} '
-                          f'!= exact {dp} (mid-channel changes should not help)')
+                          f'!= exact {dp} (mid-channel changes should not help '
+                          f'at the seeds this loop covers)')
                     bad += 1
+                # --- the PLANNER'S model, checked three ways. It is solved by
+                # an O(K^3) DP, so it needs an independent opinion: the
+                # brute force over F/B/swim (3**K, small K only) and Greene's
+                # theorem, which says the most lanes two increasing
+                # subsequences can hold is lambda1 + lambda2 of the RSK shape.
+                m = pages_model(o_s, o_d)
+                rd = {n: i for i, n in enumerate(o_d)}
+                lam = rsk_shape([rd[n] for n in o_s])
+                if m['paged'] != sum(lam[:2]):
+                    print(f'FAIL {tag}: the model pages {m["paged"]} lanes, '
+                          f'Greene says {sum(lam[:2])} (shape {lam})')
+                    bad += 1
+                if lam[0] != _lis:
+                    print(f'FAIL {tag}: RSK lambda1 {lam[0]} != LIS {_lis}')
+                    bad += 1
+                if K <= 8:
+                    import itertools
+                    eset = {tuple(sorted(e)) for e in edges}
+                    best = None
+                    for asg in itertools.product('FBS', repeat=K):
+                        if any(asg[i] == asg[j] != 'S' for i, j in eset):
+                            continue
+                        c = sum(0.0 if a == 'F' else (2.0 if a == 'B' else 100.0)
+                                for a in asg)
+                        best = c if best is None else min(best, c)
+                    if abs(m['cost'] - best) > 1e-9:
+                        print(f'FAIL {tag}: model DP {m["cost"]}, brute {best}')
+                        bad += 1
+                # pinning the model's pages can never beat the free optimum,
+                # and on a case it pages entirely it must reproduce the
+                # whole-lane answer exactly
+                fixed = {n: l for n, l in m['page'].items() if l != 'swim'}
+                mdp, mhow = exact_dp(ids, {i: i for i in ids},
+                                     {i: pi[i] for i in ids}, fixed=fixed)
+                if mdp is None:
+                    print(f'FAIL {tag}: the model\'s own plan does not route '
+                          f'({mhow})')
+                    bad += 1
+                elif mdp < dp:
+                    print(f'FAIL {tag}: pinned {mdp} below the free optimum {dp}')
+                    bad += 1
+                elif kind == 'reversed' and m['true_lb'] != dp:
+                    # On a clique crossing graph the model pages exactly one
+                    # lane per page and swims the rest, so its plan really
+                    # costs 0 + 2 + 2*(K-2) = 2*(K-1), which is the exact
+                    # optimum. That pins `true_lb`'s swimmer term to a closed
+                    # form -- the one place it can be checked and not merely
+                    # bounded, and `true_lb` is the ONLY model-cost number
+                    # available past the DP's K cap.
+                    print(f'FAIL {tag}: the model true_lb {m["true_lb"]} != '
+                          f'the exact {dp} on a clique, where they must agree')
+                    bad += 1
+                elif m['true_lb'] > mdp + 1e-9:
+                    # `true_lb` prices a swimmer at 2 and must therefore be a
+                    # BOUND on what the model's plan really costs. Asserted
+                    # because a field nothing checks is a field that drifts
+                    # (this one survived the whole battery until it was).
+                    print(f'FAIL {tag}: the model true_lb {m["true_lb"]} is '
+                          f'above what its plan really costs ({mdp})')
+                    bad += 1
+                elif m['n_swim'] == 0 and opt is not None and mdp != opt:
+                    print(f'FAIL {tag}: a fully paged plan costs {mdp}, '
+                          f'whole-lane says {opt}')
+                    bad += 1
+                # --- the LOWER BOUND. Two properties, and the first is an
+                # exact agreement between two unrelated algorithms: with
+                # both ends of every lane on F the bound's DP minimises
+                # 2*(K - |A|) over increasing subsequences A, so it must
+                # land exactly on the LIS formula that patience sorting
+                # computes. The second is the property that makes it a
+                # bound at all.
+                clb = channel_lower_bound(o_s, o_d)
+                if clb['cost'] != lb:
+                    print(f'FAIL {tag}: the channel bound {clb["cost"]} != the '
+                          f'LIS formula {lb}, which it must equal when every '
+                          f'end is on F')
+                    bad += 1
+                if dp is not None and clb['cost'] > dp:
+                    print(f'FAIL {tag}: the channel bound {clb["cost"]} is '
+                          f'ABOVE the exact optimum {dp} -- it is not a bound')
+                    bad += 1
+                # ...and with the ends MOVED it must still bound. Flip a
+                # third of the teeth to B: the LIS formula stops applying
+                # (it assumes F ends) but the bound does not.
+                tl2 = {n: ('B.Cu' if n % 3 == 0 else 'F.Cu') for n in ids}
+                clb2 = channel_lower_bound(o_s, o_d, tooth_layer=tl2)
+                dp2, _ = exact_dp(ids, {i: i for i in ids},
+                                  {i: pi[i] for i in ids}, tooth_layer=tl2)
+                if dp2 is not None and clb2['cost'] > dp2:
+                    print(f'FAIL {tag}: with teeth moved, the bound '
+                          f'{clb2["cost"]} is above the exact {dp2}')
+                    bad += 1
+                # ...and the ends must REACH it. Every berth on B against
+                # every tooth on F: each lane must change layer exactly
+                # once wherever it runs, so the answer is K whatever the
+                # permutation -- while a bound that ignored the ends would
+                # answer 2*(K - LIS), which is 0 on `sorted`.
+                bl3 = {n: 'B.Cu' for n in ids}
+                clb3 = channel_lower_bound(o_s, o_d, berth_layer=bl3)
+                if clb3['cost'] != K:
+                    print(f'FAIL {tag}: with every berth on B the bound is '
+                          f'{clb3["cost"]}, must be {K} (one change a lane)')
+                    bad += 1
+                # ...and the pin must BITE. Everything above passes a pin
+                # that does nothing: on these cases the model's own pages
+                # are the optimum's, so an inert pin reproduces it (measured
+                # -- `pin_mask |= 0` survived the whole battery). These two
+                # ask for an answer only a working pin can give.
+                if opt is not None:
+                    # `optimum` chooses the cheaper orientation PER
+                    # COMPONENT, so the pin must be built the same way --
+                    # one global flip cannot reach its answer, which is
+                    # what the first version of this check got wrong.
+                    _o, comps, _h2 = optimum(ids, edges)
+                    full = {}
+                    for p0, p1 in comps:
+                        a = len(p1) * 2      # part 1 on B: 2 vias a lane
+                        b = len(p0) * 2      # the swap
+                        for n in p0:
+                            full[n] = 'F.Cu' if a <= b else 'B.Cu'
+                        for n in p1:
+                            full[n] = 'B.Cu' if a <= b else 'F.Cu'
+                    v2, _ = exact_dp(ids, {i: i for i in ids},
+                                     {i: pi[i] for i in ids}, fixed=full)
+                    if v2 != opt:
+                        print(f'FAIL {tag}: the whole-lane colouring pinned '
+                              f'costs {v2}, whole-lane says {opt}')
+                        bad += 1
+                if kind == 'sorted':
+                    # a bus with no crossings: every lane on F is 0 vias, and
+                    # pinning ONE lane to B is 2 -- one via at each end. A pin
+                    # that is not applied answers 0.
+                    for pick in (0, K // 2, K - 1):
+                        v4, _ = exact_dp(ids, {i: i for i in ids},
+                                         {i: pi[i] for i in ids},
+                                         fixed={pick: 'B.Cu'})
+                        if v4 != 2:
+                            print(f'FAIL {tag}: lane {pick} pinned to B on a '
+                                  f'crossing-free bus costs {v4}, must be 2')
+                            bad += 1
+    # --- WITNESSES: named cases whose answer is known and DIFFERENT, so
+    # that a mechanism which quietly stops working is caught by a number
+    # and not by an absence. Each was found by search and is recorded with
+    # what it proves; the loop above cannot supply them because at its
+    # seeds every family happens to agree.
+    for kind, K, seed, want_opt, want_dp in (
+            # the whole-lane model is STRICTLY worse than the truth here, so
+            # pinning its colouring must answer `opt` and not `dp`. Without
+            # this a pin that leaks mid-channel passes the whole battery
+            # (measured: dropping the in-loop mask survived everything else).
+            ('riffle', 8, 4, 8, 6),
+            ('riffle', 11, 7, 10, 8),
+            ('riffle', 12, 11, 10, 8),
+    ):
+        pi = pattern_perm(kind, K, seed=seed)
+        ids = list(range(K))
+        o_s, o_d = ids, sorted(ids, key=lambda i: pi[i])
+        edges = crossing_edges(o_s, o_d)
+        s, d = {i: i for i in ids}, {i: pi[i] for i in ids}
+        opt, comps, _h = optimum(ids, edges)
+        dp, _ = exact_dp(ids, s, d)
+        tag = f'witness {kind} K={K} seed={seed}'
+        if (opt, dp) != (want_opt, want_dp):
+            print(f'FAIL {tag}: whole-lane/exact {opt}/{dp}, recorded '
+                  f'{want_opt}/{want_dp} -- the witness has moved')
+            bad += 1
+            continue
+        full = {}
+        for p0, p1 in comps:
+            a, b = len(p1) * 2, len(p0) * 2
+            for n in p0:
+                full[n] = 'F.Cu' if a <= b else 'B.Cu'
+            for n in p1:
+                full[n] = 'B.Cu' if a <= b else 'F.Cu'
+        v, _ = exact_dp(ids, s, d, fixed=full)
+        if v != opt:
+            print(f'FAIL {tag}: the whole-lane colouring pinned costs {v}, '
+                  f'must be {opt} -- a pinned lane is changing layer '
+                  f'mid-channel, which is what a whole-lane PLAN forbids')
+            bad += 1
+        else:
+            print(f'  note {tag}: whole-lane {opt} against exact {dp} -- the '
+                  f'two-page model cannot express the answer, and the pin '
+                  f'holds it to {v}')
+    # ...and the same again for cases the model must SWIM, where the pin
+    # holds only the paged lanes. This is the arm that catches a pin which
+    # leaks mid-channel: with the swimmers free, a leak lets the PAGED
+    # lanes drift too and the model error collapses (measured on the first
+    # of these: 34 with the pin held, 22 with it dropped).
+    for kind, K, seed, want_dp, want_paged, want_swim, want_mdp in (
+            ('shuffle', 12, 0, 20, 8, 4, 34),
+            ('shuffle', 15, 0, 30, 9, 6, 40),
+            ('shuffle', 18, 0, 28, 13, 5, 32),
+    ):
+        pi = pattern_perm(kind, K, seed=seed)
+        ids = list(range(K))
+        o_s, o_d = ids, sorted(ids, key=lambda i: pi[i])
+        s, d = {i: i for i in ids}, {i: pi[i] for i in ids}
+        dp, _ = exact_dp(ids, s, d)
+        m = pages_model(o_s, o_d)
+        fixed = {n: l for n, l in m['page'].items() if l != 'swim'}
+        mdp, _ = exact_dp(ids, s, d, fixed=fixed)
+        tag = f'witness {kind} K={K} seed={seed}'
+        got = (dp, m['paged'], m['n_swim'], mdp)
+        want = (want_dp, want_paged, want_swim, want_mdp)
+        if got != want:
+            print(f'FAIL {tag}: (exact, paged, swimmers, model-pinned) = {got}, '
+                  f'recorded {want}')
+            bad += 1
+        else:
+            print(f'  note {tag}: the model pages {m["paged"]} and swims '
+                  f'{m["n_swim"]} at a price of {m["cost"]:.0f} vias; that plan '
+                  f'really costs {mdp} against an optimum of {dp} '
+                  f'(MODEL error +{mdp - dp})')
+    # --- the REFUSALS. `pages_model` never builds a plan that pins two
+    # crossing lanes to one page, so the guard that catches it is a branch
+    # no other check reaches (measured: removing it survived the whole
+    # battery). Hand it one on purpose, and assert the REASON rather than
+    # a bare None -- a crash and a refusal both return nothing.
+    pi = pattern_perm('reversed', 6, seed=0)
+    ids = list(range(6))
+    s, d = {i: i for i in ids}, {i: pi[i] for i in ids}
+    v, why = exact_dp(ids, s, d, fixed={0: 'F.Cu', 1: 'F.Cu'})   # 0 and 1 cross
+    if v is not None or 'same page' not in why:
+        print(f'FAIL refusal: two crossing lanes pinned to one page answered '
+              f'{v} ({why}) instead of refusing')
+        bad += 1
+    else:
+        print(f'  note refusal: two crossing lanes on one page -> "{why}"')
+    # and the K cap must refuse by its own reason, not by crashing
+    big = list(range(40))
+    v, why = exact_dp(big, {i: i for i in big}, {i: 39 - i for i in big}, cap=22)
+    if v is not None or 'cap' not in why:
+        print(f'FAIL refusal: 40 free lanes past a cap of 22 answered {v} ({why})')
+        bad += 1
+    # ...and the SAME instance with all but 10 pinned must be answered,
+    # because the cap is on the free lanes. A cap that still counted K
+    # would refuse this, and the model-error column would be blank at
+    # exactly the sizes it was built for.
+    pins = {i: ('B.Cu' if i % 2 else 'F.Cu') for i in big[:30]}
+    v, why = exact_dp(big, {i: i for i in big}, {i: 39 - i for i in big},
+                      cap=22, fixed=pins)
+    if v is None and 'cap' in (why or ''):
+        print(f'FAIL refusal: 10 free lanes of 40 refused by the cap ({why})')
+        bad += 1
     print('self-test: ' + ('ALL PASS' if not bad else f'{bad} FAILURE(S)'))
     return 1 if bad else 0
 
