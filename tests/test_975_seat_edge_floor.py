@@ -798,6 +798,10 @@ class GradeConjuncts(_Boards):
             return (move['new_x'], move['new_y'], move['new_rotation']), res
         pose, res = repair()
         self.assertEqual(grade_errors_at(self, path, pose, entry), [])
+        # The band guard holds on its own, with the whole-grade delta off (a
+        # caller with no intent has only the guards).
+        guarded, _ = repair(seeder._grade_accepts)
+        self.assertEqual(grade_errors_at(self, path, guarded, entry), [])
         # Anti-vacuity: asking only the nearest edge, as the fix before this
         # did, takes the rung the grade refuses.
         nearest_only = lambda st, part, e, edge, lo, x, y: seeder._faces_its_edge(
@@ -874,21 +878,21 @@ class GradeConjuncts(_Boards):
                  'along_edge_band': {'from': 0.89, 'to': 0.92}}
         intent = floorplan.intent_from_dict(intent_doc(**entry))
 
-        def repair(window=True):
+        def repair(window=True, delta=True):
             call = lambda: seeder.repair_placement(parse_kicad_pcb(path), path, intent,
                                                    clearance=.25, board_edge_clearance=.55)
-            if window:
+            claim = seeder._outside_its_along_edge_claim if window else (lambda *a, **k: False)
+            worse = seeder._grade_worse if delta else (lambda *a, **k: ())
+            with patch.object(seeder, '_outside_its_along_edge_claim', claim), \
+                    patch.object(seeder, '_grade_worse', worse):
                 res = call()
-            else:
-                with patch.object(seeder, '_outside_its_along_edge_claim',
-                                  lambda *a, **k: False), \
-                        patch.object(seeder, '_grade_worse', lambda *a, **k: ()):
-                    res = call()
             (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
             return (move['new_x'], move['new_y'], move['new_rotation'])
         pose = repair()
         self.assertEqual(grade_errors_at(self, path, pose, entry), [])
-        blind = repair(window=False)
+        # The window guard on the move holds on its own, with the delta off.
+        self.assertEqual(grade_errors_at(self, path, repair(delta=False), entry), [])
+        blind = repair(window=False, delta=False)
         self.assertTrue([m for m in grade_errors_at(self, path, blind, entry)
                          if 'outside the declared band' in m])
         # The same question is part of what a LATER rung must pass: at the
@@ -1213,6 +1217,25 @@ class GradeDelta(_Boards):
         (j7,) = [p for p in res['placements'] if p['reference'] == 'J7']
         self.assertEqual((round(j7['new_x'], 3), round(j7['new_y'], 3)), (52.999, 72.673))
         self.assertNotIn('J7', res['edge_floor_fallback'])
+
+    def test_seat_edge_never_grades_a_first_seat_that_clears(self):
+        # Pads 1 mm in from the body's west face: the first seat clears.
+        pads = PADS.replace('(at -2.0 -0.5)', '(at -1.0 -0.5)').replace(
+            '(at -2.0 0.5)', '(at -1.0 0.5)')
+        path = self.board('clear_seat.kicad_pcb', pads=pads)
+        st = self.state(path)
+        intent = self.intent()
+        grader = floorplan.PoseGrader(intent, st, blocks={}, clearance=.25,
+                                      board_edge_clearance=.55)
+        calls = []
+        real = grader.violations
+        grader.violations = lambda **kw: (calls.append(kw), real(**kw))[1]
+        _, base, _, _ = self.seat(path, west(0.0, 0.6), base=True)
+        self.assertTrue(seeder._seat_edge(st, 'J1', dict(west(0.0, 0.6)), set(), [],
+                                          grade=grader))
+        p = st.parts['J1']
+        self.assertEqual((p.x, p.y, p.rot), base)
+        self.assertEqual(calls, [])
 
     def test_a_grade_that_cannot_be_asked_keeps_the_first_seat(self):
         path = self.write('fails.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 10)])
