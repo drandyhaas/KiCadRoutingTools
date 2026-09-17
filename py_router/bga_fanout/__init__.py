@@ -4460,6 +4460,11 @@ def main():
     args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.pcb)  # #441: a dropped sibling .kicad_pro strands the DRC floor
+    # BEFORE enforce_fab_floors below, which reads args.clearance: capping
+    # after it would pin the UNCAPPED value up to a tier floor and then cap a
+    # number nothing routed to. This front registers --clearance-ceiling and
+    # used to ignore it.
+    __import__('fab_tiers').apply_clearance_ceiling(args, 'bga_fanout')
     set_default_fab_tier(*fab_tier_from_args(args))
     __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
     _pinned_floors = enforce_fab_floors(

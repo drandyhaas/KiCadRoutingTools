@@ -1608,6 +1608,9 @@ def main():
     args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.pcb)  # #441: a dropped sibling .kicad_pro strands the DRC floor
+    # This front registers --clearance-ceiling (add_fab_tier_args does) and used
+    # to IGNORE it, so the spelling CLAUDE.md tells a chain to use did nothing.
+    __import__('fab_tiers').apply_clearance_ceiling(args, 'qfn_fanout')
     # #513 item 15: default the edge keep-out to the BOARD'S OWN
     # min_copper_edge_clearance (route.py's documented behavior and the GUI's
     # unchecked-override behavior), not the copper-copper --clearance. ice4pi
