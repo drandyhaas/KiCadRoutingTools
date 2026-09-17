@@ -3812,11 +3812,70 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
 # _SMOOTH_DEGENERATE_LEG mm is neither emitted nor counted.
 _SMOOTH_TIE_TOL = 1e-9
 _SMOOTH_DEGENERATE_LEG = 1e-5
-#: A pad array at or below this pitch is a FINE-PITCH FIELD: the space between
-#: its pads is escape corridor, not spare room. #958's equal-length tie-break
-#: does not rearrange copper inside one (see smooth_octolinear_chains). Covers
-#: BGA, QFP and QFN alike -- pitch is what makes the space a corridor.
-_SMOOTH_DENSE_PITCH_MM = 0.8
+#: A pad field is a CORRIDOR when the space between adjacent pads admits fewer
+#: than this many routing channels -- one channel being `track_width + 2 *
+#: clearance`, what it costs to thread one track between two pieces of copper.
+#: #958's equal-length tie-break does not rearrange copper inside one.
+#:
+#: Derived, not a fixed pitch. This was `pitch <= 0.8mm`, and 0.8 was only ever
+#: a round number above the four parts the fix was built for (0.2/0.31/0.5/0.65
+#: -- no 0.8mm part appears in its rationale). Two things went wrong with that.
+#: It is the commonest BGA pitch in the corpus, so cparti_fpga U3, icepi_zero
+#: U11 and zynq_ad9364 U1/U5 compute to 0.8000000000000114 / 0.8001 / 0.800092
+#: and a bare `>` put every one of them on the coarse side by float noise. And
+#: pitch is the wrong measure anyway: what the smoothing diagonal sweeps
+#: through is the GAP between pads, and gap does not follow pitch --
+#: bitaxe_ultra's 1.27mm U12 leaves 0.370mm between its pads while
+#: zynq_ad9364's 0.8mm U1 leaves 0.450mm. Normalised by the board's own channel
+#: the two populations separate where pitch could not:
+#:
+#: MEASURED over the parts this guard must decide, each at its OWN board's
+#: channel (none of these boards declares a netclass, so all fall back to
+#: routing_defaults 0.3 track / 0.25 clearance -> chan 0.800):
+#:
+#:   0.250  ft2232h  U4   0.5mm QFP   gap 0.200   protect
+#:   0.250  ottercast U3  0.4mm QFN   gap 0.200   protect
+#:   0.313  cparti   U3   0.8mm       gap 0.250   protect
+#:   0.428  icepi    U11  0.8mm       gap 0.342   protect
+#:   0.438  ottercast U1  0.65mm BGA  gap 0.350   protect
+#:   0.563  zynq     U1   0.8mm 400b  gap 0.450   protect   <- highest protect
+#:   ----------------------------------------------------------------------
+#:   0.637  glasgow  J5   1.27mm      gap 0.510   coarse    <- lowest coarse
+#:   0.750  cparti   U1   1.0mm       gap 0.600   coarse
+#:   0.838  splitflap U1  1.27mm      gap 0.670   coarse
+#:
+#: 0.6 sits in the 0.563 -> 0.637 gap, with margin either side. It is derived,
+#: not picked: a wider value pulls in splitflap_driver's nine 1.27mm parts,
+#: which costs +79 segments there with `truth.blocking` unmoved
+#: (test_703_predictor_regen's splitflap_driver:authored row) -- copper
+#: rearranged for no connectivity gain, on parts #958 never claimed.
+_SMOOTH_DENSE_CHANNELS = 0.6
+
+
+def pad_field_is_corridor(footprint, track_width: float, clearance: float,
+                          channels: float = _SMOOTH_DENSE_CHANNELS) -> bool:
+    """True when the space between this footprint's adjacent pads is escape
+    CORRIDOR rather than spare room -- the #958 fine-pitch test, as one
+    callable so the gate can exercise the real decision instead of a copy.
+
+    A channel is `track_width + 2 * clearance`: what it costs to thread one
+    track between two pieces of copper. The field is a corridor when the gap
+    between adjacent pads admits fewer than `channels` of them.
+    """
+    from kicad_parser import detect_bga_pitch
+    pads = [q for q in (footprint.pads or [])
+            if getattr(q, 'pad_type', '') != 'np_thru_hole']
+    if len(pads) < 16:
+        return False
+    pitch = detect_bga_pitch(footprint)
+    if not pitch:
+        return False
+    sizes = sorted(min(q.size_x, q.size_y) for q in pads)
+    pad = sizes[len(sizes) // 2] if sizes else 0.0
+    chan = (track_width or 0.15) + 2 * clearance
+    if chan <= 0:
+        return False
+    return (pitch - pad) < channels * chan
 
 
 def _octolinear_bends(A, B):
@@ -4258,10 +4317,9 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     try:
         from kicad_parser import detect_bga_pitch, get_footprint_bounds
         for _fp in pcb_data.footprints.values():
-            if len([q for q in _fp.pads
-                    if getattr(q, 'pad_type', '') != 'np_thru_hole']) < 16:
-                continue
-            if detect_bga_pitch(_fp) > _SMOOTH_DENSE_PITCH_MM:
+            if not pad_field_is_corridor(
+                    _fp, getattr(config, 'track_width', None) or 0.15,
+                    clearance):
                 continue
             _dense_boxes.append(get_footprint_bounds(_fp, margin=0.0))
     except Exception:

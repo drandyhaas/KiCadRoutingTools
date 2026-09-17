@@ -63,16 +63,55 @@ def check(name, cond, detail=''):
         FAILS.append(name)
 
 
-def _threshold(row):
+def _channels(row):
+    """The guard's threshold, in ROUTING CHANNELS.
+
+    It used to be a fixed `pitch <= 0.8mm`. That number was only ever a round
+    value above the four parts below (0.2/0.31/0.5/0.65) -- no 0.8mm part
+    appears in its rationale -- and it is the commonest BGA pitch in the
+    corpus, so cparti_fpga U3, icepi_zero U11 and zynq_ad9364 U1/U5 computed
+    0.8000000000000114 / 0.8001 / 0.800092 and a bare `>` put every one of them
+    on the COARSE side by float noise.
+    """
     try:
-        from pcb_modification import _SMOOTH_DENSE_PITCH_MM
-        return _SMOOTH_DENSE_PITCH_MM
+        from pcb_modification import _SMOOTH_DENSE_CHANNELS
+        return _SMOOTH_DENSE_CHANNELS
     except ImportError:
         check(row, False,
-              'pcb_modification exports no _SMOOTH_DENSE_PITCH_MM -- the '
+              'pcb_modification exports no _SMOOTH_DENSE_CHANNELS -- the '
               'equal-length tie-break is not protecting fine-pitch fields, '
               'because there is no guard to do it')
         return None
+
+
+class _FakePad:
+    def __init__(self, x, y, size):
+        self.global_x, self.global_y = x, y
+        self.size_x = self.size_y = size
+        self.pad_type = 'smd'
+
+
+class _FakeFp:
+    """A square lattice at `pitch` with square pads of `pad` -- the only two
+    numbers the decision reads, plus the >=16-pad population it requires."""
+    def __init__(self, pitch, pad, n=5):
+        self.pads = [_FakePad(i * pitch, j * pitch, pad)
+                     for i in range(n) for j in range(n)]
+
+
+def _is_dense(pitch, pad, track_width, clearance, k=None):
+    """Ask the REAL decision, not a copy of its arithmetic.
+
+    This used to reimplement the formula, which made every behavioural row
+    below self-confirming: swapping the engine back to the old fixed-pitch rule
+    left them all green and only the source-text row failed. A gate that
+    restates the code it is checking cannot detect the code changing.
+    """
+    from pcb_modification import pad_field_is_corridor
+    fp = _FakeFp(pitch, pad)
+    if k is None:
+        return pad_field_is_corridor(fp, track_width, clearance)
+    return pad_field_is_corridor(fp, track_width, clearance, channels=k)
 
 
 def _fn_body(fname):
@@ -86,28 +125,91 @@ def _fn_body(fname):
     return None
 
 
+#: MEASURED (pitch, median pad, board track_width, board clearance) for the
+#: parts this guard must decide, read off the corpus boards. Pitch alone cannot
+#: separate them -- bitaxe_ultra's 1.27mm U12 leaves 0.370mm between its pads
+#: while zynq_ad9364's 0.8mm U1 leaves 0.450mm -- which is why the rule is
+#: stated in channels the board's own geometry defines.
+MEASURED = [
+    # Each part at ITS OWN board's channel. None of these boards declares a
+    # netclass, so every one falls back to routing_defaults (0.3 track /
+    # 0.25 clearance) -> chan 0.800. An earlier cut of this table carried
+    # per-board channels that were GUESSED (0.35 / 0.404 / 0.55), which put
+    # the rows in a different order entirely and made a threshold look
+    # derivable that was not -- read the board, do not assume the floors.
+    # board/part                  pitch    pad  track  clr   must be dense?
+    ('ft2232h U4 (0.5 QFP)',      0.500, 0.300, 0.30, 0.250, True),
+    ('ottercast U3 (0.4 QFN)',    0.400, 0.200, 0.30, 0.250, True),
+    ('cparti U3 (0.8)',           0.800, 0.550, 0.30, 0.250, True),
+    ('icepi U11 (0.8)',           0.800, 0.458, 0.30, 0.250, True),
+    ('ottercast U1 (0.65 BGA)',   0.650, 0.300, 0.30, 0.250, True),
+    ('zynq U1 (0.8, 400-ball)',   0.800, 0.350, 0.30, 0.250, True),
+    # --- and the coarse side, which a wider threshold would pull in ---
+    ('glasgow J5 (1.27)',         1.270, 0.760, 0.30, 0.250, False),
+    ('cparti U1 (1.0 BGA)',       1.000, 0.400, 0.30, 0.250, False),
+    ('splitflap U1 (1.27)',       1.270, 0.600, 0.30, 0.250, False),
+]
+
+
 def t_the_threshold_admits_the_packages_that_matter():
-    """0.5mm QFP, 0.65mm BGA and 0.2mm QFN all count; a coarse part does not."""
-    thr = _threshold('t_the_threshold_admits_the_packages_that_matter')
-    if thr is None:
+    """Every measured fine-pitch part is a corridor; a coarse one is not.
+
+    The 0.8mm rows are the ones the fixed threshold got wrong: they are the
+    commonest BGA pitch in the corpus and they computed a hair ABOVE 0.8, so a
+    bare `>` skipped exactly the packages the guard exists for.
+    """
+    k = _channels('t_the_threshold_admits_the_packages_that_matter')
+    if k is None:
         return
-    measured = {'ft2232h U4 (QFP)': 0.5, 'ottercast U1 (BGA)': 0.65,
-                'ottercast U3 (QFN)': 0.2, 'ottercast J3 (QFN)': 0.31}
-    missed = {k: v for k, v in measured.items() if v > thr}
+    wrong = [n for (n, p, pad, tw, clr, want) in MEASURED
+             if _is_dense(p, pad, tw, clr) != want]
     check('t_the_threshold_admits_the_packages_that_matter',
-          not missed,
-          f'threshold {thr}mm admits {sorted(measured.values())}')
+          not wrong, f'all {len(MEASURED)} measured parts classify as '
+                     f'measured (wrong: {wrong})')
     check('t_the_threshold_is_not_unbounded',
-          thr <= 1.0,
-          f'{thr}mm keeps ordinary coarse-pitch parts out of the guard')
+          k <= 2.0,
+          f'{k} channels keeps ordinary coarse-pitch parts out of the guard')
+
+
+def t_the_rule_is_derived_not_a_fixed_pitch():
+    """The guard must read the board's geometry, not a magic millimetre.
+
+    A fixed pitch cannot express "the gap admits one track": the same pitch is
+    a corridor on a 0.2mm-clearance board and open room on a 0.1mm one. Asked
+    of the SOURCE, because the old constant's name is what a reader greps for.
+    """
+    src = open(os.path.join(os.path.dirname(__file__), '..',
+                            'py_router', 'pcb_modification.py')).read()
+    check('t_the_rule_is_derived_not_a_fixed_pitch',
+          '_SMOOTH_DENSE_PITCH_MM' not in src,
+          'the fixed-pitch constant is gone')
+    body = _fn_body('smooth_octolinear_chains')
+    check('t_the_rule_reads_track_and_clearance',
+          body is not None and 'track_width' in body and 'clearance' in body,
+          'the dense-field test is built from track_width + clearance')
+
+
+def t_a_tight_coarse_pitch_part_is_still_a_corridor():
+    """The point of measuring the GAP: bitaxe_ultra's U12 is a 1.27mm part, but
+    0.9mm pads leave only 0.370mm between them -- narrower than the 0.8mm BGAs
+    this guard protects. Under the old pitch rule it was coarse; under the gap
+    rule it is a corridor, which is what the space actually is."""
+    k = _channels('t_a_tight_coarse_pitch_part_is_still_a_corridor')
+    if k is None:
+        return
+    check('t_a_tight_coarse_pitch_part_is_still_a_corridor',
+          _is_dense(1.270, 0.900, 0.30, 0.250),
+          'a 1.27mm part with 0.370mm between pads counts as a corridor')
 
 
 def t_the_region_comes_from_the_boards_own_helpers():
     """Reuse, not a re-derivation: pitch and bounds are the shared helpers."""
     body = _fn_body('smooth_octolinear_chains')
+    _corridor = _fn_body('pad_field_is_corridor') or ''
     check('t_the_region_comes_from_the_boards_own_helpers',
-          body is not None and 'detect_bga_pitch' in body
-          and 'get_footprint_bounds' in body,
+          body is not None and 'get_footprint_bounds' in body
+          and 'pad_field_is_corridor' in body
+          and 'detect_bga_pitch' in _corridor,
           'built from detect_bga_pitch + get_footprint_bounds')
     # ...and NOT from the BGA-only component filter, which misses U4. Asked of
     # the AST: the name appears in a comment explaining exactly this, so a
@@ -125,6 +227,17 @@ def t_the_region_comes_from_the_boards_own_helpers():
           'find_components_by_type' not in called,
           "not keyed on find_components_by_type('BGA') -- ft2232h_jtag's U4 is "
           "a QFP and would be missed")
+    # The pitch helper now sits one level down, inside pad_field_is_corridor
+    # -- the decision was extracted so the gate can call it directly instead of
+    # restating its arithmetic. Follow it there rather than loosening the row.
+    for _fn2 in ast.walk(ast.parse(src)):
+        if (isinstance(_fn2, ast.FunctionDef)
+                and _fn2.name == 'pad_field_is_corridor'):
+            for _n2 in ast.walk(_fn2):
+                if isinstance(_n2, ast.Call) and isinstance(_n2.func, ast.Name):
+                    called.add(_n2.func.id)
+                if isinstance(_n2, ast.ImportFrom):
+                    called.update(a.name for a in _n2.names)
     check('t_it_calls_the_pitch_and_bounds_helpers',
           {'detect_bga_pitch', 'get_footprint_bounds'} <= called,
           f'calls {sorted({"detect_bga_pitch", "get_footprint_bounds"} & called)}')
@@ -197,6 +310,8 @@ def t_the_guard_is_scoped_to_ties_and_cheap():
 
 def main():
     t_the_threshold_admits_the_packages_that_matter()
+    t_the_rule_is_derived_not_a_fixed_pitch()
+    t_a_tight_coarse_pitch_part_is_still_a_corridor()
     t_the_region_comes_from_the_boards_own_helpers()
     t_the_measured_geometry_is_decided_correctly()
     t_the_guard_is_scoped_to_ties_and_cheap()
