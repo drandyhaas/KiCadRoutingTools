@@ -980,8 +980,8 @@ _UNRESOLVABLE = {}
 #: exact shape of the defect #877 is about, reproduced in its own gate.
 #: 42 before #902 added `mutate_902.py`; 43 before #892 added `mutate_892.py`;
 #: 45 before #893/#916 added `mutate_893_916.py`; 50 before #974 added
-#: `mutate_974.py`.
-_BATTERY_COUNT = 51
+#: `mutate_974.py`; 51 before #982 added `mutate_982.py`.
+_BATTERY_COUNT = 52
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.
