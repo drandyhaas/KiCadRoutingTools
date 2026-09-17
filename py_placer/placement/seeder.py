@@ -1550,13 +1550,19 @@ _INWARD = {'north': (0.0, 1.0), 'south': (0.0, -1.0),
 _FLOOR_SHIFT_GUARD_MM = 0.001
 #: A record names at most this many pads; the counts beside it are complete.
 _FLOOR_RECORD_PADS = 4
-#: The reasons a first seat stays short that a LATER rung can fix. On a
-#: rectangular outline the gap to the seated edge is the same at every
-#: along-edge rung, so a shortfall there is fixed by moving inward or not at
-#: all, and walking on would only find `_edge_correct`'s corner artifacts --
-#: measured, a 10 mm slide for 0.02 mm, into a corner whose nearest edge the
-#: grade then reads as the wrong one. A shortfall on another side (a pad past
-#: its courtyard at a corner), or on a sampled outline, can move with the rung.
+#: The reasons a first seat stays short for which the ladder WALKS to later
+#: rungs. A shortfall on another side than the seated one (a pad past its
+#: courtyard at a corner), or on a sampled outline, is one only an along-edge
+#: rung can change. Every other reason -- the inward move refused by the band,
+#: a setback, a keep-out, a neighbour, the grade's nearest edge -- is about
+#: the move, and the gap to the seated edge is the same at every rung of a
+#: rectangle, so a later rung could only help by having a DIFFERENT move
+#: accepted. That does happen (a random search found grade-clean seats given
+#: up on 153 of 20,000 inputs, 51 of them within 1 mm), but it trades the
+#: connector's along-edge position for 0.1 mm-scale copper, and the first
+#: version of this ladder, walking on every reason, slid one connector 10 mm
+#: to gain 0.02 mm. So this is a CHOICE to stay put, not a claim that nothing
+#: along the edge would do.
 _SLIDE_HELPS = frozenset(('along_edge', 'outline_sampled'))
 
 
@@ -1641,6 +1647,50 @@ def _carries_setback(entry: Dict) -> bool:
             or entry.get('class') in ('edge_receptacle', 'connector_affinity'))
 
 
+def _grade_band_refuses(state, part, entry: Dict, edge: str, lo: float,
+                        x: float, y: float):
+    """`(reason, detail)`: would `rule_edge_connector` refuse this pose's
+    overhang band, or charge its setback? `reason` is None when it would not.
+
+    Asked of every pose the floor preference picks over the seat the ladder
+    always chose. The ladder's own band test (`edge_seat_ok`) allows 0.02 mm
+    either side, and its first seat, aimed at the band's midpoint, never came
+    near that; a moved pose or a later rung can land inside that tolerance
+    and outside the grade's `min - EPS` / `max + EPS` (measured: a later rung
+    read 0.23 on a 0.25 minimum and turned `--repair` from rc 0 to rc 4).
+    The setback is charged only once the occupancy reading is <= EPS, which
+    an inward move is exactly what produces, so any such pose on an entry
+    that carries one is refused -- conservatively, since the grade then also
+    needs the body too far in.
+    """
+    from .connector_geometry import band_amount, geometry_for
+    from .legality import EPS
+    px, py = round(x, 3), round(y, 3)
+    legacy = state.edge_gate.rect_outside_amount(part.rects(px, py, part.rot)[0])
+    amount, basis, _row = band_amount(
+        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
+        legacy, state.edge_gate.margin, pose=(px, py, part.rot))
+    detail = {'overhang_after_mm': round(amount, 4), 'band_min_mm': lo,
+              'basis': basis}
+    hi = (entry.get('overhang_mm') or {}).get('max')
+    if amount < lo - EPS:
+        return 'band_min', detail
+    if hi is not None and amount > float(hi) + EPS:
+        return 'band_max', detail
+    if _carries_setback(entry) and legacy <= EPS:
+        return 'setback', detail
+    return None, detail
+
+
+def _grade_accepts(state, part, entry: Dict, edge: str, lo: float,
+                   x: float, y: float) -> bool:
+    """The grade's own conjuncts a preferred pose must pass beyond the seat
+    predicate: the band and setback at the grade's bounds, and the nearest
+    edge."""
+    return (_grade_band_refuses(state, part, entry, edge, lo, x, y)[0] is None
+            and _faces_its_edge(state, part, entry, edge, x, y))
+
+
 def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
                 x: float, y: float, crowds):
     """One ladder rung, already a legal conflict-free seat, asked about the
@@ -1656,14 +1706,10 @@ def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
     copper gap to the seated edge grows by exactly the distance the part moves
     inward, so the largest shortfall on that edge is the distance to move.
     Nothing else about the pose changes, and the move is then re-checked in
-    full: the band at the grade's own lower bound (`rule_edge_connector`
-    refuses below `min - EPS`, where this seat's tolerance is 0.02 and the
-    ladder's aim at the band's midpoint never came near it), the setback a
-    receptacle is graded on once it has no overhang, `edge_seat_ok`, the
-    neighbours, and the floor again.
+    full: the band and setback at the grade's own bounds
+    (`_grade_band_refuses`), `edge_seat_ok`, the neighbours, the floor again,
+    and the grade's nearest edge.
     """
-    from .connector_geometry import band_amount, geometry_for
-    from .legality import EPS
     floor = _floor_at(state, part.ref, x, y, part.rot)
     if floor is None or not floor.short:
         return (x, y), floor, None
@@ -1675,16 +1721,10 @@ def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
     shift = max(s[0] for s in floor.short) + _FLOOR_SHIFT_GUARD_MM
     ux, uy = _INWARD[edge]
     sx, sy = round(x + ux * shift, 3), round(y + uy * shift, 3)
-    legacy = state.edge_gate.rect_outside_amount(part.rects(sx, sy, part.rot)[0])
-    amount, basis, _row = band_amount(
-        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
-        legacy, state.edge_gate.margin, pose=(sx, sy, part.rot))
-    why = {'shift_mm': round(shift, 4), 'overhang_after_mm': round(amount, 4),
-           'band_min_mm': lo, 'basis': basis}
-    if amount < lo - EPS:
-        return None, floor, dict(why, why='band_min')
-    if _carries_setback(entry) and legacy <= EPS:
-        return None, floor, dict(why, why='setback')
+    reason, detail = _grade_band_refuses(state, part, entry, edge, lo, sx, sy)
+    why = dict({'shift_mm': round(shift, 4)}, **detail)
+    if reason is not None:
+        return None, floor, dict(why, why=reason)
     refused: List[str] = []
     if not edge_seat_ok(state, part, sx, sy, edge, lo, hi, reasons=refused):
         return None, floor, dict(why, why='refused',
@@ -1744,6 +1784,8 @@ def _floor_note(prefix: str, ref: str, record: Dict) -> str:
                     + ', '.join(record.get('refused_by') or ['the seat'])),
         'crowds': "the pose that clears it crowds a part already placed",
         'still_short': "moving the part inward did not clear it",
+        'band_max': ("the pose that clears it would overhang past the declared "
+                     "maximum"),
         'nearest_edge': ("the pose that clears it would read nearest another "
                          "edge than the declared one"),
         'crowding': ("no seat on this band clears the parts already placed, so "
@@ -1775,8 +1817,10 @@ def floor_records_at_poses(records: Dict[str, Dict], poses) -> Dict[str, Dict]:
             continue
         x, y, rot = record['pose']
         turn = ((pose[2] or 0.0) - rot) % 360.0
+        # 1e-3 degrees, not float equality: the writer prints an angle with
+        # `%g`, so a part seated at 0.1234567 degrees is WRITTEN at 0.123457.
         if ((round(pose[0], 3), round(pose[1], 3)) == (x, y)
-                and min(turn, 360.0 - turn) < 1e-9):
+                and min(turn, 360.0 - turn) < 1e-3):
             out[ref] = record
     return out
 
@@ -2165,13 +2209,17 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         """The seat ladder at one rotation. (x, y, record) or None; `record` is
         the `edge_floor_fallback` record when the seat is short of the floor.
 
-        #975: ONE walk that is exactly "the first rung (or its inward move)
-        that clears the floor, else the first seat the ladder always chose".
-        Every rung is tested as it always was; a conflict-free one is then
-        asked about the floor, and the walk returns at the first that clears
-        while remembering the first that did not. A rung that is not already a
-        conflict-free seat is never asked, so a rotation that seated nowhere
-        still seats nowhere.
+        #975: ONE walk. Every rung is tested as it always was, and the first
+        conflict-free one is the seat the ladder always chose. It is kept if
+        its copper clears the floor, or replaced by its inward move when that
+        move passes every re-check (`_floor_rung`). Otherwise the walk goes on
+        only when the shortfall is one a later rung can change
+        (`_SLIDE_HELPS`), and takes a later rung, or its move, only when it
+        clears the floor and passes the grade's own band, setback and
+        nearest-edge conjuncts (`_grade_accepts`). Failing all that, the first
+        seat is kept and disclosed. A rung that is not already a conflict-free
+        seat is never asked, so a rotation that seated nowhere still seats
+        nowhere.
 
         `part.rot` is SET for the duration, and that is the whole point rather
         than a shortcut. `_edge_pose`, `_edge_correct` and `edge_seat_ok` all
@@ -2211,10 +2259,11 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                     lambda a, b: not conflict_free(a, b, rot))
                 # The first seat, unmoved, is the one the ladder always chose;
                 # anything else is a pose the grade has not been measured on,
-                # and its nearest edge is asked (a move asked it already).
+                # and the grade's own conjuncts are asked of it (a move asked
+                # them already).
                 if seat is not None and (first is None or seat != (x, y)
-                                         or _faces_its_edge(state, part, entry,
-                                                            edge, x, y)):
+                                         or _grade_accepts(state, part, entry,
+                                                           edge, lo, x, y)):
                     return seat[0], seat[1], None
                 if first is None:
                     first = (x, y, _floor_record(
@@ -2761,10 +2810,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             #      always kept (`_kept`), disclosed when it is short;
             #   3. the crowding `_fallback` above, unchanged: with no clear
             #      seat anywhere the floor is not searched, only reported.
-            # A floor shortfall does not ARM the slide, and a later rung is
-            # only walked to when the first seat's shortfall is one a rung can
-            # fix (`_SLIDE_HELPS`); any pose other than the first seat must
-            # also read nearest its declared edge (`_faces_its_edge`).
+            # A floor shortfall does not ARM the slide (an unarmed slide has
+            # one rung and no later ones), a later rung is only walked to when
+            # the first seat's shortfall is one a rung can change
+            # (`_SLIDE_HELPS`), and any pose other than the first seat must
+            # also pass the grade's own conjuncts (`_grade_accepts`).
             _kept = None
             _pick = None
             for _df in _slide:
@@ -2791,7 +2841,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                             _x, _y, lambda a, b: bool(_shorted_by(a, b)))
                         if _seat is not None and (
                                 _kept is None or _seat != (_x, _y)
-                                or _faces_its_edge(state, part, c, edge, _x, _y)):
+                                or _grade_accepts(state, part, c, edge, lo, _x, _y)):
                             _pick = _seat
                             break
                         if _kept is None:

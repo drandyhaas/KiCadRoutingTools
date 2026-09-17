@@ -246,10 +246,11 @@ class Order(unittest.TestCase):
     """E. Exceptions and rows keep their order."""
 
     def test_an_invalid_requirement_raises_before_anything_is_opened(self):
+        pcb = board('esp_prog')          # parsed OUTSIDE the spy, or run alone it counts the parse
         for bad in (float('nan'), float('inf'), -1):
             with self.subTest(required=bad), Spy() as spy:
                 with self.assertRaisesRegex(ValueError, 'finite and nonnegative'):
-                    L.EdgeCopperContext(board('esp_prog'), bad, BOARDS['esp_prog'])
+                    L.EdgeCopperContext(pcb, bad, BOARDS['esp_prog'])
                 self.assertEqual(spy.counts, {})
 
     def test_malformed_projects_raise_where_the_grader_raised(self):

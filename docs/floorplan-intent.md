@@ -345,12 +345,17 @@ The board-edge FLOOR on that copper is a preference of the seat, not a
 conjunct (#975). At each rotation, when the seat the ladder always chose leaves
 copper inside the floor, the ladder tries that seat moved inward by the largest
 shortfall on the seated edge. Such a move is kept
-only if it passes the band at the grade's own minimum, the receptacle
+only if it passes the band at the grade's own bounds, the receptacle
 setback, the seat predicate (keep-outs, zones, pad copper), the neighbours,
 the floor itself and the grade's nearest-edge conjunct. When the shortfall is
-on another side of the part, which moving inward cannot fix, the ladder walks
-on to later rungs instead, keeping only one that also reads nearest its
-declared edge. Otherwise it keeps the seat it always chose. Refusing would turn
+on another side of the part, which moving inward cannot fix, or the outline
+is sampled, the ladder walks on to later rungs instead -- where there are any:
+stage 1 of a fresh seed tries one along-edge position unless something arms
+its slide -- and keeps a later rung only when it clears the floor and passes
+the same grade conjuncts. It does not walk when the move was refused for any
+other reason, although a move from a later rung might pass: trading the
+connector's along-edge position for a fraction of a millimetre of copper is
+not the ladder's call. Otherwise it keeps the seat it always chose. Refusing would turn
 a clearance shortfall into an unseated connector, which is an unrouted one.
 The kept shortfall is reported in `place_seed`'s `edge_floor_fallback`, with the
 pads and the reason the seat could not move; the copper itself is graded in

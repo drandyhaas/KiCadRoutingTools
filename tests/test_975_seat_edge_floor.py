@@ -430,8 +430,9 @@ class NearestEdge(_Boards):
                                  if f'nearest the {side} edge' in m])
 
     def test_a_short_first_seat_does_not_walk_to_a_corner(self):
-        # Short on its own edge, the move blocked by the band: no later rung
-        # can fix that on a rectangle, so the ladder does not walk to one.
+        # Short on its own edge, the move blocked by the band: the ladder
+        # CHOOSES not to walk (`_SLIDE_HELPS`), and here walking would have
+        # found only a corner the grade reads as the wrong edge.
         path = self.board('walk.kicad_pcb', NEAR_BODY, SLIDE_PADS)
         entry = {'ref': 'J1', 'edge': 'north', 'overhang_mm': {'min': 0.04, 'max': 0.06}}
         _, before, _, _ = self.seat(path, entry, base=True, target=(6.5, 0.0))
@@ -710,6 +711,128 @@ class UnreadableProject(_Boards):
         self.assertEqual(len([n for n in res['notes'] if 'could not be read' in n]), 1)
 
 
+def grade_errors_at(self, path, pose, entry, ref='J1'):
+    """`edge_connector` grade errors with `ref` written at `pose`."""
+    out = str(self.root / f'graded_{abs(hash((path, pose)))}.kicad_pcb')
+    write_placed_output(path, out, [{'reference': ref, 'new_x': pose[0],
+                                     'new_y': pose[1], 'new_rotation': pose[2]}])
+    graded = floorplan.grade(floorplan.intent_from_dict(intent_doc(**entry)),
+                             parse_kicad_pcb(out), out, clearance=.25,
+                             board_edge_clearance=.55)
+    return [v.message for v in graded.errors if v.rule == 'edge_connector']
+
+
+class GradeConjuncts(_Boards):
+    """The delta verifier's cases: a preferred pose other than the first seat
+    must pass the grade's own band, setback and nearest edge -- not only the
+    seat's 0.02 mm tolerance -- on every path that can pick one."""
+
+    def write(self, name, text):
+        path = self.root / name
+        path.write_text(text, encoding='utf-8')
+        return str(path)
+
+    def test_a_later_rung_under_the_grades_band_minimum_is_not_taken(self):
+        path = self.write('band_later.kicad_pcb',
+            '(kicad_pcb (version 20241229) (generator "t975")\n'
+            '  (gr_rect (start 0 0) (end 14.3 19.6) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 1.88 6.97 180)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_rect (start -1.18 -1.89) (end 1.54 1.82) (layer "F.CrtYd"))\n'
+            '    (fp_rect (start -2.49 -2.12) (end 0.82 2.14) (layer "F.Fab"))\n'
+            '    (pad "1" smd rect (at -1.04 -0.79) (size 0.63 0.6) (layers "F.Cu"))\n'
+            '    (pad "2" smd rect (at -1.14 0.62) (size 0.82 0.66) (layers "F.Cu"))\n'
+            '    (pad "3" smd rect (at -0.57 0.84) (size 0.64 0.55) (layers "F.Cu"))\n'
+            '    (pad "4" smd rect (at 1.44 -0.34) (size .5 .5) (layers "F.Cu")))\n'
+            '  (footprint "r" (locked yes) (layer "F.Cu") (at 11.46 5.96 0)\n'
+            '    (property "Reference" "R9")\n'
+            '    (fp_rect (start -1 -0.6) (end 1 0.6) (layer "F.CrtYd"))\n'
+            '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu"))\n'
+            '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu"))))\n')
+        entry = {'ref': 'J1', 'edge': 'south', 'overhang_mm': {'min': 0.25, 'max': 0.85}}
+        intent = floorplan.intent_from_dict(intent_doc(**entry))
+
+        def repair(accepts=None):
+            call = lambda: seeder.repair_placement(parse_kicad_pcb(path), path, intent,
+                                                   clearance=.25, board_edge_clearance=.55)
+            if accepts is None:
+                res = call()
+            else:
+                with patch.object(seeder, '_grade_accepts', accepts):
+                    res = call()
+            (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
+            return (move['new_x'], move['new_y'], move['new_rotation']), res
+        pose, res = repair()
+        self.assertEqual(grade_errors_at(self, path, pose, entry), [])
+        # Anti-vacuity: asking only the nearest edge, as the fix before this
+        # did, takes the rung the grade refuses.
+        nearest_only = lambda st, part, e, edge, lo, x, y: seeder._faces_its_edge(
+            st, part, e, edge, x, y)
+        bad, _ = repair(nearest_only)
+        self.assertNotEqual(bad, pose)
+        self.assertTrue([m for m in grade_errors_at(self, path, bad, entry)
+                         if 'under the declared minimum' in m])
+
+    def test_the_band_is_read_at_both_of_the_grades_bounds(self):
+        path = self.board('bounds.kicad_pcb')
+        st = self.state(path)
+        part = st.parts['J1']
+        # x 2.5 puts the drawn body 0.5 mm past the west edge.
+        refuse = seeder._grade_band_refuses
+        self.assertEqual(refuse(st, part, west(0.0, 0.2), 'west', 0.0, 2.5, 10.0)[0], 'band_max')
+        self.assertEqual(refuse(st, part, west(0.6, 0.9), 'west', 0.6, 2.5, 10.0)[0], 'band_min')
+        self.assertIsNone(refuse(st, part, west(0.4, 0.6), 'west', 0.4, 2.5, 10.0)[0])
+        # No declared maximum: the grade has none either.
+        self.assertIsNone(refuse(st, part, {'ref': 'J1', 'edge': 'west',
+                                            'overhang_mm': {'min': 0.0}},
+                                 'west', 0.0, 2.5, 10.0)[0])
+
+    def test_stage_one_asks_a_later_rung_its_nearest_edge(self):
+        path = self.write('s1_later_face.kicad_pcb',
+            '(kicad_pcb (version 20241229) (generator "t975")\n'
+            '  (gr_rect (start 0 0) (end 21.0 23.3) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 10.5 11.65 180)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_rect (start -1.36 -0.45) (end 2.28 2.04) (layer "F.CrtYd"))\n'
+            '    (pad "1" smd rect (at -0.67 0.85) (size 0.74 0.53) (layers "F.Cu"))\n'
+            '    (pad "2" smd rect (at -0.52 -1.45) (size 0.9 0.34) (layers "F.Cu"))\n'
+            '    (pad "3" smd rect (at -0.61 1.21) (size 0.46 0.64) (layers "F.Cu"))\n'
+            '    (pad "4" smd rect (at 0.72 -0.33) (size .5 .5) (layers "F.Cu"))))\n')
+        entry = {'ref': 'J1', 'edge': 'north', 'overhang_mm': {'min': 0.05, 'max': 0.65},
+                 'class': 'edge_receptacle', 'along_edge_band': {'from': 0.82, 'to': 1.0}}
+        pose = StageOne.pose(StageOne.seed(self, path, entry))
+        self.assertEqual(grade_errors_at(self, path, pose, entry), [])
+        with patch.object(seeder, '_faces_its_edge', lambda *a, **k: True):
+            blind = StageOne.pose(StageOne.seed(self, path, entry))
+        self.assertTrue([m for m in grade_errors_at(self, path, blind, entry)
+                         if 'sits nearest the' in m])
+
+    def test_the_nearest_edge_is_read_off_a_receptacles_drawn_body(self):
+        path = self.write('body_basis.kicad_pcb',
+            '(kicad_pcb (version 20241229) (generator "t975")\n'
+            '  (gr_rect (start 0 0) (end 14.1 19.5) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 7.05 9.75 0)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_rect (start -3.25 -0.46) (end 2.47 1.34) (layer "F.CrtYd"))\n'
+            '    (fp_rect (start -3.32 -1.58) (end 1.29 2.13) (layer "F.Fab"))\n'
+            '    (pad "1" smd rect (at -2.8 2.27) (size 0.64 0.31) (layers "F.Cu"))\n'
+            '    (pad "2" smd rect (at 1.14 -0.73) (size .5 .5) (layers "F.Cu"))))\n')
+        entry = {'ref': 'J1', 'edge': 'east', 'overhang_mm': {'min': 0.0, 'max': 0.02},
+                 'class': 'edge_receptacle', 'along_edge_band': {'from': 0.75, 'to': 1.0}}
+        pose = StageOne.pose(StageOne.seed(self, path, entry))
+        self.assertEqual(grade_errors_at(self, path, pose, entry), [])
+        from placement.floorplan import _nearest_edge
+
+        def courtyard_only(st, part, e, edge, x, y):
+            bounds = st.pcb_data.board_info.board_bounds
+            return _nearest_edge(part.rect(round(x, 3), round(y, 3), part.rot),
+                                 tuple(round(v, 6) for v in bounds)) == edge
+        with patch.object(seeder, '_faces_its_edge', courtyard_only):
+            blind = StageOne.pose(StageOne.seed(self, path, entry))
+        self.assertTrue([m for m in grade_errors_at(self, path, blind, entry)
+                         if 'sits nearest the' in m])
+
+
 class WrittenPoses(_Boards):
     def test_a_record_is_kept_only_at_the_pose_it_describes(self):
         record = {'pose': [2.7, 10.0, 0.0]}
@@ -719,6 +842,11 @@ class WrittenPoses(_Boards):
         self.assertEqual(keep({'J1': record}, {'J1': (3.7, 10.0, 0.0)}), {})
         self.assertEqual(keep({'J1': record}, {'J1': (2.7, 10.0, 90.0)}), {})
         self.assertEqual(keep({'J1': record}, {}), {})
+        # The writer prints angles with %g: seated at 0.1234567, written at
+        # 0.123457 -- the same seat.
+        tilted = {'pose': [2.7, 10.0, 0.1234567]}
+        self.assertEqual(keep({'J1': tilted}, {'J1': (2.7, 10.0, 0.123457)}), {'J1': tilted})
+        self.assertEqual(keep({'J1': tilted}, {'J1': (2.7, 10.0, 0.13)}), {})
 
     def test_place_seed_drops_a_record_its_post_polish_reseat_moved(self):
         # J1 is also a zone member, so place_seed's post-polish re-seat pulls

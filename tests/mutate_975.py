@@ -210,9 +210,9 @@ ROWS = [
      "                if first is not None and first[3] not in _SLIDE_HELPS:",
      "                if False:",
      (TS,), 'KILLED'),
-    ('seat-later-rung-skips-nearest-edge', 'sd',
-     "                                         or _faces_its_edge(state, part, entry,\n"
-     "                                                            edge, x, y)):",
+    ('seat-later-rung-skips-the-grade', 'sd',
+     "                                         or _grade_accepts(state, part, entry,\n"
+     "                                                           edge, lo, x, y)):",
      "                                         or True):",
      (TS,), 'KILLED'),
     ('seat-neighbours-lambda-false', 'sd',
@@ -233,8 +233,8 @@ ROWS = [
      "                        if (_kept is not None and (_kept[2] or {}).get('why')",
      "                        if (False and (_kept[2] or {}).get('why')",
      (TS,), 'KILLED'),
-    ('stage1-later-rung-skips-nearest-edge', 'sd',
-     "                                or _faces_its_edge(state, part, c, edge, _x, _y)):",
+    ('stage1-later-rung-skips-the-grade', 'sd',
+     "                                or _grade_accepts(state, part, c, edge, lo, _x, _y)):",
      "                                or True):",
      (TS,), 'KILLED'),
     ('stage1-kept-frac-not-restored', 'sd',
@@ -254,8 +254,27 @@ ROWS = [
      "    if False:\n        _floor_context_note(state, notes)",
      (TS,), 'KILLED'),
     ('record-kept-at-any-written-pose', 'sd',
-     "                and min(turn, 360.0 - turn) < 1e-9):",
+     "                and min(turn, 360.0 - turn) < 1e-3):",
      "                or True):",
+     (TS,), 'KILLED'),
+    ('record-rotation-compared-exactly', 'sd',
+     "                and min(turn, 360.0 - turn) < 1e-3):",
+     "                and min(turn, 360.0 - turn) < 1e-9):",
+     (TS,), 'KILLED'),
+
+    # ---- the grade's own conjuncts, asked of every preferred pose -------------
+    ('grade-accepts-skips-the-band', 'sd',
+     "    return (_grade_band_refuses(state, part, entry, edge, lo, x, y)[0] is None\n"
+     "            and _faces_its_edge(state, part, entry, edge, x, y))",
+     "    return _faces_its_edge(state, part, entry, edge, x, y)",
+     (TS,), 'KILLED'),
+    ('grade-band-max-dropped', 'sd',
+     "    if hi is not None and amount > float(hi) + EPS:",
+     "    if False:",
+     (TS,), 'KILLED'),
+    ('nearest-edge-on-the-courtyard-only', 'sd',
+     "    rect, _basis = edge_seat_rect(entry, part.rect(px, py, part.rot), body)",
+     "    rect, _basis = part.rect(px, py, part.rot), 'courtyard'",
      (TS,), 'KILLED'),
 
     # ---- the rule's seat basis, now shared ------------------------------------
