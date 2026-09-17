@@ -671,6 +671,36 @@ class FloorIsTheEdgeClearance(_Boards):
         self.assertEqual(floor.required, .3)
         self.assertEqual(floor.short, ())
 
+    def test_read_at_the_pose_apply_move_writes(self):
+        path = self.board('written.kicad_pcb')
+        st = self.state(path)
+        # Unrounded, the west pads sit 0.5496 mm in -- 0.4 um short of 0.55;
+        # written, x is 2.8 and they are exactly on the floor.
+        self.assertEqual(seeder._floor_at(st, 'J1', 2.7996, 10.0, 0.0).short, ())
+        self.assertTrue(seeder._floor_at(st, 'J1', 2.7994, 10.0, 0.0).short)
+
+
+class SeatBasis(unittest.TestCase):
+    """`floorplan.edge_seat_rect` is the rule's own choice of rect, now shared."""
+
+    def test_a_receptacle_reads_its_drawn_body_fab_or_silk(self):
+        part, body = (0, 0, 1, 1), (5, 5, 6, 6)
+        rect = floorplan.edge_seat_rect
+        for source in ('fab', 'silk'):
+            with self.subTest(source=source):
+                self.assertEqual(rect({'class': 'edge_receptacle'}, part,
+                                      lambda s=source: (body, s)), (body, f'body:{source}'))
+                self.assertEqual(rect({'context': {'mount_mode': 'edge_mount'}}, part,
+                                      lambda s=source: (body, s)), (body, f'body:{source}'))
+        self.assertEqual(rect({'class': 'edge_receptacle'}, part, lambda: (body, 'pad_bbox')),
+                         (part, 'courtyard'))
+        self.assertEqual(rect({'class': 'edge_receptacle'}, part, lambda: (None, 'none')),
+                         (part, 'courtyard'))
+
+        def never():
+            raise AssertionError('a non-receptacle entry must not read its body')
+        self.assertEqual(rect({'class': 'connector_affinity'}, part, never), (part, 'courtyard'))
+
 
 class Bounded(_Boards):
     def test_a_record_names_four_pads_and_counts_the_rest(self):

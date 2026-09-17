@@ -443,6 +443,17 @@ class ReadingIsTheGrade(unittest.TestCase):
         self.assertEqual({f['pad_index'] for f in grade['findings']
                           if f['pad_ref'].startswith('USB1.')}, {copper[-1]})
 
+    def test_a_sampled_pad_the_sampler_does_not_flag_reads_zero(self):
+        # The sampler returns (False, 0.0, '') for a pad it does not flag, and
+        # that 0.0 is the reading: not the raw amount, not a sentinel.
+        pcb = board('watchy')
+        ctx = L.EdgeCopperContext(pcb, 0.55, BOARDS['watchy'])
+        self.assertFalse(ctx.rectangular)
+        clear = [r for fp in pcb.footprints.values() for r in ctx.pad_copper(fp)
+                 if r.basis == 'sampled' and r.edge == '']
+        self.assertTrue(clear)
+        self.assertEqual({r.amount_mm for r in clear}, {0.0})
+
     def test_certified_and_fallback(self):
         pcb = fresh('esp_prog')
         ctx = L.EdgeCopperContext(pcb, 0.55, BOARDS['esp_prog'])
