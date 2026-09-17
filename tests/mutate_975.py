@@ -29,12 +29,17 @@ the battery exits 2 if one fails there. `_uncache` is carried over from
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
 
-MEASURED on the tree of `#975: delta verifier round 3` (629851d6, 2026-09-17,
-Windows; the four killer tests first run unmutated and green): 60 rows, 60
-KILLED, 0 survived, 0 broken. The first full run, on an earlier head with 54
-rows, measured 51 KILLED and 3 SURVIVED -- a sampled pad's zero reading, the
-floor read at the unrounded pose, and the silk branch of the seat basis --
-and each got a test arm rather than a waiver.
+MEASURED on the tree of `#975: round-4 verifier` (fa6677f7, 2026-09-17,
+Windows; the four killer tests first run unmutated and green): 72 rows, 69
+KILLED, 3 SURVIVED, 0 broken. The survivors were `grade-accepts-skips-the-band`
+and `move-skips-the-window` (the whole-grade delta caught what the mutated
+guard let through, so no test saw the guard alone) and
+`grades-a-clear-first-seat` (only stage 1's identity branch had a test). Each
+got a test arm at 54698a19, and a 73rd row was added for stage 1's identity;
+those four rows, re-run there: 4 KILLED. Earlier full runs: 60 of 60 at
+629851d6, and 51 of 54 before that, whose three survivors (a sampled pad's
+zero reading, the floor read at the unrounded pose, the silk branch of the
+seat basis) likewise got arms rather than waivers.
 """
 from __future__ import annotations
 
