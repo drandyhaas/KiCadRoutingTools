@@ -5497,3 +5497,214 @@ def summary(r: GradeResult) -> Dict:
                 out[out_key] = r.health[key]
         out['health_signals_skipped'] = len(r.health.get('skipped') or {})
     return out
+
+
+# --------------------------------------------------------------------------
+# #974: the declared connector requirements, reported -- never a gate
+# --------------------------------------------------------------------------
+
+#: What an `overhang_evidence` row keeps of the grade's evidence row: the
+#: band's number, currency, limit and verdict, and the copper conjunct's
+#: verdict and amounts -- with the grade's lists as COUNTS. JSON_SUMMARY is
+#: one stdout line, and the whole rows (body position, grade-wide basis
+#: strings repeated per row, per-pad lists) measured 26.7 KB for 28 declared
+#: connectors on kit-dev-coldfire's emitted intent. They stay in
+#: `check_floorplan --json`'s `edge_connector_evidence`.
+_EVIDENCE_ROW_KEYS = ('ref', 'edge', 'overhang_mm', 'overhang_basis',
+                      'overhang_limit_mm', 'overhang_disposition',
+                      'body_measured')
+_EVIDENCE_COPPER_KEYS = ('disposition', 'outside_mm', 'certified',
+                         'minimum_gap_mm', 'required_mm')
+_EVIDENCE_COUNTED_LISTS = ('findings', 'unmeasured', 'rules_unmeasured')
+
+#: `unmeasured[].reason` for a declared ref the grade left no evidence row
+#: for, when no "not on this board" finding explains it.
+NO_EVIDENCE_ROW = 'the grade produced no evidence row for it'
+
+#: `unmeasured[].reason` for a declared along-edge claim that was neither
+#: measured nor abstained -- `_grade_along_edge` returns silently on a
+#: zero-length edge span.
+NO_ALONG_EDGE_MEASUREMENT = 'no along-edge measurement recorded'
+
+#: `bands_dropped[].reason`.
+BAND_DROPPED_REASON = ("--reseat set this edge declaration aside because its "
+                       "ref is in the re-seat scope, so none of its conjuncts "
+                       "was graded, whether or not the ref moved")
+
+
+def connector_requirements_ungraded(reason: str) -> Dict[str, object]:
+    """`connector_requirements` for a run that graded nothing (#974)."""
+    return {'complete': False, 'reason': str(reason)}
+
+
+def connector_requirements(graded: GradeResult, own: Sequence[Violation],
+                           pinned: Sequence[Violation], *,
+                           bands_dropped=None) -> Dict[str, object]:
+    """What a written board's grade said about its DECLARED edge connectors,
+    as JSON_SUMMARY data (#974): abstain and report, never withhold.
+
+    `own` / `pinned` are the caller's own split of `graded.errors` -- the
+    SAME lists that decide its exit code -- so `errors_own` is non-empty
+    exactly when a connector error counted against the run. The split is
+    never recomputed here. `bands_dropped` is `seeder.reseat_scope`'s
+    `edge_bands_dropped` ({ref: band max}): entries the grade never saw.
+
+    `complete` means every declared requirement was MEASURED; it says nothing
+    about whether they passed, and it is not `graded.complete`, which also
+    counts channels that have nothing to do with connectors.
+
+    Report-only, so it never raises: a report that crashed after the board
+    was written would turn the caller's exit code into 1.
+    """
+    try:
+        return _json_plain(_connector_requirements(graded, own, pinned,
+                                                   bands_dropped))
+    except Exception as exc:  # noqa: BLE001 -- a report must not fail the run
+        try:
+            detail = str(exc)
+        except Exception:  # noqa: BLE001 -- nor may the message of one
+            detail = '<unprintable>'
+        return connector_requirements_ungraded(
+            f"connector_requirements failed: {type(exc).__name__}: {detail}")
+
+
+def _connector_requirements(graded, own, pinned, bands_dropped):
+    declared = list(graded.intent.edge_connectors)
+    declared_refs = sorted({str(c['ref']) for c in declared})
+    evidence = list(graded.edge_connector_evidence)
+    evidence_refs = {str(e['ref']) for e in evidence}
+    not_found = {str(v.ref) for v in graded.violations
+                 if v.rule == 'edge_connector'
+                 and (v.measured or {}).get('found') is False}
+
+    unmeasured = []
+    for c in declared:
+        ref = str(c['ref'])
+        if ref not in evidence_refs:
+            unmeasured.append({
+                'ref': ref, 'requirement': 'presence',
+                'reason': ('not on this board' if ref in not_found
+                           else NO_EVIDENCE_ROW)})
+            continue
+        centre, band = c.get('center_on_edge'), c.get('along_edge_band')
+        if centre is None and band is None:
+            continue
+        claim = 'center_on_edge' if centre is not None else 'along_edge_band'
+        # A recorded measurement of THIS entry settles it: the grade abstains
+        # only when it appends no measuring row, so an abstention beside one
+        # is a hand-written `context.budget_withheld` key. Matched on the
+        # entry, not the ref: a ref declared twice gets a measuring row from
+        # any entry that names an edge, claim or not. Every row names its
+        # edge, so an edgeless entry matches none.
+        if any(str(row.get('ref')) == ref and row.get('declared')
+               and row.get('edge') == c.get('edge')
+               and 'along_edge_offset_mm' in row
+               for row in graded.edge_seating):
+            continue
+        why = graded.budget_abstained.get(f"edge_connectors[{ref}].{claim}")
+        unmeasured.append({'ref': ref, 'requirement': claim,
+                           'reason': NO_ALONG_EDGE_MEASUREMENT
+                           if why is None else why})
+
+    for row in evidence:
+        ref = str(row['ref'])
+        lim = row.get('overhang_limit_mm') or {}
+        # A band no reading can fail -- no max and a zero min -- needs no
+        # body to grade it. Emitted `connector_affinity` entries are exactly
+        # that, and counting them would mark every emitted intent incomplete.
+        vacuous = (lim.get('max') is None
+                   and float(lim.get('min') or 0.0) <= legality.EPS)
+        if not row.get('body_measured') and not vacuous:
+            unmeasured.append({
+                'ref': ref, 'requirement': 'overhang_body',
+                'reason': row.get('body_unmeasured_reason'),
+                'graded_on': row.get('overhang_basis')})
+        copper = row.get('pad_copper_edge') or {}
+        # The copper-past-the-outline conjunct is graded on the BODY path
+        # only. Its CLEARANCE half (and board-wide `.kicad_dru` rules) is
+        # evidence, not a requirement, so it never reaches `unmeasured`.
+        if row.get('body_measured'):
+            if (copper.get('certified') is False
+                    or ('outside_mm' in copper
+                        and copper['outside_mm'] is None)):
+                pads = sorted({f"{u.get('pad_ref')}: {u.get('reason')}"
+                               for u in copper.get('unmeasured') or ()})
+                unmeasured.append({
+                    'ref': ref, 'requirement': 'pad_copper_outside',
+                    'reason': ('; '.join(pads) if pads else
+                               'the edge grader cannot model a pad shape, so '
+                               'its outside_mm is not a certified reading')})
+        elif row.get('edge') is not None and (
+                copper.get('minimum_gap_mm') is not None
+                or copper.get('findings') or copper.get('unmeasured')):
+            # An entry that CLAIMS an edge, on a part with copper, whose body
+            # could not be read: the conjunct was skipped, whatever its band
+            # says. A vacuous band exempts `overhang_body` above, never this.
+            unmeasured.append({
+                'ref': ref, 'requirement': 'pad_copper_outside',
+                'reason': ('pad copper is graded against the outline on the '
+                           'drawn-body path only, and this body was not '
+                           'measured: '
+                           + str(row.get('body_unmeasured_reason')))})
+
+    # Sorted, and only EXACT duplicates removed: a ref declared twice yields
+    # the same entries twice, while two requirements on one ref are two
+    # entries.
+    seen, deduped = set(), []
+    for u in sorted(unmeasured, key=lambda u: (u['ref'], u['requirement'],
+                                               str(u['reason']),
+                                               str(u.get('graded_on')))):
+        key = tuple(sorted((k, str(v)) for k, v in u.items()))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(u)
+
+    dropped = [{'ref': str(ref), 'band_max_mm': mm, 'graded': False,
+                'reason': BAND_DROPPED_REASON}
+               for ref, mm in sorted((bands_dropped or {}).items(),
+                                     key=lambda kv: str(kv[0]))]
+
+    projected = []
+    for row in evidence:
+        copper = row.get('pad_copper_edge') or {}
+        slim = {key: row.get(key) for key in _EVIDENCE_ROW_KEYS}
+        slim_copper = {key: copper.get(key) for key in _EVIDENCE_COPPER_KEYS}
+        for name in _EVIDENCE_COUNTED_LISTS:
+            slim_copper['n_' + name] = len(copper.get(name) or ())
+        slim['pad_copper_edge'] = slim_copper
+        projected.append(slim)
+
+    return {
+        'complete': not deduped and not dropped,
+        'declared_refs': declared_refs,
+        'errors_own': [v.to_dict() for v in own
+                       if v.rule == 'edge_connector'],
+        'errors_pinned': [v.to_dict() for v in pinned
+                          if v.rule == 'edge_connector'],
+        'warnings': [v.to_dict() for v in graded.warnings
+                     if v.rule == 'edge_connector'],
+        'overhang_evidence': projected,
+        'unmeasured': deduped,
+        'bands_dropped': dropped,
+    }
+
+
+def _json_plain(value):
+    """`value` as data a STRICT JSON parser accepts, sharing nothing with its
+    source: string keys, lists for tuples and sets, `None` for a non-finite
+    float (`json.dumps` would write the invalid token `NaN`), `str()` for
+    anything else."""
+    import numbers
+    if isinstance(value, dict):
+        return {str(k): _json_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_plain(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return [_json_plain(v) for v in sorted(value, key=str)]
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        return float(value) if math.isfinite(value) else None
+    return str(value)

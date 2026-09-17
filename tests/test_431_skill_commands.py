@@ -45,7 +45,7 @@ pass found ~15 wrong claims in the skills and this file passed on every one:
   3. IT COULD NOT SEE A CLAIM ABOUT A TOOL'S OUTPUT. Every "read the `X` field"
      instruction was invisible -- the class containing `hot[].ratio`, a key no
      instrument emits. Closed in a sibling file,
-     `tests/test_923_output_key_claims.py`, which runs the five instruments the
+     `tests/test_923_output_key_claims.py`, which runs the six instruments the
      skills quote and resolves their cited keys against the real documents.
      What is still open, and that file says so: a key claim in prose that names
      no instrument, and a claim about a tool it does not run.

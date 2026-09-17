@@ -28,6 +28,11 @@ it is a contradiction between the board and the intent, which only their
 author can settle. Measured, run 27: a fixed USB socket declared
 `along_edge: center` within 0.6 mm sits 1.75 mm off centre, and every one of
 ten seeds failed on it, so nothing the seeder did could ever be ranked.
+
+Every JSON_SUMMARY also carries `connector_requirements` (#974): which declared
+edge-connector requirements were graded and on what basis, which were not
+measured, and the connector errors on each side of the pinned split. It
+reports; it never withholds the board and never changes an exit code.
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -652,6 +657,11 @@ Examples:
             _print_grade(own, pinned)
             summary['grade_errors'] = len(own)
             summary['grade_errors_pinned'] = len(pinned)
+            # #974: the same own/pinned lists that decide exit_rc below.
+            summary['connector_requirements'] = floorplan.connector_requirements(
+                graded, own, pinned,
+                bands_dropped=(reseat['edge_bands_dropped']
+                               if reseat is not None else None))
             summary['pad_conflicts_after'] = pads_after['pad_conflicts']
             # #697: the requirement each counted pair was graded at, when it
             # sits above args.clearance, so the count is explainable.
@@ -665,6 +675,9 @@ Examples:
             summary['pad_edge_after'] = pads_after['pad_edge']
             if own:
                 exit_rc = 4
+        else:
+            summary['connector_requirements'] = (
+                floorplan.connector_requirements_ungraded('dry-run'))
         _stage.cleanup()
         summary.setdefault('complete', True)
         summary.setdefault('status', 'ok')
@@ -1042,6 +1055,9 @@ Examples:
                'output': args.output_file}
     summary['pad_edge_before'] = _pads_in['pad_edge']
     summary['pad_edge_after'] = _pads_out['pad_edge']
+    # #974: after the split above, from the lists gate_reason reads below.
+    summary['connector_requirements'] = floorplan.connector_requirements(
+        graded, own, pinned)
     print("JSON_SUMMARY: " + json.dumps(summary, sort_keys=True))
     _reason = gate_reason(result['unseated'], own, _my_pads, _hole_delta)
     if _reason is not None:
