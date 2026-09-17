@@ -94,9 +94,16 @@ def grade(tag, wd, board, want_code, **want):
 
 
 def rows_naming(wd, path):
-    want = os.path.normcase(os.path.abspath(path))
+    # REALPATH, not abspath: a row's path is resolved against the process's
+    # cwd at record time, and on macOS `tempfile.mkdtemp()` hands back
+    # `/var/folders/...` while `os.getcwd()` inside it reports the resolved
+    # `/private/var/folders/...` (`/var` is a symlink to `private/var`).
+    # `abspath` does not follow symlinks, so a row recorded through a relative
+    # path under a temp dir compares unequal to the same file named from the
+    # dir handle -- the row is correct and the comparison was not.
+    want = os.path.normcase(os.path.realpath(path))
     return [r for r in PV.read_ledger(wd)
-            if os.path.normcase(os.path.abspath(r.get('path') or '')) == want]
+            if os.path.normcase(os.path.realpath(r.get('path') or '')) == want]
 
 
 # ==========================================================================
@@ -288,7 +295,7 @@ for kind, flags, intent_from in (('reseat', ['--reseat'], 'staged'),
     check(f'--{kind}: the operator is told where the board was delivered',
           f'Delivered {OUT}' in (r.stdout or ''))
     check(f'--{kind}: no temp board is named by any row',
-          all(os.path.dirname(os.path.abspath(x.get('path') or '')) == os.path.abspath(wd)
+          all(os.path.dirname(os.path.realpath(x.get('path') or '')) == os.path.realpath(wd)
               for x in PV.read_ledger(wd)),
           str([x.get('path') for x in PV.read_ledger(wd)]))
 
