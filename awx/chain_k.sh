@@ -90,6 +90,17 @@ for K in "$@"; do
   # the identity check below costs the extra braids nothing there.
   FOS=""
   if [ "${CHAIN_FANOUT_AB:-1}" != "0" ]; then
+    # NOTE: the loop below OWNS SRC_REFAN_JOINT -- `SRC_REFAN_JOINT=$J` is a
+    # command-prefix assignment and overrides whatever the caller exported.
+    # That is correct (the portfolio's whole point is to try both and keep
+    # the better, which subsumes either single arm), but it means an ARMS
+    # FILE setting SRC_REFAN_JOINT is INERT while the fanout portfolio is
+    # on, and modal_k's (env, K) dedupe cannot see that: two arms differing
+    # only in that flag are then ONE experiment under two tags. Say so.
+    if [ -n "${SRC_REFAN_JOINT:-}" ]; then
+      echo "  fanout A/B: SRC_REFAN_JOINT=$SRC_REFAN_JOINT is INERT here --" \
+           "the portfolio runs BOTH arms and keeps the better."
+    fi
     for J in 0 1; do
       rm -f "${TAG}_fo_k${K}_J${J}.kicad_pcb" "${TAG}_fo_k${K}_J${J}.kicad_pro" \
             "${TAG}_fo_k${K}_J${J}.plan.json"
@@ -101,8 +112,20 @@ for K in "$@"; do
     FOS=$(python3 dedupe_boards.py $FOS)
     echo "  fanout A/B: $(echo $FOS | wc -w | tr -d ' ') distinct board(s):$FOS"
     # a portfolio with no judge is just "keep the first", so the fanout
-    # level turns the braid level on rather than silently picking an arm
-    CHAIN_BRAID_AB=${CHAIN_BRAID_AB:-1}
+    # level turns the braid level on rather than silently picking an arm.
+    # FORCED, not defaulted: the fanout A/B writes only _J0/_J1, and the
+    # single-shot braid below routes ${TAG}_fo_k${K}.kicad_pcb, which is
+    # only created inside the braid-A/B branch. Honouring an explicit
+    # CHAIN_BRAID_AB=0 here therefore braided a FILE THAT DOES NOT EXIST
+    # and reported NO BRAID at every K -- which reads as "this board is
+    # unroutable", not as "you turned off the wrong half". To get the
+    # single-shot chain set CHAIN_FANOUT_AB=0 (alone, or with
+    # CHAIN_BRAID_AB=0).
+    if [ "${CHAIN_BRAID_AB:-1}" = "0" ]; then
+      echo "  fanout A/B: CHAIN_BRAID_AB=0 ignored -- the fanout portfolio" \
+           "needs a judge. Set CHAIN_FANOUT_AB=0 for the single-shot chain."
+    fi
+    CHAIN_BRAID_AB=1
   else
     python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
       --board="$RUNBASE" > "${TAG}_fo_k${K}.log" 2>&1
