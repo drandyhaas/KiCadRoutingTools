@@ -4483,7 +4483,20 @@ class PoseGrader:
     over a `_Ctx` built on `_PosedState`. The violations `grade` adds outside
     that loop (intent validation, block resolution, keep-out allows) read only
     the intent and the footprint SET, so they cannot differ between two poses
-    of one part and are left out of a delta."""
+    of one part and are left out of a delta.
+
+    ONE cached input is NOT pose-invariant, which is why `interior_split`
+    exists: the state's `edge_gate` carries the PARSER's split of interior
+    Edge.Cuts contours into cutouts (holes, which put anything inside them off
+    the board) and milled rings (edges copper holds clearance from). A contour
+    enclosing >= 2 pad CENTRES is reclassified from the first to the second
+    (`kicad_parser.drop_pad_containing_cutouts`), so a pose that carries pads
+    into or out of one changes the classification -- and a grade of the board
+    that would be WRITTEN, which re-parses, then reads different off-board
+    numbers than this grader does. Measured on a synthetic board: one 0.6 mm
+    move of a declared connector took `board_cutouts` 1 -> 0 and `oob_count`
+    2 -> 0. A caller comparing two poses asks `interior_split` for each and
+    does not compare grades across a difference."""
 
     def __init__(self, intent, state, *, blocks, clearance=None,
                  board_edge_clearance=None):
@@ -4492,6 +4505,59 @@ class PoseGrader:
         self._outline = None
         self._locked = None
         self._bodies = None
+        self._rings = None
+        self._ring_base = None
+
+    def interior_split(self, poses=None):
+        """The cutout / milled verdict for each interior contour at `poses`.
+
+        A tuple of bools, one per interior contour in a fixed order: True when
+        at least two pad centres fall inside it, which is the parser's own
+        threshold for calling it a milled ring rather than a hole. `()` on a
+        board with no interior contour, which is most of them and costs
+        nothing after the first call.
+
+        Counted over the pads of every part the search knows, because that is
+        what the parser counts on the file it reads back. Only the refs in
+        `poses` are re-measured; the others are counted once and kept.
+        """
+        gate = getattr(self.state, 'edge_gate', None)
+        if self._rings is None:
+            rings = [r for r in (getattr(gate, 'cutouts', None) or ())
+                     if len(r) >= 3]
+            rings += [r for r in (getattr(gate, 'milled', None) or ())
+                      if len(r) >= 3 and r not in rings]
+            self._rings = rings
+        if not self._rings:
+            return ()
+        if self._ring_base is None:
+            self._ring_base = {ref: self._ring_counts(ref, None)
+                               for ref in self.state.parts}
+        counts = [0] * len(self._rings)
+        for ref in self.state.parts:
+            per = (self._ring_counts(ref, poses[ref])
+                   if poses and ref in poses else self._ring_base[ref])
+            for i, n in enumerate(per):
+                counts[i] += n
+        return tuple(n >= 2 for n in counts)
+
+    def _ring_counts(self, ref, pose):
+        """How many of `ref`'s pad centres fall inside each interior contour.
+
+        `pose` None means the pose the search holds for it right now, which is
+        the file's for anything the seeder has not moved.
+        """
+        from kicad_parser import _pt_in_ring
+        fp = (self.state.pcb_data.footprints or {}).get(ref)
+        if fp is None:
+            return [0] * len(self._rings)
+        if pose is None:
+            part = self.state.parts[ref]
+            pose = (part.x, part.y, part.rot)
+        pads = [(p.global_x, p.global_y)
+                for p in legality.pads_at_pose(fp, pose)]
+        return [sum(1 for (px, py) in pads if _pt_in_ring(px, py, r))
+                for r in self._rings]
 
     def violations(self, *, exclude=(), poses=None) -> List[Violation]:
         state = self.state
@@ -4529,7 +4595,14 @@ def grade_delta(before: Sequence[Violation],
     an error the first pose does not have is added whatever its message says.
     A board-level budget has no ref and stays ONE error however far it is
     over, so for those the measured value must not grow either -- with the
-    pile left out of both grades, only the moved part can have grown it."""
+    pile left out of both grades, only the moved part can have grown it.
+
+    What a claim deliberately cannot see, since the currency is the exit gate's
+    and the gate counts errors: an error SWAPPED for another error of the same
+    rule, ref, block and expected keys (one keep-out for another) reads as no
+    change, and a ref-carrying error that merely gets worse (0.10mm -> 9.90mm)
+    is still one error. The value check above is for the ref-less budgets only,
+    where one error is all there ever is."""
     from collections import Counter
 
     def claim(v):

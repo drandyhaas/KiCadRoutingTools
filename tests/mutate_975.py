@@ -373,6 +373,53 @@ ROWS = [
      "            if ref in self._exclude:\n                continue\n            x, y, rot = self.pose(ref)",
      "            if False:\n                continue\n            x, y, rot = self.pose(ref)",
      (TS,), 'KILLED'),
+
+    # ---- round-5 verifier: the board's own shape is not pose-invariant --------
+    ('split-not-compared', 'sd',
+     "        if (grade.interior_split({ref: at(first)})\n"
+     "                != grade.interior_split({ref: at(seat)})):",
+     "        if False:",
+     (TS,), 'KILLED'),
+    ('split-threshold-is-one-pad', 'fp',
+     "        return tuple(n >= 2 for n in counts)",
+     "        return tuple(n >= 1 for n in counts)",
+     (TS,), 'KILLED'),
+    ('split-ignores-the-asked-pose', 'fp',
+     "            per = (self._ring_counts(ref, poses[ref])\n"
+     "                   if poses and ref in poses else self._ring_base[ref])",
+     "            per = self._ring_base[ref]",
+     (TS,), 'KILLED'),
+    ('split-forgets-the-cutouts', 'fp',
+     "            rings = [r for r in (getattr(gate, 'cutouts', None) or ())\n"
+     "                     if len(r) >= 3]",
+     "            rings = []",
+     (TS,), 'KILLED'),
+    ('posed-rings-from-the-seed-cache', 'fp',
+     "        part = self._s.parts[ref]\n"
+     "        x, y, rot = self.pose(ref)\n"
+     "        pts = [(gx, gy) for (gx, gy, _net) in part.pad_globals(x, y, rot)]\n"
+     "        return self.edge_gate.rings_enclosing(pts) if pts else frozenset()",
+     "        return self._s._owned_rings(ref)",
+     (TS,), 'KILLED'),
+    ('worse-grades-the-unrounded-pose', 'sd',
+     "        return (round(pose[0], 3), round(pose[1], 3), rot)",
+     "        return (pose[0], pose[1], rot)",
+     (TS,), 'KILLED'),
+    ('delta-claim-drops-the-ref', 'fp',
+     "        return (v.rule, v.ref or '', v.block or '',\n"
+     "                tuple(sorted((v.expected or {}).keys())))",
+     "        return (v.rule, '', v.block or '',\n"
+     "                tuple(sorted((v.expected or {}).keys())))",
+     (TS,), 'KILLED'),
+    # Expected to SURVIVE, and kept for the day it stops being true: the
+    # grader's floors reach `connector_copper`, whose clearance reading is
+    # evidence and raises no violation, so no delta can see them. Measured
+    # identical with and without the floors on tigard, splitflap_driver,
+    # ulx3s and watchy, three moved connectors each, and in TS's own arm.
+    ('grader-drops-the-requested-floors', 'fp',
+     "        ctx.requested_floors = self.floors",
+     "        ctx.requested_floors = (None, None)",
+     (TS,), 'SURVIVED'),
     ('nearest-edge-on-the-courtyard-only', 'sd',
      "    rect, _basis = edge_seat_rect(entry, part.rect(px, py, part.rot), body)",
      "    rect, _basis = part.rect(px, py, part.rot), 'courtyard'",

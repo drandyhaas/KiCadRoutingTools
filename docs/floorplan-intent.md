@@ -354,7 +354,18 @@ intent grade is asked at both poses (`floorplan.PoseGrader`, the same rules
 over the search's own board with the not-yet-placed pile left out): the move
 is refused if it adds an error the first seat does not have, or grows a
 board-level budget already over. Warnings do not count, as they do not count
-in `place_seed`'s exit gate. When the shortfall is
+in `place_seed`'s exit gate.
+
+Two limits of that comparison, written here because nothing in the output
+says them. It is asked per seat, at the moment of the seat, so an error only a
+LATER part's seat produces -- the knock-on of two connectors sharing an edge
+-- is invisible to it by construction; the grade `place_seed` runs at the end
+still reports that one, and it still sets the exit code. And two poses are
+comparable only while they describe the same board: a pose carrying pads into
+or out of an interior Edge.Cuts contour changes whether the parser reads that
+contour as a hole or as a milled edge, so there the comparison is reported
+unavailable and the seat is kept, rather than being made across two
+differently-shaped boards. When the shortfall is
 on another side of the part, which moving inward cannot fix, or the outline
 is sampled, the ladder walks on to later rungs instead -- where there are any:
 stage 1 of a fresh seed tries one along-edge position unless something arms

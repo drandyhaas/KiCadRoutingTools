@@ -1099,7 +1099,7 @@ class GradeDelta(_Boards):
         record = res['edge_floor_fallback']['J1']
         self.assertEqual(record['why'], 'grade_delta')
         self.assertEqual(record['grade_delta'][0]['rule'], 'legality')
-        self.assertTrue([n for n in res['notes'] if 'intent-grade error' in n])
+        self.assertTrue([n for n in res['notes'] if 'the intent grade' in n])
 
     def test_stage_one_does_not_raise_the_overlap_budget(self):
         path = self.write('ov2.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 10)])
@@ -1376,6 +1376,192 @@ class WrittenPoses(_Boards):
         # Anti-vacuity: the re-seat really moved J1 off its stage-1 seat.
         self.assertGreater(written.x, 5.0)
         self.assertEqual(summary['edge_floor_fallback'], {})
+
+
+#: A board with an interior Edge.Cuts ring. The parser calls such a ring a
+#: CUTOUT -- a hole, which puts anything inside it off the board -- until it
+#: encloses two pad centres, when it becomes a milled edge instead
+#: (`kicad_parser.drop_pad_containing_cutouts`). A part that moves in or out of
+#: it therefore changes how the board itself reads, and a grader holding the
+#: classification it was built with stops describing the board that would be
+#: written. A verifier measured that on a real 0.6 mm connector move.
+RING_BOARD = ('(kicad_pcb (version 20241229) (generator "t975")\n'
+              '  (net 0 "") (net 1 "A") (net 2 "B")\n'
+              '  (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts"))\n'
+              '  (gr_rect (start 10 6) (end 20 14) (layer "Edge.Cuts"))\n'
+              '  (footprint "t" (layer "F.Cu") (at %s %s 0)\n'
+              '    (property "Reference" "J1")\n'
+              '    (fp_rect (start -1.2 -0.8) (end 1.2 0.8) (layer "F.CrtYd"))\n'
+              '    (pad "1" smd rect (at -0.6 0) (size .5 .5) (layers "F.Cu") (net 1 "A"))\n'
+              '    (pad "2" smd rect (at 0.6 0) (size .5 .5) (layers "F.Cu") (net 2 "B")))\n'
+              '  (footprint "r" (layer "F.Cu") (at 25 4 0)\n'
+              '    (property "Reference" "R1")\n'
+              '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu") (net 1 "A"))\n'
+              '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu") (net 2 "B")))\n)\n')
+
+
+class InteriorContours(_Boards):
+    """A pose that changes how the BOARD reads is not a pose to compare at.
+
+    `PoseGrader` keeps the state's `edge_gate`, and with it the parser's split
+    of interior contours into holes and milled edges. That split is not
+    pose-invariant, so two poses on opposite sides of its two-pad threshold
+    give grades of two differently-shaped boards. `interior_split` says so and
+    `_grade_worse` then reports the delta unavailable, which keeps the seat.
+    """
+
+    def ring_board(self, x, y, name='ring.kicad_pcb'):
+        path = self.root / name
+        path.write_text(RING_BOARD % (x, y), encoding='utf-8')
+        return str(path)
+
+    def grader(self, path, **kw):
+        pcb = parse_kicad_pcb(path)
+        state = pose_score.make_state(pcb, path, clearance=.25,
+                                      board_edge_clearance=.55)
+        intent = floorplan.intent_from_dict(intent_doc(**west(0.0, 0.6)))
+        blocks, _ = floorplan.resolve_blocks(intent, pcb, ())
+        return floorplan.PoseGrader(intent, state, blocks=blocks, clearance=.25,
+                                    board_edge_clearance=kw.get('edge', .55))
+
+    def written_split(self, path, poses):
+        """What the PARSER says about the board written at `poses` -- the thing
+        `interior_split` has to predict. Called, never mirrored."""
+        out = str(self.root / f'w_{abs(hash((path, tuple(sorted(poses.items())))))}.kicad_pcb')
+        write_placed_output(path, out, [{'reference': r, 'new_x': p[0], 'new_y': p[1],
+                                         'new_rotation': p[2]} for r, p in poses.items()])
+        info = parse_kicad_pcb(out).board_info
+        return (len(getattr(info, 'board_cutouts', None) or []),
+                len(getattr(info, 'board_edge_contours', None) or []))
+
+    def test_a_board_without_interior_contours_answers_nothing(self):
+        plain = self.root / 'plain.kicad_pcb'
+        plain.write_text('(kicad_pcb (version 20241229) (generator "t975")\n'
+                         '  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))\n'
+                         '  (footprint "r" (layer "F.Cu") (at 5 5 0)\n'
+                         '    (property "Reference" "R1")\n'
+                         '    (pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu")))\n)\n',
+                         encoding='utf-8')
+        grader = self.grader(str(plain))
+        self.assertEqual(grader.interior_split(), ())
+        self.assertEqual(grader.interior_split({'R1': (9.0, 9.0, 0.0)}), ())
+
+    def test_the_split_follows_the_pads_and_matches_the_written_board(self):
+        # J1 starts OUTSIDE the ring: the ring is a hole. Moved inside, its two
+        # pad centres reclassify it as a milled edge.
+        path = self.ring_board(25, 16)
+        grader = self.grader(path)
+        outside = grader.interior_split()
+        inside = grader.interior_split({'J1': (15.0, 10.0, 0.0)})
+        self.assertEqual((outside, inside), ((False,), (True,)))
+        # The parser agrees, on the boards those poses would write.
+        self.assertEqual(self.written_split(path, {'J1': (25.0, 16.0, 0.0)}), (1, 0))
+        self.assertEqual(self.written_split(path, {'J1': (15.0, 10.0, 0.0)}), (0, 1))
+
+    def test_one_pad_inside_is_not_enough(self):
+        # The parser's threshold is TWO centres; a part with one pad in the
+        # ring leaves the board reading as it did.
+        path = self.ring_board(25, 16)
+        grader = self.grader(path)
+        self.assertEqual(grader.interior_split({'J1': (10.4, 10.0, 0.0)}), (False,))
+        self.assertEqual(self.written_split(path, {'J1': (10.4, 10.0, 0.0)}), (1, 0))
+
+    def test_the_delta_is_unavailable_across_the_threshold(self):
+        path = self.ring_board(25, 16)
+        grader = self.grader(path)
+        memo = {}
+        across = seeder._grade_worse(grader, 'J1', 0.0, (25.0, 16.0),
+                                     (15.0, 10.0), (), memo)
+        self.assertEqual(len(across), 1)
+        self.assertIn('interior contours', across[0]['unavailable'])
+        # ... and the memo was never filled, so nothing was compared.
+        self.assertEqual(memo, {})
+        # A move that stays on one side of the threshold is compared normally.
+        same = seeder._grade_worse(grader, 'J1', 0.0, (25.0, 16.0),
+                                   (25.0, 15.0), (), memo)
+        self.assertFalse([d for d in same if 'unavailable' in d])
+        self.assertEqual(memo.get('pose'), (25.0, 16.0, 0.0))
+
+    def test_the_guard_reads_the_rounded_pose(self):
+        # `apply_move` writes 3 decimals, so the grade is asked about the pose
+        # that would be written, in the guard as in the grades.
+        seen = []
+
+        class Spy:
+            def interior_split(self, poses=None):
+                seen.append(('split', poses))
+                return ()
+
+            def violations(self, *, exclude=(), poses=None):
+                seen.append(('grade', poses))
+                return []
+
+        seeder._grade_worse(Spy(), 'J1', 90.0, (2.70049, 10.00051),
+                            (3.30049, 10.00051), (), {})
+        self.assertTrue(seen)
+        for _kind, poses in seen:
+            self.assertEqual([round(v, 3) for v in poses['J1'][:2]],
+                             list(poses['J1'][:2]))
+            self.assertEqual(poses['J1'][2], 90.0)
+
+    def test_ring_ownership_is_read_at_the_view_pose(self):
+        # J1 sits INSIDE the ring in the file, so the state's own cache says it
+        # owns that ring. Viewed at a pose outside it, it owns nothing -- which
+        # is what a grade of the written board would say.
+        path = self.ring_board(15, 10)
+        pcb = parse_kicad_pcb(path)
+        state = pose_score.make_state(pcb, path, clearance=.25, board_edge_clearance=.55)
+        here = floorplan._PosedState(state, (), None)
+        moved = floorplan._PosedState(state, (), {'J1': (25.0, 16.0, 0.0)})
+        self.assertTrue(here._owned_rings('J1'),
+                        'the fixture must own a ring at its file pose, or this '
+                        'asserts nothing')
+        self.assertFalse(moved._owned_rings('J1'))
+
+    def test_the_floors_reach_the_grader_but_not_its_errors(self):
+        """What `PoseGrader`'s floors do and do not decide, measured.
+
+        They reach `_Ctx.requested_floors`, which `connector_copper` reads --
+        and that channel is EVIDENCE: the clearance it measures raises no
+        violation, while the copper-past-the-outline finding the rule does
+        grade is geometric and the same at any floor. So no delta can see the
+        floors, and a mutation dropping them survives every test here. This
+        arm records that rather than leaving it to be rediscovered: graded
+        with the real floors and with none at all, on a board with a declared
+        connector at a moved pose, the violations are identical.
+
+        Measured the same way on four real boards -- tigard, splitflap_driver,
+        ulx3s and watchy, three moved connectors each: identical both ways.
+        The battery carries the row as an expected survivor.
+        """
+        path = self.ring_board(1.65, 10.0)
+        pcb = parse_kicad_pcb(path)
+        intent = floorplan.intent_from_dict(intent_doc(**west(0.0, 0.6)))
+        blocks, _ = floorplan.resolve_blocks(intent, pcb, ())
+        state = pose_score.make_state(pcb, path, clearance=.25,
+                                      board_edge_clearance=.55)
+        poses = {'J1': (1.65, 10.0, 0.0)}
+
+        def marks(clearance, edge):
+            grader = floorplan.PoseGrader(intent, state, blocks=blocks,
+                                          clearance=clearance,
+                                          board_edge_clearance=edge)
+            return sorted((v.sort_key(), v.severity)
+                          for v in grader.violations(poses=poses))
+        self.assertEqual(marks(.25, .55), marks(None, None))
+
+    def test_a_delta_claim_keeps_the_ref_it_is_about(self):
+        # Two parts, one rule, the same expected keys: an error that moves from
+        # one ref to another is an error ADDED for the second.
+        def v(ref):
+            return floorplan.Violation(rule='zone_containment', severity=floorplan.ERROR,
+                                       message=f'{ref} is outside its zone', ref=ref,
+                                       block='ics', measured={'outside_mm': 1.0},
+                                       expected={'zone': [0, 0, 1, 1]})
+        added = floorplan.grade_delta([v('A')], [v('B')])
+        self.assertEqual([(d['rule'], d['ref'], d['added']) for d in added],
+                         [('zone_containment', 'B', 1)])
+        self.assertEqual(floorplan.grade_delta([v('A')], [v('A')]), [])
 
 
 if __name__ == '__main__':

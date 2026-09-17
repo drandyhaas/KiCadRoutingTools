@@ -1736,7 +1736,23 @@ def _grade_worse(grade, ref: str, rot: float, first, seat, exclude, memo):
     own board at the two poses, with `exclude` (the pile, whose coordinates
     mean nothing yet) left out of both so the difference is this part's. A
     pose the grade cannot be asked about is not taken. `memo` keeps the first
-    seat's grade for one rotation."""
+    seat's grade for one rotation.
+
+    It is asked PER SEAT, at the moment of that seat, so an error only a later
+    part's seat will produce -- two connectors sharing an edge, where this
+    move leaves room the next one then wants -- is outside it by construction.
+    `place_seed`'s own end-of-run grade still reports that one, and still sets
+    the exit code from it.
+
+    The two grades are comparable only while they describe the same board, and
+    they stop doing so when the poses fall on opposite sides of the parser's
+    two-pad-centre threshold for an interior Edge.Cuts contour: the grader
+    holds the classification its state was built with, while a grade of the
+    board that would be WRITTEN re-derives it (`PoseGrader.interior_split`).
+    That is not a delta of zero, it is a delta of nothing, so it is reported
+    unavailable and the seat is kept. Measured by a verifier on a synthetic
+    board: one 0.6 mm move of the declared connector took the written board's
+    `oob_count` 2 -> 0 while the masked reading held at 2."""
     if grade is None:
         return ()
     from placement import floorplan as _fp
@@ -1744,13 +1760,17 @@ def _grade_worse(grade, ref: str, rot: float, first, seat, exclude, memo):
     def at(pose):
         return (round(pose[0], 3), round(pose[1], 3), rot)
     try:
+        if (grade.interior_split({ref: at(first)})
+                != grade.interior_split({ref: at(seat)})):
+            return ({'unavailable': "the two poses do not classify the board's "
+                                    "interior contours alike"},)
         if memo.get('pose') != at(first):
             memo['errors'] = grade.violations(exclude=exclude, poses={ref: at(first)})
             memo['pose'] = at(first)
         after = grade.violations(exclude=exclude, poses={ref: at(seat)})
+        return tuple(_fp.grade_delta(memo['errors'], after))
     except Exception as exc:                                   # noqa: BLE001
         return ({'unavailable': f'{type(exc).__name__}: {exc}'},)
-    return tuple(_fp.grade_delta(memo['errors'], after))
 
 
 def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
@@ -1864,8 +1884,12 @@ def _floor_note(prefix: str, ref: str, record: Dict) -> str:
                      "maximum"),
         'along_edge_window': ("the pose that clears it would sit outside the "
                               "declared along-edge window"),
-        'grade_delta': ("the pose that clears it would add intent-grade "
-                        "error(s) this seat does not have: "
+        # Not "error(s) this seat does not have": the same channel carries a
+        # budget this seat is already over and the move would grow -- an error
+        # the seat DOES have -- and a grade that could not be asked at all.
+        # Each row says which; the sentence must not overwrite them.
+        'grade_delta': ("the pose that clears it does not pass the intent "
+                        "grade beside this seat: "
                         + '; '.join(_grade_delta_phrase(d)
                                     for d in record.get('grade_delta') or [])),
         'nearest_edge': ("the pose that clears it would read nearest another "
