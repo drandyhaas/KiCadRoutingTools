@@ -1,3 +1,66 @@
+96912901 2026-09-17 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit a633f898..96912901 on main (16 commits: PR #981's #974 work, and the fanout
+clearance-ceiling fix). NO GAP FOUND. Eight gates green, run live on this
+machine.
+
+THE RANGE IS ONE ROUTING CHANGE PLUS PLACEMENT. Fifteen of the sixteen commits
+are #974 (place_seed reporting its declared connector requirements) and the
+previous ledger commit; they touch py_placer, tests and docs only. The whole
+routing surface is the sixteenth:
+
+    py_router/fab_tiers.py          new apply_clearance_ceiling
+    py_router/bga_fanout/__init__.py   calls it
+    py_router/qfn_fanout/__init__.py   calls it
+
+and ZERO files under kicad_routing_plugin/.
+
+THE ONE THING THAT NEEDED THINKING, because it is precisely the shape this
+file exists to catch: that change is a CLI main() edit -- the layer the GUI
+RE-IMPLEMENTS rather than shares. It makes the two fanout mains HONOUR
+--clearance-ceiling, which add_fab_tier_args had always registered for them
+and which only the routing mains read.
+
+It is a parity CLOSER, not a gap, and the reason is structural rather than a
+judgement call. On the GUI there is ONE number: swig_gui.py:1895 derives
+'placement_clearance_ceiling' from the Min Clearance control when its override
+box is ticked, and the SAME control's value is what fanout_gui.py passes as
+'clearance' to generate_bga_fanout / generate_qfn_fanout. So the GUI cannot
+express "clearance 0.2, ceiling 0.09" at all, has never had the CLI's bug, and
+needs no wiring. The CLI has moved TOWARD it.
+
+(The GUI's own 'clearance_ceiling' key is consumed by _optimize_decoupling_caps
+-- the #768 cap-placement path -- not by escape generation. Checked, so that it
+is not mistaken later for the thing this commit changed.)
+
+THE SURFACE, checked mechanically:
+
+  * NEW CLI FLAGS: ZERO. The add_argument diff over route.py, route_diff.py,
+    route_planes.py, bga_fanout/, qfn_fanout/ and place_fanout_clearance.py is
+    EMPTY -- this commit adds no flag, it makes an EXISTING one work.
+  * ENGINE KWARGS at the front-end boundary: unchanged. generate_bga_fanout and
+    generate_qfn_fanout are untouched; the resolution happens in main() BEFORE
+    the engine call, on args.clearance, which both fronts already pass.
+  * CLASS-2 DRIFT: none. No post-engine pass was added to any CLI main().
+  * ORDERING, which the gate pins: on bga_fanout the cap runs BEFORE
+    enforce_fab_floors, which reads args.clearance. Capping after it would pin
+    the UNCAPPED value up to a tier floor and then cap a number nothing routed
+    to.
+
+EIGHT GATES, all run live on this machine at 96912901:
+
+  test_manifest_plan_parity              PASS  (no wx)
+  test_cli_postpass_coverage             PASS  (no wx)
+  test_settings_roundtrip                PASS  (KiCad python)
+  test_ref_label_pcbnew_parity           PASS
+  test_714_mirror_pcbnew_parity          PASS
+  test_fanout_rotated_gui                PASS  -- the only gate that runs a
+      FANOUT, which is exactly what this range changed
+  test_gui_livechain_rp2350              PASS  GUI and CLI clean at every stage
+  test_gui_engine_parity                 PARITY -- copper sets IDENTICAL
+
+Prerequisites CHECKED, not assumed: pcbnew 10.0.0-103-gacbf1898e0,
+wx 4.2.2a1 osx-cocoa, ApplePersistenceIgnoreState = 1.
+
 a633f898 2026-09-17 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit f4fb38ed..a633f898 on main (58 commits: the rest of the v0.22.0 -> HEAD
 routing-regression campaign, the parser/grader work, and PRs #978/#979/#970/
