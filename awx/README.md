@@ -6091,6 +6091,49 @@ Neither board is better on the graded terms: same vias, same completion,
 cloud 8.9 mm shorter overall (647.44 against 656.33) and local much cleaner
 copper (783 segments against 1144).
 
+### OPEN, MERGE-BLOCKING: a back-side BGA ignores the layer names it was given (2026-09-17)
+
+Found by the branch review; **confirmed by measurement, NOT fixed** --
+the obvious fix trades this bug for a different one, and the semantics
+need an owner's decision.
+
+`_generate_bga_fanout_core` fans a back-side part out by turning the
+board over (`flip_frame.to_front_frame`, new on this branch), which
+renames `F.Cu`<->`B.Cu` on every pad, segment, via, zone and footprint.
+But the recursion forwards `layers`, `layer_costs` and
+`plane_net_layers` VERBATIM (`__init__.py:~2806`, `_args =
+dict(_entry_args)`), so those layer NAMES now refer to the mirror of the
+side the caller meant. `_plane_drop_pass` (`:~4283`) has the same shape.
+
+**Measured** (`awx/repro/repro_flip_layer_args.py`, the branch's own flip
+fixture widened to four copper layers). A back part fanned out with
+`layers=['B.Cu','In2.Cu','In1.Cu','F.Cu']` and a cost of -1 on `F.Cu`:
+
+    laid   {'F.Cu': 14, 'In1.Cu': 12, 'In2.Cu': 14}
+
+-- fourteen tracks ON the forbidden far face and **none on B.Cu, the
+part's own face**. The front-side twin is correct and unchanged. Also
+implicated: the sibling `.kicad_dru` is read with real layer names
+INSIDE the turned frame, so a per-layer rule lands on the opposite face,
+and per CLAUDE.md the dru outranks `--clearance` on every routing step.
+
+**Why every existing test missed it:** the default `['F.Cu','B.Cu']` is
+symmetric under the rename, and all three flip/translation test files are
+two-layer. It needs >2 copper layers to be visible at all.
+
+**Why the obvious fix is wrong.** Mapping the names through
+`other_layer` fixes the four-layer case and BREAKS `test_fanout_flip_frame`'s
+"the back-side fanout is the mirror of the front-side one" (16/16 -> 15/16,
+40 segments differ): for the symmetric default, remapping also REORDERS
+the list, moving `layers[0]` off the face the part is on. The root cause
+is that **two conventions for `layers` coexist**: the channel path treats
+`layers[0]` as "the top escape layer" (and refuses to have it forbidden,
+`:3236`), while underpad resolves `top_idx = layers.index(footprint.layer)`
+(`underpad.py:782`) and does not care about order. A correct fix has to
+pick one and make the frame wrapper honour it -- probably "map the names,
+then rotate the part's own layer to the front" -- and re-run both the
+symmetry test and the reproduction.
+
 ### THE OBJECTIVE IS ANTI-CORRELATED WITH THE ROUTE (2026-09-16, proven at the optimum)
 
 **Solving the plan to PROVEN OPTIMALITY makes the board WORSE at K41 and
