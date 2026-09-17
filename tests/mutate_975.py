@@ -41,19 +41,29 @@ those four rows, re-run there: 4 KILLED. Earlier full runs: 60 of 60 at
 zero reading, the floor read at the unrounded pose, the silk branch of the
 seat basis) likewise got arms rather than waivers.
 
-Those SHAs are the ones those runs were made on, BEFORE #971 and #981 merged
-upstream and this branch was rebased onto their merged form. The same commits
-are now fa6677f7 -> 812e10b9, 54698a19 -> 2aba269f, 629851d6 -> 650f179f, and
-the base f343befc -> b30b724e.
+Those SHAs name the trees those runs were made on, and none of them is in this
+branch's history any more: the branch was rebased twice, first onto the merged
+form of #971/#981 and then onto #982's branch. The SHAs are kept as written
+because that is where each number was taken; the commits carrying the same
+content now are, in order, `round-4 verifier`, `arms for the three survivors`
+and `delta verifier round 3`, and the base moved f343befc -> b30b724e ->
+1706d2dc.
 
-RE-MEASURED after the rebase and after the round-5 verifier, on the tree of
-`#975: round-5 verifier` (f17fb95b, 2026-09-17, Windows; the four killer tests
-first run unmutated and green): **81 rows, 80 KILLED, 1 SURVIVED -- the
-expected `grader-drops-the-requested-floors` -- 0 broken.** Eight rows are new
-since the 73-row run: seven for the interior-contour guard and the three
-mutations of the round-5 verifier's that had survived, plus that expected
-survivor. This is the run of record; the earlier numbers stay above because
-each says what it cost to learn.
+RE-MEASURED after the first rebase and after the round-5 verifier, on the tree
+of `#975: round-5 verifier` (f17fb95b, 2026-09-17, Windows; the four killer
+tests first run unmutated and green): **81 rows, 80 KILLED, 1 SURVIVED -- the
+expected `grader-drops-the-requested-floors` -- 0 broken.** The eight rows new
+since the 73-row run are five for the interior-contour guard
+(`split-not-compared`, `split-threshold-is-one-pad`,
+`split-ignores-the-asked-pose`, `split-forgets-the-cutouts`,
+`posed-rings-from-the-seed-cache`), two more arms for mutations a verifier
+found surviving (`worse-grades-the-unrounded-pose`, `delta-claim-drops-the-ref`)
+and the expected survivor itself.
+
+That run predates the SECOND rebase, which moved `place_seed.py` under three of
+these rows (#982 re-partitioned its pad-conflict counters). Every anchor still
+matches at this head -- `preflight` passes, 81 of 81 -- and those three rows
+were re-run here afterwards: see the line below.
 """
 from __future__ import annotations
 

@@ -4493,9 +4493,10 @@ class PoseGrader:
     (`kicad_parser.drop_pad_containing_cutouts`), so a pose that carries pads
     into or out of one changes the classification -- and a grade of the board
     that would be WRITTEN, which re-parses, then reads different off-board
-    numbers than this grader does. Measured on a synthetic board: one 0.6 mm
-    move of a declared connector took `board_cutouts` 1 -> 0 and `oob_count`
-    2 -> 0. A caller comparing two poses asks `interior_split` for each and
+    numbers than this grader does. Measured on a synthetic board: a
+    sub-millimetre move of a declared connector (0.5 mm on each axis) took
+    `board_cutouts` 1 -> 0 and the written board's `oob_count` 2 -> 0 while
+    this grader's reading held at 2. A caller comparing two poses asks `interior_split` for each and
     does not compare grades across a difference."""
 
     def __init__(self, intent, state, *, blocks, clearance=None,

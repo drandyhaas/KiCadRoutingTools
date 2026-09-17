@@ -1751,8 +1751,9 @@ def _grade_worse(grade, ref: str, rot: float, first, seat, exclude, memo):
     board that would be WRITTEN re-derives it (`PoseGrader.interior_split`).
     That is not a delta of zero, it is a delta of nothing, so it is reported
     unavailable and the seat is kept. Measured by a verifier on a synthetic
-    board: one 0.6 mm move of the declared connector took the written board's
-    `oob_count` 2 -> 0 while the masked reading held at 2."""
+    board: a sub-millimetre move of the declared connector (0.5 mm on each
+    axis) took the written board's `oob_count` 2 -> 0 while the masked reading
+    held at 2."""
     if grade is None:
         return ()
     from placement import floorplan as _fp

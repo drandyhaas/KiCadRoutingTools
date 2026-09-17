@@ -5,11 +5,14 @@ This is a HOIST plus a new primitive, so the arms are mechanism arms:
 
   A. THE GRADE IS UNCHANGED. A context graded after many pose readings equals
      a fresh `grade_pad_edge_clearance` by repr, on rectangular, sampled,
-     polygon and castellated boards; and values recorded at f343befc (the
-     parent commit) pin what neither side of that equality can move.
+     polygon and castellated boards; and the recorded values below pin what
+     neither side of that equality can move. They were read off the parent
+     commit, which was f343befc at the time; the branch has been rebased twice
+     since and not one of them has moved.
      `tests/measure_975_pad_edge_census.py` is the whole-corpus version:
-     22 boards x 9 arms + 13 sibling/outline variants, 180 of 180 identical
-     against f343befc.
+     22 boards x 7 arms + 30 synthetic sibling/outline arms = 184, and
+     184 of 184 are identical, measured 1706d2dc (this branch's base) vs
+     ab19fdf8.
   B. THE HOIST HAPPENED. Spies on every reader count 0 reads during `grade`,
      `pad_copper(pose)` and `pose_copper`, and the build's own counts.
   C. PADS ARE LIVE: a pad moved in place after the build is graded moved.
