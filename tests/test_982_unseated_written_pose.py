@@ -21,7 +21,9 @@ seed 0's is a 0.191mm graze on a board the same tool grades buildable.
 Fixture: a 30 x 20 board. J9 is declared on the north edge and is 36 mm wide,
 wider than the board, so no pose is legal anywhere and it stays unseated at its
 input pose in the middle of the board, where its centre pad sits inside the
-zone the U parts are declared into. U2 is then packed onto it. The control
+zone the U parts are declared into. A U part is then packed onto it -- U3, as
+the run works out, which is why the pair is read from the summary rather than
+spelled here. The control
 keeps J9 and shrinks it to 6mm, which the north edge can take: seated, it
 leaves the middle of the board and no conflict exists. Same board, same intent,
 same seed, one pad span apart -- so the arm above is a statement about J9
@@ -46,6 +48,8 @@ sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
 
 RUN_ALL_FAST_OK = True
+
+from kicad_parser import parse_kicad_pcb   # noqa: E402  (after the path setup)
 
 SEED = os.path.join(ROOT, 'py_placer', 'place_seed.py')
 
@@ -95,7 +99,7 @@ INTENT = {
 }
 
 
-def _run(tmp, name, extra=WIDE, seed='0'):
+def _run(tmp, name, extra=WIDE, seed='0', polish=False):
     board = os.path.join(tmp, f'{name}.kicad_pcb')
     with open(board, 'w', encoding='utf-8') as fh:
         fh.write(BOARD % extra)
@@ -105,7 +109,8 @@ def _run(tmp, name, extra=WIDE, seed='0'):
     out = os.path.join(tmp, f'{name}_out.kicad_pcb')
     r = subprocess.run([sys.executable, '-X', 'utf8', SEED, board, out,
                         '--intent', ipath, '--seed', seed,
-                        '--board-edge-clearance', '0.2', '--no-polish'],
+                        '--board-edge-clearance', '0.2']
+                       + ([] if polish else ['--no-polish']),
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=ROOT)
     text = (r.stdout or '') + (r.stderr or '')
@@ -118,6 +123,33 @@ def _run(tmp, name, extra=WIDE, seed='0'):
 
 def _pairs(summ, key):
     return {frozenset(p[:2]) for p in (summ.get(key) or [])}
+
+
+def _independent_counts(tmp, name, out, summ):
+    """(inherited, charged) re-derived from the WRITTEN board, not from the
+    summary's own arithmetic.
+
+    `pad_conflicts_inherited` is published as the residual
+    `total - seeded - unseated`, so any check that adds the three up and
+    compares with the total is true by construction. This re-grades the output
+    at the same clearance, asks which refs moved off their input pose, and
+    counts the pairs on each side of that line itself.
+    """
+    from placement.legality import grade_pad_legality
+    board = os.path.join(tmp, f'{name}.kicad_pcb')
+    before = parse_kicad_pcb(board)
+    after = parse_kicad_pcb(out)
+    moved_refs = set()
+    for ref, fp in (after.footprints or {}).items():
+        was = (before.footprints or {}).get(ref)
+        if was is None or (abs(fp.x - was.x) > 1e-6 or abs(fp.y - was.y) > 1e-6
+                           or abs((fp.rotation - was.rotation) % 360.0) > 1e-6):
+            moved_refs.add(ref)
+    graded = grade_pad_legality(after, 0.25, edge_margin=0.2, pcb_file=out,
+                                worst_n=0)
+    worst = graded.get('worst') or ()
+    charged = [w for w in worst if w[0] in moved_refs or w[1] in moved_refs]
+    return len(worst) - len(charged), len(charged)
 
 
 def main():
@@ -155,6 +187,20 @@ def main():
           and uns == [w for w in worst if w in uns], f'{mine} {uns}')
     check('nothing unseated means nothing in the second list',
           split_pad_pairs(worst, {'A', 'B'}, [])[1] == [], 'with unseated=[]')
+    # A ref in BOTH sets is charged to the seed -- the direction that keeps the
+    # gate honest. The seeder keeps them disjoint, so this pins a tie-break
+    # rather than a case in the wild.
+    both = split_pad_pairs([('A', 'J9', 0.1)], {'A', 'J9'}, ['J9'])
+    check('a ref that is both moved and unseated is charged to the seed',
+          both == ([('A', 'J9', 0.1)], []), f'{both}')
+    # A bare ref would be split by CHARACTER, and every pair would land in the
+    # wrong bucket in silence.
+    try:
+        split_pad_pairs([('A', 'J9', 0.1)], {'A'}, 'J9')
+        refused = False
+    except TypeError:
+        refused = True
+    check('a bare ref is refused, not split by character', refused)
 
     with tempfile.TemporaryDirectory(prefix='t_982_') as tmp:
         # ---- 1: a part packed onto an unseated part's written pose -------
@@ -175,11 +221,40 @@ def main():
               and all('J9' in p[:2]
                       for p in s['pad_conflicts_unseated_pairs']),
               f"{s and s.get('pad_conflicts_unseated_pairs')}")
-        check('...the PAIR is named on the console, not just counted',
-              'could NOT seat' in text and 'J9' in text, text[-700:])
-        check('...and the console says it is not charged',
-              'reported not charged' in text, text[-700:])
-        check('the three buckets partition the total',
+        # The pair must be named ON THAT LINE. Asserting it of the whole
+        # output proves nothing: JSON_SUMMARY carries every ref, and the
+        # "not charged" wording is also printed by the inherited line, which
+        # this fixture happens to leave empty.
+        line = ([ln for ln in text.splitlines() if 'could NOT seat' in ln]
+                or [''])[0]
+        pair = s and (s.get('pad_conflicts_unseated_pairs') or [[None, None]])[0]
+        check('...the PAIR is named on that console line, not just counted',
+              bool(line) and pair and all(r in line for r in pair[:2])
+              and f"{pair[2]:.3f}" in line,
+              f'line {line!r} pair {pair}')
+        check('...and that same line says it is not charged',
+              'reported not charged' in line, f'line {line!r}')
+        # The partition cannot be checked against the summary alone: the
+        # inherited count IS the residual `total - seeded - unseated`, so
+        # summing the three and comparing with the total is an identity that
+        # holds however wrongly the pairs were split (measured: a mutation
+        # sending every pair to the unseated bucket keeps it true). Count the
+        # board's own pairs INDEPENDENTLY, from the written board's grade.
+        inherited, moved = _independent_counts(tmp, 'onto', out, s)
+        # `inherited + moved` is this file's own count of the written board's
+        # pairs: if it disagrees with the published total, the re-grade used
+        # different terms than the run did and the two numbers below are not
+        # comparable -- so that is part of the check, not an assumption.
+        check('the buckets are the written board\'s own pairs, counted apart',
+              s is not None
+              and inherited + moved == s.get('pad_conflicts_after')
+              and s.get('pad_conflicts_inherited') == inherited
+              and s.get('pad_conflicts_seeded') + s.get('pad_conflicts_unseated')
+              == moved,
+              f"inherited {s and s.get('pad_conflicts_inherited')} vs {inherited}; "
+              f"charged {s and s.get('pad_conflicts_seeded')}+"
+              f"{s and s.get('pad_conflicts_unseated')} vs {moved}")
+        check('...and they still partition the published total',
               s is not None
               and (s.get('pad_conflicts_seeded') or 0)
               + (s.get('pad_conflicts_unseated') or 0)
@@ -189,6 +264,34 @@ def main():
         check('the exit code still refuses the seed, for the unseated part',
               rc == 4 and 'does NOT satisfy its intent' in text,
               f'rc {rc}\n{text[-400:]}')
+
+        # ---- 1b: the DEFAULT path, polish ON -------------------------------
+        # Every other arm passes --no-polish, so without this one the file
+        # pins only a path the tool is not normally run on. Two things are
+        # asked of it. First the PREMISE the whole bucket rests on: an
+        # unseated part is written at the pose it came in with. Nothing
+        # enforces that -- quench takes `movable = [not locked]`, so an
+        # unseated part is a polish candidate -- and here it holds, measured.
+        # Second, nothing this seed placed is charged for J9.
+        # On this fixture the polish clears the conflict entirely (it moves
+        # the U parts off J9), so the bucket is EMPTY here: that is reported,
+        # and the arm does not pretend to check a non-empty one.
+        rc_p, s_p, text_p, out_p = _run(tmp, 'onto_polished', polish=True)
+        polished = parse_kicad_pcb(out_p).footprints
+        check('[polished] the unseated part is still written at its input pose',
+              s_p is not None and 'J9' in (s_p.get('unseated_refs') or [])
+              and abs(polished['J9'].x - 15.0) < 1e-6
+              and abs(polished['J9'].y - 10.0) < 1e-6,
+              f"J9 at ({polished['J9'].x}, {polished['J9'].y}), unseated "
+              f"{s_p and s_p.get('unseated_refs')}")
+        check('[polished] no pair against it is charged to the seed',
+              s_p is not None and rc_p == 4
+              and not [p for p in (s_p.get('pad_conflicts_seeded_pairs') or [])
+                       if 'J9' in p[:2]],
+              f"rc {rc_p} seeded_pairs {s_p and s_p.get('pad_conflicts_seeded_pairs')}")
+        print(f"  INFO: polished, the conflict is "
+              f"{'still there' if (s_p.get('pad_conflicts_unseated') or 0) else 'gone'}"
+              f" ({s_p.get('pad_conflicts_unseated')} in the unseated bucket)")
 
         # ---- 2: control -- the SAME part, seatable ------------------------
         # Identical board, identical intent, identical seed; only J9's pad
@@ -206,7 +309,6 @@ def main():
               and (s2.get('pad_conflicts_unseated') or 0) == 0,
               f"after {s2 and s2.get('pad_conflicts_after')}")
 
-        from kicad_parser import parse_kicad_pcb
         p1 = parse_kicad_pcb(out).footprints
         p2 = parse_kicad_pcb(out2).footprints
         check('the control moved J9 out of the middle of the board',

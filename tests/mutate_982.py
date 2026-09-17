@@ -72,23 +72,28 @@ T923 = os.path.join(_TESTS, 'test_923_output_key_claims.py')
 ROWS = [
     # ---- the split itself ------------------------------------------------
     ('unseated-refs-ignored', 'ps',
-     "        (against_unseated if (w[0] in unseated or w[1] in unseated)\n"
+     "        (against_unseated if (unseated & {w[0], w[1]}) - charged\n"
      "         else mine).append(w)",
      "        mine.append(w)",
      (T982,), 'KILLED'),
-    ('unseated-checked-on-one-side-only', 'ps',
-     "        (against_unseated if (w[0] in unseated or w[1] in unseated)\n",
-     "        (against_unseated if (w[0] in unseated)\n",
+    ('unseated-checked-on-the-first-side-only', 'ps',
+     "        (against_unseated if (unseated & {w[0], w[1]}) - charged\n",
+     "        (against_unseated if (unseated & {w[0]}) - charged\n",
      (T982,), 'KILLED'),
-    ('unseated-checked-on-the-other-side-only', 'ps',
-     "        (against_unseated if (w[0] in unseated or w[1] in unseated)\n",
-     "        (against_unseated if (w[1] in unseated)\n",
+    ('unseated-checked-on-the-second-side-only', 'ps',
+     "        (against_unseated if (unseated & {w[0], w[1]}) - charged\n",
+     "        (against_unseated if (unseated & {w[1]}) - charged\n",
      (T982,), 'KILLED'),
     ('buckets-swapped', 'ps',
-     "        (against_unseated if (w[0] in unseated or w[1] in unseated)\n"
+     "        (against_unseated if (unseated & {w[0], w[1]}) - charged\n"
      "         else mine).append(w)",
-     "        (mine if (w[0] in unseated or w[1] in unseated)\n"
+     "        (mine if (unseated & {w[0], w[1]}) - charged\n"
      "         else against_unseated).append(w)",
+     (T982,), 'KILLED'),
+    # The tie-break when a ref is somehow in both sets: charged to the seed.
+    ('both-sets-tie-break-favours-the-unseated-bucket', 'ps',
+     "        charged = {w[0], w[1]} & seeded\n",
+     "        charged = set()\n",
      (T982,), 'KILLED'),
     ('returns-the-two-lists-swapped', 'ps',
      "    return mine, against_unseated",
@@ -135,6 +140,41 @@ ROWS = [
      "               'pad_conflicts_after': _pads_out.get('pad_conflicts') or 0,",
      "               'pad_conflicts_after': _pads_in.get('pad_conflicts') or 0,",
      (T982, T27S), 'KILLED'),
+
+    # ---- the pre-push reviewer's rows: three of my own arms were vacuous ---
+    # M1: keep the header line, drop the pairs from it. The old arm asserted
+    # `'J9' in text` of stdout+stderr, which JSON_SUMMARY satisfies on its own,
+    # so this SURVIVED. The arm now reads the line itself.
+    ('console-names-no-pair-on-its-line', 'ps',
+     "              + '; '.join(f\"{a} <-> {b} ({mm:.3f}mm)\"\n"
+     "                          for a, b, mm in _unseated_pads[:10])\n"
+     "              + (\"\" if len(_unseated_pads) <= 10 else\n"
+     "                 f\" ... and {len(_unseated_pads) - 10} more\")",
+     "              + ''",
+     (T982,), 'KILLED'),
+    # M5: every qualifying pair to the unseated bucket. The partition row
+    # could not see this (it is an identity, see below); the run27 gate's
+    # "counted as the seed's own" arm can.
+    ('everything-charged-to-the-unseated-bucket', 'ps',
+     "        charged = {w[0], w[1]} & seeded\n"
+     "        (against_unseated if (unseated & {w[0], w[1]}) - charged\n"
+     "         else mine).append(w)",
+     "        against_unseated.append(w)",
+     (T982, T27S), 'KILLED'),
+    ('split-takes-a-bare-ref-in-silence', 'ps',
+     "    if isinstance(unseated, str) or isinstance(seeded, str):",
+     "    if False:",
+     (T982,), 'KILLED'),
+    # Expected to SURVIVE: `pad_conflicts_inherited` IS the residual
+    # `total - seeded - unseated`, so publishing the total as the sum of the
+    # three buckets is the same number by algebra whenever the residual did not
+    # clamp at 0. The arm that bites is the independent re-count in T982, which
+    # derives the board's own pairs from the written board instead.
+    ('total-from-the-buckets-instead-of-the-grade', 'ps',
+     "               'pad_conflicts_after': _pads_out.get('pad_conflicts') or 0,",
+     "               'pad_conflicts_after': (len(_my_pads) + len(_unseated_pads)\n"
+     "                                       + _their_pads),",
+     (T982, T27S), 'SURVIVED'),
 
     # ---- the console: the pairs are copper, so they stay named ------------
     ('console-drops-the-unseated-pairs', 'ps',

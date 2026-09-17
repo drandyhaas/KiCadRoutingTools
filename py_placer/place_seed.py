@@ -123,19 +123,21 @@ def split_pad_pairs(worst, seeded, unseated):
     engine reproduces it, so the cause is the displacement, not the fix). Its
     own bucket keeps `pad_conflicts_seeded` a number the seed can be held to.
 
+    How widespread this is, measured over seven boards at seed 0 (19 charged
+    pairs, 17 of them against a part that could not be seated) plus ulx3s at ten
+    seeds (5 of 5): ulx3s 5 of 5, rp2350 15 of 16, orangecrab 2 of 3, and
+    nothing at all on the four boards that seat everything. On rp2350 those
+    fifteen are ONE unseated part, U6, whose 75 pads sit at the designer's pose.
+    Every number here is re-measured by `tests/measure_982_unseated_pairs.py`,
+    which prepares its boards the way the issue does; read that file's
+    docstring for the recipe, because these numbers do NOT reproduce from a
+    board prepared some other way.
+
     The exit code cannot move by this split: `gate_reason` returns the intent
     arm whenever anything is unseated, and when nothing is unseated the second
-    list is empty by construction.
-
-    How widespread this is, measured over eight boards at seed 0 plus ulx3s at
-    ten seeds: every charged pair found that involves an unseated part is
-    against copper the seeder never placed -- ulx3s 5 of 5, rp2350 15 of 16,
-    orangecrab 2 of 3. On rp2350 those fifteen are ONE unseated part, U6, whose
-    75 pads sit at the designer's pose with 21 seated courtyards over them.
-
-    The exit code cannot move by this split: `gate_reason` returns the intent
-    arm whenever anything is unseated, and when nothing is unseated the second
-    list is empty by construction.
+    list is empty by construction. A ref that is somehow BOTH moved and
+    unseated is charged to the seed, the direction that keeps the gate honest;
+    the seeder keeps the two disjoint, so this is a tie-break nothing reaches.
 
     The alternative reading -- treat the written pose as an obstacle for later
     stages -- was prototyped and MEASURED WORSE. It unseats parts that were
@@ -149,12 +151,17 @@ def split_pad_pairs(worst, seeded, unseated):
     unseated part's nets cannot be routed at all, so the search is left alone
     here; this judgement is the branch's, not a rule quoted from CLAUDE.md.
     """
-    unseated = set(unseated)
+    if isinstance(unseated, str) or isinstance(seeded, str):
+        # A bare ref would split by CHARACTER and mis-sort every pair in
+        # silence, which is the kind of thing a summary key hides for a year.
+        raise TypeError('seeded and unseated are collections of refs, not a ref')
+    unseated, seeded = set(unseated), set(seeded)
     mine, against_unseated = [], []
     for w in worst:
         if not (w[0] in seeded or w[1] in seeded):
             continue
-        (against_unseated if (w[0] in unseated or w[1] in unseated)
+        charged = {w[0], w[1]} & seeded
+        (against_unseated if (unseated & {w[0], w[1]}) - charged
          else mine).append(w)
     return mine, against_unseated
 
