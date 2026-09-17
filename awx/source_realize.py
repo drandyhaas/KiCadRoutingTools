@@ -40,10 +40,31 @@ GAP_TOL = 0.2      # mm: an achieved tooth this close to the asked exit is the s
 
 
 def move_sig(m):
-    """The identity of a menu move for the plan's feasibility ledger."""
+    """The identity of a menu move for the plan's feasibility ledger.
+
+    THE LEGS ARE PART OF THE IDENTITY (2026-09-17 review). Without them
+    this could not tell apart the very lanes `own_line` exists to create:
+    a via-in-pad climb's three lanes (straight, and one either side) all
+    reach the SAME exit point from the SAME site and differ only in the
+    copper between -- so all three hashed to one signature. Measured on
+    the bench's U1, 3216 of 11602 enumerated moves (28%) collapsed that
+    way, always in groups of three.
+
+    That is not cosmetic: `_realize_group_first` bans a refused member as
+    `(net, move_sig(move))` and `group_end_climbs` drops candidates whose
+    signature is banned, so ONE engine refusal of ONE lane removed all
+    three lanes at that row from the net's menu for the rest of the run
+    -- deleting exactly the alternatives the climb was given to try.
+
+    Legs are rounded to the same 2 dp as `exit_pt` and `site`, and are
+    derived from grid positions, so the identity is stable across
+    re-enumeration.
+    """
     return (m.kind, m.direction, m.layer, round(m.exit_pt[0], 2),
             round(m.exit_pt[1], 2),
-            (round(m.site[0], 2), round(m.site[1], 2)) if m.site else None)
+            (round(m.site[0], 2), round(m.site[1], 2)) if m.site else None,
+            tuple((round(a[0], 2), round(a[1], 2),
+                   round(b[0], 2), round(b[1], 2), L) for a, b, L in (m.legs or ())))
 
 
 # The engine lays at these (realize's own generate_bga_fanout call); the

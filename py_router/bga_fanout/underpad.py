@@ -2661,7 +2661,21 @@ def generate_underpad_escape(footprint: Footprint,
             if not legs:
                 return None
             kind = mv.get('kind', 'surface')
+            # `home` is the ball's own EXEMPTION CELL SET (home_of returns
+            # cells, not a layer). `home_li` is the ball's LAYER INDEX, in
+            # the same space as L_idx/commit. They were the same name
+            # (2026-09-17 review): `home` was used for both, so
+            # `li == home` compared an int against a set and was ALWAYS
+            # FALSE -- the exact-registry check below never ran on the
+            # ball's own layer, leaving only occ.seg_clear, whose
+            # exemptions blank the very disks around the pad that
+            # _seg_conflict exists to cover (#393). And a set reaching
+            # commit() as a layer reads as a layer CHANGE against the
+            # next cell's int, so a 'surface' lane could emit a full-span
+            # via at the ball and leave the first run a single cell --
+            # a spurious via plus an open stub.
             home = home_of(p)
+            home_li = top_idx
             gx, gy = p.global_x, p.global_y
             site = db_site.get(id(p))
             goal = goal_cell(mv)
@@ -2705,7 +2719,7 @@ def generate_underpad_escape(footprint: Footprint,
                 li = L_idx.get(Lname)
                 if li is None:
                     return None
-                if li == home and _seg_conflict(p.net_id, a[0], a[1], b[0], b[1], ctx):
+                if li == home_li and _seg_conflict(p.net_id, a[0], a[1], b[0], b[1], ctx):
                     return None
                 lane_ex = set()
                 for p2 in footprint.pads:
@@ -2751,13 +2765,13 @@ def generate_underpad_escape(footprint: Footprint,
                 return None
             sx, sy = occ.cell(gx, gy)
             if kind == 'surface':
-                path = ([(sx, sy, home)] if cells[0][:2] != (sx, sy) else []) + cells
+                path = ([(sx, sy, home_li)] if cells[0][:2] != (sx, sy) else []) + cells
                 mode = 'surface'
             elif kind == 'dogbone':
                 path, mode = cells, 'dogbone'
             else:
                 first = cells[0][2]
-                path = [(sx, sy, home), (sx, sy, first)] + [c for c in cells if c[:2] != (sx, sy)]
+                path = [(sx, sy, home_li), (sx, sy, first)] + [c for c in cells if c[:2] != (sx, sy)]
                 mode = 'via_in_pad'
             carve = _carve_foreign(db_path.get(id(p)) or [(gx, gy)] + ([site] if site else []),
                                    home, {p.net_id})
