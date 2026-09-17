@@ -753,9 +753,12 @@ def grade_errors_at(self, path, pose, entry, ref='J1'):
 
 
 class GradeConjuncts(_Boards):
-    """The delta verifier's cases: a preferred pose other than the first seat
-    must pass the grade's own band, setback and nearest edge -- not only the
-    seat's 0.02 mm tolerance -- on every path that can pick one."""
+    """The delta verifiers' cases: a preferred pose other than the first seat
+    must pass the grade's own band, setback, nearest edge and along-edge
+    window -- not only the seat's 0.02 mm tolerance -- on every path that can
+    pick one. Each blind arm also switches the whole-grade delta off, which
+    catches these too: the conjunct guards are what a caller WITHOUT an intent
+    (`repair_placement` with none, `_seat_edge` called bare) still has."""
 
     def write(self, name, text):
         path = self.root / name
@@ -788,7 +791,8 @@ class GradeConjuncts(_Boards):
             if accepts is None:
                 res = call()
             else:
-                with patch.object(seeder, '_grade_accepts', accepts):
+                with patch.object(seeder, '_grade_accepts', accepts), \
+                        patch.object(seeder, '_grade_worse', lambda *a, **k: ()):
                     res = call()
             (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
             return (move['new_x'], move['new_y'], move['new_rotation']), res
@@ -826,6 +830,36 @@ class GradeConjuncts(_Boards):
         self.assertEqual(refuse(st, st.parts['J1'], west(0.0, 0.49), 'west', 0.0, 2.5, 10.0)[0],
                          'band_max')
 
+    def test_the_window_is_read_at_the_written_pose_and_for_a_centre_claim(self):
+        path = self.write('window_unit.kicad_pcb',
+            '(kicad_pcb (version 20241229) (generator "t975")\n'
+            '  (gr_rect (start 0 0) (end 28.3 18.0) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 14.15 9.0 270)\n'
+            '    (property "Reference" "J1")\n'
+            '    (pad "1" smd oval (at 2.75 -1.41) (size 0.69 1.03) (layers "F.Cu"))\n'
+            '    (pad "2" smd rect (at 0.72 -0.09) (size .5 .5) (layers "F.Cu"))))\n')
+        st = self.state(path)
+        part = st.parts['J1']
+        part.rot = 270.0
+        claim = seeder._outside_its_along_edge_claim
+        band = {'ref': 'J1', 'edge': 'west', 'along_edge_band': {'from': 0.89, 'to': 0.92}}
+        # Walk y across the window's start in 0.1 um steps: the verdict at an
+        # unrounded pose must always be the verdict at the pose apply_move
+        # writes, and the walk must cross the boundary for that to mean anything.
+        verdicts = []
+        for k in range(-30, 31):
+            y = 14.152 + k * 0.0001
+            verdicts.append(claim(st, part, band, 'west', 0.711, y))
+            self.assertEqual(verdicts[-1],
+                             claim(st, part, band, 'west', 0.711, round(y, 3)), y)
+        self.assertEqual(set(verdicts), {True, False})
+        # A centre claim is a window too: somewhere along the edge it holds,
+        # and far from the centre it does not.
+        centre = {'ref': 'J1', 'edge': 'west', 'center_on_edge': {'tolerance_mm': 0.5}}
+        sweep = {claim(st, part, centre, 'west', 0.711, 2.0 + 0.25 * k) for k in range(57)}
+        self.assertEqual(sweep, {True, False})
+        self.assertFalse(claim(st, part, {'ref': 'J1', 'edge': 'west'}, 'west', 0.711, 14.152))
+
     def test_a_pose_rounded_out_of_its_along_edge_window_is_not_taken(self):
         # Round-3 verifier's board: the -0.4 rung sits ON the window's start,
         # and its inward move, rounded to 3 decimals, lands 0.5 um before it.
@@ -847,7 +881,8 @@ class GradeConjuncts(_Boards):
                 res = call()
             else:
                 with patch.object(seeder, '_outside_its_along_edge_claim',
-                                  lambda *a, **k: False):
+                                  lambda *a, **k: False), \
+                        patch.object(seeder, '_grade_worse', lambda *a, **k: ()):
                     res = call()
             (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
             return (move['new_x'], move['new_y'], move['new_rotation'])
@@ -882,7 +917,8 @@ class GradeConjuncts(_Boards):
                  'class': 'edge_receptacle', 'along_edge_band': {'from': 0.82, 'to': 1.0}}
         pose = StageOne.pose(StageOne.seed(self, path, entry))
         self.assertEqual(grade_errors_at(self, path, pose, entry), [])
-        with patch.object(seeder, '_faces_its_edge', lambda *a, **k: True):
+        with patch.object(seeder, '_faces_its_edge', lambda *a, **k: True), \
+                patch.object(seeder, '_grade_worse', lambda *a, **k: ()):
             blind = StageOne.pose(StageOne.seed(self, path, entry))
         self.assertTrue([m for m in grade_errors_at(self, path, blind, entry)
                          if 'sits nearest the' in m])
@@ -907,7 +943,8 @@ class GradeConjuncts(_Boards):
             bounds = st.pcb_data.board_info.board_bounds
             return _nearest_edge(part.rect(round(x, 3), round(y, 3), part.rot),
                                  tuple(round(v, 6) for v in bounds)) == edge
-        with patch.object(seeder, '_faces_its_edge', courtyard_only):
+        with patch.object(seeder, '_faces_its_edge', courtyard_only), \
+                patch.object(seeder, '_grade_worse', lambda *a, **k: ()):
             blind = StageOne.pose(StageOne.seed(self, path, entry))
         self.assertTrue([m for m in grade_errors_at(self, path, blind, entry)
                          if 'sits nearest the' in m])
@@ -975,6 +1012,295 @@ class WhichReasonsWalk(_Boards):
                 self.assertGreater(len(calls), 2)
                 self.assertEqual((round(pose[0], 3), round(pose[1], 3)), calls[0])
                 self.assertEqual(record['why'], 'along_edge')
+
+
+#: The round-4 verifier's J1: a body 3 mm west of its origin, pads inside it.
+GD_J1 = ('  (footprint "t" (layer "F.Cu") (at 15 5 0)\n'
+         '    (property "Reference" "J1")\n'
+         '    (fp_rect (start -3 -1) (end 1 1) (layer "F.Fab"))\n'
+         '    (pad "1" smd rect (at -2.0 -0.5) (size .5 .5) (layers "F.Cu"))\n'
+         '    (pad "2" smd rect (at -2.0 0.5) (size .5 .5) (layers "F.Cu"))\n'
+         '    (pad "3" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu")))\n')
+
+
+def gd_part(ref, x, y, *, locked=True, half=1.5):
+    return (f'  (footprint "r" {"(locked yes) " if locked else ""}(layer "F.Cu") (at {x} {y} 0)\n'
+            f'    (property "Reference" "{ref}")\n'
+            f'    (fp_rect (start -{half} -0.6) (end {half} 0.6) (layer "F.CrtYd"))\n'
+            '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu"))\n'
+            '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu")))\n')
+
+
+class GradeDelta(_Boards):
+    """The round-4 verifier's blocker: a preferred pose that passes every edge
+    conjunct can still break a rule OUTSIDE `rule_edge_connector` -- the
+    overlap budget, the part's own zone, a proximity claim -- and place_seed
+    then exits 4 on a board its first seat passed. The preference now asks the
+    WHOLE intent grade (`floorplan.PoseGrader`) at both poses, pile left out.
+    Every arm shows the error with the delta off, on the written board."""
+
+    def write(self, name, parts, size=20):
+        path = self.root / name
+        path.write_text('(kicad_pcb (version 20241229) (generator "t975")\n'
+                        f'  (gr_rect (start 0 0) (end {size} {size}) (layer "Edge.Cuts"))\n'
+                        + ''.join(parts) + ')\n', encoding='utf-8')
+        return str(path)
+
+    @staticmethod
+    def intent(**extra):
+        doc = intent_doc(**west(0.0, 0.6))
+        doc.update(extra)
+        return floorplan.intent_from_dict(doc)
+
+    def errors(self, path, pose, intent, ref='J1'):
+        out = str(self.root / f'gd_{abs(hash((path, pose)))}.kicad_pcb')
+        write_placed_output(path, out, [{'reference': ref, 'new_x': pose[0],
+                                         'new_y': pose[1], 'new_rotation': pose[2]}])
+        graded = floorplan.grade(intent, parse_kicad_pcb(out), out, clearance=.25,
+                                 board_edge_clearance=.55)
+        return sorted(v.message for v in graded.errors)
+
+    def repair(self, path, intent, delta=True):
+        def call():
+            return seeder.repair_placement(parse_kicad_pcb(path), path, intent,
+                                           clearance=.25, board_edge_clearance=.55)
+        if delta:
+            res = call()
+        else:
+            with patch.object(seeder, '_grade_worse', lambda *a, **k: ()):
+                res = call()
+        (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
+        return (move['new_x'], move['new_y'], move['new_rotation']), res
+
+    def seed(self, path, intent, delta=True, grade_worse=None):
+        import random
+        call = lambda: seeder.seed_from_intent(parse_kicad_pcb(path), path, intent,
+                                               random.Random(0), clearance=.25,
+                                               board_edge_clearance=.55)
+        patched = (lambda *a, **k: ()) if not delta else grade_worse
+        if patched is None:
+            res = call()
+        else:
+            with patch.object(seeder, '_grade_worse', patched):
+                res = call()
+        return StageOne.pose(res), res
+
+    def test_repair_does_not_raise_the_overlap_budget(self):
+        path = self.write('ov1.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 5)])
+        intent = self.intent(legality_budget={'overlap_area': 0.0})
+        blind, _ = self.repair(path, intent, delta=False)
+        self.assertTrue([m for m in self.errors(path, blind, intent) if 'overlap' in m])
+        pose, res = self.repair(path, intent)
+        self.assertEqual(self.errors(path, pose, intent), [])
+        record = res['edge_floor_fallback']['J1']
+        self.assertEqual(record['why'], 'grade_delta')
+        self.assertEqual(record['grade_delta'][0]['rule'], 'legality')
+        self.assertTrue([n for n in res['notes'] if 'intent-grade error' in n])
+
+    def test_stage_one_does_not_raise_the_overlap_budget(self):
+        path = self.write('ov2.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 10)])
+        intent = self.intent(legality_budget={'overlap_area': 0.0})
+        blind, _ = self.seed(path, intent, delta=False)
+        self.assertTrue([m for m in self.errors(path, blind, intent) if 'overlap' in m])
+        pose, res = self.seed(path, intent)
+        self.assertEqual(self.errors(path, pose, intent), [])
+        self.assertEqual(res['edge_floor_fallback']['J1']['why'], 'grade_delta')
+
+    def test_the_pile_is_left_out_of_both_grades(self):
+        # R5 is still in the pile, at a meaningless coordinate just past the
+        # west edge, overlapping J1's first seat. Graded WITH the pile, the
+        # move sheds more of that overlap than it adds against R9, the budget
+        # value falls, and the move -- which adds 0.18 mm2 against a part
+        # that is really there -- would be taken.
+        path = self.write('pile.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 10),
+                                             gd_part('R5', -1.0, 10, locked=False)])
+        intent = self.intent(legality_budget={'overlap_area': 0.0})
+        real = seeder._grade_worse
+
+        def unmasked(grade, ref, rot, first, seat, exclude, memo):
+            return real(grade, ref, rot, first, seat, set(), memo)
+        blind, _ = self.seed(path, intent, grade_worse=unmasked)
+        pose, res = self.seed(path, intent)
+        self.assertNotEqual(blind, pose)
+        self.assertEqual(res['edge_floor_fallback']['J1']['why'], 'grade_delta')
+
+    def test_a_budget_already_over_may_not_grow(self):
+        # Two locked parts already overlap: the budget error exists at both
+        # poses, so only its measured value can show what the move adds.
+        path = self.write('grow.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 10),
+                                             gd_part('R6', 12.0, 16.0),
+                                             gd_part('R7', 13.0, 16.0)])
+        intent = self.intent(legality_budget={'overlap_area': 0.0})
+        blind, _ = self.seed(path, intent, delta=False)
+        pose, res = self.seed(path, intent)
+        self.assertNotEqual(blind, pose)
+        delta = res['edge_floor_fallback']['J1']['grade_delta']
+        self.assertEqual([d.get('budget') for d in delta], ['overlap_area'])
+        self.assertGreater(delta[0]['after'], delta[0]['before'])
+
+    def test_a_later_rung_stays_in_its_own_zone(self):
+        corner = CORNER_BODY + '\n    ' + CORNER_PADS
+        path = self.write('zone.kicad_pcb', [
+            '  (footprint "t" (layer "F.Cu") (at 10 10 0)\n'
+            '    (property "Reference" "J1")\n    ' + corner + ')\n'])
+        intent = self.intent(blocks=[{'name': 'io', 'refs': ['J1'],
+                                      'zone': [-1.0, 0.5, 5.0, 3.0]}])
+        blind, _ = self.repair(path, intent, delta=False)
+        self.assertTrue([m for m in self.errors(path, blind, intent) if "block 'io'" in m])
+        pose, res = self.repair(path, intent)
+        self.assertEqual(self.errors(path, pose, intent), [])
+        self.assertEqual(res['edge_floor_fallback']['J1']['why'], 'along_edge')
+        # A rule the intent demotes to a warning is not the gate's, so the
+        # delta does not stand in its way. (Asked of the seat directly: with
+        # the zone only a warning, repair finds nothing to repair.)
+        zone = [{'name': 'io', 'refs': ['J1'], 'zone': [-1.0, 0.5, 5.0, 3.0]}]
+        for severity, expect_taken in (({}, False), ({'zone_containment': 'warn'}, True)):
+            with self.subTest(severity=severity):
+                intent = self.intent(blocks=zone, severity=severity)
+                st = self.state(path)
+                grader = floorplan.PoseGrader(intent, st,
+                                              blocks=floorplan.resolve_blocks(intent, st.pcb_data, ())[0],
+                                              clearance=.25, board_edge_clearance=.55)
+                disclose = {}
+                self.assertTrue(seeder._seat_edge(st, 'J1', dict(west(0.0, 0.6)), set(), [],
+                                                  target=(2.0, 1.75), disclose=disclose,
+                                                  grade=grader))
+                p = st.parts['J1']
+                self.assertEqual((p.x, p.y, p.rot) == blind, expect_taken)
+                self.assertEqual('J1' not in disclose, expect_taken)
+
+    def test_a_proximity_claim_named_by_either_part(self):
+        corner = CORNER_BODY + '\n    ' + CORNER_PADS
+        parts = ['  (footprint "t" (layer "F.Cu") (at 10 10 0)\n'
+                 '    (property "Reference" "J1")\n    ' + corner + ')\n',
+                 gd_part('R9', 5.5, 0.9, half=1.0)]
+        path = self.write('prox.kicad_pcb', parts)
+        zone = [{'name': 'io', 'refs': ['J1'], 'zone': [-1.0, 0.5, 5.0, 3.5],
+                 'tolerance_mm': 5.0}]
+        for subject, near in (('J1', 'R9'), ('R9', 'J1')):
+            with self.subTest(claim=f'{subject} near {near}'):
+                intent = self.intent(blocks=zone, proximity=[
+                    {'ref': subject, 'near': near, 'max_mm': 1.5}])
+                blind, _ = self.repair(path, intent, delta=False)
+                self.assertTrue([m for m in self.errors(path, blind, intent)
+                                 if 'mm from' in m])
+                pose, res = self.repair(path, intent)
+                self.assertEqual(self.errors(path, pose, intent), [])
+
+    def test_a_first_seat_that_clears_is_never_graded(self):
+        path = self.board('clear.kicad_pcb')
+        calls = []
+        real = floorplan.PoseGrader.violations
+
+        def spy(self_, **kw):
+            calls.append(kw)
+            return real(self_, **kw)
+        with patch.object(floorplan.PoseGrader, 'violations', spy):
+            StageOne.seed(self, path, west(0.0, 0.6, center_on_edge={'tolerance_mm': 8.0}))
+            tigard = str(ROOT / 'kicad_files' / 'tigard.kicad_pcb')
+            doc = floorplan.emit_intent(parse_kicad_pcb(tigard), tigard)
+            ip = self.root / 'tigard.json'
+            ip.write_text(json.dumps(doc), encoding='utf-8')
+            import random
+            before = len(calls)
+            res = seeder.seed_from_intent(parse_kicad_pcb(tigard), tigard,
+                                          floorplan.load_intent(str(ip)), random.Random('0'),
+                                          clearance=.2, board_edge_clearance=.55, grid_step=0.1)
+        self.assertGreater(before, 0)                  # the synthetic J1's move was graded
+        # tigard: only J7 is short of the floor, graded twice (first seat and
+        # its move) -- the other edge connectors clear at their first seat.
+        self.assertEqual(len(calls) - before, 2)
+        (j7,) = [p for p in res['placements'] if p['reference'] == 'J7']
+        self.assertEqual((round(j7['new_x'], 3), round(j7['new_y'], 3)), (52.999, 72.673))
+        self.assertNotIn('J7', res['edge_floor_fallback'])
+
+    def test_a_grade_that_cannot_be_asked_keeps_the_first_seat(self):
+        path = self.write('fails.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 10)])
+        intent = self.intent()
+        base, _ = self.seed(path, intent, delta=False)
+
+        def boom(self_, **kw):
+            raise RuntimeError('forced')
+        with patch.object(floorplan.PoseGrader, 'violations', boom):
+            pose, res = self.seed(path, intent)
+        record = res['edge_floor_fallback']['J1']
+        self.assertEqual(record['why'], 'grade_delta')
+        self.assertIn('unavailable', record['grade_delta'][0])
+        self.assertNotEqual(pose, base)
+        self.assertEqual(pose[1], base[1])
+
+
+class PoseGraderParity(unittest.TestCase):
+    """`PoseGrader` at poses nothing has written equals `floorplan.grade` of the
+    board written at those poses -- message and measured value -- with parts
+    moved and turned, on boards whose intents arm every rule family."""
+
+    def check(self, path, intent_path, moves, clearance=.2, edge=.55):
+        import shutil
+        pcb = parse_kicad_pcb(path)
+        intent = floorplan.load_intent(intent_path)
+        state = pose_score.make_state(pcb, path, clearance=clearance, board_edge_clearance=edge)
+        blocks, _ = floorplan.resolve_blocks(intent, pcb, ())
+        grader = floorplan.PoseGrader(intent, state, blocks=blocks, clearance=clearance,
+                                      board_edge_clearance=edge)
+        posed = sorted((v.sort_key(), v.severity, json.dumps(v.measured, sort_keys=True))
+                       for v in grader.violations(poses=moves))
+        with tempfile.TemporaryDirectory(prefix='t975p_') as tmp:
+            out = os.path.join(tmp, 'posed.kicad_pcb')
+            write_placed_output(path, out, [{'reference': r, 'new_x': x, 'new_y': y,
+                                             'new_rotation': rot}
+                                            for r, (x, y, rot) in moves.items()])
+            for ext in ('.kicad_pro', '.kicad_dru'):
+                sibling = os.path.splitext(path)[0] + ext
+                if os.path.exists(sibling):
+                    shutil.copyfile(sibling, os.path.splitext(out)[0] + ext)
+            written = parse_kicad_pcb(out)
+            graded = floorplan.grade(intent, written, out, clearance=clearance,
+                                     board_edge_clearance=edge)
+            outside = {v.sort_key() for v in
+                       list(floorplan.validate_intent(intent))
+                       + list(floorplan.resolve_blocks(intent, written, ())[1])
+                       + list(floorplan.unresolved_keepout_allows(intent, written))
+                       + list(floorplan.intent_zone_keepout_problems(
+                           intent, floorplan.resolve_blocks(intent, written, ())[0],
+                           written, out))}
+            full = sorted((v.sort_key(), v.severity, json.dumps(v.measured, sort_keys=True))
+                          for v in graded.violations if v.sort_key() not in outside)
+        self.assertTrue(full, 'a parity check over no violations checks nothing')
+        self.assertEqual(posed, full)
+
+    def test_emitted_intents_with_connectors_moved_and_turned(self):
+        for name in ('tigard', 'splitflap_driver'):
+            with self.subTest(board=name), tempfile.TemporaryDirectory(prefix='t975i_') as tmp:
+                path = str(ROOT / 'kicad_files' / f'{name}.kicad_pcb')
+                pcb = parse_kicad_pcb(path)
+                doc = floorplan.emit_intent(pcb, path)
+                doc.setdefault('legality_budget', {})['overlap_area'] = 0.0
+                ip = os.path.join(tmp, 'intent.json')
+                with open(ip, 'w', encoding='utf-8') as stream:
+                    json.dump(doc, stream)
+                refs = sorted(c['ref'] for c in doc['edge_connectors'])[:2]
+                moves = {}
+                for turn, ref in zip((0, 90), refs):
+                    fp = pcb.footprints[ref]
+                    moves[ref] = (round(fp.x + 3.0, 3), round(fp.y + 2.0, 3),
+                                  (fp.rotation + turn) % 360)
+                self.check(path, ip, moves)
+
+    def test_the_run_27_esp_prog_plan(self):
+        fixture = ROOT / 'tests' / 'fixtures' / '975' / 'esp_prog_run27'
+        with tempfile.TemporaryDirectory(prefix='t975e_') as tmp:
+            pile = json.loads((fixture / 'pile.json').read_text(encoding='utf-8'))
+            board = os.path.join(tmp, 'board.kicad_pcb')
+            x, y, rot = pile['pose']
+            write_placed_output(str(ROOT / pile['source']), board,
+                                [{'reference': r, 'new_x': x, 'new_y': y, 'new_rotation': rot}
+                                 for r in pile['refs']])
+            import shutil
+            shutil.copyfile(fixture / 'board.kicad_pro', os.path.join(tmp, 'board.kicad_pro'))
+            self.check(board, str(fixture / 'zone_plan.json'),
+                       {'USB1': (117.2, 98.0, 180.0), 'CON1': (141.15, 98.25, 0.0),
+                        'U1': (126.0, 99.0, 90.0)}, clearance=.15, edge=.3)
 
 
 class WrittenPoses(_Boards):

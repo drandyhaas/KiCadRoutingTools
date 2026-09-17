@@ -346,14 +346,20 @@ conjunct (#975). At each rotation, when the seat the ladder always chose leaves
 copper inside the floor, the ladder tries that seat moved inward by the largest
 shortfall on the seated edge. Such a move is kept
 only if it passes the band at the grade's own bounds, the seat predicate
-(keep-outs, zones, pad copper), the neighbours, the floor itself, and the
-grade's nearest-edge and along-edge-window conjuncts; for an entry that
-carries a setback, a move that leaves no overhang is refused outright. When the shortfall is
+(keep-outs, other blocks' exclusive zones, pad copper), the neighbours, the
+floor itself, and the grade's nearest-edge and along-edge-window conjuncts;
+for an entry that carries a setback, a move that leaves no overhang is
+refused outright. Then, because a list of conjuncts misses rules, the WHOLE
+intent grade is asked at both poses (`floorplan.PoseGrader`, the same rules
+over the search's own board with the not-yet-placed pile left out): the move
+is refused if it adds an error the first seat does not have, or grows a
+board-level budget already over. Warnings do not count, as they do not count
+in `place_seed`'s exit gate. When the shortfall is
 on another side of the part, which moving inward cannot fix, or the outline
 is sampled, the ladder walks on to later rungs instead -- where there are any:
 stage 1 of a fresh seed tries one along-edge position unless something arms
 its slide -- and keeps a later rung only when it clears the floor and passes
-the same grade conjuncts. It does not walk when the move was refused for any
+the same checks, the whole-grade comparison included. It does not walk when the move was refused for any
 other reason, although a move from a later rung might pass: trading the
 connector's along-edge position for a fraction of a millimetre of copper is
 not the ladder's call. Otherwise it keeps the seat it always chose. Refusing would turn

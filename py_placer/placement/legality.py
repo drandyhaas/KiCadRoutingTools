@@ -3467,6 +3467,35 @@ def pads_at_pose(fp, pose) -> List[_PosedPad]:
     return posed
 
 
+def footprint_at_pose(fp, pose):
+    """A copy of `fp` at `pose` = `(x, y, rot)`, with REAL `Pad` copies moved by
+    `pads_at_pose`'s transform -- every other pad field (net, pin metadata,
+    castellation, local position) kept -- and a drill hole centre moved with its
+    copper. `fp` itself when it already sits at `pose`. For a grader asked about
+    a pose nothing has written yet (#975's grade delta); `pads_at_pose`'s
+    proxies carry only what the edge grader reads."""
+    import copy as _copy
+    x, y, rot = pose
+    if (fp.x, fp.y, (fp.rotation or 0.0) % 360.0) == (x, y, rot % 360.0):
+        return fp
+    delta = rot - (fp.rotation or 0.0)
+    c, s = math.cos(math.radians(delta)), math.sin(math.radians(delta))
+    moved = []
+    for original, posed in zip(fp.pads, pads_at_pose(fp, pose)):
+        pad = _copy.copy(original)
+        for name in ('global_x', 'global_y', 'rotation', 'size_x', 'size_y',
+                     'rect_rotation', 'polygons'):
+            setattr(pad, name, getattr(posed, name))
+        if getattr(original, 'hole_x', None) is not None:
+            a, b = original.hole_x - fp.x, original.hole_y - fp.y
+            pad.hole_x, pad.hole_y = x + c*a + s*b, y - s*a + c*b
+        moved.append(pad)
+    out = _copy.copy(fp)
+    out.pads = moved
+    out.x, out.y, out.rotation = x, y, rot
+    return out
+
+
 class EdgeCopperContext:
     """`grade_pad_edge_clearance` with its per-board constants read once (#975).
 
