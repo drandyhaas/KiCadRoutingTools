@@ -40,6 +40,14 @@ those four rows, re-run there: 4 KILLED. Earlier full runs: 60 of 60 at
 629851d6, and 51 of 54 before that, whose three survivors (a sampled pad's
 zero reading, the floor read at the unrounded pose, the silk branch of the
 seat basis) likewise got arms rather than waivers.
+
+Those SHAs are the ones the runs were made on, BEFORE #971 and #981 merged
+upstream and this branch was rebased onto their merged form. The same commits
+are now fa6677f7 -> 812e10b9, 54698a19 -> 2aba269f, 629851d6 -> 650f179f,
+and the base f343befc -> b30b724e. The rebase changed no line of the branch's
+own diff, but upstream moved `place_seed.py`, `kicad_parser.py` and
+`check_drc.py` under it, so the numbers above are re-measured on the rebased
+tree before the branch is pushed.
 """
 from __future__ import annotations
 
