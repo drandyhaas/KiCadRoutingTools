@@ -719,6 +719,7 @@ def cmd_poses(a):
                   "which nets a move can affect", file=sys.stderr)
             return 2
         from placement.writer import write_placed_output
+        from placement.portfolio import copy_siblings
         tmp = tempfile.mkdtemp(prefix='converge_poses_')
         with _StdoutToStderr():     # the writer and the router both narrate
             for p in poses[:a.route_top]:
@@ -728,6 +729,10 @@ def cmd_poses(a):
                                                      'new_x': p['x'],
                                                      'new_y': p['y'],
                                                      'new_rotation': p['rot']}])
+                # #441: the probe ROUTES this candidate, and a board without
+                # its project routes at the stock netclass floor, so every
+                # pose would be ranked under rules the board does not have.
+                copy_siblings(a.board, cand)
                 res = scoped_route(cand, a.affected, extra_args=a.route_args or [])
                 n, note = route_verdict(res['summary'])
                 # `nets`/`returncode`/`summary_error` so a row that carries no

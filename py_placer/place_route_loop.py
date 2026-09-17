@@ -1290,6 +1290,14 @@ def main():
 
         cand_file = os.path.join(work, f'loop_round{rnd}.kicad_pcb')
         write_placed_output(quench_base, cand_file, placements)
+        # #441, for EVERY round, not just round 0. The candidate is routed next,
+        # judged against the incumbent, and -- once accepted -- becomes the
+        # board the next round quenches, relocates and finally delivers. The
+        # writer carries no siblings, so without this every round after 0 was
+        # routed at the stock netclass floor (a board's own 0.4 USB class
+        # became the 0.25 fallback, and the "improvement" that bought was
+        # accepted), and an accepted round delivered OUT with no project.
+        copy_siblings(quench_base, cand_file)
 
         metrics = run_route(
             cand_file, os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),

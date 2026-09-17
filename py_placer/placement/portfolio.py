@@ -182,9 +182,18 @@ def copy_siblings(src_board: str, dst_board: str) -> None:
     dst_base = os.path.splitext(dst_board)[0]
     from copy_board import SIBLING_EXTS   # ONE list (#711)
     for ext in SIBLING_EXTS:
-        s = src_base + ext
-        if os.path.isfile(s):
-            shutil.copyfile(s, dst_base + ext)
+        s, d = src_base + ext, dst_base + ext
+        if not os.path.isfile(s):
+            continue
+        # IN PLACE the sibling is already its own destination. `copyfile`
+        # raises SameFileError there (PermissionError via copy2 on Windows),
+        # and every in-place run crashed AFTER writing its board: place_seed
+        # --repair/--reseat with nothing to move and the seed path,
+        # place_optimize X X, beautify_labels X X. `samefile`, not an abspath
+        # compare, so a case-only spelling on a case-insensitive disk counts.
+        if os.path.exists(d) and os.path.samefile(s, d):
+            continue
+        shutil.copyfile(s, d)
 
 
 # --------------------------------------------------------------------------
