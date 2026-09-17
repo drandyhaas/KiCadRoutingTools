@@ -6091,11 +6091,10 @@ Neither board is better on the graded terms: same vias, same completion,
 cloud 8.9 mm shorter overall (647.44 against 656.33) and local much cleaner
 copper (783 segments against 1144).
 
-### OPEN, MERGE-BLOCKING: a back-side BGA ignores the layer names it was given (2026-09-17)
+### FIXED: a back-side BGA ignored the layer names it was given (2026-09-17)
 
-Found by the branch review; **confirmed by measurement, NOT fixed** --
-the obvious fix trades this bug for a different one, and the semantics
-need an owner's decision.
+Found by the branch review, reproduced, and now fixed with a gate
+(`tests/test_flip_frame_layer_args.py`, which fails without the fix).
 
 `_generate_bga_fanout_core` fans a back-side part out by turning the
 board over (`flip_frame.to_front_frame`, new on this branch), which
@@ -6105,7 +6104,7 @@ But the recursion forwards `layers`, `layer_costs` and
 dict(_entry_args)`), so those layer NAMES now refer to the mirror of the
 side the caller meant. `_plane_drop_pass` (`:~4283`) has the same shape.
 
-**Measured** (`awx/repro/repro_flip_layer_args.py`, the branch's own flip
+**Measured** (`tests/test_flip_frame_layer_args.py`, the branch's own flip
 fixture widened to four copper layers). A back part fanned out with
 `layers=['B.Cu','In2.Cu','In1.Cu','F.Cu']` and a cost of -1 on `F.Cu`:
 
@@ -6121,18 +6120,32 @@ and per CLAUDE.md the dru outranks `--clearance` on every routing step.
 symmetric under the rename, and all three flip/translation test files are
 two-layer. It needs >2 copper layers to be visible at all.
 
-**Why the obvious fix is wrong.** Mapping the names through
-`other_layer` fixes the four-layer case and BREAKS `test_fanout_flip_frame`'s
-"the back-side fanout is the mirror of the front-side one" (16/16 -> 15/16,
-40 segments differ): for the symmetric default, remapping also REORDERS
-the list, moving `layers[0]` off the face the part is on. The root cause
-is that **two conventions for `layers` coexist**: the channel path treats
-`layers[0]` as "the top escape layer" (and refuses to have it forbidden,
-`:3236`), while underpad resolves `top_idx = layers.index(footprint.layer)`
-(`underpad.py:782`) and does not care about order. A correct fix has to
-pick one and make the frame wrapper honour it -- probably "map the names,
-then rotate the part's own layer to the front" -- and re-run both the
-symmetry test and the reproduction.
+**The fix is TWO steps, and the second is why a plain rename is not
+enough.** `layer_costs` is POSITIONAL, so renaming alone keeps each cost
+on its layer -- but the engine ALSO reads `layers[0]` as "the top escape
+layer" (`:3236` refuses to have it forbidden) while underpad instead
+resolves `layers.index(footprint.layer)` (`underpad.py:782`) and ignores
+order. **Two conventions for `layers` coexist**, and under the symmetric
+default `['F.Cu','B.Cu']` the rename REORDERS the pair and moves
+`layers[0]` off the face the part is on -- which broke the
+back==mirror(front) guarantee (16/16 -> 15/16, 40 segments differ) on the
+first attempt. So the wrapper renames, then brings the part's own turned
+layer back to the front, permuting `layer_costs` by the SAME permutation.
+A caller who already leads with the part's layer (the four-layer case) is
+untouched, because it is already at index 0.
+
+Both paths are fixed -- the signal recursion and `_plane_drop_pass` (the
+latter also maps `plane_net_layers`, or a declared plane is modelled on
+the wrong face and a ball can skip its drop via on the strength of fill
+that is on the other side of the board, a #678 promise the post-route
+audit would then fail). Green after: flip-frame 16/16, translation 8/8,
+rotated-frame 28/28, `test_622_rules_of`, and the new gate -- which fails
+with 14 tracks on the forbidden face when the fix is removed.
+
+STILL OPEN from the same finding: the sibling `.kicad_dru` is read with
+real layer names INSIDE the turned frame, so a per-layer clearance rule
+lands on the opposite face. Per CLAUDE.md the dru outranks `--clearance`
+on every routing step, so that one is worth closing too.
 
 ### THE OBJECTIVE IS ANTI-CORRELATED WITH THE ROUTE (2026-09-16, proven at the optimum)
 
