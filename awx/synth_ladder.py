@@ -93,6 +93,8 @@ def case(k, pattern, **kw):
                         else f'{key[:3]}{c[key]}')
     if c['pad_inner']:
         bits.append(f'pi{c["pad_inner"]:g}')
+    if c['inversions'] is not None:
+        bits.append(f'inv{c["inversions"]:g}')       # 0 is a real value here
     if c['obstacle_h']:
         bits.append(f'obs{c["obstacle_w"]:g}x{c["obstacle_h"]:g}'
                     + (f'y{c["obstacle_y"]:g}' if c['obstacle_y'] else '')
@@ -203,6 +205,131 @@ BATCHES['b4'] = (
 )
 
 
+# b5: the MODEL ladder -- the cases where the planner's own two-page model
+# cannot express the answer, which b1..b4 do not contain.
+#
+# Measured before this batch existed (`synth_bus --self-test`, and the sweep
+# in the README): on `sorted`, `blocks`, `interleave`, `riffle` and even
+# `reversed` the two-page model's best plan costs EXACTLY the optimum, so
+# every one of those cases grades the search and the braid and says nothing
+# about the model. The model error lives on IRREGULAR permutations, where
+# the model swims lanes it cannot page and, at a swim price of 100 vias
+# against a swimmer's true cost of 2, buys paged lanes at any price:
+# `shuffle` K=12 seed 0 is +14 vias (34 against 20), K=15 +10, K=18 +4.
+#
+# So this batch is `shuffle` at several seeds and K -- the only family whose
+# crossing graph is a general permutation graph -- with the interiors CLOSED
+# so the channel-confined optimum really is one, plus the INVERSION
+# dose-response the first batches have no curve for (the patterns are
+# corners of the space, not a sweep). `inversions` is a controlled crossing
+# count at fixed K, so `model_err` against it is the shape of the defect
+# rather than one number.
+def _no_duplicate_tags():
+    """A case's tag is its FILENAME, so two cases sharing one overwrite each
+    other's boards and the table reports the second twice. That is silent --
+    the run looks complete -- so it is checked at import. It has bitten once
+    already: `inversions` was not in the tag, which collapsed b5's whole
+    dose-response onto one name."""
+    for b, cs in BATCHES.items():
+        seen = {}
+        for c in cs:
+            if c['tag'] in seen:
+                raise SystemExit(
+                    f'batch {b}: two cases share the tag {c["tag"]!r} -- they '
+                    f'would write the same files. Differing keys: '
+                    + ', '.join(sorted(k for k in c
+                                       if k != 'tag' and c[k] != seen[c['tag']][k])))
+            seen[c['tag']] = c
+
+
+BATCHES['b5'] = (
+    [case(k, 'shuffle', seed=s, pad_inner=0.6)
+     for k in (12, 15, 18)
+     for s in (0, 1, 2)]
+    # the dose-response: K fixed, crossings swept from none to nearly all
+    # (K=12 has 66 pairs, so 0 is `sorted` and 66 is `reversed`)
+    + [case(12, 'shuffle', seed=0, inversions=v, pad_inner=0.6)
+       for v in (0, 6, 12, 22, 33, 44, 55, 66)]
+)
+
+
+# b6: CALIBRATED TO THE BENCH, for the rungs that matter (K41, K51).
+#
+# `b5` measured that a swim price of 2 beats the shipped 100 by 20 vias --
+# and on the bench it LOSES on all three rungs. The reason is a property of
+# b5 and not of the price: every b5 case is `pad_inner=0.6`, interiors
+# CLOSED, so a lane cannot leave the channel and the case is confined to the
+# homotopy class the truth model describes. **The bench is not.** Measured on
+# the shipped boards, lanes with copper past the deepest bus ball at one end:
+# 5 of 28 at K28, 8 of 35 at K35, 8 of 41 at K41 -- a fifth of the bus goes
+# through or around an array, which un-crosses pairs for free. It is why K28
+# routes 34 against a channel bound of 44.
+#
+# So a batch meant to PREDICT the bench must leave the interiors OPEN, and
+# must be at the bench's own K. Two things make this a calibration and not a
+# fit to one board: the permutation family is `shuffle`, chosen because the
+# bench's own bus IS statistically a uniform random permutation (inversions
+# 195/302/399 against a random mean of 189/298/410 at K28/35/41, LIS within
+# one standard deviation at every rung), and nothing here copies a ball map,
+# a net name or a pitch.
+#
+# `depth=2` draws the bus from two columns, so the teeth are a real escape
+# field with some launches on B -- the bench carries 6 teeth on B at K41 and
+# 8 at K51, which `depth=1` cannot produce.
+#
+# CALIBRATION, measured before the batch was run (8 seeds a rung, against the
+# bench's own numbers) on the four quantities the PLANNER consumes:
+#
+#              crossings      LIS      paged by the model   swimmers
+#   K28      177 / 195      8 / 7          15 / 13          13 / 15
+#   K35      303 / 302      9 / 9          16 / 15          19 / 20
+#   K41      406 / 399     10 / 9          18 / 16          23 / 25
+#   K51      664 / 539     10 / 11         19 / 20          32 / 28
+#
+# K41 is a tight match on all four, which is the rung this batch is for.
+#
+# K51 is NOT, and the obvious repair does not work: the bench's K51 bus is
+# more ordered than a uniform shuffle (539 crossings against 655), but pinning
+# the count with `--inversions 539` buys the crossings at the cost of the
+# structure -- it lands at **LIS 6.2 +- 0.6 where the bench is 11**, because
+# the generator's accept-while-it-moves-toward-the-target walk does not sample
+# uniformly among permutations of that inversion count. LIS is the quantity
+# that sets both the floor (`2*(K - LIS)`) and the largest page a plan can
+# have, so it is the one to match: plain `shuffle` gives LIS 10.5 +- 1.6
+# against the bench's 11, and 655 crossings against 539. Those cases are
+# therefore a HARDER article than the bench's K51, not a model of it -- read
+# them as a stress rung, and calibrate K51 properly only with a generator
+# that can hit a target LIS.
+BATCHES['b6'] = (
+    [case(41, 'shuffle', seed=s) for s in (0, 1, 2)]
+    + [case(41, 'shuffle', seed=0, depth=2)]
+    + [case(51, 'shuffle', seed=s) for s in (0, 1)]
+)
+
+
+# cal: the POROSITY calibration, and it is a prerequisite for b6 rather than
+# a result of its own.
+#
+# `thru` -- lanes whose copper passes the deepest bus ball at one end, so they
+# reached their pad through or around an array -- is the one property that
+# decides whether the channel model applies at all, and the bench's value is
+# **about a fifth**: 5 of 28, 8 of 35, 8 of 41 on the shipped boards. The
+# harness's two settings bracket that and neither hits it: `pad_inner=0.6`
+# CLOSES the interior (thru 0 by construction, which is what b5 measured and
+# why its answer did not transfer), while the default 0.4 leaves a 0.4 mm gap
+# between balls at 0.8 pitch -- wide open to a 0.127 track, and more porous
+# than a real BGA, which carries its own escape copper in there.
+#
+# So sweep the ball diameter at a K that runs in a minute and read `thru` off
+# the routed board. Porosity is geometry, so the setting transfers to K41
+# where a probe costs the best part of an hour.
+BATCHES['cal'] = [case(15, 'shuffle', seed=0, pad_inner=pi)
+                  for pi in (0.40, 0.45, 0.50, 0.55, 0.60)]
+
+
+_no_duplicate_tags()
+
+
 # ---------------------------------------------------------------------------
 # The truth, re-derived from the built boards
 # ---------------------------------------------------------------------------
@@ -222,6 +349,9 @@ def _axis(pcb, src, dst):
 # floor and what chain_k.sh grades at. Named here because the capacity
 # bound below is arithmetic on them, not a guess.
 TRACK, CLEAR, EDGE = 0.1, 0.1, 0.2
+# `pages_first.PAGES_SWIM` -- read from the planner rather than re-spelled,
+# so the model column is priced at what the chain actually charges
+SWIM_DEFAULT = float(os.environ.get('PLAN_PAGES_SWIM', '100'))
 
 
 def slot_capacity(pcb, v, src, dst):
@@ -269,7 +399,7 @@ def slot_capacity(pcb, v, src, dst):
             'per_layer': (a, b), 'capacity': 2 * (a + b)}
 
 
-def truth_from_board(bench, names, src=SRC, dst=DST):
+def truth_from_board(bench, names, src=SRC, dst=DST, swim_price=None):
     """The known answer for the nets the chain is ACTUALLY given, read off
     the prepared bench: each lane's source tooth (the free stub end and
     the layer its copper sits on) and its destination pad, ordered along
@@ -347,10 +477,50 @@ def truth_from_board(bench, names, src=SRC, dst=DST):
     half = rad + 0.105
     assert dp is None or opt is None or dp <= opt, \
         f'exact {dp} above the whole-lane optimum {opt}: one of them is wrong'
+    # ---- the PLANNER'S OWN model, solved exactly, and what its answer
+    # really costs. `planner gap` alone cannot say whether the plan is off
+    # because the search stopped early or because the model cannot express
+    # the answer; these two columns split it. `m_dp` pins the model's paged
+    # lanes to their pages and re-runs the exact DP, so `model_err =
+    # m_dp - dp` is measured in the same units and homotopy class as the
+    # optimum. `m2_dp` is the same at a swim price of 2 -- what a lane that
+    # leaves layer F and comes back actually costs -- so the pair prices
+    # the shipped PLAN_PAGES_SWIM against the truth on this case.
+    # ---- the CHANNEL FLOOR, available at EVERY K. `dp` is exact but costs
+    # 2**(free lanes), so it is blank past the cap -- and the rungs that
+    # matter, K41 and K51, have never carried a reference number at all.
+    # This one is a true lower bound (synth_bus.channel_lower_bound) and
+    # costs milliseconds. It bounds the CHANNEL-CONFINED class only, so on
+    # a case with `thru > 0` it is the floor for the lanes that stayed in.
+    clb = sy.channel_lower_bound(order_src, order_dst, tooth_layer=tooth,
+                                 berth_layer=berth)
+    model = {}
+    # the price the CHAIN is running at, not this process's environment --
+    # the driver passes the chain's own `--env` through, or a bench run
+    # under one price would be graded against the model at another
+    swim_p = SWIM_DEFAULT if swim_price is None else float(swim_price)
+    for tag, price in (('m', swim_p), ('m2', 2.0)):
+        mm_ = sy.pages_model(order_src, order_dst, tooth_layer=tooth,
+                             berth_layer=berth, swim=price)
+        fixed = {n: l for n, l in mm_['page'].items() if l != 'swim'}
+        v_, _how = sy.exact_dp(names, key_s, key_d, tooth_layer=tooth,
+                               berth_layer=berth, fixed=fixed)
+        model[tag] = mm_
+        model[tag + '_dp'] = v_
     return {'xing': len(edges), 'lis': lis, 'lb': lb, 'opt': opt, 'how': how,
             'dp': dp, 'dp_how': dp_how, 'slot': slot_capacity(pcb, v, src, dst),
             'teeth_b': sum(1 for l in tooth.values() if l != 'F.Cu'),
             'mm_lb': mmlb, 'u': u,
+            'bound': clb['cost'],
+            'm_obj': model['m']['cost'], 'paged': model['m']['paged'],
+            'm_swim': model['m']['n_swim'], 'm_dp': model['m_dp'],
+            'm2_swim': model['m2']['n_swim'], 'm2_dp': model['m2_dp'],
+            'swim_price': swim_p,
+            'model_err': (None if (model['m_dp'] is None or dp is None)
+                          else model['m_dp'] - dp),
+            'swim_price_cost': (None if (model['m_dp'] is None
+                                         or model['m2_dp'] is None)
+                                else model['m_dp'] - model['m2_dp']),
             's_in': (min(sp) - half) if sp else None,
             'd_in': (max(dp_) + half) if dp_ else None}
 
@@ -505,16 +675,76 @@ def inband_lanes(log_path):
     return (a, b) if b else ('', '')
 
 
+def planner_ran(log_path):
+    """Which planner the chain actually used, read off the FANOUT stage's
+    log -- which is where `pages_first` prints, and NOT the braid's (that
+    mistake is why this function's first version reported 16 of 17 cases
+    as planner-less on a batch where it had run every time).
+
+    The model columns in this table describe `pages_first`'s model, so a
+    case where that planner did not run is a case they do not describe.
+    The driver ASKS for it (`run_chain` sets `PLAN_PAGES=1`), and asking is
+    not the same as it happening: `chain_k.sh` does not set the variable
+    itself, so a chain run by hand gets the OLD planner and grades
+    identically in both arms of a swim-price A/B -- measured, a whole
+    vacuous K28/K35/K41 pair.
+
+    Returns 'pages-first', or 'NO pages-first LINE' -- which is ambiguous
+    on purpose, because an INFEASIBLE solve prints no such line either and
+    reads exactly like a planner that never ran (README TODO item 8)."""
+    if not os.path.isfile(log_path):
+        return ''
+    for line in open(log_path, errors='replace'):
+        if 'pages-first' in line:
+            return 'pages-first'
+    return 'NO pages-first LINE'
+
+
+def swim_price_real(log_path):
+    """What a SWIMMER actually cost the braid, from its own report:
+    `swimmer SYN00: 8 page crossing(s), 6 change(s), ...`.
+
+    This is the number no offline analysis can supply. The harness's exact
+    DP prices a swimmer at its BEST possible routing (2 vias for an F-to-F
+    lane), because the unpinned lanes are free in it; `pages_first` charges
+    a flat `PLAN_PAGES_SWIM`, 100 as shipped. The braid prints what it
+    really paid, and on the generated cases the answer is neither.
+
+    Returns (swimmers, total changes) over the braid's LAST reported block
+    -- it re-plans, so an earlier block is superseded.
+    """
+    if not os.path.isfile(log_path):
+        return '', ''
+    runs, cur = [], []
+    for line in open(log_path, errors='replace'):
+        m = re.search(r'swimmer (\S+): (\d+) page crossing\(s\), (\d+) change',
+                      line)
+        if m:
+            cur.append(int(m.group(3)))
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    if not runs:
+        return '', ''
+    return len(runs[-1]), sum(runs[-1])
+
+
 FIELDS = ['tag', 'k_asked', 'k_real', 'pattern', 'xing', 'lis',
-          'lb', 'opt', 'dp', 'teeth_b', 'bench_vias', 'total_opt',
+          'lb', 'bound', 'total_bound', 'opt', 'dp', 'teeth_b', 'bench_vias',
+          'total_opt',
           'total_dp', 'thru',
           'plan', 'routed', 'open', 'drc', 'segs', 'resid',
           'inband', 'offered', 'slot_cap', 'slot_room',
           'planner_gap', 'braid_gap', 'total_gap', 'dp_gap',
+          'planner', 'swimmers', 'swim_changes',
+          'paged', 'm_swim', 'm_obj', 'm_dp', 'model_err',
+          'm2_swim', 'm2_dp', 'swim_price', 'swim_price_cost', 'solve_vs_model',
           'mm', 'mm_lb', 'detour', 'sec', 'how', 'dp_how']
 
 
-def grade(c, bench, tag, dt, outdir, log=print):
+def grade(c, bench, tag, dt, outdir, log=print, swim_price=None):
     K = c['k']
     names = coherent(bench, K)
     fo = f'{tag}_fo_k{K}.kicad_pcb'
@@ -525,11 +755,18 @@ def grade(c, bench, tag, dt, outdir, log=print):
     if not names:
         row['how'] = 'NO NETS -- the ladder gave the chain nothing'
         return row
-    t = truth_from_board(bench, names)
+    t = truth_from_board(bench, names, swim_price=swim_price)
     bench_vias, _ = vias_mm(bench, names)
+    row['bound'] = t['bound']
+    row['total_bound'] = t['bound'] + bench_vias
     row.update(xing=t['xing'], lis=t['lis'], lb=t['lb'], opt=t['opt'],
                dp=t['dp'], teeth_b=t['teeth_b'], bench_vias=bench_vias,
                mm_lb=round(t['mm_lb'], 1), how=t['how'], dp_how=t['dp_how'])
+    row.update(paged=t['paged'], m_swim=t['m_swim'],
+               m_obj=round(t['m_obj'], 1), m_dp=t['m_dp'],
+               model_err=t['model_err'], m2_swim=t['m2_swim'],
+               m2_dp=t['m2_dp'], swim_price=t['swim_price'],
+               swim_price_cost=t['swim_price_cost'])
     if t['slot']:
         row['slot_cap'] = t['slot']['capacity']
         row['slot_room'] = '/'.join(str(r) for r in t['slot']['room'])
@@ -555,6 +792,8 @@ def grade(c, bench, tag, dt, outdir, log=print):
     row['thru'] = through_array(rt, names, t['u'], t['s_in'], t['d_in'])
     row['detour'] = round(mm / t['mm_lb'], 2) if t['mm_lb'] else ''
     row['inband'], row['offered'] = inband_lanes(f'{tag}_k{K}.log')
+    row['planner'] = planner_ran(f'{tag}_fo_k{K}.log')
+    row['swimmers'], row['swim_changes'] = swim_price_real(f'{tag}_k{K}.log')
     pc, resid = plan_count(fo, names, DST)
     if pc is not None:
         row['plan'], row['resid'] = pc, resid
@@ -565,6 +804,13 @@ def grade(c, bench, tag, dt, outdir, log=print):
         ref = row['total_dp'] if row['total_dp'] != '' else row['total_opt']
         if ref != '':
             row['planner_gap'] = pc - ref
+        # the plan this solve FOUND against the best its own model can
+        # express. Do not read it as a search gap: it is signed, and a
+        # NEGATIVE value is the interesting one -- the solve stopped
+        # somewhere its objective ranks worse and the truth ranks better,
+        # which is the anti-correlation, per case, with a known answer.
+        if t['m_dp'] is not None:
+            row['solve_vs_model'] = pc - (t['m_dp'] + bench_vias)
     if row['total_opt'] != '':
         row['total_gap'] = row['routed'] - row['total_opt']
     if row['total_dp'] != '':
@@ -573,9 +819,14 @@ def grade(c, bench, tag, dt, outdir, log=print):
 
 
 def print_table(rows, log=print):
-    cols = ['tag', 'k_real', 'xing', 'lb', 'opt', 'dp', 'total_dp', 'plan',
+    cols = ['tag', 'k_real', 'xing', 'lis', 'total_bound', 'opt', 'dp',
+            'total_dp', 'plan',
             'routed', 'open', 'drc', 'thru', 'slot_cap', 'inband', 'offered',
-            'planner_gap', 'braid_gap', 'dp_gap', 'detour', 'sec']
+            'swimmers', 'swim_changes',
+            'paged', 'm_swim', 'm_dp', 'model_err', 'm2_dp',
+            'swim_price_cost',
+            'planner_gap', 'solve_vs_model', 'braid_gap', 'dp_gap', 'detour',
+            'sec']
     w = {c: max(len(c), *(len(str(r.get(c, ''))) for r in rows)) for c in cols}
     log('  '.join(c.rjust(w[c]) if c != 'tag' else c.ljust(w[c]) for c in cols))
     for r in rows:
@@ -602,6 +853,54 @@ def print_table(rows, log=print):
                 f'{sum(1 for r in conf if r["dp_gap"] == 0)} exact. The rest had '
                 'copper inside an array, so a cheaper topology than the model '
                 'describes was available to them.')
+        # the planner gap, SPLIT. `model_err` is what the two-page whole-lane
+        # model costs AT ITS OWN OPTIMUM, and it answers the question a bare
+        # planner gap cannot: a model error means more solving is wasted,
+        # because the answer is not in the model to be found.
+        # a case whose planner did not run is a case the model columns do
+        # not describe -- named, not silently averaged in
+        off = [r for r in ok if r.get('planner') == 'NO pages-first LINE']
+        if off:
+            log(f'\n{len(off)} case(s) printed NO pages-first line, so the '
+                f'model columns below describe a planner that may not have '
+                f'run (it is also what an INFEASIBLE solve prints): '
+                + ', '.join(r['tag'] for r in off[:6])
+                + (', ...' if len(off) > 6 else ''))
+        sp = [r for r in ok if r.get('model_err', '') != ''
+              and r.get('solve_vs_model', '') != '']
+        if sp:
+            me = sum(r['model_err'] for r in sp)
+            se = sum(r['solve_vs_model'] for r in sp)
+            worse = sum(1 for r in sp if r['solve_vs_model'] < 0)
+            log(f'The planner gap SPLIT over {len(sp)} case(s): MODEL error '
+                f'{me:+d} vias -- the best plan the two-page model can express, '
+                f'priced by the exact DP, against the optimum. '
+                f'{sum(1 for r in sp if r["model_err"] > 0)} case(s) where the '
+                f'model cannot express the optimum at all.')
+            log(f'The solve landed {se:+d} vias from its own model\'s optimum '
+                f'over those cases, BETTER on {worse} of them -- a plan its '
+                f'objective ranks worse and the truth ranks better is the '
+                f'anti-correlation, per case, against a known answer.')
+        real = [r for r in ok if r.get('swimmers', '') not in ('', 0)]
+        if real:
+            n_ = sum(r['swimmers'] for r in real)
+            c_ = sum(r['swim_changes'] for r in real)
+            log(f'What a SWIMMER really cost the braid, from its own report: '
+                f'{c_} layer change(s) over {n_} swimmer(s) = {c_ / n_:.1f} '
+                f'each, on {len(real)} case(s). The exact DP prices one at 2 '
+                f'(it routes the free lanes optimally) and PLAN_PAGES_SWIM '
+                f'charges {real[0].get("swim_price", "?")}; neither is this '
+                f'number, and this is the one the board paid.')
+        sw = [r for r in ok if r.get('swim_price_cost', '') != '']
+        if sw:
+            c = sum(r['swim_price_cost'] for r in sw)
+            log(f'The SWIM PRICE costs {c:+d} vias over {len(sw)} case(s): the '
+                f'plan the model picks at PLAN_PAGES_SWIM='
+                f'{sw[0]["swim_price"]:g} against the one it '
+                f'picks at 2, both priced by the exact DP. '
+                f'{sum(1 for r in sw if r["swim_price_cost"] > 0)} case(s) where '
+                f'the shipped price picks the worse plan, '
+                f'{sum(1 for r in sw if r["swim_price_cost"] < 0)} the better.')
         ib = [r for r in ok if r.get('offered', '') != '']
         if ib:
             log(f'In band on the first attempt (the braid\'s own objective): '
@@ -657,7 +956,8 @@ def main(argv=None):
                         with contextlib.suppress(FileNotFoundError):
                             os.remove(stem + ext)
                 dt, _ = run_chain(c, bench, tag, env_extra)
-        rows.append(grade(c, bench, tag, dt, outdir))
+        rows.append(grade(c, bench, tag, dt, outdir,
+                          swim_price=env_extra.get('PLAN_PAGES_SWIM')))
     print()
     print_table(rows)
     tsv = os.path.join(outdir, 'ladder.tsv')

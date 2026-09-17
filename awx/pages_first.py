@@ -127,6 +127,32 @@ if PAGES_CANON and int(os.environ.get('PLAN_PAGES_WALK', '0') or 0):
           f'budget ({PAGES_CANON}) and the det backstop ({PAGES_CANON_DET:g}), '
           'not the walk budget. The two do not compose.')
 PAGES_SWIM = float(os.environ.get('PLAN_PAGES_SWIM', '100'))  # vias: the price of a net left to swim
+# PLAN_PAGES_SWIM_XING (2026-09-17): a swimmer's price PER PAGED LANE IT
+# CROSSES, instead of the flat `PLAN_PAGES_SWIM` alone. 0 = off, and off is
+# the default, so the objective is unchanged by construction.
+#
+# Why a flat price cannot be right, measured. The braid reports what each
+# swimmer actually cost it -- `swimmer SDQ15: 8 page crossing(s), 6
+# change(s)` -- and over 262 swimmers from every run of the K ladder and the
+# synthetic b5 batch those changes are NOT a constant: they run from 2 to 22,
+# and they track the page crossings:
+#
+#     changes ~ 0.44 * page_crossings + 0.79   (Pearson r = 0.83, n = 262)
+#
+# 70% of the variance, against a flat mean of 4.98 -- and the model charges
+# 100. That is the term this campaign's anti-correlation lives in: with a
+# flat price the objective cannot tell a cheap swimmer from an expensive one,
+# so its optimum is DEGENERATE over plans whose real costs differ by many
+# vias (awx/synth_bus.py --judge measures exactly that).
+#
+# The fix is expressible because "how many paged lanes does this net cross"
+# is PAIRWISE, which is the shape the no-inversion constraint already has:
+# for each crossing pair, one term when exactly one of the two swims. So it
+# costs one bool and two linear constraints per pair and no new search
+# structure. Set it with a matching `PLAN_PAGES_SWIM` base (the fit says
+# 0.44 / 0.8); the flat 100 with a non-zero XING would just be the flat
+# price again.
+PAGES_SWIM_XING = float(os.environ.get('PLAN_PAGES_SWIM_XING', '0'))
 PAGES_ISLAND = float(os.environ.get('PLAN_PAGES_ISLAND', '0') or 0)   # vias per corridor part a page lane's chord crosses on its page (learned from verify; 0 = off)
 PAGES_SRC = int(os.environ.get('PLAN_PAGES_SRC', '1'))        # 0 = the source frozen (destination only)
 PAGES_LOG = int(os.environ.get('PLAN_PAGES_LOG', '0'))        # 1 = per-net choice printed
@@ -1897,6 +1923,28 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
             m.Add(pg[a] != pg[b]).OnlyEnforceIf(same.Not())
             m.Add(ltL == ltT).OnlyEnforceIf([same, sw[a].Not(), sw[b].Not()])
             npairs += 1
+            if PAGES_SWIM_XING:
+                # this pair CROSSES iff its launch and target orders
+                # disagree; it is a PAGE crossing for a swimmer iff exactly
+                # one of the two swims. Both are xors, encoded the way the
+                # end-mismatch pair above is.
+                inv = m.NewBoolVar(f'inv_{a}_{b}')
+                m.Add(inv >= ltL - ltT)
+                m.Add(inv >= ltT - ltL)
+                m.Add(inv <= ltL + ltT)
+                m.Add(inv <= 2 - ltL - ltT)
+                one = m.NewBoolVar(f'one_{a}_{b}')
+                m.Add(one >= sw[a] - sw[b])
+                m.Add(one >= sw[b] - sw[a])
+                m.Add(one <= sw[a] + sw[b])
+                m.Add(one <= 2 - sw[a] - sw[b])
+                xg = m.NewBoolVar(f'xg_{a}_{b}')
+                # the cost is positive and minimised, so it only has to be
+                # forced UP: it cannot sit at 0 when both halves hold, and
+                # nothing has to stop it sitting at 0 otherwise
+                m.Add(xg >= inv + one - 1)
+                cost_terms.append(
+                    int(round(PAGES_SWIM_XING * VIA_W * SCALE)) * xg)
     # ---- moves that cannot both be laid
     nconf = 0
     excl_d = []

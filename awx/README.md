@@ -664,7 +664,392 @@ build-failure row carried only a tag.
    obstacle ladder is the gate: `sorted` with a blocker should cost 0 vias.
 4. A `--pattern shuffle --inversions N` sweep at fixed K would give a
    dose-response of gap against crossing count, which none of these batches
-   has (the patterns are corners, not a curve).
+   has (the patterns are corners, not a curve). **Done** -- it is the second
+   half of `b5`, below.
+
+## The harness grades the JUDGE (2026-09-17)
+
+TODO item 1 is "fix the judge", and the evidence for it was one number on one
+board: at `PLAN_PAGES_DET=5000` the K41 plan solves to PROVEN OPTIMAL with a
+24% better objective and routes **twelve vias worse**. That says the objective
+is wrong somewhere but not where, and re-measuring it costs 43 minutes. The
+synthetic harness can say where, in seconds, because it knows the answer.
+
+### The two new truths
+
+* **`pages_model(...)`** -- the exact optimum of the **planner's own model**.
+  Two lanes are inverted exactly when they cross, so "a page" is a
+  crossing-free set is an *increasing subsequence*: the model's optimum is to
+  cover the lanes with two increasing subsequences, pay each its end-mismatch
+  price and pay `PLAN_PAGES_SWIM` for every lane left over. An O(K^3) DP over
+  (last rank on page F, last rank on page B) -- so it answers at K=51 in
+  milliseconds, where `exact_dp` stops at 22.
+* **`exact_dp(..., fixed=...)`** -- the exact optimum with lanes PINNED to a
+  page for the whole channel. That is what a whole-lane plan *is*, so
+  `exact_dp(fixed=the model's pages) - exact_dp()` is the exact price of
+  planning in whole lanes. A pinned lane is not a variable, so the walk runs
+  over the FREE lanes only: the cap applies to the swimmers, not to K.
+
+Both are checked three ways in `--self-test`: brute force over F/B/swim at
+K<=8, **Greene's theorem** (the largest union of two increasing subsequences
+is `lambda1 + lambda2` of the RSK shape, computed by a different algorithm),
+and closed forms. A ten-mutant battery kills nine; the survivor
+(`bisect_left` -> `bisect_right` in the RSK insertion) is provably equivalent
+on a permutation and is recorded in the code as such.
+
+### What a planner gap is made of
+
+    MODEL error = the best plan the two-page model can express  - the optimum
+    solve_vs_model = the plan this solve actually found         - that best plan
+
+They answer opposite questions, and a bare `planner_gap` mixes them: a model
+error means more solving is **wasted**, because the answer is not in the model
+to be found. New ladder columns: `paged`, `m_swim`, `m_obj`, `m_dp`,
+`model_err`, `m2_dp`, `swim_price_cost`, `solve_vs_model`.
+
+The first thing it measured is that **b1..b4 cannot see the model at all**. On
+`sorted`, `blocks`, `interleave`, `riffle` -- and even on `reversed`, where the
+model swims K-2 lanes -- the model's best plan costs *exactly* the optimum. The
+model error lives on IRREGULAR permutations, which is why `b5` exists:
+`shuffle` at three seeds and three K (the only family whose crossing graph is a
+general permutation graph), interiors closed, plus the inversion
+dose-response. Measured: `shuffle` K=12 seed 0 is **+14 vias** (34 against 20),
+K=15 +10, K=18 +4. All three are pinned as self-test witnesses.
+
+### `--judge`: is the objective pointing the right way?
+
+```bash
+python3 synth_bus.py --judge                     # ~1 min, no board, no chain
+python3 synth_bus.py --judge --judge-swims 1.5,2,100 --judge-k 10,12
+```
+
+It builds a pool of model-feasible plans, scores each one **both ways** -- the
+planner's objective, and the exact via count of the best routing consistent
+with it -- and reports the rank correlation, the regret of the plan the
+objective would choose, and the spread of true cost inside the objective's own
+optimum set. Over 60 cases at K=10..18:
+
+| swim price | mean rho | total regret | mean spread inside the optimum |
+|---|---|---|---|
+| 2 | +0.18 | +340 | 5.6 |
+| 3 | +0.06 | +326 | -- |
+| 6 | -0.03 | +330 | 4.4 |
+| 20 | -0.05 | +330 | -- |
+| **100 (shipped)** | **-0.05** | **+330** | **4.4** |
+
+**The objective is rank-uninformative about the routed via count, and at the
+shipped weights very slightly anti-correlated.** Regret is a STEP with the step
+at 2 -- every price below 2 measures +8..+12, every price above it +326..+340 --
+because a swimmer that routes freely costs exactly 2.
+
+**The blind spot, and why the price is not the finding.** In this model a
+swimmer is FREE: `exact_dp` routes the unpinned lanes optimally. The real braid
+routes a swimmer outside its page chains and may pay far more, or fail. So an
+objective that prefers swimmers scores well here **by construction**, and
+nothing in this table sets `PLAN_PAGES_SWIM`. Only a chain run can.
+
+### The arm the blind spot cannot reach
+
+Group the plans by how many lanes they swim. Inside one group every plan pays
+the same swim total, so whatever a swimmer really costs, it costs the same in
+all of them and the price cancels. What is left is the objective's opinion
+about *which* lanes to page:
+
+```
+case                  plans  swims     rho   TRUE spans  objective spans
+blocks_k12               59      7   -0.03       12..40         702..708
+interleave_k12           56      6   +0.56       10..22         602..610
+reversed_k12             37     10     --        34..42       1002..1002
+blocks_k15               53      9   +0.23       14..48         902..910
+reversed_k15             36     13     --        50..58       1302..1302
+```
+
+**mean rho +0.40 over 36 groups, mean true span inside a group 13.7 vias, and
+9 groups where the objective is CONSTANT across a spread of up to 12 vias.**
+Not weakly correlated: one value, no ranking. No budget, no solver and no
+tie-break inside this model can choose between those plans, which is why
+proving the K41 plan optimal moved the board twelve vias the wrong way, and
+why `PLAN_PAGES_CANON` (making the degenerate choice *reproducible*) treats
+the symptom. `blocks_k12` is the sharpest non-degenerate row: the objective
+spans 6 over plans whose real costs span 28, and does not rank them.
+
+**The jitter, and why it is on by default.** `reversed` crosses every pair at
+the MIDPOINT, so on the article exactly as drawn the crossing *order* is
+`crossing_events`' deterministic tie-break rather than a fact about the
+problem -- and a spread read off it is partly an artifact. Measured at K=10:
+14 vias degenerate, 6..12 across five jitter seeds. `--judge-jitter` (0.30 of
+a pitch by default) moves the ends by less than half a pitch, so no pair's
+order changes and the crossing GRAPH is identical, but every crossing gets its
+own place along the channel. The numbers above are the jittered ones; the
+degenerate article reads 14/18/24/30 and that reading is **withdrawn**.
+
+The degeneracy is concentrated where the model must SWIM. When it pages
+everything the objective is unique and its regret is zero -- `blocks`,
+`interleave`, `riffle` at every K. **And the bench sits in the swimming
+regime**: with the ends as the board has them, `pages_model` pages 13 of 28 at
+K28, 16 of 41 at K41 and 20 of 48 at K51 (the planner does better because it
+also *chooses* the ends, so read those as a floor on pageability, not as the
+planner's own number).
+
+### And then run it, because only the chain prices a swimmer
+
+`b5` twice, same 17 cases, the two arms in parallel:
+
+```
+                   vias   open   in band (first attempt)   wall clock
+swim=100 (shipped)  292      0   364/397, 6 cases retried     16.5 min
+swim=2              272      0   231/231, none retried        10.8 min
+      B better on 6, worse on 0, tied on 11.  -20 vias, and 1.5x faster.
+```
+
+The two arms produced a **different plan on 12 of the 17 cases**, so this is
+the price moving the plan and not noise in the braid. The `in band` column is
+the mechanism in one number: arm A's offered counts are 36, 52, 54 against a
+K of 12 and 18, which is the braid *retrying* -- the high price hands it a plan
+whose lanes do not fit their band, and everything after that is recovery.
+
+**This is a result on ONE generated family and it is not a default.** `b5` is
+`shuffle` at three K and one inversion sweep, all from one generator, on a
+straight two-array channel. Per the edicts, the gate is the K28/K35/K41 bench.
+
+### What a swimmer really costs, from the braid's own mouth
+
+The harness's blind spot has a number, and it was in the logs the whole time.
+The braid reports, per swimmer:
+
+```
+swimmer SYN00: 8 page crossing(s), 6 change(s), 6 diamond(s) reserved
+```
+
+`swim_price_real` reads those and the ladder now carries `swimmers` and
+`swim_changes`. Both `b5` arms agree, and they agree independently of the
+price the planner charged:
+
+| arm | swimmers | changes | per swimmer |
+|---|---|---|---|
+| swim=100 | 20 over 10 cases | 70 | **3.5** |
+| swim=2 | 86 over 15 cases | 291 | **3.4** |
+| the bench, K28, swim=2 | 9 | 34 | **3.8** |
+
+**Neither model has this number.** The exact DP prices a swimmer at 2, because
+it routes the free lanes optimally; `pages_first` charges 100. The braid pays
+about 3.5.
+
+### The bench says NO, and says it in the clearest possible way
+
+`chain_k.sh` at K28, `PLAN_PAGES=1`, one price apart:
+
+| PLAN_PAGES_SWIM | what the planner chose | its objective | **routed** |
+|---|---|---|---|
+| 100 (shipped) | pages F 18 / B 10, **0 swimmers** | model vias 28 | **34** |
+| 2 | pages F 25 / B 3, **10 swimmers** | model vias **8** | **42** |
+
+The objective improved by 71% and the board got **eight vias worse**. That is
+the campaign's headline anti-correlation -- which cost a 43-minute K41 solve at
+`PLAN_PAGES_DET=5000` to establish -- reproduced in two minutes by moving a
+price instead of a budget. It also explains *why*: at 2 the model buys
+swimmers at less than half what the braid charges for them, so it buys too
+many; at 100 it will not buy one at any price.
+
+**So the swim price is NOT a default change, and the synthetic gain does not
+transfer.**
+
+### A flat price cannot be right, so: `PLAN_PAGES_SWIM_XING`
+
+Over **262 swimmers** from every run of the K ladder and of `b5`, the braid's
+own reported cost is not a constant -- it runs from 2 to 22 changes, and it
+tracks the page crossings:
+
+```
+changes ~ 0.44 * page_crossings + 0.79      (Pearson r = 0.83, n = 262)
+70% of the variance, against a flat mean of 4.98 -- and the model charges 100.
+```
+
+`page_crossings` -- how many PAGED lanes a swimmer crosses -- is **pairwise**,
+which is the shape the no-inversion constraint already has, so it costs one
+bool and two linear constraints per pair and no new search structure.
+`PLAN_PAGES_SWIM_XING` adds it (0 = off = the default; flag-off copper is
+IDENTICAL to the pre-change chain on `copper_same` and `cmp_copper`).
+
+### Every arm, and none of them ships
+
+`chain_k.sh`, `PLAN_PAGES=1`, all 0 DRC:
+
+| arm | K28 | K35 | K41 | total | open |
+|---|---|---|---|---|---|
+| **flat 100 (shipped)** | **34** | **62** | **79** | **175** | 0 |
+| flat 4 (~the measured mean) | 36 | 54 | 86 | 176 | 0 |
+| flat 2 | 42 | 64 | 80 | 186 | 0 |
+| 0.8 + 0.44/crossing (the fit) | 44 | 64 | 97 | 205 | 0 |
+| 1.6 + 0.88/crossing (2x the fit) | 44 | 60 | 78 | 182 | 0 |
+| 100 + 1/crossing (**tie-break only**) | **30** | 62 | 91 | 183 | **2** |
+
+**Nothing beats the shipped 175, so nothing ships** (edict 3). Two results in
+that table are worth keeping anyway, and both were repeated because a single
+K28 run on this bench is not a measurement:
+
+* **The tie-break arm takes K28 to 30 vias, 0 open, 0 DRC -- below every
+  recorded arm** (the reference `jcl`, the portfolio and `+replan.py` all sit
+  at 34) and 16 below the human's 46. Repeated: **30 / 30 / 30**, against a
+  base that measures **34 / 34 / 32 / 32**. So it is outside the base's own
+  run-to-run band, not inside it.
+* **And it breaks K41: 91 vias with 2 open (`SDQ10`, `SDQ13`), repeated
+  91 / 91 / 91 against a base of 79 / 79 / 79.** Deterministic, not noise.
+
+That arm is the one the analysis predicted: it does not change how MANY lanes
+swim (the base stays at 100), only WHICH -- exactly the degeneracy `--judge`
+says the objective cannot see. It moves the right rung by the right mechanism
+and breaks another, which is what "the direction is right and the term is not
+finished" looks like.
+
+**One hypothesis is closed off.** A swimmer does not pay for itself by pushing
+its neighbours out of band: across the arms, MORE swimmers measured BETTER
+first-attempt in-band, not worse (4 swimmers -> 75%, 41 -> 89%, 77 -> 95%)
+while routing more vias. Swimmers route fine; they just cost.
+
+### A LOWER BOUND for K41 and K51, and why it does not grade them
+
+`exact_dp` costs `2**(free lanes)`, so the rungs that matter have never had a
+number to be compared against -- only each other. `channel_lower_bound` gives
+one at any K, in milliseconds, and it is a bound rather than an estimate:
+
+> Any routing splits the lanes into A (holds layer F for the whole channel),
+> B (holds layer B) and S (the rest). A and B are each crossing-free, so each
+> is an increasing subsequence; a lane in A costs exactly its end mismatches
+> and so does one in B; and a lane in S changes layer at least once, so it
+> costs at least 1 -- at least 2 when its two ends share a layer. The minimum
+> of that sum over all valid (A, B) is below every routing's cost, and it is
+> exactly `pages_model` with each lane's swim price set to its own floor,
+> which the O(K^3) DP computes exactly.
+
+It is checked two ways that cannot both be wrong the same way: with every end
+on F it must land **exactly** on the LIS formula `2*(K - LIS)` that patience
+sorting computes by a different algorithm, and it must never exceed
+`exact_dp` -- including with the teeth moved, where the LIS formula stops
+applying and the bound does not. 5/5 mutants killed.
+
+On the bench (`fb_t2q_fresh`, U1 -> DU1, fanout vias added):
+
+| K | nets | crossings | LIS | teeth on B | bound + fanout | routed |
+|---|---|---|---|---|---|---|
+| 28 | 28 | 195 | 7 | 3 | 44 | **34** |
+| 35 | 35 | 302 | 9 | 4 | 54 | 62 |
+| 41 | 41 | 399 | 9 | 6 | 66 | 79 |
+| 51 | 48 | 539 | 11 | 8 | 76 | -- |
+
+**K28 routes ten vias BELOW its own floor, and that is the finding.** The
+bound holds for the channel-confined homotopy class -- every inverted pair
+crossing once, no other pair crossing -- and **the bench does not stay in
+it**: measured on the shipped boards, lanes with copper past the deepest bus
+ball are **5 of 28, 8 of 35 and 8 of 41**. A fifth of the bus reaches its pad
+through or around an array, which un-crosses pairs at no via cost at all.
+
+So the table is not a scorecard, and 79 against 66 at K41 is **not** "13 vias
+of room". What it is worth is the diagnosis it hands the harness, below.
+
+### Where the room actually is: K41 is done, K51 is the whole gap
+
+With a floor to compare against, the ladder reads completely differently:
+
+| K | floor | ours (best recorded) | human | our room | human room |
+|---|---|---|---|---|---|
+| 28 | 44 | 34 | 46 | **-10** | +2 |
+| 35 | 54 | 58 | 58 | +4 | +4 |
+| 41 | 66 | **68** | 70 | **+2** | +4 |
+| 51 | 76 | 96 | 81 | **+20** | +5 |
+
+The human sits a consistent **+2 to +5** above the floor at every rung, which
+is the sanity check the floor needed -- a hand layout should land just above a
+rigorous bound. Against that:
+
+* **K41 is essentially solved.** 68 against a floor of 66, and *closer to it
+  than the human is*. Plan-side work at K41 is chasing at most two vias.
+* **K51 carries the entire remaining opportunity** -- 20 vias against the
+  human's 5, and the human proves 81 is reachable.
+* K28's -10 is the escape again, not a win over physics.
+
+### K51's twenty vias are FIFTEEN NETS
+
+Per-net breakdown of a clean K51 baseline (116 vias, 0 open, 0 DRC):
+
+```
+ vias  nets  subtotal          9 nets pay 0   (they hold F end to end; LIS 11)
+    6     5        30         23 nets pay 2   (the expected dive and return)
+    5     1         5         ---------------------------------------------
+    4     7        28         15 nets pay MORE than 2, carrying 69 vias,
+    3     2         6            of which 39 are excess over 2.
+    2    23        46
+    0     9         0         if every net paid at most 2: 78 vias.
+```
+
+**78 is the floor (76) and the human (81).** So K51 is not a plan that is
+diffusely bad -- it is fifteen nets that weave, and `pages_first`'s own
+directive is *"no net may need more than two vias"*. `SCKE1` at K41 is the
+same shape in miniature: 8 vias, detour only 1.29x, three extra dive-and-
+return pairs -- not wandering, weaving.
+
+### The mechanism built for those nets does nothing
+
+`DST_RESIDUE` aims at exactly this population -- "the nets its schedule cannot
+place and would leave to weave". Measured this session:
+
+* **`DST_RESIDUE` defaults to 0**, so `DST_RESIDUE_CANDS` (README TODO item 2's
+  lever) is dead on the default chain: 8, 12 and 16 all gave **116 vias and an
+  identical 838 berth candidates** at K51. A vacuous null until the candidate
+  count was checked.
+* With `DST_RESIDUE=3` the machinery runs and **identifies the right nets** --
+  16 residue nets at K51, against the 15 that carry the whole gap -- then
+  builds 374 candidate berths / 788 moves / 11418 exclusions, and its solve
+  returns **`objective n/a`, 0 moves, in about one second**. Every sweep.
+* **Zero moves at K28, K35 AND K51**, and unchanged grades (32 / 62 / 116).
+  Not a solver issue: `BRAID_ALT_SOLVER=cpsat` behaves identically to the
+  default HiGHS. `alt_obj` is set at the *end* of the alternatives solve, so
+  "n/a" means that solve never completed -- the silent-exhaustion class TODO
+  item 12 already flags for `braid_tier`, on the one mechanism pointed at
+  K51's actual defect.
+
+**That is the lead to pick up**: not a knob, a mechanism that is switched off
+by default and returns nothing when switched on.
+
+### What the synthetic bench can and cannot do at K41+
+
+* **It cannot be a fast screening loop there.** A generated K41 case routes in
+  ~40 minutes against the bench's own ~5, because the synthetic array is far
+  more porous than a real BGA and the router searches the whole interior.
+* **Its truth machinery is the instrument, and that transferred**: the floor,
+  the crossing census and the escape count above are all `synth_bus` functions
+  run on the real board.
+* **The permutation family calibrates well.** The bench's bus IS statistically
+  a uniform random permutation, and `shuffle` matches it on every quantity the
+  planner consumes (K41: crossings 406 vs 399, LIS 10 vs 9, paged 18 vs 16,
+  swimmers 23 vs 25). `b6` is that batch.
+* **The geometry does not calibrate, yet.** `thru` on the bench is about a
+  fifth; the harness's settings give 40% (open, lanes cut through) and 40%
+  again (closed -- the lanes go *around* instead, which the `cal` batch shows
+  in renders). `thru` conflates the two escapes and is non-monotone in ball
+  diameter, so it is the wrong calibration target as it stands.
+* **K51 needs a generator that can hit a target LIS.** Pinning the crossing
+  count with `--inversions 539` reproduces the bench's crossings exactly and
+  lands at **LIS 6.2 +- 0.6 against the bench's 11**, because the walk does not
+  sample uniformly at a given inversion count.
+
+### A measurement trap this work fell into, recorded
+
+The first bench A/B graded **identically in both arms** at K28, K35 and K41 --
+36 / 62 / 91 vias, same segment counts. The reason: **`chain_k.sh` does not set
+`PLAN_PAGES`**, and `pages_first` defaults to 0, so both arms ran the OLD
+planner and `PLAN_PAGES_SWIM` reached nothing. A vacuous pass that looked
+exactly like a clean null result. `synth_ladder.run_chain` sets `PLAN_PAGES=1`
+itself, which is why `b5` was never affected -- and why the two harnesses
+disagreed about whether the knob did anything.
+
+`planner_ran` now reads the FANOUT stage's log (where `pages_first` prints --
+not the braid's, which was this function's own first bug, reporting 16 of 17
+cases as planner-less on a batch where it had run every time) and the table
+carries a `planner` column; a case with no `pages-first` line is NAMED in the
+summary, with the caveat that an INFEASIBLE solve prints no such line either
+(README TODO item 8).
+
 ## `rules.py` -- one place for the topo chain's design constants (agent, 2026-09-15)
 
 Half of the generality debt recorded above is paid, and the other half was
@@ -926,7 +1311,43 @@ way are in "Settled -- do not re-run these" and in the history.
    `--rounds=4 --probes=2` used lately. Hours, so it wants the cloud.
    `BRAID_CPSAT_REPAIR` (hint repair) is built and still unmeasured.
 
-2. **The berth menu is the binding constraint, and the fix is ROW pruning
+   **2026-09-17 -- WHERE the objective is wrong is now measured, and it is
+   the SWIM TERM** (see "The harness grades the JUDGE"). Three findings,
+   in order of how much they constrain what comes next:
+
+   * The objective is **rank-uninformative** about the routed via count
+     (mean Spearman -0.05 at the shipped weights over 60 known-answer
+     cases) and its optimum is **DEGENERATE**: inside a fixed swimmer
+     count it spans 6 units over plans whose real costs span 28 vias, and
+     on 9 of 36 groups it takes ONE value across a spread of up to 12
+     vias. Neither is reachable by more search -- both are properties of
+     the objective, which is why proving K41 optimal moved the board the
+     wrong way and why `PLAN_PAGES_CANON` treats a symptom.
+   * **The flat swim price is the term at fault, and it has a measured
+     right answer that is not a constant**: the braid's own report over
+     262 swimmers gives `changes ~ 0.44 * page_crossings + 0.79`, r =
+     0.83, against a flat mean of 4.98 and a charged 100.
+   * **Per-crossing pricing is built (`PLAN_PAGES_SWIM_XING`, default off,
+     flag-off copper identical) and does not ship**: nothing beats the
+     shipped ladder total of 175. But the tie-break arm (base 100, +1 a
+     crossing) takes **K28 to 30 vias, 0 open, below every recorded arm's
+     34**, reproducibly (30/30/30 against a base band of 34/34/32/32) --
+     and breaks K41 (91 with 2 open, 91/91/91). The mechanism is right and
+     the term is not finished. The next arm is the one that does not exist
+     yet: a per-crossing price **gated on slack** (item 4's shape), or the
+     crossing count taken against the ACTUAL corridor rather than all
+     pairs.
+
+2. **The berth menu -- but FIRST, `DST_RESIDUE` is off and inert
+   (2026-09-17).** The knob this item names, `DST_RESIDUE_CANDS`, is dead on
+   the default chain because `DST_RESIDUE` defaults to 0: 8 / 12 / 16 all
+   gave 116 vias and an identical 838 berth candidates at K51. Switched on,
+   `DST_RESIDUE=3` identifies the right nets (16 at K51, against the 15 that
+   carry the entire gap) and then makes **zero moves at K28, K35 and K51** --
+   `objective n/a` in about a second, every sweep, on both solvers. Fix that
+   before pruning rows in a menu nothing is reading.
+
+   **The berth menu is the binding constraint, and the fix is ROW pruning
    -- not column generation.** Measured on the joint arm's K41 instance:
    each net has ~19 distinct berth geometries across ~4 faces, and at
    `CANDS=4` the one-per-face guarantee consumes all four slots for 28 of
@@ -934,10 +1355,16 @@ way are in "Settled -- do not re-run these" and in the history.
    one representative per face. This is the most concrete plan-side lever
    on the list and it feeds item 1 directly.
 
-3. **K51, the only rung the human still wins** (96 against 81). It is
-   also where the anti-correlation is worst and where the portfolio's
-   gain is largest, so it is the natural target for whatever comes out of
-   items 1 and 2 rather than a separate line of work.
+3. **K51 is now the ONLY rung with room, and it is 20 vias (2026-09-17).**
+   Against a rigorous floor (`channel_lower_bound`): K41 is 68 against 66 and
+   is *closer to the floor than the human* -- essentially solved, worth at
+   most two vias. K51 is 96 against 76 where the human is 81. And the gap is
+   **fifteen nets**: on a clean K51 baseline 23 nets pay the expected 2 and 9
+   pay 0, while 15 pay more, carrying 39 vias of excess. At 2 vias a net the
+   board would be 78 -- the floor, and the human. `pages_first`'s own
+   directive is "no net may need more than two vias"; K51 breaks it on 15 of
+   48 nets, and item 2's `DST_RESIDUE` is the mechanism aimed at exactly
+   those.
 
 4. **Slack-gated arms.** Two knobs are the largest single-knob wins
    measured and both LOSE where there is capacity to spare, in the same
