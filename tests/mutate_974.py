@@ -274,6 +274,12 @@ ROWS = [
      "                graded, pinned, own,\n"
      "                bands_dropped=",
      (T974C,), 'KILLED'),
+    ('repair-split-ignored', 'ps',
+     "                graded, own, pinned,\n"
+     "                bands_dropped=",
+     "                graded, own + pinned, [],\n"
+     "                bands_dropped=",
+     (T974C,), 'KILLED'),
     ('reseat-drops-not-passed', 'ps',
      "                bands_dropped=(reseat['edge_bands_dropped']\n"
      "                               if reseat is not None else None))",

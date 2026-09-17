@@ -21,9 +21,13 @@ Checks are named by what they hold:
 
 Issue acceptance, by arm: (1) a body-less connector writes the board at its
 old rc and is listed unmeasured -- `pinned`, `unlocked`, `shorts`; (2) a band
-failure writes the board with rc 4 and names it -- `reseat_other`; (3) the
-run27-pinned fixture reports its error pinned with rc 0 -- `pinned`; (4) the
-board exists at every rc a non-dry run exits with.
+failure writes the board with rc 4 and names it -- `reseat_auto`, whose
+re-seat is ACCEPTED and moves nothing, so the band is the only cause of its 4
+(`reseat_other` exits 4 too, but its gate also refused); (3) the run27-pinned
+fixture reports its error pinned with rc 0 -- `pinned`; (4) every non-dry arm
+here writes its board, at rc 0 and at rc 4. (Not every rc: an untrustworthy
+outline raises inside `--repair` before anything is written, exactly as before
+this change.)
 
 Run:
     python3 tests/test_974_place_seed_connector_requirements.py
@@ -272,26 +276,50 @@ def main():
 
         # --- --reseat / --repair on a placed board -------------------------
         b, i = _write(tmp, 'placed', PLACED, PLACED_INTENT)
+        def band_failure(rep, side):
+            return [e for e in rep.get(side) or ()
+                    if e.get('ref') == 'J1'
+                    and 'overhang_mm' in (e.get('measured') or {})
+                    and e['measured']['overhang_mm'] > e['expected']['max']]
+
+        # Acceptance 2. The re-seat is accepted and moves nothing, so the
+        # band is the ONLY thing that can make this exit 4.
+        rc, s, text = _cli(b, i, out_of('reseat_auto'), ['--reseat'])
+        check('rc: reseat_auto: a band failure alone fails the run', rc == 4,
+              f'rc {rc}\n{text[-900:]}')
+        check('board: reseat_auto: written at rc 4',
+              os.path.exists(out_of('reseat_auto')))
+        check('rc: reseat_auto: nothing else fails it -- accepted, nothing '
+              'unseated, refused or re-seated',
+              (s or {}).get('accepted') is True and not s.get('unseated')
+              and not s.get('refused') and not s.get('reseated'), f'{s}')
+        rep = graded_invariants('reseat_auto', rc, s)
+        check('key: reseat_auto: the band failure is NAMED as own, with its '
+              'number and limit', band_failure(rep, 'errors_own'), f'{rep}')
+
         rc, s, text = _cli(b, i, out_of('reseat_other'), ['--reseat', 'U1'])
-        check('rc: reseat_other: a band failure fails the run', rc == 4,
+        check('rc: reseat_other: exit code as before the report', rc == 4,
               f'rc {rc}\n{text[-900:]}')
         check('board: reseat_other: written at rc 4',
               os.path.exists(out_of('reseat_other')))
         rep = graded_invariants('reseat_other', rc, s)
-        band = [e for e in rep.get('errors_own') or ()
-                if e.get('ref') == 'J1'
-                and 'overhang_mm' in (e.get('measured') or {})]
-        check('key: reseat_other: the band failure is NAMED as own, with its '
-              'number and limit',
-              band and band[0]['measured']['overhang_mm']
-              > band[0]['expected']['max'], f'{rep}')
+        check('key: reseat_other: the same band failure, own',
+              band_failure(rep, 'errors_own'), f'{rep}')
 
-        rc, s, text = _cli(b, i, out_of('reseat_auto'), ['--reseat'])
-        check('rc: reseat_auto: exit code as before the report', rc == 4,
-              f'rc {rc}\n{text[-900:]}')
-        check('board: reseat_auto: written at rc 4',
-              os.path.exists(out_of('reseat_auto')))
-        graded_invariants('reseat_auto', rc, s)
+        # `must_lock` alone pins: J1 is NOT `(locked yes)` in the file, so a
+        # split re-derived from the file lock would call this error own --
+        # beside the rc 0 this run exits with.
+        _b, i_ml = _write(tmp, 'placed_must_lock', PLACED,
+                          dict(PLACED_INTENT, must_lock=['J1']))
+        rc, s, text = _cli(b, i_ml, out_of('reseat_must_lock'), ['--reseat'])
+        check('rc: reseat_must_lock: a must_lock error does not fail the run',
+              rc == 0, f'rc {rc}\n{text[-900:]}')
+        check('board: reseat_must_lock: written',
+              os.path.exists(out_of('reseat_must_lock')))
+        rep = graded_invariants('reseat_must_lock', rc, s)
+        check('key: reseat_must_lock: the band failure is reported PINNED',
+              band_failure(rep, 'errors_pinned')
+              and rep.get('errors_own') == [], f'{rep}')
 
         rc, s, text = _cli(b, i, out_of('repair'), ['--repair'])
         check('rc: repair: exit code as before the report', rc == 0,
