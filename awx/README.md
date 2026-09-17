@@ -6147,6 +6147,53 @@ real layer names INSIDE the turned frame, so a per-layer clearance rule
 lands on the opposite face. Per CLAUDE.md the dru outranks `--clearance`
 on every routing step, so that one is worth closing too.
 
+### The review's three routing fixes, MEASURED (2026-09-17)
+
+Two of the three pay; the one that looked most obviously correct loses.
+
+**`move_sig` + `exact_lane`: -3 at K41, -2 at K51, an EDICT-3 PASS.**
+Measured as a pair on Modal, each arm run with and without, every canary
+MATCHED and every instance identical:
+
+| arm | without | with |
+|---|---|---|
+| production (det 40) K41 | 79 | **76** |
+| production (det 40) K51 | 115 | **113** |
+| `PLAN_PAGES_CANON=20000` K41 | 80 | 80 |
+| `PLAN_PAGES_CANON=20000` K51 | 120 + 2 open | 120 + 2 open |
+
+Inert under CANON, which is consistent rather than contradictory: its
+plan is far weaker (obj 2953.1 against production's 2052.5 at K41) and
+does not reach the paths these touch. K51 **113 is a new cloud best**,
+against `cport`'s 115.
+
+What they were: `move_sig` omitted the LEGS, so a via-in-pad climb's
+three `own_line` lanes -- same exit, same site, different copper --
+hashed to ONE signature (3216 of 11602 enumerated moves, always in
+threes), and since `_realize_group_first` bans by `(net, move_sig)`, one
+refusal of one lane deleted all three. `exact_lane` used `home_of(p)` --
+an exemption CELL SET -- as a layer index, so `li == home` was `int ==
+set`, always False: the exact-registry check never ran on the ball's own
+layer, and a set reaching `commit()` as a layer reads as a layer CHANGE
+(a spurious via plus an open stub).
+
+**`_relax_pitch`: the fix is CORRECT and COSTS 8 VIAS, so it ships off.**
+See `BRAID_PITCH_EXACT` in braid.py for the full measurement. The short
+version: the 60-sweep relaxation never converges on a long comb (-0.33 mm
+of slack at 40 coincident stubs) and the exact projection is one O(n)
+PAVA pass agreeing with the converged loop to 1.7e-08 -- and on ONE FIXED
+fanout board it gives 88 vias against 80, both DRC-clean. `pair_floor` is
+a PLANNING heuristic, not a clearance rule, so the under-relaxed comb was
+never illegal; the cap was relaxing an over-conservative heuristic and
+buying eight vias. **Correct is not the same as better.**
+
+**Suite:** 554 passed, 3 failed, 1 timed out locally. All three failures
+(`test_703_predictor_regen`, `test_782_nondefault_netclass_clamp`,
+`test_fanout_cancel`) reproduce at `e94a48a7`, BEFORE today's
+`py_router` changes, so they are pre-existing. Note this branch has no
+`tests/stress/modal_suite/run_all_modal.py` -- that postdates the
+divergence, so the suite is local-only here until main is merged.
+
 ### THE OBJECTIVE IS ANTI-CORRELATED WITH THE ROUTE (2026-09-16, proven at the optimum)
 
 **Solving the plan to PROVEN OPTIMALITY makes the board WORSE at K41 and
