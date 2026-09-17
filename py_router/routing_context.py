@@ -260,6 +260,42 @@ def build_single_ended_obstacles(
     """
     obstacles = base_obstacles.clone_fresh()
 
+    # #908: the own-pad lift has to ride THIS path too, or a footprint's own
+    # copper seals the pad it was drawn around on every net routed through
+    # here. `prepare_obstacles_inplace` lifts it for the map it mutates, and
+    # `build_base_obstacle_map` BAKES it when the base was built for a single
+    # net -- but this builder clones a base built for the whole batch and was
+    # covered by neither, so the lift simply never happened.
+    #
+    # Measured on cparti_fpga's net ties: with the lift correct but absent
+    # here, HF_Bn_50Ohm routed 3 of 4 pads and failed at the tie pad; the same
+    # board with the tie copper physically removed routed 4 of 4. The lift was
+    # being computed, recorded and then not applied on the map the net was
+    # actually routed on.
+    #
+    # No restore, unlike prepare_obstacles_inplace: this is a `clone_fresh()`
+    # built for ONE net and discarded after it, so there is no shared map to
+    # put the rows back into.
+    #
+    # Unconditional, because the base this clones NEVER lifts (#977): the base
+    # build records the rows and applies none of them, so this clone carries
+    # every own-pad row blocked and is the only thing that can take them off.
+    # It used to be guarded -- by `pcb_data._graphic_own_pad_lift_baked`, a
+    # marker shared by every build on that board, which a NESTED single-net
+    # build (`net_rescue._pristine_rescue_map` laps the run's own pcb_data
+    # into its build) sets to its own net. This clone would then skip the lift
+    # for a net its base never baked and hand the router a sealed pad, or find
+    # the marker cleared and lift rows a second time, taking a cell two
+    # obstacles blocked from 2 -> 0 on the very map the net routes on.
+    _op_lift = (getattr(pcb_data, '_graphic_own_pad_lift', None)
+                or {}).get(net_id)
+    _op_via = (getattr(pcb_data, '_graphic_own_pad_via_lift', None)
+               or {}).get(net_id)
+    if _op_lift is not None and len(_op_lift):
+        obstacles.remove_blocked_cell_spans_batch(_op_lift)
+    if _op_via is not None and len(_op_via):
+        obstacles.remove_blocked_via_spans_batch(_op_via)
+
     # Add previously routed nets as obstacles
     # Note: Cannot use cache for routed nets because their segments have changed
     for routed_id in routed_net_ids:
@@ -496,19 +532,22 @@ def prepare_obstacles_inplace(
     # net whose pad it touches, and restore_obstacles_inplace puts them back.
     # Recorded rows, not recomputed geometry, so the remove/re-add is exactly
     # balanced and cannot desync a refcount.
-    # ... UNLESS the base build already baked this net's lift into the map
-    # this one was cloned from (it does that when it was built for a single
-    # net -- see obstacle_map's `_graphic_own_pad_lift_baked`). Lifting again
-    # is not a no-op: a cell two obstacles blocked goes 2 -> 0 instead of
-    # 2 -> 1, and the restore below returns it at 1, so the map stops
-    # matching the copper it stands for.
+    # Unconditional: no obstacle map arrives here with any net's own-pad rows
+    # already off, because the base build records them and lifts none (#977).
     _op_lift = (getattr(pcb_data, '_graphic_own_pad_lift', None)
                 or {}).get(net_id)
-    if (_op_lift is not None and len(_op_lift)
-            and net_id != getattr(pcb_data,
-                                  '_graphic_own_pad_lift_baked', None)):
+    if _op_lift is not None and len(_op_lift):
         working_obstacles.remove_blocked_cell_spans_batch(_op_lift)
-        _OWNPAD_LIFTED[(id(working_obstacles), net_id)] = _op_lift
+        _lift_record(_OWNPAD_LIFTED, working_obstacles, net_id, _op_lift)
+    # #908 VIA half. Stamped for every net and, until now, lifted for none --
+    # so a footprint's own copper kept a via keep-out over the pad it was drawn
+    # around and a pad needing a via stayed unreachable however clear the track
+    # layer was. Same balanced remove/restore.
+    _op_via = (getattr(pcb_data, '_graphic_own_pad_via_lift', None)
+               or {}).get(net_id)
+    if _op_via is not None and len(_op_via):
+        working_obstacles.remove_blocked_via_spans_batch(_op_via)
+        _lift_record(_OWNPAD_VIA_LIFTED, working_obstacles, net_id, _op_via)
 
     _tie_lift = getattr(pcb_data, '_net_tie_lift', None)
     if _tie_lift:
@@ -516,7 +555,7 @@ def prepare_obstacles_inplace(
         if _lifted:
             for _arr in _lifted:
                 working_obstacles.remove_blocked_cells_batch(_arr)
-            _TIE_LIFTED[(id(working_obstacles), net_id)] = _lifted
+            _lift_record(_TIE_LIFTED, working_obstacles, net_id, _lifted)
             # #667: the lifted band is legal CELL-BY-CELL but its copper
             # can be illegal as a SEGMENT (KiCad's IsNetTieExclusion
             # waives a (track, partner-pad) pair only when the contact
@@ -676,13 +715,36 @@ def prepare_obstacles_inplace(
     return all_stubs, same_net_via_arr
 
 
-# Net-tie corridor stamps lifted by prepare_obstacles_inplace, re-added by
-# restore_obstacles_inplace. Keyed by (map id, net id): prepare/restore are
-# strictly paired per net route on one thread, so entries live only across
-# that window; keying by map id keeps cloned maps independent.
-_TIE_LIFTED: Dict[tuple, list] = {}
-#: #908 own-pad lift, same lifetime and keying as _TIE_LIFTED.
-_OWNPAD_LIFTED: Dict[tuple, object] = {}
+# Rows lifted by prepare_obstacles_inplace / ensure_own_pad_lift and re-added
+# by their matching restore/release. Keyed by (map id, net id): the lift and
+# its undo are strictly paired per net route on one thread, so entries live
+# only across that window, and keying by map keeps cloned maps independent.
+#
+# Each value PINS the map (#977). `id()` names an object only while that object
+# is alive; a freed map's address is handed straight back to the next map
+# (measured on macOS: twenty maps built and dropped in a row all landed on ONE
+# address), so an entry that outlives its map -- a lift whose undo an exception
+# skipped -- would answer for whatever map lands there next and suppress that
+# map's own lift. Holding the map in the value makes its address unavailable
+# for as long as the entry exists, so a key cannot come to mean a different
+# map. It pins nothing beyond the lift's own bracket, where the caller is
+# holding the map anyway. All three registries, because they share the key:
+# an id() that lies lies for every table built on it.
+_TIE_LIFTED: Dict[tuple, tuple] = {}
+#: #908 own-pad lift, same lifetime, keying and pin as _TIE_LIFTED.
+_OWNPAD_LIFTED: Dict[tuple, tuple] = {}
+_OWNPAD_VIA_LIFTED: Dict[tuple, tuple] = {}
+
+
+def _lift_record(registry, obstacles, net_id, rows):
+    """Record `rows` as lifted from `obstacles` for `net_id`, pinning the map."""
+    registry[(id(obstacles), net_id)] = (obstacles, rows)
+
+
+def _lift_take(registry, obstacles, net_id):
+    """Pop and return the rows recorded for (`obstacles`, `net_id`), else None."""
+    entry = registry.pop((id(obstacles), net_id), None)
+    return None if entry is None else entry[1]
 
 
 def restore_obstacles_inplace(
@@ -722,20 +784,72 @@ def restore_obstacles_inplace(
             pass
 
     # Re-add the net-tie corridor stamps lifted by prepare (see there).
-    _lifted = _TIE_LIFTED.pop((id(working_obstacles), net_id), None)
+    _lifted = _lift_take(_TIE_LIFTED, working_obstacles, net_id)
     if _lifted:
         for _arr in _lifted:
             working_obstacles.add_blocked_cells_batch(_arr)
 
     # #908: and the own-pad graphic lift, the same balanced way.
-    _op = _OWNPAD_LIFTED.pop((id(working_obstacles), net_id), None)
+    _op = _lift_take(_OWNPAD_LIFTED, working_obstacles, net_id)
     if _op is not None and len(_op):
         working_obstacles.add_blocked_cell_spans_batch(_op)
+    _opv = _lift_take(_OWNPAD_VIA_LIFTED, working_obstacles, net_id)
+    if _opv is not None and len(_opv):
+        working_obstacles.add_blocked_via_spans_batch(_opv)
 
     # Restore current net's obstacles (from cache - original stubs)
     # Note: If routing succeeded, caller should update cache first with new route data
     if net_id in net_obstacles_cache:
         add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[net_id])
+
+
+
+def ensure_own_pad_lift(obstacles, pcb_data, net_id):
+    """Apply the #908 own-pad lift to `obstacles` if it is not there already.
+
+    prepare_obstacles_inplace lifts the map IT mutates, and the single-net base
+    build bakes the map IT returns -- but a net can be routed on a map that had
+    neither: multipoint Phase 3 receives a map built elsewhere, and measured on
+    cparti_fpga its view of a net-tie pad was sealed (the approach solid on
+    F.Cu) while the same board with the tie copper removed had it open. The
+    lift rows were sitting on pcb_data, unapplied, the whole time.
+
+    IDEMPOTENT, because double-lifting is the hazard #908 already paid for: a
+    cell two obstacles blocked would go 2 -> 0 instead of 2 -> 1 and the
+    restore would hand it back at 1, leaving the map describing copper that is
+    not there. The (map, net) registry prepare already keeps is the same one
+    consulted here, so a map prepare is holding open is not lifted twice. No
+    base map is ever consulted, because none of them lift (#977).
+
+    Returns a token for `release_own_pad_lift`, or None when nothing was done.
+    """
+    key = (id(obstacles), net_id)
+    if key in _OWNPAD_LIFTED or key in _OWNPAD_VIA_LIFTED:
+        return None
+    cells = (getattr(pcb_data, '_graphic_own_pad_lift', None) or {}).get(net_id)
+    vias = (getattr(pcb_data, '_graphic_own_pad_via_lift', None) or {}).get(net_id)
+    did = False
+    if cells is not None and len(cells):
+        obstacles.remove_blocked_cell_spans_batch(cells)
+        _lift_record(_OWNPAD_LIFTED, obstacles, net_id, cells)
+        did = True
+    if vias is not None and len(vias):
+        obstacles.remove_blocked_via_spans_batch(vias)
+        _lift_record(_OWNPAD_VIA_LIFTED, obstacles, net_id, vias)
+        did = True
+    return key if did else None
+
+
+def release_own_pad_lift(obstacles, net_id, token):
+    """Undo `ensure_own_pad_lift`. Safe to call with None."""
+    if token is None:
+        return
+    cells = _lift_take(_OWNPAD_LIFTED, obstacles, net_id)
+    if cells is not None and len(cells):
+        obstacles.add_blocked_cell_spans_batch(cells)
+    vias = _lift_take(_OWNPAD_VIA_LIFTED, obstacles, net_id)
+    if vias is not None and len(vias):
+        obstacles.add_blocked_via_spans_batch(vias)
 
 
 def record_diff_pair_success(

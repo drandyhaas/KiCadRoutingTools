@@ -116,6 +116,7 @@ section. Used for accurate length/time matching.
 | `pintype` | str | Pin electrical type (`'passive'`, `'input'`, `'power_in'`) |
 | `pad_type` | str | Pad kind: `'smd'`, `'thru_hole'`, `'np_thru_hole'`, `'connect'`. NPTH pads carry **no copper** (their size is just the mask opening, even when `layers` lists `*.Cu`), so copper-clearance checks skip them; only their drill hole matters. |
 | `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5) |
+| `geometry_approximations` | Tuple[str, ...] | Shape variants simplified by the parser, currently chamfered pads and per-layer padstacks. Both text and live-board paths disclose them. An empty tuple does not certify arbitrary custom geometry; exactness still depends on the consumer's supported shapes. Placement edge grading retains approximate findings but marks these variants unmeasured. |
 | `rect_rotation` | float | Residual rectangle tilt in the global frame, in (-90, 90]. `0` for axis-aligned pads (the common case); non-zero only for pads on non-orthogonal angles. |
 | `local_clearance` | float | The pad's **resolved** clearance override in mm (issue #326): its own `(clearance …)` token, else the footprint-level override, else `0` (= use the global/netclass clearance). KiCad enforces `max(the two items' clearances)` per pair; the router's obstacle stamps and `check_drc` honor this the same way. Negative (shrinking) overrides clamp to `0`. |
 | `castellated` | bool | KiCad's `(property pad_prop_castellated)`: a deliberate half-hole pad **on** the board outline. Set by both parse paths. The routing mains run a castellated-landing retract post-pass that pulls track ends landing inside such a pad's edge-clearance zone back to the pad's inner reach (`pcb_modification.retract_castellated_landings`). |
@@ -315,6 +316,15 @@ auto_detect_bga_exclusion_zones(pcb_data: PCBData, margin: float = 0.0)
     -> List[Tuple[float, float, float, float, float]]
     # (min_x, min_y, max_x, max_y, edge_tolerance) per BGA
 ```
+
+`detect_bga_pitch` is the MEDIAN adjacent pad gap per axis, then the smaller
+axis -- on a regular array that is the pitch, and it is not moved by a few odd
+pads. It is deliberately not a `min()` over adjacent gaps: that let one
+anomalous pad pair speak for the package (cparti_fpga's 256-ball 1.0mm U1 read
+1e-6mm), which collapsed `auto_detect_bga_exclusion_zones`' `edge_tolerance` to
+nothing -- and `connectivity.is_edge_stub` compares a pad CENTRE against a
+pad-EDGE box, so no pad could then be an edge stub. `1.0` still means "could not
+detect"; never 0.0, which callers would read as falsy AND as infinitely fine.
 
 Classification uses the footprint name first, then pad arrangement (grid vs
 perimeter) and pad shapes. Land-grid and chip-scale families are classified as

@@ -325,7 +325,20 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
     in the key. Bounded LRU (escalation maps are board-global at fine
     grids); build cfg fields beyond the rung-varying five are constant
     within a pass by construction (_rescue_rungs / the escalation ladder
-    vary exactly grid/clearance/track/via geometry)."""
+    vary exactly grid/clearance/track/via geometry).
+
+    The clone it returns carries the #908 own-pad lift, applied here. The
+    rescue is the one routing path that never reaches
+    `prepare_obstacles_inplace` or `build_single_ended_obstacles`, so nothing
+    else would take a footprint's own copper back off the pad it was drawn
+    around, and the rescue -- the last chance a failed net gets -- would route
+    against a sealed pad. The base build used to do it, because this map is
+    built for a single net; it no longer lifts for anybody (#977), so the
+    lift moved to the map that is actually routed on.
+    (The rows are cached WITH the map rather than re-read from `board`: the
+    build writes them onto the board object it was given, and a later build on
+    another board object -- or another rung's, at a different via size -- would
+    answer for the wrong map on a cache hit.)"""
     from collections import OrderedDict
     from obstacle_map import build_base_obstacle_map
 
@@ -335,19 +348,29 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
     epoch = getattr(parent_pcb, '_copper_epoch', 0)
     key = (net_id, scope_key, epoch, cfg.grid_step, cfg.clearance,
            cfg.track_width, cfg.via_size, cfg.via_drill)
-    pristine = cache.get(key)
-    if pristine is None:
+    entry = cache.get(key)
+    if entry is None:
         pristine = build_base_obstacle_map(board, cfg, [net_id],
                                            net_clearances=net_clearances)
+        entry = (pristine,
+                 (getattr(board, '_graphic_own_pad_lift', None) or {}).get(net_id),
+                 (getattr(board, '_graphic_own_pad_via_lift', None) or {}).get(net_id))
         # Stale-epoch entries can never hit again; drop them first, then LRU.
         for k in [k for k in cache if k[2] != epoch]:
             del cache[k]
-        cache[key] = pristine
+        cache[key] = entry
         while len(cache) > 4:
             cache.popitem(last=False)
     else:
         cache.move_to_end(key)
-    return pristine.clone_fresh()
+    pristine, _op_cells, _op_vias = entry
+    obstacles = pristine.clone_fresh()
+    # No restore: the clone is this attempt's own map and is discarded with it.
+    if _op_cells is not None and len(_op_cells):
+        obstacles.remove_blocked_cell_spans_batch(_op_cells)
+    if _op_vias is not None and len(_op_vias):
+        obstacles.remove_blocked_via_spans_batch(_op_vias)
+    return obstacles
 
 
 def _choose_grid(config, half_size):
@@ -1274,6 +1297,24 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                 prev['tap_pads_connected'] = (prev.get('tap_pads_connected', 0)
                                               + reconnected)
             summary['pads_reconnected'] += reconnected
+
+        # The rescue put copper on the board, so the persistent working map
+        # must be told -- `refresh_net_obstacles` is that contract, spelled
+        # once (#806). Rescue builds its OWN pristine windows (keyed on a
+        # copper epoch), so it sees its own copper fine; what goes stale is
+        # `state.working_obstacles` / `net_obstacles_cache`, which the passes
+        # AFTER rescue use -- the pre-existing-victim restore ladder and the
+        # final reconciliation. Registration is already done above (both
+        # branches put the net in routed_net_ids); only the map was missed.
+        #
+        # Measured on cparti_fpga's retry step with KICAD_STAGE_AUDIT: rescue
+        # was the last remaining source of invariant-E staleness once the
+        # #134 sites were fixed -- 3 stale entries and ~3.4k under-blocked
+        # cells appearing between the casualty and rescue stage audits.
+        from obstacle_cache import refresh_net_obstacles  # #806
+        refresh_net_obstacles(getattr(state, 'working_obstacles', None),
+                              getattr(state, 'net_obstacles_cache', None),
+                              pcb_data, config, [net_id])
 
         record_net_event(state, net_id, "rescue_succeeded",
                          {"fully_connected": fully,

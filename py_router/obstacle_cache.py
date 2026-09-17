@@ -314,11 +314,36 @@ def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
     through. Distinct from A/B/C, which only check that adds and removes
     balance -- a stale-but-balanced entry passes them.
 
+    MEASURED ON A `clone_fresh()` COPY, NOT THE LIVE MAP. `is_blocked()` folds
+    in the SOURCE/TARGET exemption: a cell whose refcount is positive answers
+    False while it sits in `source_target_cells`, so a route may start and end
+    on its own pads. Those overrides are cleared at the START of the next route
+    (`routing_context.prepare_obstacles_inplace`), not the end of the current
+    one, so after a pass's last route they linger -- and this audit then read
+    them as UNDER-BLOCKS. `clone_fresh()` preserves every block and clears
+    exactly that set, so the query measures what the map HOLDS.
+
+    Measured on kicad_files/flat_hierarchy (2026-09-16), with the map otherwise
+    correct: 42 and 814 "NOT blocked" cells, of which 42 and 814 -- every one --
+    were endpoint exemptions and 0 were map errors. Without this the metric
+    cannot distinguish a real under-block from a route that simply ended on a
+    pad, which is the one thing it exists to tell you.
+
     Returns the counts (also printed), or None when nothing could be checked.
     """
     try:
         if working_obstacles is None or not net_obstacles_cache:
             return None
+        # Fall back to the live map if the clone is unavailable (a probe/mock
+        # without clone_fresh): a noisier answer beats no audit at all, so say
+        # which one was used rather than silently degrading.
+        _exempt_free = working_obstacles
+        _on_clone = False
+        try:
+            _exempt_free = working_obstacles.clone_fresh()
+            _on_clone = True
+        except Exception:                      # noqa: BLE001
+            pass
         n_nets = n_cells = n_missing = n_vias = n_vmissing = 0
         n_entry_stale = 0
         stale_nets = []
@@ -339,11 +364,11 @@ def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
             entry_missing = sum(1 for c in cells.tolist() if tuple(c) not in ent_keys)
             miss = 0
             for gx, gy, li in cells:
-                if not working_obstacles.is_blocked(int(gx), int(gy), int(li)):
+                if not _exempt_free.is_blocked(int(gx), int(gy), int(li)):
                     miss += 1
             vmiss = 0
             for gx, gy in vias:
-                if not working_obstacles.is_via_blocked(int(gx), int(gy)):
+                if not _exempt_free.is_via_blocked(int(gx), int(gy)):
                     vmiss += 1
             n_cells += len(cells)
             n_vias += len(vias)
@@ -356,7 +381,8 @@ def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
             if miss or vmiss:
                 stale_nets.append((name, miss, len(cells), vmiss, len(vias)))
         print("\n" + "=" * 60)
-        print(f"[OBSTACLE CONTENT{' ' + label if label else ''}] "
+        print(f"[OBSTACLE CONTENT{' ' + label if label else ''}"
+              f"{'' if _on_clone else ' (LIVE MAP -- source/target exemptions counted)'}] "
               f"{n_nets} nets recomputed from pcb_data: {n_cells} cells checked, "
               f"{n_missing} NOT blocked in working map; {n_vias} via cells checked, "
               f"{n_vmissing} NOT via-blocked; {n_entry_stale} cells absent from "

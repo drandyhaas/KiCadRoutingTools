@@ -497,6 +497,40 @@ def _web_min_connection(cfg: dict):
     return None
 
 
+_PAD_OVERRIDE_CACHE = {}
+
+
+def _smallest_pad_override(board: str):
+    """The smallest per-pad `local_clearance` this board DECLARES, or None.
+
+    #326 resolves the pad's own `(clearance ...)` else the footprint-level one,
+    so this is the tightest clearance the board says some pair may legally have.
+    A staged BOARD MINIMUM above it grades that declaration away (see the call
+    site). Cached per path: `compare_board_data` stages the final and the
+    baseline, and a big board is not worth parsing twice.
+    """
+    if board in _PAD_OVERRIDE_CACHE:
+        return _PAD_OVERRIDE_CACHE[board]
+    val = None
+    try:
+        import io
+        import contextlib
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'py_router'))
+        from kicad_parser import parse_kicad_pcb
+        with contextlib.redirect_stderr(io.StringIO()):
+            pcb = parse_kicad_pcb(board)
+        for fp in (getattr(pcb, 'footprints', None) or {}).values():
+            for pd in fp.pads:
+                lc = getattr(pd, 'local_clearance', 0) or 0
+                if lc > 0 and (val is None or lc < val):
+                    val = lc
+    except Exception:
+        val = None          # never let this turn a gradeable board into a skip
+    _PAD_OVERRIDE_CACHE[board] = val
+    return val
+
+
 def _staged_copy(board: str, clearance: float):
     """Copy board + sibling .kicad_pro into a temp dir, staged so KiCad grades at
     the routed floor. `clearance` here is the caller's RESOLVED grading clearance,
@@ -543,7 +577,29 @@ def _staged_copy(board: str, clearance: float):
         if c.get("name", "Default") == "Default" and "clearance" in c:
             c["clearance"] = min(_f(c.get("clearance"), clearance), clearance)
     rules = cfg.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})
-    rules["min_clearance"] = min(_f(rules.get("min_clearance"), clearance) or clearance, clearance)
+    # The BOARD MINIMUM outranks a per-pad `local_clearance` override in KiCad,
+    # where the netclass does not (#326: a pad override REPLACES the class for
+    # that pad). So forcing this key up to the routed floor grades the board's
+    # OWN declared pad overrides away and manufactures items on copper the
+    # router legitimately laid at them -- the writeback caps this key DOWN to a
+    # pad override for exactly that reason (#900/#530), and staging it back up
+    # undoes that.
+    #
+    # MEASURED on a20_can. U1's 8 pads, plus C1/C2/CAN_T1 and the 3.3V/5.0V1
+    # jumper, declare local_clearance 0.0508 (2 mil). With the board's own
+    # project (min_clearance 0.0, Default class 0.254) kicad-cli reports ZERO
+    # clearance items; staging min_clearance to 0.254 reports 48, every one a
+    # pad-to-track pair at 0.070..0.234mm -- all legal at the pad's own 0.0508,
+    # none of them >= 0.254. That was the whole of this board's kicad_only=49,
+    # and a large share of the corpus kicad_drc totals it drove.
+    #
+    # The netclass arm above is untouched: raising the Default class DOES grade
+    # (probed: 0.254 -> 0.60 turns 0 items into 255), so the routed floor is
+    # still enforced everywhere a pad has not declared otherwise.
+    pad_floor = _smallest_pad_override(board)
+    mc_target = clearance if pad_floor is None else min(clearance, pad_floor)
+    rules["min_clearance"] = min(
+        _f(rules.get("min_clearance"), mc_target) or mc_target, mc_target)
     # Hole floor (#327): equalize min_hole_clearance to the routed copper
     # clearance too -- our stack guarantees the NPTH fab floor (0.2, #308) and
     # copper clearance, not a board's stricter DESIGN hole rule; grading holes
@@ -701,6 +757,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # finals AND baseline -- so the two engines agree and baseline subtraction (#405)
     # lines up at the same floor.
     recorded = _pro_clearance(board)
+    requested = clearance
     if recorded is not None:
         clearance = recorded
     kicad, err = kicad_items_for(board, clearance)
@@ -854,6 +911,20 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # (baseline) AND accepted-by-design edge items (#408) already removed. The
     # subtracted edge counts are reported separately for transparency.
     return {"board": label, "kicad": len(kicad), "kicad_preexisting": pre,
+            # The floor this grade ACTUALLY used, and the one the caller asked
+            # for. They differ whenever the board ships its own recorded floor
+            # (the #439 rule above), and the grade is then only comparable to
+            # another board graded at the SAME value -- so an A/B that pairs two
+            # arms has to be able to SEE it. a20_can: the v0.22.0 arm shipped a
+            # 0.0508 Default class (the #900 pad-override-clobbers-Default bug)
+            # and was graded at 0.0508, reporting ZERO kicad items on copper
+            # that has 54 at the 0.254 its own route step asked for; the fixed
+            # arm ships 0.254 and reports 49. Read as a pair that is a 0 -> 49
+            # "regression" and is really two different rulers. Disclosed rather
+            # than forced to `requested`, because grading at the manifest
+            # ceiling is what #439 measured as 499 phantom items on neo6502.
+            "graded_clearance": clearance,
+            "requested_clearance": requested,
             "check_drc": len(cd), "checkdrc_preexisting": cd_pre,
             "kicad_intentional_edge": kicad_intentional,
             "checkdrc_intentional_edge": checkdrc_intentional,

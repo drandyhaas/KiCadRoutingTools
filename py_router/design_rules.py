@@ -244,6 +244,58 @@ def _to_num(tok) -> Optional[float]:
         return None
 
 
+def validate_dru_structure(text: str) -> None:
+    """Reject malformed rule containers before a consumer certifies coverage.
+
+    The legacy list parser is permissive and can drop an unterminated rule.
+    Quotes, escapes and line comments must not count as structural parentheses.
+    This validates structure only, not KiCad's full rule grammar.
+    """
+    depth = 0
+    quoted = escaped = comment = False
+    for char in text:
+        if comment:
+            comment = char != '\n'
+        elif escaped:
+            escaped = False
+        elif quoted:
+            if char == '\\':
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '#':
+            comment = True
+        elif char == '"':
+            quoted = True
+        elif char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+            if depth < 0:
+                raise ValueError('unmatched closing parenthesis in custom rules')
+    if quoted:
+        raise ValueError('unterminated quoted string in custom rules')
+    if depth:
+        raise ValueError('unclosed parenthesis in custom rules')
+    from kicad_dru import _tokenize, _parse_nodes
+    for node in _parse_nodes(_tokenize(text)):
+        if (not isinstance(node, list) or not node
+                or not isinstance(node[0], str) or node[0] not in ('version', 'rule')):
+            raise ValueError('unsupported top-level form in custom rules')
+        if len(node) < 2 or isinstance(node[1], list):
+            raise ValueError('missing version or rule name in custom rules')
+        if node[0] == 'version':
+            if len(node) != 2:
+                raise ValueError('malformed version in custom rules')
+            continue
+        for clause in node[2:]:
+            if (not isinstance(clause, list) or len(clause) < 2
+                    or not isinstance(clause[0], str)
+                    or clause[0] not in ('severity', 'layer', 'condition', 'constraint')
+                    or isinstance(clause[1], list)):
+                raise ValueError('unsupported rule clause in custom rules')
+
+
 def parse_dru(text: str) -> Tuple[List[Rule], List[str]]:
     """Every rule in a .kicad_dru, in file order, with every constraint and
     every min/opt/max. Returns (rules, notes). A rule whose condition or layer

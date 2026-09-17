@@ -334,11 +334,42 @@ def board_io(argv):
     (bga_fanout.py, qfn_fanout.py), because the --output value still appears after
     the input in argv. Boards are keyed by BASENAME so the dependency analysis is
     invariant under --remap / --workdir path rewriting (issue #231). Returns
-    ([], None) when the command names no board (e.g. `--help`)."""
-    toks = [a for a in argv if a.endswith(".kicad_pcb")]
-    if not toks:
+    ([], None) when the command names no board (e.g. `--help`).
+
+    ONE board token is the exception, and it is not the output unless a write
+    flag introduces it. A READ-ONLY step names its board once and writes
+    nothing -- hexberry_fpga records
+    `qfn_fanout.py step1_planes.kicad_pcb --component U7 ... --dry-run`.
+    Under the bare last-token rule `toks[:-1]` is empty, so that command was
+    read as a PRODUCER of the board it only reads. It then took over
+    `producer['step1_planes.kicad_pcb']` from the real route_planes step, the
+    backward walk kept it instead, and the plane step was pruned out -- every
+    later step died on `FileNotFoundError: step1_planes.kicad_pcb`, in 2.6s,
+    identically in both A/B arms, so the board was excluded from every corpus
+    A/B. The chain-HOLE warning could not fire either: from the pruner's own
+    view that board was produced. Measured over all 402 recorded manifests,
+    2665 of 2666 board-bearing non-check commands carry >= 2 board tokens and
+    are untouched by this branch; hexberry's is the only single-token one.
+
+    `--output=<board>` is read as the board too. A joined token ENDS with
+    .kicad_pcb, so the bare scan took the whole `--output=b.kicad_pcb` string
+    as the board's name -- latent (no recorded manifest spells it that way)
+    but wrong for both the output and this branch's write-flag test."""
+    def _named_board(a):
+        return a.split("=", 1)[1] if a.startswith("-") and "=" in a else a
+
+    vals = [_named_board(a) for a in argv]
+    idx = [i for i, v in enumerate(vals) if v.endswith(".kicad_pcb")]
+    if not idx:
         return [], None
-    return [os.path.basename(t) for t in toks[:-1]], os.path.basename(toks[-1])
+    if len(idx) == 1:
+        i = idx[0]
+        prev = argv[i - 1] if i > 0 else ""
+        written = prev in ("--output", "-o") or argv[i].startswith("--output=")
+        if not written:
+            return [os.path.basename(vals[i])], None
+    return ([os.path.basename(vals[i]) for i in idx[:-1]],
+            os.path.basename(vals[idx[-1]]))
 
 
 def compute_prune_keep(cmds):

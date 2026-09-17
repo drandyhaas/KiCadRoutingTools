@@ -268,6 +268,53 @@ read it when the step below points at it:
 | `.claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md` | you are dispatching a verification subagent |
 | `.claude/skills/plan-pcb-placement-and-routing/references/convergence.md` | you are running a fix loop and need its stop conditions |
 
+### Which tool, when
+
+Two kinds, and the difference is the whole safety story: an **actor** changes
+the board, an **instrument** only measures it. Reach for an instrument freely;
+reach for an actor only when you can say which of the rows below you are in.
+`python3 -X utf8 krt_registry.py --door placement` is the authority for which
+tool is which and for the complete list — this table is the DECISION, not the
+catalogue, and `tests/test_956_skill_tool_index.py` fails when an actor at
+that door appears in neither.
+
+**Actors — choose by what you HAVE, not by what the tool is called:**
+
+| you have | reach for | not |
+|---|---|---|
+| a pile, no placement at all | decide the fixed parts and the connectors yourself and LOCK them (`place_pose`), then `place_seed` from a zone plan, and rank several with `compare_seeds` | `place_optimize` — there is nothing to refine yet |
+| one part in the wrong place, and you know where it belongs | `place_pose` — set, rotate, face or lock; it grades the pose and refuses one that makes the board's pad legality worse | a whole-board search, which orders violators by its own priority and may never reach yours |
+| a rough, imported or generated placement, all legal | `place_optimize --max-displacement 3` | `place_reconstruct` |
+| a placement that is WRONG — copper-free DRC violations, or a mechanically-fixed part where mechanics forbid | `place_reconstruct` for structural damage, `place_seed --repair` for local violations | `place_optimize` — the quench is a local search and this is not a local problem |
+| a need for OPTIONS rather than one answer | `place_portfolio` explores around ONE seed; `compare_seeds` ranks ACROSS seeds. The portfolio cannot cross seeds, so rank first | |
+| a routing failure your classifier called congestion | `place_route_loop --target-nets <the nets the failure named> --accept-cmd <the comparator>` | router parameters — no setting adds a lane |
+| a fine-pitch escape that will not fit | `place_fanout_clearance` — the one placement step that lays copper, so it is the only one with a DRC floor to write back | |
+| a move you are about to pay for, or a lap to undo | `converge` — rank the poses first, step back after | |
+| silkscreen that collides after the parts moved | `beautify_labels` | |
+| any reason to copy a board | `copy_board` — never `cp`, which strands the sibling `.kicad_pro` DRC floor (#441) | |
+
+**Instruments — choose by the QUESTION you are asking:**
+
+| the question | the instrument |
+|---|---|
+| is this physically buildable? | `check_assembly` |
+| does it satisfy what was DECLARED? | `check_floorplan --intent` |
+| one number a loop can tell better from worse by | `board_score` |
+| which placement terms moved, and which way | `placement_score` |
+| what does it LOOK like (and the movie) | `render_placement`, `make_film` |
+| what is this board, before I place anything | `board_brief`, `board_context` |
+| can the board even hold its parts | `check_capacity` |
+| are the lanes open, is this pad reachable, where is it tight | `check_channels`, `check_reachability`, `check_pockets` |
+| is the pad geometry itself sane | `check_pads` |
+| did that change move parts as a BLOCK or break something | `check_rigid_consistency` |
+| what nets are on this board | `list_nets` |
+| how fragile are the planes under this arrangement | `plane_score` |
+| DRC on the COPPER-FREE board | `check_drc` |
+| the fanout cap repair, animated | `animate_fanout_clearance` |
+
+One stage at a time comes from the driver, not from this table:
+`.claude/skills/plan-pcb-placement/scripts/placement_driver.py`.
+
 ## Step 0: Placement gate — measure first, then decide
 
 Before planning any routing, MEASURE whether the board should be **placed** or
@@ -697,13 +744,29 @@ order:
        --intent floorplan.json [--seed N]
    ```
 
-   The driver's P1 refuses to seed without a ZONE PLAN (`--zone-plan`): that
-   intent with a `zone` rectangle and a `note` on a block for every movable
-   part, `must_lock` and the declared edge connectors excepted. Run 26 seeded
-   from one zone and then hand-placed most of its parts; the plan is where
-   the arrangement is decided, and the seed only fills it -- and P1 ranks
-   SEVERAL seeds from it with `compare_seeds.py` (next) rather than taking
-   the first.
+   **The seeder places the RESIDUE, not the decisions.** It is a greedy
+   first-fit: it packs declared zones, drops everything else at its
+   connectivity centroid, and keeps the first rotation that fits. That is a
+   good way to arrange the many small parts and it has no representation at
+   all for a decision — which edge a connector belongs on is declarable, but
+   *where along it* and *which way the mating face points* are not, so the
+   seeder takes the band's midpoint at the part's incoming angle, which on a
+   pile is a generator default. Measured on a 21-part 2-layer board: both
+   free connectors came out at rotation 0, and one of them put its declared
+   band's midpoint through a fixed socket's ground tab on every one of ten
+   seeds.
+
+   So **place and lock the decisions first** — the connectors, the
+   mechanically-fixed parts, anything a spec pins (Step 0a-0 and the driver's
+   P2 enumerate them; `place_pose set/rotate/lock` is the verb) — and seed
+   what is left. The driver's P1 enforces both halves: it refuses without a
+   ZONE PLAN (`--zone-plan`, an intent with a `zone` rectangle and a `note`
+   on a block for every movable part), and it refuses to let the seeder
+   choose a declared edge connector's pose unless that hand-over is on the
+   record (`--waive seed-connectors:<why>`). Run 26 seeded from one zone and
+   then hand-placed most of its parts; the plan is where the arrangement is
+   decided, and the seed only fills it — and P1 ranks SEVERAL seeds from it
+   with `compare_seeds.py` (next) rather than taking the first.
 
    The seeder turns the intent's constructs into placement (edge bands →
    edge poses, single-ref zones → the spec coordinate, multi-ref zones →
@@ -1456,6 +1519,16 @@ crossings from 52 to 60. That is the correct trade, not a regression.
 Castellated edge rows, card edges and a USB shell are *meant* to cross the
 boundary. Declare them in `must_lock` **and** `edge_connectors` — the second is
 what stops `oob_count` reporting them as defects forever.
+
+**`must_lock` does not pin the pose, and on a connector that matters.** It is a
+claim about the FILE that `place_seed` honours by stamping `(locked yes)` into
+its OUTPUT — *after* it has seated the part. So a declared edge connector
+carrying `must_lock` and no file lock is seated by the seeder at its band's
+midpoint at whatever angle it came in with, byte for byte as though nothing had
+been declared (measured). If its pose is a decision, place it and stamp the
+lock in the BOARD first — `place_pose set <REF> <X> <Y> --rot <DEG>` then
+`place_pose lock <REF>` — and the seeder will leave it alone. P1 refuses a zone
+plan whose declared connectors are not pinned that way.
 
 Four things follow that nothing will tell you:
 

@@ -1229,7 +1229,11 @@ def _generate_debug_arrows(center_src_x, center_src_y, src_dir_x, src_dir_y,
 
 def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data):
     """#318: neck a polarity's segment that sits sub-clearance to its PARTNER's
-    just-created copper.
+    just-created copper, and REPORT what necking cannot fix.
+
+    Returns ``(necked, hard)``: `hard` lists (seg, partner, gap) still inside
+    clearance after necking, which the caller must treat as a failed route --
+    an intra-pair short is not a pair.
 
     Emission-time necking against pcb_data cannot see the partner's legs: both
     polarities are assembled in ONE commit, so neither is on the board when the
@@ -1251,6 +1255,29 @@ def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data):
     floor = _fab_track_floor(pcb_data)
     necked = 0
 
+    # P and N are DIFFERENT NETS, so the clearance between them is KiCad's
+    # pairwise max(classP, classN) -- the same rule the obstacle map prices
+    # foreign copper at (#530/#326, `config.obstacle_clearance`). This used to
+    # test the bare global `config.clearance`, which is one-directionally
+    # wrong: net classes only ever WIDEN (see `get_net_clearance`), so a pair
+    # whose class is wider than the run's floor was measured too leniently and
+    # could ship copper KiCad then flags. It cannot reject anything the old
+    # test accepted on a board that declares no netclass -- `obstacle_clearance`
+    # documents itself as byte-identical to `config.clearance` when the map is
+    # empty -- so this is a tightening exactly where a class asks for one.
+    _oc = getattr(config, 'obstacle_clearance', None)
+    _pc_memo = {}
+
+    def _pair_clearance(a_nid, b_nid):
+        if _oc is None:
+            return config.clearance
+        key = (a_nid, b_nid)
+        hit = _pc_memo.get(key)
+        if hit is None:
+            hit = max(_oc(a_nid), _oc(b_nid))
+            _pc_memo[key] = hit
+        return hit
+
     def neck_side(own, partner):
         nonlocal necked
         for s in own:
@@ -1259,7 +1286,8 @@ def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data):
                     continue
                 d = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
                                       o.start_x, o.start_y, o.end_x, o.end_y)
-                allowed_half = d - o.width / 2.0 - config.clearance - 2e-4
+                allowed_half = (d - o.width / 2.0
+                                - _pair_clearance(s.net_id, o.net_id) - 2e-4)
                 if allowed_half < s.width / 2.0 - 1e-9:
                     new_w = max(floor, 2.0 * allowed_half)
                     if new_w < s.width - 1e-9:
@@ -1268,7 +1296,31 @@ def _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data):
 
     neck_side(p_segs, n_segs)
     neck_side(n_segs, p_segs)
-    return necked
+
+    # HARD violations -- what necking cannot reach. `neck_side` floors every
+    # width at the fab minimum, so when `allowed_half` goes NEGATIVE it quietly
+    # ships copper that is still sub-clearance. Two collinear members are the
+    # case that cannot be necked at all: their gap is measured END TO END, so
+    # narrowing the tracks barely moves it. Measured on icepi_zero, /USB/D1 at
+    # x=143.100: the two members sit 0.100mm apart centre-to-centre against a
+    # 0.09mm clearance, which needs a track width of ~0.01mm to clear -- the
+    # geometry has to change, and the only honest answer at emission time is to
+    # refuse the pair rather than write a short.
+    #
+    # Reported, not fixed, here: the caller fails the route so the ladder takes
+    # another option, exactly as the terminal SHORT gate (#157 `hard` list) does
+    # for single-ended terminals.
+    hard = []
+    for s in p_segs:
+        for o in n_segs:
+            if o.layer != s.layer:
+                continue
+            d = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
+                                  o.start_x, o.start_y, o.end_x, o.end_y)
+            gap = d - s.width / 2.0 - o.width / 2.0
+            if gap < _pair_clearance(s.net_id, o.net_id) - 1e-6:
+                hard.append((s, o, gap))
+    return necked, hard
 
 
 def _float_path_to_geometry(float_path, net_id, original_start, original_end, sign,
@@ -3348,10 +3400,26 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         best = min(cands, key=lambda c: (c['overlaps'], round(c['length'] + c['vias'] * via_mm, 3)))
         leg_segs = best['leg_segs']
         # #318: pairwise partner neck on the assembled candidate (see helper).
-        _neck_pair_partner_grazes(
+        _n318, _h318 = _neck_pair_partner_grazes(
             [s for s in best['all_segs'] if s.net_id == p_net_id],
             [s for s in best['all_segs'] if s.net_id == n_net_id],
             config, pcb_data)
+        if _h318:
+            # An intra-pair short is not a pair. This loop already RANKS
+            # candidates by `overlaps`, so a self-grazing polarity loses to a
+            # clean one -- but when every candidate for this layer combination
+            # grazes, the winner was still written. Reject it the way any other
+            # unusable combination is rejected and let the next one be tried.
+            #
+            # Necking has already had its go: `hard` is what survives it, and
+            # the collinear case cannot be necked at all (the gap is end to
+            # end, so narrowing the tracks barely moves it). Measured on
+            # icepi_zero /USB/D1: the two members 0.100mm apart centre to
+            # centre against 0.09mm clearance would need a ~0.01mm track.
+            _g = min(_h318, key=lambda t: t[2])[2]
+            _rej(a_layer, b_layer,
+                 f"intra-pair clearance {_g:.4f}mm < {config.clearance:.4f}mm")
+            continue
         _mid_desc = (layer_names[a_layer] if a_layer == b_layer
                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
         _pol_note = "" if best['p_sign'] == p_sign else " [polarity flipped: cleaner/shorter legs]"
@@ -4645,7 +4713,25 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
 
     # #318: pairwise partner neck -- emission-time necking cannot see the
     # partner's copper (assembled in the same commit), see helper docstring.
-    _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data)
+    _necked318, _hard318 = _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data)
+    if _hard318:
+        # An intra-pair short is not a pair. Necking has already tried and the
+        # gap is still inside clearance, so writing this would ship P and N
+        # touching -- refuse and let the ladder pick another route, the way the
+        # single-ended terminal SHORT gate does (#157).
+        _s, _o, _gap = min(_hard318, key=lambda t: t[2])
+        print(f"  WARNING: intra-pair clearance: P and N would sit "
+              f"{_gap:.4f}mm apart on {_s.layer} (need {config.clearance:.4f}mm) "
+              f"at ({_s.start_x:.3f},{_s.start_y:.3f}) -- rejecting the pair "
+              f"rather than shipping a short")
+        return {
+            'failed': True,
+            'intra_pair_short': True,
+            'intra_pair_gap': round(_gap, 5),
+            'iterations': 0,
+            'blocked_cells_forward': [],
+            'blocked_cells_backward': [],
+        }
 
     # Create GND vias at layer changes if enabled
     gnd_vias = _create_gnd_vias(

@@ -468,6 +468,7 @@ def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
         print(f"  (late orphan sweep skipped: {_e})")
 
 
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 # #530: cap every auto-read net class at this clearance (the
@@ -2397,8 +2398,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # This ensures tap routes see meanders from other nets as obstacles
     if progress_callback:
         progress_callback(0, 0, "Syncing pcb_data...")
+    # Stub layer-swap vias live in all_swap_vias and in NO result's new_vias,
+    # yet the writer emits them (output_writer's all_swap_vias channel). They
+    # are shipped copper, so the sync must preserve them exactly like an
+    # input-file original -- the same union run_post_route_cleanup's orphan
+    # sweep already takes below, for the same reason.
     sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config,
-                           original_via_ids=original_via_ids)
+                           original_via_ids=(original_via_ids
+                                             | {id(v) for v in all_swap_vias}))
 
     # Phase 3: Complete multi-point routing (tap connections)
     # This happens AFTER length matching so tap routes connect to meandered main routes
@@ -2494,6 +2501,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             pruned['new_vias'] = keep_vias
             pruned['partial_restore_134'] = True
             add_route_to_pcb_data(pcb_data, pruned, debug_lines=config.debug_lines)
+            # The copper is on the board, so the working map must know it --
+            # `refresh_net_obstacles` is that contract, spelled once (#806).
+            # Without it this restore is INVISIBLE to every pass that runs
+            # after it (the later #134 recovery laps, the casualty reconcile,
+            # net_rescue), and they route straight through the copper it just
+            # put back. Measured on cparti_fpga's retry step, which takes this
+            # branch NINE times in one run: SPIs_MISO was restored here, then
+            # SPIs_SCK was rerouted over it, and the two shipped collinear on
+            # F.Cu at y=78.70 for ~11mm -- a dead short, plus 28 further
+            # clearance items. The sibling implementation of this same
+            # piece-level settle in `diff_pair_custody.run_casualty_reconcile`
+            # already refreshes; this one claimed parity with it and did not.
+            from obstacle_cache import refresh_net_obstacles  # #806
+            refresh_net_obstacles(state.working_obstacles,
+                                  state.net_obstacles_cache,
+                                  pcb_data, config, [nid])
             results.append(pruned)
             # #508 finding 8: register the restore as the net's AUTHORITATIVE
             # result, or the #87 superseded-result filter (`_authoritative`,
@@ -2504,6 +2527,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # runs_set14/rusefi_alphax4/step2b_retry.log). The entry
             # condition guarantees the net has no other result.
             routed_results[nid] = pruned
+            # ...and REGISTER the net as carrying copper, or the restore is
+            # invisible to every map built afterwards.
+            # `build_single_ended_obstacles` stamps foreign copper for nets in
+            # `routed_net_ids` (from pcb_data) or `remaining_net_ids` (from the
+            # cache) -- a net in NEITHER list is never stamped at all, however
+            # much copper it owns. The rip took this net out of routed_net_ids
+            # and the failed reroute left it out of both, so its restored
+            # copper was structurally invisible: refreshing its cache entry
+            # does not help, because the cache is only consulted for
+            # remaining_net_ids. Every other commit path does this pair of
+            # updates; this one set routed_results alone.
+            #
+            # Measured on cparti_fpga's retry step: SPIs_MISO was restored
+            # here, stayed in neither list, and SPIs_SCK was then routed
+            # straight over it -- the two shipped collinear on F.Cu at
+            # y=78.70 for ~11mm, a dead short.
+            if nid in remaining_net_ids:
+                remaining_net_ids.remove(nid)
+            if nid not in routed_net_ids:
+                routed_net_ids.append(nid)
             nm = pcb_data.nets[nid].name if nid in pcb_data.nets else nid
             print(f"Issue #134 last resort: {nm} reroute failed; restored "
                   f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of its "
@@ -2603,7 +2646,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if not _ckpt_stop:
             from rip_up_reroute import (rip_up_net as _pe_rip,
                                         restore_net as _pe_restore,
-                                        _saved_route_collides as _pe_collides)
+                                        _saved_route_collides as _pe_collides,
+                                        _saved_route_colliders as _pe_colliders)
             for _rid in sorted(_pe_ripped_reg):
                 _r_pe = routed_results.get(_rid)
                 if _r_pe is None or _r_pe.get('is_existing_route'):
@@ -2617,7 +2661,52 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     continue  # reroute genuinely landed
                 if _pe_collides(_orig_pe[0], pcb_data, [_rid],
                                 config.clearance):
-                    continue  # corridor taken; keep partial, report below
+                    # The corridor was taken while this victim was ripped --
+                    # but WHOSE copper took it decides whether that matters.
+                    # Copper belonging to a net that is ITSELF still open is a
+                    # partial reroute connecting nothing, so protecting it
+                    # costs a fully connected restore and buys not one pad.
+                    #
+                    # watchy shipped exactly that cascade: SDA ripped BTN3,
+                    # BTN3 ripped EN, both victims rerouted PARTIAL, and EN's
+                    # intact original was refused because BTN3's worthless
+                    # partial sat in its corridor. Two nets lost to gain one.
+                    # The tap rip-up path has had this accounting since #310
+                    # ("lost N pad(s) to gain M; abandoning tap"); the
+                    # pre-existing path never got it.
+                    #
+                    # Deliberately narrow: EVERY blocker must be a
+                    # pre-existing victim that is still disconnected. One
+                    # connected net holding the corridor and the restore stays
+                    # refused, exactly as before.
+                    _blk = {getattr(_o, 'net_id', None) for _k, _o in
+                            _pe_colliders(_orig_pe[0], pcb_data, [_rid],
+                                          config.clearance)}
+                    _blk.discard(None)
+                    _blk.discard(_rid)
+                    _worthless = {_b for _b in _blk
+                                  if _b in _pe_ripped_reg
+                                  and not _pe_connected(_b)}
+                    if not _blk or _worthless != _blk:
+                        continue  # a CONNECTED net holds it -- keep partial
+                    for _b in sorted(_worthless):
+                        _, _, _wir_b = _pe_rip(
+                            _b, pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, state.diff_pair_by_net_id,
+                            remaining_net_ids, results, config,
+                            track_proximity_cache, state.working_obstacles,
+                            state.net_obstacles_cache,
+                            state.ripped_route_layer_costs,
+                            state.ripped_route_via_positions, layer_map)
+                        if _wir_b:
+                            successful -= 1
+                        print(f"  Pre-existing victim "
+                              f"'{_pe_ripped_reg[_rid]}': cleared "
+                              f"'{_pe_ripped_reg.get(_b, _b)}' partial copper "
+                              f"(it connects nothing) to free the corridor")
+                    if _pe_collides(_orig_pe[0], pcb_data, [_rid],
+                                    config.clearance):
+                        continue  # something else holds it after all
                 _, _, _wir_par = _pe_rip(
                     _rid, pcb_data, routed_net_ids, routed_net_paths,
                     routed_results, state.diff_pair_by_net_id,
@@ -2722,19 +2811,33 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _fr_new_copper.add(_s.net_id)
             for _v in _r.get('new_vias') or []:
                 _fr_new_copper.add(_v.net_id)
-        _fr_restored = []
-        for _nid, (_segs, _vias) in force_ripped.items():
-            if _nid in _fr_new_copper:
-                continue
-            pcb_data.segments = list(pcb_data.segments) + _segs
-            pcb_data.vias = list(pcb_data.vias) + _vias
-            _fr_restored.append(pcb_data.nets[_nid].name
-                                if _nid in pcb_data.nets else str(_nid))
+        # The saved copper is STALE the moment another net routes while this one
+        # is ripped, which is the NORMAL case here: --force-reroute strips every
+        # named net up front and they contend for one corridor. #134's restore
+        # has always refused a stale restore that would short; this site did
+        # not. partition_force_restores applies the same predicate and keeps the
+        # intent -- every non-colliding net is still restored.
+        from rip_up_reroute import partition_force_restores
+        _fr_ids, _fr_refused_ids = partition_force_restores(
+            force_ripped, pcb_data, config.clearance,
+            skip_net_ids=_fr_new_copper)
+
+        def _fr_name(_nid):
+            return (pcb_data.nets[_nid].name
+                    if _nid in pcb_data.nets else str(_nid))
+        _fr_restored = [_fr_name(_n) for _n in _fr_ids]
+        _fr_refused = [_fr_name(_n) for _n in _fr_refused_ids]
         if _fr_restored:
             print(f"--force-reroute: replan produced no copper for "
                   f"{len(_fr_restored)} net(s); ORIGINAL copper restored: "
                   f"{', '.join(_fr_restored[:6])}"
                   f"{', ...' if len(_fr_restored) > 6 else ''}")
+        if _fr_refused:
+            print(f"--force-reroute: restore SKIPPED for {len(_fr_refused)} "
+                  f"net(s) -- the saved copper would short copper routed into "
+                  f"its corridor this run; left unrouted (#134): "
+                  f"{', '.join(_fr_refused[:6])}"
+                  f"{', ...' if len(_fr_refused) > 6 else ''}")
 
     # ---- Issue #209 fix C: catch cleanup passes that disconnect a completed route ----
     # Snapshot each in-scope multi-pad net's connectivity on the WRITE-LIST copper
@@ -2923,6 +3026,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # them, presumably by freeing corridor space. --no-smoothing disables it
         # per step; KICAD_SMOOTH_ROUTE=0/1 still overrides either way.
         smooth=smoothing)
+    # The cleanup pipeline MOVES and STRIPS copper -- nudge_grazing_octolinear /
+    # _microshift / _vias re-bend and shift it, the prunes, sweeps and the #536
+    # smoother delete and replace it -- all by mutating pcb_data directly. None
+    # of that goes through the rip/commit choke points, so the working map keeps
+    # blocking the copper's OLD footprint and not its new one.
+    #
+    # That matters because the map is still USED after this point: route.py's
+    # in-run plane finalize calls repair_planes, whose #517 immediate-reconnect
+    # runs a nested batch_route. Measured on kicad_files/flat_hierarchy with
+    # KICAD_STAGE_AUDIT, this pipeline was the single largest source of
+    # invariant-E error in the whole run -- the map goes in CLEAN and comes out
+    # wrong:
+    #
+    #     7a-before-cleanup:  42 cells NOT blocked,     0 via,  0 stale
+    #     7b-after-cleanup:   31456 cells NOT blocked, 30997 via, 15 stale
+    #
+    # Re-derive every scope net's footprint from the board the cleanup left
+    # behind. `refresh_net_obstacles` is the same contract the commit sites use
+    # (#806); doing it once here costs one cache rebuild (~2s on a 333-net
+    # board) rather than one per moved segment.
+    if _cleanup is not None:
+        from obstacle_cache import refresh_net_obstacles  # #806
+        refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,
+                              pcb_data, config, sorted(sweep_scope_ids or []))
     dead_end_input_segments = _cleanup.input_strip_segments if _cleanup is not None else []
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
@@ -2998,6 +3125,48 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"Stripping {len(state.tap_relocation_removed_segments)} "
               f"segment(s) + {len(state.tap_relocation_removed_vias)} via(s) "
               f"removed by committed tap relocations (#508)")
+
+    # ---- CLOSING THE STRIP LOOP (both fronts) --------------------------------
+    # Everything above adds to the strip list by REMEMBERING: each pass reports
+    # the input copper it removed, matched by object id(). That is a coverage
+    # argument, and coverage arguments fail silently. Measured on this board:
+    # the dead-end sweep took SRAM_D0's B.Cu diagonal out of pcb_data AND out of
+    # the write-list -- keeping those two consistent, so every in-memory
+    # invariant held -- but recorded NO strip, because after a rip/restore cycle
+    # the object in pcb_data was no longer the one registered as input copper.
+    # The file kept its copy, octolinear smoothing then legitimately routed
+    # SRAM_A4 through the vacated corridor (its clearance check saw an empty
+    # corridor, correctly), and the two shipped crossing on B.Cu. The
+    # KICAD_BOARD_LEDGER audit reported "8/333 net(s) differ" and the run
+    # shipped anyway.
+    #
+    # So finish the list by DERIVATION instead of recollection: any in-scope
+    # ORIGINAL segment/via whose geometry is not on the final board is stale,
+    # whoever removed it and however deeply nested they were. Geometry, not
+    # identity -- identity is exactly what the rip/restore cycle breaks.
+    #
+    # This is the shared fix: the CLI writer strips these from its input copy,
+    # and the GUI gets them in results_data['segments_to_remove'] (#84) to
+    # delete from the live board, so neither front can ship copper the engine
+    # deleted from its own model.
+    # Derived by the shared core (cleanup_pipeline.unreported_input_strips), so
+    # the GUI front gets the identical rule and the graphic-exclusion asymmetry
+    # is stated in one place rather than re-derived per caller.
+    from cleanup_pipeline import unreported_input_strips as _uis
+    _wl_segs = [x for _r in results for x in (_r.get('new_segments') or [])]
+    _wl_vias = [x for _r in results for x in (_r.get('new_vias') or [])]
+    _derived_s, _derived_v = _uis(
+        _orig_seg_by_net, _orig_via_by_net, sweep_scope_ids,
+        {id(x) for x in dead_end_input_segments},
+        {id(x) for x in stale_input_vias},
+        pcb_data.segments, pcb_data.vias,
+        extra_segments=_wl_segs, extra_vias=_wl_vias)
+    if _derived_s or _derived_v:
+        dead_end_input_segments = list(dead_end_input_segments) + _derived_s
+        stale_input_vias = list(stale_input_vias) + _derived_v
+        print(f"Strip loop closed: {len(_derived_s)} original segment(s) and "
+              f"{len(_derived_v)} original via(s) are absent from the final "
+              f"board but no pass reported them -- stripping (geometry-matched)")
 
     # Uniform contract, stale-strip edition: the #284 re-emit clause can strip
     # an original that is STILL on the board (a routed twin reproduced its
@@ -4189,6 +4358,58 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # in-memory contract checked before the write.
             verify_written_file_parity(output_file, pcb_data, sweep_scope_ids,
                                        label=' route')
+            # ...and ACT on it, unconditionally. The audit above is gated on
+            # KICAD_BOARD_LEDGER and only REPORTS -- it printed
+            # "FAILED: 8/333 net(s) differ" on this very board while the run
+            # shipped the file anyway. Copper the engine removed from pcb_data
+            # but never got into a strip list is copper nothing reasoned
+            # about: the cleanup passes, the connectivity sweep and the DRC
+            # route.py reports are all computed from pcb_data, so a file-only
+            # segment is unreviewed by every one of them.
+            #
+            # MEASURED on cparti_fpga step 10: the dead-end sweep removed
+            # SRAM_D0's B.Cu diagonal from pcb_data, smoothing then routed
+            # SRAM_A4 through the freed corridor (correctly -- its clearance
+            # check saw an empty corridor), and the diagonal shipped anyway,
+            # crossing it. Every net in that board's remaining DRC (SRAM_D0,
+            # SRAM_A7, SRAM_WE) is in the diverged set.
+            #
+            # Removing it is the CONSERVATIVE direction: pcb_data is the
+            # engine's final answer, and this only deletes copper that answer
+            # does not contain. keep_input_copper runs are exempt -- there the
+            # difference is deliberate and the strip lists are empty by design.
+            if not keep_input_copper:
+                from cleanup_pipeline import file_only_copper
+                _fo_segs, _fo_vias = file_only_copper(
+                    output_file, pcb_data, sweep_scope_ids)
+                if _fo_segs or _fo_vias:
+                    # Both helpers return (content, count) and need the net
+                    # dialect map on KiCad 10 files -- same call shape as the
+                    # #659 orphan strip above.
+                    from kicad_parser import is_kicad_10 as _k10_rc
+                    from kicad_writer import (
+                        remove_segments_from_content as _rsc_rc,
+                        remove_vias_from_content as _rvc_rc)
+                    with open(output_file, 'r', encoding='utf-8') as _fh:
+                        _content = _fh.read()
+                    _nmap = ({nid: n.name for nid, n in pcb_data.nets.items()}
+                             if _k10_rc(_content) else None)
+                    _ns = _nv_rc = 0
+                    if _fo_segs:
+                        _content, _ns = _rsc_rc(_content, _fo_segs,
+                                                net_id_to_name=_nmap)
+                    if _fo_vias:
+                        _content, _nv_rc = _rvc_rc(_content, _fo_vias,
+                                                   net_id_to_name=_nmap)
+                    with open(output_file, 'w', encoding='utf-8') as _fh:
+                        _fh.write(_content)
+                    print(f"Output reconcile: removed {_ns} segment(s) "
+                          f"and {_nv_rc} via(s) that were in the written "
+                          f"file but NOT on the board pcb_data describes "
+                          f"(no pass accounted for them)")
+                    verify_written_file_parity(output_file, pcb_data,
+                                               sweep_scope_ids,
+                                               label=' route/reconciled')
         if output_file and os.path.isfile(output_file):
             # #650: sync the output's sibling .kicad_pro to the floors this run
             # ROUTED to, BEFORE anything grades the board in-run (the plane

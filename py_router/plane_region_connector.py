@@ -3061,10 +3061,46 @@ def route_disconnected_regions(
             _tl = _transition_layers(vx, vy)
             if not _tl:
                 return
+            # This bridge is NOT a route_points leg, so wide_route_clear --
+            # which only ever sees same-layer legs of the routed path -- never
+            # saw it, and it is drawn on the TRANSITION layers, which are not
+            # the layers the strap was routed and gated on. Measured on
+            # zynq_ad9364: the strap ran on In1.Cu/In2.Cu (gated clear there),
+            # while this bridge put a 0.8mm-wide, 0.057mm-long disc on F.Cu
+            # straight through TX_D1_N -- a protected diff-pair member whose
+            # copper is in the step's own input. Nine violations, and not
+            # grazes: the copper OVERLAPS by up to 160um, a hard short.
+            #
+            # Two things are wrong and both are fixed here. The WIDTH: this
+            # joint ties two barrels a fraction of a via apart, so the strap's
+            # full width buys nothing electrically (the barrels dominate) and
+            # only widens the keep-out -- cap it at the via diameter. And the
+            # CHECK: run the same predicate the widening path uses, per layer,
+            # narrowing to min_track_width before giving up.
+            #
+            # If no width is clear the bridge is SKIPPED on that layer rather
+            # than drawn illegally. That can leave the strap's transition
+            # unbridged (#508 finding 14) and the plane region split, which the
+            # run reports -- strictly better than shipping copper shorted to a
+            # signal net, which nothing downstream would have caught.
+            # Floored at `min_track_width`: the cap is about not drawing a
+            # disc where a joint belongs, not about going under the caller's
+            # declared minimum. Without the floor an advanced-tier via
+            # (--via-size below min_track_width) would silently emit a bridge
+            # thinner than the run asked for -- a narrowing with no disclosure,
+            # which is not how this repo reports them (design_rules.narrowed).
             for _l in set(_tl):
+                _w_ok = via_bridge_width(
+                    [(vx, vy, _l), (sx, sy, _l)], track_width,
+                    config.via_size, min_track_width, pcb_data, net_id, config)
+                if _w_ok is None:
+                    print(f"    via-suppression bridge on {_l} at "
+                          f"({vx:.3f}, {vy:.3f}) SKIPPED: no width clears "
+                          f"foreign copper (strap stays split here)")
+                    continue
                 segments.append({
                     'start': (vx, vy), 'end': (sx, sy),
-                    'width': track_width, 'layer': _l, 'net_id': net_id})
+                    'width': _w_ok, 'layer': _l, 'net_id': net_id})
 
         # First filter via_positions to remove vias too close to each other within this route
         filtered_via_positions = []
@@ -3129,6 +3165,48 @@ def route_disconnected_regions(
         print(f"  {GREEN}Result: All {routes_added} route(s) succeeded{_coin_note}{RESET}")
 
     return segments, vias, routes_added, previous_routes, connectivity_paths
+
+
+def via_bridge_width(leg, track_width, via_size, min_track_width,
+                     pcb_data, net_id, config):
+    """Width for a via-suppression bridge on one layer, or None to skip it.
+
+    When two vias on a region-join strap land closer than
+    `via_drill + hole_to_hole`, one is suppressed and a bridge joins the
+    orphaned transition to the survivor -- on BOTH transition layers (#508
+    finding 14), so the strap is not severed there.
+
+    Two things this decides, both of which the bridge used to get wrong:
+
+    WIDTH. It was drawn at the strap's full `track_width`. The joint ties two
+    barrels a fraction of a via apart, so the strap width buys nothing
+    electrically (the barrels dominate) and only widens the keep-out. Measured
+    on zynq_ad9364: a 0.057mm bridge at 0.8mm put a disc on F.Cu straight
+    through TX_D1_N -- a protected diff-pair member whose copper is in the
+    step's own INPUT -- overlapping by up to 160um. Nine segment-segment
+    violations, and shorts rather than grazes. Capped at the via diameter, and
+    FLOORED at `min_track_width` so an advanced-tier via cannot silently emit a
+    bridge thinner than the run asked for.
+
+    CLEARANCE. The bridge is not a `route_points` leg, so `wide_route_clear` --
+    which only ever sees same-layer legs of the routed path -- never saw it,
+    and it lands on the TRANSITION layers, which are not the layers the strap
+    was routed and gated on. It now runs the same predicate, per layer,
+    narrowing to `min_track_width` before giving up.
+
+    Returns None when no width clears. The caller skips that layer rather than
+    drawing illegal copper: the strap's transition may then be unbridged and
+    the region stays split, which the run reports -- strictly better than
+    copper shorted to a signal net, which nothing downstream catches.
+    """
+    cap = max(min_track_width, min(track_width, via_size))
+    for w in (cap, min_track_width):
+        if w <= 0:
+            continue
+        if pcb_data is None or net_id is None or wide_route_clear(
+                leg, w, pcb_data, net_id, config):
+            return w
+    return None
 
 
 def wide_route_clear(route_points, width, pcb_data, net_id, config,

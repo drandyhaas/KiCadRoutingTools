@@ -23,6 +23,7 @@ MAP=(
   "lora_cubesat_cm|lora_cubesat_cm"
   "osm_l_bmc_som|osm_l_bmc_som"
   "polarfire_som|polarfire_som"
+  "smartprint_h7x|smartprint_h7x"
   "stm32h7_hdmi|stm32h7_hdmi"
 )
 

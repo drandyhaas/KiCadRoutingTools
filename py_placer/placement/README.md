@@ -237,6 +237,16 @@ python py_placer/place_seed.py unplaced.kicad_pcb seed.kicad_pcb --intent floorp
 python py_placer/place_seed.py unplaced.kicad_pcb seed3.kicad_pcb --intent floorplan.json --seed 3
 ```
 
+Every `JSON_SUMMARY` it prints (seed, `--repair`, `--reseat`) carries
+`connector_requirements` (#974): the declared edge connectors' graded
+evidence, the requirements that were NOT measured, declarations `--reseat`
+dropped, and the connector errors split own / pinned exactly as the exit code
+split them; a dry run carries only `{complete: false, reason: 'dry-run'}`. It
+reports only -- it never withholds the board or moves the exit code.
+`floorplan.connector_requirements` builds it; the keys are read per
+`.claude/skills/plan-pcb-placement-and-routing/references/evidence-map.md`
+section I.
+
 Rotations: the input rotation is tried in full first and kept when it fits; a
 part with no contained legal pose at it falls back to its 90° lattice (noted
 in the output — measured: an LDO with 0 legal poses at rot 0 and 3 at rot 90
@@ -1252,6 +1262,7 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `../render_placement.py` | Headless PNG stills of placement status (#431) |
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
 | `body.py` | THE body model (#896): courtyard -> fab -> silk U pads -> pad bbox, with the occupancy rect and the source that answered |
+| `connector_geometry.py` | The DRAWN connector envelope against a declared compass edge (#961): the number an `overhang_mm` band is graded on, at zero margin, and the legacy occupancy reading named as the basis wherever no body can be measured |
 | `parser.py` | Courtyard, fab, silk and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation). Resolves blocks through `kicad_parser.iter_footprint_blocks`, so one placement moves ONE block even when two share a reference (#726) |
 | `board_grid.py` | The pitch a board was laid out on, inferred from its footprint origins (#708). Pure; no engine imports |

@@ -12,7 +12,9 @@
 Every verb writes through `placement.writer.write_placed_output` -- the same
 writer `place_seed` uses -- carries the sibling `.kicad_pro` / `.kicad_dru`
 (#441), and runs inside `declare_lever('place_pose.py')`, so an armed unaided
-regime accepts this tool and still refuses the hand script it replaces.
+regime accepts this tool and still refuses the hand script it replaces. The
+provenance row is recorded when the finished candidate is promoted onto OUT,
+not when it is staged (#960).
 
 SEVERAL VERBS IN ONE CALL describe ONE arrangement: every op is resolved
 against the INPUT board and written in a single pass, so no op sees another's
@@ -385,7 +387,10 @@ def main(argv=None):
         # text is reprinted verbatim by the --force path on a run that WROTE,
         # so a "refused rather than written" inside it contradicted the
         # outcome in its own last clause.
-        print("place_pose REFUSED, nothing written: %s" % exc.reason,
+        output_state = (exc.extra.get('summary') or {}).get('output_state')
+        print("place_pose REFUSED, %s: %s" % (
+            'output partially changed' if output_state == 'partial' else 'nothing written',
+            exc.reason),
               file=sys.stderr)
         # EVERY exit carries a summary, including the refusals raised before
         # one was built (an unknown ref, a locked part, a face with no pads):
@@ -457,13 +462,22 @@ def _report(summary):
         if n.get('snapped'):
             extra += ' [snapped]'
         print("  %-6s %-8s %s%s" % (n['kind'], n['ref'], arrow, extra))
-    print("pad legality: conflicts %s -> %s, holes %s -> %s, off-board "
+    print("pad legality: conflicts %s -> %s, holes %s -> %s, coarse outline "
           "%s -> %s" % (summary['pad_conflicts_before'],
                         summary['pad_conflicts_after'],
                         summary['hole_conflicts_before'],
                         summary['hole_conflicts_after'],
                         summary['oob_pad_count_before'],
                         summary['oob_pad_count_after']))
+    edge = summary['pad_edge_after']
+    print("pad-edge clearance: %s -> %s violations; shortfall %.6g mm; "
+          "coverage %s" % (summary['pad_edge_conflicts_before'],
+                            summary['pad_edge_conflicts_after'],
+                            summary['pad_edge_shortfall_after'],
+                            'complete' if edge['complete'] else 'partial/unmeasured'))
+    for finding in edge['findings']:
+        print("  %s: edge shortfall %.6g mm (required %g mm)" % (
+            finding['pad_ref'], finding['shortfall_mm'], finding['required_mm']))
     if summary['knobs']['clearance']['source'] == 'cli':
         # A refusing tool whose threshold is a flag has to say when the
         # threshold came from the caller: measured on esp_prog (no netclass),

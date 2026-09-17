@@ -93,11 +93,12 @@ Validate routed boards against the *real* spec, with the right checker — most
   AST, and every string literal of 12+ characters a refusal can print must
   appear in the dump, so an unrendered ARM of a four-arm refusal fails too.
   `tests/test_923_output_key_claims.py` is the third: it RUNS `board_context`,
-  `check_pockets`, `check_floorplan`, `render_placement` and `board_score` on a
-  tracked fixture and resolves every cited key against what they really wrote
-  (`hot[].ratio` was never an emitted key; `broken.poured_nets_meaning` is
-  written under `components.`). A claim about a tool it does not run, or one
-  in prose naming no instrument, is still invisible -- both files say so.
+  `check_pockets`, `check_floorplan`, `render_placement`, `board_score` and
+  `place_seed` on a tracked fixture and resolves every cited key against what
+  they really wrote (`hot[].ratio` was never an emitted key;
+  `broken.poured_nets_meaning` is written under `components.`). A claim about a
+  tool it does not run, or one in prose naming no instrument, is still
+  invisible -- both files say so.
 - **A mutation battery calls `preflight(__file__)` from
   `tests/mutation_anchors.py`, right after its `ROWS`.** A stale anchor then
   refuses in one second instead of reporting BROKEN after the witnesses are

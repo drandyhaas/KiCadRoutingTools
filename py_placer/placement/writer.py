@@ -12,7 +12,8 @@ import sys
 from typing import List, Dict
 
 from kicad_parser import (find_matching_paren, flip_layer_token,
-                          iter_footprint_blocks)
+                          iter_footprint_blocks, footprint_at_match,
+                          AT_NUM)
 from kicad_writer import move_copper_text_to_silkscreen
 
 
@@ -98,7 +99,7 @@ def _edit_reference_node(node: str, res) -> str:
     refs carry it; dropping it would mirror-flip every one). layer / uuid /
     tstamp / hide pass through untouched.
     """
-    at_m = re.search(r'\(at\s+[\d.-]+\s+[\d.-]+(?:\s+[\d.-]+)?\)', node)
+    at_m = re.search(r'\(at\s+' + AT_NUM + r'\s+' + AT_NUM + r'(?:\s+' + AT_NUM + r')?\)', node)
     if not at_m:
         return node  # no (at ...): not a label the parser modelled; leave it
     rot = res.file_rotation % 360
@@ -260,7 +261,7 @@ def _rotate_pad_angles(fp_text: str, delta_rot: float) -> str:
 
     return re.sub(
         r'(\(pad\s+"[^"]*"\s+\S+\s+\S+\s*\n?\s*)'
-        r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)',
+        r'\(at\s+(' + AT_NUM + r')\s+(' + AT_NUM + r')(?:\s+(' + AT_NUM + r'))?\)',
         fix_pad, fp_text)
 
 
@@ -908,8 +909,7 @@ def write_placed_output(input_file: str, output_file: str,
             continue
 
         # Find the footprint's (at X Y [rotation]) - it's the first (at ...) in the block
-        at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)',
-                             fp_text)
+        at_match = footprint_at_match(fp_text)
         if not at_match:
             # Resolved, but there is nothing to rewrite. `matched` is added
             # BELOW this guard on purpose: it means "the writer acted", so a
@@ -1140,7 +1140,12 @@ def write_placed_output(input_file: str, output_file: str,
     # footprint `(at ...)` rewrite in py_placer comes through here, so this is
     # the one place that can answer "was every pose in this board produced by
     # a registered engine lever?". Outside an unaided regime it is a no-op and
-    # the behaviour is byte-identical; inside one, an undeclared write raises.
+    # the behaviour is byte-identical; inside one, an undeclared write raises,
+    # and the row records the input's and the output's pose digests -- the
+    # links `provenance_audit` walks from the staged board (#972).
+    # `place_seed` and `place_route_loop`, which copy or rename a board built
+    # elsewhere into place, record that delivery too, via
+    # `provenance.recorded_delivery` (#973).
     #
     # It used to raise AFTER `f.write(content)`, which made the refusal
     # decorative: the poses were already on disk, so the "gate" reported a

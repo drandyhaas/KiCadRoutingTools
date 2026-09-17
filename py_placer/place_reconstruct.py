@@ -662,10 +662,14 @@ Examples:
 
     out_pcb = parse_kicad_pcb(args.output_file)
     final = grade_pad_legality(out_pcb, args.clearance,
+                               edge_margin=args.board_edge_clearance,
                                pcb_file=args.output_file)
     report['final'] = {k: final[k] for k in
                        ('pad_conflicts', 'pad_shortfall', 'hole_conflicts',
                         'oob_pad_count', 'oob_pad_amount', 'exact')}
+    report['final'].update({k: final[k] for k in
+                           ('pad_edge', 'pad_edge_conflicts',
+                            'pad_edge_shortfall', 'pad_edge_unmeasured')})
     # Run-6: the assembly channel joins the final verdict -- run 5's output
     # carried a two-part STACK the pad/hole channels cannot see, and this
     # report (plus the exit code) was the last silent gate.

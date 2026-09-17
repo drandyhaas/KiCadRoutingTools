@@ -15,7 +15,8 @@
   "resources": {
     "homepage": "https://github.com/drandyhaas/KiCadRoutingTools",
     "repository": "https://github.com/drandyhaas/KiCadRoutingTools",
-    "bugtracker": "https://github.com/drandyhaas/KiCadRoutingTools/issues"
+    "bugtracker": "https://github.com/drandyhaas/KiCadRoutingTools/issues",
+    "Donate": "https://ko-fi.com/drandyhaas"
   },
   "tags": [
     "routing",
@@ -25,7 +26,7 @@
   ],
   "versions": [
     {
-      "version": "0.22.0",
+      "version": "0.22.1",
       "status": "development",
       "kicad_version": "10.0",
       "runtime": "ipc",
@@ -34,7 +35,7 @@
         "macos",
         "windows"
       ],
-      "download_url": "https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v0.22.0/KiCadRoutingTools-0.22.0.zip",
+      "download_url": "https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v0.22.1/KiCadRoutingTools-0.22.1.zip",
       "download_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "download_size": 0,
       "install_size": 0

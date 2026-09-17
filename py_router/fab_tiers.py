@@ -825,6 +825,50 @@ def fab_tier_from_args(args):
     return tier, overrides
 
 
+def apply_clearance_ceiling(args, tool=''):
+    """Cap this run's scalar ``--clearance`` at ``--clearance-ceiling``, and SAY SO.
+
+    ``add_fab_tier_args`` registers ``--clearance-ceiling`` on every tool that
+    takes ``--escalation``, which is the fanout fronts too -- but only the
+    ROUTING mains ever read it, so ``bga_fanout`` and ``qfn_fanout`` ACCEPTED
+    the flag and ignored it. Nothing warned, and the chain doctrine in
+    CLAUDE.md says to pass the ceiling rather than a bare ``--clearance``, so
+    the recommended spelling was the one that silently did nothing.
+
+    MEASURED on butterstick (a 381-ball 0.8mm BGA): passing only
+    ``--clearance-ceiling`` left the escape field at the tool's own generic
+    default instead of the intended floor -- 3232 grazes, 2 dropped balls, 112
+    failed plane drops and 3 of 85 GND balls pour-served, against 19 grazes, 0
+    dropped and 85/85 with the same number spelled ``--clearance``.
+
+    These fronts route to ONE scalar, so the ceiling's "cap every net class"
+    reading collapses to ``min(requested, ceiling)`` -- tighten-only, exactly
+    as it is for the Default class on the routing mains. The WRITEBACK half
+    already matched: both fronts pass ``clamp_nondefault_netclasses=True``
+    unconditionally, so only the run clearance was missing.
+
+    Call it AFTER ``parse_args`` and BEFORE anything reads ``args.clearance``
+    (on bga_fanout that means before ``enforce_fab_floors``, which would
+    otherwise pin the UNCAPPED value up to a tier floor). Returns the ceiling,
+    or None when the flag was omitted.
+    """
+    ceiling = getattr(args, 'clearance_ceiling', None)
+    if ceiling is None:
+        return None
+    label = f"{tool}: " if tool else ""
+    cur = getattr(args, 'clearance', None)
+    if cur is None or ceiling < cur:
+        args.clearance = ceiling
+        print(f"  {label}--clearance-ceiling {ceiling}: clearance capped at it "
+              f"for this run (was {cur}); the output project's classes are "
+              f"clamped down to it (#439).")
+    else:
+        print(f"  {label}--clearance-ceiling {ceiling}: no cap applied -- "
+              f"--clearance {cur} is already at or below it; the output "
+              f"project's classes are still clamped to the routed floor.")
+    return ceiling
+
+
 def set_policy_from_args(args, pcb_path=None):
     """CLI helper: ``set_escalation_policy`` from ``--escalation`` plus the
     board's own ``rules.min_*`` read from the sibling .kicad_pro of

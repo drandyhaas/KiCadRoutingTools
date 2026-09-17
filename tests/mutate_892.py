@@ -88,13 +88,13 @@ ROWS = [
      (T_POSE,), 'KILLED'),
 
     ('off-board-amount-stops-being-an-arm', 'o',
-     "MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount')",
-     "MAGNITUDE_KEYS = ('pad_shortfall',)",
+     "MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall')",
+     "MAGNITUDE_KEYS = ('pad_shortfall', 'pad_edge_shortfall')",
      (T_POSE,), 'KILLED'),
 
     ('is_clean-ignores-the-magnitudes', 'o',
-     "    return not (any(report.get(k) for k in LEGALITY_KEYS)",
-     "    return True or not (any(report.get(k) for k in LEGALITY_KEYS)",
+     "    return not (report.get('pad_edge', {}).get('complete') is False",
+     "    return True or not (report.get('pad_edge', {}).get('complete') is False",
      (T_POSE,), 'KILLED'),
 
     ('legal-goes-back-to-meaning-no_worse', 'o',
@@ -168,6 +168,43 @@ ROWS = [
      "            tmp = dst + '.krt-tmp'",
      "        for src, dst in pairs:\n"
      "            tmp = dst",
+     (T_POSE,), 'KILLED'),
+
+    # ---- the promote is where provenance is recorded (#960) ---------------
+    ('the-promote-records-nothing-again', 'o',
+     "    provenance.record_write(input_file or staged, out_path, list(placements),\n"
+     "                            pending=True)\n",
+     "",
+     (T_POSE,), 'KILLED'),
+
+    # The #960 shape itself: a record made for a path outside the regime.
+    ('the-promote-records-the-staged-path-again', 'o',
+     "provenance.record_write(input_file or staged, out_path,",
+     "provenance.record_write(input_file or staged, staged,",
+     (T_POSE,), 'KILLED'),
+
+    # The row computed AFTER the replace. Only an in-place write can tell:
+    # there the input already holds the delivered pose, so nothing is claimed.
+    ('the-promote-row-is-computed-after-the-write-again', 'o',
+     "        provenance.commit_write(out_path)\n",
+     "        provenance.discard_write(out_path)\n"
+     "        provenance.record_write(input_file or staged, out_path,\n"
+     "                                list(placements))\n",
+     (T_POSE,), 'KILLED'),
+
+    ('a-failed-promote-leaks-its-pending-row-again', 'o',
+     "        provenance.discard_write(out_path)\n",
+     "",
+     (T_POSE,), 'KILLED'),
+
+    # The commit outside the rollback: a ledger that cannot be appended to
+    # would then ship the board with no row for it.
+    ('a-ledger-failure-ships-the-board-anyway', 'o',
+     "        provenance.commit_write(out_path)\n",
+     "        try:\n"
+     "            provenance.commit_write(out_path)\n"
+     "        except OSError:\n"
+     "            pass\n",
      (T_POSE,), 'KILLED'),
 
     ('a-forced-run-is-not-disclosed', 'o',

@@ -787,10 +787,17 @@ def sync_pcb_data_segments(
         original_segment_ids: Set of id() for original segments to preserve
         state: Optional RoutingState for cache updates
         config: Optional config for cache recomputation
-        original_via_ids: Set of id() for original vias to preserve. Omit it and
+        original_via_ids: Set of id() for vias to preserve. Omit it and
             the via half is skipped entirely -- callers that hold no via
             keep-alive cannot tell an input-file barrel from a superseded one,
-            and guessing would strip real copper off the map.
+            and guessing would strip real copper off the map. It is "vias the
+            writer will emit that no result carries", not literally "vias from
+            the input file": both callers union in the run's STUB LAYER-SWAP
+            vias, which ship through output_writer's own all_swap_vias channel
+            and appear in no result's new_vias. Leave them out and this call
+            deletes shipped copper from pcb_data -- measured on ecp5_mini,
+            where the dead-end sweep immediately after it then read two hybrid
+            pairs' legs as unsupported and trimmed them off the board.
     """
     if not routed_results:
         return

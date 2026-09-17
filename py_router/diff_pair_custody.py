@@ -582,6 +582,22 @@ def run_casualty_reconcile(state, progress_callback=None,
                     state.routed_net_ids, state.routed_net_paths,
                     state.routed_results, state.track_proximity_cache,
                     state.layer_map)
+                # `record_single_ended_success` takes no obstacle map -- it
+                # updates pcb_data and the tracking dicts only. The main loop
+                # refreshes separately around its own calls; this branch did
+                # not, so a casualty RE-ROUTE (as opposed to branch D's
+                # partial restore, which already refreshes) left the working
+                # map holding that net's PRE-ROUTE footprint.
+                #
+                # Measured on cparti_fpga's retry step with KICAD_STAGE_AUDIT,
+                # once the #134 and rescue sites were fixed this was the last
+                # remaining source of invariant-E staleness: "REROUTED
+                # SRAM_A8" left 1 stale entry, 1599 of its 2465 cells
+                # unblocked and 119 via cells unblocked.
+                from obstacle_cache import refresh_net_obstacles  # #806
+                refresh_net_obstacles(state.working_obstacles,
+                                      state.net_obstacles_cache,
+                                      pcb_data, config, [net_id])
                 rerouted = True
         if rerouted:
             print(f"  {GREEN}REROUTED{RESET} {name}: casualty re-routed with "
@@ -621,6 +637,17 @@ def run_casualty_reconcile(state, progress_callback=None,
                                   state.net_obstacles_cache, pcb_data, config,
                                   sorted(set(ripped_ids or []) | {net_id}))
             state.results.append(pruned)
+            # Same registration the route.py sibling owes (see there): a net in
+            # neither routed_net_ids nor remaining_net_ids is never stamped as
+            # foreign copper by `build_single_ended_obstacles`, so this restore
+            # would be invisible to every map built afterwards. Refreshing the
+            # cache entry alone does not cover it -- the cache is consulted
+            # only for remaining_net_ids.
+            for _rid in sorted(set(ripped_ids or []) | {net_id}):
+                if _rid in state.remaining_net_ids:
+                    state.remaining_net_ids.remove(_rid)
+                if _rid not in state.routed_net_ids:
+                    state.routed_net_ids.append(_rid)
             print(f"  {RED}PARTIAL{RESET} {name}: reroute failed; restored "
                   f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of "
                   f"its pre-rip route (dropped {dropped} colliding piece(s)); "

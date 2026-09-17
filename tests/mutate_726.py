@@ -68,6 +68,11 @@ T_PARITY = os.path.join(TESTS, 'test_parser_pcbnew_parity.py')
 # those rows were about is graded instead by `test_726_kipy_reference_keys.py`,
 # on `kipy_raw_references`, which is a function for exactly that reason.
 T_KIPY = os.path.join(TESTS, 'test_726_kipy_reference_keys.py')
+#: The footprint's OWN (at ...) in any number spelling KiCad writes. A sibling
+#: of #726's resolver: both answer "which text is THIS footprint's". Its rows
+#: grade the TEXT parser and writer, which the IPC port does not touch, so
+#: they port unchanged.
+T_AT = os.path.join(TESTS, 'test_footprint_at_parsing.py')
 
 #: (name, target, old, new, tests, expectation)
 ROWS = [
@@ -243,6 +248,96 @@ ROWS = [
     # anchor: it would match nothing, and a row that matches nothing reports
     # every mutation as killed, which is the most flattering possible bug
     # (#877). Restore it with the function if the sync ever comes back.
+
+    # ---- the footprint's own (at ...) ---------------------------------------
+    # Any depth instead of the footprint's direct child: a property's (at ...)
+    # listed first becomes the pose again.
+    ('the-pose-is-any-at-in-the-block-again', 'p',
+     "            if depth == 2:\n"
+     "                # `( at ...)` is the same node to KiCad's reader.",
+     "            if depth >= 2:\n"
+     "                # `( at ...)` is the same node to KiCad's reader.",
+     (T_AT,), 'KILLED'),
+
+    ('a-spaced-at-is-not-the-node', 'p',
+     "                while fp_text[k:k + 1] in (' ', '\\t', '\\n', '\\r'):\n"
+     "                    k += 1\n",
+     "",
+     (T_AT,), 'KILLED'),
+
+    ('a-footprint-whose-at-does-not-parse-is-dropped-silently', 'p',
+     "            print(\"WARNING: footprint %s has an (at ...) that does not parse; \"\n",
+     "            print(\"\" and \"WARNING: footprint %s has an (at ...) that does not parse; \"\n",
+     (T_AT,), 'KILLED'),
+
+    ('the-edge-points-read-the-first-at-again', 'p',
+     "        _pose = footprint_pose(fp_text)\n"
+     "        if _pose is None:\n"
+     "            continue\n"
+     "        fx, fy, frot = _pose\n",
+     "        _m = re.search(r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)"
+     "(?:\\s+([\\d.-]+))?\\)', fp_text)\n"
+     "        if _m is None:\n"
+     "            continue\n"
+     "        fx, fy, frot = (float(_m.group(1)), float(_m.group(2)),"
+     " float(_m.group(3) or 0))\n",
+     (T_AT,), 'KILLED'),
+
+    # The pad-angle rotation when a footprint turns: an exponent pad angle
+    # was skipped, so the pads kept their old angle.
+    ('the-pad-angle-rotation-reads-no-exponent-again', 'w',
+     "        r'\\(at\\s+(' + AT_NUM + r')\\s+(' + AT_NUM + r')(?:\\s+(' + AT_NUM + r'))?\\)',",
+     "        r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)(?:\\s+([\\d.-]+))?\\)',",
+     (T_AT,), 'KILLED'),
+
+    ('the-label-editor-reads-no-exponent-again', 'w',
+     "    at_m = re.search(r'\\(at\\s+' + AT_NUM + r'\\s+' + AT_NUM + r'(?:\\s+' + AT_NUM + r')?\\)', node)",
+     "    at_m = re.search(r'\\(at\\s+[\\d.-]+\\s+[\\d.-]+(?:\\s+[\\d.-]+)?\\)', node)",
+     (T_AT,), 'KILLED'),
+
+    # Numbers spelled without an exponent: `1e-05`, which the writer's `:.6g`
+    # emits and pcbnew writes, stops matching everywhere AT_NUM is used.
+    ('an-at-number-cannot-be-an-exponent-again', 'p',
+     "AT_NUM = r'[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?'",
+     "AT_NUM = r'[\\d.-]+'",
+     (T_AT,), 'KILLED'),
+
+    ('a-pad-angle-cannot-be-an-exponent-again', 'p',
+     "            pad_at_match = AT_NODE_RE.search(pad_text)",
+     "            pad_at_match = re.search(r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)"
+     "(?:\\s+([\\d.-]+))?\\)', pad_text)",
+     (T_AT,), 'KILLED'),
+
+    ('a-label-angle-cannot-be-an-exponent-again', 'p',
+     "    at_match = AT_NODE_RE.search(ref_text)",
+     "    at_match = re.search(r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)"
+     "(?:\\s+([\\d.-]+))?\\)', ref_text)",
+     (T_AT,), 'KILLED'),
+
+    # A footprint with no (at ...) of its own is dropped with its pads,
+    # where KiCad places it at the origin.
+    ('a-footprint-with-no-own-at-is-dropped', 'p',
+     "        # default pose, the origin; taking a child's instead was the bug.\n"
+     "        return (0.0, 0.0, 0.0)",
+     "        # default pose, the origin; taking a child's instead was the bug.\n"
+     "        return None",
+     (T_AT,), 'KILLED'),
+
+    ('the-edge-collector-reads-the-first-at-again', 'p',
+     "        _pose = footprint_pose(block)",
+     "        _m = re.search(r'\\(at\\s+([-\\d.]+)\\s+([-\\d.]+)"
+     "(?:\\s+([-\\d.]+))?\\)', block)\n"
+     "        _pose = ((float(_m.group(1)), float(_m.group(2)),"
+     " float(_m.group(3) or 0)) if _m else None)",
+     (T_AT,), 'KILLED'),
+
+    # The writer finds the first (at ...) again: a second write to a board at
+    # an exponent angle rewrites the Reference property and leaves the part.
+    ('the-writer-rewrites-the-first-at-again', 'w',
+     "        at_match = footprint_at_match(fp_text)",
+     "        at_match = re.search(r'\\(at\\s+([\\d.-]+)\\s+([\\d.-]+)"
+     "(?:\\s+([\\d.-]+))?\\)', fp_text)",
+     (T_AT,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is

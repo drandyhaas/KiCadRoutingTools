@@ -153,7 +153,8 @@ try:
     # cannot see because `.jsonl` is not a scanned extension.
     ck('a staging row carries no argv, no parent hash and no poses',
        not {'lever_argv', 'parent_sha256', 'poses_written', 'refs_written',
-            'refs_moved', 'sides_written'} & set(lr[0]),
+            'refs_moved', 'sides_written', 'parent_pose_sha256',
+            'board_pose_sha256'} & set(lr[0]),
        str(sorted(lr[0])))
     ck('...and says so, rather than looking like a row that never had them',
        'fence' in (lr[0].get('redacted') or ''), str(lr[0].get('redacted')))

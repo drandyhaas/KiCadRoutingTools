@@ -860,9 +860,83 @@ def graphic_own_pad_nets(pcb_data):
             if min(point_to_pad_distance(g.start_x, g.start_y, pd),
                    point_to_pad_distance(g.end_x, g.end_y, pd)) <= hw + 1e-6:
                 nets.add(pd.net_id)
+        # A segment bridging pads of TWO DIFFERENT nets is lifted for BOTH
+        # unless a declared tie says the short is intended -- and then each net
+        # routes INTO it and they meet inside net-less copper, which KiCad
+        # grades as `shorting_items`. Measured on a20_can: the `3.3V/5.0V1`
+        # solder jumper (SJ_2_SMALL_12_TIED, `net_tie_groups == []` -- the NAME
+        # says tied, the footprint DECLARES nothing) draws one F.Cu segment
+        # from pad 1 `+5V` to pad 2 `Net-(3.3V/5.0V1-Pad2)`; both nets were
+        # routed into it (-0.171mm and -0.230mm overlap) and KiCad reported two
+        # new shorting_items. A DECLARED tie is the case KiCad itself exempts,
+        # so it still lifts; anything else stays blocking, which is also the
+        # only answer that keeps this generator no more permissive than the
+        # checker (the subset chain in the docstring above).
+        #
+        # Census over 489 corpus boards: of 1126 segments lifted for >= 2 nets,
+        # 1032 ARE declared ties and keep their lift; the 94 that are not are
+        # solder jumpers on 6 boards (tigard JP1, ulx3s RP1/2/3 + D9/D51/D52,
+        # butterstick JP1/2/3, ecp5_sbc_mobo NT1, eez_dib_b3c JP1/3/5/7) -- the
+        # a20_can family exactly. A jumper bridge is a stub off one pad edge,
+        # not esp_prog's notch AROUND a pad, so refusing it does not re-seal a
+        # pad the way #907 did.
+        tie = _net_tie_group_nets(fp, nets)
+        if len(nets) > 1 and not (tie and nets <= tie):
+            continue
+        nets |= tie
         if nets:
             out[id(g)] = frozenset(nets)
     return out
+
+
+def _net_tie_group_nets(fp, touched):
+    """The tie-group nets to add for one piece of a NET TIE's own copper.
+
+    A footprint declaring `(net_tie_pad_groups ...)` shorts those pads THROUGH
+    ITS OWN COPPER -- that copper is the intended conductor between them, not
+    foreign copper that happens to be nearby. The per-pad rule above cannot see
+    that: it lifts each edge only for the pad it physically touches, so on a
+    two-pad tie the two END CAPS lift for one net each and each tied net is
+    walled off by the cap at the other end.
+
+    Measured on cparti_fpga, whose four ties (NT1-NT4) each draw a filled
+    0.8 x 0.2355mm bar: `check_reachability` called NT1.1 **CAGED for any track
+    width**, and demoting just those four polys off copper made it **PASSABLE
+    at 0.15mm with +350um margin**. All 8 pads of those 4 ties shipped
+    unconnected -- 8 of the 23 nets that regressed on that board.
+
+    So a tie's copper is lifted for every net in the group it bridges. Narrow
+    by construction, and it does NOT reopen what the per-pad rule exists to
+    prevent:
+      * only footprints that DECLARE a tie group qualify, which watchy's
+        antenna and esp_prog's tab do not;
+      * only the nets of pads IN that group are added, so a third net is still
+        blocked by the same copper;
+      * the group is matched per group, so a footprint carrying two independent
+        ties never lends one group's nets to the other's copper.
+
+    A piece touching NO pad falls back to the union of the footprint's tie
+    nets: on a net-tie footprint that copper can only be more of the same
+    bridge, and leaving it blocking is what cages the pad in the first place.
+
+    The subset chain still holds -- `graphic_effective_nets` unifies by CLUSTER
+    and already carries both tied nets for this copper, so this can only ever
+    approach the checker's answer, never exceed it.
+    """
+    groups = getattr(fp, 'net_tie_groups', None) or []
+    if not groups:
+        return set()
+    by_number = {str(pd.pad_number): pd.net_id for pd in fp.pads if pd.net_id}
+    group_nets = [{by_number[str(n)] for n in grp if str(n) in by_number}
+                  for grp in groups]
+    add = set()
+    for gn in group_nets:
+        if touched & gn:
+            add |= gn
+    if not touched:
+        for gn in group_nets:
+            add |= gn
+    return add
 
 
 _GRAPHIC_OWN_PAD_NETS = {}  # set per check run beside _GRAPHIC_EFFECTIVE_NETS
@@ -1472,6 +1546,71 @@ def check_via_board_edge(via: Via, board_bounds: Tuple[float, float, float, floa
 # an internal cutout, slot, or notch, copper routed INTO the cutout sits inside
 # the bbox and is never flagged. These helpers measure to the actual Edge.Cuts
 # outline (outer ring + interior cutouts), matching KiCad's copper_edge_clearance.
+
+def npth_slot_capsules(pcb_data):
+    """Every NPTH SLOT on the board, as (p1, p2, radius, "REF.PAD") capsules.
+
+    An NPTH slot (a milled oval) IS board edge to KiCad (#448): its edge
+    provider grades copper proximity to a slot's hole wall as
+    `copper_edge_clearance`, while a ROUND NPTH drill stays in the
+    hole_clearance / copper-to-hole domain. Verified with kicad-cli 10 probes
+    on sofle_pico: a track 0.22mm from the SW25 2.8x1.5 slot flags
+    copper_edge_clearance; the same track 0.10mm from a round 3.0mm NPTH flags
+    nothing.
+
+    This lives here, next to `board_edge_geometry`, because a consumer that
+    keeps copper off the board edge must keep it off these too -- at the EDGE
+    floor, which is typically higher than the NPTH-to-track floor. The
+    octolinear smoother mirrored the geometry with only the NPTH floor and
+    straightened a sofle_pico track 0.1mm closer to SW25's slot: legal at
+    `max(clearance, NPTH_TO_TRACK_CLEARANCE)` = 0.325mm, graded against
+    `max(clearance, board_edge_clearance)` = 0.425mm, shipped 0.350mm. One
+    source of the geometry, so the generator and the checker cannot disagree
+    about what counts as an edge.
+    """
+    caps = []
+    from kicad_parser import pad_drill_capsule as _pdc
+    for fp in pcb_data.footprints.values():
+        for pd in fp.pads:
+            if getattr(pd, 'pad_type', '') != 'np_thru_hole' or pd.drill <= 0:
+                continue
+            (p1, p2, r) = _pdc(pd)
+            if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) <= 1e-9:
+                continue  # round drill: not part of the milled edge
+            caps.append((p1, p2, r, f"{pd.component_ref}.{pd.pad_number}"))
+    return caps
+
+
+def segment_to_npth_slots_distance(slot_caps, x1, y1, x2, y2):
+    """Distance from a track CENTRELINE to the nearest NPTH slot WALL.
+
+    `slot_caps` comes from `npth_slot_capsules`. Returns +inf when the board
+    has no slots, so a caller can compare unconditionally. A caller keeping a
+    track legal wants `>= board_edge_clearance + width / 2`, because a slot is
+    milled edge (see `npth_slot_capsules`) -- not the NPTH-to-track floor.
+    """
+    if not slot_caps:
+        return float('inf')
+    from geometry_utils import closest_point_on_segment, segments_intersect
+    best = float('inf')
+    for (p1, p2, r, _ref) in slot_caps:
+        if segments_intersect(x1, y1, x2, y2, p1[0], p1[1], p2[0], p2[1]):
+            d = 0.0
+        else:
+            d = float('inf')
+            for (px, py, qx1, qy1, qx2, qy2) in (
+                    (x1, y1, p1[0], p1[1], p2[0], p2[1]),
+                    (x2, y2, p1[0], p1[1], p2[0], p2[1]),
+                    (p1[0], p1[1], x1, y1, x2, y2),
+                    (p2[0], p2[1], x1, y1, x2, y2)):
+                cx, cy = closest_point_on_segment(px, py, qx1, qy1, qx2, qy2)
+                dd = math.hypot(px - cx, py - cy)
+                if dd < d:
+                    d = dd
+        if d - r < best:
+            best = d - r
+    return best
+
 
 def board_edge_geometry(board_info) -> Tuple[List[List[Tuple[float, float]]],
                                              Optional[List[Tuple[float, float]]],
@@ -3332,17 +3471,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # same effective edge clearance, with EXACT capsule distance -- these
         # breaches are often a few um (sofle SW25A: 13.5um under the 0.3 rule),
         # so ring sampling error would swallow them.
-        _slot_caps = []
-        from kicad_parser import pad_drill_capsule as _pdc
-        for _fp in pcb_data.footprints.values():
-            for _pd in _fp.pads:
-                if getattr(_pd, 'pad_type', '') != 'np_thru_hole' or _pd.drill <= 0:
-                    continue
-                (_s1, _s2, _sr) = _pdc(_pd)
-                if math.hypot(_s2[0] - _s1[0], _s2[1] - _s1[1]) <= 1e-9:
-                    continue  # round drill: not part of the milled edge
-                _slot_caps.append((_s1, _s2, _sr,
-                                   f"{_pd.component_ref}.{_pd.pad_number}"))
+        _slot_caps = npth_slot_capsules(pcb_data)
         if _slot_caps and pcb_data.segments:
             # Reuse the copper-to-hole check's per-segment arrays when it ran
             # (slots are NPTH pads, so they are always in its holes list);

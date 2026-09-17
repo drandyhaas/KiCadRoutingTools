@@ -721,7 +721,7 @@ _DECLARED_BASELINE_COUNT = 21
 #: says what the shape actually is.
 _NOT_A_BASELINE = (
     (r'tests/stress/manifest_set\d+(monster)?\.json$',
-     'stress-corpus manifests -- set1..set28 plus the three `monster` sets: '
+     'stress-corpus manifests -- set1..set29 plus the three `monster` sets: '
      'they name the boards to fetch and record nothing'),
     (r'tests/stress/modal_sweep/arms\.[A-Za-z0-9_]+\.json$',
      'sweep ARM configurations, an input to a study. Deliberately not the '
@@ -979,8 +979,9 @@ _UNRESOLVABLE = {}
 #: finding batteries would otherwise report a clean sweep over nothing -- the
 #: exact shape of the defect #877 is about, reproduced in its own gate.
 #: 42 before #902 added `mutate_902.py`; 43 before #892 added `mutate_892.py`;
-#: 45 before #893/#916 added `mutate_893_916.py`.
-_BATTERY_COUNT = 50
+#: 45 before #893/#916 added `mutate_893_916.py`; 50 before #974 added
+#: `mutate_974.py`.
+_BATTERY_COUNT = 51
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

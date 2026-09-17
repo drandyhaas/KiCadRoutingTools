@@ -235,6 +235,9 @@ class Pad:
     # the castellated-landing retract post-pass pulls track endpoints that
     # land in the edge-clearance zone of such a pad back to its inner reach.
     # Set by BOTH parse paths (text + pcbnew).
+    geometry_approximations: Tuple[str, ...] = ()  # Shape variants flattened by
+    # this parser. Consumers claiming exact primitive geometry must disclose
+    # these instead of certifying the simplified shape/size as native copper.
 
 
 _VIA_BIRTH_WATCH = None
@@ -1205,6 +1208,13 @@ def _resolve_pad_rect(size_x: float, size_y: float,
     return size_x, size_y, rect_rotation
 
 
+# A quoted KiCad S-expr string body, honoring backslash escapes. `[^"]*` is
+# the wrong spelling everywhere a NET NAME is captured: it ends at the first
+# escaped quote, so the enclosing token stops matching and the object is read
+# with the wrong net -- or, for segments and arcs, is not read AT ALL.
+_ESC_STR = r'((?:[^"\\]|\\.)*)'
+
+
 def _unescape_kicad_string(s: str) -> str:
     """Undo KiCad s-expression string escapes (backslash and quote).
 
@@ -1220,6 +1230,80 @@ def _unescape_kicad_string(s: str) -> str:
 
 
 _PAREN_OR_QUOTE = re.compile(r'["()]')
+
+
+#: A KiCad number as the file may spell it. KiCad writes ANGLES with a
+#: significant-digit format (probed on pcbnew 10.0.0: `1e-14`,
+#: `1.421085472e-14`), and this repo's writer uses `:.6g`, so both emit
+#: exponent form for |angle| < 1e-4.
+AT_NUM = r'[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?'
+AT_NODE_RE = re.compile(r'\(\s*at\s+(' + AT_NUM + r')\s+(' + AT_NUM + r')'
+                        r'(?:\s+(' + AT_NUM + r'))?\s*\)')
+
+
+def _footprint_at_start(fp_text: str) -> int:
+    """Index of the footprint's OWN `(at` -- its direct child -- or -1.
+
+    String-aware (a `(descr "(at 9 9)")` is not markup) and depth-scoped (a
+    property's or pad's `(at ...)` is not the footprint's, whatever order the
+    file lists them in).
+    """
+    depth = 0
+    i = 0
+    search = _PAREN_OR_QUOTE.search
+    find_quote = fp_text.find
+    while True:
+        m = search(fp_text, i)
+        if m is None:
+            return -1
+        j = m.start()
+        c = fp_text[j]
+        if c == '(':
+            depth += 1
+            if depth == 2:
+                # `( at ...)` is the same node to KiCad's reader.
+                k = j + 1
+                while fp_text[k:k + 1] in (' ', '\t', '\n', '\r'):
+                    k += 1
+                if (fp_text.startswith('at', k)
+                        and fp_text[k + 2:k + 3] in (' ', '\t', '\n', '\r')):
+                    return j
+            i = j + 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return -1
+            i = j + 1
+        else:
+            i = j + 1
+            while True:
+                k = find_quote('"', i)
+                if k == -1:
+                    return -1
+                b = k - 1
+                while b >= i and fp_text[b] == '\\':
+                    b -= 1
+                i = k + 1
+                if (k - 1 - b) % 2 == 0:
+                    break
+
+
+def footprint_at_match(fp_text: str):
+    """The footprint's OWN `(at ...)` as a re.Match, or None.
+
+    Groups 1..3 are x, y and the optional angle; `.start()`/`.end()` are the
+    node's span inside `fp_text`, which is what a writer needs to rewrite it.
+    None when the block has no `(at ...)` of its own or it does not parse.
+
+    Two ways the textually-first `(at` was wrong, both fixed here: a child's
+    `(at ...)` placed before the footprint's own was read as the footprint's
+    pose, and an angle in exponent form (`1e-05`, which the writer's `:.6g`
+    emits and pcbnew 10 writes as `1e-14`) did not match the old digits, dots
+    and minus class at all, so the FIRST CHILD's `(at ...)` was read instead
+    -- or the footprint was dropped with its pads.
+    """
+    j = _footprint_at_start(fp_text)
+    return None if j < 0 else AT_NODE_RE.match(fp_text, j)
 
 
 def find_matching_paren(content: str, open_idx: int) -> int:
@@ -1618,6 +1702,9 @@ def iter_footprint_shapes(fp_text: str, tags=_FP_SHAPE_TAGS):
 def footprint_pose(fp_text: str):
     """`(x, y, rotation_deg)` of one footprint block, or None.
 
+    `(0, 0, 0)` -- KiCad's default -- when the block has no `(at ...)` of its
+    own; None only when it has one that does not parse.
+
     The footprint's own `(at ...)` is the one at the block's TOP LEVEL. Taking
     the textually first one instead is wrong twice over, and #908 raised the
     stakes from a bounds point to a copper obstacle at the wrong place:
@@ -1634,33 +1721,16 @@ def footprint_pose(fp_text: str):
     `GetPosition()`/`GetOrientationDegrees()` on all 1349 corpus footprints --
     so both are latent. They are also free to rule out.
     """
-    depth = 0
-    i, n = 0, len(fp_text)
-    while i < n:
-        c = fp_text[i]
-        if c == '"':                        # skip the whole string literal
-            i += 1
-            while i < n:
-                if fp_text[i] == '\\':
-                    i += 2
-                    continue
-                if fp_text[i] == '"':
-                    break
-                i += 1
-            i += 1
-            continue
-        if c == '(':
-            depth += 1
-            if depth == 2 and fp_text.startswith('(at', i):
-                m = re.match(r'\(at\s+([\d.-]+)\s+([\d.-]+)'
-                             r'(?:\s+([\d.-]+))?\s*\)', fp_text[i:])
-                if m:
-                    return (float(m.group(1)), float(m.group(2)),
-                            float(m.group(3)) if m.group(3) else 0.0)
-        elif c == ')':
-            depth -= 1
-        i += 1
-    return None
+    j = _footprint_at_start(fp_text)
+    if j < 0:
+        # KiCad's own reader leaves a footprint with no `(at ...)` at its
+        # default pose, the origin; taking a child's instead was the bug.
+        return (0.0, 0.0, 0.0)
+    m = AT_NODE_RE.match(fp_text, j)
+    if m is None:
+        return None
+    return (float(m.group(1)), float(m.group(2)),
+            float(m.group(3)) if m.group(3) else 0.0)
 
 
 _FP_PAD_RE = re.compile(r'\(pad\s+("(?:[^"\\]|\\.)*"|\S+)\s+(\w+)')
@@ -1776,11 +1846,10 @@ def _footprint_edge_points_by_ref_uncached(
         if '"Edge.Cuts"' not in fp_text:
             continue
         pts: List[Tuple[float, float]] = []
-        at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
-        if not at_match:
+        _pose = footprint_pose(fp_text)
+        if _pose is None:
             continue
-        fx, fy = float(at_match.group(1)), float(at_match.group(2))
-        frot = float(at_match.group(3)) if at_match.group(3) else 0.0
+        fx, fy, frot = _pose
         local: List[Tuple[float, float]] = []
         for sm in re.finditer(
                 r'\(fp_(line|rect)\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
@@ -2242,11 +2311,10 @@ def _collect_footprint_edge_segments_by_ref(content: str):
         if '"Edge.Cuts"' not in block:
             continue
         out = out_by_ref.setdefault(_key, [])
-        at = re.search(r'\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)', block)
-        if not at:
+        _pose = footprint_pose(block)
+        if _pose is None:
             continue
-        fx, fy = float(at.group(1)), float(at.group(2))
-        rot = float(at.group(3)) if at.group(3) else 0.0
+        fx, fy, rot = _pose
         rad = math.radians(-rot)
         cos_r, sin_r = math.cos(rad), math.sin(rad)
 
@@ -2780,7 +2848,12 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
         # KiCad 10 removes the top-level net table entirely.
         # Discover all net names from their usage in pads, segments, vias, and zones.
         # Match (net "name") anywhere in the file — deduplicate to build the net list.
-        net_pattern = r'\(net\s+"([^"]*)"\)'
+        # `(?:[^"\\]|\\.)*` -- not `[^"]*`, which ENDS at the first escaped
+        # quote, so the whole `(net ...)` failed to match and the net never
+        # entered the table. A net name may legally carry a backslash
+        # (neo6502's `/GPIO22\\I2C1_SDA`) or a quote; both spellings must
+        # round-trip through the same raw key every lookup site uses.
+        net_pattern = r'\(net\s+"%s"\)' % _ESC_STR
         # (net "") is the canonical NO-NET (net 0), not a real net: pcbnew maps
         # it to net code 0, so synthesizing an id for it split no-net copper
         # onto a phantom net (comexpress7's two dangling F.Cu segments).
@@ -2796,7 +2869,7 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
             synthetic_id += 1
     else:
         # KiCad 9: nets are (net <id> "name")
-        net_pattern = r'\(net\s+(\d+)\s+"([^"]*)"\)'
+        net_pattern = r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR
         for m in re.finditer(net_pattern, content):
             net_id = int(m.group(1))
             net_name = m.group(2)
@@ -2819,8 +2892,7 @@ def _parse_ref_label(fp_text: str, ref_start: int,
     (size 1.0, thickness 0.15).
     """
     ref_text = fp_text[ref_start:find_matching_paren(fp_text, ref_start)]
-    at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)',
-                         ref_text)
+    at_match = AT_NODE_RE.search(ref_text)
     if not at_match:
         return None
     layer_match = re.search(r'\(layer\s+"([^"]+)"\)', ref_text)
@@ -3064,14 +3136,22 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             continue
         fp_name = fp_name_match.group(1)
 
-        # Extract position and rotation
-        at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
-        if not at_match:
+        # Extract position and rotation: the footprint's OWN `(at ...)`, not
+        # the first one in the block, in any number spelling KiCad writes.
+        _pose = footprint_pose(fp_text)
+        if _pose is None:
+            # KiCad refuses to load such a file; the part is dropped with its
+            # pads, and that must not happen in silence.
+            print("WARNING: footprint %s has an (at ...) that does not parse; "
+                  "the footprint and its pads are skipped" % _block_key,
+                  file=sys.stderr)
             continue
-
-        fp_x = float(at_match.group(1))
-        fp_y = float(at_match.group(2))
-        fp_rotation = float(at_match.group(3)) if at_match.group(3) else 0.0
+        fp_x, fp_y, fp_rotation = _pose
+        if _footprint_at_start(fp_text) < 0:
+            # Said, not silent: a footprint with no pose of its own is not
+            # something KiCad writes, and the origin is only its default.
+            print("WARNING: footprint %s has no (at x y) of its own; placed at "
+                  "the origin, as KiCad places it" % _block_key, file=sys.stderr)
 
         # Extract layer
         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', fp_text)
@@ -3196,7 +3276,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             pad_shape = pad_match.group(3)  # circle, rect, roundrect, etc.
 
             # Extract pad local position and rotation
-            pad_at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', pad_text)
+            pad_at_match = AT_NODE_RE.search(pad_text)
             if not pad_at_match:
                 continue
 
@@ -3267,13 +3347,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 pad_layers = re.findall(r'"([^"]+)"', layers_section.group(1))
 
             # Extract net - try KiCad 9 format first, then KiCad 10
-            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]*)"\)', pad_text)
+            net_match = re.search(r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR, pad_text)
             if net_match:
                 net_id = int(net_match.group(1))
                 net_name = _unescape_kicad_string(net_match.group(2))
             else:
                 # KiCad 10: (net "name") with no numeric ID
-                net_match_v10 = re.search(r'\(net\s+"([^"]*)"\)', pad_text)
+                net_match_v10 = re.search(r'\(net\s+"%s"\)' % _ESC_STR, pad_text)
                 if net_match_v10 and name_to_id:
                     net_id = name_to_id.get(net_match_v10.group(1), 0)
                     net_name = _unescape_kicad_string(net_match_v10.group(1))
@@ -3387,7 +3467,11 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 polygons=pad_polygons,
                 hole_x=pad_hole_x,
                 hole_y=pad_hole_y,
-                castellated='pad_prop_castellated' in pad_text
+                castellated='pad_prop_castellated' in pad_text,
+                geometry_approximations=tuple(reason for token, reason in (
+                    ('chamfer', 'chamfered pad'),
+                    ('padstack', 'per-layer padstack'))
+                    if re.search(r'\(' + token + r'\s', pad_text))
             )
 
             footprint.pads.append(pad)
@@ -3567,7 +3651,15 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             # behavior, and parse_kicad_pcb always passes a map.
             if not name_to_id:
                 continue
-            net_id = name_to_id.get(_unescape_kicad_string(net_name), 0)
+            # Key on the RAW file text, exactly like every other name_to_id
+            # lookup (pads 3373, segments 4376, the zone/graphic sites).
+            # name_to_id is BUILT from the raw text -- _unescape_kicad_string's
+            # own docstring says so -- so unescaping first missed every net
+            # whose name carries a backslash. neo6502's `/GPIO22\\I2C1_SDA`
+            # resolved for its 11 segments and for none of its 4 vias, which
+            # then modelled as net 0 and graded as 8 phantom DRC violations
+            # against the net's own copper.
+            net_id = name_to_id.get(net_name, 0)
         u = _VIA_UUID_RE.search(block)
         via = Via(
             x=float(m.group(1)),
@@ -3925,7 +4017,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         # pattern and merge — mixed-style files are legal and each segment
         # matches exactly one pattern (issue #79).
         # uuid OPTIONAL here too (PR #534, the KiCad-10 twin).
-        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
+        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"' + _ESC_STR + r'"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
         for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
             segment = Segment(
@@ -3975,7 +4067,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                     float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
                     int(m.group(9)), m.group(10) or "", '(locked yes)' in m.group(0))
     if name_to_id:
-        for m in re.finditer(arc_fields + r'"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?', content, re.DOTALL):
+        for m in re.finditer(arc_fields + r'"' + _ESC_STR + r'"\)(?:\s+\(uuid\s+"([^"]+)"\))?', content, re.DOTALL):
             _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
                         float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
                         name_to_id.get(m.group(9), 0), m.group(10) or "", '(locked yes)' in m.group(0))
@@ -4280,14 +4372,22 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         if net_match:
             net_id = int(net_match.group(1))
         else:
-            # KiCad 10: (net "name") - first net reference in zone. Unescape
-            # before the lookup: name_to_id is keyed by UNESCAPED Net.name
-            # (#369 A12 -- escaped zone names resolved to net 0).
+            # KiCad 10: (net "name") - first net reference in zone. Look up
+            # the RAW token: name_to_id is keyed by the raw FILE TEXT, not by
+            # the unescaped Net.name -- extract_nets says so and every other
+            # site (pads, segments, vias) reads it that way. This comment used
+            # to claim the opposite and unescape first, which is the same
+            # defect #369 A12 meant to fix: measured, a zone on
+            # `/GPIO22\\I2C1_SDA` resolved to net 0 while the identical
+            # segment token resolved to 4.
             if name_to_id:
-                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', zone_content)
+                net_match_v10 = re.search(r'\(net\s+"%s"\)' % _ESC_STR, zone_content)
             if net_match_v10:
+                net_id = name_to_id.get(net_match_v10.group(1), 0)
+                # The DISPLAY name is unescaped, which is all #369 A12 was
+                # ever about (a raw net_name evaded --nets filters and zone
+                # dedup keys). The LOOKUP above is the half that must stay raw.
                 net_name_v10 = _unescape_kicad_string(net_match_v10.group(1))
-                net_id = name_to_id.get(net_name_v10, 0)
             else:
                 # No net clause at all: a NO-NET copper pour (net 0). It still
                 # pours real copper (nitrokey/vfo_ctrl decorative fills), and
@@ -4297,7 +4397,7 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         # Extract net name. Unescaped like every other net_name in the model
         # (#369 A12: zones kept the RAW file text, so backslash/quote-named
         # plane nets evaded --nets filters and zone dedup keys).
-        net_name_match = re.search(r'\(net_name\s+"((?:[^"\\]|\\.)*)"\)', zone_content)
+        net_name_match = re.search(r'\(net_name\s+"%s"\)' % _ESC_STR, zone_content)
         if net_name_match:
             net_name = _unescape_kicad_string(net_name_match.group(1))
         elif net_match_v10 is not None:
@@ -6086,6 +6186,49 @@ def _fp_pads(fp):
     return []
 
 
+def _kipy_geometry_approximations(padstack, primary_layer) -> Tuple[str, ...]:
+    """Shape variants this builder flattens, for the pad to disclose (#974).
+
+    The IPC twin of the SWIG builder's `GetChamferPositions()` /
+    `Padstack().Mode()` probe and of the text parser's `(chamfer`/`(padstack`
+    tokens. It emits the SAME reason strings as both, because a consumer must
+    not be able to tell which front read the board.
+
+    Both approximations are real on this path, not theoretical:
+    `_pad_shape_label` maps a CHAMFEREDRECT to `roundrect`, and the caller
+    reads size/shape from `copper_layers[0]` alone -- so a padstack whose
+    layers differ is modelled by its first copper layer.
+    """
+    out: List[str] = []
+
+    # A chamfer KiCad actually CUTS: any corner flag set. Deliberately not the
+    # PSS_CHAMFEREDRECT shape enum -- the other two fronts key on the corners
+    # (`GetChamferPositions()`, and the `(chamfer` node, which KiCad writes only
+    # when corners are set), so a chamfered-rect with no corner flagged cuts
+    # nothing and must stay silent here too, or this front would disclose an
+    # approximation the other two do not.
+    try:
+        corners = getattr(primary_layer, "chamfered_corners", None)
+        if corners is not None and any(
+                bool(getattr(corners, c, False)) for c in
+                ("top_left", "top_right", "bottom_left", "bottom_right")):
+            out.append('chamfered pad')
+    except Exception:
+        out.append('chamfer geometry unavailable')
+
+    # PST_NORMAL is one padstack for every layer; anything else (front/inner/
+    # back, or fully custom) is per-layer geometry this builder does not model.
+    try:
+        from kipy.proto.board.board_types_pb2 import PadStackType
+        pst_type = getattr(padstack, "type", None)
+        if pst_type is not None and pst_type != PadStackType.PST_NORMAL:
+            out.append('per-layer padstack')
+    except Exception:
+        out.append('padstack geometry unavailable')
+
+    return tuple(out)
+
+
 def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
                          fp_rotation: float, get_layer_name,
                          resolve_net,
@@ -6278,6 +6421,8 @@ def _build_pad_from_kipy(pad, reference: str, fp_x: float, fp_y: float,
             roundrect_rratio=roundrect_rratio,
             rect_rotation=rect_rotation,
             local_clearance=local_clearance,
+            geometry_approximations=_kipy_geometry_approximations(
+                padstack, primary_layer),
         )
     except Exception as e:
         print(f"Warning: failed to read pad {getattr(pad, 'number', '?')}: {e}")
@@ -7262,9 +7407,46 @@ def find_components_by_type(pcb_data: 'PCBData', package_type: str) -> List[Foot
     return matches
 
 
+#: An adjacent-coordinate gap below this is not spacing -- it is float noise, or
+#: two pads that sit at the same point on that axis. 10um is far under any real
+#: pad pitch (the finest in the corpus is a 0.2mm QFN).
+_PITCH_NOISE_MM = 0.01
+
+
 def detect_bga_pitch(footprint: Footprint) -> float:
     """
     Detect the pitch (pad spacing) of a BGA footprint.
+
+    The MEDIAN adjacent gap per axis, then the smaller of the two axes. On a
+    regular array that is exactly the pitch, and unlike a minimum it is not
+    moved by a few odd pads.
+
+    It used to return `min()` over the adjacent gaps of the unique x and y
+    coordinates, which let a SINGLE anomalous pad pair speak for the whole
+    package. Measured over corpus sets 1-5, that read a pitch of ~1e-6mm for
+    cparti_fpga's 256-ball U1 and zynq_ad9364's 400-ball U1 and U2 (all real
+    1.0mm/0.8mm arrays), 0.0125mm for watchy's U6, and 0.006mm for a 2.54mm
+    header -- 78 of 348 footprints under 0.05mm, which is not a pitch any part
+    has. Two consumers acted on those numbers:
+
+      * `auto_detect_bga_exclusion_zones` (and routing_common's --no-bga-zones
+        branch) set `edge_tolerance = margin + pitch * 1.1`, which feeds
+        `connectivity.is_edge_stub`. That compares a pad CENTRE against a
+        bounding box drawn at pad EDGES, so a collapsed tolerance can never
+        match: is_edge_stub returned False for every pad of those four parts,
+        silently disabling the outer-row test that gates ~10
+        layer_swap_optimization branches -- on the largest arrays on the board.
+      * `route_planes._resolve_zone_clearance_impl` computes
+        `gap = pitch - field_via` and takes a min ACROSS fields, so one bad
+        reading poisons the whole board: it returns early warning "pour cannot
+        thread the densest BGA lattice even at the fab floor" and skips the
+        tightening every other field might have needed. Its `if not pitch`
+        guard does not catch this -- the bad values are ~1e-6, not 0. Seen in
+        the recorded corpus on quickfeather, whose 10-pad U5 read 0.095mm and
+        produced a NEGATIVE requirement (`needs -0.253mm < floor 0.1`).
+
+    `diff_pair_routing._field_at` reports the value in diagnostics and says so
+    ("reported, never acted on"); it is unaffected either way.
 
     Returns:
         Pitch in mm, or 1.0 as default if cannot be detected
@@ -7272,22 +7454,27 @@ def detect_bga_pitch(footprint: Footprint) -> float:
     if not footprint.pads or len(footprint.pads) < 2:
         return 1.0
 
-    # Get unique x and y positions
-    x_positions = sorted(set(p.global_x for p in footprint.pads))
-    y_positions = sorted(set(p.global_y for p in footprint.pads))
+    axis_pitches = []
+    for _coord in (lambda q: q.global_x, lambda q: q.global_y):
+        positions = sorted({_coord(p) for p in footprint.pads})
+        gaps = [b - a for a, b in zip(positions, positions[1:])
+                if (b - a) >= _PITCH_NOISE_MM]
+        if gaps:
+            axis_pitches.append(_median(gaps))
 
-    pitches = []
-    if len(x_positions) > 1:
-        x_diffs = [x_positions[i+1] - x_positions[i] for i in range(len(x_positions)-1)]
-        pitches.extend(x_diffs)
-    if len(y_positions) > 1:
-        y_diffs = [y_positions[i+1] - y_positions[i] for i in range(len(y_positions)-1)]
-        pitches.extend(y_diffs)
-
-    if pitches:
-        # Use minimum pitch (most common spacing)
-        return min(pitches)
+    if axis_pitches:
+        return min(axis_pitches)
     return 1.0
+
+
+def _median(values):
+    """Median without importing statistics into this hot module."""
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
 def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.0) -> List[Tuple[float, float, float, float, float]]:

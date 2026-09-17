@@ -232,6 +232,7 @@ Examples:
     legality_before = None
     if not args.courtyard_only:
         legality_before = grade_pad_legality(pcb_data, args.clearance,
+                                             edge_margin=args.board_edge_clearance,
                                              pcb_file=args.input_file)
         print(f"Pad legality before: {legality_before['pad_conflicts']} "
               f"conflict pair(s), {legality_before['hole_conflicts']} hole "
@@ -348,6 +349,7 @@ Examples:
     if legality_before is not None:
         legality_after = grade_pad_legality(parse_kicad_pcb(args.output_file),
                                             args.clearance,
+                                            edge_margin=args.board_edge_clearance,
                                             pcb_file=args.output_file)
         print(f"Pad legality after: {legality_after['pad_conflicts']} "
               f"conflict pair(s), {legality_after['hole_conflicts']} hole "
@@ -359,7 +361,10 @@ Examples:
             print(f"  above the {args.clearance}mm floor: "
                   f"{_req_clause(legality_after)}")
         summary['pad_clearance_required'] = legality_after['required']
-        for key in ('pad_conflicts', 'hole_conflicts', 'oob_pad_count'):
+        summary['pad_edge_before'] = legality_before['pad_edge']
+        summary['pad_edge_after'] = legality_after['pad_edge']
+        for key in ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
+                    'pad_edge_conflicts', 'pad_edge_shortfall', 'pad_edge_unmeasured'):
             summary[f'{key}_before'] = legality_before[key]
             summary[f'{key}_after'] = legality_after[key]
             if legality_after[key] > legality_before[key]:

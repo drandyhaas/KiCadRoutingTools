@@ -7,6 +7,20 @@ aided path: the intent file IS the constraint carrier (zones, edge bands,
 locks, decap rules), so a board whose repo declares one can get a legal,
 deterministic, seeded starting placement instead of a refusal.
 
+IT PLACES THE RESIDUE, NOT THE DECISIONS. Everything below is greedy
+first-fit: a zone is packed radially from its centre, anything unzoned lands
+on its connectivity centroid, and the first rotation that fits is kept. That
+is the right shape for the many small parts and it is not a chooser -- it has
+no representation for a pose that is a DECISION. An edge band says which edge
+and not where along it; nothing says which way a mating face points, so a
+connector is seated at the band's midpoint at whatever angle it came in with,
+which on a pile is a generator default. Measured on esp_prog (run 27): both
+free connectors came out at rotation 0, and one of them put the band midpoint
+through a fixed socket's ground tab on every one of ten seeds. Place and lock
+the parts whose pose is a decision first; seed what is left. The placement
+driver's P1 enforces that, and `--waive seed-connectors:<why>` is how a
+caller deliberately hands a connector to this module instead.
+
 What each intent construct becomes, in placement order:
 
   1. ``edge_connectors``   the declared edge, overhang centered in the band,
@@ -1305,11 +1319,13 @@ def _edge_pose(part, bounds, edge: str, frac: float, overhang: float
 
 
 def _edge_correct(state, ref: str, edge: str, x: float, y: float,
-                  target: float) -> Tuple[float, float, bool]:
+                  target: float, band=None) -> Tuple[float, float, bool]:
     """Walk the pose along the edge normal until the MEASURED overhang hits
     `target`. The analytic pose measures against the bounding box, but the
     grade's rule_edge_connector measures rect_outside_amount against the real
-    Edge.Cuts rings -- on a non-rectangular outline the two differ by the
+    Edge.Cuts rings (since #961 it grades the drawn body instead wherever one
+    can be measured, which `band` and `_body_band_correct` follow) -- on a
+    non-rectangular outline the two differ by the
     local inset, and a seed placed by the bbox grades over its declared band
     (measured on splitflap: 4 connectors 0.1-0.2mm past their max).
 
@@ -1344,7 +1360,58 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
         # that happened to land on its target on the final step is converged.
         amt = state.edge_gate.rect_outside_amount(part.rect(x, y, part.rot))
         converged = abs(target - amt) < 0.02
+    if band is not None and converged:
+        return _body_band_correct(state, ref, edge, x, y, target, band)
     return x, y, converged
+
+
+def _body_band_correct(state, ref: str, edge: str, x: float, y: float,
+                       target: float, band) -> Tuple[float, float, bool]:
+    """#961: the second rung of `_edge_correct`, taken only when the first
+    rung's pose would be REFUSED by the band `edge_seat_ok` now grades.
+
+    The walk above converges `rect_outside_amount` -- the occupancy reading
+    at the gate's margin -- on `target`. Where the part's drawn body can be
+    measured, the band is graded on the body instead (see
+    `connector_geometry`), and the two disagree by the margin and by any gap
+    between courtyard and body: esp_prog's USB1 has a pad-box courtyard 1.6 mm
+    inboard of a body flush with the west edge. A pose the walk converged on
+    and the body band accepts is returned UNCHANGED, so every seat upstream
+    produced that is still legal is bit-identical. Only a pose the band would
+    refuse is moved, analytically, along the declared edge's normal, to put
+    that edge's signed position on `target`; a body that cannot be measured
+    leaves the walk's pose alone. The convergence check is on the SUMMED
+    overhang, so a corner part -- whose second edge one normal cannot fix --
+    is reported unconverged rather than seated.
+
+    What that does NOT promise: that every seat is the one upstream chose.
+    Where the walk's pose was REFUSED, this rung can make it legal, so a
+    ladder that used to fall through to a later rung, rotation or stage can
+    now seat at the earlier one. The Round3 test whose name ends
+    "ladder_seats_on_the_body_band" is that case at its simplest: a body
+    reaching 3 mm west of its only pad seats at x 2.0 here, and nowhere at
+    all without this rung.
+    """
+    from .connector_geometry import geometry_for
+    part = state.parts[ref]
+    geometry = geometry_for(state, state.pcb_data, state.pcb_file)
+    row = geometry.measure(ref, edge, (x, y, part.rot))
+    lo, hi = band
+    if (not row['body_measured']
+            or (lo - 0.02) <= row['body_outside_mm'] <= (hi + 0.02)):
+        return x, y, True
+    err = target - row['body_signed_position_mm']
+    if edge == 'north':
+        y -= err
+    elif edge == 'south':
+        y += err
+    elif edge == 'west':
+        x -= err
+    else:
+        x += err
+    row = geometry.measure(ref, edge, (x, y, part.rot))
+    return x, y, (row['body_measured']
+                  and abs(target - row['body_outside_mm']) < 0.02)
 
 
 def edge_seat_ok(state, part, x: float, y: float, edge: str,
@@ -1391,8 +1458,40 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     """
     r, tht = part.rects(x, y, part.rot)
     amt = state.edge_gate.rect_outside_amount(r)
+    # #961: the band in the currency `rule_edge_connector` now grades it in
+    # -- the drawn body at zero margin where it can be measured, `amt` itself
+    # where it cannot -- so this predicate and the rule read one number, as
+    # they did before (agreeing up to this check's own +/-0.02 tolerance,
+    # which the rule does not share, exactly as upstream).
+    from .connector_geometry import band_amount, geometry_for
+    geometry = geometry_for(state, state.pcb_data, state.pcb_file)
+    amt, _basis, _body = band_amount(geometry, part.ref, edge, amt,
+                                     state.edge_gate.margin,
+                                     pose=(x, y, part.rot))
     if not ((lo - 0.02) <= amt <= (hi + 0.02)):
         return False
+    if _body.get('body_measured'):
+        # The band used to be read off the COURTYARD, which on a connector
+        # that draws none is the pad box itself, so it usually carried pad
+        # copper past the outline. The drawn body never does, and the rule
+        # now names that copper (#961 round 3) -- so this predicate must see
+        # it too, or the seat accepts a pose the grade refuses, which is
+        # exactly what the pad conjunct below exists to prevent. The case is
+        # committed as the Round3 test whose name ends
+        # "refuses_a_pose_whose_pad_copper_is_off_the_board": a body flush
+        # with the edge while a pad sits 0.75 mm past it. CONTAINMENT only,
+        # at zero margin -- the edge-clearance floor is check_drc's question.
+        from .connector_geometry import pad_copper_outside
+        from .legality import BoardOutlineGate
+        zero = getattr(state, '_zero_edge_gate', None)
+        if zero is None:
+            zero = BoardOutlineGate(state.pcb_data.board_info, 0.0)
+            state._zero_edge_gate = zero
+        off = pad_copper_outside(geometry, zero, part.ref, (x, y, part.rot))
+        if off > 1e-9:
+            if reasons is not None:
+                reasons.append(f'pad copper {off:.3f}mm past the outline')
+            return False
     _blockers = state.keepout_blockers(part.ref, (r, tht))
     if _blockers:
         if reasons is not None:
@@ -1824,7 +1923,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                 frac = min(f_hi, max(f_lo, cur + df * step))
                 x, y = _edge_pose(part, state.board, edge, frac, overhang)
                 x, y, converged = _edge_correct(state, ref, edge, x, y,
-                                                overhang)
+                                                overhang, band=(lo, hi_eff))
                 if not converged or not on_board(x, y):
                     continue
                 if conflict_free(x, y, rot):
@@ -2274,15 +2373,63 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # entirely when nothing is declared and no keep-out exists, so a
             # board that declares nothing is unchanged.
             #
-            # The three arming conditions are a UNION: #701's keep-out,
-            # #706's declared position and #797's exclusive zone each need
-            # the ladder, and any one of them alone leaves the other two
-            # parking a connector in the interior.
+            # The four arming conditions are a UNION: #701's keep-out,
+            # #706's declared position, #797's exclusive zone and run 27's
+            # already-placed neighbour each need the ladder, and any one of
+            # them alone leaves the others parking a connector in the
+            # interior or on top of a fixed part.
+            #
+            # RUN 27, the fourth: `placed` at this point is the parts whose
+            # pose is AUTHORITATIVE -- locked in the file, or outside an
+            # explicit `seed_refs` scope -- and this stage seats a connector
+            # without looking at any of them. Measured on esp_prog seeded
+            # from a zone plan: CON2, declared on the south edge with band
+            # 0.25-0.75, took the band's midpoint and put pin 1 through the
+            # fixed USB socket's ground tab (0.198mm2 of pad intersection, a
+            # short). Every one of ten seeds did it, the seed gate passed
+            # them all because a pad conflict is not a budgeted channel, and
+            # `check_assembly` then called each one NOT BUILDABLE. The band
+            # had a clear seat the whole time -- run 26 found it by hand and
+            # narrowed the declaration to 0.52-0.75 to force it.
             _slide = ((0.0,) if not (state.keepouts_for.get(ref)
                                      or _dec is not None
-                                     or state.exclusive_for.get(ref)) else
+                                     or state.exclusive_for.get(ref)
+                                     or placed) else
                       (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                        0.2, -0.2, 0.3, -0.3, 0.4, -0.4))
+
+            def _shorted_by(px, py):
+                """Already-placed refs this seat comes within clearance of.
+
+                `pair_shortfall` measures a CLEARANCE shortfall, not contact,
+                so a seat that merely crowds a placed part arms the slide too.
+                Deliberately the wider predicate: the seat is free to move
+                along its own band, so preferring a pose that is legal over
+                one that is merely not-touching costs nothing.
+
+                `placed`, never `state.parts`: a part still in the pile sits
+                at one meaningless coordinate, and vetoing an honest edge
+                seat against it is what `_seat_edge`'s `exclude` comment
+                warns about -- the connector slides along the edge until one
+                fraction is "free" and hangs off the end. Grows as this stage
+                seats each connector, so two on one edge see each other.
+                """
+                ctx = state.legality_ctx
+                if ctx is None:
+                    return []
+                hit = []
+                for other in sorted(placed):
+                    if other == ref or other not in state.parts:
+                        continue
+                    # The pose as it will be WRITTEN (`apply_move` rounds to
+                    # 3dp below), so the predicate and the seat cannot differ
+                    # by half a micron against a 1e-6 threshold.
+                    sf = ctx.pair_shortfall(
+                        ref, other,
+                        pose_a=(round(px, 3), round(py, 3), part.rot))
+                    if sf.pad > 1e-6 or sf.hole > 1e-6:
+                        hit.append(other)
+                return hit
             # SCALED to the declared window, exactly as `_seat_edge`'s ladder
             # is. Unscaled, a `center_on_edge {tolerance_mm: 1.0}` window on
             # splitflap's 198.12mm north edge is 0.0101 wide and every
@@ -2291,19 +2438,45 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             _sstep = ((f_hi - f_lo) / 0.8) if _win is not None else 1.0
             _base_frac = frac
             _why: List[str] = []
+            # The FIRST rung that is a legal seat but crowds a placed part --
+            # the declared position when rung 0.0 was legal, the nearest legal
+            # rung to it otherwise. So a band with no clear seat anywhere
+            # still gets its declared edge instead of being dropped to the
+            # stages that park a connector in the interior. The conflict is
+            # named on the record and `place_seed`'s gate refuses it; trading
+            # the declared edge for it would lose both.
+            _fallback = None
             for _df in _slide:
                 frac = min(f_hi, max(f_lo, _base_frac + _df * _sstep))
                 _x, _y = _edge_pose(part, bounds, edge, frac, overhang)
-                _x, _y, _conv = _edge_correct(state, ref, edge, _x, _y,
-                                              overhang)
+                _x, _y, _conv = _edge_correct(
+                    state, ref, edge, _x, _y, overhang,
+                    band=(lo, float(hi) if hi is not None
+                          else max(2.0 * overhang, lo + 1.0)))
                 _why = []
                 if _conv and edge_seat_ok(state, part, _x, _y, edge, lo,
                                           float(hi) if hi is not None
                                           else max(2.0 * overhang, lo + 1.0),
                                           reasons=_why):
-                    break
+                    _hit = _shorted_by(_x, _y)
+                    if not _hit:
+                        break
+                    if _fallback is None:
+                        _fallback = (frac, _hit)
+            else:
+                if _fallback is not None:
+                    frac, _hit = _fallback
+                    notes.append(
+                        f"edge connector {ref}: no seat on the {edge} band "
+                        f"clears {', '.join(_hit)}, so it keeps the nearest "
+                        f"legal seat to its declared position and the "
+                        f"conflict is left for the gate -- narrow the band, "
+                        f"or move what it crowds")
             x, y = _edge_pose(part, bounds, edge, frac, overhang)
-            x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
+            x, y, converged = _edge_correct(
+                state, ref, edge, x, y, overhang,
+                band=(lo, float(hi) if hi is not None
+                      else max(2.0 * overhang, lo + 1.0)))
             if not converged:
                 # The walk diverged (it drives a scalar SUM along one axis, so
                 # an along-edge overshoot never cancels). It used to
@@ -3379,6 +3552,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     # bounded one repair pass at 10 pair-movers on a 20-pair board -- the
     # summary said 20 conflicts while only 10 got charged.
     pads = _leg.grade_pad_legality(pcb_data, clearance, worst_n=0,
+                                   edge_margin=board_edge_clearance,
                                    pcb_file=pcb_file)
     print(f"  Repair census: {pads['pad_conflicts']} conflict pair(s), "
           f"all listed")

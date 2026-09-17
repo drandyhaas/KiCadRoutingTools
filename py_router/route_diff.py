@@ -119,8 +119,17 @@ from grid_router import GridObstacleMap, GridRouter
 _NO_PAIRS_MATCHED = False
 
 
-def protection_candidates(routed_results, pcb_data):
+def protection_candidates(routed_results, pcb_data, pairs=None):
     """{net name -> 'diff-pair'} for every pair member this run really routed.
+
+    `pairs` is the run's [(name, DiffPair)] list. With it, protection is decided
+    PER PAIR: BOTH members must be admitted, so half a pair is never protected
+    on its own. It does NOT require the pair to end terminal to terminal -- a
+    partially routed pair still laid coupled copper, and that is precisely what
+    a later step cannot reproduce (see the loop below for the cparti_fpga
+    measurement). Without `pairs` the decision stays per-net (the
+    pre-#521-pair-check behaviour, kept so a caller that has no pair list -- and
+    #906's own gate -- is unchanged).
 
     #521 protects coupled-pair copper because a later chain step cannot
     reproduce it -- P/N geometry, gap, polarity. #906 is which results count.
@@ -157,15 +166,61 @@ def protection_candidates(routed_results, pcb_data):
     candidates and smoothing collapsed 16 spans / 10 nets including the pair.
     After a hand `persist_protected_nets` call: 14 spans / 8 nets, pair intact.
     """
-    out = {}
-    for _nid, _res in (routed_results or {}).items():
+    def _admitted(_nid):
+        _res = (routed_results or {}).get(_nid)
         if not _res or _res.get('failed') or _res.get('selfgraze'):
-            continue
-        if not (_res.get('is_diff_pair') or _res.get('hybrid_escape')):
-            continue
+            return False
+        return bool(_res.get('is_diff_pair') or _res.get('hybrid_escape'))
+
+    def _name(_nid):
         _net = (pcb_data.nets or {}).get(_nid)
-        if _net and _net.name:
-            out[_net.name] = 'diff-pair'
+        return _net.name if _net and _net.name else None
+
+    if pairs is None:
+        out = {}
+        for _nid in (routed_results or {}):
+            if _admitted(_nid) and _name(_nid):
+                out[_name(_nid)] = 'diff-pair'
+        return out
+
+    # PER PAIR, and BOTH members must carry pair-produced copper. Protection is
+    # for copper a later step cannot reproduce -- a coupled P/N geometry. Half a
+    # pair is not that: if one member failed or self-grazed, the survivor's
+    # copper is ordinary single-ended routing the next step can redo, and
+    # freezing it only takes a rip candidate away from whatever still has to get
+    # through. This function used to decide per NET off each member's own result
+    # dict, so a survivor was protected on its own, and the `is_diff_pair` path
+    # never looked at the partner at all.
+    #
+    # WHAT THIS DELIBERATELY DOES *NOT* REQUIRE: that the pair ends terminal to
+    # terminal. A PARTIALLY routed pair still laid coupled copper, and coupled
+    # copper is exactly what a later step cannot redo. An earlier cut of this
+    # function added `_member_connected` on both members and that was wrong --
+    # it cannot tell a pair that failed from one that handed a leg off BY
+    # DESIGN. Measured on cparti_fpga, whose /USB/USB_D+ /USB/USB_D- is a
+    # 3-terminal multi-point pair:
+    #
+    #     DIRECT HYBRID: coupled middle on F.Cu + 14 leg seg(s)
+    #     Leg 1 via hybrid (coupled middle + single-ended escapes)
+    #       electrically short (< 3.0mm coupled) - deferring leg to single-ended
+    #
+    # The coupled middle is real and on the board; only the short leg was
+    # deferred, which is the engine working as intended (the manifest's very
+    # next step routes those two nets single-ended). `_member_connected`
+    # reported "not connected", both members lost protection, and the chain's
+    # later rip-up passes were free to tear out the coupled middle.
+    #
+    # The failed-partner case that motivated the per-pair rule is already
+    # handled above: `_admitted` is False for a member whose result is missing,
+    # `failed` or `selfgraze`, so such a pair never reaches this loop.
+    out = {}
+    for _pn, _pair in pairs:
+        p_id, n_id = _pair.p_net_id, _pair.n_net_id
+        if not (_admitted(p_id) and _admitted(n_id)):
+            continue
+        for _nid in (p_id, n_id):
+            if _name(_nid):
+                out[_name(_nid)] = 'diff-pair'
     return out
 
 
@@ -1425,8 +1480,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 })
 
     # Sync pcb_data with length-matched segments
+    # Stub layer-swap vias ride all_swap_vias, not any result's new_vias, and
+    # the writer emits them -- so to the sync they are originals (see route.py).
+    # Dropping them severs every layer-swapped leg from its pad in pcb_data, and
+    # the dead-end sweep that runs next then trims the whole leg off the board.
     sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config,
-                           original_via_ids=original_via_ids)
+                           original_via_ids=(original_via_ids
+                                             | {id(v) for v in all_swap_vias}))
 
     # #521: coupled pair copper is an invariant later chain steps cannot
     # reproduce (P/N geometry, gap, polarity) -- mark routed members protected
@@ -1434,7 +1494,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # AI-plan executor inherit the noting; the writeback next to the DRC-floor
     # persistence records it in the sibling .kicad_pro.
     from protected_nets import note_protection_candidates
-    _prot = protection_candidates(routed_results, pcb_data)
+    _prot = protection_candidates(routed_results, pcb_data,
+                                  pairs=diff_pair_ids_to_route)
     if _prot:
         note_protection_candidates(_prot)
 

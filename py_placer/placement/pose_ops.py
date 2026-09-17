@@ -37,7 +37,9 @@ Two rules worth stating because getting either wrong is silent:
 from __future__ import annotations
 
 import os
+import math
 import shutil
+import stat
 import tempfile
 from typing import Dict, List, Optional, Sequence
 
@@ -64,7 +66,8 @@ FACE_ALIASES = {'n': 'north', 'north': 'north',
 
 #: The legality categories a request may not WORSEN. Board-level counts from
 #: `grade_pad_legality`.
-LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count')
+LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
+                 'pad_edge_conflicts', 'pad_edge_unmeasured')
 
 #: The MAGNITUDES, and they are not a nicety: a count arm alone accepts a
 #: request that keeps the tally and deepens the damage. Measured on the
@@ -74,7 +77,7 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count')
 #: the same mechanism at 2.008 -> 101.008 mm.) CLAUDE.md calls copper outside
 #: the
 #: outline the top-priority placement defect, so its AMOUNT is an arm too.
-MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount')
+MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall')
 MAGNITUDE_EPS = 1e-6
 
 
@@ -115,6 +118,9 @@ def resolve_knobs(board_path: str, clearance=None, board_edge_clearance=None,
     import routing_defaults as defaults
     clr, edge, knobs = list_nets.board_floor_knobs(
         board_path, clearance, board_edge_clearance)
+    if not math.isfinite(edge) or edge < 0:
+        raise PoseRefusal('board-edge-clearance must be finite and nonnegative (mm); '
+                          'got %r' % edge, code=2)
     tw = track_width
     if tw is None:
         tw = (list_nets.board_default_netclass_param(board_path, 'track_width')
@@ -355,7 +361,8 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
 # legality
 # ---------------------------------------------------------------------------
 
-def grade(pcb_data, board_path: str, clearance: float) -> Dict:
+def grade(pcb_data, board_path: str, clearance: float,
+          board_edge_clearance=None) -> Dict:
     """`grade_pad_legality` at this board's own poses -- never a re-derivation.
 
     `pcb_file` is passed so `PadClearanceModel` can read the netclasses, the
@@ -364,7 +371,8 @@ def grade(pcb_data, board_path: str, clearance: float) -> Dict:
     would, and one that declares them is graded the way check_drc will.
     """
     from placement.legality import grade_pad_legality
-    return grade_pad_legality(pcb_data, clearance, pcb_file=board_path)
+    return grade_pad_legality(pcb_data, clearance, pcb_file=board_path,
+                              edge_margin=board_edge_clearance)
 
 
 def worsened(before: Dict, after: Dict) -> List[str]:
@@ -378,7 +386,8 @@ def worsened(before: Dict, after: Dict) -> List[str]:
 
 def is_clean(report: Dict) -> bool:
     """Is this board legal in the ABSOLUTE sense, not merely no worse?"""
-    return not (any(report.get(k) for k in LEGALITY_KEYS)
+    return not (report.get('pad_edge', {}).get('complete') is False
+                or any(report.get(k) for k in LEGALITY_KEYS)
                 or any((report.get(k) or 0.0) > MAGNITUDE_EPS
                        for k in MAGNITUDE_KEYS))
 
@@ -390,6 +399,12 @@ def _legality_row(before: Dict, after: Dict) -> Dict:
         row[key + '_after'] = after.get(key)
     row['pad_clearance_required'] = after.get('required')
     row['worst'] = after.get('worst')
+    row['pad_edge_before'] = before.get('pad_edge')
+    row['pad_edge_after'] = after.get('pad_edge')
+    row['oob_pad_copper_count_before'] = before.get('oob_pad_copper_count')
+    row['oob_pad_copper_count_after'] = after.get('oob_pad_copper_count')
+    row['oob_pad_copper_refs_after'] = after.get('oob_pad_copper_refs')
+    row['oob_pad_basis'] = after.get('oob_pad_basis')
     return row
 
 
@@ -577,8 +592,11 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
     if not dry_run and not out_path:
         raise PoseRefusal("a write needs an output path; pass one, or "
                           "--dry-run to grade without writing", code=2)
+    requested = {'clearance': clearance, 'board_edge_clearance': board_edge_clearance}
     clearance, board_edge_clearance, track_width, knobs = resolve_knobs(
         board_path, clearance, board_edge_clearance, track_width)
+    for key, value in requested.items():
+        knobs[key].update(requested=value, units='mm')
     pcb = pcb_data if pcb_data is not None else parse_kicad_pcb(board_path)
 
     placements, notes = resolve_ops(pcb, ops, clearance=clearance,
@@ -634,7 +652,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         'would_write': out_path,
     }
 
-    before = grade(pcb, board_path, clearance)
+    before = grade(pcb, board_path, clearance, board_edge_clearance)
     stage = tempfile.TemporaryDirectory(prefix='place_pose_')
     try:
         cand = os.path.join(stage.name, 'candidate.kicad_pcb')
@@ -644,7 +662,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             shutil.copyfile(board_path, cand)
         copy_siblings(board_path, cand)
         cand_pcb = parse_kicad_pcb(cand)
-        after = grade(cand_pcb, cand, clearance)
+        after = grade(cand_pcb, cand, clearance, board_edge_clearance)
         bad = worsened(before, after)
 
         if snap and len(placements) != 1:
@@ -655,7 +673,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             summary['snap_census'] = {
                 'skipped': 'snap applies to exactly one pose op; this call '
                            'carries %d' % len(placements)}
-        if bad and snap and len(placements) == 1:
+        if (bad or (strict and not is_clean(after))) and snap and len(placements) == 1:
             # Rank around the REQUESTED point, not the part's old one: the
             # sweep in `rank_poses` is centred on where the part sits in the
             # board it is handed, and on the staged board that is exactly
@@ -689,7 +707,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 write_placed_output(board_path, cand, trial)
                 copy_siblings(board_path, cand)
                 pcb_c = parse_kicad_pcb(cand)
-                g = grade(pcb_c, cand, clearance)
+                g = grade(pcb_c, cand, clearance, board_edge_clearance)
                 return trial, pcb_c, g, worsened(before, g)
 
             # TWO PHASES, each with its OWN budget, and the reason is the
@@ -714,7 +732,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             for cp in [p for p in poses if p['rung'] == 'ranked'][:snap_tries]:
                 tried += 1
                 trial, pcb_c, g, b = _grade_pose(cp)
-                if not b:
+                if not b and (not strict or is_clean(g)):
                     chosen = (cp, trial, pcb_c, g, b)
                     break
             limit = chosen[0]['dist_mm'] if chosen else float('inf')
@@ -723,7 +741,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                        and (p['dist_mm'] or 0.0) < limit][:snap_tries]:
                 tried += 1
                 trial, pcb_c, g, b = _grade_pose(cp)
-                if not b:
+                if not b and (not strict or is_clean(g)):
                     chosen = (cp, trial, pcb_c, g, b)   # strictly nearer
                     break
             summary['snap_census']['candidates_tried'] = tried
@@ -763,7 +781,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 write_placed_output(board_path, cand, placements)
                 copy_siblings(board_path, cand)
                 cand_pcb = parse_kicad_pcb(cand)
-                after = grade(cand_pcb, cand, clearance)
+                after = grade(cand_pcb, cand, clearance, board_edge_clearance)
                 bad = worsened(before, after)
 
         # A `face` op's rotation is PREDICTED (FACE_CYCLE) and then MEASURED on
@@ -815,6 +833,9 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 face_miss.append(n)
 
         summary.update(_legality_row(before, after))
+        for channel in ('pad_edge_before', 'pad_edge_after'):
+            summary[channel]['source'] = knobs['board_edge_clearance']['source']
+            summary[channel]['requested_mm'] = requested['board_edge_clearance']
         # TWO keys, because one word cannot carry both facts and the wrong one
         # was being published: `legal` used to mean "no worse than the input",
         # so a board still carrying a pad conflict reported `legal: true`.
@@ -823,8 +844,9 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         summary['no_worse'] = not bad
         summary['legal'] = is_clean(after)
         summary['legal_basis'] = (
-            'legal = the board is clean at this pose; no_worse = the verdict '
-            'this verb refuses on (relative to the input board)')
+            'legal = measured pad/hole/outline channels are clean and edge '
+            'coverage is complete; no_worse = no measured category worsened '
+            'relative to the input board. Neither verifies bodies, routing or fill.')
 
         if face_miss:
             reason = '; '.join(
@@ -930,51 +952,113 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 summary['output'] = None
                 raise PoseRefusal(reason, summary=summary, unlock_failed=still)
 
-        _promote(cand, out_path, summary)
+        _promote(cand, out_path, summary, input_file=board_path,
+                 placements=placements)
         return summary
     finally:
         stage.cleanup()
 
 
-def _promote(staged: str, out_path: str, summary: Optional[Dict] = None) -> None:
+def _promote(staged: str, out_path: str, summary: Optional[Dict] = None, *,
+             input_file: Optional[str] = None,
+             placements: Sequence[Dict] = ()) -> None:
     """Move a finished staged board and its siblings onto the output path.
 
-    ALL OR NOTHING. Every file is copied to a `.krt-tmp` name beside its
-    destination and only then `os.replace`d into place, so a failure part way
-    leaves the previous output exactly as it was. It used to copy the board and
-    then the siblings inside one `try`, and a sibling that could not be written
-    left the NEW board on disk beside the OLD project -- the #441 pairing
-    hazard -- while the refusal said "nothing was written". Measured with a
-    read-only `.kicad_pro`: an 11-byte output file came back at 831914 bytes
-    and the summary reported `output: null`.
+    Stage all files and back up prior destinations before replacing anything.
+    Roll back completed replacements on failure. If restoration itself fails,
+    report the affected paths and retain backups instead of claiming atomicity.
+    Destination-only requirements cannot join a board graded without them.
+
+    PROVENANCE IS RECORDED HERE, against `out_path` (#960). The candidate was
+    written in a temp dir, and `record_write` finds the regime by walking up
+    from the path it is handed -- so the writer's own call, made for the temp
+    path, found no regime, returned None and refused nothing, and this copy
+    then landed the board in an armed work dir with no row. `input_file` is the
+    board `placements` were resolved against: a row's `refs_moved` is the
+    input diffed against the placements, so recording against the staged
+    candidate would claim nothing at all.
     """
+    if placements and input_file is None:
+        raise TypeError("_promote needs input_file when placements are given: "
+                        "the provenance row diffs the placements against it")
     from copy_board import SIBLING_EXTS
+    from placement import provenance
     src_base = os.path.splitext(staged)[0]
     dst_base = os.path.splitext(out_path)[0]
     pairs = [(staged, out_path)]
+    extra_requirements = [dst_base + ext for ext in SIBLING_EXTS
+                          if ext != '.kicad_prl' and os.path.exists(dst_base + ext)
+                          and not os.path.isfile(src_base + ext)]
+    if extra_requirements:
+        doc = dict(summary or {})
+        reason = (
+            'output has requirement siblings absent from the graded input: %s. '
+            'Use a fresh output path or reconcile these declarations with the input.'
+            % ', '.join(extra_requirements))
+        doc.update(output=None, refused='; '.join(x for x in (doc.get('refused'), reason) if x))
+        raise PoseRefusal(doc['refused'], code=2, summary=doc)
     for ext in SIBLING_EXTS:
         if os.path.isfile(src_base + ext):
             pairs.append((src_base + ext, dst_base + ext))
+    # BEFORE the first copy, so an armed work dir with no declared lever
+    # refuses with the destination untouched. And before the replace for a
+    # second reason: on an in-place write `input_file` IS `out_path`, and the
+    # diff is only meaningful while that file still holds the incumbent board.
+    provenance.record_write(input_file or staged, out_path, list(placements),
+                            pending=True)
     staged_tmps = []
+    backups = {}
+    replaced = []
+    recovery_paths = []
     try:
+        for _src, dst in pairs:
+            if os.path.lexists(dst) and (not os.path.isfile(dst) or os.path.islink(dst)):
+                raise OSError('destination is not a regular file: %s' % dst)
         for src, dst in pairs:
             tmp = dst + '.krt-tmp'
             shutil.copyfile(src, tmp)
             staged_tmps.append((tmp, dst))
+        for _src, dst in pairs:
+            backups[dst] = None
+            if os.path.exists(dst):
+                fd, backup = tempfile.mkstemp(prefix='.krt-backup-', dir=os.path.dirname(
+                    os.path.abspath(dst)))
+                os.close(fd)
+                backups[dst] = backup
+                shutil.copy2(dst, backup)
         # NOT `pop()` before the replace: a failing `os.replace` would then
         # have already removed its own tmp from the cleanup list, and the file
         # it could not move was left beside the output. Remove only on
         # success, so `finally` still owns everything that did not land.
         for entry in list(reversed(staged_tmps)):
             os.replace(entry[0], entry[1])
+            replaced.append(entry[1])
             staged_tmps.remove(entry)
+        # Inside the `try`: a ledger that cannot be appended to rolls the board
+        # back with everything else, so no board lands without its row.
+        provenance.commit_write(out_path)
     except OSError as exc:
-        # A missing output directory used to surface as a FileNotFoundError
-        # traceback and an exit 1 that the CLI's own table does not list.
-        reason = ("cannot write %s: %s. Nothing was written: the board and "
-                  "its siblings are staged beside their destination and moved "
-                  "into place together, so a failure here leaves the previous "
-                  "output untouched." % (out_path, exc))
+        rollback_errors = []
+        for dst in reversed(replaced):
+            try:
+                backup = backups[dst]
+                if backup is None:
+                    os.remove(dst)
+                else:
+                    os.replace(backup, dst)
+                    backups[dst] = None
+            except OSError as restore_error:
+                rollback_errors.append({'path': dst, 'error': str(restore_error),
+                                        'backup': backups[dst]})
+                if backups[dst]:
+                    recovery_paths.append(backups[dst])
+        reason = 'cannot write %s: %s. ' % (out_path, exc)
+        if rollback_errors:
+            reason += ('Output partially changed; restoration failed for %s. '
+                       'Retained backup paths are listed in rollback_errors.'
+                       % ', '.join(row['path'] for row in rollback_errors))
+        else:
+            reason += 'Nothing was written: previous output files were preserved or restored.'
         doc = dict(summary or {})
         # The grade this run already did is kept, and any finding it was
         # forced past is kept WITH the write error rather than replaced by it:
@@ -982,8 +1066,20 @@ def _promote(staged: str, out_path: str, summary: Optional[Dict] = None) -> None
         # waived finding disappears.
         doc['refused'] = '; '.join(x for x in (doc.get('refused'), reason) if x)
         doc['output'] = None
+        doc['output_state'] = 'partial' if rollback_errors else 'unchanged'
+        doc['rollback_errors'] = rollback_errors
         raise PoseRefusal(reason, code=2, summary=doc)
     finally:
+        # A no-op after a commit. Otherwise the write did not land, and its row
+        # must not stay pending for some later commit of this path to pick up.
+        provenance.discard_write(out_path)
+        for backup in backups.values():
+            if backup and backup not in recovery_paths:
+                try:
+                    os.chmod(backup, os.stat(backup).st_mode | stat.S_IWUSR)
+                    os.remove(backup)
+                except OSError:
+                    pass
         for tmp, _dst in staged_tmps:
             try:
                 os.remove(tmp)

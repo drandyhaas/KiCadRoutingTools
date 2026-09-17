@@ -442,6 +442,49 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     return hits
 
 
+def partition_force_restores(force_ripped, pcb_data: PCBData,
+                             clearance: float, skip_net_ids=None):
+    """Split --force-reroute's saved copper into what may be restored and what
+    may not, and APPLY the restores to pcb_data in order.
+
+    Returns ``(restored_ids, refused_ids)``.
+
+    `--force-reroute` strips every named net up front, so the nets it ripped
+    contend for one corridor: whichever routes first may legitimately occupy
+    space a later one used to hold. Re-adding a failed net's saved copper
+    verbatim then ships a DIFFERENT-NET short -- the exact stale-geometry case
+    #134 refuses on the rip/reroute path, which this path did not check.
+    Measured on ecp5_mini: the step rips /PE26+ and /PE26-, /PE26+ routes a via
+    into the vacated corridor at (130.20, 85.10), /PE26- fails, and its original
+    via returns at (130.30, 85.10) -- via-via and via-drill in CONTACT plus
+    three via-segment grazes, 5 DRC on a board that was otherwise clean.
+
+    The intent of the restore is kept: a failed replan must not be paid for by
+    deleting a working route, so every net whose saved copper does NOT collide
+    is still restored. Only the colliding ones are refused, and those ship
+    unrouted -- honest, and strictly better than copper that is both shorted and
+    disconnected.
+
+    Order matters and is deliberate: each restore is applied before the next is
+    tested, so two refused-then-restored nets cannot be re-admitted on top of
+    each other. `skip_net_ids` are nets whose replan DID land copper; they keep
+    it and are not candidates here.
+    """
+    skip = set(skip_net_ids or ())
+    restored, refused = [], []
+    for net_id, (segs, vias) in force_ripped.items():
+        if net_id in skip:
+            continue
+        saved = {'new_segments': segs, 'new_vias': vias}
+        if _saved_route_collides(saved, pcb_data, [net_id], clearance):
+            refused.append(net_id)
+            continue
+        pcb_data.segments = list(pcb_data.segments) + list(segs)
+        pcb_data.vias = list(pcb_data.vias) + list(vias)
+        restored.append(net_id)
+    return restored, refused
+
+
 def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 was_in_results: bool, pcb_data: PCBData, routed_net_ids: List[int],
                 routed_net_paths: Dict[int, List], routed_results: Dict[int, dict],

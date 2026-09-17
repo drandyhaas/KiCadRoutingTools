@@ -308,23 +308,37 @@ print('stacked at defaults:', len({{(round(f.x,3), round(f.y,3))
       for f in p.footprints.values()}}) < len(p.footprints) / 2)"
 
 ZONE PLAN {a.zone_plan}: {plan['zoned']} zoned block(s) cover all {plan['movable']}
-movable part(s); {plan['locked']} must_lock and {plan['edge']} declared edge
-connector(s) are not the seed's to arrange. The plan is where the arrangement
-is DECIDED: run 26 seeded from one zone and then hand-placed most of its parts.
+movable part(s); {plan['locked']} claimed by must_lock or pinned in the file
+({plan['pinned']} pinned, the only kind the seeder cannot move), {plan['edge']}
+declared edge connector(s) of which {plan['seeded_edge']} are the seeder's to choose.
+
+THE SEEDER PLACES THE RESIDUE. It is a greedy first-fit that packs declared
+zones and drops everything else at its connectivity centroid, at the first
+rotation that fits -- so it is good at the many small parts and has no
+representation at all for a decision. Decide these YOURSELF, above, and lock
+them; what is left is what the seeder is for.
 
 Walk the ladder in order and say which rung applies:
 
 1. The repo has its own seeder -> run it, then treat the output as a rough
    placement (P4/P5).
-2. Otherwise seed FROM THE PLAN, several seeds, and rank only the ones that
-   pass their own gate (exit 4 names the rule; 0 of N passing is the PLAN's
-   problem, not the seeder's -- run 26 had none pass and hand-placed instead):
+2. Otherwise: DECIDE, then seed the rest.
+   a. Place and lock every part whose pose is a decision -- the connectors
+      (which edge, where along it, which way the mating face points), the
+      mechanically-fixed parts, anything a spec pins. P2 is the stage that
+      enumerates them; `place_pose set/rotate/lock` is the verb, and it
+      refuses a pose that makes the board's pad legality worse.
+   b. Seed the rest FROM THE PLAN, several seeds, and rank only the ones that
+      pass their own gate (exit 4 names the rule; none passing is the PLAN's
+      problem, not the seeder's -- run 26 had none pass and hand-placed
+      everything instead):
        python3 -X utf8 py_placer/compare_seeds.py {a.board} --intent {a.zone_plan} \\
            --seeds 0 1 2 --out-dir wk/seedcmp
-   Then FACE the rows. The seeder keeps the first rotation that fits, so read
-   `edge_facing` per part off the best seed and turn every part whose connected
-   pads face the outline with nothing beyond (run 26's regulator: 3 of 3 pins
-   0.40 mm from the edge, and a review with no number wrote PASS):
+   c. Then FACE the rows. The seeder keeps the first rotation that fits, so
+      read `edge_facing` per part off the best seed and turn every part whose
+      connected pads face the outline with nothing beyond (run 26's regulator:
+      3 of 3 pins 0.40 mm from the edge, and a review with no number wrote
+      PASS):
        python3 -X utf8 py_placer/placement_score.py wk/seedcmp/seed_<best>.kicad_pcb \\
            --intent {a.zone_plan} --json wk/terms_seed.json
        python3 -X utf8 py_placer/place_pose.py wk/seedcmp/seed_<best>.kicad_pcb \\
@@ -1124,8 +1138,26 @@ def _guard_zone_plan(a):
     for z in zoned:
         covered.update(members.get(z.name, ()))
     movable = {ref for ref, fp_ in pcb.footprints.items() if fp_.pads}
-    locked = {ref for ref in movable
-              if any(fnmatch.fnmatch(ref, pat) for pat in intent.must_lock)}
+    # TWO DIFFERENT LOCKS, and they answer two different questions.
+    #
+    # `file_locked` is `(locked yes)` in the board, which is what actually
+    # pins a pose: the seeder puts such a ref in `placed` before stage 1 runs
+    # and every stage skips it. `must_lock` is a claim about the FILE -- "this
+    # ought to be locked" -- that the seeder honours by STAMPING the lock into
+    # its OUTPUT, after it has seated the part. So must_lock answers "is this
+    # the seed's to arrange" (stage 1.5 seats it at its current pose where it
+    # can) and does NOT answer "is its pose already decided".
+    #
+    # Measured, and this is the review finding that corrected this guard: a
+    # declared edge connector with `must_lock` and no file lock is seated by
+    # stage 1 at the band midpoint at its incoming angle, byte for byte as if
+    # nothing had been declared at all. Accepting must_lock here would have
+    # let the plan through on the very route SKILL.md recommends.
+    file_locked = {ref for ref in movable
+                   if getattr(pcb.footprints[ref], 'locked', False)}
+    locked = file_locked | {ref for ref in movable
+                            if any(fnmatch.fnmatch(ref, pat)
+                                   for pat in intent.must_lock)}
     claimed = {str(c.get('ref')) for c in intent.edge_claims()}
     edge = {ref for ref in movable if ref in claimed}
     left = sorted(movable - locked - edge - covered)
@@ -1137,8 +1169,57 @@ def _guard_zone_plan(a):
             'rotation that fits -- the pose nobody decided. Add each to a '
             'block with a zone, or declare it must_lock / an edge connector '
             'if that is what it is.')
+    # THE SEEDER PLACES THE RESIDUE, NOT THE DECISIONS (run 27).
+    #
+    # A declared edge connector states its EDGE and nothing else that matters:
+    # where along the edge it sits and which way its mating face points are
+    # both decisions, and the seeder has neither. It takes the declared band's
+    # midpoint (or an even distribution when no band is declared) and the
+    # part's incoming angle, which on a pile is a generator default. Measured
+    # on a 21-part 2-layer board: both free connectors came out at rotation 0
+    # with their mating faces pointing nowhere in particular, and one of them
+    # took the band midpoint straight through a fixed socket's ground tab.
+    #
+    # So a declared edge connector is placed BY THE AUTHOR and locked, and the
+    # seed fills in around it. `--waive seed-connectors:<reason>` is the way
+    # to hand one to the seeder deliberately -- the escape exists because a
+    # board whose connectors genuinely have a free run along their edge is a
+    # real case, and it should be a decision on the record rather than a
+    # default nobody chose.
+    # `file_locked`, NOT `locked`: only the file lock keeps stage 1 off it.
+    free_edge = sorted(edge - file_locked)
+    _sw = _waiver_for(a, 'seed-connectors')
+    if free_edge and _sw == '':
+        return False, (
+            '--waive seed-connectors: needs a REASON after the colon. Handing '
+            f'{", ".join(free_edge)} to the seeder is a decision about who '
+            'chooses those poses, and a waiver with no reason is a flag that '
+            'makes the refusal go away rather than an answer to it.')
+    if free_edge and _sw is None:
+        return False, (
+            f'{len(free_edge)} declared edge connector(s) carry no '
+            f'`(locked yes)` in the board: {", ".join(free_edge)}. An edge is '
+            'the only thing their declaration states; where along it they sit '
+            'and which way the mating face points are decisions the seeder '
+            'does not have, so it takes the band midpoint at the incoming '
+            'angle. Place each one yourself and lock it, then seed the rest:\n'
+            f'  python3 -X utf8 py_placer/place_pose.py {a.board} {a.board} '
+            'set <REF> <X> <Y> --rot <DEG>\n'
+            f'  python3 -X utf8 py_placer/place_pose.py {a.board} {a.board} '
+            'lock <REF>\n'
+            'An intent `must_lock` does NOT do this: it is a claim about the '
+            'file that the seeder stamps into its OUTPUT after seating the '
+            'part, so a must_lock connector is seated at the band midpoint '
+            'exactly as an undeclared one is (measured). The FILE lock is '
+            'what stage 1 skips.\n'
+            '(P2 is the stage for deciding them; `check_floorplan --intent '
+            '<plan> --json` grades the result against the declared edge and '
+            'band.)\n\n'
+            'Or hand them to the seeder on the record: '
+            '--waive seed-connectors:<why the seeder may choose these poses>')
     return True, {'zoned': len(zoned), 'movable': len(movable - locked - edge),
-                  'locked': len(locked), 'edge': len(edge)}
+                  'locked': len(locked), 'pinned': len(file_locked),
+                  'edge': len(edge), 'seeded_edge': len(free_edge)}
 
 
 def _guard_damage(a):
@@ -1723,12 +1804,20 @@ def _guard_congestion(a):
 #: two limits (refuses unscoped; leaves zone pours) and the prohibition. A
 #: mandate with no lever is worse than three lines of body.
 #:
+#: P1 45 -> 60 (run 27). The ladder's rung 2 became "decide, THEN seed the
+#: rest": a paragraph saying what the seeder is (a greedy first-fit with no
+#: representation for a decision) and a sub-rung for placing and locking the
+#: connectors and the mechanically-fixed parts before it runs. Measured on a
+#: 21-part 2-layer board: left to the seeder, both free connectors came out at
+#: rotation 0 and one of them took its declared band's midpoint through a
+#: fixed socket's ground tab, on every one of ten seeds.
+#:
 #: P1 35 -> 45 and P0 75 -> 78 (run 26). P1 seeds FROM A ZONE PLAN now: its
 #: body gained the plan's coverage line, a ranked-seeds command in place of
 #: the single seed, and a facing step -- the three things run 26's placement
 #: half did not have and hand-placed most of its parts without. P0 gained the
 #: three-line handoff that carries the plan into P1, since P1 refuses without it.
-_BODY_CEILING = {'P-brief': 60, 'P0': 78, 'P1': 45, 'P2': 45, 'P3': 80,
+_BODY_CEILING = {'P-brief': 60, 'P0': 78, 'P1': 60, 'P2': 45, 'P3': 80,
                  'P4': 100, 'P5': 45, 'P6': 30, 'P-close': 60}
 
 STAGES = {
@@ -1883,13 +1972,16 @@ def _fake_render(board, halo=100.0, crossings=100.0, hpwl=1000.0, moved=3):
     }
 
 
-def _tiny_board(path, refs, unconnected=()):
+def _tiny_board(path, refs, unconnected=(), locked=()):
     """A board `parse_kicad_pcb` reads: an outline and one part per ref, each
     with one pad -- connected, except for the refs in `unconnected` (a
-    mounting hole, a fiducial), which the seeder moves all the same. On disk,
+    mounting hole, a fiducial), which the seeder moves all the same. Refs in
+    `locked` carry `(locked yes)`, which is what `place_pose lock` writes and
+    what the zone-plan guard reads as "the author decided this one". On disk,
     because the guard reads the file the flag names."""
     fps = ''.join(
-        f'  (footprint "test:FP" (layer "F.Cu") (uuid "fp-{r}") (at {2 + 3 * i} 2)\n'
+        f'  (footprint "test:FP" (layer "F.Cu") (uuid "fp-{r}") (at {2 + 3 * i} 2)'
+        f'{" (locked yes)" if r in locked else ""}\n'
         f'    (property "Reference" "{r}" (at 0 0))\n'
         f'    (pad "1" smd rect (at 0 0) (size 0.6 0.8) (layers "F.Cu") '
         f'(net {0 if r in unconnected else 1} "{"" if r in unconnected else "/A"}") (uuid "p1-{r}"))\n'
@@ -2301,6 +2393,23 @@ def _refusal_scenarios(tmp):
          ['--board', tiny, '--zone-plan', wrote('zp_half.json', _zone_plan_doc(
              [{'name': 'a', 'refs': ['U1'], 'zone': [0, 0, 5, 5],
                'note': 'U1 only'}]))]
+         + damaged),
+        # run 27: the seeder does not choose a declared connector's pose, and
+        # the hand-over that lets it needs a reason. Both arms, because the
+        # no-reason one is a different text.
+        ('a declared connector left for the seeder',
+         ['--board', tiny, '--zone-plan', wrote('zp_ec.json', _zone_plan_doc(
+             [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
+               'note': 'the ICs'}],
+             edge_connectors=[{'ref': 'U2', 'edge': 'west'}]))]
+         + damaged),
+        ('a seed-connectors waiver with no reason',
+         ['--board', tiny, '--zone-plan', wrote(
+             'zp_ec2.json', _zone_plan_doc(
+                 [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
+                   'note': 'the ICs'}],
+                 edge_connectors=[{'ref': 'U2', 'edge': 'west'}])),
+            '--waive', 'seed-connectors:']
          + damaged),
         # P3's lock advice
         ('no lock advice', base + damaged),
@@ -2736,18 +2845,59 @@ def _self_test():
         want(out.startswith('<error>') and '3 movable part(s)' in out
              and 'H1, J1, U2' in out,
              'P1 names every movable part the plan leaves out')
-        # A declared edge connector is exempt only when it CLAIMS an edge
-        # (`edge_claims()`, what the seeder's edge stage seats); a
+        # A declared edge connector is exempt from ZONING only when it CLAIMS
+        # an edge (`edge_claims()`, what the seeder's edge stage seats); a
         # connector_affinity entry is seeded at its centroid like any part.
-        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
+        # It is exempt from being DECIDED never: run 27.
+        _plan_ec = _zp(
             'lock.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
                            'note': 'the two ICs'}],
-            must_lock=['H*'], edge_connectors=[{'ref': 'J1', 'edge': 'west'}])]))
+            must_lock=['H*'], edge_connectors=[{'ref': 'J1', 'edge': 'west'}])
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _plan_ec]))
+        want(out.startswith('<error>')
+             and 'carry no `(locked yes)` in the board' in out
+             and 'J1' in out and 'place_pose.py' in out,
+             'P1 refuses to let the seeder choose a declared connector\'s pose')
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _plan_ec,
+                                  '--waive', 'seed-connectors:']))
+        want(out.startswith('<error>') and 'needs a REASON' in out,
+             '...and the waiver that hands it over needs a reason')
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _plan_ec,
+                                  '--waive',
+                                  'seed-connectors:the west edge is clear']))
         want(out.startswith('<stage_instructions')
              and '1 zoned block(s) cover all 2' in out
-             and '1 must_lock and 1 declared edge' in out,
-             'P1 proceeds once every movable part is zoned, locked or a '
-             'declared edge connector, and prints the census')
+             and 'of which 1 are the seeder' in out,
+             'P1 proceeds once the hand-over is on the record, and says how '
+             'many connectors the seeder is choosing')
+        # `must_lock` DOES NOT SATISFY THIS, and the review is why the arm
+        # says so: the seeder stamps must_lock into its OUTPUT after seating
+        # the part, so a must_lock connector with no file lock is seated at
+        # the band midpoint at its incoming angle, byte for byte as if nothing
+        # had been declared (measured on the seeder directly). Accepting it
+        # would have let the plan through on the route SKILL.md recommends.
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
+            'locked_ec.json',
+            [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
+              'note': 'the two ICs'}],
+            must_lock=['H*', 'J1'],
+            edge_connectors=[{'ref': 'J1', 'edge': 'west'}])]))
+        want(out.startswith('<error>') and 'must_lock` does NOT do this' in out,
+             'P1 refuses a must_lock connector and says why that is not a pin')
+        # The FILE lock is what the refusal tells the reader to write
+        # (`place_pose lock`) and what an author who placed it by hand has.
+        # The intent need not mention it at all.
+        _tb3 = _tiny_board(os.path.join(tmp1, 'lockfile.kicad_pcb'),
+                           ('U1', 'U2', 'H1', 'J1'), locked=('H1', 'J1'))
+        out = STAGES['P1'](_args(['--board', _tb3, '--zone-plan', _zp(
+            'filelock_ec.json',
+            [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
+              'note': 'the two ICs'}],
+            edge_connectors=[{'ref': 'J1', 'edge': 'west'}])]))
+        want(out.startswith('<stage_instructions')
+             and '2 pinned, the only kind' in out,
+             'a connector locked IN THE FILE needs no intent clause and no '
+             'waiver, and the census counts the pins apart')
         out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
             'aff.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
                           'note': 'the two ICs'}],

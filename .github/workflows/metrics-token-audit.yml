@@ -1,0 +1,122 @@
+name: Audit METRICS_TOKEN
+
+# Manual only. A repository secret cannot be read back -- not by this workflow,
+# not by anyone -- so the only way to check that METRICS_TOKEN is scoped the
+# way it was meant to be is to ask it what it can DO, from inside a run that
+# holds it.
+#
+# Every probe here is read-only except the last, which is a deliberate
+# VALIDATION FAILURE: posting an empty body to the issues endpoint returns 422
+# when the token may write (title is required, so nothing is created) and 403
+# when it may not. That distinction is the only way to detect write access
+# without using it.
+#
+# Safe to delete once you are satisfied; useful to keep for re-auditing after a
+# token rotation.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe the token
+        env:
+          TOK: ${{ secrets.METRICS_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.request
+
+          TOK = os.environ.get('TOK', '')
+          if not TOK:
+              raise SystemExit('METRICS_TOKEN is not set at all')
+
+          def probe(path, method='GET', body=None):
+              """-> (status, scopes header). Never raises."""
+              req = urllib.request.Request(
+                  'https://api.github.com/' + path, method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={'Authorization': f'Bearer {TOK}',
+                           'Accept': 'application/vnd.github+json',
+                           'User-Agent': 'metrics-token-audit'})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return r.status, r.headers.get('x-oauth-scopes')
+              except urllib.error.HTTPError as e:
+                  return e.code, e.headers.get('x-oauth-scopes')
+              except Exception as e:
+                  return f'ERR {e}', None
+
+          OWN = 'drandyhaas/KiCadRoutingTools'
+          OTHER_PUBLIC = 'drandyhaas/HaasoscopePro'
+          OTHER_PRIVATE = 'drandyhaas/headband'
+
+          verdicts = []
+
+          # 1. Classic vs fine-grained. A classic token reports its scopes in a
+          #    header; a fine-grained one sends the header empty or absent.
+          st, scopes = probe(f'repos/{OWN}')
+          if scopes:
+              kind = f'CLASSIC, scopes: {scopes}'
+              verdicts.append(('token type', 'WIDE',
+                               f'classic token carrying [{scopes}] -- these apply '
+                               'to every repo you can reach, not just this one'))
+          else:
+              kind = 'fine-grained (no scopes header)'
+              verdicts.append(('token type', 'GOOD', 'fine-grained'))
+          print(f'token type            : {kind}')
+
+          # 2. The access it MUST have: traffic on this repo.
+          st, _ = probe(f'repos/{OWN}/traffic/clones')
+          ok = st == 200
+          print(f'traffic on own repo   : HTTP {st}')
+          verdicts.append(('required access', 'GOOD' if ok else 'BROKEN',
+                           'traffic readable' if ok else
+                           f'traffic NOT readable (HTTP {st}) -- collection will not work'))
+
+          # 3. Resource scope: another PUBLIC repo's traffic. Traffic needs push
+          #    access, so a repo-scoped token must be refused here.
+          st, _ = probe(f'repos/{OTHER_PUBLIC}/traffic/clones')
+          narrow = st in (403, 404)
+          print(f'traffic on other repo : HTTP {st}')
+          verdicts.append(('resource scope', 'GOOD' if narrow else 'WIDE',
+                           'limited to this repository' if narrow else
+                           f'can read {OTHER_PUBLIC} traffic too (HTTP {st})'))
+
+          # 4. The sharpest over-scope test: a PRIVATE repo. A correctly scoped
+          #    token cannot see it exists.
+          st, _ = probe(f'repos/{OTHER_PRIVATE}')
+          blind = st in (403, 404)
+          print(f'private repo metadata : HTTP {st}')
+          verdicts.append(('private repos', 'GOOD' if blind else 'WIDE',
+                           'cannot see your private repos' if blind else
+                           f'CAN read {OTHER_PRIVATE} (HTTP {st}) -- far broader than needed'))
+
+          # 5. Write access, detected without writing: empty body -> 422 when
+          #    permitted (validation failed, nothing created), 403 when not.
+          st, _ = probe(f'repos/{OWN}/issues', method='POST', body={})
+          readonly = st in (403, 404)
+          print(f'write probe (issues)  : HTTP {st}')
+          verdicts.append(('write access', 'GOOD' if readonly else 'WIDE',
+                           'read-only, as intended' if readonly else
+                           f'token MAY WRITE to this repo (HTTP {st} = validation, '
+                           'not permission) -- more than the metrics job needs'))
+
+          print()
+          print('=' * 62)
+          worst = 'GOOD'
+          for name, mark, detail in verdicts:
+              print(f'  [{mark:6}] {name:16} {detail}')
+              if mark == 'BROKEN' or (mark == 'WIDE' and worst != 'BROKEN'):
+                  worst = mark
+          print('=' * 62)
+          print({'GOOD': 'VERDICT: correctly scoped -- read-only, this repo only.',
+                 'WIDE': 'VERDICT: it WORKS but is broader than needed. Narrowing it '
+                         'costs nothing and limits the blast radius if it leaks.',
+                 'BROKEN': 'VERDICT: the token cannot read traffic; collection will '
+                           'not work.'}[worst])
+          PY

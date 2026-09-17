@@ -1677,13 +1677,32 @@ class _Ctx:
         self._bodies = None
         self._bodies_error = ''
         self._oob_exempt = None
+        #: #961. One row per declared edge connector on the board, passing
+        #: ones included: the number its `overhang_mm` band was graded on,
+        #: the currency of that number, the drawn-body measurements and the
+        #: part's pad-copper edge clearance. A measurement, never a verdict.
+        self.edge_connector_evidence: List[Dict[str, object]] = []
+        #: The caller's own (clearance, board_edge_clearance), None = unset,
+        #: so the copper evidence resolves its floor exactly as
+        #: `grade_pad_legality` does. `grade` sets it.
+        self.requested_floors = (None, None)
+        self._connector_copper = None
+        self._zero_gate = None
 
     def oob_exempt(self) -> Dict[str, float]:
-        """`{ref: overhang_mm}` for every declared edge connector whose
-        courtyard leaves the outline by an amount INSIDE its own
-        `overhang_mm` band -- the parts `rule_edge_connector` has always said
-        are correct off the board, and that `rule_legality` used to count
+        """`{ref: overhang_mm}` for every declared edge connector the census
+        counts as leaving the outline and whose overhang lies INSIDE its own
+        `overhang_mm` band -- the parts `rule_edge_connector` says are
+        correct off the board, and that `rule_legality` used to count
         against `legality_budget.oob_count` anyway.
+
+        #961: TWO readings, on purpose. "Counted" is still the census number
+        described below; "inside the band" is the band's own currency -- the
+        drawn body where it can be measured (what `rule_edge_connector`
+        grades), else that census number. Where no body is measured the "one
+        number" below holds as it did before, including its old caveat: the
+        census skips the part's own milled rings and the rule does not, so
+        the two differ for a part that owns milled rings.
 
         Measured, run 26: an intent declaring `CON1 east overhang 0..0.5` and
         `legality_budget {oob_count: 0}` (the emitter bakes the pile's own 0)
@@ -1713,10 +1732,59 @@ class _Ctx:
                 hi = float(lim['max'])
                 amt = self.gate.rect_outside_amount(
                     part.rect, skip_rings=self.state._owned_rings(ref))  # noqa: SLF001
-                if amt > legality.EPS and lo - legality.EPS <= amt <= hi + legality.EPS:
-                    out[ref] = float(amt)
+                # #961: "exempt" is decided on the band's OWN currency, the
+                # one `rule_edge_connector` grades -- the drawn body where it
+                # can be measured, this very reading where it cannot. `amt`
+                # still decides whether the census counted the part at all.
+                band, _basis, _body = _band_amount(self, ref, c.get('edge'),
+                                                   amt)
+                # The same body path that must still see copper off the
+                # outline (`rule_edge_connector`): a part with pads past the
+                # edge stays counted, whatever its body reads.
+                copper_ok = (not _body.get('body_measured')
+                             or (_copper_outside_mm(self, ref) <= legality.EPS
+                                 and not _unmodellable_pads(self, ref)))
+                if (amt > legality.EPS and copper_ok
+                        and lo - legality.EPS <= band <= hi + legality.EPS):
+                    out[ref] = float(band)
             self._oob_exempt = out
         return self._oob_exempt
+
+    def zero_gate(self):
+        """The outline at ZERO margin -- "is this copper ON the board", which
+        `self.gate` cannot answer because it carries the placement margin."""
+        if self._zero_gate is None:
+            self._zero_gate = legality.BoardOutlineGate(
+                self.pcb.board_info, 0.0)
+        return self._zero_gate
+
+    def connector_copper(self) -> Dict[str, object]:
+        """#961: pad-copper edge clearance of the DECLARED edge connectors,
+        graded once per grade by `legality.grade_pad_edge_clearance` at the
+        floor `grade_pad_legality` resolves -- the channel `check_drc
+        --check-pad-edge` grades, reported beside the body overhang so the
+        two can be read side by side. The CLEARANCE it measures is evidence
+        only -- no violation, no abstention -- but `_copper_outside_mm` reads
+        the same findings for copper past the OUTLINE, which the rule does
+        grade on the body path. Memoised; only declared parts' pads walked."""
+        if self._connector_copper is None:
+            from copy import copy
+            from list_nets import board_floor_knobs
+            clearance, edge_margin = self.requested_floors
+            _, required, knobs = board_floor_knobs(
+                self.pcb_file or getattr(self.pcb, 'source_path', None),
+                clearance, edge_margin)
+            subset = copy(self.pcb)
+            subset.footprints = {
+                c['ref']: self.pcb.footprints[c['ref']]
+                for c in self.intent.edge_connectors
+                if c['ref'] in (self.pcb.footprints or {})}
+            graded = legality.grade_pad_edge_clearance(
+                subset, required, self.pcb_file)
+            graded['requirement_source'] = (
+                knobs['board_edge_clearance']['source'])
+            self._connector_copper = graded
+        return self._connector_copper
 
     def assembly_census(self) -> Dict[str, object]:
         """#837's per-side census, memoised. The SAME function
@@ -2640,22 +2708,66 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         lim = c.get('overhang_mm') or {}
         lo = float(lim.get('min', 0.0))
         hi = lim.get('max')
-        if amount < lo - legality.EPS:
+        # #961: the band is graded on the DRAWN BODY's overhang past the
+        # outline -- summed over the sides it crosses, the form of the reading
+        # it replaces -- at zero margin, wherever that body can be measured.
+        # `amount` is the occupancy reading at the gate's margin -- `margin -
+        # gap` inside the board, `overhang + margin` outside -- and graded
+        # alone it let esp_prog's USB1, 0.15 mm INSIDE its edge, read 0.10 and
+        # satisfy a band `check_drc --check-pad-edge` failed. Where no body
+        # can be read `band` IS `amount`, and `overhang_basis` says which it
+        # was. `amount` keeps its other job: the setback conjunct's
+        # no-overhang gate below, which #961 does not change.
+        band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),
+                                                  amount)
+        if band < lo - legality.EPS:
             yield Violation(
                 rule='edge_connector', severity=ctx.sev('edge_connector'),
                 ref=ref, message=(f"{ref} overhangs the outline by "
-                                  f"{amount:.2f}mm, under the declared minimum "
-                                  f"{lo:.2f}mm"),
-                measured={'overhang_mm': round(amount, 4)},
+                                  f"{band:.2f}mm, under the declared minimum "
+                                  f"{lo:.2f}mm ({overhang_basis})"),
+                measured={'overhang_mm': round(band, 4),
+                          'overhang_basis': overhang_basis},
                 expected={'min': lo, 'max': hi})
-        elif hi is not None and amount > float(hi) + legality.EPS:
+        elif hi is not None and band > float(hi) + legality.EPS:
             yield Violation(
                 rule='edge_connector', severity=ctx.sev('edge_connector'),
                 ref=ref, message=(f"{ref} overhangs the outline by "
-                                  f"{amount:.2f}mm, past the declared maximum "
-                                  f"{float(hi):.2f}mm"),
-                measured={'overhang_mm': round(amount, 4)},
+                                  f"{band:.2f}mm, past the declared maximum "
+                                  f"{float(hi):.2f}mm ({overhang_basis})"),
+                measured={'overhang_mm': round(band, 4),
+                          'overhang_basis': overhang_basis},
                 expected={'min': lo, 'max': float(hi)})
+        # A band licenses the BODY, never copper. The occupancy reading this
+        # replaced often carried pad copper in front of the body -- it
+        # measures the courtyard, which is the PAD BOX itself on a part that
+        # draws none -- and the body reading never does, so on the body path
+        # copper past the outline is named here. Without it a part with its
+        # pads off the board grades clean where it used to fail twice
+        # (measured: tigard J7 flush with its edge, 0.2 mm of copper off).
+        # BODY PATH ONLY, and not because the legacy reading is equivalent:
+        # a courtyard that does not enclose its pads misses the same copper,
+        # on this branch and on main alike (the suite pins that with a
+        # courtyard-only fixture carrying 0.75 mm of unnamed copper). It is
+        # scoped so the path this change cannot measure grades exactly as it
+        # did before #961.
+        copper_out = (_copper_outside_mm(ctx, ref)
+                      if body.get('body_measured') else 0.0)
+        if copper_out > legality.EPS:
+            yield Violation(
+                rule='edge_connector', severity=ctx.sev('edge_connector'),
+                ref=ref, message=(f"{ref}'s pad copper leaves the outline by "
+                                  f"{copper_out:.2f}mm; its band is graded on "
+                                  f"the drawn body ({overhang_basis}) and "
+                                  f"licenses no copper"),
+                measured={'pad_copper_outside_mm': round(copper_out, 4),
+                          # `_charge` in the seeder's repair census reads its
+                          # magnitude from `outside_mm`.
+                          'outside_mm': round(copper_out, 4),
+                          'overhang_basis': overhang_basis},
+                expected={'pad_copper_outside_mm': 0.0})
+        evidence = _connector_evidence(ctx, c, ref, band, overhang_basis, body,
+                                       lo, hi)
         # The SEAT BASIS, decided once for the two conjuncts that ask where
         # the part's MATING FACE is (nearest edge, seat). A receptacle's
         # pads sit well inboard of its opening by construction: a micro-USB
@@ -2663,9 +2775,9 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # `edge_receptacle` (or a brief row carrying `mount_mode:
         # edge_mount`) both conjuncts are therefore measured on the DRAWN
         # body when the library drew one; everything else keeps the
-        # courtyard, and the OVERHANG conjunct above stays on the courtyard
-        # too (its edge-margin graze would read a flush body as a 0.55 mm
-        # overhang -- a different currency, not changed here).
+        # courtyard. (The OVERHANG conjunct above no longer does: since #961
+        # it reads the drawn body wherever one can be measured, because the
+        # edge-margin graze read a flush body as a 0.55 mm overhang.)
         basis = 'courtyard'
         seat_rect = part.rect
         ctxd = c.get('context') or {}
@@ -2763,8 +2875,161 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # inverting. Measured on esp_prog: with the class set, the same
         # violation went [ERROR] -> [warn ], errors 6 -> 4, and had it been
         # the only finding the exit would have flipped 4 -> 0.
+        rows_before = len(ctx.edge_seating)
         yield from _grade_along_edge(ctx, c, ref, part,
                                      ctx.sev('edge_connector'))
+        # #961: "the edge_seating row carries the number its clause was graded
+        # on". Onto the row the along-edge measurement just appended, when it
+        # appended one -- never a NEW row, because `summary` counts rows.
+        # `setdefault` rather than assignment so a key the row already owns
+        # keeps its own value; today the two dicts share only `ref` and
+        # `edge`, with equal values, so it is a guard rather than a fix.
+        # Every entry, row or not, lands in `edge_connector_evidence`, so a
+        # passing clause is reported too.
+        if len(ctx.edge_seating) > rows_before:
+            for key, value in evidence.items():
+                ctx.edge_seating[-1].setdefault(key, value)
+        ctx.edge_connector_evidence.append(evidence)
+
+
+def _band_amount(ctx, ref, edge, legacy_amount):
+    """`connector_geometry.band_amount` for a grade context: one geometry per
+    context, the gate's own margin named in the legacy basis."""
+    from .connector_geometry import band_amount, geometry_for
+    return band_amount(geometry_for(ctx, ctx.pcb, ctx.pcb_file), ref, edge,
+                       legacy_amount, ctx.gate.margin)
+
+
+def _unmodellable_pads(ctx, ref):
+    """Indices of `ref`'s pads `grade_pad_edge_clearance` could not model.
+
+    It records them as unmeasured and produces no finding, so nothing exact
+    is known about where their copper reaches. A part carrying one is never
+    CERTIFIED clean of copper past the outline: it keeps its `oob_count`
+    charge and its evidence row says `certified: false`."""
+    fp = ctx.pcb.footprints.get(ref)
+    return {index for index, pad in enumerate(getattr(fp, 'pads', None) or ())
+            if not legality._pad_has_no_copper(pad)            # noqa: SLF001
+            and not legality.pad_shape_is_modelled(pad)}
+
+
+def _copper_outside_mm(ctx, ref):
+    """How far a declared connector's pad copper reaches past the outline, at
+    zero margin: the largest `-gap` among its own edge-clearance findings.
+
+    #961's round-2 review: a band graded on the drawn body stops seeing pad
+    copper that sits in front of that body, which the occupancy reading (a
+    courtyard, often the pad box itself) always carried. A band licenses the
+    body, never copper, so the body path must still see it. Castellated pads
+    straddle the outline by design and are skipped. 0.0 when nothing leaves
+    the board; findings from a sampled (non-rectangular) outline carry no gap
+    and are not counted, which is harmless because the body path only runs on
+    rectangular outlines."""
+    fp = ctx.pcb.footprints.get(ref)
+    prefix = ref + '.'
+    worst = 0.0
+    for f in ctx.connector_copper()['findings']:
+        if not str(f['pad_ref']).startswith(prefix) or f.get('gap_mm') is None:
+            continue
+        pads = getattr(fp, 'pads', None) or ()
+        index = f.get('pad_index')
+        if (isinstance(index, int) and index < len(pads)
+                and getattr(pads[index], 'castellated', False)):
+            continue
+        worst = max(worst, -float(f['gap_mm']))
+    # A pad the edge grader cannot model -- a trapezoid, a custom pad with no
+    # parsed primitives -- yields NO finding: it is recorded as unmeasured
+    # and skipped, so the loop above reads 0.0 for a pad that may be entirely
+    # off the board. Upstream needed no conjunct there, because its band read
+    # the pad box itself. For those pads only, fall back to the rotated
+    # pad-box reading the seat predicate uses. That box is a BEST EFFORT, not
+    # a bound: a trapezoid's copper lies up to its `rect_delta` outside it
+    # (pcbnew measures 1.10 mm where the box says 1.00), and the parser does
+    # not expose `rect_delta`, so nothing here can recover the true extent.
+    # A positive reading therefore still names copper off the board, and a
+    # zero one certifies nothing -- which is why `_unmodellable_pads` also
+    # withholds the part's exemption and marks its row uncertified. The exact
+    # extrema above still decide every pad the grader could model.
+    unsupported = _unmodellable_pads(ctx, ref)
+    if unsupported and fp is not None:
+        from .connector_geometry import geometry_for, pad_copper_outside
+        worst = max(worst, pad_copper_outside(
+            geometry_for(ctx, ctx.pcb, ctx.pcb_file), ctx.zero_gate(), ref,
+            (fp.x, fp.y, fp.rotation or 0.0), only=unsupported))
+    return worst
+
+
+def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
+    """One `edge_connector_evidence` row (#961): the band's number and
+    currency, the body measurements behind it, and the part's pad-copper edge
+    clearance from `_Ctx.connector_copper` -- units, limits and a disposition
+    on every channel, passing ones included."""
+    def r4(v):
+        return None if v is None else round(float(v), 4)
+
+    copper = ctx.connector_copper()
+    prefix = ref + '.'
+    findings = [f for f in copper['findings']
+                if str(f['pad_ref']).startswith(prefix)]
+    unmeasured = [u for u in copper['unmeasured']
+                  if str(u['pad_ref']).startswith(prefix)]
+    gap = (copper.get('minimum_gap_by_ref_mm') or {}).get(ref)
+    if findings:
+        copper_disposition = 'fail'
+    elif unmeasured or copper['rules_unmeasured']:
+        copper_disposition = 'unmeasured'
+    elif gap is None:
+        copper_disposition = 'no copper pads measured'
+    else:
+        copper_disposition = 'pass'
+    over = (band < lo - legality.EPS
+            or (hi is not None and band > float(hi) + legality.EPS))
+    others = body.get('other_body_edge_overhang_mm')
+    return {
+        'ref': ref, 'edge': c.get('edge'), 'units': 'mm',
+        'overhang_mm': round(band, 4),
+        'overhang_basis': basis,
+        'overhang_limit_mm': {'min': lo,
+                              'max': None if hi is None else float(hi)},
+        'overhang_disposition': 'fail' if over else 'pass',
+        'effective_margin_mm': ctx.gate.margin,
+        'body_measured': body['body_measured'],
+        'body_layer': body.get('body_layer'),
+        # The declared edge alone, beside the summed number the band read.
+        'body_overhang_mm': r4(body.get('body_overhang_mm')),
+        'body_signed_position_mm': r4(body.get('body_signed_position_mm')),
+        'body_setback_mm': r4(body.get('body_setback_mm')),
+        'other_body_edge_overhang_mm': (
+            None if others is None else {e: r4(v) for e, v in others.items()}),
+        'body_unmeasured_reason': body.get('body_unmeasured_reason'),
+        'pad_copper_edge': {
+            'required_mm': copper['required_mm'],
+            'requirement_source': copper.get('requirement_source'),
+            'minimum_gap_mm': r4(gap),
+            'shortfall_mm': round(max((f['shortfall_mm'] for f in findings),
+                                      default=0.0), 4),
+            # Past the outline itself, castellated pads excepted: the number
+            # the body path's copper conjunct grades (0.0 = on the board).
+            # None when a finding came from the sampled (non-rectangular)
+            # path, which carries no gap -- the amount is unknown, not zero.
+            'outside_mm': (None if any(
+                str(f['pad_ref']).startswith(prefix) and f.get('gap_mm') is None
+                for f in copper['findings'])
+                else round(_copper_outside_mm(ctx, ref), 4)),
+            # False when a pad's shape defeated the edge grader: `outside_mm`
+            # is then a best-effort box reading, so a zero says "not shown to
+            # be off the board", never "on the board". Such a part is not
+            # exempted from the occupancy census either.
+            'certified': not _unmodellable_pads(ctx, ref),
+            # The pads this grade walked: every DECLARED connector's, never
+            # the whole board's. One number for the grade, repeated on each
+            # row -- not this part's own count.
+            'measured_pads': copper['measured_pads'],
+            'findings': findings, 'unmeasured': unmeasured,
+            'rules_unmeasured': copper['rules_unmeasured'],
+            'disposition': copper_disposition,
+            'basis': copper['basis'], 'units': 'mm'},
+    }
 
 
 def _grade_along_edge(ctx, c, ref, part, sev) -> Iterator[Violation]:
@@ -4003,6 +4268,14 @@ class GradeResult:
     #: declares no proximity claim, which is DIFFERENT from every claim
     #: passing, and the consumer must not confuse the two.
     proximity_measured: List[Dict[str, object]] = field(default_factory=list)
+    #: #961: one row per declared edge connector found on the board -- the
+    #: number its `overhang_mm` band was graded on and the CURRENCY of it
+    #: (`overhang_basis`: the drawn body, or the legacy occupancy reading when
+    #: no body can be measured), the body measurements, and the part's
+    #: pad-copper edge clearance. A measurement, never a verdict; empty when
+    #: the rule did not run.
+    edge_connector_evidence: List[Dict[str, object]] = field(
+        default_factory=list)
     #: #705: HOW the pin rule reached its answer, whether or not it found
     #: anything. Without it a board graded entirely on channel-3 inference
     #: and a board graded on declared pintype print the same clean pass --
@@ -4124,6 +4397,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
 
     blocks, block_problems = resolve_blocks(intent, pcb_data, group_sources)
     ctx = _Ctx(intent, pcb_data, pcb_file, state, blocks, locked, outline)
+    ctx.requested_floors = (clearance, board_edge_clearance)
 
     violations = (list(validate_intent(intent)) + list(block_problems)
                   + list(unresolved_keepout_allows(intent, pcb_data))
@@ -4235,6 +4509,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         budget_abstained=abstained,
         edge_seating=list(ctx.edge_seating),
         proximity_measured=list(ctx.proximity_measured),
+        edge_connector_evidence=list(ctx.edge_connector_evidence),
         decap_pin_evidence=pin_evidence,
         n_footprints=len(pcb_data.footprints))
 
@@ -4544,7 +4819,9 @@ def emit_intent(pcb_data, pcb_file: str, *,
     if state.legality_ctx is not None:
         from . import legality as _leg
         try:
-            g = _leg.grade_pad_legality(pcb_data, state.clearance, worst_n=0)
+            g = _leg.grade_pad_legality(pcb_data, state.clearance, worst_n=0,
+                                        edge_margin=state.edge_gate.margin,
+                                        pcb_file=pcb_file)
             for (ra, rb, _mm) in g.get('worst', ()):
                 suspect_pairs.add(ra)
                 suspect_pairs.add(rb)
@@ -4595,6 +4872,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
 
     conns = []
     declared = set()
+    body_geometry = None     # #961: built only if an edged entry is emitted
     for ref in sorted(parts):
         amt = state.edge_gate.rect_outside_amount(parts[ref].rect)
         if amt > legality.EPS:
@@ -4670,6 +4948,30 @@ def emit_intent(pcb_data, pcb_file: str, *,
                                                            bounds),
                          'overhang_mm': {'min': 0.0,
                                          'max': round(amt + 0.5, 3)}}
+                # #961: an edged entry's band is GRADED on the drawn body
+                # when one can be measured, so a band observed only on the
+                # occupancy reading can come out narrower than the body it
+                # blesses -- a pad-box courtyard 1.6 mm inboard of a flush
+                # body is esp_prog's USB1. Widen to the body in that case
+                # alone, and say so: where the body reads no more than `amt`
+                # the emitted band is unchanged. Either way `max` is at least
+                # the number the rule grades (`body_outside_mm`, or `amt`
+                # itself when no body is measured) plus 0.5, so an edged
+                # entry still grades its band clean by construction. Measured
+                # on the 22 tracked boards: the widening never fires.
+                if body_geometry is None:
+                    from .connector_geometry import ConnectorGeometry
+                    body_geometry = ConnectorGeometry(pcb_data, pcb_file)
+                body = body_geometry.measure(ref, entry['edge'])
+                if (body['body_measured']
+                        and body['body_outside_mm'] > amt + legality.EPS):
+                    entry['overhang_mm']['max'] = round(
+                        body['body_outside_mm'] + 0.5, 3)
+                    entry['note'] = (
+                        f"band max from the drawn body's "
+                        f"{body['body_outside_mm']:.3f}mm overhang "
+                        f"({body['body_layer']}), wider than the occupancy "
+                        f"reading {amt:.3f}mm it would otherwise use")
             if declare_classes and pc is not None \
                     and pc.name in ('edge_receptacle', 'edge_actuator'):
                 entry['class'] = pc.name
@@ -4963,6 +5265,21 @@ def format_text(r: GradeResult) -> str:
                          f"{e['span_mm']:.2f}mm edge, {e['basis']}){mark}")
         if len(rows) > 5:
             lines.append(f"    ... {len(rows) - 5} more")
+    if r.edge_connector_evidence:
+        # #961: the number each band was graded on and its CURRENCY, printed
+        # on a passing clause too -- a body reading and a legacy occupancy
+        # reading are different claims about the same connector.
+        lines.append("  edge connector overhang (measured; the band's own "
+                     "currency is named):")
+        for e in r.edge_connector_evidence:
+            cu = e.get('pad_copper_edge') or {}
+            gap = cu.get('minimum_gap_mm')
+            lines.append(
+                f"    {e['ref']} {e.get('edge') or '(no edge)'}: overhang "
+                f"{e['overhang_mm']:.4f}mm [{e['overhang_basis']}] "
+                f"{e['overhang_disposition']}; pad copper "
+                + (f"{gap:.4f}mm" if gap is not None else 'unmeasured')
+                + f" vs {cu.get('required_mm')}mm {cu.get('disposition')}")
     ev = r.decap_pin_evidence or {}
     if ev:
         # WHAT the pin rule graded, printed whether or not it found anything.
@@ -5109,6 +5426,7 @@ def to_json(r: GradeResult) -> Dict:
         'rules_skipped': r.rules_skipped,
         'budget_abstained': r.budget_abstained,
         'edge_seating': r.edge_seating,
+        'edge_connector_evidence': r.edge_connector_evidence,
         'decap_pin_evidence': r.decap_pin_evidence,
         'n_footprints': r.n_footprints,
     }
@@ -5179,3 +5497,214 @@ def summary(r: GradeResult) -> Dict:
                 out[out_key] = r.health[key]
         out['health_signals_skipped'] = len(r.health.get('skipped') or {})
     return out
+
+
+# --------------------------------------------------------------------------
+# #974: the declared connector requirements, reported -- never a gate
+# --------------------------------------------------------------------------
+
+#: What an `overhang_evidence` row keeps of the grade's evidence row: the
+#: band's number, currency, limit and verdict, and the copper conjunct's
+#: verdict and amounts -- with the grade's lists as COUNTS. JSON_SUMMARY is
+#: one stdout line, and the whole rows (body position, grade-wide basis
+#: strings repeated per row, per-pad lists) measured 26.7 KB for 28 declared
+#: connectors on kit-dev-coldfire's emitted intent. They stay in
+#: `check_floorplan --json`'s `edge_connector_evidence`.
+_EVIDENCE_ROW_KEYS = ('ref', 'edge', 'overhang_mm', 'overhang_basis',
+                      'overhang_limit_mm', 'overhang_disposition',
+                      'body_measured')
+_EVIDENCE_COPPER_KEYS = ('disposition', 'outside_mm', 'certified',
+                         'minimum_gap_mm', 'required_mm')
+_EVIDENCE_COUNTED_LISTS = ('findings', 'unmeasured', 'rules_unmeasured')
+
+#: `unmeasured[].reason` for a declared ref the grade left no evidence row
+#: for, when no "not on this board" finding explains it.
+NO_EVIDENCE_ROW = 'the grade produced no evidence row for it'
+
+#: `unmeasured[].reason` for a declared along-edge claim that was neither
+#: measured nor abstained -- `_grade_along_edge` returns silently on a
+#: zero-length edge span.
+NO_ALONG_EDGE_MEASUREMENT = 'no along-edge measurement recorded'
+
+#: `bands_dropped[].reason`.
+BAND_DROPPED_REASON = ("--reseat set this edge declaration aside because its "
+                       "ref is in the re-seat scope, so none of its conjuncts "
+                       "was graded, whether or not the ref moved")
+
+
+def connector_requirements_ungraded(reason: str) -> Dict[str, object]:
+    """`connector_requirements` for a run that graded nothing (#974)."""
+    return {'complete': False, 'reason': str(reason)}
+
+
+def connector_requirements(graded: GradeResult, own: Sequence[Violation],
+                           pinned: Sequence[Violation], *,
+                           bands_dropped=None) -> Dict[str, object]:
+    """What a written board's grade said about its DECLARED edge connectors,
+    as JSON_SUMMARY data (#974): abstain and report, never withhold.
+
+    `own` / `pinned` are the caller's own split of `graded.errors` -- the
+    SAME lists that decide its exit code -- so `errors_own` is non-empty
+    exactly when a connector error counted against the run. The split is
+    never recomputed here. `bands_dropped` is `seeder.reseat_scope`'s
+    `edge_bands_dropped` ({ref: band max}): entries the grade never saw.
+
+    `complete` means every declared requirement was MEASURED; it says nothing
+    about whether they passed, and it is not `graded.complete`, which also
+    counts channels that have nothing to do with connectors.
+
+    Report-only, so it never raises: a report that crashed after the board
+    was written would turn the caller's exit code into 1.
+    """
+    try:
+        return _json_plain(_connector_requirements(graded, own, pinned,
+                                                   bands_dropped))
+    except Exception as exc:  # noqa: BLE001 -- a report must not fail the run
+        try:
+            detail = str(exc)
+        except Exception:  # noqa: BLE001 -- nor may the message of one
+            detail = '<unprintable>'
+        return connector_requirements_ungraded(
+            f"connector_requirements failed: {type(exc).__name__}: {detail}")
+
+
+def _connector_requirements(graded, own, pinned, bands_dropped):
+    declared = list(graded.intent.edge_connectors)
+    declared_refs = sorted({str(c['ref']) for c in declared})
+    evidence = list(graded.edge_connector_evidence)
+    evidence_refs = {str(e['ref']) for e in evidence}
+    not_found = {str(v.ref) for v in graded.violations
+                 if v.rule == 'edge_connector'
+                 and (v.measured or {}).get('found') is False}
+
+    unmeasured = []
+    for c in declared:
+        ref = str(c['ref'])
+        if ref not in evidence_refs:
+            unmeasured.append({
+                'ref': ref, 'requirement': 'presence',
+                'reason': ('not on this board' if ref in not_found
+                           else NO_EVIDENCE_ROW)})
+            continue
+        centre, band = c.get('center_on_edge'), c.get('along_edge_band')
+        if centre is None and band is None:
+            continue
+        claim = 'center_on_edge' if centre is not None else 'along_edge_band'
+        # A recorded measurement of THIS entry settles it: the grade abstains
+        # only when it appends no measuring row, so an abstention beside one
+        # is a hand-written `context.budget_withheld` key. Matched on the
+        # entry, not the ref: a ref declared twice gets a measuring row from
+        # any entry that names an edge, claim or not. Every row names its
+        # edge, so an edgeless entry matches none.
+        if any(str(row.get('ref')) == ref and row.get('declared')
+               and row.get('edge') == c.get('edge')
+               and 'along_edge_offset_mm' in row
+               for row in graded.edge_seating):
+            continue
+        why = graded.budget_abstained.get(f"edge_connectors[{ref}].{claim}")
+        unmeasured.append({'ref': ref, 'requirement': claim,
+                           'reason': NO_ALONG_EDGE_MEASUREMENT
+                           if why is None else why})
+
+    for row in evidence:
+        ref = str(row['ref'])
+        lim = row.get('overhang_limit_mm') or {}
+        # A band no reading can fail -- no max and a zero min -- needs no
+        # body to grade it. Emitted `connector_affinity` entries are exactly
+        # that, and counting them would mark every emitted intent incomplete.
+        vacuous = (lim.get('max') is None
+                   and float(lim.get('min') or 0.0) <= legality.EPS)
+        if not row.get('body_measured') and not vacuous:
+            unmeasured.append({
+                'ref': ref, 'requirement': 'overhang_body',
+                'reason': row.get('body_unmeasured_reason'),
+                'graded_on': row.get('overhang_basis')})
+        copper = row.get('pad_copper_edge') or {}
+        # The copper-past-the-outline conjunct is graded on the BODY path
+        # only. Its CLEARANCE half (and board-wide `.kicad_dru` rules) is
+        # evidence, not a requirement, so it never reaches `unmeasured`.
+        if row.get('body_measured'):
+            if (copper.get('certified') is False
+                    or ('outside_mm' in copper
+                        and copper['outside_mm'] is None)):
+                pads = sorted({f"{u.get('pad_ref')}: {u.get('reason')}"
+                               for u in copper.get('unmeasured') or ()})
+                unmeasured.append({
+                    'ref': ref, 'requirement': 'pad_copper_outside',
+                    'reason': ('; '.join(pads) if pads else
+                               'the edge grader cannot model a pad shape, so '
+                               'its outside_mm is not a certified reading')})
+        elif row.get('edge') is not None and (
+                copper.get('minimum_gap_mm') is not None
+                or copper.get('findings') or copper.get('unmeasured')):
+            # An entry that CLAIMS an edge, on a part with copper, whose body
+            # could not be read: the conjunct was skipped, whatever its band
+            # says. A vacuous band exempts `overhang_body` above, never this.
+            unmeasured.append({
+                'ref': ref, 'requirement': 'pad_copper_outside',
+                'reason': ('pad copper is graded against the outline on the '
+                           'drawn-body path only, and this body was not '
+                           'measured: '
+                           + str(row.get('body_unmeasured_reason')))})
+
+    # Sorted, and only EXACT duplicates removed: a ref declared twice yields
+    # the same entries twice, while two requirements on one ref are two
+    # entries.
+    seen, deduped = set(), []
+    for u in sorted(unmeasured, key=lambda u: (u['ref'], u['requirement'],
+                                               str(u['reason']),
+                                               str(u.get('graded_on')))):
+        key = tuple(sorted((k, str(v)) for k, v in u.items()))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(u)
+
+    dropped = [{'ref': str(ref), 'band_max_mm': mm, 'graded': False,
+                'reason': BAND_DROPPED_REASON}
+               for ref, mm in sorted((bands_dropped or {}).items(),
+                                     key=lambda kv: str(kv[0]))]
+
+    projected = []
+    for row in evidence:
+        copper = row.get('pad_copper_edge') or {}
+        slim = {key: row.get(key) for key in _EVIDENCE_ROW_KEYS}
+        slim_copper = {key: copper.get(key) for key in _EVIDENCE_COPPER_KEYS}
+        for name in _EVIDENCE_COUNTED_LISTS:
+            slim_copper['n_' + name] = len(copper.get(name) or ())
+        slim['pad_copper_edge'] = slim_copper
+        projected.append(slim)
+
+    return {
+        'complete': not deduped and not dropped,
+        'declared_refs': declared_refs,
+        'errors_own': [v.to_dict() for v in own
+                       if v.rule == 'edge_connector'],
+        'errors_pinned': [v.to_dict() for v in pinned
+                          if v.rule == 'edge_connector'],
+        'warnings': [v.to_dict() for v in graded.warnings
+                     if v.rule == 'edge_connector'],
+        'overhang_evidence': projected,
+        'unmeasured': deduped,
+        'bands_dropped': dropped,
+    }
+
+
+def _json_plain(value):
+    """`value` as data a STRICT JSON parser accepts, sharing nothing with its
+    source: string keys, lists for tuples and sets, `None` for a non-finite
+    float (`json.dumps` would write the invalid token `NaN`), `str()` for
+    anything else."""
+    import numbers
+    if isinstance(value, dict):
+        return {str(k): _json_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_plain(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return [_json_plain(v) for v in sorted(value, key=str)]
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        return float(value) if math.isfinite(value) else None
+    return str(value)

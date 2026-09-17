@@ -1851,6 +1851,67 @@ board is simply unfilled, and `kicad-cli pcb drc --refill-zones` (or **B** in
 KiCad) still grades it correctly. Exit 0 when filled with classes intact,
 1 when the fill did not run or a class went missing.
 
+## Reach Metrics (`repo_metrics.py`)
+
+Snapshots this repository's own GitHub reach — release asset downloads, daily
+views and clones, referrers and popular paths — into a snapshot archive, and
+renders `docs/site/` for GitHub Pages — a landing page at the root and the
+metrics page at `/metrics`. Run daily — and on every published release — by
+`.github/workflows/metrics.yml`.
+
+**Where the archive lives:** the orphan **`metrics-data`** branch, not `main`.
+It has to be committed (see below) but not to a branch anyone reads history on:
+one bookkeeping commit per day plus one per release buries the project's real
+log, and eight had landed within two days of the workflow going live. The
+branch shares no history with `main` and holds nothing but the JSON. Locally
+the default is still `metrics/data/`; `--data-dir` (or `$KRT_METRICS_DATA`)
+points the collector anywhere, which is how CI aims it at the branch checkout.
+
+    git fetch origin metrics-data
+    git show origin/metrics-data:traffic_daily.json
+
+Snapshots taken before 2026-09-16 remain in `main`'s history; the branch was
+seeded from the last of them.
+
+**Why it must be committed and run on a schedule:** GitHub's traffic API is a
+**rolling 14-day window** that is never backfilled. Days older than that are
+discarded by GitHub and cannot be recovered by anyone, so the committed archive
+on `metrics-data` is the project's only history of its own reach. Actions
+artifacts expire and the Actions cache is evicted, so neither can hold it — it
+must be a branch. Release
+counters do not expire, but they are **cumulative**, so "how many downloads
+last week" exists only as the difference between two snapshots.
+
+Each traffic call returns 14 daily buckets, so any cadence under a fortnight
+observes every day — the margin is the point: weekly left one run of slack,
+daily leaves thirteen. Merging is by date keeping the **max**, which makes the
+heavy overlap between daily runs idempotent and lets a part-elapsed day be
+corrected by the next run instead of being frozen low. Snapshot stores are
+thinned to one per ISO week after 30 days, which cannot move a lifetime total
+(counters only rise, so the last snapshot of a week holds its maximum).
+
+**Two populations, never summed.** The PCM zip is what KiCad's Plugin and
+Content Manager fetches on install/update, and it accumulates on whichever
+release PCM currently points at — so a newer release showing few zip downloads
+means PCM has not been pointed at it, not that interest fell. The
+`grid_router-*` binaries are fetched by `build_router.py` and therefore count
+from-source installs **including this project's own CI**: every Modal image
+build downloads the Linux binary, which makes Linux an upper bound rather than
+a user count.
+
+```bash
+# Both stages (default): snapshot, then render
+python3 py_tools/repo_metrics.py
+
+# Re-render the page from the committed archive without calling the API
+python3 py_tools/repo_metrics.py --only render
+```
+
+The traffic endpoints need a token with **push access**; releases are public
+and need none. A failing endpoint is recorded in the archive's `meta.json` and
+disclosed on the page, because a silently absent series looks exactly like a
+quiet week.
+
 ## Common Workflows
 
 ### Route and Verify

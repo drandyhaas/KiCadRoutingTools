@@ -3806,6 +3806,78 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
 
 
+# #958: smooth_octolinear_chains accepts an octolinear connector of EQUAL
+# length -- equal to floating-point roundoff, never min_gain as an allowance to
+# get longer -- when it emits strictly fewer legs; a leg at or under
+# _SMOOTH_DEGENERATE_LEG mm is neither emitted nor counted.
+_SMOOTH_TIE_TOL = 1e-9
+_SMOOTH_DEGENERATE_LEG = 1e-5
+#: A pad field is a CORRIDOR when the space between adjacent pads admits fewer
+#: than this many routing channels -- one channel being `track_width + 2 *
+#: clearance`, what it costs to thread one track between two pieces of copper.
+#: #958's equal-length tie-break does not rearrange copper inside one.
+#:
+#: Derived, not a fixed pitch. This was `pitch <= 0.8mm`, and 0.8 was only ever
+#: a round number above the four parts the fix was built for (0.2/0.31/0.5/0.65
+#: -- no 0.8mm part appears in its rationale). Two things went wrong with that.
+#: It is the commonest BGA pitch in the corpus, so cparti_fpga U3, icepi_zero
+#: U11 and zynq_ad9364 U1/U5 compute to 0.8000000000000114 / 0.8001 / 0.800092
+#: and a bare `>` put every one of them on the coarse side by float noise. And
+#: pitch is the wrong measure anyway: what the smoothing diagonal sweeps
+#: through is the GAP between pads, and gap does not follow pitch --
+#: bitaxe_ultra's 1.27mm U12 leaves 0.370mm between its pads while
+#: zynq_ad9364's 0.8mm U1 leaves 0.450mm. Normalised by the board's own channel
+#: the two populations separate where pitch could not:
+#:
+#: MEASURED over the parts this guard must decide, each at its OWN board's
+#: channel (none of these boards declares a netclass, so all fall back to
+#: routing_defaults 0.3 track / 0.25 clearance -> chan 0.800):
+#:
+#:   0.250  ft2232h  U4   0.5mm QFP   gap 0.200   protect
+#:   0.250  ottercast U3  0.4mm QFN   gap 0.200   protect
+#:   0.313  cparti   U3   0.8mm       gap 0.250   protect
+#:   0.428  icepi    U11  0.8mm       gap 0.342   protect
+#:   0.438  ottercast U1  0.65mm BGA  gap 0.350   protect
+#:   0.563  zynq     U1   0.8mm 400b  gap 0.450   protect   <- highest protect
+#:   ----------------------------------------------------------------------
+#:   0.637  glasgow  J5   1.27mm      gap 0.510   coarse    <- lowest coarse
+#:   0.750  cparti   U1   1.0mm       gap 0.600   coarse
+#:   0.838  splitflap U1  1.27mm      gap 0.670   coarse
+#:
+#: 0.6 sits in the 0.563 -> 0.637 gap, with margin either side. It is derived,
+#: not picked: a wider value pulls in splitflap_driver's nine 1.27mm parts,
+#: which costs +79 segments there with `truth.blocking` unmoved
+#: (test_703_predictor_regen's splitflap_driver:authored row) -- copper
+#: rearranged for no connectivity gain, on parts #958 never claimed.
+_SMOOTH_DENSE_CHANNELS = 0.6
+
+
+def pad_field_is_corridor(footprint, track_width: float, clearance: float,
+                          channels: float = _SMOOTH_DENSE_CHANNELS) -> bool:
+    """True when the space between this footprint's adjacent pads is escape
+    CORRIDOR rather than spare room -- the #958 fine-pitch test, as one
+    callable so the gate can exercise the real decision instead of a copy.
+
+    A channel is `track_width + 2 * clearance`: what it costs to thread one
+    track between two pieces of copper. The field is a corridor when the gap
+    between adjacent pads admits fewer than `channels` of them.
+    """
+    from kicad_parser import detect_bga_pitch
+    pads = [q for q in (footprint.pads or [])
+            if getattr(q, 'pad_type', '') != 'np_thru_hole']
+    if len(pads) < 16:
+        return False
+    pitch = detect_bga_pitch(footprint)
+    if not pitch:
+        return False
+    sizes = sorted(min(q.size_x, q.size_y) for q in pads)
+    pad = sizes[len(sizes) // 2] if sizes else 0.0
+    chan = (track_width or 0.15) + 2 * clearance
+    if chan <= 0:
+        return False
+    return (pitch - pad) < channels * chan
+
+
 def _octolinear_bends(A, B):
     """Candidate octolinear (45-degree) polylines from A to B: the direct segment
     (when A->B is already octolinear) and the two single-bend L-elbows (diagonal-
@@ -3897,16 +3969,25 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     # only clear FOREIGN COPPER, so a bend could otherwise be pushed off-board /
     # across an Edge.Cuts cutout that the original A* route legally skirted
     # (lily58 Net-(LED10-DIN): a dogleg re-bent 1mm INTO a switch cutout, #256).
-    from check_drc import board_edge_geometry, _point_on_board, _segment_to_rings_distance
+    from check_drc import (board_edge_geometry, _point_on_board, _segment_to_rings_distance,
+                           npth_slot_capsules, segment_to_npth_slots_distance)
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
     # #438: honor the board's own copper-edge rule (0.5mm on strict boards), not
     # the flat routing clearance -- a re-bend must not re-open the edge band the
     # base A* map kept clear.
     _edge_clr = max(clearance, board_edge_clearance)
+    # An NPTH SLOT is milled board edge, not a drill (#448): KiCad grades copper
+    # against a slot wall at copper_edge_clearance, ABOVE the NPTH-to-track floor
+    # the hole term applies, and Edge.Cuts rings do not contain these. Geometry
+    # and distance both come from check_drc so a copper-moving pass and the
+    # checker cannot disagree about what counts as an edge (sofle_pico SW25).
+    _slot_caps = npth_slot_capsules(pcb_data)
 
     def edge_clears(x1, y1, x2, y2, w):
         required = _edge_clr + w / 2.0 - 1e-4
+        if segment_to_npth_slots_distance(_slot_caps, x1, y1, x2, y2) < required:
+            return False
         if edge_rings:
             if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
                not _point_on_board(x2, y2, edge_outer, edge_cutouts):
@@ -4118,7 +4199,13 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         .kicad_dru layer rule replacing the base clearance on ruled layers
         (#498, which the older graze passes never honored) and a .kicad_dru
         TRACK rule raising the seg-vs-seg term on top of it (#735);
-      * is strictly shorter than the copper it replaces (min_gain);
+      * is shorter than the copper it replaces by at least min_gain, or
+        (#958, in a second greedy phase over the shortened chain, which
+        also takes the strictly shorter connectors the first phase's new
+        bends expose) equal in length to floating-point roundoff with
+        strictly fewer emitted legs -- a jog that is already a shortest
+        octolinear path loses its needless corner at the same length;
+        min_gain is never an allowance to get longer;
       * strands no same-net copper: mid-span via taps, pad touches, and
         T/X-touching sibling tracks hold their span un-collapsed unless the
         touch sits at a kept endpoint.
@@ -4147,7 +4234,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                       _seg_foreign_via_dist, _seg_foreign_hole_dist)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     from check_drc import (board_edge_geometry, _point_on_board,
-                           _segment_to_rings_distance, point_to_pad_distance)
+                           _segment_to_rings_distance, point_to_pad_distance,
+                           npth_slot_capsules, segment_to_npth_slots_distance)
     from connectivity import COINCIDENCE_TOL
 
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
@@ -4180,9 +4268,20 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
     _edge_clr = max(clearance, board_edge_clearance)
+    # An NPTH SLOT is milled board edge, not a drill (#448) -- KiCad grades
+    # copper against a slot wall at copper_edge_clearance, which is normally
+    # ABOVE the NPTH-to-track floor the hole term below applies. Edge.Cuts
+    # rings do not contain these, so without this the only floor a slot got
+    # here was the lower one, and a shortcut could legally sit inside the
+    # clearance the grader enforces (sofle_pico SW25: straightened 0.1mm in,
+    # legal at 0.325mm, graded at 0.425mm). Geometry comes from check_drc so
+    # the two cannot disagree about what counts as an edge.
+    _slot_caps = npth_slot_capsules(pcb_data)
 
     def edge_clears(x1, y1, x2, y2, w):
         required = _edge_clr + w / 2.0 - 1e-4
+        if segment_to_npth_slots_distance(_slot_caps, x1, y1, x2, y2) < required:
+            return False
         if edge_rings:
             if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
                not _point_on_board(x2, y2, edge_outer, edge_cutouts):
@@ -4193,6 +4292,45 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
             return all(min(x - min_x, max_x - x, y - min_y, max_y - y) >= required
                        for x, y in ((x1, y1), (x2, y2)))
         return True
+
+    # FINE-PITCH PAD FIELDS, from the board's OWN helpers -- `detect_bga_pitch`
+    # and `get_footprint_bounds`, the two `auto_detect_bga_exclusion_zones` is
+    # itself built from. A dense field's inter-pad space is escape corridor: the
+    # only way out for a pad that still needs one.
+    #
+    # Keyed on PITCH, not on the package name. `find_components_by_type('BGA')`
+    # is the obvious reuse and it is the wrong set here: ft2232h_jtag's U4 --
+    # the part whose corridor this fix exists for -- is
+    # `Package_QFP:LQFP-64_10x10mm_P0.5mm`, so `detect_package_type` calls it
+    # QFP and the BGA filter returns nothing. (Its log line "BGA Grid Analysis
+    # for U4" is the FANOUT's grid analyser, which runs on any candidate and
+    # finds a pitch in a QFP's peripheral rows.) What makes the space a corridor
+    # is the pitch, not the ball/lead distinction, so a 0.5mm QFP and a 0.65mm
+    # BGA both qualify and ottercast's 0.2mm QFN does too.
+    #
+    # A static REGION deliberately, not "pads that currently lack copper": that
+    # set changes on every route pass, so a guard keyed on it fires differently
+    # each lap. Measured -- an earlier cut keyed on waiting pads and
+    # destabilised ottercast_audio's five-pass chain (2 -> 4 nets incomplete)
+    # while fixing ft2232h_jtag. A package does not move between passes.
+    _dense_boxes = []
+    try:
+        from kicad_parser import detect_bga_pitch, get_footprint_bounds
+        for _fp in pcb_data.footprints.values():
+            if not pad_field_is_corridor(
+                    _fp, getattr(config, 'track_width', None) or 0.15,
+                    clearance):
+                continue
+            _dense_boxes.append(get_footprint_bounds(_fp, margin=0.0))
+    except Exception:
+        _dense_boxes = []
+
+    def _in_dense_field(x1, y1, x2, y2):
+        for (bx0, by0, bx1, by1) in _dense_boxes:
+            if (min(x1, x2) <= bx1 and max(x1, x2) >= bx0
+                    and min(y1, y2) <= by1 and max(y1, y2) >= by0):
+                return True
+        return False
 
     # Foreign-net POURS are deliberately NOT consulted (same convention as
     # routing itself, which is pour-blind): a shortcut inside a foreign pour
@@ -4518,58 +4656,227 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                 if d < r:
                                     touches.append((pt_on_chain[0], pt_on_chain[1], k, r))
 
-                        def span_free(i, j):
-                            ax, ay = vpts[i]
-                            bx, by = vpts[j]
-                            for tx, ty, k, r in touches:
-                                if i <= k < j:
-                                    if math.hypot(tx - ax, ty - ay) >= r and \
-                                       math.hypot(tx - bx, ty - by) >= r:
-                                        return False
-                            # Pad touches are exempt only when the pad EXACTLY
-                            # touches a kept endpoint's capsule end -- a bounding-
-                            # radius "near the endpoint" test waived mid-span pad
-                            # contacts on big rect pads (anyshake GNDA: C75/C76
-                            # stranded, masked in-pass by pour outline credit).
-                            for pad, k in pad_touches:
-                                if i <= k < j:
-                                    if point_to_pad_distance(ax, ay, pad) > w / 2.0 + COINCIDENCE_TOL and \
-                                       point_to_pad_distance(bx, by, pad) > w / 2.0 + COINCIDENCE_TOL:
-                                        return False
-                            return True
+                        # Greedy farthest-reachable-vertex shortcutting, in TWO
+                        # phases (#536, #958). Phase 1 is the original rule --
+                        # accept a connector only when it saves at least min_gain
+                        # -- and is unchanged, so it saves exactly the copper it
+                        # saved before. Phase 2 walks the phase-1 polyline again
+                        # under the same rule -- so a strictly shorter connector
+                        # that a phase-1 elbow exposes is taken too -- and ALSO
+                        # accepts a connector of EQUAL length (floating-point
+                        # roundoff only; min_gain is never a growth allowance)
+                        # when it emits strictly fewer legs: a grid jog that is
+                        # already a shortest octolinear path (diag / axis / diag)
+                        # collapses to one bend at the same length. The
+                        # tie-break must not ride in phase 1: taken farthest-first
+                        # it commits an equal-length prefix and its end vertex,
+                        # pre-empting a strictly shorter span that starts inside
+                        # it (a shortest-path detour around a pad: joint pass 3
+                        # legs at 10.24 mm, two phases 3 legs at 9.66 mm --
+                        # tests/test_958_smoother_equal_length.py).
+                        #
+                        # Same-net touches were found on the ORIGINAL legs. On a
+                        # later polyline a touch pins the leg its original leg
+                        # maps to (when that leg was kept) plus every leg within
+                        # its reach -- the rule the list was built with -- so a
+                        # touch phase 1 left at a kept endpoint pins the legs
+                        # around that vertex in phase 2.
+                        _tl = {}
+                        for tx, ty, k, r in touches:
+                            _tl.setdefault((tx, ty, r), set()).add(k)
+                        touch_list = [(tx, ty, r, ks) for (tx, ty, r), ks in _tl.items()]
+                        _pl = {}
+                        for pad, k in pad_touches:
+                            _pl.setdefault(id(pad), (pad, set()))[1].add(k)
+                        pad_list = list(_pl.values())
 
-                        # Greedy farthest-reachable-vertex shortcutting.
-                        spans = {}
-                        i = 0
-                        while i < n - 1:
-                            found = None
-                            for j in range(n, i + 1, -1):
-                                sub_len = cum[j] - cum[i]
-                                if sub_len <= min_gain:
-                                    break                 # closer spans only shrink
-                                if not span_free(i, j):
-                                    continue
-                                A, B = vpts[i], vpts[j]
-                                for inter in _octolinear_bends(A, B):
-                                    pts = [A] + inter + [B]
-                                    new_len = sum(math.hypot(pts[q + 1][0] - pts[q][0],
-                                                             pts[q + 1][1] - pts[q][1])
-                                                  for q in range(len(pts) - 1))
-                                    if new_len > sub_len - min_gain:
+                        def _legsets(poly, leg_pos):
+                            m = len(poly) - 1
+                            tl, pl = [], []
+                            for tx, ty, r, ks in touch_list:
+                                legs = {leg_pos[k] for k in ks if leg_pos[k] is not None}
+                                for p in range(m):
+                                    if _pt_seg_dist(tx, ty, poly[p][0], poly[p][1],
+                                                    poly[p + 1][0], poly[p + 1][1]) < r:
+                                        legs.add(p)
+                                tl.append((tx, ty, r, legs))
+                            for pad, ks in pad_list:
+                                legs = {leg_pos[k] for k in ks if leg_pos[k] is not None}
+                                r = pad_reach(pad) + w / 2.0 + COINCIDENCE_TOL
+                                for p in range(m):
+                                    if _pt_seg_dist(pad.global_x, pad.global_y,
+                                                    poly[p][0], poly[p][1],
+                                                    poly[p + 1][0], poly[p + 1][1]) < r:
+                                        legs.add(p)
+                                pl.append((pad, legs))
+                            return tl, pl
+
+                        # clears() is a function of FOREIGN copper only, which
+                        # nothing inside this chain's evaluation changes (the
+                        # commit comes after both phases), and phase 2 re-asks
+                        # phase 1's blocked probes -- same endpoints, same bends
+                        # -- so one memo per chain makes the second phase cost
+                        # only its genuinely new legs (measured on splitflap's
+                        # signal step: 5128 probes / 2.3 s before #958, 8525 /
+                        # 3.7 s with a bare second phase, 4666 / 2.1 s memoised).
+                        _cmemo = {}
+
+                        def clears_m(x1, y1, x2, y2):
+                            key = (x1, y1, x2, y2)
+                            v = _cmemo.get(key)
+                            if v is None:
+                                v = _cmemo[key] = clears(x1, y1, x2, y2, layer, net_id, w)
+                            return v
+
+                        def collapse(poly, leg_pos, allow_tie):
+                            """One greedy pass over polyline poly -> {i: (j, pts)}."""
+                            m = len(poly) - 1
+                            pcum = [0.0]
+                            for p in range(m):
+                                pcum.append(pcum[-1] + math.hypot(poly[p + 1][0] - poly[p][0],
+                                                                  poly[p + 1][1] - poly[p][1]))
+                            tl, pl = _legsets(poly, leg_pos)
+
+                            def span_free(i, j):
+                                ax, ay = poly[i]
+                                bx, by = poly[j]
+                                for tx, ty, r, legs in tl:
+                                    if any(i <= p < j for p in legs):
+                                        if math.hypot(tx - ax, ty - ay) >= r and \
+                                           math.hypot(tx - bx, ty - by) >= r:
+                                            return False
+                                # Pad touches are exempt only when the pad EXACTLY
+                                # touches a kept endpoint's capsule end -- a bounding-
+                                # radius "near the endpoint" test waived mid-span pad
+                                # contacts on big rect pads (anyshake GNDA: C75/C76
+                                # stranded, masked in-pass by pour outline credit).
+                                for pad, legs in pl:
+                                    if any(i <= p < j for p in legs):
+                                        if point_to_pad_distance(ax, ay, pad) > w / 2.0 + COINCIDENCE_TOL and \
+                                           point_to_pad_distance(bx, by, pad) > w / 2.0 + COINCIDENCE_TOL:
+                                            return False
+                                return True
+
+                            out = {}
+                            i = 0
+                            while i < m:
+                                found = None
+                                for j in range(m, i + 1, -1):
+                                    sub_len = pcum[j] - pcum[i]
+                                    if not allow_tie and sub_len <= min_gain:
+                                        break             # closer spans only shrink
+                                    if not span_free(i, j):
                                         continue
-                                    if all(clears(pts[q][0], pts[q][1],
-                                                  pts[q + 1][0], pts[q + 1][1],
-                                                  layer, net_id, w)
-                                           for q in range(len(pts) - 1)):
-                                        found = (j, pts, sub_len - new_len)
+                                    A, B = poly[i], poly[j]
+                                    for inter in _octolinear_bends(A, B):
+                                        pts = [A] + inter + [B]
+                                        lengths = [math.hypot(b[0] - a[0], b[1] - a[1])
+                                                   for a, b in zip(pts, pts[1:])]
+                                        new_len = sum(lengths)
+                                        _is_tie = (allow_tie
+                                                   and abs(new_len - sub_len) <= _SMOOTH_TIE_TOL
+                                                   and sum(d > _SMOOTH_DEGENERATE_LEG
+                                                           for d in lengths) < j - i)
+                                        if new_len > sub_len - min_gain and not _is_tie:
+                                            continue
+                                        # No EQUAL-LENGTH rearrangement inside a
+                                        # FINE-PITCH pad field (#958 + this).
+                                        #
+                                        # Straightening does not add copper -- it
+                                        # MOVES it. A staircase hugs its own
+                                        # corner; the diagonal replacing it cuts
+                                        # across, sweeping through the space the
+                                        # steps left open. Between 0.5mm-pitch
+                                        # balls that space is the escape corridor
+                                        # for a pad that still needs one, and
+                                        # BOTH variants are DRC-legal, so
+                                        # clears() cannot choose between them. A
+                                        # tie buys one fewer leg; it must not buy
+                                        # it there.
+                                        #
+                                        # Measured on ft2232h_jtag, +1V8 under
+                                        # U4's 18x18 0.5mm BGA -- 3.8728mm either
+                                        # way, 3 legs vs 2:
+                                        #   run at y=102.900  ->  run at y=102.600
+                                        # 0.15mm from where /OSCI's #666
+                                        # bare-ball escape drops its via. The
+                                        # dogbone failed, the rescue failed, and
+                                        # /OSCI shipped in two pieces.
+                                        #
+                                        # Strictly-shorter collapses are
+                                        # untouched, inside the field as well --
+                                        # those pay real length for the space,
+                                        # the trade #536 has always made.
+                                        if _is_tie and _dense_boxes and any(
+                                                _in_dense_field(pts[q][0], pts[q][1],
+                                                                pts[q + 1][0], pts[q + 1][1])
+                                                for q in range(len(pts) - 1)):
+                                            continue
+                                        if all(clears_m(pts[q][0], pts[q][1],
+                                                        pts[q + 1][0], pts[q + 1][1])
+                                               for q in range(len(pts) - 1)):
+                                            found = (j, pts)
+                                            break
+                                    if found:
                                         break
                                 if found:
-                                    break
-                            if found:
-                                spans[i] = found
-                                i = found[0]
-                            else:
-                                i += 1
+                                    out[i] = found
+                                    i = found[0]
+                                else:
+                                    i += 1
+                            return out
+
+                        def apply(tagged, out):
+                            """Splice accepted spans into a tagged polyline
+                            [(x, y, original_vertex_or_None)]. A bend within a
+                            hair of its span endpoint (near-diagonal spans put it
+                            there) is dropped and the endpoint kept exact, so no
+                            sliver leg is emitted; the gap is far below
+                            SOFT_JOINT_MIN_GAP."""
+                            res = []
+                            k = 0
+                            while k < len(tagged):
+                                if k in out:
+                                    j, pts = out[k]
+                                    res.append(tagged[k])
+                                    for x, y in pts[1:-1]:
+                                        if (math.hypot(x - pts[0][0], y - pts[0][1])
+                                                > _SMOOTH_DEGENERATE_LEG and
+                                                math.hypot(x - pts[-1][0], y - pts[-1][1])
+                                                > _SMOOTH_DEGENERATE_LEG):
+                                            res.append((x, y, None))
+                                    k = j
+                                else:
+                                    res.append(tagged[k])
+                                    k += 1
+                            return res
+
+                        tagged = [(x, y, k) for k, (x, y) in enumerate(vpts)]
+                        tagged = apply(tagged, collapse(vpts, list(range(n)), False))
+                        pos = {t[2]: p for p, t in enumerate(tagged) if t[2] is not None}
+                        leg_pos = [pos[k] if (k in pos and pos.get(k + 1) == pos[k] + 1)
+                                   else None for k in range(n)]
+                        tagged = apply(tagged, collapse([(t[0], t[1]) for t in tagged],
+                                                        leg_pos, True))
+
+                        # Back onto ORIGINAL vertex indices: each run between two
+                        # surviving original vertices that is not the untouched
+                        # original leg is one span (its pts may hold 2+ legs).
+                        spans = {}
+                        p = 0
+                        while p < len(tagged) - 1:
+                            a = tagged[p][2]
+                            q = p + 1
+                            while tagged[q][2] is None:
+                                q += 1
+                            b = tagged[q][2]
+                            if not (q == p + 1 and b == a + 1):
+                                pts = [(t[0], t[1]) for t in tagged[p:q + 1]]
+                                new_len = sum(math.hypot(pts[r + 1][0] - pts[r][0],
+                                                         pts[r + 1][1] - pts[r][1])
+                                              for r in range(len(pts) - 1))
+                                spans[a] = (b, pts, max(0.0, cum[b] - cum[a] - new_len))
+                            p = q
                         if not spans:
                             continue
 
@@ -4587,7 +4894,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                     # endpoint); the sub-writer-precision gap is
                                     # far below SOFT_JOINT_MIN_GAP.
                                     if math.hypot(pts[q + 1][0] - pts[q][0],
-                                                  pts[q + 1][1] - pts[q][1]) > 1e-5:
+                                                  pts[q + 1][1] - pts[q][1]) > _SMOOTH_DEGENERATE_LEG:
                                         new_chain_segs.append(Segment(
                                             start_x=pts[q][0], start_y=pts[q][1],
                                             end_x=pts[q + 1][0], end_y=pts[q + 1][1],
@@ -5302,13 +5609,22 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         for s in r.get('new_segments') or []:
             routed_seg_result[id(s)] = r
 
-    from check_drc import board_edge_geometry, _point_on_board, _segment_to_rings_distance
+    from check_drc import (board_edge_geometry, _point_on_board, _segment_to_rings_distance,
+                           npth_slot_capsules, segment_to_npth_slots_distance)
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
     _edge_clr = max(clearance, board_edge_clearance)  # #438 honor board edge rule
+    # An NPTH SLOT is milled board edge, not a drill (#448): KiCad grades copper
+    # against a slot wall at copper_edge_clearance, ABOVE the NPTH-to-track floor
+    # the hole term applies, and Edge.Cuts rings do not contain these. Geometry
+    # and distance both come from check_drc so a copper-moving pass and the
+    # checker cannot disagree about what counts as an edge (sofle_pico SW25).
+    _slot_caps = npth_slot_capsules(pcb_data)
 
     def edge_clears(x1, y1, x2, y2, w):
         required = _edge_clr + w / 2.0 - 1e-4
+        if segment_to_npth_slots_distance(_slot_caps, x1, y1, x2, y2) < required:
+            return False
         if edge_rings:
             if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
                not _point_on_board(x2, y2, edge_outer, edge_cutouts):

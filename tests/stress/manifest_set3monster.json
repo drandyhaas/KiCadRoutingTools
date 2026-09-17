@@ -217,5 +217,29 @@
     "license": "see repo",
     "short_name": "stm32h7_hdmi",
     "note": "STM32H7 + HDMI board, 8 layers / 835 fp; large MCU board with video output and heavy passive count"
+  },
+  {
+    "set": "set3monster",
+    "repo": "BoltzRnD/SmartPrintCoreH7x",
+    "path": "SmartPrintCoreH7x/SmartPrintCoreH7x.kicad_pcb",
+    "branch": "main",
+    "file": "smartprint_h7x.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/BoltzRnD/SmartPrintCoreH7x/main/SmartPrintCoreH7x/SmartPrintCoreH7x.kicad_pcb",
+    "github_url": "https://github.com/BoltzRnD/SmartPrintCoreH7x/blob/main/SmartPrintCoreH7x/SmartPrintCoreH7x.kicad_pcb",
+    "archive_url": "",
+    "archive_member": "",
+    "size_kb": 7858,
+    "layers_est": 2,
+    "footprints": 567,
+    "routable_nets": 383,
+    "max_pads": 144,
+    "kicad_version": 20221018,
+    "has_kicad_pro": true,
+    "tier": "monster",
+    "packages": "BGA/SoC,high-speed,high-layer",
+    "lane": "industrial_auto",
+    "license": "see repo",
+    "short_name": "smartprint_h7x",
+    "note": "SmartPrintCoreH7x STM32H7 3D-printer mainboard: 567 footprints and 383 routable nets on TWO layers, 170x97mm. Monster by PART COUNT rather than stackup (like lora_cubesat_cm, unlike the Antmicro high-layer boards): with no inner layers every net competes for the same two planes, and the human routing needed 1506 vias to do it."
   }
 ]

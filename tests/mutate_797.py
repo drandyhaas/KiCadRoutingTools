@@ -291,12 +291,20 @@ ROWS = [
     # The mutation still removes ONLY the exclusive clause: a row that also
     # dropped #706's would be testing that PR's feature rather than this one,
     # and would go red for a reason #797 has nothing to do with.
+    # RE-ANCHORED (run 27): the arming condition gained a fourth clause, `or
+    # placed`, so a connector also slides off a part that is already at an
+    # authoritative pose. The mutation still removes ONLY the exclusive
+    # clause; `placed` is empty in this battery's fixtures (nothing is
+    # file-locked and no `seed_refs` scope is passed), so the ladder is still
+    # disarmed by the mutation and the row still measures #797.
     ('the-edge-slide-is-armed-for-keepouts-only', 's',
      "            _slide = ((0.0,) if not (state.keepouts_for.get(ref)\n"
      "                                     or _dec is not None\n"
-     "                                     or state.exclusive_for.get(ref)) else",
+     "                                     or state.exclusive_for.get(ref)\n"
+     "                                     or placed) else",
      "            _slide = ((0.0,) if not (state.keepouts_for.get(ref)\n"
-     "                                     or _dec is not None) else",
+     "                                     or _dec is not None\n"
+     "                                     or placed) else",
      (T797S,), 'KILLED'),
 
     # ---- rows kept as EXPECTED SURVIVORS, with the reason ---------------

@@ -6,6 +6,10 @@
 
 A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiCad 9 and KiCad 10**. Available as both a **KiCad Plugin** with full GUI and a **Command-Line Interface** for scripting and automation.
 
+📊 **[Project metrics](https://drandyhaas.github.io/KiCadRoutingTools/metrics/)** — installs, downloads and traffic, updated daily.
+
+☕ **[Donate](https://ko-fi.com/drandyhaas)** — the tool is free and MIT-licensed; donations cover the ~$500/month of cloud compute and AI development behind it.
+
 <p align="center">
   <img src="docs/routed_all.png" alt="Routed PCB example" width="600">
   <img src="docs/routed_kit.png" alt="Routed PCB example 2" width="600">
@@ -21,7 +25,8 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - [Project Structure](#project-structure) & [Module Overview](#module-overview)
 - [Performance](#performance)
 - [Command Reference](#command-reference) — options per tool (full list: `--help` / [configuration.md](docs/configuration.md))
-- [Requirements](#requirements) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
+- [Project metrics](https://drandyhaas.github.io/KiCadRoutingTools/metrics/) — installs, downloads and traffic
+- [Requirements](#requirements) · [Limitations](#limitations) · [Contributing](#contributing) · [Support](#support) · [License](#license)
 
 ## Features
 
@@ -890,6 +895,27 @@ the result with `check_drc.py` + `check_connected.py`, and file an issue for
 anything that breaks — ideally with a pointer to the board file. Fixes and
 pull requests for open issues are just as welcome. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
+
+## Support
+
+KiCadRoutingTools is free and MIT-licensed, and it stays that way — there is no
+paid tier, no feature held back, and nothing in this repository is paywalled.
+
+Donations go to what it costs to build and maintain it: about **$500/month** of
+cloud computing and AI-assisted development.
+
+The compute is not incidental. Every change to the router is A/B-tested by
+replaying a corpus of real open-source boards on rented cores and grading each
+one for DRC violations and unconnected nets, and the ~600-file test suite fans
+out the same way. It is what stops a change that helps one board from quietly
+breaking ten others.
+
+**[☕ Donate on Ko-fi](https://ko-fi.com/drandyhaas)** — card or PayPal, no account needed.
+Prefer PayPal directly? **[paypal.me/DrAndyHaas](https://www.paypal.me/DrAndyHaas)** (the sender needs a PayPal account).
+
+A donation buys no priority support and unlocks no features. If you would rather
+contribute something worth more than money, route one of your own boards and file
+an issue for whatever breaks — see [Contributing](#contributing).
 
 ## License
 

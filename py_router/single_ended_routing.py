@@ -368,8 +368,11 @@ def _foreign_seg_arrays(pcb_data, layer):
     arr = per_layer.get(layer)
     if arr is None:
         nid, ax, ay, bx, by, hw = [], [], [], [], [], []
+        _row_segs = []
+        _own_pad_nets = _cached_own_pad_nets(pcb_data)
         for s in pcb_data.segments:
             if s.layer == layer:
+                _row_segs.append(s)
                 nid.append(s.net_id); ax.append(s.start_x); ay.append(s.start_y)
                 bx.append(s.end_x); by.append(s.end_y)
                 hw.append((s.width if s.width > 0 else 0.0) / 2.0)
@@ -379,6 +382,20 @@ def _foreign_seg_arrays(pcb_data, layer):
             r = (v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
             nid.append(v.net_id); ax.append(v.x); ay.append(v.y)
             bx.append(v.x); by.append(v.y); hw.append(r)
+        # #908: which rows are a FOOTPRINT'S OWN copper, and which nets that
+        # copper is the intended conductor for. A net tie's bridge is net 0, so
+        # the plain `nid != net_id` test below calls it foreign to the very
+        # nets it exists to join -- and the terminal SHORT gate then rejects
+        # every rescue that lands on the tie pad ("terminal copper would
+        # OVERLAP a foreign track/via"). Recorded here so the mask is built
+        # once per (layer, net) and dies with these arrays.
+        _g_rows, _g_nets = [], []
+        for _i, _s in enumerate(_row_segs):
+            if getattr(_s, 'graphic', False):
+                _lift = _own_pad_nets.get(id(_s))
+                if _lift:
+                    _g_rows.append(_i); _g_nets.append(_lift)
+        per_layer[(layer, 'giftrows')] = (_g_rows, _g_nets)
         arr = (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
                np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
                np.asarray(by, dtype=float), np.asarray(hw, dtype=float))
@@ -392,6 +409,48 @@ def _foreign_seg_arrays(pcb_data, layer):
                                       np.minimum(_ay, _by) - _hw,
                                       np.maximum(_ay, _by) + _hw)
     return arr
+
+
+def _cached_own_pad_nets(pcb_data):
+    """`graphic_own_pad_nets` memoised on pcb_data, keyed with the segment
+    cache signature so it dies exactly when that does."""
+    sig = getattr(pcb_data, '_foreign_seg_arr_cache', (None,))[0]
+    hit = getattr(pcb_data, '_gopn_cache', None)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    try:
+        from check_drc import graphic_own_pad_nets
+        out = graphic_own_pad_nets(pcb_data)
+    except Exception:
+        out = {}
+    pcb_data._gopn_cache = (sig, out)
+    return out
+
+
+def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows):
+    """Boolean mask of foreign-array rows that are NOT foreign to `net_id`.
+
+    #908: a footprint's own copper carries no net, so it is foreign to every
+    net including the pad it was drawn around -- and for a NET TIE it is the
+    conductor between the two nets it ties. Overlapping it is the intended
+    connection, not a short. The obstacle map already lifts it; this is the
+    same exemption for the geometric terminal-graze / short gate, which reads
+    copper directly rather than the map. Foreign nets are untouched: a row is
+    exempt only for the nets its own footprint's pads put on it.
+    """
+    _foreign_seg_arrays(pcb_data, layer)
+    per_layer = pcb_data._foreign_seg_arr_cache[1]
+    key = (layer, 'exempt', net_id)
+    hit = per_layer.get(key)
+    if hit is not None and len(hit) == n_rows:
+        return hit
+    rows, nets = per_layer.get((layer, 'giftrows'), ([], []))
+    mask = np.zeros(n_rows, dtype=bool)
+    for _i, _lift in zip(rows, nets):
+        if _i < n_rows and net_id in _lift:
+            mask[_i] = True
+    per_layer[key] = mask
+    return mask
 
 
 def _foreign_seg_bboxes(pcb_data, layer):
@@ -432,6 +491,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     fminx, fmaxx, fminy, fmaxy = _foreign_seg_bboxes(pcb_data, layer)
     near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
             (fmaxy >= min(y1, y2) - R) & (fminy <= max(y1, y2) + R) & (nid != net_id))
+    near &= ~_foreign_seg_exempt(pcb_data, layer, net_id, nid.size)
     if not near.any():
         return 1e9
     ax, ay, bx, by, hw = fax[near], fay[near], fbx[near], fby[near], fhw[near]
@@ -516,13 +576,30 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
 
 
 def _foreign_hole_capsules(pcb_data):
-    """Cached NPTH (no-copper) drill capsules: (net_id, ax, ay, bx, by, r, lc)
-    numpy arrays, one row per pad whose drill carries no copper ring (mechanical
-    / mounting holes -- np_thru_hole, or a pad with no copper layer). The pad /
-    segment / via distance trio all measure to COPPER, so they never see these
-    holes; but a track crossing one is a real fab short (check_drc's track-hole
-    rule, issue #233), gated by the higher NPTH-to-track floor. Holes are
-    through, so the distance is layer-agnostic. Round drills degenerate to a
+    """Cached EXPOSED drill capsules: (net_id, ax, ay, bx, by, r, lc) numpy
+    arrays, one row per pad whose drill is not covered by its own copper ring.
+    Two populations:
+
+      * no copper at all -- np_thru_hole mechanical / mounting holes, or a pad
+        declaring no copper layer; and
+      * #441 RING-UNCOVERED PLATED pads, whose copper ring is SMALLER than their
+        drill (vfo_ctrl's U4 "MH": 0.001mm of copper over a 2.5mm drill). These
+        have copper, so `_pad_has_no_copper` is False and the copper distance
+        functions "see" them -- as a ~1um speck that keeps nothing off the real
+        2.5mm hole. They were therefore invisible to every caller of this
+        function: measured on vfo_ctrl, a board with FOUR 2.5mm mounting holes
+        reported 0 foreign-hole capsules, and a track through a hole centre
+        scored 1e9. Three tracks crossed U4.MH at v0.22.0 (one by 0.857mm,
+        clean through) and four at HEAD. check_drc grades this population
+        (its copper-to-hole branch names this pad) and
+        add_drill_hole_obstacles stamps it; this list is the third consumer and
+        was the one that did not, so the passes that MOVE copper could put it
+        back over a hole the router had kept clear.
+
+    The pad / segment / via distance trio all measure to COPPER, so they never
+    see these holes; but a track crossing one is a real fab short (check_drc's
+    track-hole rule, issue #233), gated by the higher NPTH-to-track floor. Holes
+    are through, so the distance is layer-agnostic. Round drills degenerate to a
     zero-length capsule (a=b). Rebuilt when the board's pad count changes (pads
     are static during routing, so this almost never refires).
 
@@ -541,12 +618,20 @@ def _foreign_hole_capsules(pcb_data):
         nid, ax, ay, bx, by, r, lc = [], [], [], [], [], [], []
         for pad_net, pads in pcb_data.pads_by_net.items():
             for pad in pads:
-                if (getattr(pad, 'drill', 0) or 0) > 0 and _pad_has_no_copper(pad):
-                    (p1x, p1y), (p2x, p2y), hr = pad_drill_capsule(pad)
-                    nid.append(pad_net)
-                    ax.append(p1x); ay.append(p1y); bx.append(p2x); by.append(p2y)
-                    r.append(hr)
-                    lc.append(getattr(pad, 'local_clearance', 0.0) or 0.0)
+                if (getattr(pad, 'drill', 0) or 0) <= 0:
+                    continue
+                # #441: ring-uncovered PLATED pads join the no-copper ones --
+                # same test add_drill_hole_obstacles and check_drc use, so the
+                # map, the grader and the movers agree on what an exposed drill
+                # is.
+                if not (_pad_has_no_copper(pad)
+                        or max(pad.size_x, pad.size_y) < pad.drill):
+                    continue
+                (p1x, p1y), (p2x, p2y), hr = pad_drill_capsule(pad)
+                nid.append(pad_net)
+                ax.append(p1x); ay.append(p1y); bx.append(p2x); by.append(p2y)
+                r.append(hr)
+                lc.append(getattr(pad, 'local_clearance', 0.0) or 0.0)
         cache = (sig, (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
                        np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
                        np.asarray(by, dtype=float), np.asarray(r, dtype=float),
@@ -4286,11 +4371,18 @@ def route_multipoint_taps(
     net's recomputed obstacle cache), so remove exactly the cells added, on
     every exit path. On a clone the removal is harmless."""
     ring_cells: list = []
+    # #908: Phase 3 routes on a map built elsewhere, which had neither
+    # prepare's lift nor the single-net bake -- so a footprint's own copper
+    # sealed the pad it was drawn around here even when every other path was
+    # correct. Idempotent, and released on every exit beside the via rings.
+    from routing_context import ensure_own_pad_lift, release_own_pad_lift
+    _oplift = ensure_own_pad_lift(obstacles, pcb_data, net_id)
     try:
         return _route_multipoint_taps_impl(
             pcb_data, net_id, config, obstacles, main_result,
             global_offset, global_total, global_failed, ring_cells)
     finally:
+        release_own_pad_lift(obstacles, net_id, _oplift)
         if ring_cells:
             _rc = np.array(ring_cells, dtype=np.int32)
             obstacles.remove_blocked_vias_batch(_rc)

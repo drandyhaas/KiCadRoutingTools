@@ -258,7 +258,7 @@ def advise_locks(pcb_data, pcb_file: Optional[str] = None, *,
     _conflict_refs: set = set()
     try:
         from placement.legality import grade_pad_legality
-        _rep = grade_pad_legality(pcb_data, _cc, worst_n=0)
+        _rep = grade_pad_legality(pcb_data, _cc, worst_n=0, pcb_file=pcb_file)
         for _a, _b, _mm in (_rep.get('worst') or ()):
             _conflict_refs.add(_a)
             _conflict_refs.add(_b)

@@ -65,6 +65,115 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #:
 #: MEASURED, from the run recorded in the pull request. Never predicted.
 #:
+#: RE-RECORDED 2026-09-16 (the #958 fine-pitch tie guard, `32167508`). The
+#: three esp_prog rows moved in ONE column and in ONE direction: `segments`
+#: ROSE everywhere while `vias` is identical on all three and `copper_mm` is
+#: identical on two. That is the EXACT MIRROR of the 2026-09-14 #958 re-record
+#: below, where segments fell everywhere at identical vias and copper -- and it
+#: is the intended effect: the guard refuses #958's equal-length collapses
+#: inside a fine-pitch pad field, so staircases there keep their corners. Same
+#: length, more legs.
+#:
+#:   esp_prog:authored            segs 250 -> 260   (vias 34, copper 336.58 both)
+#:   esp_prog:perturb-scatter-d1  segs 296 -> 302   (vias 38, copper 361.26 both)
+#:   esp_prog:portfolio-1         segs 282 -> 293, copper 362.75 -> 362.65
+#:   splitflap_driver:authored    unmoved
+#:
+#: BISECTED, not assumed: the row passes at `549f16b5`, the guard's immediate
+#: parent, and fails at `32167508`. splitflap staying put is consistent -- the
+#: guard only fires where a tie's new legs cross a <=0.8mm-pitch pad field.
+#:
+#: portfolio-1 is again the only row whose copper moved, by -0.10mm (-0.03%),
+#: and again it is the row the 2026-09-15 note calls pathological by
+#: construction (the quench candidate that lands U2's tab ON Q1's pads).
+#:
+#: `truth.headline` did not mismatch on ANY row, so nothing became unrouted or
+#: broken. MORE segments at equal copper and equal vias is a LOSS on this
+#: repo's own tie-break, and it is the price the guard charges: measured on
+#: ft2232h_jtag it buys back a whole net (1/34 -> 0/34 incomplete) and leaves
+#: ottercast_audio unchanged at 2/158, where the previous, reverted cut had made
+#: it 4/158. That trade is the commit's argument; this row is where its cost
+#: shows.
+#:
+#: RE-RECORDED 2026-09-15 (#908, the own-pad lift reaching Phase 3). The three
+#: `esp_prog` rows moved; `splitflap_driver:authored` did NOT. That split is the
+#: evidence for the cause rather than a story about it: esp_prog carries EIGHT
+#: footprint-copper segments (U2's SOT89 tab, the #908 population) and splitflap
+#: carries none, so a change to how footprint copper is modelled can only reach
+#: one of the two boards -- and only one moved.
+#:
+#: BISECTED over the #908 chain, one detached worktree per commit, running
+#: `--row esp_prog:portfolio-1` and parsing the LEFT of `got != want` (see the
+#: bisect note below -- the same trap was waiting):
+#:
+#:   f0838d2d  matches      (the last green commit)
+#:   b0016cc3  matches      #908 partial
+#:   5c00f277  matches      own-pad lift covers the via keep-out
+#:   ddd55b3c  matches      the lift could never remove anything (#422 static)
+#:   9272d942  35 -> 36 vias, 362.75 -> 364.33  <-- THE COMMIT
+#:   07412c06  36 -> 35 vias, 364.33 -> 362.75  (settles to the recorded value)
+#:
+#: `9272d942` is "the bake marker is per-MAP, PHASE 3 GETS THE LIFT, and a gate
+#: that pins it". Phase 3 is tap routing, which is where a multi-point net
+#: places its vias -- so a lift that newly applies there is exactly a change to
+#: the via count. `07412c06` (the short gate counted the tie as foreign) then
+#: nudges it back. Both are #908 doing MORE of what #908 is for.
+#:
+#:   esp_prog:authored            34/344.06/254 -> 34/336.58/250   better
+#:   esp_prog:perturb-scatter-d1  37/363.0/292  -> 38/361.26/296   mixed (+1 via)
+#:   esp_prog:portfolio-1         30/350.67/269 -> 35/362.75/282   WORSE (+5 vias)
+#:   splitflap_driver:authored    unmoved
+#:
+#: The direction is MIXED and one row is frankly worse, which is recorded here
+#: rather than rounded off -- there is precedent in the 2026-08-30 note below
+#: for a mixed re-record, and the same reasoning applies. `truth.headline` did
+#: not mismatch on ANY row (portfolio-1 stays at 1, and that 1 is a `drc` item,
+#: not `unrouted`/`broken`), so nothing became disconnected; the movement is in
+#: the quality tie-break only. portfolio-1 is the pathological row by
+#: construction -- the quench candidate that lands U2's SOT89 tab ON Q1's pads,
+#: as its own comment below already says -- so it is the row where freeing the
+#: tab's own copper has the most room to reroute, for better or worse.
+#:
+#: Re-recorded rather than treated as a defect because the lift is CORRECT: a
+#: footprint's own copper must not cage its own pads, on the tap path as much as
+#: anywhere else. If a later corpus A/B shows Phase 3 taps getting worse broadly
+#: -- not on one hand-perturbed candidate -- that is the signal to revisit, and
+#: this row is where it would show first.
+#:
+#: RE-RECORDED 2026-09-14 (#958, the smoother's second phase). `truth.quality`
+#: moved on all four rows, and in ONE column: `segments` fell everywhere while
+#: `vias` is identical on all four and `copper_mm` is identical on three. That
+#: signature is a re-SEGMENTATION, not a different route, and it was BISECTED
+#: rather than assumed -- `git bisect run` over the 146 commits since the last
+#: re-record lands on `2fe97a30` ("#958: the smoother prefers fewer segments at
+#: equal length, in a second greedy phase"), whose own commit message records
+#: the same fingerprint on splitflap's signal step (1149 -> 968 segments, 96
+#: vias in both, copper 2477.79 -> 2477.10 mm).
+#:
+#:   esp_prog:authored            segs 286 -> 254   (vias 34, copper 344.06 both)
+#:   esp_prog:perturb-scatter-d1  segs 311 -> 292   (vias 37, copper 363.0 both)
+#:   esp_prog:portfolio-1         segs 304 -> 269   (vias 30, copper 350.67 both)
+#:   splitflap_driver:authored    segs 1422 -> 1155, copper 2915.15 -> 2913.82
+#:
+#: splitflap is the only row whose copper moved, by -1.33 mm (-0.05%), and that
+#: is the SAME second-order effect the 2026-08-30 note below already records for
+#: the collinear merge: re-segmentation changes rip/restore granularity for the
+#: later steps of a multi-step chain, so end-to-end copper shifts a hair. The
+#: three esp_prog rows are single-step and their copper is unmoved to the
+#: hundredth, which is what makes that reading the one to believe.
+#:
+#: `truth.blocking` is 0 on all four, before and after -- no net became unrouted
+#: or broken. FEWER segments at equal copper and equal vias is an improvement on
+#: this repo's own tie-break, so this re-record is not papering over a loss.
+#:
+#: A NOTE ON BISECTING THIS FILE. The first attempt used a shell predicate
+#: grepping the mismatch line for the recorded segment count -- but that line is
+#: `got != want`, so the pattern matched the WANT side and every commit read as
+#: good, converging on HEAD (an unrelated one-line project-writeback commit).
+#: A predicate for this test must parse the left of `!=`, and must exit 125 on a
+#: checkout that produced no comparison line at all, or an untestable commit is
+#: silently scored as a passing one.
+#:
 #: RE-RECORDED 2026-09-03 (#530 decision 3). `truth.quality` moved on the three
 #: esp_prog rows and the cause is named: a pad clearance OVERRIDE now REPLACES
 #: the class value (KiCad 10, measured by tests/oracle/constraint_agreement.py)
@@ -171,7 +280,10 @@ EXPECTED = {
         truth={'headline': 0,
                # 2026-09-03 (#530 auto/fab defaults): 33/345.52/373 -> 39/353.93/256
                # 2026-09-10 (#908 footprint copper): 39/353.93/256 -> 34/344.06/286
-               'quality': {'vias': 34, 'copper_mm': 344.06, 'segments': 286}},
+               # 2026-09-14 (#958 phase 2): segs 286 -> 254; vias/copper unmoved
+               # 2026-09-15 (#908 Phase 3 lift): 34/344.06/254 -> 34/336.58/250
+               # 2026-09-16 (#958 fine-pitch tie guard): segs 250 -> 260
+               'quality': {'vias': 34, 'copper_mm': 336.58, 'segments': 260}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
             'halo': 127.48707486477095, 'overlap_area': 1.1400451712000104,
@@ -186,7 +298,10 @@ EXPECTED = {
         truth={'headline': 0,
                # 2026-09-03 (auto/fab defaults): 29/341.07/288 -> 32/327.31/282
                # 2026-09-10 (#908 footprint copper): 32/327.31/282 -> 37/363.0/311
-               'quality': {'vias': 37, 'copper_mm': 363.0, 'segments': 311}},
+               # 2026-09-14 (#958 phase 2): segs 311 -> 292; vias/copper unmoved
+               # 2026-09-15 (#908 Phase 3 lift): 37/363.0/292 -> 38/361.26/296
+               # 2026-09-16 (#958 fine-pitch tie guard): segs 296 -> 302
+               'quality': {'vias': 38, 'copper_mm': 361.26, 'segments': 302}},
         predictors={
             'crossings': 50, 'hpwl': 252.34828000000005,
             'halo': 130.46454030971682, 'overlap_area': 1.1400451712000104,
@@ -240,7 +355,11 @@ EXPECTED = {
         truth={'headline': 1,
                # 2026-09-03 (auto/fab defaults): 32/347.03/270 -> 31/341.99/263
                # 2026-09-10 (#908 footprint copper): 31/341.99/263 -> 30/350.67/304
-               'quality': {'vias': 30, 'copper_mm': 350.67, 'segments': 304}},
+               # 2026-09-14 (#958 phase 2): segs 304 -> 269; vias/copper unmoved
+               # 2026-09-15 (#908 Phase 3 lift): 30/350.67/269 -> 35/362.75/282
+               # 2026-09-16 (#958 fine-pitch tie guard): 35/362.75/282 ->
+               #   35/362.65/293 (the only row whose copper moved, -0.10mm)
+               'quality': {'vias': 35, 'copper_mm': 362.65, 'segments': 293}},
         predictors={
             'crossings': 23, 'hpwl': 260.0687799999999,
             'halo': 101.01900525631262, 'overlap_area': 1.0,
@@ -256,8 +375,11 @@ EXPECTED = {
         argv_sha='d32ea90c2e348bd6c1fb318983e73f953f179d1ea85aeca7ad4ed4b2bed5cbdc',
         seconds=32.6,
         truth={'headline': 0,
-               'quality': {'vias': 168, 'copper_mm': 2915.15,
-                           'segments': 1422}},
+               # 2026-09-14 (#958 phase 2): segs 1422 -> 1155, copper
+               # 2915.15 -> 2913.82 (-0.05%); vias unmoved. The only row whose
+               # copper moved -- see the re-record note in the header.
+               'quality': {'vias': 168, 'copper_mm': 2913.82,
+                           'segments': 1155}},
         predictors={
             'crossings': 300, 'hpwl': 2504.4400000000014,
             'halo': 297.4273114820511, 'overlap_area': 1.7621459846850488e-13,

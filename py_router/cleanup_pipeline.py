@@ -539,6 +539,140 @@ def _via_ledger_sig(v):
             _q(getattr(v, 'drill', 0) or 0))
 
 
+def file_only_copper(output_file, pcb_data, scope_net_ids):
+    """The SHARED board-vs-target core: copper present on the shipped target
+    that `pcb_data` does not have, as the target's own objects.
+
+    Both front-ends assemble their output the same way -- start from something
+    that ALREADY holds the board's original copper, then apply the run's
+    additions and a list of removals (the CLI copies the input file verbatim
+    and strips `segments_to_remove`, #220; the GUI applies the same list to the
+    live pcbnew board, #84). So copper only leaves if some pass REMEMBERED to
+    put it in that list, which is a coverage argument, and coverage arguments
+    fail silently. Two structural reasons they do, both measured on
+    cparti_fpga's retry step:
+
+      * IDENTITY -- input copper is matched by id(); a rip -> restore ->
+        cleanup cycle can leave a DIFFERENT object in pcb_data, so the pass no
+        longer recognises it as input-file copper;
+      * NESTING -- each batch_route owns its own strip list, and route.py's
+        plane finalize runs a NESTED batch_route (repair_planes' #517
+        reconnect) whose removals need not reach the outer writer.
+
+    Comparing the ARTIFACT against pcb_data is representation-independent: it
+    does not care which channel missed the removal, whether identity survived,
+    or how deep the nesting was. pcb_data is the engine's own final answer --
+    every pass maintains it, and the DRC and connectivity route.py reports are
+    computed from it -- so copper on the target that pcb_data lacks was never
+    part of that answer.
+
+    MEASURED (2026-09-16, cparti_fpga step 10): the dead-end sweep removed
+    SRAM_D0's B.Cu diagonal from pcb_data, octolinear smoothing then routed
+    SRAM_A4 through the vacated corridor -- correctly, its clearance check saw
+    an empty corridor (0 violations across 602 emitted segments) -- and the
+    diagonal SHIPPED anyway, crossing it. 8 of 333 nets diverged; SRAM_D0 by 19
+    segments. Every net in that board's remaining DRC (SRAM_D0, SRAM_A7,
+    SRAM_WE) is in the diverged set.
+
+    Returns (segments, vias) from the WRITTEN file, or ([], []) if it cannot be
+    re-parsed -- an audit must never break a run.
+    """
+    from collections import Counter
+    from kicad_parser import parse_kicad_pcb
+    try:
+        written = parse_kicad_pcb(output_file)
+    except Exception:                                  # noqa: BLE001
+        return [], []
+    scope = {pcb_data.nets[nid].name for nid in (scope_net_ids or [])
+             if nid in getattr(pcb_data, 'nets', {})}
+
+    def _by_name(pcb, attr, graphic_ok=False):
+        out = {}
+        for o in getattr(pcb, attr, []) or []:
+            if not graphic_ok and getattr(o, 'graphic', False):
+                continue
+            n = pcb.nets[o.net_id].name if o.net_id in pcb.nets else o.net_id
+            out.setdefault(n, []).append(o)
+        return out
+
+    b_s, f_s = _by_name(pcb_data, 'segments'), _by_name(written, 'segments')
+    b_v, f_v = _by_name(pcb_data, 'vias'), _by_name(written, 'vias')
+    segs, vias = [], []
+    for name in scope:
+        # MULTISET, not set: a net legitimately carrying two identical stacked
+        # segments must not have one read as a leak because the other matched.
+        want = Counter(_seg_ledger_sig(x) for x in b_s.get(name, []))
+        for x in f_s.get(name, []):
+            k = _seg_ledger_sig(x)
+            if want.get(k, 0) > 0:
+                want[k] -= 1
+            else:
+                segs.append(x)
+        wantv = Counter(_via_ledger_sig(x) for x in b_v.get(name, []))
+        for x in f_v.get(name, []):
+            k = _via_ledger_sig(x)
+            if wantv.get(k, 0) > 0:
+                wantv[k] -= 1
+            else:
+                vias.append(x)
+    return segs, vias
+
+
+def unreported_input_strips(orig_seg_by_net, orig_via_by_net, scope_net_ids,
+                            known_seg_ids, known_via_ids, board_segments,
+                            board_vias, extra_segments=(), extra_vias=()):
+    """Input copper that is gone from the engine's model but that no pass put on
+    a strip list -- derived by GEOMETRY, returned as (segments, vias).
+
+    Every pass reports the input copper it removed by object id(). That is a
+    coverage argument, and a rip -> restore -> cleanup cycle breaks identity, so
+    a removal can go unrecorded and the input file's copy ships. Deriving the
+    remainder closes that loop whoever missed it and however deeply nested.
+
+    NEITHER GRAPHIC NOR LOCKED COPPER IS EVER A CANDIDATE. Graphic is the
+    asymmetry that motivated this function (below). LOCKED copper is the same
+    class for the same reason: KiCad's `(locked yes)` is user-pinned, every
+    prune site refuses it (`pcb_modification` 1645/2056/2072/2080/5156) and
+    #521 makes its net never-rippable with no override -- so a locked original
+    missing from the model is not something this pass may finish by deleting
+    the user's copper from the output.
+
+    GRAPHIC COPPER IS NEVER A CANDIDATE, and that asymmetry is the whole reason
+    this is a named function instead of a comprehension. The "still present" set
+    is built from non-graphic copper (graphics are not tracks; the writer has no
+    `(segment)` block to strip and no pass may prune them -- #337/#908), so a
+    graphic original is absent from it BY CONSTRUCTION. Filtering the reference
+    but not the candidates therefore strips every graphic in scope. Measured on
+    zynq_ad9364: 10 net-tagged graphics on VCC_1V8/VCC_3V3 stripped, the first
+    behavioural divergence in a 64k-line log, cascading to rip candidates
+    196 -> 195, six nets left unrouted, and ETH_RXD0 routed across VCC_3V3's
+    art (an `ETH_RXD0 <-> VCC_3V3 [Graphic]` short).
+
+    `extra_segments`/`extra_vias` are the write-list's new copper: the #284
+    re-emit clause lets a result reproduce an original's span, so that span is
+    still on the board even when the original object is not in `board_*`.
+    """
+    present_s = {_seg_ledger_sig(x) for x in board_segments
+                 if not getattr(x, 'graphic', False)}
+    present_v = {_via_ledger_sig(x) for x in board_vias}
+    for x in extra_segments:
+        present_s.add(_seg_ledger_sig(x))
+    for x in extra_vias:
+        present_v.add(_via_ledger_sig(x))
+    segs = [x for nid in (scope_net_ids or ())
+            for x in orig_seg_by_net.get(nid, ())
+            if id(x) not in known_seg_ids
+            and not getattr(x, 'graphic', False)
+            and not getattr(x, 'locked', False)
+            and _seg_ledger_sig(x) not in present_s]
+    vias = [x for nid in (scope_net_ids or ())
+            for x in orig_via_by_net.get(nid, ())
+            if id(x) not in known_via_ids
+            and not getattr(x, 'locked', False)
+            and _via_ledger_sig(x) not in present_v]
+    return segs, vias
+
+
 def verify_written_file_parity(output_file, pcb_data, scope_net_ids,
                                label: str = '') -> bool:
     """KICAD_BOARD_LEDGER=1 post-write audit: re-parse the WRITTEN file and

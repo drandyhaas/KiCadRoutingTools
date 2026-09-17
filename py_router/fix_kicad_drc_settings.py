@@ -896,6 +896,18 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
                 continue
             target = round(float(target), 6)
             cur = default_cls.get(field)
+            # A declared 0 is UNSET, not a floor of zero: KiCad writes 0 for
+            # "not configured" and then grades the class at rules.min_clearance.
+            # This branch read it as "already below the target" and left it,
+            # so a project whose Default class was never configured (the
+            # human-routed originals the bench boards descend from) shipped
+            # every chain step with clearance 0.0 -- which route.py pins up to
+            # the fab floor and the GUI replaces with its Min Clearance
+            # control's default, 0.25 on copper routed at 0.1. The same rule
+            # every reader in this module applies (project_copper_clearance:
+            # "None if unset or 0").
+            if cur is not None and cur <= EPS:
+                cur = None
             if cur is None or cur > target + EPS:
                 changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
                 default_cls[field] = target
