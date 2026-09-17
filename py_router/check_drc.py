@@ -860,7 +860,30 @@ def graphic_own_pad_nets(pcb_data):
             if min(point_to_pad_distance(g.start_x, g.start_y, pd),
                    point_to_pad_distance(g.end_x, g.end_y, pd)) <= hw + 1e-6:
                 nets.add(pd.net_id)
-        nets |= _net_tie_group_nets(fp, nets)
+        # A segment bridging pads of TWO DIFFERENT nets is lifted for BOTH
+        # unless a declared tie says the short is intended -- and then each net
+        # routes INTO it and they meet inside net-less copper, which KiCad
+        # grades as `shorting_items`. Measured on a20_can: the `3.3V/5.0V1`
+        # solder jumper (SJ_2_SMALL_12_TIED, `net_tie_groups == []` -- the NAME
+        # says tied, the footprint DECLARES nothing) draws one F.Cu segment
+        # from pad 1 `+5V` to pad 2 `Net-(3.3V/5.0V1-Pad2)`; both nets were
+        # routed into it (-0.171mm and -0.230mm overlap) and KiCad reported two
+        # new shorting_items. A DECLARED tie is the case KiCad itself exempts,
+        # so it still lifts; anything else stays blocking, which is also the
+        # only answer that keeps this generator no more permissive than the
+        # checker (the subset chain in the docstring above).
+        #
+        # Census over 489 corpus boards: of 1126 segments lifted for >= 2 nets,
+        # 1032 ARE declared ties and keep their lift; the 94 that are not are
+        # solder jumpers on 6 boards (tigard JP1, ulx3s RP1/2/3 + D9/D51/D52,
+        # butterstick JP1/2/3, ecp5_sbc_mobo NT1, eez_dib_b3c JP1/3/5/7) -- the
+        # a20_can family exactly. A jumper bridge is a stub off one pad edge,
+        # not esp_prog's notch AROUND a pad, so refusing it does not re-seal a
+        # pad the way #907 did.
+        tie = _net_tie_group_nets(fp, nets)
+        if len(nets) > 1 and not (tie and nets <= tie):
+            continue
+        nets |= tie
         if nets:
             out[id(g)] = frozenset(nets)
     return out
