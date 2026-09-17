@@ -6143,13 +6143,35 @@ candidates correctly:
     braid tier: ..._tier0_0a routed 70 via(s), 1 open
     braid tier: ..._tier0_0b routed 61 via(s), 0 open   <- picked, rightly
 
-...and the chain then ships **68**. The candidate that routes better AS AN
-INTERMEDIATE routes worse after the remaining stages, exactly as a plan
-with a better objective does. **Routing a mid-chain board is not measuring
-the board that ships.** Any judge worth having has to be evaluated on the
-final artefact, which is what `replan.py` does per net with the router as
-an oracle -- and `replan` is the one mechanism that has actually paid
-(74 -> 68 at K41, 98 -> 96 at K51).
+...and the chain then ships **68**.
+
+**CORRECTION (review, 2026-09-16): the first diagnosis written here -- "it
+is a proxy one level up" -- was the wrong reason.** The real defect is
+cruder and is a BUG. `braid_tier` fans its candidate out through
+`fanout_once` (`:2784`), and `fanout_once` NEVER CALLS `explain_plan` --
+the only writer of the `<board>.plan.json` sidecar (`:3474`, `:3752`). So
+the tier's board has no sidecar, and `braid.py:8051` falls back to
+`plan = None`: no `pages_first` marker, `schedule.EXACT_PAGES` off,
+`PLAN_PAGES_SIDERS` off. **The tier judge routes in a THIRD regime that
+neither shipped arm uses** -- and this chain's own portfolio measures
+those two arms as 14 vias apart at K51 (112/1-open against 98/0). So its
+verdict is a number about a board nobody will build, which is enough on
+its own to explain the K35 regression; the "intermediate vs final" story
+is unproven and should not be quoted.
+
+The fix is to give the tier fanout its sidecar (call `explain_plan` on the
+tier stem, or route the tier through `fanout_destination`). **The measured
+verdicts above are therefore NOT a fair test of the idea** -- judging by
+routing has not really been tried yet. Re-run after the fix before
+concluding anything about the judge.
+
+Two more from the same review, both real: `PLAN_PAGES_TIER_MAX` exhaustion
+is SILENT (`:2776`), so after ~2 decisions the round quietly resumes
+trusting a count the braid has already contradicted; and the `_near` test
+at `:3173` compares `key2[0]` against `best_key[0]`, which is the COUNT
+under `PLAN_JUDGE` but a small residue integer under bare `PLAN_PAGES` --
+so a threshold like 5 makes every decision a "near tie" and burns the
+whole budget on the first two.
 
 **Instrument note:** the first reading of this sweep showed zero tier
 lines and nearly became "the judge never fired" -- `braid tier` was not in
@@ -6221,8 +6243,11 @@ measurement above, which reorders it:**
    gate this file asked for: `synth_ladder --batch b1`, 23
    planted-optimum cases, better on 5, WORSE ON 0, identical on 18, 331 ->
    319 total vias at unchanged completion. `CHAIN_FANOUT_AB` and
-   `CHAIN_BRAID_AB` default to 1; set either to 0 for the single-shot
-   chain. The only cost is TIME (K51 ~3 min -> ~8).
+   `CHAIN_BRAID_AB` default to 1. **Set `CHAIN_FANOUT_AB=0` for the
+   single-shot chain** -- NOT `CHAIN_BRAID_AB=0` alone, which the fanout
+   portfolio now overrides with a notice (it writes only `_J0`/`_J1`, so
+   the single-shot braid would route a file that does not exist). The only
+   cost is TIME (K51 ~3 min -> ~8).
 3. **K51, the only rung the human still wins** (96 against 81), and the
    rung where the anti-correlation is worst.
 

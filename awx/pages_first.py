@@ -110,6 +110,22 @@ PAGES_CANON_LP = int(os.environ.get('PLAN_PAGES_CANON_LP', '0') or 0)
 # LP is not the only float channel once the portfolio is on. Both are
 # pinned here, and the arm is measured rather than assumed.
 PAGES_CANON_WORKERS = int(os.environ.get('PLAN_PAGES_CANON_WORKERS', '1') or 1)
+# CANON AND THE WALK DO NOT COMPOSE, and the walk loses (review, 2026-09-16).
+# `_walk` controls its proposals by REASSIGNING the module global PAGES_DET
+# (to PLAN_PAGES_WALK_DET, default 10) and swapping it back for the
+# reference solve. A canonical solve reads NEITHER -- it is bounded by
+# conflicts with PAGES_CANON_DET as its backstop -- so every walk proposal
+# silently gets the backstop (default 600) instead of the 10 it asked for:
+# up to PLAN_PAGES_WALK_SOLVES proposals at ~60x their intended budget, and
+# PLAN_PAGES_WALK_FROM=solve's deliberate cheap-proposal / full-reference
+# distinction collapses to nothing. Say so once rather than let a walk arm
+# quietly cost sixty times its budget and mean something else.
+if PAGES_CANON and int(os.environ.get('PLAN_PAGES_WALK', '0') or 0):
+    print('  pages-first: WARNING -- PLAN_PAGES_CANON with PLAN_PAGES_WALK: the '
+          'walk controls its proposals through PLAN_PAGES_WALK_DET, which a '
+          f'canonical solve does not read. Every proposal gets the conflict '
+          f'budget ({PAGES_CANON}) and the det backstop ({PAGES_CANON_DET:g}), '
+          'not the walk budget. The two do not compose.')
 PAGES_SWIM = float(os.environ.get('PLAN_PAGES_SWIM', '100'))  # vias: the price of a net left to swim
 PAGES_ISLAND = float(os.environ.get('PLAN_PAGES_ISLAND', '0') or 0)   # vias per corridor part a page lane's chord crosses on its page (learned from verify; 0 = off)
 PAGES_SRC = int(os.environ.get('PLAN_PAGES_SRC', '1'))        # 0 = the source frozen (destination only)
@@ -1888,7 +1904,17 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
             m.AddBoolOr([xs[a][idx_real[a][i]].Not(), xs[b][idx_real[b][j]].Not()]); nconf += 1
     if learned:
         sig_d = {n: [sr.move_sig(mv) for mv in D[n]] for n in names}
-        for pair in sorted(learned, key=repr):    # a set: canonical order (see _conflicts)
+        # CANONICAL, and `key=repr` was NOT (review, 2026-09-16). `_conflicts`
+        # sorts a set of TUPLES, whose repr is deterministic; `learned` is a
+        # set of FROZENSETS, and a frozenset renders its elements in internal
+        # hash order -- which for strings depends on PYTHONHASHSEED, pinned
+        # NOWHERE in this chain. Measured: one two-element `learned` sorted
+        # into two different orders across seeds 1..6. The exclusions below
+        # are added to the model in this order, so two identical re-plan
+        # passes could stop at different feasible points and lay different
+        # copper from identical inputs -- the defect `_conflicts` documents
+        # (obj 1784 / 1727 / 1809 on one model).
+        for pair in sorted(learned, key=lambda p: sorted(p)):
             pair = list(pair)
             if len(pair) != 2:
                 continue
@@ -2028,6 +2054,20 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     rep = list(cert_lines)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         rep.append(f'  pages-first: NO SOLUTION ({solver.StatusName(status)}) -- the greedy choice stands')
+        # ...AND SAY WHAT STOPPED IT (review, 2026-09-16). The CANON report
+        # lives after this early return, so UNKNOWN -- the one status that
+        # MEANS "a limit fired before a solution was found" -- printed no
+        # portability warning at all: the warning written to catch a
+        # non-portable stop was unreachable on exactly the stop it was
+        # written for. An UNKNOWN here ships the GREEDY plan, so two
+        # machines diverge with nothing in the log saying so.
+        if PAGES_CANON:
+            _dt = solver.ResponseProto().deterministic_time
+            rep.append(f'  pages-first: CANON stopped with NO SOLUTION -- '
+                       f'{solver.NumConflicts()} conflicts, det {_dt:.1f}/{PAGES_CANON_DET:g}'
+                       + (' -- THE DETERMINISTIC BACKSTOP FIRED, NOT PORTABLE'
+                          if _dt >= 0.99 * PAGES_CANON_DET else
+                          ' -- conflict-bounded, but the GREEDY plan ships'))
         if status == cp_model.INFEASIBLE and excl_d:
             # WHY (2026-09-15, session 9; log only, changes nothing): the
             # damped re-solve holds every non-swimmer at a one-move menu and
@@ -2110,7 +2150,13 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                + (f' (cells: at-most-one over {ncell} memberships)' if PAGES_CELLS else '') + '; '
                f'{solver.StatusName(status)} obj {solver.ObjectiveValue() / SCALE:.1f} '
                f'bound {solver.BestObjectiveBound() / SCALE:.1f} in {time.time() - t0:.1f} s'
-               + (f' (CANON: {solver.NumConflicts()}/{PAGES_CANON} conflicts, {solver.NumBranches()} branches, '
+               # the conflict figure is NOT a budget fraction:
+               # max_number_of_conflicts applies PER SUBSOLVER, so the total
+               # overshoots it (measured 1034 against a budget of 200 at one
+               # worker). It is reported for comparison BETWEEN runs, which
+               # is what portability needs, not as a budget check.
+               + (f' (CANON: {solver.NumConflicts()} conflicts [budget {PAGES_CANON}/subsolver], '
+                  f'{solver.NumBranches()} branches, '
                   f'det {solver.ResponseProto().deterministic_time:.1f}/{PAGES_CANON_DET:g}'
                   # WHICH LIMIT FIRED, tested on the BACKSTOP ITSELF. The first
                   # spelling of this asked whether the conflict count was under

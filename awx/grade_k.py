@@ -26,6 +26,21 @@ if not os.path.isfile(board) or os.path.getsize(board) < 1000:
 r = subprocess.run([PY, os.path.join(HERE, '..', 'py_router',
                                      'check_connected.py'), board],
                    capture_output=True, text=True)
+# ASSERT THE CHECKER RAN, exactly as the check_drc call below does. A
+# check_connected that dies (import error, an exception in reconciliation,
+# an OOM) prints no net lines, `opens` stays empty, and the board grades
+# `open=0`. That is not a harmless default: `open` is the FIRST key of
+# every verdict in this campaign -- pick_braid's (open, vias), replan's
+# better(), synth_ladder's grade -- so a crashed checker silently makes
+# every candidate look fully connected and the fewest-via board wins
+# whether or not its pads are joined.
+_cc = r.stdout + r.stderr
+if not re.search(r'ALL NETS FULLY CONNECTED|FOUND \d+ ISSUE|'
+                 r'\d+ net\(s\) with issues|unconnected', _cc, re.I):
+    print(f'GRADE {os.path.basename(board)} BROKEN: check_connected did not '
+          f'report (rc={r.returncode}); refusing to grade it as 0 open. '
+          f'tail: {_cc.strip().splitlines()[-1] if _cc.strip() else "(no output)"}')
+    sys.exit(2)
 opens = []
 for line in (r.stdout + r.stderr).splitlines():
     m = re.search(r'(\S+) \(net \d+\):', line)

@@ -259,7 +259,15 @@ def run_arm(arm: dict) -> dict:
         if f.exists():
             txt = f.read_text(errors="replace").splitlines()
             logs[suffix] = [ln for ln in txt if KEEP.search(ln)][-400:]
-    grade = next((ln for ln in reversed(out.splitlines()) if "GRADE" in ln), "")
+    # FROM STDOUT, ANCHORED. `out` concatenates stdout+stderr, so scanning it
+    # in reverse reads ALL OF STDERR FIRST -- and pick_braid.py prints
+    # "braid A/B: <file>: NO GRADE -- ..." to stderr for any candidate that
+    # did not grade. That substring contains "GRADE", so a arm whose chain
+    # succeeded but which had one dud braid candidate reported NO GRADE for
+    # the whole arm, and --resume then treated it as done and never re-ran
+    # it. Live since the braid portfolio became default-ON.
+    grade = next((ln for ln in reversed(p.stdout.splitlines())
+                  if ln.startswith("GRADE ")), "")
     grade = f"[{planner}] {grade}" if grade else grade
     # THE REPLAN ROUND, optional (arm["replan"] = extra argv for replan.py).
     # replan.py reads the chain's own outputs -- tmp/TAG_fo_kK.kicad_pcb and
