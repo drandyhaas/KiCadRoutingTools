@@ -102,7 +102,8 @@ def split_pad_pairs(worst, seeded, unseated):
     seed's when either member is a ref it MOVED, and lands in the second list
     instead when the other member is a ref it could not seat. Pairs with
     neither member moved are in neither list: they are the board's own, counted
-    from the total by the caller.
+    from the total by the caller -- and a pair between TWO unseated parts is one
+    of those, since the seed moved neither of them.
 
     #982. A part the seed cannot seat keeps the pose it came in with, and THAT
     pose is what gets written -- `placements` has no row for it and the writer
@@ -110,24 +111,43 @@ def split_pad_pairs(worst, seeded, unseated):
     (`seeder._try_place`: "the pile they still form at their meaningless input
     coordinates must not veto real poses"), so they pack onto that copper, and
     the pair then reaches the count through the partner the seed DID move. It
-    is real copper -- on ulx3s seed 1, `check_assembly` grades `H4 <-> J1` a
-    1.509 mm2 `pad_intersection` and the board NOT BUILDABLE -- so it stays
-    named and counted. What it is not is the seed's answer for the parts it
-    placed: whether a hole lands on an unseated part is incidental to the seed,
-    and the count swung 0 -> 1 when an edge connector was seated 0.386 mm
-    further inward for a board-edge copper fix (#975's A/B). Its own bucket
-    keeps `pad_conflicts_seeded` a number the seed can be held to.
+    is real copper -- on ulx3s SEED 1, `py_tools/check_assembly.py` grades
+    `H4 <-> J1` a 1.5089 mm2 `pad_intersection`, BLOCKING, and the board NOT
+    BUILDABLE -- so it stays named and counted. A pair in this bucket is not
+    always that severe: ulx3s seed 0's H4-J2 is a 0.191 mm graze on a board
+    `check_assembly` still grades buildable. What it is not is the seed's answer
+    for the parts it placed: whether a hole lands on an unseated part is
+    incidental to the seed, and the count swung 0 -> 1 at seed 0 and 5 -> 8 over
+    seeds 0..9 when AUDIO1 was seated 0.386 mm further inward for a board-edge
+    copper fix (#975's A/B; a sham nudge of the same size on the unmodified
+    engine reproduces it, so the cause is the displacement, not the fix). Its
+    own bucket keeps `pad_conflicts_seeded` a number the seed can be held to.
+
+    The exit code cannot move by this split: `gate_reason` returns the intent
+    arm whenever anything is unseated, and when nothing is unseated the second
+    list is empty by construction.
+
+    How widespread this is, measured over eight boards at seed 0 plus ulx3s at
+    ten seeds: every charged pair found that involves an unseated part is
+    against copper the seeder never placed -- ulx3s 5 of 5, rp2350 15 of 16,
+    orangecrab 2 of 3. On rp2350 those fifteen are ONE unseated part, U6, whose
+    75 pads sit at the designer's pose with 21 seated courtyards over them.
 
     The exit code cannot move by this split: `gate_reason` returns the intent
     arm whenever anything is unseated, and when nothing is unseated the second
     list is empty by construction.
 
     The alternative reading -- treat the written pose as an obstacle for later
-    stages -- was prototyped and MEASURED WORSE on ulx3s: seed 1 traded the one
-    conflict for H4 unseated (224 placed -> 223), and seed 7 kept three
-    conflicts while unseating H1, H2 and H3. An unseated part converts
-    one-for-one into unrouted nets, which CLAUDE.md ranks above every
-    clearance graze, so the search is left alone here.
+    stages -- was prototyped and MEASURED WORSE. It unseats parts that were
+    seated: ulx3s 20 -> 25 unseated over ten seeds (H4 at seeds 1 and 4, H1, H2
+    and H3 at seed 7), rp2350 1 -> 3, and hole conflicts up on two boards. It
+    does not even buy stability, because at ulx3s seed 7 it swapped three pairs
+    against J1/J2 for three against the H1/H2/H3 it had just unseated -- the
+    seat predicate is courtyard-level, so an unseated part's whole courtyard
+    (14.5 x 52 mm for ulx3s J1/J2) becomes a keep-out. It also ran about 20%
+    slower. Trading seats for a cleaner count is the wrong way round when an
+    unseated part's nets cannot be routed at all, so the search is left alone
+    here; this judgement is the branch's, not a rule quoted from CLAUDE.md.
     """
     unseated = set(unseated)
     mine, against_unseated = [], []

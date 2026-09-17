@@ -11,18 +11,22 @@ ulx3s: seeding an edge connector 0.386 mm further inward for a board-edge
 copper fix took the count 0 -> 1, on a pair between a mounting hole and an
 unseated connector.
 
-The copper is real (`check_assembly` on that output: `H4 <-> J1
-pad_intersection 1.509mm2`, NOT BUILDABLE), so this file pins that it stays
-counted and NAMED -- in `pad_conflicts_unseated` -- and that the three buckets
-partition `pad_conflicts_after`.
+The copper is real: `py_tools/check_assembly.py` on that seed-1 output prints
+`H4 <-> J1  pad_intersection  1.5089mm2  side  BLOCKING` and `VERDICT: NOT
+BUILDABLE`. So this file pins that such a pair stays counted and NAMED -- in
+`pad_conflicts_unseated` -- and that the three buckets partition
+`pad_conflicts_after`. Not every pair in that bucket is that severe: ulx3s
+seed 0's is a 0.191mm graze on a board the same tool grades buildable.
 
 Fixture: a 30 x 20 board. J9 is declared on the north edge and is 36 mm wide,
 wider than the board, so no pose is legal anywhere and it stays unseated at its
 input pose in the middle of the board, where its centre pad sits inside the
 zone the U parts are declared into. U2 is then packed onto it. The control
-removes J9 from the board: U2 takes the same pose and no conflict exists, which
-is what makes the arm above a statement about J9's written pose and not about
-U2's.
+keeps J9 and shrinks it to 6mm, which the north edge can take: seated, it
+leaves the middle of the board and no conflict exists. Same board, same intent,
+same seed, one pad span apart -- so the arm above is a statement about J9
+staying at its INPUT pose, not about U2's choice of pose (which is reported,
+not asserted).
 
 Run:
     python3 tests/test_982_unseated_written_pose.py
