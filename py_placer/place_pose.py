@@ -12,7 +12,9 @@
 Every verb writes through `placement.writer.write_placed_output` -- the same
 writer `place_seed` uses -- carries the sibling `.kicad_pro` / `.kicad_dru`
 (#441), and runs inside `declare_lever('place_pose.py')`, so an armed unaided
-regime accepts this tool and still refuses the hand script it replaces.
+regime accepts this tool and still refuses the hand script it replaces. The
+provenance row is recorded when the finished candidate is promoted onto OUT,
+not when it is staged (#960).
 
 SEVERAL VERBS IN ONE CALL describe ONE arrangement: every op is resolved
 against the INPUT board and written in a single pass, so no op sees another's

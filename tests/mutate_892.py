@@ -170,6 +170,43 @@ ROWS = [
      "            tmp = dst",
      (T_POSE,), 'KILLED'),
 
+    # ---- the promote is where provenance is recorded (#960) ---------------
+    ('the-promote-records-nothing-again', 'o',
+     "    provenance.record_write(input_file or staged, out_path, list(placements),\n"
+     "                            pending=True)\n",
+     "",
+     (T_POSE,), 'KILLED'),
+
+    # The #960 shape itself: a record made for a path outside the regime.
+    ('the-promote-records-the-staged-path-again', 'o',
+     "provenance.record_write(input_file or staged, out_path,",
+     "provenance.record_write(input_file or staged, staged,",
+     (T_POSE,), 'KILLED'),
+
+    # The row computed AFTER the replace. Only an in-place write can tell:
+    # there the input already holds the delivered pose, so nothing is claimed.
+    ('the-promote-row-is-computed-after-the-write-again', 'o',
+     "        provenance.commit_write(out_path)\n",
+     "        provenance.discard_write(out_path)\n"
+     "        provenance.record_write(input_file or staged, out_path,\n"
+     "                                list(placements))\n",
+     (T_POSE,), 'KILLED'),
+
+    ('a-failed-promote-leaks-its-pending-row-again', 'o',
+     "        provenance.discard_write(out_path)\n",
+     "",
+     (T_POSE,), 'KILLED'),
+
+    # The commit outside the rollback: a ledger that cannot be appended to
+    # would then ship the board with no row for it.
+    ('a-ledger-failure-ships-the-board-anyway', 'o',
+     "        provenance.commit_write(out_path)\n",
+     "        try:\n"
+     "            provenance.commit_write(out_path)\n"
+     "        except OSError:\n"
+     "            pass\n",
+     (T_POSE,), 'KILLED'),
+
     ('a-forced-run-is-not-disclosed', 'o',
      "            summary['forced'] = True\n\n        if dry_run:",
      "            summary['forced'] = False\n\n        if dry_run:",

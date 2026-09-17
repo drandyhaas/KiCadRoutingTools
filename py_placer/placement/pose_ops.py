@@ -952,21 +952,37 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 summary['output'] = None
                 raise PoseRefusal(reason, summary=summary, unlock_failed=still)
 
-        _promote(cand, out_path, summary)
+        _promote(cand, out_path, summary, input_file=board_path,
+                 placements=placements)
         return summary
     finally:
         stage.cleanup()
 
 
-def _promote(staged: str, out_path: str, summary: Optional[Dict] = None) -> None:
+def _promote(staged: str, out_path: str, summary: Optional[Dict] = None, *,
+             input_file: Optional[str] = None,
+             placements: Sequence[Dict] = ()) -> None:
     """Move a finished staged board and its siblings onto the output path.
 
     Stage all files and back up prior destinations before replacing anything.
     Roll back completed replacements on failure. If restoration itself fails,
     report the affected paths and retain backups instead of claiming atomicity.
     Destination-only requirements cannot join a board graded without them.
+
+    PROVENANCE IS RECORDED HERE, against `out_path` (#960). The candidate was
+    written in a temp dir, and `record_write` finds the regime by walking up
+    from the path it is handed -- so the writer's own call, made for the temp
+    path, found no regime, returned None and refused nothing, and this copy
+    then landed the board in an armed work dir with no row. `input_file` is the
+    board `placements` were resolved against: a row's `refs_moved` is the
+    input diffed against the placements, so recording against the staged
+    candidate would claim nothing at all.
     """
+    if placements and input_file is None:
+        raise TypeError("_promote needs input_file when placements are given: "
+                        "the provenance row diffs the placements against it")
     from copy_board import SIBLING_EXTS
+    from placement import provenance
     src_base = os.path.splitext(staged)[0]
     dst_base = os.path.splitext(out_path)[0]
     pairs = [(staged, out_path)]
@@ -984,6 +1000,12 @@ def _promote(staged: str, out_path: str, summary: Optional[Dict] = None) -> None
     for ext in SIBLING_EXTS:
         if os.path.isfile(src_base + ext):
             pairs.append((src_base + ext, dst_base + ext))
+    # BEFORE the first copy, so an armed work dir with no declared lever
+    # refuses with the destination untouched. And before the replace for a
+    # second reason: on an in-place write `input_file` IS `out_path`, and the
+    # diff is only meaningful while that file still holds the incumbent board.
+    provenance.record_write(input_file or staged, out_path, list(placements),
+                            pending=True)
     staged_tmps = []
     backups = {}
     replaced = []
@@ -1012,6 +1034,9 @@ def _promote(staged: str, out_path: str, summary: Optional[Dict] = None) -> None
             os.replace(entry[0], entry[1])
             replaced.append(entry[1])
             staged_tmps.remove(entry)
+        # Inside the `try`: a ledger that cannot be appended to rolls the board
+        # back with everything else, so no board lands without its row.
+        provenance.commit_write(out_path)
     except OSError as exc:
         rollback_errors = []
         for dst in reversed(replaced):
@@ -1045,6 +1070,9 @@ def _promote(staged: str, out_path: str, summary: Optional[Dict] = None) -> None
         doc['rollback_errors'] = rollback_errors
         raise PoseRefusal(reason, code=2, summary=doc)
     finally:
+        # A no-op after a commit. Otherwise the write did not land, and its row
+        # must not stay pending for some later commit of this path to pick up.
+        provenance.discard_write(out_path)
         for backup in backups.values():
             if backup and backup not in recovery_paths:
                 try:
