@@ -367,8 +367,9 @@ The same keys are added to the entry's `edge_seating` row when one exists.
 `connector_requirements` (#974), on every run that prints a summary. It adds
 what the grade does not say in one place: which declared requirements were
 **not measured** (`unmeasured`: a part not on the board, a band graded on the
-legacy reading, a pad shape the edge grader cannot model, an along-edge claim
-that abstained), which bands `--reseat` set aside ungraded (`bands_dropped`),
+legacy reading, copper past the outline left ungraded because the body could
+not be read or a pad shape cannot be modelled, an along-edge claim that
+abstained), which bands `--reseat` set aside ungraded (`bands_dropped`),
 and the connector errors on each side of place_seed's pinned split, so an
 error it answers for is never reported beside exit 0. `complete` there means
 everything declared was measured, not that it passed. The report never

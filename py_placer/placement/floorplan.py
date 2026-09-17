@@ -5551,8 +5551,12 @@ def connector_requirements(graded: GradeResult, own: Sequence[Violation],
         return _json_plain(_connector_requirements(graded, own, pinned,
                                                    bands_dropped))
     except Exception as exc:  # noqa: BLE001 -- a report must not fail the run
+        try:
+            detail = str(exc)
+        except Exception:  # noqa: BLE001 -- nor may the message of one
+            detail = '<unprintable>'
         return connector_requirements_ungraded(
-            f"connector_requirements failed: {type(exc).__name__}: {exc}")
+            f"connector_requirements failed: {type(exc).__name__}: {detail}")
 
 
 def _connector_requirements(graded, own, pinned, bands_dropped):
@@ -5577,16 +5581,16 @@ def _connector_requirements(graded, own, pinned, bands_dropped):
         if centre is None and band is None:
             continue
         claim = 'center_on_edge' if centre is not None else 'along_edge_band'
+        # A recorded measurement settles it: the grade only abstains when it
+        # appended none, so an abstention beside a measured row can only be a
+        # hand-written `context.budget_withheld` key.
+        if any(str(row.get('ref')) == ref and 'along_edge_offset_mm' in row
+               for row in graded.edge_seating):
+            continue
         why = graded.budget_abstained.get(f"edge_connectors[{ref}].{claim}")
-        measured_along = any(
-            str(row.get('ref')) == ref and 'along_edge_offset_mm' in row
-            for row in graded.edge_seating)
-        if why is not None:
-            unmeasured.append({'ref': ref, 'requirement': claim,
-                               'reason': why})
-        elif not measured_along:
-            unmeasured.append({'ref': ref, 'requirement': claim,
-                               'reason': NO_ALONG_EDGE_MEASUREMENT})
+        unmeasured.append({'ref': ref, 'requirement': claim,
+                           'reason': NO_ALONG_EDGE_MEASUREMENT
+                           if why is None else why})
 
     for row in evidence:
         ref = str(row['ref'])
@@ -5602,24 +5606,41 @@ def _connector_requirements(graded, own, pinned, bands_dropped):
                 'reason': row.get('body_unmeasured_reason'),
                 'graded_on': row.get('overhang_basis')})
         copper = row.get('pad_copper_edge') or {}
-        # The copper conjunct is graded on the body path only; its CLEARANCE
-        # half (and board-wide `.kicad_dru` rules) is evidence, not a
-        # requirement, so it never reaches `unmeasured`.
-        if row.get('body_measured') and (
-                copper.get('certified') is False
-                or ('outside_mm' in copper and copper['outside_mm'] is None)):
-            pads = sorted({f"{u.get('pad_ref')}: {u.get('reason')}"
-                           for u in copper.get('unmeasured') or ()})
+        # The copper-past-the-outline conjunct is graded on the BODY path
+        # only. Its CLEARANCE half (and board-wide `.kicad_dru` rules) is
+        # evidence, not a requirement, so it never reaches `unmeasured`.
+        if row.get('body_measured'):
+            if (copper.get('certified') is False
+                    or ('outside_mm' in copper
+                        and copper['outside_mm'] is None)):
+                pads = sorted({f"{u.get('pad_ref')}: {u.get('reason')}"
+                               for u in copper.get('unmeasured') or ()})
+                unmeasured.append({
+                    'ref': ref, 'requirement': 'pad_copper_outside',
+                    'reason': ('; '.join(pads) if pads else
+                               'the edge grader cannot model a pad shape, so '
+                               'its outside_mm is not a certified reading')})
+        elif row.get('edge') is not None and (
+                copper.get('minimum_gap_mm') is not None
+                or copper.get('findings') or copper.get('unmeasured')):
+            # An entry that CLAIMS an edge, on a part with copper, whose body
+            # could not be read: the conjunct was skipped, whatever its band
+            # says. A vacuous band exempts `overhang_body` above, never this.
             unmeasured.append({
                 'ref': ref, 'requirement': 'pad_copper_outside',
-                'reason': ('; '.join(pads) if pads else
-                           'the edge grader cannot model a pad shape, so '
-                           'its outside_mm is not a certified reading')})
+                'reason': ('pad copper is graded against the outline on the '
+                           'drawn-body path only, and this body was not '
+                           'measured: '
+                           + str(row.get('body_unmeasured_reason')))})
 
+    # Sorted, and only EXACT duplicates removed: a ref declared twice yields
+    # the same entries twice, while two requirements on one ref are two
+    # entries.
     seen, deduped = set(), []
     for u in sorted(unmeasured, key=lambda u: (u['ref'], u['requirement'],
-                                               str(u['reason']))):
-        key = (u['ref'], u['requirement'], str(u['reason']))
+                                               str(u['reason']),
+                                               str(u.get('graded_on')))):
+        key = tuple(sorted((k, str(v)) for k, v in u.items()))
         if key not in seen:
             seen.add(key)
             deduped.append(u)
