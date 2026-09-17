@@ -1651,7 +1651,7 @@ def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
     moved = _floor_at(state, part.ref, sx, sy, part.rot)
     if moved is None or moved.short:
         return None, floor, dict(why, why='still_short')
-    return (sx, sy), moved, None
+    return (sx, sy), floor, None
 
 
 def _floor_record(ref: str, edge: str, kept: str, pose, floor: _Floor,
