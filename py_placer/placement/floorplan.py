@@ -5586,9 +5586,9 @@ def _connector_requirements(graded, own, pinned, bands_dropped):
         # only when it appends no measuring row, so an abstention beside one
         # is a hand-written `context.budget_withheld` key. Matched on the
         # entry, not the ref: a ref declared twice gets a measuring row from
-        # any entry that names an edge, claim or not.
-        if c.get('edge') is not None and any(
-               str(row.get('ref')) == ref and row.get('declared')
+        # any entry that names an edge, claim or not. Every row names its
+        # edge, so an edgeless entry matches none.
+        if any(str(row.get('ref')) == ref and row.get('declared')
                and row.get('edge') == c.get('edge')
                and 'along_edge_offset_mm' in row
                for row in graded.edge_seating):
