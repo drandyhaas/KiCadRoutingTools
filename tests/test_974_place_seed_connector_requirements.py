@@ -12,8 +12,10 @@ Checks are named by what they hold:
 
 * `rc:` / `board:` -- the exit code and the written board. These pass on the
   commit BEFORE the key existed (measured: every `rc:` and `board:` check
-  green, every `key:` check red), so they pin the codes the change must not
-  move. The codes are that measurement, not a policy restated.
+  green; every `key:` check that runs red -- the rest of an arm's `key:`
+  checks are skipped once its report is absent), so they pin the codes the
+  change must not move. The codes are that measurement, not a policy
+  restated.
 * `key:` -- the report itself.
 * `ab:` -- the exit code does not depend on the report. Each arm runs twice in
   its own process, once as shipped and once with the report's body forced to
@@ -267,6 +269,7 @@ def main():
         rc, s, text = _cli(b, i, out_of('flush'), [])
         check('rc: flush: a seated, measured receptacle passes', rc == 0,
               f'rc {rc}\n{text[-900:]}')
+        check('board: flush: written', os.path.exists(out_of('flush')))
         rep = graded_invariants('flush', rc, s)
         ev = rep.get('overhang_evidence') or [{}]
         check('key: flush: every declared requirement measured, on the body',
@@ -290,9 +293,10 @@ def main():
         check('board: reseat_auto: written at rc 4',
               os.path.exists(out_of('reseat_auto')))
         check('rc: reseat_auto: nothing else fails it -- accepted, nothing '
-              'unseated, refused or re-seated',
+              'unseated, refused or re-seated, and one grade error',
               (s or {}).get('accepted') is True and not s.get('unseated')
-              and not s.get('refused') and not s.get('reseated'), f'{s}')
+              and not s.get('refused') and not s.get('reseated')
+              and s.get('grade_errors') == 1, f'{s}')
         rep = graded_invariants('reseat_auto', rc, s)
         check('key: reseat_auto: the band failure is NAMED as own, with its '
               'number and limit', band_failure(rep, 'errors_own'), f'{rep}')
