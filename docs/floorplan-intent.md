@@ -363,7 +363,8 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
 
 The same keys are added to the entry's `edge_seating` row when one exists.
 
-`place_seed` reports the same evidence in its own `JSON_SUMMARY`, as
+`place_seed` reports a projection of the same evidence in its own
+`JSON_SUMMARY`, as
 `connector_requirements` (#974), in every summary it prints; a dry run's
 carries only `{complete: false, reason: 'dry-run'}`. It adds what the grade
 does not say in one place: which declared requirements were

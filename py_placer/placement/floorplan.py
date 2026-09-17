@@ -5503,10 +5503,18 @@ def summary(r: GradeResult) -> Dict:
 # #974: the declared connector requirements, reported -- never a gate
 # --------------------------------------------------------------------------
 
-#: The per-pad lists an `overhang_evidence` row carries as COUNTS. On a large
-#: connector, or a sampled outline where every pad lands in `unmeasured`, they
-#: run to kilobytes per row, and JSON_SUMMARY is one stdout line. The full rows
-#: stay in `check_floorplan --json`'s `edge_connector_evidence`.
+#: What an `overhang_evidence` row keeps of the grade's evidence row: the
+#: band's number, currency, limit and verdict, and the copper conjunct's
+#: verdict and amounts -- with the per-pad lists as COUNTS. JSON_SUMMARY is
+#: one stdout line, and the whole rows (body position, grade-wide basis
+#: strings repeated per row, per-pad lists) measured 26.7 KB for 28 declared
+#: connectors on kit-dev-coldfire's emitted intent. They stay in
+#: `check_floorplan --json`'s `edge_connector_evidence`.
+_EVIDENCE_ROW_KEYS = ('ref', 'edge', 'overhang_mm', 'overhang_basis',
+                      'overhang_limit_mm', 'overhang_disposition',
+                      'body_measured')
+_EVIDENCE_COPPER_KEYS = ('disposition', 'outside_mm', 'certified',
+                         'minimum_gap_mm', 'required_mm')
 _EVIDENCE_COUNTED_LISTS = ('findings', 'unmeasured', 'rules_unmeasured')
 
 #: `unmeasured[].reason` for a declared ref the grade left no evidence row
@@ -5658,13 +5666,13 @@ def _connector_requirements(graded, own, pinned, bands_dropped):
 
     projected = []
     for row in evidence:
-        row = dict(row)
-        copper = dict(row.get('pad_copper_edge') or {})
+        copper = row.get('pad_copper_edge') or {}
+        slim = {key: row.get(key) for key in _EVIDENCE_ROW_KEYS}
+        slim_copper = {key: copper.get(key) for key in _EVIDENCE_COPPER_KEYS}
         for name in _EVIDENCE_COUNTED_LISTS:
-            if name in copper:
-                copper['n_' + name] = len(copper.pop(name) or ())
-        row['pad_copper_edge'] = copper
-        projected.append(row)
+            slim_copper['n_' + name] = len(copper.get(name) or ())
+        slim['pad_copper_edge'] = slim_copper
+        projected.append(slim)
 
     return {
         'complete': not deduped and not dropped,

@@ -136,14 +136,37 @@ class Basis(_Case):
                          ([], [], []))
         ev, = r['overhang_evidence']
         self.assertTrue(ev['overhang_basis'].startswith('body:'), ev)
-        # The projection: every row key kept, the per-pad lists counted.
+        # The projection: the band and copper verdicts and amounts, copied
+        # from the grade's row, and the per-pad lists as counts.
         src, = graded.edge_connector_evidence
-        self.assertEqual(set(ev), set(src))
+        kept = ('ref', 'edge', 'overhang_mm', 'overhang_basis',
+                'overhang_limit_mm', 'overhang_disposition', 'body_measured')
+        self.assertEqual(set(ev), set(kept) | {'pad_copper_edge'})
+        self.assertEqual({k: ev[k] for k in kept}, {k: src[k] for k in kept})
         copper = ev['pad_copper_edge']
+        copper_kept = ('disposition', 'outside_mm', 'certified',
+                       'minimum_gap_mm', 'required_mm')
+        self.assertEqual(set(copper), set(copper_kept) | {
+            'n_findings', 'n_unmeasured', 'n_rules_unmeasured'})
+        self.assertEqual({k: copper[k] for k in copper_kept},
+                         {k: src['pad_copper_edge'][k] for k in copper_kept})
         for name in ('findings', 'unmeasured', 'rules_unmeasured'):
-            self.assertNotIn(name, copper)
             self.assertEqual(copper['n_' + name],
                              len(src['pad_copper_edge'][name]))
+        # A part whose copper IS counted: the counts are not constant zeros.
+        path = self.board('trapcount.kicad_pcb', _fp(
+            'J1', '1 10 0', '(fp_rect (start -1.2 -1) (end 1 1) '
+            '(layer "F.Fab"))',
+            '(pad "1" smd trapezoid (at -.55 0) (size .5 .5) '
+            '(rect_delta 0 .2) (layers "F.Cu"))'))
+        g2, _o, _p, r2 = self.report(path, _intent([
+            {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0, 'max': .5}}]))
+        self.assertEqual(r2['overhang_evidence'][0]['pad_copper_edge']
+                         ['n_unmeasured'],
+                         len(g2.edge_connector_evidence[0]['pad_copper_edge']
+                             ['unmeasured']))
+        self.assertGreater(r2['overhang_evidence'][0]['pad_copper_edge']
+                           ['n_unmeasured'], 0)
         # Nothing shared with the grade: editing the report edits nothing.
         before = json.dumps(graded.edge_connector_evidence, sort_keys=True)
         ev['pad_copper_edge']['disposition'] = 'edited'
