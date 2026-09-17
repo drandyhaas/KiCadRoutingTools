@@ -226,8 +226,18 @@ def build_artifacts(tmp):
     r_dry = _run([seed, FIXTURE, os.path.join(tmp, 'seed_dry.kicad_pcb'),
                   '--intent', ps_intent, '--repair', '--dry-run'],
                  expect=(0, 4))
+    # #982: the FRESH-seed document too. The two runs above cannot stand in
+    # for it -- `unseated_refs`, `rotation_unseated` and the whole
+    # `pad_conflicts_*` family exist only on the fresh path, so section I's
+    # rows about them resolved against nothing at all, and a misspelt key
+    # there was invisible to this gate. `--force` because the fixture is
+    # placed; `--no-polish` to keep a documentation gate cheap.
+    r_fresh = _run([seed, FIXTURE, os.path.join(tmp, 'seed_fresh.kicad_pcb'),
+                    '--intent', ps_intent, '--force', '--no-polish',
+                    '--seed', '0'], expect=(0, 4))
     art['place_seed.py'] = [('JSON_SUMMARY --reseat', _summary(r.stdout)),
-                            ('JSON_SUMMARY --dry-run', _summary(r_dry.stdout))]
+                            ('JSON_SUMMARY --dry-run', _summary(r_dry.stdout)),
+                            ('JSON_SUMMARY fresh', _summary(r_fresh.stdout))]
     _declare_health(intent)
     # --health because section E's own heading carries it, and the `health_*`
     # keys exist ONLY when it is passed.
