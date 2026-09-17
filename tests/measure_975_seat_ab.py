@@ -149,7 +149,9 @@ def edge_refs(intent_path):
 def poses(board, refs):
     from kicad_parser import parse_kicad_pcb
     fps = parse_kicad_pcb(board).footprints
-    return {r: [round(fps[r].x, 4), round(fps[r].y, 4), fps[r].rotation]
+    # Rotation modulo 360: the writer re-emits an unmoved part's angle in its
+    # own spelling (rp2350's locked U8 reads -90 in, 270 out).
+    return {r: [round(fps[r].x, 4), round(fps[r].y, 4), round((fps[r].rotation or 0.0) % 360.0, 6)]
             for r in refs if r in fps}
 
 
