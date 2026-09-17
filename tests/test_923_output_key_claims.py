@@ -11,7 +11,7 @@ document that writes it at `components.broken.poured_nets_meaning`.
 
 `tests/test_895_boundary_criteria.py` closed that hole for the seven boundary
 criteria -- eight paths, one hand-written resolver lambda each. This file is
-the same idea without the hand list: run the five instruments the skills quote
+the same idea without the hand list: run the six instruments the skills quote
 ONCE on a tracked fixture, and resolve every key claim the skills make about
 them against the document they actually wrote.
 
@@ -30,7 +30,7 @@ only where the text says whose output it is:
   3. Prose: a backticked path within `NEAR` characters of an instrument's name,
      spelled with or without `.py`. This is the channel that would have caught
      `hot[].ratio`, which sat one line under `check_pockets.py`. Proximity is a
-     GUESS, so a prose claim only has to resolve in one of the five, and a
+     GUESS, so a prose claim only has to resolve in one of the six, and a
      claim that resolves in a different one than it sits beside is printed
      rather than failed.
 
@@ -174,6 +174,27 @@ def _declare_health(intent_path):
         json.dump(doc, fh)
 
 
+def _declare_connectors(src, dst):
+    """The edge connectors section I's place_seed rows are resolved against.
+
+    Declared here rather than taken from the emitter, so the rows do not move
+    when emission does. Every key the section cites needs a run that writes
+    it: `--reseat Y1` drops Y1's band (Y1 is the one declared part on this
+    fixture that is not `(locked yes)`, and a locked ref is outside the
+    re-seat scope, so its band is kept), and USB1, declared with no edge, is
+    graded on the legacy occupancy reading, which fills `graded_on`.
+    """
+    with open(src, encoding='utf-8') as fh:
+        doc = json.load(fh)
+    doc['edge_connectors'] = [
+        {'ref': 'CON1', 'edge': 'east', 'overhang_mm': {'min': 0.0, 'max': 1.5}},
+        {'ref': 'CON2', 'edge': 'north', 'overhang_mm': {'min': 0.0, 'max': 0.7}},
+        {'ref': 'Y1', 'edge': 'south', 'overhang_mm': {'min': 0.0, 'max': 0.73}},
+        {'ref': 'USB1', 'overhang_mm': {'min': 0.0, 'max': 1.0}}]
+    with open(dst, 'w', encoding='utf-8') as fh:
+        json.dump(doc, fh)
+
+
 def build_artifacts(tmp):
     """{instrument: [(artifact label, document)]}, from real runs."""
     art = {}
@@ -193,6 +214,20 @@ def build_artifacts(tmp):
     graded = os.path.join(tmp, 'graded.json')
     _run([cf, FIXTURE, '--brief', BRIEF, '--emit-intent', intent], expect=(0, 4))
     run_utils.evidence(intent, 'the emitted intent')
+    # place_seed (#974), on its own copy of the emitted intent and BEFORE
+    # `_declare_health` rewrites it: section I's rows need a dropped band, a
+    # legacy basis and a dry run, and none of them may hang on what the health
+    # declarations add.
+    ps_intent = os.path.join(tmp, 'intent_ps.json')
+    _declare_connectors(intent, ps_intent)
+    seed = os.path.join('py_placer', 'place_seed.py')
+    r = _run([seed, FIXTURE, os.path.join(tmp, 'seed.kicad_pcb'),
+              '--intent', ps_intent, '--reseat', 'Y1'], expect=(0, 4))
+    r_dry = _run([seed, FIXTURE, os.path.join(tmp, 'seed_dry.kicad_pcb'),
+                  '--intent', ps_intent, '--repair', '--dry-run'],
+                 expect=(0, 4))
+    art['place_seed.py'] = [('JSON_SUMMARY --reseat', _summary(r.stdout)),
+                            ('JSON_SUMMARY --dry-run', _summary(r_dry.stdout))]
     _declare_health(intent)
     # --health because section E's own heading carries it, and the `health_*`
     # keys exist ONLY when it is passed.
@@ -447,7 +482,7 @@ def test_the_skills_key_what_the_instruments_emit():
         return any(run_utils.resolve_json_path(doc, segs)
                    for _label, doc in art[tool] if isinstance(doc, dict))
 
-    # ...and per INSTRUMENT, because two of the five have no evidence-map
+    # ...and per INSTRUMENT, because two of the six have no evidence-map
     # section at all and hang entirely on prose: dropping `.py` from one tool
     # name in one paragraph took `check_pockets` out of the gate completely and
     # still cleared the channel floor.

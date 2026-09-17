@@ -363,6 +363,18 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
 
 The same keys are added to the entry's `edge_seating` row when one exists.
 
+`place_seed` reports the same evidence in its own `JSON_SUMMARY`, as
+`connector_requirements` (#974), on every run that prints a summary. It adds
+what the grade does not say in one place: which declared requirements were
+**not measured** (`unmeasured`: a part not on the board, a band graded on the
+legacy reading, a pad shape the edge grader cannot model, an along-edge claim
+that abstained), which bands `--reseat` set aside ungraded (`bands_dropped`),
+and the connector errors on each side of place_seed's pinned split, so an
+error it answers for is never reported beside exit 0. `complete` there means
+everything declared was measured, not that it passed. The report never
+withholds the board and never changes the exit code; the key-by-key reading is
+section I of the placement skill's `references/evidence-map.md`.
+
 ### `refs` is the primitive, not `group`
 
 Sheet group keys are opaque uuid paths — KiCad's `Sheetname` property is absent

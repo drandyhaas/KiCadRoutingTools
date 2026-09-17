@@ -274,3 +274,22 @@ only when you know better than the board.
 | accepted `result_sha`s, in order | the frame list for `make_movie.py`. Reverted boards animate a change that was undone |
 
 Full procedure: [`convergence.md`](convergence.md).
+
+---
+
+## I. `place_seed.py IN OUT --intent fp.json [--repair] [--reseat [REF ...]] [--dry-run]` — the stdout `JSON_SUMMARY`
+
+The board is written whatever the grade says (a dry run writes nothing), and the report below never changes the exit code: it says what was and was not measured about the declared edge connectors (#974), it does not gate. A `--repair` / `--reseat` summary also carries a top-level `complete` that is always `true` — that is not this one.
+
+| key | decision |
+|---|---|
+| exit code | `0` written and graded clean on what the run answers for · `2` bad arguments · `3` refused before writing (no outline, already placed, copper) — or, on a fresh seed, an outline that cannot be trusted for grading, AFTER the board was written and with no summary · `4` written, but parts unseated / unrepairable / refused, or own grade errors |
+| `grade_errors` / `grade_errors_pinned` | Errors the run answers for, and errors on `(locked yes)` / `must_lock` parts, which are named and do NOT fail it. Absent on a dry run |
+| `connector_requirements.complete` | `true` only when every declared edge-connector requirement was MEASURED and no band was dropped. About measurement, not passing: read the errors for that |
+| `connector_requirements.reason` | Present only when nothing was graded — `dry-run`, or `connector_requirements failed: …` (the report broke; the exit code did not). No other key is then present |
+| `connector_requirements.declared_refs` | The refs the grade was asked about, after any `--reseat` drop. Empty means nothing was declared, not that everything passed |
+| `connector_requirements.errors_own` / `.errors_pinned` | The `edge_connector` errors on each side of the split the exit code used: `errors_own` non-empty means exit 4. Full violations with `measured` / `expected`. A `legality` `oob_count` error a connector caused carries no ref: it is in `grade_errors`, not here |
+| `connector_requirements.warnings` | `edge_connector` findings below error: a `connector_affinity` setback, or a band failure the intent's `severity` demoted to `warn` — which is then visible only here and in `overhang_disposition` |
+| `connector_requirements.unmeasured[].requirement` / `.reason` / `.graded_on` | What was NOT measured, per ref: `presence` (not on the board), `overhang_body` (no measurable drawn body — the band was graded on the old occupancy reading named in `graded_on`), `pad_copper_outside` (a pad shape the edge grader cannot model), `center_on_edge` / `along_edge_band` (abstained, or never measured). A ref can be here AND in the errors |
+| `connector_requirements.overhang_evidence[].overhang_basis` / `.overhang_disposition` / `.pad_copper_edge` | The #961 evidence row for each declared connector on the board. Its per-pad lists are COUNTS here (`n_findings`, `n_unmeasured`, `n_rules_unmeasured`); the lists themselves are E2's `edge_connector_evidence`. The copper clearance is evidence only and never makes the report incomplete |
+| `connector_requirements.bands_dropped[].ref` / `.band_max_mm` | Declarations `--reseat` set aside for the refs it re-seats: nothing about them was graded. `band_max_mm` `0.0` can also mean the entry declared no max |
