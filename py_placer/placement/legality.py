@@ -3360,99 +3360,233 @@ def _segments_cover_rectangle(segments, bounds) -> bool:
     return True
 
 
-def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
-    """Pad copper inset, separate from physical containment and part AABBs.
+class PadCopper(NamedTuple):
+    """One copper pad's edge reading, as `EdgeCopperContext` measures it.
 
-    Rectangular Edge.Cuts and supported pad shapes use analytic extrema,
-    including rounded corners and arbitrary rotation. Other parsed outlines
-    use the DRC perimeter sampler and explicitly remain partially measured.
-    EPS (1 nm) is an absolute numerical tolerance, not a rule relaxation.
+    `amount_mm` is how far the pad's copper falls short of the context's
+    required inset: `required - gap` on the analytic path, the DRC sampler's
+    amount on a sampled outline, and None when nothing about the pad can be
+    measured (no outline, or a shape the grader cannot model). `gap_mm` is
+    None on the sampled path, which reports no gap. `reason` is the grader's
+    `unmeasured` row text for this pad, '' when it writes none -- a pad can be
+    measured AND carry a reason (approximated shapes, sampled outlines).
     """
-    from check_drc import board_edge_geometry, check_pad_board_edge
+    index: int
+    pad: object
+    amount_mm: Optional[float]
+    gap_mm: Optional[float]
+    edge: str
+    basis: str
+    reason: str
 
-    if not math.isfinite(required) or required < 0:
-        raise ValueError('board-edge-clearance must be finite and nonnegative (mm)')
-    bi = pcb_data.board_info
-    bounds = getattr(bi, 'board_bounds', None)
-    rings, outer, cutouts = board_edge_geometry(bi)
-    # Closed rings can omit open internal Edge.Cuts. Inspect ALL source edges
-    # even when a rectangular ring survived parsing; a ring/bbox alone cannot
-    # certify the outline. A live caller must supply its current saved board.
-    rectangular = False
-    source = pcb_file or getattr(pcb_data, 'source_path', None)
-    if source and bounds:
-        from kicad_parser import _collect_edge_cuts_segments
-        try:
-            with open(source, encoding='utf-8') as stream:
-                segments = _collect_edge_cuts_segments(stream.read())
-            rectangular = _segments_cover_rectangle(segments, bounds)
-        except (OSError, ValueError):
-            pass
-    rules_unmeasured = []
-    if source:
-        from design_rules import parse_dru, validate_dru_structure
-        rule_path = os.path.splitext(source)[0] + '.kicad_dru'
-        if os.path.exists(rule_path):
+
+class PoseCopper(NamedTuple):
+    """One footprint's readings summarised: `worst_mm` over measured pads,
+    `clears` when no measured pad falls short by more than EPS (exactly when
+    `EdgeCopperContext.grade` would write no finding for it), `certified`
+    when the outline is certified rectangular, no edge rule is unmeasured and
+    every pad was measured without a reason, `fallback` the indices of pads
+    with no measurable amount."""
+    pads: Tuple[PadCopper, ...]
+    worst_mm: Optional[float]
+    worst_index: Optional[int]
+    clears: bool
+    certified: bool
+    fallback: Tuple[int, ...]
+
+
+class _PosedPad:
+    """A pad moved to a trial pose, carrying exactly the attributes the edge
+    grader reads (`_pad_has_no_copper`, `pad_shape_is_modelled`, the analytic
+    extrema and `check_drc._pad_perimeter_points`).
+
+    Transient: never hand one to an id-keyed cache such as
+    `check_drc._PAD_PERIMETER_CACHE`, whose fingerprint omits `rect_rotation`
+    and whose ids are reused as soon as the proxy is freed.
+    """
+    __slots__ = ('pad_number', 'pad_type', 'layers', 'shape', 'size_x', 'size_y',
+                 'roundrect_rratio', 'rect_rotation', 'rotation', 'global_x',
+                 'global_y', 'polygons', 'geometry_approximations')
+
+
+def pads_at_pose(fp, pose) -> List[_PosedPad]:
+    """`fp.pads` as they would sit with the footprint at `pose`.
+
+    `pose` is `(x, y, rot)` in the footprint's own `x`/`y`/`rotation`
+    convention -- the one `quench.Part` and `connector_geometry` use -- so a
+    trial rotation turns every pad about the footprint origin by
+    `rot - fp.rotation`. No side change: a pose never flips a part.
+
+    The copper centre is rotated (a drill offset turns with it), the pad angle
+    advances by the same delta, and the size and residual tilt are re-resolved
+    through the parser's own `_resolve_pad_rect` after undoing its near-90
+    size bake, so the tilt keeps the sign the DRC sampler applies. Custom pad
+    polygons are transformed point by point; their size box is not read by
+    the grader and is carried unchanged.
+    """
+    from kicad_parser import _PAD_ORTHO_TOL, _resolve_pad_rect
+    x, y, rot = pose
+    ox, oy = fp.x, fp.y
+    delta = rot - (fp.rotation or 0.0)
+    c, s = math.cos(math.radians(delta)), math.sin(math.radians(delta))
+    posed = []
+    for original in fp.pads:
+        pad = _PosedPad()
+        a, b = original.global_x - ox, original.global_y - oy
+        pad.global_x, pad.global_y = x + c*a + s*b, y - s*a + c*b
+        pad.pad_number = original.pad_number
+        pad.pad_type = getattr(original, 'pad_type', '')
+        pad.layers = original.layers
+        pad.shape = original.shape
+        pad.roundrect_rratio = getattr(original, 'roundrect_rratio', 0.0)
+        pad.geometry_approximations = getattr(original, 'geometry_approximations', ())
+        base = getattr(original, 'rotation', 0.0) or 0.0
+        pad.rotation = (base + delta) % 360
+        polygons = getattr(original, 'polygons', None)
+        if polygons:
+            pad.polygons = [[(x + c*(u-ox) + s*(v-oy), y - s*(u-ox) + c*(v-oy))
+                             for u, v in poly] for poly in polygons]
+            pad.size_x, pad.size_y = original.size_x, original.size_y
+            pad.rect_rotation = getattr(original, 'rect_rotation', 0.0)
+        else:
+            pad.polygons = polygons
+            size_x, size_y = original.size_x, original.size_y
+            if abs(base % 180 - 90) <= _PAD_ORTHO_TOL:
+                size_x, size_y = size_y, size_x
+            pad.size_x, pad.size_y, pad.rect_rotation = _resolve_pad_rect(
+                size_x, size_y, pad.rotation)
+        posed.append(pad)
+    return posed
+
+
+class EdgeCopperContext:
+    """`grade_pad_edge_clearance` with its per-board constants read once (#975).
+
+    Construction does every board-level read the grader did per call, in the
+    same order and with the same exceptions: the requirement is validated
+    before anything is read, the outline is certified rectangular from the
+    source file, the `.kicad_dru` edge rules and the `.kicad_pro` edge floor
+    are checked. After that `grade`, `pad_copper` and `pose_copper` read no
+    file. Footprints and pads are read LIVE on every call, so a caller that
+    moves a pad in place grades the moved pad.
+
+    There is deliberately no module-level cache: a candidate rewritten at the
+    same path (pose_ops) must be re-read. Hold a context for the life of one
+    board object instead (`edge_copper_for`).
+    """
+    __slots__ = ('pcb_data', 'path', 'required', 'bounds', 'rings', 'outer',
+                 'cutouts', 'rectangular', 'rules_unmeasured', 'clearance',
+                 'argument_mm', 'knobs', 'source', '_check_pad_board_edge')
+
+    def __init__(self, pcb_data, required: float, pcb_file=None):
+        from check_drc import board_edge_geometry, check_pad_board_edge
+
+        if not math.isfinite(required) or required < 0:
+            raise ValueError('board-edge-clearance must be finite and nonnegative (mm)')
+        bi = pcb_data.board_info
+        bounds = getattr(bi, 'board_bounds', None)
+        rings, outer, cutouts = board_edge_geometry(bi)
+        # Closed rings can omit open internal Edge.Cuts. Inspect ALL source edges
+        # even when a rectangular ring survived parsing; a ring/bbox alone cannot
+        # certify the outline. A live caller must supply its current saved board.
+        rectangular = False
+        source = pcb_file or getattr(pcb_data, 'source_path', None)
+        if source and bounds:
+            from kicad_parser import _collect_edge_cuts_segments
             try:
-                with open(rule_path, encoding='utf-8') as stream:
-                    text = stream.read()
-                validate_dru_structure(text)
-                declared, _notes = parse_dru(text)
-                rules_unmeasured = [
-                    {'rule': rule.name, 'source': rule_path,
-                     'constraint': 'edge_clearance',
-                     'declared': rule.constraints['edge_clearance'],
-                     'reason': 'custom edge rule not evaluated by scalar edge check'}
-                    for rule in declared if 'edge_clearance' in rule.constraints]
-            except (OSError, ValueError) as exc:
-                rules_unmeasured = [{'source': rule_path,
-                                     'reason': 'custom rules unreadable: ' + str(exc)}]
-        from list_nets import read_design_rules
-        declared_edge = (read_design_rules(source).get('constraints') or {}).get(
-            'min_copper_edge_clearance')
-        if declared_edge is not None:
-            try:
-                valid = math.isfinite(float(declared_edge)) and float(declared_edge) >= 0
-            except (TypeError, ValueError):
-                valid = False
-            if not valid:
-                rules_unmeasured.append({
-                    'source': os.path.splitext(source)[0] + '.kicad_pro',
-                    'constraint': 'min_copper_edge_clearance',
-                    'declared': repr(declared_edge),
-                    'reason': 'project edge clearance must be finite and nonnegative'})
-    findings, unmeasured = [], []
-    measured = 0
-    minimum = None
-    # #961: the same minimum per part, so a consumer reporting ONE part's
-    # copper (an edge connector's evidence row) reads it rather than running
-    # this whole function once per part.
-    minimum_by_ref: Dict[str, float] = {}
-    for ref, fp in sorted(pcb_data.footprints.items()):
-        for index, pad in enumerate(fp.pads):
+                with open(source, encoding='utf-8') as stream:
+                    segments = _collect_edge_cuts_segments(stream.read())
+                rectangular = _segments_cover_rectangle(segments, bounds)
+            except (OSError, ValueError):
+                pass
+        rules_unmeasured = []
+        if source:
+            from design_rules import parse_dru, validate_dru_structure
+            rule_path = os.path.splitext(source)[0] + '.kicad_dru'
+            if os.path.exists(rule_path):
+                try:
+                    with open(rule_path, encoding='utf-8') as stream:
+                        text = stream.read()
+                    validate_dru_structure(text)
+                    declared, _notes = parse_dru(text)
+                    rules_unmeasured = [
+                        {'rule': rule.name, 'source': rule_path,
+                         'constraint': 'edge_clearance',
+                         'declared': rule.constraints['edge_clearance'],
+                         'reason': 'custom edge rule not evaluated by scalar edge check'}
+                        for rule in declared if 'edge_clearance' in rule.constraints]
+                except (OSError, ValueError) as exc:
+                    rules_unmeasured = [{'source': rule_path,
+                                         'reason': 'custom rules unreadable: ' + str(exc)}]
+            from list_nets import read_design_rules
+            declared_edge = (read_design_rules(source).get('constraints') or {}).get(
+                'min_copper_edge_clearance')
+            if declared_edge is not None:
+                try:
+                    valid = math.isfinite(float(declared_edge)) and float(declared_edge) >= 0
+                except (TypeError, ValueError):
+                    valid = False
+                if not valid:
+                    rules_unmeasured.append({
+                        'source': os.path.splitext(source)[0] + '.kicad_pro',
+                        'constraint': 'min_copper_edge_clearance',
+                        'declared': repr(declared_edge),
+                        'reason': 'project edge clearance must be finite and nonnegative'})
+        self.pcb_data, self.path, self.required = pcb_data, source, required
+        self.bounds, self.rings, self.outer, self.cutouts = bounds, rings, outer, cutouts
+        self.rectangular = rectangular
+        # A tuple, so no caller can append to the board's constants; `grade`
+        # hands out a deep copy because callers mutate the result.
+        self.rules_unmeasured = tuple(rules_unmeasured)
+        self.clearance = self.argument_mm = self.knobs = self.source = None
+        self._check_pad_board_edge = check_pad_board_edge
+
+    @classmethod
+    def for_board(cls, pcb_data, pcb_file, clearance, edge_margin=None):
+        """Resolve the edge requirement as `grade_pad_legality` does -- an
+        explicit `edge_margin` wins, else the project's
+        `min_copper_edge_clearance`, else the fixed default -- and build the
+        context at it. `source` is the label `grade_pad_legality` publishes."""
+        from list_nets import board_floor_knobs
+        _, required, knobs = board_floor_knobs(
+            pcb_file or getattr(pcb_data, 'source_path', None), clearance, edge_margin)
+        ctx = cls(pcb_data, required, pcb_file)
+        ctx.clearance, ctx.argument_mm, ctx.knobs = clearance, edge_margin, knobs
+        ctx.source = ('caller argument' if edge_margin is not None else
+                      knobs['board_edge_clearance']['source'])
+        return ctx
+
+    def pad_copper(self, fp, pose=None) -> Tuple[PadCopper, ...]:
+        """One reading per copper pad of `fp`, in `fp.pads` order, at the
+        footprint's own pose or at `pose` (`pads_at_pose`). Pads with no copper
+        get no reading, as they get no grader row."""
+        pads = fp.pads if pose is None else pads_at_pose(fp, pose)
+        return tuple(self._readings(pads))
+
+    def _readings(self, pads):
+        required, bounds = self.required, self.bounds
+        for index, pad in enumerate(pads):
             if _pad_has_no_copper(pad):
                 continue
-            identity = {'pad_ref': f'{ref}.{pad.pad_number}', 'pad_index': index,
-                        'pad_loc': [pad.global_x, pad.global_y]}
             polygons = getattr(pad, 'polygons', None)
             supported = pad_shape_is_modelled(pad)
             if not bounds or not supported:
-                unmeasured.append(dict(identity, reason=(
-                    'missing board outline' if not bounds else 'unsupported pad geometry')))
+                yield PadCopper(index, pad, None, None, '', 'none', (
+                    'missing board outline' if not bounds else 'unsupported pad geometry'))
                 continue
             approximations = getattr(pad, 'geometry_approximations', ())
             reasons = (['simplified pad geometry: ' + ', '.join(approximations)]
                        if approximations else [])
             if pad.shape == 'circle' and abs(pad.size_x - pad.size_y) > EPS:
                 reasons.append('unequal-axis circle uses unsupported native geometry')
-            if not rectangular:
-                hit, amount, edge = check_pad_board_edge(
-                    pad, rings, outer, cutouts, required, bounds, 0.0)
+            if not self.rectangular:
+                hit, amount, edge = self._check_pad_board_edge(
+                    pad, self.rings, self.outer, self.cutouts, required, bounds, 0.0)
                 reasons.append('outline uses sampled perimeter check')
-                unmeasured.append(dict(identity, reason='; '.join(reasons)))
-                if hit and amount > EPS:
-                    findings.append(dict(identity, required_mm=required,
-                                         gap_mm=None, shortfall_mm=amount, edge=edge))
+                # A miss reports (False, 0.0, ''), so the amount alone carries
+                # the verdict the grader reads as `hit and amount > EPS`.
+                yield PadCopper(index, pad, amount if hit else 0.0, None, edge,
+                                'sampled', '; '.join(reasons))
                 continue
             if polygons:
                 # The parser tessellates custom circles/arcs into inscribed
@@ -3463,6 +3597,7 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
                 points = [p for poly in polygons for p in poly]
                 x0, y0 = min(p[0] for p in points), min(p[1] for p in points)
                 x1, y1 = max(p[0] for p in points), max(p[1] for p in points)
+                basis = 'polygons'
             else:
                 hx, hy = pad.size_x / 2, pad.size_y / 2
                 radius = (min(hx, hy) if pad.shape in ('circle', 'oval') else
@@ -3481,26 +3616,111 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
                 ey = (hx-radius)*s + (hy-radius)*c + radius
                 x0, y0 = pad.global_x-ex, pad.global_y-ey
                 x1, y1 = pad.global_x+ex, pad.global_y+ey
-            if reasons:
-                unmeasured.append(dict(identity, reason='; '.join(reasons)))
+                basis = 'analytic'
             gap, edge = min((x0-bounds[0], 'left'), (bounds[2]-x1, 'right'),
                             (y0-bounds[1], 'bottom'), (bounds[3]-y1, 'top'))
-            measured += 1
-            minimum = gap if minimum is None else min(minimum, gap)
-            minimum_by_ref[ref] = min(minimum_by_ref.get(ref, gap), gap)
-            amount = required - gap
-            if amount > EPS:
-                findings.append(dict(identity, required_mm=required, gap_mm=gap,
-                                     shortfall_mm=amount, edge=edge))
-    return {'required_mm': required, 'tolerance_mm': EPS, 'units': 'mm',
-            'minimum_gap_mm': minimum, 'measured_pads': measured,
-            'minimum_gap_by_ref_mm': minimum_by_ref,
-            'complete': rectangular and not unmeasured and not rules_unmeasured,
-            'rules_unmeasured': rules_unmeasured,
-            'unmeasured': unmeasured, 'findings': findings,
-            'basis': ('analytic pad copper extrema (custom pads: parsed polygons) '
-                      'vs rectangular Edge.Cuts centreline; '
-                      'other outlines sampled, not certified; no body/track/via/fill check')}
+            yield PadCopper(index, pad, required - gap, gap, edge, basis,
+                            '; '.join(reasons))
+
+    def pose_copper(self, fp, pose=None) -> PoseCopper:
+        """`pad_copper` summarised for a search: is this footprint, at this
+        pose, clear of the requirement on every pad that can be measured?"""
+        readings = self.pad_copper(fp, pose)
+        worst = worst_index = None
+        fallback = []
+        certified = self.rectangular and not self.rules_unmeasured
+        for reading in readings:
+            if reading.amount_mm is None:
+                fallback.append(reading.index)
+                certified = False
+                continue
+            if reading.reason:
+                certified = False
+            if worst is None or reading.amount_mm > worst:
+                worst, worst_index = reading.amount_mm, reading.index
+        return PoseCopper(readings, worst, worst_index,
+                          worst is None or worst <= EPS, certified, tuple(fallback))
+
+    def grade(self, footprints=None) -> Dict:
+        """The `grade_pad_edge_clearance` result for `footprints` ({ref: fp},
+        default the board's own, read live). A fresh dict on every call."""
+        from copy import deepcopy
+        required = self.required
+        if footprints is None:
+            footprints = self.pcb_data.footprints
+        findings, unmeasured = [], []
+        measured = 0
+        minimum = None
+        # #961: the same minimum per part, so a consumer reporting ONE part's
+        # copper (an edge connector's evidence row) reads it rather than running
+        # this whole function once per part.
+        minimum_by_ref: Dict[str, float] = {}
+        for ref, fp in sorted(footprints.items()):
+            for reading in self._readings(fp.pads):
+                pad = reading.pad
+                identity = {'pad_ref': f'{ref}.{pad.pad_number}', 'pad_index': reading.index,
+                            'pad_loc': [pad.global_x, pad.global_y]}
+                if reading.reason:
+                    unmeasured.append(dict(identity, reason=reading.reason))
+                if reading.amount_mm is None:
+                    continue
+                if reading.gap_mm is None:
+                    if reading.amount_mm > EPS:
+                        findings.append(dict(identity, required_mm=required,
+                                             gap_mm=None, shortfall_mm=reading.amount_mm,
+                                             edge=reading.edge))
+                    continue
+                gap = reading.gap_mm
+                measured += 1
+                minimum = gap if minimum is None else min(minimum, gap)
+                minimum_by_ref[ref] = min(minimum_by_ref.get(ref, gap), gap)
+                amount = reading.amount_mm
+                if amount > EPS:
+                    findings.append(dict(identity, required_mm=required, gap_mm=gap,
+                                         shortfall_mm=amount, edge=reading.edge))
+        rules_unmeasured = deepcopy(list(self.rules_unmeasured))
+        return {'required_mm': required, 'tolerance_mm': EPS, 'units': 'mm',
+                'minimum_gap_mm': minimum, 'measured_pads': measured,
+                'minimum_gap_by_ref_mm': minimum_by_ref,
+                'complete': self.rectangular and not unmeasured and not rules_unmeasured,
+                'rules_unmeasured': rules_unmeasured,
+                'unmeasured': unmeasured, 'findings': findings,
+                'basis': ('analytic pad copper extrema (custom pads: parsed polygons) '
+                          'vs rectangular Edge.Cuts centreline; '
+                          'other outlines sampled, not certified; no body/track/via/fill check')}
+
+
+def edge_copper_for(holder, pcb_data, pcb_file, clearance, edge_margin):
+    """One `EdgeCopperContext` per holder (a search state), rebuilt when the
+    holder is asked about a different board object, path, clearance or edge
+    margin. Returns `(context, None)`, or `(None, error)` when the board's
+    constants cannot be read -- a failure is cached too, so a malformed
+    project costs one read per holder, not one per candidate."""
+    key = (pcb_file or getattr(pcb_data, 'source_path', None), clearance, edge_margin)
+    hit = getattr(holder, '_edge_copper', None)
+    if hit is None or hit[0] is not pcb_data or hit[1] != key:
+        try:
+            hit = (pcb_data, key,
+                   EdgeCopperContext.for_board(pcb_data, pcb_file, clearance, edge_margin),
+                   None)
+        except Exception as exc:  # noqa: BLE001 -- reported, never raised mid-search
+            hit = (pcb_data, key, None, f'{type(exc).__name__}: {exc}')
+        holder._edge_copper = hit
+    return hit[2], hit[3]
+
+
+def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
+    """Pad copper inset, separate from physical containment and part AABBs.
+
+    Rectangular Edge.Cuts and supported pad shapes use analytic extrema,
+    including rounded corners and arbitrary rotation. Other parsed outlines
+    use the DRC perimeter sampler and explicitly remain partially measured.
+    EPS (1 nm) is an absolute numerical tolerance, not a rule relaxation.
+
+    Reads the board's constants afresh on every call; a caller grading many
+    poses of one board holds an `EdgeCopperContext` instead (#975).
+    """
+    return EdgeCopperContext(pcb_data, required, pcb_file).grade()
 
 
 def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
@@ -3543,12 +3763,9 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     # The legacy part-AABB diagnostic keeps its copper-clearance inset.
     # The independent per-pad channel enforces the resolved edge requirement;
     # increasing an edge floor must not invent whole-part AABB phantoms.
-    from list_nets import board_floor_knobs
-    _, resolved_edge, edge_knobs = board_floor_knobs(
-        pcb_file or getattr(pcb_data, 'source_path', None), clearance, edge_margin)
-    edge_grade = grade_pad_edge_clearance(pcb_data, resolved_edge, pcb_file)
-    edge_grade['source'] = ('caller argument' if edge_margin is not None else
-                            edge_knobs['board_edge_clearance']['source'])
+    edge_ctx = EdgeCopperContext.for_board(pcb_data, pcb_file, clearance, edge_margin)
+    edge_grade = edge_ctx.grade()
+    edge_grade['source'] = edge_ctx.source
     edge_grade['argument_mm'] = edge_margin
     fps = pcb_data.footprints
     pads_by_ref = {ref: [p for p in fp.pads] for ref, fp in fps.items()}
