@@ -23,7 +23,10 @@ because it restores by overwriting.
     python3 -X utf8 tests/mutate_974.py --list
 
 A row is KILLED by any non-zero exit of a listed test, a raised error
-included. `_uncache` is carried over from `tests/mutate_797.py`: several rows
+included -- which is why every killer runs on the UNMUTATED tree first,
+and the battery exits 2 if one fails there: a test that cannot run at all
+exits non-zero under every mutation too, and would score every row
+KILLED. `_uncache` is carried over from `tests/mutate_797.py`: several rows
 are same-size edits, and CPython trusts a `.pyc` on (mtime seconds, size).
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
@@ -376,6 +379,21 @@ def run(only=None):
                   'first -- this battery restores by overwriting.'
                   % os.path.basename(path))
             return 2
+
+    # The battery is only evidence if every killer passes UNMUTATED first.
+    for path in TARGETS.values():
+        _uncache(path)
+    for t in sorted({t for row in rows for t in row[4]}):
+        p = subprocess.run([sys.executable, '-X', 'utf8', t],
+                           capture_output=True, text=True,
+                           encoding='utf-8', errors='replace',
+                           timeout=1800, cwd=_ROOT)
+        if p.returncode:
+            print('BROKEN: %s fails on the UNMUTATED tree (exit %d); every '
+                  'verdict below would be meaningless.'
+                  % (os.path.basename(t), p.returncode))
+            return 2
+        print('  unmutated %-40s passes' % os.path.basename(t))
 
     orig = {k: io.open(v, encoding='utf-8', newline='').read()
             for k, v in TARGETS.items()}

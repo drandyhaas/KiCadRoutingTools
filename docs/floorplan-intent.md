@@ -364,19 +364,18 @@ Every declared connector on the board gets a row in `edge_connector_evidence`
 The same keys are added to the entry's `edge_seating` row when one exists.
 
 `place_seed` reports a projection of the same evidence in its own
-`JSON_SUMMARY`, as
-`connector_requirements` (#974), in every summary it prints; a dry run's
-carries only `{complete: false, reason: 'dry-run'}`. It adds what the grade
-does not say in one place: which declared requirements were
-**not measured** (`unmeasured`: a part not on the board, a band graded on the
-legacy reading, copper past the outline left ungraded because an entry claims
-an edge but the body could not be read or a pad shape cannot be modelled,
-an along-edge claim that abstained), which declarations `--reseat` set aside ungraded (`bands_dropped`),
-and the connector errors on each side of place_seed's pinned split, so an
-error it answers for is never reported beside exit 0. `complete` there means
-everything declared was measured, not that it passed. The report never
-withholds the board and never changes the exit code; the key-by-key reading is
-section I of the placement skill's `references/evidence-map.md`.
+`JSON_SUMMARY`, as `connector_requirements` (#974), in every summary it prints;
+a dry run's carries only `{complete: false, reason: 'dry-run'}`. It adds what
+the grade does not say in one place: which declared requirements were **not
+measured** (`unmeasured`: a part not on the board, a band graded on the legacy
+reading, copper past the outline left ungraded because an entry claims an edge
+but the body could not be read or a pad shape cannot be modelled, an along-edge
+claim that abstained), which declarations `--reseat` set aside ungraded
+(`bands_dropped`), and the connector errors on each side of place_seed's pinned
+split, so an error it answers for is never reported beside exit 0. `complete`
+there means everything declared was measured, not that it passed. The report
+never withholds the board and never changes the exit code; the key-by-key
+reading is section I of the placement skill's `references/evidence-map.md`.
 
 ### `refs` is the primitive, not `group`
 

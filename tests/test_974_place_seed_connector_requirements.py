@@ -49,8 +49,6 @@ sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
 import test_run27_seed_gate_pinned as run27        # noqa: E402
 import test_run27_seed_gate_shorts as shorts       # noqa: E402
 
-RUN_ALL_FAST_OK = True
-
 SEED = os.path.join(ROOT, 'py_placer', 'place_seed.py')
 KEY = 'connector_requirements'
 DRY = {'complete': False, 'reason': 'dry-run'}
