@@ -134,10 +134,54 @@ def t_the_helper_still_necks_what_it_can():
           f'{necked} segment(s) necked on a parallel graze (#318 behaviour kept)')
 
 
+def _real_cfg(clearance, pair_class=None):
+    """The REAL GridRouteConfig, not a stub: the point of these rows is the
+    production `obstacle_clearance` semantics, which a stub would restate."""
+    from routing_config import GridRouteConfig
+    c = GridRouteConfig(clearance=clearance, track_width=0.0889)
+    if pair_class is not None:
+        c.net_clearances = {1: pair_class, 2: pair_class}
+    return c
+
+
+def t_a_wider_pair_class_is_honoured():
+    """P and N are DIFFERENT NETS, so the gap between them is KiCad's pairwise
+    max(classP, classN) -- not the run's global floor.
+
+    This used to test the bare `config.clearance`. Net classes only ever WIDEN
+    (`get_net_clearance`), so a pair whose class asks for more than the run's
+    floor was measured too leniently and could ship copper KiCad then flags.
+    Geometry here: centres 0.320mm apart at 0.2mm width -> 0.120mm of copper
+    gap, which clears a 0.10mm floor and does NOT clear a 0.20mm class.
+    """
+    p = [_seg(1.0, 1.0, 5.0, 1.0, 1, w=0.2)]
+    n = [_seg(1.0, 1.32, 5.0, 1.32, 2, w=0.2)]
+    _, hard = _neck(p, n, _real_cfg(0.10, pair_class=0.20), _pcb())
+    check('t_a_wider_pair_class_is_honoured',
+          bool(hard),
+          f'0.120mm of copper gap is refused against a 0.20mm pair class '
+          f'({len(hard)} hard violation(s))')
+
+
+def t_it_is_inert_without_netclasses():
+    """The other half, and the reason this is a safe tightening: on a board
+    that declares no class, `obstacle_clearance` is documented as byte-identical
+    to `config.clearance`, so the SAME geometry must still pass. A fix that
+    also rejected this would be a regression dressed as a correction."""
+    p = [_seg(1.0, 1.0, 5.0, 1.0, 1, w=0.2)]
+    n = [_seg(1.0, 1.32, 5.0, 1.32, 2, w=0.2)]
+    _, hard = _neck(p, n, _real_cfg(0.10), _pcb())
+    check('t_it_is_inert_without_netclasses',
+          not hard,
+          '0.120mm of copper gap still passes a 0.10mm floor with no classes')
+
+
 def main():
     t_collinear_members_are_reported_hard()
     t_a_properly_spaced_pair_is_not_refused()
     t_the_helper_still_necks_what_it_can()
+    t_a_wider_pair_class_is_honoured()
+    t_it_is_inert_without_netclasses()
     print()
     if FAILS:
         print(f"{len(FAILS)} FAILURE(S): {', '.join(FAILS)}")
