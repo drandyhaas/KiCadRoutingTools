@@ -29,7 +29,12 @@ the battery exits 2 if one fails there. `_uncache` is carried over from
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
 
-MEASURED: not yet run.
+MEASURED on the tree of `#975: delta verifier round 3` (629851d6, 2026-09-17,
+Windows; the four killer tests first run unmutated and green): 60 rows, 60
+KILLED, 0 survived, 0 broken. The first full run, on an earlier head with 54
+rows, measured 51 KILLED and 3 SURVIVED -- a sampled pad's zero reading, the
+floor read at the unrounded pose, and the silk branch of the seat basis --
+and each got a test arm rather than a waiver.
 """
 from __future__ import annotations
 
