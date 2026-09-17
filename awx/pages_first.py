@@ -399,7 +399,20 @@ sm.SEL_XING = max(sm.SEL_XING, 2)
 # chains cover must be paged as two chains, which the greedy pager (the LIS
 # of one page first) can miss. In-process for the judge; the plan sidecar
 # carries `pages_first` so the braid stage does the same.
-_schedule.EXACT_PAGES = 1
+#
+# HONOUR THE FLAG (review, 2026-09-17). This used to be a bare `= 1`,
+# consulting no environment at all -- so `BRAID_EXACT_PAGES=0` could not
+# turn it off ON THE PLANNER SIDE even though braid.py had been fixed to
+# honour it. That matters because `judge_by_braid` calls the braid
+# IN-PROCESS, and importing this module pins the judge's schedule to
+# EXACT_PAGES=1 for the whole run: the planner then scores every
+# candidate as ARM A of the braid portfolio while the chain frequently
+# ships ARM B (the K51 log's "the marker-OFF arm won"). The marker is
+# worth up to 14 vias, so the judge was systematically modelling the
+# wrong regime on the rung where the deficit is worst.
+# The braid SUBPROCESS was never affected -- braid.py does not import
+# this module, so every ladder number measured through chain_k.sh stands.
+_schedule.EXACT_PAGES = 0 if os.environ.get('BRAID_EXACT_PAGES') == '0' else 1
 SCALE = 100                                                   # cost units -> ints
 
 
