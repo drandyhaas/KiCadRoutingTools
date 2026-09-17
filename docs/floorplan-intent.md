@@ -345,9 +345,10 @@ The board-edge FLOOR on that copper is a preference of the seat, not a
 conjunct (#975). At each rotation, when the seat the ladder always chose leaves
 copper inside the floor, the ladder tries that seat moved inward by the largest
 shortfall on the seated edge. Such a move is kept
-only if it passes the band at the grade's own bounds, the receptacle
-setback, the seat predicate (keep-outs, zones, pad copper), the neighbours,
-the floor itself and the grade's nearest-edge conjunct. When the shortfall is
+only if it passes the band at the grade's own bounds, the seat predicate
+(keep-outs, zones, pad copper), the neighbours, the floor itself, and the
+grade's nearest-edge and along-edge-window conjuncts; for an entry that
+carries a setback, a move that leaves no overhang is refused outright. When the shortfall is
 on another side of the part, which moving inward cannot fix, or the outline
 is sampled, the ladder walks on to later rungs instead -- where there are any:
 stage 1 of a fresh seed tries one along-edge position unless something arms

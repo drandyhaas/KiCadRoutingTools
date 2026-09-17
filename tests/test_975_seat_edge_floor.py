@@ -817,6 +817,56 @@ class GradeConjuncts(_Boards):
                                             'overhang_mm': {'min': 0.0}},
                                  'west', 0.0, 2.5, 10.0)[0])
 
+    def test_the_band_maximum_is_the_grades_not_the_seats(self):
+        path = self.board('bound_max.kicad_pcb')
+        st = self.state(path)
+        refuse = seeder._grade_band_refuses
+        # 0.5 mm of body past the edge against a 0.49 maximum: inside the
+        # seat's 0.02 tolerance, outside the grade's EPS.
+        self.assertEqual(refuse(st, st.parts['J1'], west(0.0, 0.49), 'west', 0.0, 2.5, 10.0)[0],
+                         'band_max')
+
+    def test_a_pose_rounded_out_of_its_along_edge_window_is_not_taken(self):
+        # Round-3 verifier's board: the -0.4 rung sits ON the window's start,
+        # and its inward move, rounded to 3 decimals, lands 0.5 um before it.
+        path = self.write('along_min.kicad_pcb',
+            '(kicad_pcb (version 20241229) (generator "t975")\n'
+            '  (gr_rect (start 0 0) (end 28.3 18.0) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 14.15 9.0 270)\n'
+            '    (property "Reference" "J1")\n'
+            '    (pad "1" smd oval (at 2.75 -1.41) (size 0.69 1.03) (layers "F.Cu"))\n'
+            '    (pad "2" smd rect (at 0.72 -0.09) (size .5 .5) (layers "F.Cu"))))\n')
+        entry = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.0, 'max': 1.5},
+                 'along_edge_band': {'from': 0.89, 'to': 0.92}}
+        intent = floorplan.intent_from_dict(intent_doc(**entry))
+
+        def repair(window=True):
+            call = lambda: seeder.repair_placement(parse_kicad_pcb(path), path, intent,
+                                                   clearance=.25, board_edge_clearance=.55)
+            if window:
+                res = call()
+            else:
+                with patch.object(seeder, '_outside_its_along_edge_claim',
+                                  lambda *a, **k: False):
+                    res = call()
+            (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
+            return (move['new_x'], move['new_y'], move['new_rotation'])
+        pose = repair()
+        self.assertEqual(grade_errors_at(self, path, pose, entry), [])
+        blind = repair(window=False)
+        self.assertTrue([m for m in grade_errors_at(self, path, blind, entry)
+                         if 'outside the declared band' in m])
+        # The same question is part of what a LATER rung must pass: at the
+        # rounded-out pose every other conjunct holds and the window alone
+        # refuses it.
+        st = self.state(path)
+        part = st.parts['J1']
+        part.rot = blind[2]
+        x, y = blind[:2]
+        self.assertIsNone(seeder._grade_band_refuses(st, part, entry, 'west', 0.0, x, y)[0])
+        self.assertTrue(seeder._faces_its_edge(st, part, entry, 'west', x, y))
+        self.assertFalse(seeder._grade_accepts(st, part, entry, 'west', 0.0, x, y))
+
     def test_stage_one_asks_a_later_rung_its_nearest_edge(self):
         path = self.write('s1_later_face.kicad_pcb',
             '(kicad_pcb (version 20241229) (generator "t975")\n'
@@ -861,6 +911,70 @@ class GradeConjuncts(_Boards):
             blind = StageOne.pose(StageOne.seed(self, path, entry))
         self.assertTrue([m for m in grade_errors_at(self, path, blind, entry)
                          if 'sits nearest the' in m])
+
+
+class WhichReasonsWalk(_Boards):
+    """The walk's CHOICE, pinned on its own: a later rung is considered only
+    after an `along_edge` or `outline_sampled` shortfall, never after any
+    other reason, and then only if the grade accepts it -- at both call sites.
+    The floor readings are scripted so no geometry can hide the choice."""
+
+    SHORT = seeder._Floor(0.55, ((0.1, 0, 'west', 0.45, '1'),), ())
+
+    def scripted(self, first_why):
+        calls = []
+
+        def floor_rung(st, part, entry, edge, lo, hi, x, y, crowds):
+            calls.append((round(x, 3), round(y, 3)))
+            if len(calls) == 1:
+                return None, self.SHORT, {'why': first_why}
+            return (x, y), self.SHORT, None
+        return calls, floor_rung
+
+    def seat(self, first_why, accepts=True, stage_one=False):
+        path = self.board(f'walk_{first_why}_{accepts}_{stage_one}.kicad_pcb')
+        entry = west(0.0, 0.6, center_on_edge={'tolerance_mm': 8.0})
+        calls, floor_rung = self.scripted(first_why)
+        with patch.object(seeder, '_floor_rung', floor_rung), \
+                patch.object(seeder, '_grade_accepts', lambda *a, **k: accepts):
+            if stage_one:
+                res = StageOne.seed(self, path, entry)
+                return calls, StageOne.pose(res), res['edge_floor_fallback'].get('J1')
+            st = self.state(path)
+            disclose = {}
+            self.assertTrue(seeder._seat_edge(st, 'J1', dict(entry), set(), [],
+                                              disclose=disclose))
+            p = st.parts['J1']
+            return calls, (p.x, p.y, p.rot), disclose.get('J1')
+
+    def test_reasons_about_the_move_keep_the_first_seat(self):
+        for stage_one in (False, True):
+            for why in ('band_min', 'band_max', 'setback', 'refused', 'crowds',
+                        'still_short', 'nearest_edge', 'along_edge_window'):
+                with self.subTest(why=why, stage_one=stage_one):
+                    calls, pose, record = self.seat(why, stage_one=stage_one)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual((round(pose[0], 3), round(pose[1], 3)), calls[0])
+                    self.assertEqual(record['why'], why)
+
+    def test_reasons_a_rung_can_change_walk_on(self):
+        for stage_one in (False, True):
+            for why in ('along_edge', 'outline_sampled'):
+                with self.subTest(why=why, stage_one=stage_one):
+                    calls, pose, record = self.seat(why, stage_one=stage_one)
+                    self.assertEqual(len(calls), 2)
+                    self.assertNotEqual(calls[0], calls[1])
+                    self.assertEqual((round(pose[0], 3), round(pose[1], 3)), calls[1])
+                    self.assertIsNone(record)
+
+    def test_a_later_rung_the_grade_refuses_is_not_taken(self):
+        for stage_one in (False, True):
+            with self.subTest(stage_one=stage_one):
+                calls, pose, record = self.seat('along_edge', accepts=False,
+                                                stage_one=stage_one)
+                self.assertGreater(len(calls), 2)
+                self.assertEqual((round(pose[0], 3), round(pose[1], 3)), calls[0])
+                self.assertEqual(record['why'], 'along_edge')
 
 
 class WrittenPoses(_Boards):

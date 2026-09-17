@@ -1554,14 +1554,16 @@ _FLOOR_RECORD_PADS = 4
 #: rungs. A shortfall on another side than the seated one (a pad past its
 #: courtyard at a corner), or on a sampled outline, is one only an along-edge
 #: rung can change. Every other reason -- the inward move refused by the band,
-#: a setback, a keep-out, a neighbour, the grade's nearest edge -- is about
-#: the move, and the gap to the seated edge is the same at every rung of a
-#: rectangle, so a later rung could only help by having a DIFFERENT move
-#: accepted. That does happen (a random search found grade-clean seats given
-#: up on 153 of 20,000 inputs, 51 of them within 1 mm), but it trades the
-#: connector's along-edge position for 0.1 mm-scale copper, and the first
+#: a setback, a keep-out, a neighbour, still short, the grade's nearest edge
+#: or along-edge window -- is about the MOVE. A later rung can still help
+#: there, by having a different move accepted: away from a corner its gap to
+#: the seated edge is the same, but near one `_edge_correct` converges on the
+#: sum of every side and the gap varies from rung to rung. A random search
+#: found grade-clean seats given up on 153 of 20,000 inputs (51 of them within
+#: 1 mm; 102 were nearest-edge refusals, 23 still short). But walking trades
+#: the connector's along-edge position for 0.1 mm-scale copper, and the first
 #: version of this ladder, walking on every reason, slid one connector 10 mm
-#: to gain 0.02 mm. So this is a CHOICE to stay put, not a claim that nothing
+#: to clear 0.03 mm. So this is a CHOICE to stay put, not a claim that nothing
 #: along the edge would do.
 _SLIDE_HELPS = frozenset(('along_edge', 'outline_sampled'))
 
@@ -1654,10 +1656,10 @@ def _grade_band_refuses(state, part, entry: Dict, edge: str, lo: float,
 
     Asked of every pose the floor preference picks over the seat the ladder
     always chose. The ladder's own band test (`edge_seat_ok`) allows 0.02 mm
-    either side, and its first seat, aimed at the band's midpoint, never came
-    near that; a moved pose or a later rung can land inside that tolerance
-    and outside the grade's `min - EPS` / `max + EPS` (measured: a later rung
-    read 0.23 on a 0.25 minimum and turned `--repair` from rc 0 to rc 4).
+    either side of the band. Its first seat can already sit in that margin
+    (a pre-existing grade error this does not touch), and a moved pose or a
+    later rung can land there where the first seat did not (measured: a later
+    rung read 0.23 on a 0.25 minimum and turned `--repair` from rc 0 to rc 4).
     The setback is charged only once the occupancy reading is <= EPS, which
     an inward move is exactly what produces, so any such pose on an entry
     that carries one is refused -- conservatively, since the grade then also
@@ -1682,13 +1684,43 @@ def _grade_band_refuses(state, part, entry: Dict, edge: str, lo: float,
     return None, detail
 
 
+def _outside_its_along_edge_claim(state, part, entry: Dict, edge: str,
+                                  x: float, y: float) -> bool:
+    """Would `rule_edge_connector`'s along-edge conjunct flag this pose?
+
+    Asked by CALLING the rule's own conjunct (`floorplan._grade_along_edge`)
+    on the pose `apply_move` writes, with the edge span the seat ladder
+    already uses (`_declared_edge_span`'s outline stand-in), so the two
+    cannot disagree about the window. The ladder clamps its rungs to the
+    declared window, but a rung ON a window end is rounded to 3 decimals by
+    `apply_move` and can land half a micron outside it, where the grade's
+    EPS is 1 nm -- measured: a one-footprint board whose seed went rc 0 -> 4."""
+    if entry.get('center_on_edge') is None and entry.get('along_edge_band') is None:
+        return False
+    from types import SimpleNamespace
+    from placement import floorplan as _fp
+    bounds = state.pcb_data.board_info.board_bounds
+    if not bounds:
+        return False
+    outline = {'simple_rectangle': not getattr(state.edge_gate, 'rings', None),
+               'cutouts': 0, 'edge_segments': 0}
+    ctx = SimpleNamespace(gate=state.edge_gate, outline=outline,
+                          outline_bounds=tuple(round(v, 6) for v in bounds),
+                          edge_seating=[], abstain=lambda key, why: None)
+    probe = SimpleNamespace(rect=part.rect(round(x, 3), round(y, 3), part.rot))
+    return any(True for _ in _fp._grade_along_edge(ctx, dict(entry, edge=edge),
+                                                   part.ref, probe, 'error'))
+
+
 def _grade_accepts(state, part, entry: Dict, edge: str, lo: float,
                    x: float, y: float) -> bool:
     """The grade's own conjuncts a preferred pose must pass beyond the seat
-    predicate: the band and setback at the grade's bounds, and the nearest
-    edge."""
+    predicate (which already holds the pad copper past the outline): the band
+    and setback at the grade's bounds, the nearest edge, and the declared
+    along-edge window."""
     return (_grade_band_refuses(state, part, entry, edge, lo, x, y)[0] is None
-            and _faces_its_edge(state, part, entry, edge, x, y))
+            and _faces_its_edge(state, part, entry, edge, x, y)
+            and not _outside_its_along_edge_claim(state, part, entry, edge, x, y))
 
 
 def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
@@ -1736,6 +1768,8 @@ def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
         return None, floor, dict(why, why='still_short')
     if not _faces_its_edge(state, part, entry, edge, sx, sy):
         return None, floor, dict(why, why='nearest_edge')
+    if _outside_its_along_edge_claim(state, part, entry, edge, sx, sy):
+        return None, floor, dict(why, why='along_edge_window')
     return (sx, sy), floor, None
 
 
@@ -1786,6 +1820,8 @@ def _floor_note(prefix: str, ref: str, record: Dict) -> str:
         'still_short': "moving the part inward did not clear it",
         'band_max': ("the pose that clears it would overhang past the declared "
                      "maximum"),
+        'along_edge_window': ("the pose that clears it would sit outside the "
+                              "declared along-edge window"),
         'nearest_edge': ("the pose that clears it would read nearest another "
                          "edge than the declared one"),
         'crowding': ("no seat on this band clears the parts already placed, so "
