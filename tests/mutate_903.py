@@ -51,10 +51,18 @@ SB = os.path.join(ROOT, 'tests', 'stress', 'stage_blind.py')
 PV = os.path.join(ROOT, 'py_placer', 'placement', 'provenance.py')
 RW = os.path.join(ROOT, 'tests', 'stress', 'run_watch.py')
 PA = os.path.join(ROOT, 'tests', 'stress', 'provenance_audit.py')
-TARGETS = {'su': SU, 'sb': SB, 'pv': PV, 'rw': RW, 'pa': PA}
+PS = os.path.join(ROOT, 'py_placer', 'place_seed.py')
+RL = os.path.join(ROOT, 'py_placer', 'place_route_loop.py')
+TARGETS = {'su': SU, 'sb': SB, 'pv': PV, 'rw': RW, 'pa': PA, 'ps': PS,
+           'rl': RL}
 
 T_903 = os.path.join(TESTS, 'test_903_stagers_arm_the_regime.py')
 T_PROV = os.path.join(TESTS, 'test_provenance_audit.py')
+#: #972's lineage gate. In-process and a few seconds, so rows that it kills
+#: name it ALONE rather than paying for T_PROV's real CLI runs.
+T_972 = os.path.join(TESTS, 'test_972_pose_lineage.py')
+#: #973's delivery gate: the real place_seed CLI and place_route_loop's main().
+T_973 = os.path.join(TESTS, 'test_973_delivery_rows.py')
 
 #: The cheap gate, run unmutated first. `T_PROV` is the in-process half and
 #: `T_903` the subprocess half; a row is only evidence if both are green
@@ -264,6 +272,478 @@ ROWS = [
      "    if _outer is not None and os.path.abspath(_outer) != _wd:\n",
      "    if False:\n",
      (T_903,), 'KILLED'),
+
+    # ---- #972: the pose digest the lineage links on -----------------------
+    # Every row below keeps the ledger WRITING and the audit RUNNING, so a
+    # suite that only checks for rows and verdicts stays green. What breaks is
+    # the link: a digest that describes the wrong board, or none.
+    ('the-row-records-no-parent-pose', 'pv',
+     "           'parent_pose_sha256': _parent_pose,\n",
+     "",
+     (T_972,), 'KILLED'),
+
+    # Hashing the OUTPUT at record time instead of the parsed input: identical
+    # for an in-place write, None for every write to a new path.
+    ('the-parent-pose-is-read-from-the-output', 'pv',
+     "            _parent_pose = pose_digest(pose_table_of(before))\n",
+     "            _parent_pose = file_pose_digest(output_file)\n",
+     (T_972,), 'KILLED'),
+
+    # A board digest that restates the parent: every write becomes a no-op
+    # link, so any arrangement reaches the root.
+    ('the-board-pose-restates-the-parent', 'pv',
+     "        row['board_pose_sha256'] = file_pose_digest(output_file)\n",
+     "        row['board_pose_sha256'] = row.get('parent_pose_sha256')\n",
+     (T_972,), 'KILLED'),
+
+    ('the-pose-digest-ignores-rotation', 'pv',
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     "             0, side]\n",
+     (T_972,), 'KILLED'),
+
+    ('the-pose-digest-ignores-the-side', 'pv',
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, 'F']\n",
+     (T_972,), 'KILLED'),
+
+    # `% 360` on a float leaves -1e-17 at 360.0; without the integer modulo
+    # after quantising, 0 and 360 are two arrangements and a normalising
+    # rewrite breaks the chain.
+    ('the-rotation-is-not-folded-after-quantising', 'pv',
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     "             round(((rot or 0.0) % 360.0) * 1e4), side]\n",
+     (T_972,), 'KILLED'),
+
+    ('a-staging-row-carries-a-pose-digest', 'pv',
+     "    if 'redacted' not in row:\n",
+     "    if True:\n",
+     (T_972, T_903), 'KILLED'),
+
+    # The digest runs inside `commit_write`, AFTER the board is on disk. A
+    # narrowed except lets a parse failure escape there, and the board ships
+    # with no row -- #960's defect by another road.
+    ('the-board-digest-can-raise-after-the-write', 'pv',
+     "    except Exception:                            # noqa: BLE001\n"
+     "        return None\n",
+     "    except KeyError:\n"
+     "        return None\n",
+     (T_972,), 'KILLED'),
+
+    # The PARENT digest's own guard. Reached only when the input parsed and
+    # digesting it failed; a narrowed except there raises out of
+    # `record_write` and the lever's write never happens.
+    ('the-parent-digest-can-raise', 'pv',
+     "        except Exception:                        # noqa: BLE001\n"
+     "            _parent_pose = None\n",
+     "        except KeyError:\n"
+     "            _parent_pose = None\n",
+     (T_972,), 'KILLED'),
+
+    # The non-pending path: no production lever takes it today, which is
+    # exactly why nothing else would notice its rows stop linking.
+    ('a-direct-row-carries-no-board-pose', 'pv',
+     "        return row\n"
+     "    row['board_sha256'] = (sha256_file(output_file)\n"
+     "                           if os.path.isfile(output_file) else None)\n"
+     "    _stamp_board_pose(row, output_file)\n",
+     "        return row\n"
+     "    row['board_sha256'] = (sha256_file(output_file)\n"
+     "                           if os.path.isfile(output_file) else None)\n",
+     (T_972,), 'KILLED'),
+
+    # Truncating instead of rounding: 137.253 * 1e4 is 1372529.99..., so an
+    # angle the writer emits as `.6g` would digest one step off the same
+    # angle read back from another spelling.
+    # The ROTATION alone truncated: esp_prog's golden cannot see it (every
+    # angle there is a multiple of 90); only the synthetic golden can.
+    ('the-pose-digest-truncates-the-rotation', 'pv',
+     "    rows = [[ref, round(x * 1e6), round(y * 1e6),\n"
+     "             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     "    rows = [[ref, round(x * 1e6), round(y * 1e6),\n"
+     "             int(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]\n",
+     (T_972,), 'KILLED'),
+
+    ('the-pose-digest-escapes-nothing', 'pv',
+     "    blob = json.dumps(rows, separators=(',', ':'), ensure_ascii=True)\n",
+     "    blob = json.dumps(rows, separators=(',', ':'), ensure_ascii=False)\n",
+     (T_972,), 'KILLED'),
+
+    ('the-delivery-commits-by-the-late-path', 'pv',
+     "        commit_write(key)\n",
+     "        commit_write(output_file)\n",
+     (T_973,), 'KILLED'),
+
+    # Outside a regime the writer must cost nothing it did not cost before.
+    ('the-digest-is-computed-outside-a-regime', 'pv',
+     "    root = regime_for(output_file)\n"
+     "    lever = active_lever()\n",
+     "    file_pose_digest(input_file)\n"
+     "    root = regime_for(output_file)\n"
+     "    lever = active_lever()\n",
+     (T_972,), 'KILLED'),
+
+    # ---- #972: the lineage the audit walks --------------------------------
+    # The finding itself, put back: the lineage is computed and then ignored,
+    # which is the per-file scoping's blindness by another road.
+    ('the-lineage-names-nothing', 'pa',
+     "        drifted = [r for r in lin['drift'] if r not in unclaimed]\n",
+     "        drifted = []\n",
+     (T_972,), 'KILLED'),
+
+    # "Some row produced my parent" instead of "my parent is reachable from
+    # the staged board": two no-op writes of a hand-edited board vouch for
+    # each other. The drift check still names the part, so what dies is the
+    # lineage status the tests pin.
+    ('reachability-becomes-membership', 'pa',
+     "            if _linkable(b) and _linkable(p) and p in known and b not in known:\n"
+     "                known[b] = _replay(known[p], r)\n",
+     "            if _linkable(b) and b not in known:\n"
+     "                known[b] = _replay(known.get(p, staged_table), r)\n",
+     (T_972,), 'KILLED'),
+
+    # A verified arrangement short-circuits to "nothing drifted": a row whose
+    # delivered file carries a pose its claims do not is blessed.
+    ('a-verified-board-skips-the-replay', 'pa',
+     "        return _done('verified', known[dg], _who(made_by[dg]))\n",
+     "        return _done('verified', None, _who(made_by[dg]))\n",
+     (T_972,), 'KILLED'),
+
+    # Replaying every written pose instead of every MOVE re-blesses a hand
+    # edit that a write-all lever (place_seed, perturb) passed through.
+    ('the-replay-applies-every-written-pose', 'pa',
+     "    _sides = row.get('sides_written') or {}\n"
+     "    for ref in row.get('refs_moved') or ():\n",
+     "    _sides = row.get('sides_written') or {}\n"
+     "    for ref in _poses:\n",
+     (T_972,), 'KILLED'),
+
+    # A redacted staging row has no digests by design; counting it as a
+    # pre-digest row sends every restaged work dir back to the #972 path.
+    ('a-staging-row-makes-the-ledger-legacy', 'pa',
+     "    if any('board_pose_sha256' not in r or 'parent_pose_sha256' not in r\n"
+     "           for _i, r in usable):\n",
+     "    if any('board_pose_sha256' not in r or 'parent_pose_sha256' not in r\n"
+     "           for r in rows):\n",
+     (T_972,), 'KILLED'),
+
+    ('a-staging-row-can-claim', 'pa',
+     "            and row.get('lever') not in PV.FENCE_SENSITIVE_LEVERS\n"
+     "            and 'redacted' not in row)\n",
+     "            )\n",
+     (T_972,), 'KILLED'),
+
+    ('an-unknown-digest-scheme-links', 'pa',
+     "        return isinstance(d, str) and d.startswith(_pfx)\n",
+     "        return isinstance(d, str)\n",
+     (T_972,), 'KILLED'),
+
+    ('a-malformed-row-crashes-the-audit', 'pa',
+     "    rows = [r for r in _read if _well_formed(r)]\n",
+     "    rows = list(_read)\n",
+     (T_972,), 'KILLED'),
+
+    # The newest row is not the nearest arrangement: a hand edit in a copy of
+    # the FIRST candidate would name every part the second one moved.
+    ('the-nearest-state-is-the-newest', 'pa',
+     "        return (len(diff), -(made_by[d] if made_by[d] is not None else -1))\n",
+     "        return (0, -(made_by[d] if made_by[d] is not None else -1))\n",
+     (T_972,), 'KILLED'),
+
+    ('a-broken-lineage-outranks-unclaimed', 'pa',
+     "    if unclaimed:\n",
+     "    if unclaimed and lin['status'] != 'broken':\n",
+     (T_972,), 'KILLED'),
+
+    ('legacy-skips-the-any-pose-check', 'pa',
+     "            if all(_pose_differs(got, w) for w in\n",
+     "            if False and all(_pose_differs(got, w) for w in\n",
+     (T_972,), 'KILLED'),
+
+    ('a-broken-lineage-with-nothing-named-is-clean', 'pa',
+     "    if lin['status'] == 'broken':\n"
+     "        # Something moved outside the ledger",
+     "    if False:\n"
+     "        # Something moved outside the ledger",
+     (T_972,), 'KILLED'),
+
+    # Compared with the nearest state WITHOUT the chain's own recorded moves:
+    # the write that broke the chain gets its legitimate parts named too.
+    ('the-chain-is-not-replayed', 'pa',
+     "    for i in chain:\n"
+     "        expected = _replay(expected, rows[i])\n",
+     "",
+     (T_972,), 'KILLED'),
+
+    ('an-unlinkable-ledger-is-clean', 'pa',
+     "    if lin['status'] == 'unlinkable' and unverifiable:\n",
+     "    if False:\n",
+     (T_972,), 'KILLED'),
+
+    # The second verifier round: each of these survived every gate at the
+    # commit it reviewed, with a named witness that changed verdict.
+    ('the-drift-tolerance-is-a-millimetre', 'pa',
+     "DRIFT_TOL_MM, DRIFT_TOL_DEG = 1e-3, 1e-2\n",
+     "DRIFT_TOL_MM, DRIFT_TOL_DEG = 1.0, 5.0\n",
+     (T_972,), 'KILLED'),
+
+    ('the-drift-ignores-rotation', 'pa',
+     "            or abs(((got[2] or 0.0) - (want[2] or 0.0) + 180.0) % 360.0\n"
+     "                   - 180.0) > DRIFT_TOL_DEG\n",
+     "            or False\n",
+     (T_972,), 'KILLED'),
+
+    ('the-fixpoint-runs-one-pass', 'pa',
+     "                made_by[b] = i\n"
+     "                grew = True\n",
+     "                made_by[b] = i\n",
+     (T_972,), 'KILLED'),
+
+    ('the-chain-is-replayed-newest-first', 'pa',
+     "    chain.reverse()                                    # oldest first\n",
+     "",
+     (T_972,), 'KILLED'),
+
+    ('the-auto-pick-reads-malformed-rows', 'pa',
+     "        for r in reversed([x for x in PV.read_ledger(workdir)\n"
+     "                           if _well_formed(x)]):\n",
+     "        for r in reversed(PV.read_ledger(workdir)):\n",
+     (T_972,), 'KILLED'),
+
+    # Rename a part and move it: the old ref is missing, the new one is
+    # "added", and a per-ref comparison compares neither.
+    ('a-renamed-part-is-compared-by-nothing', 'pa',
+     "        if lin['missing'] and added:\n",
+     "        if False:\n",
+     (T_972,), 'KILLED'),
+
+    ('a-deleted-part-is-clean', 'pa',
+     "    if lin['missing']:\n",
+     "    if False:\n",
+     (T_972,), 'KILLED'),
+
+    ('an-unreadable-row-vouches-for-its-poses', 'pa',
+     "                if _wrote_this and ref in _poses and not _blind:\n",
+     "                if _wrote_this and ref in _poses:\n",
+     (T_972,), 'KILLED'),
+
+    # The pre-push review.
+    # A row that wrote this arrangement from an input nothing recorded is
+    # ignored as long as another row's claims also reach it: a hand edit of a
+    # round board that the next accepted round carried on grades CLEAN.
+    ('a-rogue-producer-is-ignored', 'pa',
+     "    if dg in known and not rogue:\n",
+     "    if dg in known:\n",
+     (T_973,), 'KILLED'),
+
+    ('the-rank-counts-the-chain-moves', 'pa',
+     "        diff = [r for r in _differing(delivered_table, known[d])\n"
+     "                if r not in moved_by_chain]\n",
+     "        diff = list(_differing(delivered_table, known[d]))\n",
+     (T_972,), 'KILLED'),
+
+    ('a-malformed-caller-crashes-the-audit', 'pa',
+     "               for k in ('path', 'lever', 'caller', 'parent_pose_sha256',\n",
+     "               for k in ('path', 'lever', 'parent_pose_sha256',\n",
+     (T_972,), 'KILLED'),
+
+    ('an-unlinkable-ledger-is-unproven-even-when-checked', 'pa',
+     "    if lin['status'] == 'unlinkable' and unverifiable:\n",
+     "    if lin['status'] == 'unlinkable':\n",
+     (T_972,), 'KILLED'),
+
+    # The delta round.
+    ('the-replay-invents-a-part-the-board-lacks', 'pa',
+     "        if p is None or old is None:\n",
+     "        if p is None:\n",
+     (T_972,), 'KILLED'),
+
+    ('a-renamed-part-a-lever-moved-is-accused', 'pa',
+     "                if all(_pose_differs(_dp[a], w) for w in _gone)\n"
+     "                and all(_pose_differs(_dp[a], w)\n"
+     "                        for w in _trusted.get(a, []))})\n",
+     "                if all(_pose_differs(_dp[a], w) for w in _gone)})\n",
+     (T_972,), 'KILLED'),
+
+    ('any-expected-pose-explains-an-added-part', 'pa',
+     "            _gone = [lin['expected'][m] for m in lin['missing']]\n",
+     "            _gone = list(lin['expected'].values())\n",
+     (T_972,), 'KILLED'),
+
+    # An unreadable-input row's poses must still keep a ref UNVERIFIABLE:
+    # dropped from the candidates, the hand pose it passed through becomes an
+    # accusation of a part that may be exactly where the lever put it.
+    ('an-unreadable-rows-poses-are-ignored', 'pa',
+     "            _moves.setdefault(ref, []).append(w)\n",
+     "            if not _row_blind:\n"
+     "                _moves.setdefault(ref, []).append(w)\n",
+     (T_972,), 'KILLED'),
+
+    ('the-watcher-drops-the-reason-line', 'rw',
+     "            or (i and lines[i - 1].startswith('VERDICT'))]\n",
+     "            ]\n",
+     (T_972,), 'KILLED'),
+
+    ('legacy-counts-pass-through-poses', 'pa',
+     "        for ref in row.get('refs_moved') or ():\n"
+     "            p = _poses.get(ref)\n",
+     "        for ref in _poses:\n"
+     "            p = _poses.get(ref)\n",
+     (T_972,), 'KILLED'),
+
+    # ---- #973: a delivery by copy or rename is recorded -------------------
+    # Recorded AFTER the body: an undeclared caller is still refused, but only
+    # once the output is already on disk -- the refusal made decorative.
+    ('the-delivery-records-after-the-body', 'pv',
+     "    row = record_write(input_file, output_file, placements, pending=True)\n"
+     "    if row is None:\n"
+     "        yield None\n"
+     "        return\n"
+     "    key = os.path.abspath(output_file)\n"
+     "    try:\n"
+     "        yield row\n",
+     "    yield None\n"
+     "    row = record_write(input_file, output_file, placements, pending=True)\n"
+     "    if row is None:\n"
+     "        return\n"
+     "    key = os.path.abspath(output_file)\n"
+     "    try:\n"
+     "        pass\n",
+     (T_973,), 'KILLED'),
+
+    # Committed BEFORE the body: the row's board digest describes whatever
+    # the output held before the copy.
+    ('the-delivery-commits-before-the-body', 'pv',
+     "        yield row\n"
+     "        # A writer call to the same path inside the body keys its own pending\n"
+     "        # row on this path and commits it; put this one back before committing.\n"
+     "        _PENDING[key] = row\n"
+     "        # `key`, not `output_file`: resolved before the body, so a relative\n"
+     "        # path cannot resolve somewhere else after it.\n"
+     "        commit_write(key)\n",
+     "        _PENDING[key] = row\n"
+     "        commit_write(key)\n"
+     "        yield row\n",
+     (T_973,), 'KILLED'),
+
+    ('a-writer-call-in-the-body-swallows-the-delivery-row', 'pv',
+     "        _PENDING[key] = row\n",
+     "",
+     (T_973,), 'KILLED'),
+
+    ('a-failed-delivery-leaves-its-row-pending', 'pv',
+     "    finally:\n"
+     "        if _PENDING.get(key) is row:\n"
+     "            del _PENDING[key]\n",
+     "    finally:\n"
+     "        pass\n",
+     (T_973,), 'KILLED'),
+
+    # The defect itself, for place_seed --repair/--reseat.
+    ('the-repair-delivery-is-an-empty-write-again', 'ps',
+     "            write_placed_output(cur, _final, [])\n"
+     "            with provenance.recorded_delivery(\n"
+     "                    args.input_file, args.output_file,\n"
+     "                    list(delivered_moves.values())):\n"
+     "                shutil.copyfile(_final, args.output_file)\n",
+     "            write_placed_output(cur, args.output_file, [])\n",
+     (T_973,), 'KILLED'),
+
+    ('the-repair-delivery-claims-nothing', 'ps',
+     "                    list(delivered_moves.values())):\n",
+     "                    []):\n",
+     (T_973,), 'KILLED'),
+
+    ('the-reseat-pass-moves-are-dropped', 'ps',
+     "            accumulate_moves(delivered_moves, moves)\n",
+     "            accumulate_moves(delivered_moves,\n"
+     "                             moves if tag == 'repair' else [])\n",
+     (T_973,), 'KILLED'),
+
+    # Recorded against the temp board the passes built: a parent no row
+    # produced, so the lineage breaks on every legitimate repair.
+    ('the-repair-delivery-reads-the-staged-board', 'ps',
+     "                    args.input_file, args.output_file,\n",
+     "                    cur, args.output_file,\n",
+     (T_973,), 'KILLED'),
+
+    ('siblings-reach-the-output-before-the-refusal', 'ps',
+     "            write_placed_output(cur, _final, [])\n",
+     "            write_placed_output(cur, _final, [])\n"
+     "            copy_siblings(cur, args.output_file)\n",
+     (T_973,), 'KILLED'),
+
+    ('the-polish-rename-is-unrecorded-again', 'ps',
+     "        with provenance.recorded_delivery(args.output_file, args.output_file,\n"
+     "                                          moves):\n"
+     "            os.replace(tmp, args.output_file)\n",
+     "        os.replace(tmp, args.output_file)\n",
+     (T_973,), 'KILLED'),
+
+    # The RE-SEAT FIX's rename alone put back: the polish's delivery is still
+    # recorded, so only a case that makes the re-seat fix fire can see it.
+    ('the-reseat-fix-rename-is-unrecorded-again', 'ps',
+     "                    _replace_output(fixes, '.reseat')\n",
+     "                    _tmp = args.output_file + '.reseat'\n"
+     "                    write_placed_output(args.output_file, _tmp, fixes)\n"
+     "                    os.replace(_tmp, args.output_file)\n",
+     (T_973,), 'KILLED'),
+
+    # The defect itself, for place_route_loop.
+    ('the-loop-delivery-is-a-bare-copy-again', 'rl',
+     "    with provenance.recorded_delivery(args.input_file, args.output_file,\n"
+     "                                      list(delivered_moves.values())):\n"
+     "        shutil.copy(cur_file, args.output_file)\n",
+     "    shutil.copy(cur_file, args.output_file)\n",
+     (T_973,), 'KILLED'),
+
+    ('the-loop-claims-only-its-last-accepted-round', 'rl',
+     "            if reloc is not None and not reloc.refusal:\n"
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n",
+     "            delivered_moves.clear()\n"
+     "            if reloc is not None and not reloc.refusal:\n"
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n",
+     (T_973,), 'KILLED'),
+
+    # The third verifier round: both survived test_973 until it ran
+    # --relocate, and on a --relocate run each accuses a clean run.
+    ('the-loop-drops-the-relocation-moves', 'rl',
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n",
+     "                pass\n",
+     (T_973,), 'KILLED'),
+
+    ('the-loop-folds-the-quench-before-the-relocation', 'rl',
+     "            if reloc is not None and not reloc.refusal:\n"
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n"
+     "            provenance.accumulate_moves(delivered_moves, placements or [])\n",
+     "            provenance.accumulate_moves(delivered_moves, placements or [])\n"
+     "            if reloc is not None and not reloc.refusal:\n"
+     "                provenance.accumulate_moves(delivered_moves, reloc.moves)\n",
+     (T_973,), 'KILLED'),
+
+    # `new_side: None` is the writer's "keep the current side"; copied into
+    # the claim it wipes an earlier pass's flip that the board still carries.
+    ('a-later-none-wipes-an-earlier-move', 'pv',
+     "                        **{k: v for k, v in m.items() if v is not None})\n",
+     "                        **m)\n",
+     (T_973,), 'KILLED'),
+
+    ('a-rejected-round-is-claimed', 'rl',
+     "            print(f\"  REJECTED - reverting, widening the nudge cap\"\n",
+     "            delivered_moves.update({p['reference']: dict(p)\n"
+     "                                    for p in (placements or [])})\n"
+     "            print(f\"  REJECTED - reverting, widening the nudge cap\"\n",
+     (T_973,), 'KILLED'),
+
+    ('the-loop-delivery-reads-the-round-board', 'rl',
+     "    with provenance.recorded_delivery(args.input_file, args.output_file,\n",
+     "    with provenance.recorded_delivery(cur_file, args.output_file,\n",
+     (T_973,), 'KILLED'),
+
+    ('siblings-reach-the-loop-output-before-the-refusal', 'rl',
+     "    with provenance.recorded_delivery(args.input_file, args.output_file,\n",
+     "    copy_siblings(cur_file, args.output_file)\n"
+     "    with provenance.recorded_delivery(args.input_file, args.output_file,\n",
+     (T_973,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is

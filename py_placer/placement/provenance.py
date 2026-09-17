@@ -19,10 +19,12 @@ THIS IS AN ACCOUNTING BOUNDARY, NOT A SECURITY BOUNDARY, and saying so is the
 honest register (`fence_audit.py:84-113` does the same for its own allow-list).
 A determined author can call `declare_lever` from a hand script. What changes
 is that doing so is an affirmative falsification rather than an omission -- and
-because `provenance_audit` reconciles the DELIVERED BOARD's moved poses against
-the ledger rather than reading the log alone, a forger must fabricate a
-consistent `refs_moved` chain, which is a much larger act than skipping a
-disclosure.
+because `provenance_audit` reconciles the DELIVERED BOARD's poses against the
+ledger rather than reading the log alone, a forger must append rows that claim
+the hand-placed poses -- rows whose pose digests chain from the staged board
+to the delivered one (#972), or rows with no digests, which the audit reads
+the pre-#972 way -- and that is a much larger act than skipping a disclosure.
+It is not a defence against that act: the digest function is importable.
 
 Registration is by explicit call, never by sniffing `sys.argv[0]`: sniffing is
 defeated by one assignment, and a boundary that looks stronger than it is, is
@@ -142,6 +144,11 @@ def _caller() -> str:
             fn = fr.filename.replace('\\', '/')
             if '/py_placer/placement/' in fn or fn.endswith('provenance.py'):
                 continue
+            # `recorded_delivery` is a context manager, so the frame between
+            # it and the lever is contextlib's `__enter__`; without this every
+            # delivery row names `contextlib.py` as its author.
+            if fn.endswith('/contextlib.py'):
+                continue
             if fn.startswith('<'):               # <frozen runpy>, <string>
                 continue
             return f"{os.path.basename(fr.filename)}:{fr.lineno} in {fr.function}"
@@ -172,6 +179,94 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+# THE POSE DIGEST (#972). The byte hashes above answer "is this the same FILE",
+# and a chain of rows cannot be linked on that: legitimate steps rewrite a board
+# without moving a part -- `seeder.stamp_locked` adds `(locked yes)` after the
+# seed row, route.py writes copper, `beautify_labels` moves silkscreen, a fill
+# or a pcbnew re-save rewrites the text -- and every one of them would read as
+# an unrecorded change. The digest answers "is this the same ARRANGEMENT": a
+# canonical hash of every footprint's (x, y, rotation, side), so a row's
+# `parent_pose_sha256` links to an earlier row's `board_pose_sha256` across any
+# rewrite that moved nothing, and a copy or `os.replace` delivery links by
+# content rather than by path.
+#
+# The scheme id is part of the VALUE, not a separate key: a digest written
+# under a different canonical form must never be compared with this one, and
+# a prefix cannot be separated from the hash it qualifies.
+POSE_DIGEST_SCHEME = 'p1'
+
+
+def pose_footprints(path: str) -> Dict:
+    """{ref: Footprint} through the parser's own footprint extractor.
+
+    `parse_kicad_pcb` takes its footprints from exactly this call and changes
+    no x/y/rotation/layer afterwards, so the keys are the ones the audit and
+    every lever use -- including #726's `TP4~2` ordinals and a reference-less
+    block's `#<uuid>` -- at a third to a half of the cost, because nets,
+    zones and outline contours are never built.
+    """
+    from kicad_parser import extract_footprints_and_pads
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    return extract_footprints_and_pads(content, {}, {})[0]
+
+
+def pose_table_of(footprints: Dict) -> Dict:
+    """{ref: (x, y, rotation, side)} -- the audit's pose shape since #714."""
+    from placement.legality import footprint_side
+    return {ref: (fp.x, fp.y, fp.rotation or 0.0, footprint_side(fp))
+            for ref, fp in footprints.items()}
+
+
+def pose_table(path: str) -> Dict:
+    return pose_table_of(pose_footprints(path))
+
+
+def pose_digest(table: Dict) -> str:
+    """Canonical digest of a pose table: `"p1:<sha256 hex>"`.
+
+    Positions are integer NANOMETRES: the writer emits `:.6f` millimetres and
+    KiCad stores integer nm, so any rewrite that keeps the decimal recovers the
+    same integer. Rotation is folded into [0, 360), quantised to 1e-4 degree
+    and folded AGAIN as an integer, so -90 and 270, 360 and 0, and a `-1e-17`
+    that the float `% 360` turns into 360.0 all land on one integer. Integers
+    and side letters only: a float in the JSON
+    would spell -0.0 differently from 0.0.
+
+    Exact on purpose. Two poses that differ by less than a nanometre link;
+    anything else does not, and the audit then compares poses at its own drift
+    tolerance -- so a missed link can hide nothing, it only stops a shortcut.
+    """
+    rows = [[ref, round(x * 1e6), round(y * 1e6),
+             round(((rot or 0.0) % 360.0) * 1e4) % 3600000, side]
+            for ref, (x, y, rot, side) in sorted(table.items())]
+    blob = json.dumps(rows, separators=(',', ':'), ensure_ascii=True)
+    return (POSE_DIGEST_SCHEME + ':'
+            + hashlib.sha256(blob.encode('ascii')).hexdigest())
+
+
+def file_pose_digest(path: str) -> Optional[str]:
+    """The pose digest of a board file, or None. NEVER raises.
+
+    Called from inside `commit_write`, which runs after the board is already
+    on disk: an exception there would ship a board with no ledger row, which
+    is the defect #960 closed. A digest that cannot be computed is recorded as
+    None and the audit treats that link as unknown.
+    """
+    try:
+        if not os.path.isfile(path):
+            return None
+        return pose_digest(pose_table(path))
+    except Exception:                            # noqa: BLE001
+        return None
+
+
+def _stamp_board_pose(row: Dict, output_file: str) -> None:
+    # A staging row carries no pose content of any kind (FENCE_SENSITIVE_LEVERS).
+    if 'redacted' not in row:
+        row['board_pose_sha256'] = file_pose_digest(output_file)
+
+
 _PENDING: Dict[str, Dict] = {}
 
 
@@ -188,6 +283,7 @@ def commit_write(output_file: str) -> Optional[Dict]:
     root = row.pop('_root')
     row['board_sha256'] = (sha256_file(output_file)
                            if os.path.isfile(output_file) else None)
+    _stamp_board_pose(row, output_file)
     with open(os.path.join(root, LEDGER_NAME), 'a', encoding='utf-8') as f:
         f.write(json.dumps(row, sort_keys=True) + '\n')
     return row
@@ -265,8 +361,7 @@ def record_write(input_file: str, output_file: str,
     moved = []
     before = None
     try:
-        from kicad_parser import parse_kicad_pcb
-        before = parse_kicad_pcb(input_file).footprints
+        before = pose_footprints(input_file)
         for p in placements:
             ref = p.get('reference')
             fp = before.get(ref)
@@ -323,10 +418,21 @@ def record_write(input_file: str, output_file: str,
               for p_ in placements
               if p_.get('reference') and p_.get('new_side') is not None}
 
+    # The INPUT's arrangement, from the same parse `refs_moved` just used and
+    # therefore from before the write -- an in-place write hashes the board it
+    # replaces. None when the input could not be read; never an exception.
+    _parent_pose = None
+    if isinstance(before, dict):
+        try:
+            _parent_pose = pose_digest(pose_table_of(before))
+        except Exception:                        # noqa: BLE001
+            _parent_pose = None
+
     row = {'t': time.time(), 'schema': SCHEMA,
            'path': os.path.abspath(output_file),
            'parent_sha256': (sha256_file(input_file)
                              if os.path.isfile(input_file) else None),
+           'parent_pose_sha256': _parent_pose,
            'lever': lever['lever'], 'lever_argv': lever['lever_argv'],
            'declared': True, 'caller': _caller(),
            'refs_written': sorted(p.get('reference') for p in placements),
@@ -340,7 +446,10 @@ def record_write(input_file: str, output_file: str,
         # of it inside the fence, in a file the run can read (see
         # FENCE_SENSITIVE_LEVERS). `parent_sha256` goes too: a hash is not a
         # path, but it turns "which board is this?" into a test the run can
-        # run against every candidate on disk.
+        # run against every candidate on disk. `parent_pose_sha256` goes for
+        # the same reason, and `_stamp_board_pose` adds no board digest to a
+        # redacted row: the audit's root is the hash-verified staged FILE, so
+        # nothing would read one.
         #
         # Dropping the pose keys is not a loss to the audit, it is more
         # correct: the staged board is the BASELINE the audit compares
@@ -356,6 +465,7 @@ def record_write(input_file: str, output_file: str,
         return row
     row['board_sha256'] = (sha256_file(output_file)
                            if os.path.isfile(output_file) else None)
+    _stamp_board_pose(row, output_file)
     with open(os.path.join(root, LEDGER_NAME), 'a', encoding='utf-8') as f:
         f.write(json.dumps(row, sort_keys=True) + '\n')
     return row
@@ -390,3 +500,64 @@ def start_regime(workdir: str, staged_board: str, **extra) -> str:
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(doc, f, indent=1, sort_keys=True)
     return path
+
+
+@contextlib.contextmanager
+def recorded_delivery(input_file: str, output_file: str,
+                      placements: Sequence[Dict]):
+    """Record a delivery that is not a writer call -- a copy or a rename (#973).
+
+    A lever that builds its board somewhere else and then `shutil.copy`s or
+    `os.replace`s it onto the output leaves either no row at all or a row
+    naming the intermediate: place_seed's `--repair`/`--reseat` staged in a
+    temp dir and delivered with an EMPTY writer call, its polish wrote
+    `<out>.polish` and renamed it, and place_route_loop copied its last round.
+    Wrap the copy:
+
+        with provenance.recorded_delivery(real_input, out, moves):
+            shutil.copyfile(staged_board, out)
+
+    `placements` are the moves the LEVER made, relative to `input_file` --
+    never a diff of the two files, which would record whatever else the staged
+    board carries as the lever's own work. If the delivered file disagrees
+    with them, the audit's replay names the difference.
+
+    The row is recorded BEFORE the body, so an undeclared caller is refused
+    while the output is untouched; it is committed after the body, so its
+    board digest is the delivered file's. A body that raises leaves no row.
+    Outside a regime this does nothing and parses nothing.
+    """
+    row = record_write(input_file, output_file, placements, pending=True)
+    if row is None:
+        yield None
+        return
+    key = os.path.abspath(output_file)
+    try:
+        yield row
+        # A writer call to the same path inside the body keys its own pending
+        # row on this path and commits it; put this one back before committing.
+        _PENDING[key] = row
+        # `key`, not `output_file`: resolved before the body, so a relative
+        # path cannot resolve somewhere else after it.
+        commit_write(key)
+    finally:
+        if _PENDING.get(key) is row:
+            del _PENDING[key]
+
+
+def accumulate_moves(acc: Dict, moves: Sequence[Dict]) -> Dict:
+    """Fold a pass's moves into `acc` ({ref: placement}), later passes winning
+    KEY BY KEY, for a `recorded_delivery` that claims several passes at once.
+
+    Key by key, so a later move that omits `new_rotation` keeps the earlier
+    pass's; and a None value is skipped rather than copied, because the writer
+    reads `new_side: None` as "keep the current side" -- copying it would wipe
+    an earlier pass's flip from the claim while the board keeps it.
+    """
+    for m in moves:
+        ref = m.get('reference')
+        if not ref:
+            continue
+        acc[ref] = dict(acc.get(ref, {}),
+                        **{k: v for k, v in m.items() if v is not None})
+    return acc

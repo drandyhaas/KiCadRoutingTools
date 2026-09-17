@@ -44,6 +44,7 @@ import sys
 
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
+from placement import provenance
 from placement.portfolio import copy_siblings
 from placement.groups import GroupError, derive_groups, describe, parse_sources
 from placement.cli_gates import (add_board_state_args, add_intent_arg,
@@ -1006,6 +1007,11 @@ def main():
     # the run cannot report what it started from, which is half of any delta.
     baseline = dict(best)
     accepted_rounds = 0
+    # Every move an ACCEPTED round made, keyed by ref, later rounds winning.
+    # The delivery row claims these against the real input (#973): the round
+    # boards may sit outside the regime (`--work-dir`), where nothing records
+    # them, and the output itself is a copy.
+    delivered_moves: dict = {}
     # #554. `relocate_applied == 0` beside a non-zero `relocate_refused` is the
     # machine-readable statement that the flag did nothing this run -- the same
     # anti-degeneration device --target-select carries.
@@ -1348,6 +1354,11 @@ def main():
             if args.accept_cmd:
                 best_score = metrics.get('accept_score')
             cur_file = cand_file
+            # The relocation first, then the quench over it: the candidate was
+            # written from `quench_base` in exactly that order.
+            if reloc is not None and not reloc.refusal:
+                provenance.accumulate_moves(delivered_moves, reloc.moves)
+            provenance.accumulate_moves(delivered_moves, placements or [])
             max_disp = args.max_displacement
             accepted_rounds += 1
         else:
@@ -1355,7 +1366,12 @@ def main():
                   f" (swap cap stays {swap_cap:.1f}mm).")
             max_disp *= 1.5
 
-    shutil.copy(cur_file, args.output_file)
+    # Recorded against the REAL input with every accepted move (#973): a bare
+    # copy left no row naming the output, so the audit picked a round board
+    # instead, and with `--work-dir` outside the regime left no row at all.
+    with provenance.recorded_delivery(args.input_file, args.output_file,
+                                      list(delivered_moves.values())):
+        shutil.copy(cur_file, args.output_file)
     copy_siblings(cur_file, args.output_file)          # #441, as at round 0
     if args.ratsnest_screen > 0:
         print(f"Ratsnest screen: {screened} round(s) skipped the routing run"

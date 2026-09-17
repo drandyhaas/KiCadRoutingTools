@@ -483,6 +483,22 @@ def _is_staging_cmd(toks):
                for t in toks)
 
 
+def _provenance_lines(stdout):
+    """The lines of a `provenance_audit` run worth relaying (#972).
+
+    VERDICT, the unclaimed list, the `lineage:` line -- and the REASON, which
+    is the line after VERDICT. The reason is the only place the audit names
+    drifted parts and the write a broken lineage descends from, and the exit-5
+    text below tells the reader to read it; relaying only VERDICT/unclaimed
+    left that instruction pointing at a line the watcher never printed.
+    """
+    lines = (stdout or '').splitlines()
+    return [ln.strip() for i, ln in enumerate(lines)
+            if ln.startswith('VERDICT') or 'unclaimed' in ln
+            or ln.lstrip().startswith('lineage:')
+            or (i and lines[i - 1].startswith('VERDICT'))]
+
+
 def _ledger_stagings(path):
     """Re-stagings recorded in a pose-provenance ledger (#903).
 
@@ -843,10 +859,9 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                      '--workdir', workdir],
                     capture_output=True, text=True, timeout=900)
                 _said = False
-                for line in (r.stdout or '').splitlines():
-                    if line.startswith('VERDICT') or 'unclaimed' in line:
-                        print(f'PROVENANCE {line.strip()}', flush=True)
-                        _said = True
+                for line in _provenance_lines(r.stdout):
+                    print(f'PROVENANCE {line}', flush=True)
+                    _said = True
                 # 0/4/5 are its verdicts (CLEAN / VIOLATION / UNPROVEN); 2 is
                 # a usage error and anything else is a crash. Silence there
                 # reads as CLEAN.
@@ -858,8 +873,9 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                           f'not a pass', flush=True)
                 if r.returncode == 4:
                     print('PROVENANCE exit 4 -- a pose in the delivered board '
-                          'traces to no registered lever, i.e. something '
-                          'moved parts that was not the engine', flush=True)
+                          'traces to no registered lever, or is not where the '
+                          'recorded writes put it, i.e. something moved parts '
+                          'that was not the engine', flush=True)
                 if r.returncode == 5:
                     # NAMED, not graded. Before #903 nothing armed a regime,
                     # so 5 was the only reachable answer and saying anything
@@ -872,17 +888,24 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                     # work dir staged before this change.
                     print('PROVENANCE exit 5 -- UNPROVEN. Since #903 both '
                           'stagers ARM the regime, so a dir they staged '
-                          'should not read 5. The reasons, all four: this '
-                          'dir was staged by neither stager; it was MOVED '
-                          'after staging (the manifest holds an absolute '
-                          'path); no delivered board sits beside the staged '
-                          'one (pass --delivered); or NOTHING MOVED -- no '
+                          'should not read 5. The reasons: this dir was '
+                          'staged by neither stager; it was MOVED after '
+                          'staging (the manifest holds an absolute path); the '
+                          'manifest describes a different board than the '
+                          'staged one; no delivered board sits beside the '
+                          'staged one (pass --delivered); NOTHING MOVED -- no '
                           'ledger and no pose differs from the staged board, '
-                          'which on a finished run is the interesting one. '
-                          'Read the reason line above rather than guessing '
-                          'from this list. Not a violation -- but the claim '
-                          '"the engine placed this board" is unproven, so it '
-                          'may not be made', flush=True)
+                          'which on a finished run is the interesting one; a '
+                          'part the lineage expects is missing (deleted or '
+                          'renamed); a recorded write read a board no '
+                          'recorded write produced and re-moved every part '
+                          'that differs (#972); the pose digests cannot link; '
+                          'or the audit itself raised (no VERDICT line above, '
+                          'the exception is on its stderr). Read the '
+                          'reason line above rather than guessing from this '
+                          'list. Not a violation -- but the claim "the engine '
+                          'placed this board" is unproven, so it may not be '
+                          'made', flush=True)
             except Exception as e:                     # noqa: BLE001
                 print(f'PROVENANCE could not run ({type(e).__name__}: {e})',
                       flush=True)

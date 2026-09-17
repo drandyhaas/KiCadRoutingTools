@@ -750,7 +750,7 @@ Three rules about that number:
   never let it read as clean.
 
 **`place_route_loop`'s own `ACCEPTED` / `REJECTED` is NOT a quality verdict.**
-`better()` (`py_placer/place_route_loop.py:569`) compares `failures` and `iterations`, both
+`better()` (`py_placer/place_route_loop.py:570`) compares `failures` and `iterations`, both
 from route.py's own `JSON_SUMMARY`; it never runs a checker. Treat it as a cheap
 pre-filter and **re-score with `board_score.py` before believing it.**
 
