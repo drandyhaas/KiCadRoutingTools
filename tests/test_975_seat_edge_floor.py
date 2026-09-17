@@ -403,6 +403,19 @@ class StageOne(_Boards):
                          if n.startswith('edge connector J1: no in-band seat')])
         self.agree(path, 'J1', after, record)
 
+    def test_tier_two_on_an_armed_slide_keeps_the_first_rung_not_the_last(self):
+        # A declared position arms the 13-rung slide; every rung is short and
+        # blocked by the band, so the kept seat is the FIRST conflict-free
+        # rung -- the walk has run on past it to the last.
+        entry = west(0.25, 0.35, center_on_edge={'tolerance_mm': 5.0})
+        path = self.board('s1_armed.kicad_pcb')
+        before = self.pose(self.seed(path, entry, base=True))
+        res = self.seed(path, entry)
+        after = self.pose(res)
+        self.assertEqual(after, before)
+        self.assertEqual(res['edge_floor_fallback']['J1']['why'], 'band_min')
+        self.agree(path, 'J1', after, res['edge_floor_fallback']['J1'])
+
     def test_the_crowding_fallback_is_kept_and_named(self):
         # esp_prog USB1 on a band that no seat clears of its neighbours: the
         # pose #961 pinned, now with its copper shortfall disclosed.
