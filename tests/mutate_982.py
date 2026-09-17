@@ -39,13 +39,22 @@ deleted so that the day the gate's order changes, the battery says so.
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
 
-MEASURED on the tree of `#982: the key-claim gate had no fresh-seed document`
-(1a3737ff, 2026-09-17, Windows; the three killer tests first run unmutated and
-green): 17 rows, 16 KILLED, 1 SURVIVED -- the expected one above -- 0 broken.
-An earlier run at 3f2e4ef6 exited 2 without scoring anything, naming test_923
-BROKEN on the unmutated tree: its place_seed documents were `--reseat` and
-`--repair --dry-run` only, so the fresh path's keys resolved against nothing.
-That is the defect 1a3737ff fixes, and it is why the unmutated gate exists.
+MEASURED on the tree of `#982: the pre-push review's findings` (dbfdc0a5,
+2026-09-17, Windows; the three killer tests first run unmutated and green):
+**22 rows, 20 KILLED, 2 SURVIVED -- both of them the expected ones above -- 0
+broken.**
+
+Earlier runs, kept because each says something:
+- 17 rows, 16 KILLED at 1a3737ff, before the pre-push review. FOUR of the rows
+  above did not exist then, and they are there because an adversarial reviewer
+  wrote those mutations itself and they SURVIVED: the console line emptied of
+  its pairs, every pair charged to the unseated bucket, the total taken from
+  the buckets instead of the grade, and a bare ref string. Three now die; the
+  fourth is expected to survive and says why.
+- At 3f2e4ef6 the battery exited 2 without scoring anything, naming test_923
+  BROKEN on the unmutated tree: its place_seed documents were `--reseat` and
+  `--repair --dry-run` only, so a row about a fresh-path key could not resolve.
+  That is the defect 1a3737ff fixes, and it is why the unmutated gate exists.
 """
 from __future__ import annotations
 
