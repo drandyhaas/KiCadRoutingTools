@@ -20,7 +20,10 @@ that one construction, timed separately because a search pays it once per
 state, not per candidate.
 
 Poses: 13 along-edge offsets (the seat ladder's rung count) x 3 rotations
-(own, +90, +33) = 39 per part. Timings are the minimum over `--reps`.
+(own, +90, +33) = 39 per part, the same 39 for BEFORE and AFTER. Timings are
+the minimum over `--reps`. BEFORE moves its pads with `pads_at_pose` too, so
+the two cannot disagree on a pose: whether `pads_at_pose` puts pads where the
+writer does is `tests/test_975_edge_copper_context.py`'s arm F, not this.
 
 The #975 target is <= 0.2 ms per candidate on RECTANGULAR outlines; sampled
 outlines run the DRC perimeter sampler per pad and are reported, not targeted.
@@ -97,8 +100,7 @@ def main():
     ap.add_argument('--required', type=float, default=0.55)
     args = ap.parse_args()
     print(f'{"board/part":26s} {"pads":>4s} {"outline":>8s} {"build ms":>9s} '
-          f'{"before ms/cand":>15s} {"after us/cand":>14s} {"reads/cand":>11s} '
-          f'{"max |d| mm":>11s}  target')
+          f'{"before ms/cand":>15s} {"after us/cand":>14s} {"reads/cand":>11s}  target')
     for board, ref in CASES:
         path = os.path.join(ROOT, 'kicad_files', board + '.kicad_pcb')
         if not os.path.exists(path):
@@ -110,25 +112,17 @@ def main():
         build = best(lambda: L.EdgeCopperContext(pcb, args.required, path), args.reps)
         ctx = L.EdgeCopperContext(pcb, args.required, path)
         after = best(lambda: [ctx.pose_copper(fp, p) for p in ps], args.reps) / len(ps)
-        old = best(lambda: [before(pcb, ref, p, args.required, path) for p in ps[:13]],
-                   args.reps) / 13
+        old = best(lambda: [before(pcb, ref, p, args.required, path) for p in ps],
+                   args.reps) / len(ps)
         reads_before = reads(lambda: before(pcb, ref, ps[0], args.required, path))
         reads_after = reads(lambda: ctx.pose_copper(fp, ps[0]))
-        worst = 0.0
-        for p in ps[:13]:
-            graded = {f['pad_index']: f['shortfall_mm']
-                      for f in before(pcb, ref, p, 1000.0, path)['findings']}
-            wide = L.EdgeCopperContext(pcb, 1000.0, path)
-            for r in wide.pad_copper(fp, p):
-                if r.index in graded:
-                    worst = max(worst, abs(r.amount_mm - graded[r.index]))
         copper = sum(1 for p in fp.pads if not L._pad_has_no_copper(p))
         outline = 'rect' if ctx.rectangular else 'sampled'
         verdict = (('PASS' if after * 1e3 <= TARGET_MS else 'OVER') if ctx.rectangular
                    else 'n/a (sampled)')
         print(f'{board + "/" + ref:26s} {copper:4d} {outline:>8s} {build * 1e3:9.2f} '
-              f'{old * 1e3:15.3f} {after * 1e6:14.1f} {reads_before:>4d} -> {reads_after:<3d} '
-              f'{worst:11.2e}  {verdict}')
+              f'{old * 1e3:15.3f} {after * 1e6:14.1f} {reads_before:>4d} -> {reads_after:<3d}'
+              f'  {verdict}')
     return 0
 
 

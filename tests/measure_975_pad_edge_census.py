@@ -30,8 +30,14 @@ Synthetic arms, each a copy of `kicad_files/esp_prog.kicad_pcb` in a temp dir
 with ONE sibling or outline change, graded both ways: a `.kicad_dru` edge rule,
 an unterminated one, a copper-only rule; a `.kicad_pro` edge floor of NaN, -1,
 0 and Infinity, and whole-file `[]` / `"abc"`; an open internal Edge.Cuts line,
-a round cutout, and no Edge.Cuts at all. An exception is recorded as
-`{raised, message}`, because raising at the same place IS the identity for those.
+a round cutout, and no Edge.Cuts at all; a footprint of pad shapes no tracked
+board carries (trapezoid, chamfered roundrect, custom with no primitives,
+unequal-axis circle, a 33-degree oval), inside the floor so they also grade;
+and a board graded against a DIFFERENT `pcb_file` than it was parsed from. An
+exception is recorded as `{raised, message}`, because raising at the same
+place IS the identity for those. (The pad-shape and `pcb_file` arms were added
+after the phase-1 verifier committed a mutant that dropped three unmeasured
+reasons and swapped `pcb_file or source_path`, which scored 180 of 180 equal.)
 
 Temp and root paths are normalised to `<tmp>` / `<root>` so the two arms
 compare. `--diff` exits 0 only when every arm is identical, and prints each arm
@@ -141,6 +147,20 @@ def _synthetic(parse, legality, root, tmp):
         'outline-none': board('no-outline', body=text.replace(
             '(layer "Edge.Cuts")', '(layer "Dwgs.User")')),
     }
+    # Pad shapes no tracked board carries: the grader's unmeasured and
+    # approximated branches, placed near the west edge so they also grade.
+    exotic = (
+        '(footprint "t975:exotic" (layer "F.Cu") (at 114.6 95)\n'
+        '  (property "Reference" "X975")\n'
+        '  (pad "1" smd trapezoid (at 0 0) (size 0.8 0.8) (rect_delta 0 0.2) (layers "F.Cu"))\n'
+        '  (pad "2" smd roundrect (at 0 2) (size 0.8 0.8) (layers "F.Cu") '
+        '(roundrect_rratio 0.25) (chamfer_ratio 0.2) (chamfer top_left))\n'
+        '  (pad "3" smd custom (at 0 4) (size 0.8 0.8) (layers "F.Cu") '
+        '(options (clearance outline) (anchor rect)) (primitives))\n'
+        '  (pad "4" smd circle (at 0 6) (size 0.6 1.2) (layers "F.Cu"))\n'
+        '  (pad "5" smd oval (at 0 8 33) (size 0.6 1.2) (layers "F.Cu"))\n'
+        ')\n')
+    cases['pads-exotic'] = board('exotic', body=text[:close] + exotic + text[close:])
     arms = {}
     for name, path in cases.items():
         pcb = parse(path)
@@ -148,6 +168,15 @@ def _synthetic(parse, legality, root, tmp):
         out = _call(legality.grade_pad_legality, pcb, 0.25, exact=False, pcb_file=path)
         arms[f'{name}:legality@None'] = (out if 'raised' in out
                                          else {k: out[k] for k in EDGE_KEYS})
+    # A board graded against a DIFFERENT file than the one it was parsed from:
+    # `pcb_file` must win over `source_path` for every sibling read.
+    parsed_from = cases['pro-zero']
+    arms['pcb-file-differs:edge@0.55'] = _call(
+        legality.grade_pad_edge_clearance, parse(parsed_from), 0.55, cases['dru-edge'])
+    out = _call(legality.grade_pad_legality, parse(parsed_from), 0.25, exact=False,
+                pcb_file=cases['outline-open-line'])
+    arms['pcb-file-differs:legality@None'] = (out if 'raised' in out
+                                              else {k: out[k] for k in EDGE_KEYS})
     return arms
 
 

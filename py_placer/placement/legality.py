@@ -3423,6 +3423,14 @@ def pads_at_pose(fp, pose) -> List[_PosedPad]:
     size bake, so the tilt keeps the sign the DRC sampler applies. Custom pad
     polygons are transformed point by point; their size box is not read by
     the grader and is carried unchanged.
+
+    It agrees with writing the pose and re-parsing to within the parser's own
+    nanometre snap for poses the writer stores EXACTLY -- coordinates of a few
+    decimals (the seat ladder rounds to 3) and angles of at most six
+    significant digits. The writer prints angles with `%g`, so a
+    full-precision angle is written rounded (measured: 4.1e-5 mm at
+    -126.16549296222809 deg), and an angle within float noise of the parser's
+    1-degree size bake can land on the other side of it.
     """
     from kicad_parser import _PAD_ORTHO_TOL, _resolve_pad_rect
     x, y, rot = pose
@@ -3636,6 +3644,11 @@ class EdgeCopperContext:
                 continue
             if reading.reason:
                 certified = False
+            # A NaN amount (a malformed pad size) is no finding in `grade`, so
+            # it is no shortfall here either -- and taken as `worst`, no later
+            # pad could ever replace it.
+            if reading.amount_mm != reading.amount_mm:
+                continue
             if worst is None or reading.amount_mm > worst:
                 worst, worst_index = reading.amount_mm, reading.index
         return PoseCopper(readings, worst, worst_index,
@@ -3695,7 +3708,11 @@ def edge_copper_for(holder, pcb_data, pcb_file, clearance, edge_margin):
     holder is asked about a different board object, path, clearance or edge
     margin. Returns `(context, None)`, or `(None, error)` when the board's
     constants cannot be read -- a failure is cached too, so a malformed
-    project costs one read per holder, not one per candidate."""
+    project costs one read per holder, not one per candidate.
+
+    The key is the board OBJECT, not its contents: a caller that edits
+    `pcb_data.board_info` in place would be served the old outline, so such a
+    caller builds its own context."""
     key = (pcb_file or getattr(pcb_data, 'source_path', None), clearance, edge_margin)
     hit = getattr(holder, '_edge_copper', None)
     if hit is None or hit[0] is not pcb_data or hit[1] != key:

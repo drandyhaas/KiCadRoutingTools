@@ -60,7 +60,24 @@ RUN_ALL_TIMEOUT = 600
 EPS = L.EPS
 # Two independent integer-nanometre snaps (the parser's pad globals, and the
 # written footprint origin), each <= 0.5 nm per axis, rotate into <= 1.21 nm.
+# That holds for the poses below, which the writer stores exactly (3-decimal
+# coordinates, short angles); an arbitrary-decimal pose adds the writer's own
+# rounding, and `pads_at_pose`'s docstring says so.
 POSE_TOL = 1.5e-6
+
+#: Every file open in this process, whatever API asked for it. `builtins.open`
+#: alone misses `io.open`, `pathlib` and C-level opens: a `Path.read_bytes()`
+#: added to `grade` passed arm B while it spied on `open` only. An audit hook
+#: cannot be removed, so it counts only while `_OPENS['on']`.
+_OPENS = {'on': False, 'paths': []}
+
+
+def _audit(event, args):
+    if event == 'open' and _OPENS['on']:
+        _OPENS['paths'].append(args[0])
+
+
+sys.addaudithook(_audit)
 BOARDS = {name: str(ROOT / 'kicad_files' / f'{name}.kicad_pcb') for name in (
     'esp_prog', 'tigard', 'watchy', 'rp2350_fpga_eensy_prePlane', 'orangecrab_ext_pll')}
 _PARSED = {}
@@ -101,9 +118,14 @@ class Spy:
         ]
         for p in self.patches:
             p.start()
+        _OPENS['paths'] = []
+        _OPENS['on'] = True
         return self
 
     def __exit__(self, *exc):
+        _OPENS['on'] = False
+        if _OPENS['paths']:
+            self.counts['audit_open'] = len(_OPENS['paths'])
         for p in reversed(self.patches):
             p.stop()
 
@@ -405,6 +427,20 @@ class ReadingIsTheGrade(unittest.TestCase):
                 self.assertEqual(pc.clears, clears)
                 self.assertEqual(pc.clears, not [
                     f for f in ctx.grade()['findings'] if f['pad_ref'].startswith('USB1.')])
+
+    def test_a_nan_reading_is_not_the_worst_pad(self):
+        pcb = fresh('esp_prog')
+        fp = pcb.footprints['USB1']
+        copper = [i for i, p in enumerate(fp.pads) if not L._pad_has_no_copper(p)]
+        fp.pads[copper[0]].size_x = float('nan')
+        fp.pads[copper[-1]].global_x = pcb.board_info.board_bounds[0] + 0.1
+        ctx = L.EdgeCopperContext(pcb, 0.55, BOARDS['esp_prog'])
+        pc = ctx.pose_copper(fp)
+        self.assertEqual(pc.worst_index, copper[-1])
+        self.assertFalse(pc.clears)
+        grade = ctx.grade()
+        self.assertEqual({f['pad_index'] for f in grade['findings']
+                          if f['pad_ref'].startswith('USB1.')}, {copper[-1]})
 
     def test_certified_and_fallback(self):
         pcb = fresh('esp_prog')
