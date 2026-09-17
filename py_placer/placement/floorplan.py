@@ -5519,8 +5519,9 @@ NO_EVIDENCE_ROW = 'the grade produced no evidence row for it'
 NO_ALONG_EDGE_MEASUREMENT = 'no along-edge measurement recorded'
 
 #: `bands_dropped[].reason`.
-BAND_DROPPED_REASON = ("--reseat set this edge declaration aside for the ref "
-                       "it re-seats, so none of its conjuncts was graded")
+BAND_DROPPED_REASON = ("--reseat set this edge declaration aside because its "
+                       "ref is in the re-seat scope, so none of its conjuncts "
+                       "was graded, whether or not the ref moved")
 
 
 def connector_requirements_ungraded(reason: str) -> Dict[str, object]:
@@ -5581,10 +5582,15 @@ def _connector_requirements(graded, own, pinned, bands_dropped):
         if centre is None and band is None:
             continue
         claim = 'center_on_edge' if centre is not None else 'along_edge_band'
-        # A recorded measurement settles it: the grade only abstains when it
-        # appended none, so an abstention beside a measured row can only be a
-        # hand-written `context.budget_withheld` key.
-        if any(str(row.get('ref')) == ref and 'along_edge_offset_mm' in row
+        # A recorded measurement of THIS entry settles it: the grade abstains
+        # only when it appends no measuring row, so an abstention beside one
+        # is a hand-written `context.budget_withheld` key. Matched on the
+        # entry, not the ref: a ref declared twice gets a measuring row from
+        # any entry that names an edge, claim or not.
+        if c.get('edge') is not None and any(
+               str(row.get('ref')) == ref and row.get('declared')
+               and row.get('edge') == c.get('edge')
+               and 'along_edge_offset_mm' in row
                for row in graded.edge_seating):
             continue
         why = graded.budget_abstained.get(f"edge_connectors[{ref}].{claim}")

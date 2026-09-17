@@ -237,12 +237,13 @@ python py_placer/place_seed.py unplaced.kicad_pcb seed.kicad_pcb --intent floorp
 python py_placer/place_seed.py unplaced.kicad_pcb seed3.kicad_pcb --intent floorplan.json --seed 3
 ```
 
-Every `JSON_SUMMARY` it prints (seed, `--repair`, `--reseat`, and their dry
-runs) carries `connector_requirements` (#974): the declared edge connectors'
-graded evidence, the requirements that were NOT measured, bands `--reseat`
+Every `JSON_SUMMARY` it prints (seed, `--repair`, `--reseat`) carries
+`connector_requirements` (#974): the declared edge connectors' graded
+evidence, the requirements that were NOT measured, declarations `--reseat`
 dropped, and the connector errors split own / pinned exactly as the exit code
-split them. It reports only -- it never withholds the board or moves the exit
-code. `floorplan.connector_requirements` builds it; the keys are read per
+split them; a dry run carries only `{complete: false, reason: 'dry-run'}`. It
+reports only -- it never withholds the board or moves the exit code.
+`floorplan.connector_requirements` builds it; the keys are read per
 `.claude/skills/plan-pcb-placement-and-routing/references/evidence-map.md`
 section I.
 

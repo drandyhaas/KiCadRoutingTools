@@ -265,6 +265,32 @@ class Copper(_Case):
         _g, _o, _p, r = self.report(npth, _intent([
             {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0}}]))
         self.assertEqual(r['unmeasured'], [], r)
+        # ...and a board-wide `.kicad_dru` edge rule is not copper either.
+        npth.with_suffix('.kicad_dru').write_text(
+            '(version 1)\n(rule "edge floor" '
+            '(constraint edge_clearance (min 0.75mm)))\n', encoding='utf-8')
+        g, _o, _p, r = self.report(npth, _intent([
+            {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0}}]))
+        self.assertTrue(g.edge_connector_evidence[0]['pad_copper_edge']
+                        ['rules_unmeasured'])
+        self.assertEqual(r['unmeasured'], [], r)
+
+    def test_copper_known_only_as_unmeasured_pads_still_counts(self):
+        """On a sampled outline the grader records no gap and, for copper
+        inside the board, no finding: the part's copper is visible only as
+        unmeasured pads. Its skipped conjunct must still be listed."""
+        outline = (RECT_OUTLINE + '\n  (gr_circle (center 10 15) (end 11 15) '
+                   '(layer "Edge.Cuts"))')
+        path = self.board('sampled_inside.kicad_pcb',
+                          _fp('J1', '3 5 0', FAB_2MM), outline=outline)
+        graded, _o, _p, r = self.report(path, _intent([
+            {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0}}]))
+        copper = graded.edge_connector_evidence[0]['pad_copper_edge']
+        self.assertIsNone(copper['minimum_gap_mm'])
+        self.assertEqual(copper['findings'], [])
+        self.assertTrue(copper['unmeasured'])
+        self.assertEqual([u['requirement'] for u in r['unmeasured']],
+                         ['pad_copper_outside'])
 
     def test_a_measured_body_with_no_copper_amount_is_listed(self):
         """`outside_mm: None` on the body path. No real grade produces it
@@ -349,6 +375,63 @@ class AlongEdge(_Case):
         self.assertEqual([(u['ref'], u['requirement'])
                           for u in r['unmeasured']],
                          [('J2', 'center_on_edge')])
+
+    def test_a_second_declaration_does_not_lend_its_measurement(self):
+        """V1b's counterexample. J1 declared twice: once on an edge (which
+        writes a measuring row), once with a centring claim and no edge (which
+        abstains). The claim was never graded -- J1 sits 6 mm off centre and
+        nothing says so -- so it must be listed, whatever the other entry's
+        row reads."""
+        path = self.board('twice.kicad_pcb', _fp('J1', '1 4 0', FAB_2MM))
+        graded, _o, _p, r = self.report(path, _intent([
+            {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0, 'max': .5}},
+            {'ref': 'J1', 'center_on_edge': {'tolerance_mm': 0.1}}]))
+        self.assertIn('edge_connectors[J1].center_on_edge',
+                      graded.budget_abstained)
+        self.assertEqual([(u['ref'], u['requirement'])
+                          for u in r['unmeasured']],
+                         [('J1', 'center_on_edge')])
+        self.assertFalse(r['complete'])
+
+    def test_only_this_entrys_row_is_its_measurement(self):
+        """The row must be THIS entry's: declared, and on its edge. Built by
+        hand, because a real grade never pairs a measured row with the other
+        entry's abstention on the same edge."""
+        path = self.board('centred.kicad_pcb', _fp('J1', '1 10 0', FAB_2MM))
+        intent = _intent([{'ref': 'J1', 'edge': 'west',
+                           'overhang_mm': {'min': 0, 'max': .5},
+                           'center_on_edge': {'tolerance_mm': 1.0}}])
+        graded, own, pinned, _r = self.report(path, intent)
+        row, = [e for e in graded.edge_seating if e.get('ref') == 'J1']
+        key = {'edge_connectors[J1].center_on_edge': 'withheld'}
+        for foreign in (dict(row, declared=False), dict(row, edge='east')):
+            forged = dataclasses.replace(graded, edge_seating=[foreign],
+                                         budget_abstained=key)
+            r = floorplan.connector_requirements(forged, own, pinned)
+            self.invariants(r, forged, own, pinned)
+            self.assertEqual([(u['ref'], u['requirement'], u['reason'])
+                              for u in r['unmeasured']],
+                             [('J1', 'center_on_edge', 'withheld')], foreign)
+
+    def test_a_row_that_abstained_is_not_a_measurement(self):
+        """A row the grade appended while abstaining (no usable span on the
+        edge) carries no offset. Built by hand from a measured grade."""
+        path = self.board('centred.kicad_pcb', _fp('J1', '1 10 0', FAB_2MM))
+        intent = _intent([{'ref': 'J1', 'edge': 'west',
+                           'overhang_mm': {'min': 0, 'max': .5},
+                           'center_on_edge': {'tolerance_mm': 1.0}}])
+        graded, own, pinned, _r = self.report(path, intent)
+        forged = dataclasses.replace(
+            graded,
+            edge_seating=[{'ref': 'J1', 'edge': 'west', 'declared': True,
+                           'abstained': 'no usable span'}],
+            budget_abstained={'edge_connectors[J1].center_on_edge':
+                              'no usable span'})
+        r = floorplan.connector_requirements(forged, own, pinned)
+        self.invariants(r, forged, own, pinned)
+        self.assertEqual(r['unmeasured'], [{
+            'ref': 'J1', 'requirement': 'center_on_edge',
+            'reason': 'no usable span'}])
 
     def test_a_recorded_measurement_outranks_an_abstention_key(self):
         """The grade abstains only when it records no row, so an abstention
@@ -457,6 +540,21 @@ class Order(_Case):
                           ('J1', 'pad_copper_outside'),
                           ('J2', 'along_edge_band'),
                           ('J2', 'overhang_body')])
+
+    def test_one_requirement_with_two_reasons_is_two_entries(self):
+        """Only EXACT duplicates merge. No real grade gives one ref two body
+        reasons, so two evidence rows are built by hand."""
+        path = self.board('legacy.kicad_pcb', _fp('J1', '0.3 10 0'))
+        graded, own, pinned, _r = self.report(path, _intent([
+            {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0, 'max': .5}}]))
+        row = graded.edge_connector_evidence[0]
+        forged = dataclasses.replace(graded, edge_connector_evidence=[
+            row, dict(row, body_unmeasured_reason='a second reason')])
+        r = floorplan.connector_requirements(forged, own, pinned)
+        self.assertEqual(sorted(u['reason'] for u in r['unmeasured']
+                                if u['requirement'] == 'overhang_body'),
+                         sorted([row['body_unmeasured_reason'],
+                                 'a second reason']))
 
 
 class Wire(_Case):

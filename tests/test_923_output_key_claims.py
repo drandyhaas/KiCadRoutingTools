@@ -482,8 +482,8 @@ def test_the_skills_key_what_the_instruments_emit():
         return any(run_utils.resolve_json_path(doc, segs)
                    for _label, doc in art[tool] if isinstance(doc, dict))
 
-    # ...and per INSTRUMENT, because two of the six have no evidence-map
-    # section at all and hang entirely on prose: dropping `.py` from one tool
+    # ...and per INSTRUMENT, because an instrument with no evidence-map
+    # section (check_pockets) hangs entirely on prose: dropping `.py` from one tool
     # name in one paragraph took `check_pockets` out of the gate completely and
     # still cleared the channel floor.
     covered = {t: 0 for t in known}
