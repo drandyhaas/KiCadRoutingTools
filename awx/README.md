@@ -798,6 +798,11 @@ AST-scans every awx file for that shape.
 | `DST_XING_SCREEN` | helps nothing, alone or with the pattern seed |
 | `SEL_CONTEND` / `DST_CONTEND` | fail in both placements, at every weight |
 | `DST_WALK_OFF` (off-array walk) | built, general, loses |
+| `SF_ACCEPT_MARGIN` | **neutral at 1, harmful at 2-3** (K41 88 -> 122 / 1 open), measured on the cloud 2026-09-13. The residue is not a completion guard; margin 0 stands |
+| the per-net DP "floor" as a target | REFUTED 2026-09-12: "every lane is 0 or 2" is an artefact of a CIRCULAR instrument, and "bring every violator down to 2" is NOT the objective -- at K35 the joint optimum takes four lanes from 2 to 0 and pays ONE up to 4, which is 4 vias cheaper. The COMPARATIVE form survives (human one lane above 2, we six) |
+| `PLAN_PAGES_GROUP_DST` (the destination re-berth) | worse at K35 by 8 and K41 by 1, better on none; also inert on the planted b4 cases. Kept as a change detector |
+| `PLAN_PAGES_WALK_STAGE` | ties three rungs and opens two nets at K51. Kept as a change detector |
+| `BRAID_PITCH_EXACT` (the exact lane-pitch projection) | CORRECT and costs 8 vias at K41 (88 against 80, both DRC-clean) -- `pair_floor` is a planning heuristic, not a clearance rule, so the under-relaxed comb was never illegal. Shipped OFF |
 | optimising the SWIMMER count | anti-correlated with vias on 3 of 4 benches; a swimmer costs ~1 via |
 | `DST_SEED_ORDER` = `perp` / `arc` / `win` / `dp` | one global order round the array loses at every bench; the face carries topology AND partitions the monotone run |
 | `DST_ASK_BAN=1` | an ask the engine answered a layer/kind away is not repeated: INERT on the pattern arm (18 bans, identical copper), harmful on the baseline (K35 58 -> 66; K51 0 open -> 5 open + 23 DRC) |
@@ -904,64 +909,117 @@ OFF behind `BRAID_PITCH_EXACT`. **Correct is not the same as better.**
 
 ## TODO
 
-1. **Fix the judge.** Solving the plan to proven optimality makes the
-   board worse (above), so the objective the planner optimises is not the
-   thing worth optimising, and more search on it is actively harmful. The
-   braid-tier judge -- route the candidates, decide on `(open, vias)` --
-   is now correct and measures neutral, so judging by routing is not
-   automatically the answer either. The one mechanism that has actually
-   paid is `replan.py`, which evaluates per net against the FINAL board
-   with the router as an oracle. Widening it is the obvious next
-   experiment: the recorded K35 46 came from a much wider sweep than the
-   `--rounds=4 --probes=2` used lately. It is hours, so it wants the cloud.
+Ordered, highest value first. An item leaves this list only when it is
+**done** or **abandoned with a measurement** -- the ones that ended that
+way are in "Settled -- do not re-run these" and in the history.
 
-2. **K51, the only rung the human still wins** (96 against 81). It is
+1. **Fix the judge.** Solving the plan to proven optimality makes the
+   board WORSE (K41 -24% objective for +12 vias; K51 -33% for two open
+   nets), so the objective the planner optimises is not the thing worth
+   optimising and more search on it is actively harmful. The braid-tier
+   judge -- route the candidates, decide on `(open, vias)` -- is now
+   correct and measures neutral, so judging by routing is not
+   automatically the answer either. The one mechanism that has paid is
+   `replan.py`, which evaluates per net against the FINAL board with the
+   router as an oracle; widening it is the obvious next experiment, since
+   the recorded K35 46 came from a much wider sweep than the
+   `--rounds=4 --probes=2` used lately. Hours, so it wants the cloud.
+   `BRAID_CPSAT_REPAIR` (hint repair) is built and still unmeasured.
+
+2. **The berth menu is the binding constraint, and the fix is ROW pruning
+   -- not column generation.** Measured on the joint arm's K41 instance:
+   each net has ~19 distinct berth geometries across ~4 faces, and at
+   `CANDS=4` the one-per-face guarantee consumes all four slots for 28 of
+   41 nets, so the `vias + ride` ranking never chooses WHICH berth, only
+   one representative per face. This is the most concrete plan-side lever
+   on the list and it feeds item 1 directly.
+
+3. **K51, the only rung the human still wins** (96 against 81). It is
    also where the anti-correlation is worst and where the portfolio's
    gain is largest, so it is the natural target for whatever comes out of
-   item 1 rather than a separate line of work.
+   items 1 and 2 rather than a separate line of work.
 
-3. **The `.kicad_dru` is read with real layer names inside the turned
+4. **Slack-gated arms.** Two knobs are the largest single-knob wins
+   measured and both LOSE where there is capacity to spare, in the same
+   shape: `BRAID_LAY_ORDER=xing` (K51 -13, K41 +6) and the pattern seed
+   (K35 69 against 58, K41 88 against 80). Either gate them on slack or
+   find what they give up when they are not needed. A working slack test
+   would settle both at once.
+
+5. **The `.kicad_dru` is read with real layer names inside the turned
    frame.** The unfixed half of the back-side layer bug: a per-layer
    clearance rule lands on the opposite face for a back-side part, and
    per CLAUDE.md the dru outranks `--clearance` on every routing step.
-   Shipped `py_router` code, so it blocks a merge to main.
+   Shipped `py_router` code, so it blocks the merge to main.
 
-4. **Audit `modal_k`'s `KEEP`.** Only about two of ~40 distinct
+6. **The corpus A/B for the production changes, then the PR to main.**
+   Everything in "What this adds to `py_router`" changes copper on boards
+   that have nothing to do with this chain, and a change that moves
+   copper but is not on the list is the one nobody thinks to measure. The
+   list now also carries this session's work: the back-side layer-name
+   fix, `exact_lane`, and `KICAD_SEG_DIST_EXACT`, which ships ON by
+   default and whose own comment says the A/B is owed.
+
+7. **Generality -- the router is tuned on ONE bench.** zynq_ad9364 at K28
+   is 0 open / 55 vias but only 17 of 28 in band, and the leg rules were
+   tuned on `fb_t2q_fresh`; `flow_frame.py turn` needs fixing first,
+   because that article does not run through `chain_k.sh` today. Poses
+   off the axes (R30, R45) break the plan's compass faces and need a
+   trigonometric turn of the file. Both matter more than their position
+   here suggests if any of this is to be general.
+
+8. **Audit `modal_k`'s `KEEP`.** Only about two of ~40 distinct
    `pages-first:` log shapes survive the filter, and an INFEASIBLE solve
    returns no `pages-first` line at all -- which reads exactly like "the
-   planner never ran". Three separate misreads have come from this
-   (the canary, the smoother, the tier judge). It wants one audit pass
-   against what the chain actually prints, not another line-by-line patch.
+   planner never ran". Three separate misreads have come from this (the
+   canary, the smoother, the tier judge). One audit pass against what the
+   chain actually prints, not another line-by-line patch.
 
-5. **`pick_braid` ignores DRC.** It judges `(open, vias)` only, so now
-   that the portfolio is default-on it can ship a 98-via board with
-   violations over a clean 99-via one, silently. Every other selector in
+9. **`pick_braid` ignores DRC.** It judges `(open, vias)` only, so now
+   that the portfolio is default-on it can ship a board with violations
+   over a clean one with a via more, silently. Every other selector in
    the chain treats a DRC-dirty board as unshippable.
 
-6. **Merge main and re-baseline.** The branch is ~123 commits diverged and
-   predates `#958`, `#441` and `#521`/`#906`, so the whole recorded ladder
-   sits on older engine code. It also has no
-   `tests/stress/modal_suite/run_all_modal.py`, so the suite is local-only
-   (~48 min) until the merge.
+10. **Merge main and re-baseline.** The branch is ~123 commits diverged
+    and predates `#958`, `#441` and `#521`/`#906`, so the whole recorded
+    ladder sits on older engine code. It also has no
+    `tests/stress/modal_suite/run_all_modal.py`, so the suite is
+    local-only (~48 min) until the merge.
 
-7. **The remaining review findings**, none verified by me beyond the
-   reviewer's evidence: `dedupe_boards` fingerprints copper but not the
-   sidecar, so two copper-identical fanouts with different plans lose
-   one; `braid_tier`'s budget exhaustion is silent and its `_near` test
-   compares different key scales under bare `PLAN_PAGES`;
-   `_realize_group_first` bans nothing on a pure DRC rejection;
-   `blockers_of` double-counts half a track; `collapse_dives` calls
-   `os.chdir` at import and keys nodes at 10 um; several planner items (a
-   wasted seed solve, a silently unenforced fixed berth, the walk budget
-   going negative). `flip_frame` also does not mirror `pad.polygons`, and
-   `_SEG_DIST_EXACT` ships on by default without the corpus A/B its own
-   comment says is owed.
+11. **Built, default off, never finished.** `DST_ASK_BAN` (an ask the
+    engine answered a layer/kind/face away is not asked again) had one
+    negative reading at K35 and the ladder was never finished.
+    `BRAID_PACK=1` ships 0 open / 0 DRC with vias unchanged and far fewer
+    segments, and nobody has measured what those segments buy.
+    `SRC_EXCHANGE=1` is a probe whose first K15 reading found 2 of 60
+    pairs improving the judge -- it was built to decide whether a source
+    re-fan is worth writing, and the question is still open. Note the
+    SOURCE ITSELF is no longer frozen in the default chain: the portfolio
+    fans out both with and without `SRC_REFAN_JOINT`, and that arm is
+    half of the K51 98.
 
-8. **Three pre-existing suite failures**, confirmed to predate this
-   session's work: `test_703_predictor_regen`,
-   `test_782_nondefault_netclass_clamp`, `test_fanout_cancel`, plus
-   `test_459_group_routing` hitting its own 1200 s budget. Nobody has
-   diagnosed them.
+12. **The remaining review findings**, none verified beyond the
+    reviewer's evidence: `dedupe_boards` fingerprints copper but not the
+    sidecar, so two copper-identical fanouts with different plans lose
+    one; `braid_tier`'s budget exhaustion is silent and its `_near` test
+    compares different key scales under bare `PLAN_PAGES`;
+    `_realize_group_first` bans nothing on a pure DRC rejection;
+    `blockers_of` double-counts half a track; `collapse_dives` calls
+    `os.chdir` at import and keys nodes at 10 um; several planner items
+    (a wasted seed solve, a silently unenforced fixed berth, the walk
+    budget going negative). `flip_frame` also does not mirror
+    `pad.polygons`.
+
+13. **Tooling.** Still owed: the flag-off parity gate that a hand check
+    does today. Promote session probes into `awx/` with a line each here
+    when they earn it -- `room_probe.py` and `modal_k`'s
+    `return_board`/`return_files` came in that way.
+
+14. **Three pre-existing suite failures**, confirmed to predate this
+    session: `test_703_predictor_regen`,
+    `test_782_nondefault_netclass_clamp`, `test_fanout_cancel`, plus
+    `test_459_group_routing` hitting its own 1200 s budget. Nobody has
+    diagnosed them.
 
 ## History, in brief
 
