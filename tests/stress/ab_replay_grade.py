@@ -290,6 +290,12 @@ def _kicad_grade(pcb, clearance, baseline=None):
                 # doesn't inflate the summary.
                 "checkdrc_reconciled": data["check_drc"],
                 "checkdrc_preexisting": data["checkdrc_preexisting"],
+                # The floor this row's kicad numbers were graded at (#439 takes
+                # it from the BOARD, not the manifest). Two arms of one board
+                # can differ here, and then their kicad counts are two different
+                # rulers -- `clearance` alone says the manifest value for both
+                # and hides it. See kicad_drc_compare.compare_board_data.
+                "graded_clearance": data.get("graded_clearance"),
                 "kicad_only": data["kicad_only"], "checkdrc_only": data["checkdrc_only"],
                 "kicad_matched": data["matched"],
                 "kicad_intentional_edge": data.get("kicad_intentional_edge", 0),
@@ -480,8 +486,16 @@ def do_board(set_dir, out_dir, label, board):
         res.update(grade(final, clr, baseline=baseline))
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
     fp_note = f" fp={res['peak_footprint_mb']}MB" if res.get("peak_footprint_mb") else ""
+    # Say the floor the kicad numbers were graded at whenever it is NOT the one
+    # the manifest asked for. #439 takes it from the board's own .kicad_pro, so
+    # a writeback bug grades its own arm leniently and nothing on this line
+    # would otherwise say so (a20_can: 0.0508 written by a 0.254 route step).
+    gc = res.get("graded_clearance")
+    gc_note = ""
+    if gc is not None and clr is not None and abs(float(gc) - float(clr)) > 1e-9:
+        gc_note = f" kdrc@{gc}(asked {clr})"
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
-          f"drc={res['drc']} kdrc={res.get('kicad_drc')} cw={res.get('kicad_connection_width')} "
+          f"drc={res['drc']} kdrc={res.get('kicad_drc')}{gc_note} cw={res.get('kicad_connection_width')} "
           f"conn={res['conn']} compl={res['completion_pct']}% "
           f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB{fp_note} final={res['final']}", flush=True)
     return res
@@ -649,6 +663,19 @@ def compare(old_json, new_json):
         nie = n.get("drc_intentional_edge") or 0
         if nie:
             flag += f"  (#408 -{nie} edge accepted)"
+        # The two arms' kicad-side numbers (connw here, kicad_drc in the rows)
+        # are only comparable when both were graded at the SAME floor. #439
+        # takes that floor from each board's OWN .kicad_pro, so an arm whose
+        # writeback is wrong grades ITSELF leniently and the pair silently
+        # compares two rulers. a20_can: v0.22.0 shipped a 0.0508 Default class
+        # (#900) and reported 0 kicad items where the fixed arm, graded at the
+        # 0.254 its route step asked for, reports 49. Name it rather than
+        # quietly re-grading: which arm is right is a question about the
+        # WRITEBACK, and the answer is not always the higher floor.
+        ogc, ngc = o.get("graded_clearance"), n.get("graded_clearance")
+        if (ogc is not None and ngc is not None
+                and abs(float(ogc) - float(ngc)) > 1e-9):
+            flag += f"  <-- FLOORS DIFFER {ogc} vs {ngc}: kicad counts not comparable"
         speed = f"  ({to/tn:.2f}x)" if (to and tn) else ""
         print(f"{b:14} {_fmt(od):>4} -> {_fmt(nd):<4} {_fmt(ocw):>4} -> {_fmt(ncw):<4} "
               f"{_fmt(oi):>5} -> {_fmt(ni):<5} "

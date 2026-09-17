@@ -701,6 +701,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # finals AND baseline -- so the two engines agree and baseline subtraction (#405)
     # lines up at the same floor.
     recorded = _pro_clearance(board)
+    requested = clearance
     if recorded is not None:
         clearance = recorded
     kicad, err = kicad_items_for(board, clearance)
@@ -854,6 +855,20 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # (baseline) AND accepted-by-design edge items (#408) already removed. The
     # subtracted edge counts are reported separately for transparency.
     return {"board": label, "kicad": len(kicad), "kicad_preexisting": pre,
+            # The floor this grade ACTUALLY used, and the one the caller asked
+            # for. They differ whenever the board ships its own recorded floor
+            # (the #439 rule above), and the grade is then only comparable to
+            # another board graded at the SAME value -- so an A/B that pairs two
+            # arms has to be able to SEE it. a20_can: the v0.22.0 arm shipped a
+            # 0.0508 Default class (the #900 pad-override-clobbers-Default bug)
+            # and was graded at 0.0508, reporting ZERO kicad items on copper
+            # that has 54 at the 0.254 its own route step asked for; the fixed
+            # arm ships 0.254 and reports 49. Read as a pair that is a 0 -> 49
+            # "regression" and is really two different rulers. Disclosed rather
+            # than forced to `requested`, because grading at the manifest
+            # ceiling is what #439 measured as 499 phantom items on neo6502.
+            "graded_clearance": clearance,
+            "requested_clearance": requested,
             "check_drc": len(cd), "checkdrc_preexisting": cd_pre,
             "kicad_intentional_edge": kicad_intentional,
             "checkdrc_intentional_edge": checkdrc_intentional,
