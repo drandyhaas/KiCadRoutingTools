@@ -307,8 +307,173 @@ class Setback(_Boards):
         self.assertEqual(why['why'], 'setback')
         seat, _, why = seeder._floor_rung(st, part, west(0.0, 1.0, max_setback_mm=0.5), *args)
         self.assertEqual(why['why'], 'setback')
+        seat, _, why = seeder._floor_rung(st, part,
+                                          west(0.0, 1.0, **{'class': 'connector_affinity'}), *args)
+        self.assertEqual(why['why'], 'setback')
         seat, _, why = seeder._floor_rung(st, part, west(0.0, 1.0), *args)
         self.assertIsNotNone(seat, why)
+
+
+class MoveRefused(_Boards):
+    """Every re-check of the moved pose is load-bearing, not only the band."""
+
+    def test_a_keep_out_over_the_moved_pose(self):
+        path = self.board('ko.kicad_pcb')
+        pcb = parse_kicad_pcb(path)
+        keepout = {'name': 'k', 'sides': ('F', 'B'), 'allow': (), 'rect': (3.52, 9.0, 3.9, 11.0)}
+        st = pose_score.make_state(pcb, path, clearance=.25, board_edge_clearance=.55,
+                                   keepouts=[keepout])
+        part = st.parts['J1']
+        self.assertTrue(seeder.edge_seat_ok(st, part, 2.5, 10.0, 'west', 0.0, 0.6))
+        seat, _, why = seeder._floor_rung(st, part, west(0.0, 0.6), 'west', 0.0, 0.6,
+                                          2.5, 10.0, lambda a, b: False)
+        self.assertIsNone(seat)
+        self.assertEqual(why['why'], 'refused')
+        self.assertEqual(why['refused_by'], ["keep-out 'k'"])
+
+    def test_a_move_that_the_floor_still_reads_short(self):
+        path = self.board('still.kicad_pcb')
+        st = self.state(path)
+        stuck = seeder._floor_at(st, 'J1', 2.5, 10.0, 0.0)
+        self.assertTrue(stuck.short)
+        with patch.object(seeder, '_floor_at', lambda *a, **k: stuck):
+            seat, _, why = seeder._floor_rung(st, st.parts['J1'], west(0.0, 0.6), 'west',
+                                              0.0, 0.6, 2.5, 10.0, lambda a, b: False)
+        self.assertIsNone(seat)
+        self.assertEqual(why['why'], 'still_short')
+
+    def test_a_sampled_outline_derives_no_move(self):
+        path = self.board('sampled.kicad_pcb')
+        text = Path(path).read_text(encoding='utf-8').replace(
+            '(layer "Edge.Cuts"))\n',
+            '(layer "Edge.Cuts"))\n  (gr_circle (center 15 15) (end 16 15) (layer "Edge.Cuts"))\n', 1)
+        Path(path).write_text(text, encoding='utf-8')
+        st = self.state(path)
+        seat, floor, why = seeder._floor_rung(st, st.parts['J1'], west(0.0, 0.6), 'west',
+                                              0.0, 0.6, 2.5, 10.0, lambda a, b: False)
+        self.assertIsNone(seat)
+        self.assertTrue(floor.short)
+        self.assertEqual(why['why'], 'outline_sampled')
+
+
+#: A locked neighbour 3.9 mm in: clear of J1's first seat, crowded by its move.
+NEIGHBOUR = ('  (footprint "n" (locked yes) (layer "F.Cu") (at 3.9 10 0)\n'
+             '    (property "Reference" "J2")\n'
+             '    (pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu")))\n')
+
+
+class Crowding(_Boards):
+    """Both call sites hand `_floor_rung` their own neighbour test."""
+
+    def board_with_neighbour(self, name):
+        path = self.board(name)
+        text = Path(path).read_text(encoding='utf-8')
+        Path(path).write_text(text[:text.rfind(')')] + NEIGHBOUR + ')\n', encoding='utf-8')
+        return path
+
+    def test_seat_edge(self):
+        path = self.board_with_neighbour('crowd_seat.kicad_pcb')
+        _, before, _, _ = self.seat(path, west(0.0, 0.6), base=True)
+        ok, after, record, _ = self.seat(path, west(0.0, 0.6))
+        self.assertTrue(ok)
+        self.assertEqual(after, before)
+        self.assertEqual(record['why'], 'crowds')
+
+    def test_stage_one(self):
+        path = self.board_with_neighbour('crowd_s1.kicad_pcb')
+        res = StageOne.seed(self, path, west(0.0, 0.6))
+        base = StageOne.seed(self, path, west(0.0, 0.6), base=True)
+        self.assertEqual(StageOne.pose(res), StageOne.pose(base))
+        self.assertEqual(res['edge_floor_fallback']['J1']['why'], 'crowds')
+
+
+#: The grade reads this part's nearest edge off its courtyard, which is wider
+#: than its pads: moved inward near a corner it reads nearest the side edge.
+NEAR_BODY = '(fp_rect (start -2 -1.25) (end 2 1.25) (layer "F.CrtYd"))'
+NEAR_PADS = ('(pad "1" smd rect (at -1 -0.95) (size .5 .6) (layers "F.Cu"))\n'
+             '    (pad "2" smd rect (at 1 -0.95) (size .5 .6) (layers "F.Cu"))')
+SLIDE_PADS = NEAR_PADS.replace('-0.95', '-0.93')
+
+
+class NearestEdge(_Boards):
+    """The phase-2 verifier's blocker: a pose the preference picks must still
+    read nearest its declared edge, or the grade refuses the seat (rc 4)."""
+
+    def grade_errors(self, path, pose, entry):
+        out = str(self.root / 'nearest_written.kicad_pcb')
+        write_placed_output(path, out, [{'reference': 'J1', 'new_x': pose[0],
+                                         'new_y': pose[1], 'new_rotation': pose[2]}])
+        graded = floorplan.grade(floorplan.intent_from_dict(intent_doc(**entry)),
+                                 parse_kicad_pcb(out), out, clearance=.25,
+                                 board_edge_clearance=.55)
+        return [v.message for v in graded.errors if v.rule == 'edge_connector']
+
+    def test_a_move_that_reads_nearest_another_edge_is_not_taken(self):
+        path = self.board('near.kicad_pcb', NEAR_BODY, NEAR_PADS)
+        st = self.state(path)
+        part = st.parts['J1']
+        for band, side in (({'from': 0.1, 'to': 0.15}, 'west'), ({'from': 0.85, 'to': 0.9}, 'east')):
+            entry = {'ref': 'J1', 'edge': 'north', 'overhang_mm': {'min': 0.0, 'max': 0.6},
+                     'along_edge_band': band}
+            with self.subTest(band=band):
+                base = StageOne.seed(self, path, entry, base=True)
+                res = StageOne.seed(self, path, entry)
+                pose = StageOne.pose(res)
+                self.assertEqual(pose, StageOne.pose(base))
+                self.assertEqual(res['edge_floor_fallback']['J1']['why'], 'nearest_edge')
+                self.assertEqual(self.grade_errors(path, pose, entry), [])
+                # The move itself is what the grade would refuse.
+                shift = res['edge_floor_fallback']['J1']['shift_mm']
+                moved = (pose[0], round(pose[1] + shift, 3), pose[2])
+                self.assertFalse(seeder._faces_its_edge(st, part, entry, 'north', *moved[:2]))
+                self.assertTrue([m for m in self.grade_errors(path, moved, entry)
+                                 if f'nearest the {side} edge' in m])
+
+    def test_a_short_first_seat_does_not_walk_to_a_corner(self):
+        # Short on its own edge, the move blocked by the band: no later rung
+        # can fix that on a rectangle, so the ladder does not walk to one.
+        path = self.board('walk.kicad_pcb', NEAR_BODY, SLIDE_PADS)
+        entry = {'ref': 'J1', 'edge': 'north', 'overhang_mm': {'min': 0.04, 'max': 0.06}}
+        _, before, _, _ = self.seat(path, entry, base=True, target=(6.5, 0.0))
+        ok, after, record, _ = self.seat(path, entry, target=(6.5, 0.0))
+        self.assertTrue(ok)
+        self.assertEqual(after, before)
+        self.assertEqual(record['why'], 'band_min')
+        self.assertEqual(self.grade_errors(path, after, entry), [])
+
+    def test_a_slide_armed_by_an_unrelated_part_does_not_walk(self):
+        locked = ('  (footprint "r" (locked yes) (layer "F.Cu") (at 12.5 15 0)\n'
+                  '    (property "Reference" "R9")\n'
+                  '    (fp_rect (start -1 -0.6) (end 1 0.6) (layer "F.CrtYd"))\n'
+                  '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu"))\n'
+                  '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu")))\n')
+        path = self.board('armed.kicad_pcb', NEAR_BODY, SLIDE_PADS)
+        text = Path(path).read_text(encoding='utf-8').replace('(end 20 20)', '(end 25 20)')
+        Path(path).write_text(text[:text.rfind(')')] + locked + ')\n', encoding='utf-8')
+        entry = {'ref': 'J1', 'edge': 'north', 'overhang_mm': {'min': 0.04, 'max': 0.06}}
+        base = StageOne.pose(StageOne.seed(self, path, entry, base=True))
+        res = StageOne.seed(self, path, entry)
+        self.assertEqual(StageOne.pose(res), base)
+        self.assertEqual(res['edge_floor_fallback']['J1']['why'], 'band_min')
+        self.assertEqual(self.grade_errors(path, base, entry), [])
+
+    def test_a_later_rung_reads_nearest_its_edge_before_it_is_taken(self):
+        path = self.board('later_face.kicad_pcb', CORNER_BODY, CORNER_PADS)
+        entry = west(0.0, 0.6)
+        real = seeder._faces_its_edge
+        asked = []
+
+        def spy(st, part, e, edge, x, y):
+            asked.append((round(x, 3), round(y, 3)))
+            return False
+        with patch.object(seeder, '_faces_its_edge', spy):
+            ok, after, record, _ = self.seat(path, entry, target=(10.0, 0.0))
+        _, before, _, _ = self.seat(path, entry, base=True, target=(10.0, 0.0))
+        self.assertTrue(ok)
+        self.assertTrue(asked)
+        self.assertEqual(after, before)              # every later rung refused
+        self.assertEqual(record['why'], 'along_edge')
+        self.assertIs(seeder._faces_its_edge, real)
 
 
 class Unmeasured(_Boards):
@@ -400,8 +565,21 @@ class StageOne(_Boards):
         record = res['edge_floor_fallback']['J1']
         self.assertEqual((record['kept'], record['why']), ('conflict_free', 'band_min'))
         self.assertTrue([n for n in res['notes']
-                         if n.startswith('edge connector J1: no in-band seat')])
+                         if n.startswith('edge connector J1: its seat on the west edge')])
         self.agree(path, 'J1', after, record)
+
+    def test_tier_one_takes_a_later_rung_when_the_shortfall_faces_a_corner(self):
+        path = self.board('s1_corner.kicad_pcb', CORNER_BODY, CORNER_PADS)
+        entry = west(0.0, 0.6, along_edge_band={'from': 0.05, 'to': 0.15})
+        before = self.pose(self.seed(path, entry, base=True))
+        short = self.findings(path, 'J1', before)
+        self.assertEqual({f['edge'] for f in short}, {'bottom'})
+        res = self.seed(path, entry)
+        after = self.pose(res)
+        self.assertEqual(res['edge_floor_fallback'], {})
+        self.assertEqual(after[0], before[0])
+        self.assertGreater(after[1], before[1])
+        self.agree(path, 'J1', after, None)
 
     def test_tier_two_on_an_armed_slide_keeps_the_first_rung_not_the_last(self):
         # A declared position arms the 13-rung slide; every rung is short and
@@ -522,6 +700,61 @@ class UnreadableProject(_Boards):
         self.assertEqual((p.x, p.y, p.rot), before)
         self.assertEqual(disclose, {})
         self.assertEqual(len([n for n in notes if 'could not be read' in n]), 1)
+
+    def test_stage_one_says_it_too(self):
+        path = self.board('bad_pro_s1.kicad_pcb', siblings=[('.kicad_pro', '[]')])
+        res = StageOne.seed(self, path, west(0.0, 0.6))
+        base = StageOne.seed(self, path, west(0.0, 0.6), base=True)
+        self.assertEqual(StageOne.pose(res), StageOne.pose(base))
+        self.assertEqual(res['edge_floor_fallback'], {})
+        self.assertEqual(len([n for n in res['notes'] if 'could not be read' in n]), 1)
+
+
+class WrittenPoses(_Boards):
+    def test_a_record_is_kept_only_at_the_pose_it_describes(self):
+        record = {'pose': [2.7, 10.0, 0.0]}
+        keep = seeder.floor_records_at_poses
+        self.assertEqual(keep({'J1': record}, {'J1': (2.7, 10.0, 360.0)}), {'J1': record})
+        self.assertEqual(keep({'J1': record}, {'J1': (2.7004, 10.0, 0.0)}), {'J1': record})
+        self.assertEqual(keep({'J1': record}, {'J1': (3.7, 10.0, 0.0)}), {})
+        self.assertEqual(keep({'J1': record}, {'J1': (2.7, 10.0, 90.0)}), {})
+        self.assertEqual(keep({'J1': record}, {}), {})
+
+    def test_place_seed_drops_a_record_its_post_polish_reseat_moved(self):
+        # J1 is also a zone member, so place_seed's post-polish re-seat pulls
+        # it into the zone after stage 1 recorded its edge seat.
+        body = BODY
+        pads = ('(pad "1" smd rect (at -2.0 -0.5) (size .5 .5) (layers "F.Cu") (net 1 "A"))\n'
+                '    (pad "2" smd rect (at -2.0 0.5) (size .5 .5) (layers "F.Cu") (net 2 "B"))\n'
+                '    (pad "3" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu"))')
+        r1 = ('  (footprint "r" (layer "F.Cu") (at 12 12 0)\n    (property "Reference" "R1")\n'
+              '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu") (net 1 "A"))\n'
+              '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu") (net 2 "B")))\n')
+        path = self.root / 'zone.kicad_pcb'
+        path.write_text('(kicad_pcb (version 20241229) (generator "t975")\n'
+                        '  (net 0 "") (net 1 "A") (net 2 "B")\n'
+                        '  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))\n'
+                        '  (footprint "t" (layer "F.Cu") (at 10 10 0)\n'
+                        '    (property "Reference" "J1")\n'
+                        f'    {body}\n    {pads})\n{r1})\n', encoding='utf-8')
+        ipath = self.root / 'zone.json'
+        doc = intent_doc(**west(0.25, 0.35))
+        doc['blocks'] = [{'name': 'conn', 'refs': ['J1'], 'zone': [10.0, 8.0, 16.0, 14.0],
+                          'tolerance_mm': 0.1}]
+        ipath.write_text(json.dumps(doc), encoding='utf-8')
+        # Anti-vacuity: stage 1 does record J1's edge seat before the re-seat.
+        import random
+        seeded = seeder.seed_from_intent(parse_kicad_pcb(str(path)), str(path),
+                                         floorplan.load_intent(str(ipath)), random.Random(0),
+                                         clearance=.25, board_edge_clearance=.55)
+        self.assertIn('J1', seeded['edge_floor_fallback'])
+        out = self.root / 'zone_out.kicad_pcb'
+        _rc, summary = Summaries.run_seed(self, str(path), str(out), '--intent', str(ipath),
+                                          '--force')
+        written = parse_kicad_pcb(str(out)).footprints['J1']
+        # Anti-vacuity: the re-seat really moved J1 off its stage-1 seat.
+        self.assertGreater(written.x, 5.0)
+        self.assertEqual(summary['edge_floor_fallback'], {})
 
 
 if __name__ == '__main__':

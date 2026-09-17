@@ -1881,6 +1881,28 @@ def _nearest_edge(rect, bounds) -> str:
     return min(d, key=lambda k: d[k])
 
 
+def edge_seat_rect(entry: Dict, part_rect, body_rect):
+    """`(rect, basis)` on which `rule_edge_connector` asks where a declared
+    edge part's MATING FACE is: its nearest-edge and setback conjuncts.
+
+    The drawn body for an `edge_receptacle`, or an entry whose context says
+    `mount_mode: edge_mount`, when the library drew one (fab or silk);
+    otherwise the part's courtyard rect. `body_rect` is a zero-argument
+    callable returning `(rect, source)`, called only when the entry asks for
+    a body, so a board with no receptacle never reads its bodies.
+
+    Lifted out of the rule (#975) so an edge seat that picks a pose the rule
+    has not seen can ask the rule's own question of it, rather than a copy.
+    """
+    ctxd = entry.get('context') or {}
+    if (entry.get('class') == 'edge_receptacle'
+            or ctxd.get('mount_mode') == 'edge_mount'):
+        brect, src = body_rect()
+        if brect is not None and src in ('fab', 'silk'):
+            return brect, f'body:{src}'
+    return part_rect, 'courtyard'
+
+
 #: The axis a part slides along when it moves ALONG the named edge: x for a
 #: horizontal edge, y for a vertical one.
 _EDGE_AXIS = {'north': 0, 'south': 0, 'east': 1, 'west': 1}
@@ -2778,14 +2800,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # courtyard. (The OVERHANG conjunct above no longer does: since #961
         # it reads the drawn body wherever one can be measured, because the
         # edge-margin graze read a flush body as a 0.55 mm overhang.)
-        basis = 'courtyard'
-        seat_rect = part.rect
-        ctxd = c.get('context') or {}
-        if (c.get('class') == 'edge_receptacle'
-                or ctxd.get('mount_mode') == 'edge_mount'):
-            brect, src = ctx.body_rect(ref)
-            if brect is not None and src in ('fab', 'silk'):
-                seat_rect, basis = brect, f'body:{src}'
+        seat_rect, basis = edge_seat_rect(c, part.rect,
+                                          lambda: ctx.body_rect(ref))
         edge = c.get('edge')
         if edge and ctx.outline_bounds:
             # Run 27's replay measured the courtyard reading on the same

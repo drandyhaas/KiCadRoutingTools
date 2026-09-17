@@ -342,14 +342,18 @@ leaves the outline for the same reason the rule names it: otherwise the
 search hands the grade a seat it will reject.
 
 The board-edge FLOOR on that copper is a preference of the seat, not a
-conjunct (#975). At each rotation the seat ladder takes the first seat whose
-pad copper clears the floor -- a rung, or a rung moved inward by the largest
-shortfall on the seated edge, re-checked in full against the band at the
-grade's own minimum, the receptacle setback, keep-outs, zones and neighbours --
-and otherwise keeps the seat it always chose. Refusing would turn a clearance
-shortfall into an unseated connector, which is an unrouted one. The kept
-shortfall is reported in `place_seed`'s `edge_floor_fallback`, with the pads
-and the reason the seat could not move; the copper itself is graded in
+conjunct (#975). At each rotation, when the seat the ladder always chose leaves
+copper inside the floor, the ladder tries that seat moved inward by the largest
+shortfall on the seated edge. Such a move is kept
+only if it passes the band at the grade's own minimum, the receptacle
+setback, the seat predicate (keep-outs, zones, pad copper), the neighbours,
+the floor itself and the grade's nearest-edge conjunct. When the shortfall is
+on another side of the part, which moving inward cannot fix, the ladder walks
+on to later rungs instead, keeping only one that also reads nearest its
+declared edge. Otherwise it keeps the seat it always chose. Refusing would turn
+a clearance shortfall into an unseated connector, which is an unrouted one.
+The kept shortfall is reported in `place_seed`'s `edge_floor_fallback`, with the
+pads and the reason the seat could not move; the copper itself is graded in
 `pad_edge_after` as before. A rotation is never changed to clear the floor.
 
 Every declared connector on the board gets a row in `edge_connector_evidence`

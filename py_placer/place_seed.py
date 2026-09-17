@@ -45,10 +45,10 @@ better reason. All three are named on the console, because every one of them
 is copper a fab will see.
 
 It also carries `edge_floor_fallback` (#975): the declared edge connectors whose
-seat leaves pad copper inside the board-edge floor because no in-band seat
-clears it, by ref, with the pads and why the seat could not move. An edge seat
-prefers a pose that clears the floor and otherwise keeps the one the pad-centre
-test accepts, since an unseated connector is an unrouted one. Like
+seat leaves pad copper inside the board-edge floor because no pose the seat
+ladder tried clears it, by ref, with the pads and why the seat could not move.
+An edge seat prefers a pose that clears the floor and otherwise keeps the seat
+it always chose, since an unseated connector is an unrouted one. Like
 `connector_requirements`, it never changes an exit code.
 """
 
@@ -1131,9 +1131,11 @@ Examples:
                # revisit from a board that is simply full.
                'rotation_unseated': result.get('rotation_unseated') or {},
                # #975: declared edge connectors seated with pad copper inside
-               # the board-edge floor because no in-band seat clears it -- the
-               # alternative was not seating them. `pad_edge_after` grades the
-               # copper; this says which seats chose it, and why.
+               # the board-edge floor because no pose the seat ladder tried
+               # clears it -- the alternative was not seating them.
+               # `pad_edge_after` grades the copper; this says which seats
+               # chose it, and why. Filtered below against the WRITTEN poses:
+               # the post-polish re-seat can move a stage-1 connector.
                'edge_floor_fallback': result.get('edge_floor_fallback') or {},
                'no_pose_blockers': result.get('no_pose_blockers') or {},
                # WHY each of them has no pose, not just who is nearby (#699).
@@ -1177,6 +1179,10 @@ Examples:
                'output': args.output_file}
     summary['pad_edge_before'] = _pads_in['pad_edge']
     summary['pad_edge_after'] = _pads_out['pad_edge']
+    _written = parse_kicad_pcb(args.output_file).footprints
+    summary['edge_floor_fallback'] = seeder.floor_records_at_poses(
+        summary['edge_floor_fallback'],
+        {r: (f.x, f.y, f.rotation) for r, f in _written.items()})
     # #974: after the split above, from the lists gate_reason reads below.
     summary['connector_requirements'] = floorplan.connector_requirements(
         graded, own, pinned)

@@ -41,8 +41,11 @@ THE RULE, written before any arm ran:
   SIGNAL: `pad_edge_after` findings on the intent's declared edge refs are
     <= the base on every row, and < on at least one board.
   CONSISTENCY, branch rows: every `edge_floor_fallback` ref has a finding in
-    `pad_edge_after`, and every declared edge ref that the run SEATED (not in
-    `unseated_refs`) with a finding has a record.
+    `pad_edge_after`, and every declared edge ref that the run SEATED with a
+    finding has a record. SEATED means the run moved it: not in
+    `unseated_refs` AND at a pose other than its input pose. (Corrected after
+    the first run, which read "not unseated" as seated and so flagged
+    rp2350's U8 -- `(locked yes)` in the input, never seated by anything.)
   Rows where nothing moved are printed as NULL rows, never dropped.
 
 MEASURED: see the #975 PR, which carries the table this prints.
@@ -213,7 +216,8 @@ def collect(repo, out_path):
                'boards': {}}
         for name, (board, intent, flags) in inputs.items():
             doc['boards'][name] = {'board_sha256': sha(board), 'intent_sha256': sha(intent),
-                                   'edge_refs': edge_refs(intent), 'arms': {}}
+                                   'edge_refs': edge_refs(intent),
+                                   'input_poses': poses(board, edge_refs(intent)), 'arms': {}}
             for polish in (False, True):
                 arm = 'polish' if polish else 'no-polish'
                 work = os.path.join(tmp, name, arm)
@@ -278,7 +282,8 @@ def diff(a_path, b_path):
                     not moved and r0['edge_findings'] == r1['edge_findings'] and g0 == g1):
                 null_rows.append((name, arm))
             findings_refs = {p.split('.')[0] for p, _, _ in r1['edge_findings']}
-            seated = set(b1['edge_refs']) - set(r1['unseated_refs'] or [])
+            seated = {r for r in set(b1['edge_refs']) - set(r1['unseated_refs'] or [])
+                      if r1['edge_poses'].get(r) != b1.get('input_poses', {}).get(r)}
             for ref in r1['edge_floor_fallback']:
                 if ref not in findings_refs:
                     inconsistent.append((name, arm, ref, 'record without a finding'))

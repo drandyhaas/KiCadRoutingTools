@@ -1550,6 +1550,14 @@ _INWARD = {'north': (0.0, 1.0), 'south': (0.0, -1.0),
 _FLOOR_SHIFT_GUARD_MM = 0.001
 #: A record names at most this many pads; the counts beside it are complete.
 _FLOOR_RECORD_PADS = 4
+#: The reasons a first seat stays short that a LATER rung can fix. On a
+#: rectangular outline the gap to the seated edge is the same at every
+#: along-edge rung, so a shortfall there is fixed by moving inward or not at
+#: all, and walking on would only find `_edge_correct`'s corner artifacts --
+#: measured, a 10 mm slide for 0.02 mm, into a corner whose nearest edge the
+#: grade then reads as the wrong one. A shortfall on another side (a pad past
+#: its courtyard at a corner), or on a sampled outline, can move with the rung.
+_SLIDE_HELPS = frozenset(('along_edge', 'outline_sampled'))
 
 
 class _Floor(NamedTuple):
@@ -1588,6 +1596,41 @@ def _floor_context_note(state, notes: List[str]) -> None:
         state._edge_floor_noted = True
         notes.append(f"edge seats: the board-edge copper floor could not be "
                      f"read ({err}), so seats were chosen without it")
+
+
+def _faces_its_edge(state, part, entry: Dict, edge: str, x: float, y: float) -> bool:
+    """Does `rule_edge_connector` read this pose as nearest its declared edge?
+
+    Asked of every pose the floor preference picks over the seat the ladder
+    always chose, because that seat is the only one the grade has already been
+    measured against. The rect and its basis are the rule's own
+    (`floorplan.edge_seat_rect`, the drawn body of a receptacle) at the pose
+    `apply_move` writes."""
+    from .floorplan import _nearest_edge, drawn_body_rect, edge_seat_rect
+    bounds = state.pcb_data.board_info.board_bounds
+    if not bounds:
+        return True
+    px, py = round(x, 3), round(y, 3)
+
+    def body():
+        bodies = getattr(state, '_edge_seat_bodies', None)
+        if bodies is None:
+            from .body import board_bodies
+            try:
+                bodies = board_bodies(state.pcb_data, state.pcb_file)
+            except Exception:                                 # noqa: BLE001
+                bodies = {}
+            state._edge_seat_bodies = bodies
+        fp = state.pcb_data.footprints.get(part.ref)
+        if fp is None:
+            return None, 'none'
+        from copy import copy
+        moved = copy(fp)
+        moved.x, moved.y, moved.rotation = px, py, part.rot
+        return drawn_body_rect(bodies.get(part.ref), moved)
+
+    rect, _basis = edge_seat_rect(entry, part.rect(px, py, part.rot), body)
+    return _nearest_edge(rect, tuple(round(v, 6) for v in bounds)) == edge
 
 
 def _carries_setback(entry: Dict) -> bool:
@@ -1651,6 +1694,8 @@ def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
     moved = _floor_at(state, part.ref, sx, sy, part.rot)
     if moved is None or moved.short:
         return None, floor, dict(why, why='still_short')
+    if not _faces_its_edge(state, part, entry, edge, sx, sy):
+        return None, floor, dict(why, why='nearest_edge')
     return (sx, sy), floor, None
 
 
@@ -1699,28 +1744,38 @@ def _floor_note(prefix: str, ref: str, record: Dict) -> str:
                     + ', '.join(record.get('refused_by') or ['the seat'])),
         'crowds': "the pose that clears it crowds a part already placed",
         'still_short': "moving the part inward did not clear it",
+        'nearest_edge': ("the pose that clears it would read nearest another "
+                         "edge than the declared one"),
         'crowding': ("no seat on this band clears the parts already placed, so "
                      "the floor was not searched"),
     }.get(why, str(why))
-    return (f"{prefix}{ref}: no in-band seat on the {record['edge']} edge "
-            f"clears the {record['required_mm']:g}mm board-edge copper floor -- "
+    return (f"{prefix}{ref}: its seat on the {record['edge']} edge leaves pad "
+            f"copper inside the {record['required_mm']:g}mm board-edge floor -- "
             f"{pad['pad_ref']}{gap} ({record['shortfall_mm']:.3f}mm short); "
-            f"{because}. Kept the seat the pad-centre test accepts "
-            f"(edge_floor_fallback): an unseated connector is an unrouted one")
+            f"{because}. Kept the seat rather than leave the connector "
+            f"unseated, which leaves its nets unrouted (edge_floor_fallback)")
 
 
 def _floor_records_at_final_pose(state, records: Dict[str, Dict]) -> Dict[str, Dict]:
     """The records whose part still sits at the pose each describes. A later
     stage (stage 3b's anchor rounds) can re-seat a part, and a record about a
     pose that was not written would describe copper that is not there."""
+    return floor_records_at_poses(
+        records, {ref: (p.x, p.y, p.rot) for ref, p in state.parts.items()})
+
+
+def floor_records_at_poses(records: Dict[str, Dict], poses) -> Dict[str, Dict]:
+    """The `edge_floor_fallback` records whose ref sits, in `poses`
+    ({ref: (x, y, rot)}), at the pose the record describes. `place_seed` asks
+    it of the WRITTEN board, after passes the seeder never saw."""
     out = {}
-    for ref, record in sorted(records.items()):
-        part = state.parts.get(ref)
-        if part is None:
+    for ref, record in sorted((records or {}).items()):
+        pose = poses.get(ref)
+        if pose is None:
             continue
         x, y, rot = record['pose']
-        turn = (part.rot - rot) % 360.0
-        if ((round(part.x, 3), round(part.y, 3)) == (x, y)
+        turn = ((pose[2] or 0.0) - rot) % 360.0
+        if ((round(pose[0], 3), round(pose[1], 3)) == (x, y)
                 and min(turn, 360.0 - turn) < 1e-9):
             out[ref] = record
     return out
@@ -2149,15 +2204,23 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                     continue
                 if not conflict_free(x, y, rot):
                     continue
+                if first is not None and first[3] not in _SLIDE_HELPS:
+                    break
                 seat, floor, why = _floor_rung(
                     state, part, entry, edge, lo, hi_eff, x, y,
                     lambda a, b: not conflict_free(a, b, rot))
-                if seat is not None:
+                # The first seat, unmoved, is the one the ladder always chose;
+                # anything else is a pose the grade has not been measured on,
+                # and its nearest edge is asked (a move asked it already).
+                if seat is not None and (first is None or seat != (x, y)
+                                         or _faces_its_edge(state, part, entry,
+                                                            edge, x, y)):
                     return seat[0], seat[1], None
                 if first is None:
                     first = (x, y, _floor_record(
-                        ref, edge, 'conflict_free', (x, y, rot), floor, why))
-            return first
+                        ref, edge, 'conflict_free', (x, y, rot), floor, why),
+                        (why or {}).get('why'))
+            return first[:3] if first is not None else None
         finally:
             part.rot = saved
 
@@ -2453,7 +2516,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     no_pose_verdict: Dict[str, str] = {}
     no_pose_census: Dict[str, Dict] = {}
     # #975: stage 1's edge seats that keep pad copper inside the board-edge
-    # floor because no in-band seat clears it -- see `_floor_rung`.
+    # floor because no pose the ladder tried clears it -- see `_floor_rung`.
     edge_floor_fallback: Dict[str, Dict] = {}
     # A part locked IN THE FILE is already authoritatively placed -- a caller
     # that pre-placed its spec-fixed parts and stamped them (locked yes) must
@@ -2698,9 +2761,10 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             #      always kept (`_kept`), disclosed when it is short;
             #   3. the crowding `_fallback` above, unchanged: with no clear
             #      seat anywhere the floor is not searched, only reported.
-            # A floor shortfall does not ARM the slide: the inward move runs
-            # along the edge normal, so a board that declares nothing still
-            # keeps its along-edge position.
+            # A floor shortfall does not ARM the slide, and a later rung is
+            # only walked to when the first seat's shortfall is one a rung can
+            # fix (`_SLIDE_HELPS`); any pose other than the first seat must
+            # also read nearest its declared edge (`_faces_its_edge`).
             _kept = None
             _pick = None
             for _df in _slide:
@@ -2717,12 +2781,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                                           reasons=_why):
                     _hit = _shorted_by(_x, _y)
                     if not _hit:
+                        if (_kept is not None and (_kept[2] or {}).get('why')
+                                not in _SLIDE_HELPS):
+                            break
                         _seat, _floor, _fwhy = _floor_rung(
                             state, part, c, edge, lo,
                             float(hi) if hi is not None
                             else max(2.0 * overhang, lo + 1.0),
                             _x, _y, lambda a, b: bool(_shorted_by(a, b)))
-                        if _seat is not None:
+                        if _seat is not None and (
+                                _kept is None or _seat != (_x, _y)
+                                or _faces_its_edge(state, part, c, edge, _x, _y)):
                             _pick = _seat
                             break
                         if _kept is None:
@@ -2730,7 +2799,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         continue
                     if _fallback is None:
                         _fallback = (frac, _hit)
-            else:
+            # Without a pick the only early exit leaves `_kept` set, so this is
+            # the old `for ... else`: the loop ran out, or tier 2 stopped it.
+            if _pick is None:
                 if _kept is not None:
                     frac = _kept[0]
                 elif _fallback is not None:
@@ -3549,7 +3620,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 for r in unseated if r in declared_rot},
             'no_pose_census': no_pose_census,
             # #975. Declared edge connectors seated with pad copper inside the
-            # board-edge floor because no in-band seat clears it, by ref: the
+            # board-edge floor because no pose the ladder tried clears it, by ref: the
             # pose, the floor, the worst pads and why the seat could not move.
             # Only records still describing the written pose are kept.
             'edge_floor_fallback': _floor_records_at_final_pose(
