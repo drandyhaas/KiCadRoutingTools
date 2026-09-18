@@ -756,6 +756,75 @@ def cap_floor(ids, s, d, tooth_layer=None, berth_layer=None, cap=None):
     return int(round(float(cvec @ res.x))), per, 'optimal'
 
 
+def cap_sat_feasible(ids, s, d, tooth_layer=None, berth_layer=None, cap=2,
+                     workers=8, det_time=120.0):
+    """Is a routing with at most `cap` vias a lane POSSIBLE? -- CP-SAT.
+
+    The same question as `cap_floor`, as satisfiability rather than
+    optimisation, because that is what scales: at K=48 the MILP ran over
+    thirty minutes and was killed, while this proves the real bench
+    channel infeasible in about a minute (and a second on an easier one).
+    Use `cap_floor` when the COST matters, this when only the answer does.
+
+    Returns one of 'FEASIBLE', 'INFEASIBLE', 'UNKNOWN', or a 'not
+    computed...' string. **UNKNOWN is not a negative** -- it means the
+    deterministic budget ran out, and the self-test only compares the two
+    backends where this one is decisive.
+
+    Budgeted in DETERMINISTIC time, never wall clock (the campaign rule:
+    a clock budget makes a slow machine answer DIFFERENTLY, not later).
+    """
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError as e:            # pragma: no cover - environment
+        return f'not computed (needs ortools: {e})'
+    tl, bl = tooth_layer or {}, berth_layer or {}
+    events = crossing_events(ids, s, d)
+    sites = {n: [] for n in ids}
+    for ei, (a, b) in enumerate(events):
+        sites[ids[a]].append(ei)
+        sites[ids[b]].append(ei)
+    m = cp_model.CpModel()
+    y = {(n, k): m.NewBoolVar(f'y{n}_{k}') for n in ids for k in sites[n]}
+    for ei, (a, b) in enumerate(events):        # a crossing: opposite layers
+        ya, yb = y[(ids[a], ei)], y[(ids[b], ei)]
+        m.AddBoolOr([ya, yb])
+        m.AddBoolOr([ya.Not(), yb.Not()])
+    for n in ids:
+        p0 = 1 if tl.get(n, 'F.Cu') == 'B.Cu' else 0
+        p1 = 1 if bl.get(n, 'F.Cu') == 'B.Cu' else 0
+        seq = [p0] + [y[(n, k)] for k in sites[n]] + [p1]
+        fixed, free = 0, []
+        for i in range(len(seq) - 1):
+            a, b = seq[i], seq[i + 1]
+            if isinstance(a, int) and isinstance(b, int):
+                fixed += int(a != b)
+                continue
+            dv = m.NewBoolVar(f'd{n}_{i}')
+            if isinstance(a, int):
+                m.Add(dv == (b if a == 0 else 1 - b))
+            elif isinstance(b, int):
+                m.Add(dv == (a if b == 0 else 1 - a))
+            else:
+                # dv = a XOR b, i.e. a XOR b XOR (NOT dv) is true. Spelt by
+                # hand this is easy to invert, and an inverted dv bounds the
+                # NON-transitions -- which every alternating assignment
+                # satisfies, so every infeasible case reads FEASIBLE. That
+                # bug is why the self-test below compares the two backends.
+                m.AddBoolXOr([a, b, dv.Not()])
+            free.append(dv)
+        if free:
+            m.Add(sum(free) <= cap - fixed)
+        elif fixed > cap:
+            return 'INFEASIBLE'
+    sol = cp_model.CpSolver()
+    sol.parameters.num_workers = workers
+    sol.parameters.max_deterministic_time = det_time
+    st = sol.Solve(m)
+    return {cp_model.OPTIMAL: 'FEASIBLE', cp_model.FEASIBLE: 'FEASIBLE',
+            cp_model.INFEASIBLE: 'INFEASIBLE'}.get(st, 'UNKNOWN')
+
+
 def cap_survey(seeds=5, ks=(8, 10, 12, 14, 16, 20, 24, 32), cap=2):
     """Is "no lane over `cap` vias" reachable at all, as K grows?
 
@@ -1899,6 +1968,50 @@ def self_test():
     if v is None and 'cap' in (why or ''):
         print(f'FAIL refusal: 10 free lanes of 40 refused by the cap ({why})')
         bad += 1
+    # --- the two-via cap, checked by TWO independent solvers.
+    #
+    # These witnesses are INFEASIBLE cases on purpose. A cross-check run
+    # only on feasible channels is vacuous: a SAT model with its
+    # transition literal inverted bounds the NON-transitions instead, which
+    # every alternating assignment satisfies, so it calls everything
+    # feasible and agrees with the MILP on every feasible case. Measured --
+    # with that exact bug in place, a self-test whose cases were all
+    # K <= 12 (all feasible) printed ALL PASS. The infeasible rows are the
+    # test.
+    CAP_WITNESS = [           # (K, seed, cap, feasible?)
+        (12, 0, 2, True),
+        (16, 1, 2, False),
+        (16, 2, 2, False),
+        (20, 0, 2, False),
+        (16, 1, 4, True),     # the same channel is fine at four
+    ]
+    for K, seed, cp, want in CAP_WITNESS:
+        pi = pattern_perm('shuffle', K, seed=seed)
+        ids = list(range(K))
+        s_ = {i: float(i) for i in ids}
+        d_ = {i: float(pi[i]) for i in ids}
+        tag = f'cap witness shuffle K={K} seed={seed} cap={cp}'
+        v, _p, st = cap_floor(ids, s_, d_, cap=cp)
+        if st.startswith('not computed'):
+            print(f'  note {tag}: skipped ({st})')
+            continue
+        if (v is not None) != want:
+            print(f'FAIL {tag}: MILP says '
+                  f'{"feasible" if v is not None else "infeasible"}, '
+                  f'expected {"feasible" if want else "infeasible"}')
+            bad += 1
+        sat = cap_sat_feasible(ids, s_, d_, cap=cp)
+        if sat.startswith('not computed'):
+            print(f'  note {tag}: CP-SAT skipped ({sat})')
+        elif sat == 'UNKNOWN':
+            print(f'  note {tag}: CP-SAT UNKNOWN (a budget, not a verdict)')
+        elif (sat == 'FEASIBLE') != want:
+            print(f'FAIL {tag}: CP-SAT says {sat}, expected '
+                  f'{"FEASIBLE" if want else "INFEASIBLE"}')
+            bad += 1
+    print(f'  note the two-via cap: {len(CAP_WITNESS)} witness(es), '
+          f'{sum(1 for w in CAP_WITNESS if not w[3])} of them INFEASIBLE -- '
+          f'which is the half that can fail')
     print('self-test: ' + ('ALL PASS' if not bad else f'{bad} FAILURE(S)'))
     return 1 if bad else 0
 
