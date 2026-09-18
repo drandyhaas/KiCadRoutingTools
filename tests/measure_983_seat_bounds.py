@@ -85,7 +85,30 @@ review (never loosened):
   SIGNAL: the A, B and C error counts fall; rows that stay dirty are named.
   Rows where nothing changed are counted as NULL rows, never dropped.
 
-MEASURED: filled in from the runs, never predicted.
+MEASURED on the tree of `#983: cite the committed measurement's own numbers
+for the deepened overlaps` (ab4f4854, 2026-09-18, Windows), base = #986's head
+faa03526, both arms graded from ab4f4854 (recorded from the run, never
+predicted):
+
+  lattice  rows  along-edge   band       setback   floor-short    fired
+  L-A1     2880  70 -> 0      -          -         2696 -> 512    step
+  L-A1r    2880  70 -> 0      -          -         2758 -> 806    step
+  L-A2      720  21 -> 0      -          -          720 -> 230    step
+  L-A3     1068  146 -> 90    -          -          335 -> 289    step
+  L-B1      488  -            38 -> 16   -          238 -> 238    settle
+  L-B2       66  -            28 -> 0    -            0           settle
+  L-B3       20  -            10 -> 10   10 -> 10     0           none
+  L-B4        6  -             6 -> 0    -            0           settle
+  L-C         8   4 -> 0      -          -            0           stage-1 rot
+
+  rows 8136, pose changed 4883, NULL 3171, fixed 152; VERDICT: PASS.
+  The 90 left on L-A3 are all `tolerance_mm: 0` and all NOTE'd; the 16 on L-B1
+  are refused by the floor guard; L-B3 is the {0, 0} contradiction (#987).
+  Existing courtyard overlap deepened on 21 judged pairs, at most 0.0020 mm2
+  and 2.7 % (16 of them on L-A1r). Not judged: 3655 bare-seat rows, 196 of
+  which would fail (#975's grader-less move, up to 0.64 -> 1.43 mm2), and 8
+  L-C rows, 4 of which would fail (up to 60.69 -> 93.89 mm2 with J5's fixed
+  neighbours).
 """
 import argparse
 import contextlib

@@ -44,7 +44,23 @@ EXPECTED SURVIVORS, with the reason, rather than deleted rows:
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
 
-MEASURED: (not yet run)
+MEASURED on the tree of `#983: cite the committed measurement's own numbers
+for the deepened overlaps` (ab4f4854, 2026-09-18, Windows; the killer test run
+unmutated first, and green): **54 rows, 52 KILLED, 2 SURVIVED -- the two
+expected ones above -- 0 broken.** That is the run of record.
+
+Earlier runs, each of which changed the tests rather than the table:
+- 31 rows at 02a0c091: 28 KILLED, 3 SURVIVED, 2 of them unexpected, and both
+  holes in my own tests. The cap test's body sat so far inside that the
+  settle's three-step bound refused it first, so the cap never bound. The
+  seat test's `seats` answered "not a seat" everywhere, which made the
+  settle's raw-must-seat guard equivalent.
+- 42 rows at 21872ca6: 40 KILLED, 2 expected survivors.
+- 51 rows at 43db6c0a: 48 KILLED, 3 SURVIVED, 1 of them unexpected:
+  `step-judged-against-its-own-input`. The ladder fixture meant to catch it
+  never reached the compound, because its rung sat mid-window and the step
+  never fired after a settle. A4b's unit arm and B7c's wiring spy (e4181e9d),
+  then B7d's end-to-end fixture from the round-4 review, pin it now.
 """
 from __future__ import annotations
 
