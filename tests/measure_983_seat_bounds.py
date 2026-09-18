@@ -62,10 +62,11 @@ review (never loosened):
   every row: head `unseated` <= base; head grade errors (edge-connector and
     `legality`) a sub-multiset of base's (a band error traded for a setback
     error fails); head pad-edge floor shortfall no worse on EITHER count
-    (pads short, worst shortfall); no courtyard overlap on the written board
-    where base had none. An overlap base already had may deepen -- the
-    user's choice for #983, see seeder `_no_worse` -- and every such row is
-    counted and its growth printed.
+    (pads short, worst shortfall); per NEIGHBOUR of the seated part, no
+    courtyard overlap on the written board where base had less than the
+    grade reports (5e-5 mm2), and none more than doubled. An overlap base
+    already had may deepen that far -- the user's choice for #983, see
+    seeder `_no_worse` -- and every such pair is counted and printed.
   a row whose written pose differs from base must have fired a correction
     (on SOME rung of that seat: the count is per seat, not per kept rung).
   a row that raised on either arm fails the run; a row seated only on head
@@ -360,6 +361,18 @@ def grade_row(case, row, tmp):
     pcb = parse_kicad_pcb(out)
     graded = floorplan.grade(floorplan.intent_from_dict(json.loads(case['intent'])), pcb, out,
                              clearance=clr, board_edge_clearance=edge)
+    import pose_score
+    parts = pose_score.make_state(pcb, out, clearance=clr,
+                                  board_edge_clearance=edge).graded_parts()
+    me = [g for g in parts if g.ref == ref]
+    pairs = {}
+    for g in parts:
+        if me and g.ref != ref:
+            area = legality.pair_overlap_area(me[0].sides, me[0].side, me[0].rect,
+                                              me[0].tht_rect, g.sides, g.side, g.rect,
+                                              g.tht_rect)
+            if area > 0.0:
+                pairs[g.ref] = round(area, 7)
     floor = legality.grade_pad_edge_clearance(pcb, edge, out)
     short = [f['shortfall_mm'] for f in floor['findings']
              if f['pad_ref'].split('.')[0] == ref]
@@ -367,7 +380,8 @@ def grade_row(case, row, tmp):
     return {'errors': classify(graded.errors, ref),
             'written': [round(fp.x, 4), round(fp.y, 4), round((fp.rotation or 0.0) % 360.0, 6)],
             'floor_n': len(short), 'floor_max': round(max(short, default=0.0), 6),
-            'overlap': round(float(graded.legality.get('overlap_area') or 0.0), 6)}
+            'overlap': round(float(graded.legality.get('overlap_area') or 0.0), 6),
+            'pairs': pairs}
 
 
 def collect(repo, out_path, quick):
@@ -498,11 +512,18 @@ def diff(a_path, b_path):
                     or h.get('floor_max', 0) > b.get('floor_max', 0) + 1e-9):
                 violations.append((rid, f'floor {b.get("floor_n")}/{b.get("floor_max")} -> '
                                         f'{h.get("floor_n")}/{h.get("floor_max")}'))
-            ob, oh = b.get('overlap', 0.0), h.get('overlap', 0.0)
-            if ob <= 1e-6 < oh:
-                violations.append((rid, f'new courtyard overlap 0 -> {oh}'))
-            elif oh > ob + 1e-6:
-                grew.append((rid, ob, oh))
+            pb, ph = b.get('pairs') or {}, h.get('pairs') or {}
+            for other, oh in ph.items():
+                ob = pb.get(other, 0.0)
+                if oh <= ob + 1e-9:
+                    continue
+                if ob < 5e-5 <= oh:
+                    violations.append((rid, f'new courtyard overlap with {other}: {ob} -> {oh}'))
+                elif oh > 2.0 * ob:
+                    violations.append((rid, f'courtyard overlap with {other} more than '
+                                            f'doubled: {ob} -> {oh}'))
+                else:
+                    grew.append((rid, ob, oh))
             if b.get('written') != h.get('written'):
                 changed += 1
                 if not fired(h):
@@ -518,9 +539,10 @@ def diff(a_path, b_path):
           f'fixed {len(fixed)}  still dirty on head {len(still)}')
     if grew:
         worst = max(oh - ob for _r, ob, oh in grew)
-        print(f'existing courtyard overlap deepened on {len(grew)} rows, by at most '
-              f'{worst:.4f} mm2 (base overlap {min(g[1] for g in grew):.4f}-'
-              f'{max(g[1] for g in grew):.4f} mm2)')
+        ratio = max(oh / ob for _r, ob, oh in grew if ob > 0)
+        print(f'existing courtyard overlap deepened on {len(grew)} pairs, by at most '
+              f'{worst:.4f} mm2 and {100 * (ratio - 1):.1f} % (base overlap '
+              f'{min(g[1] for g in grew):.4f}-{max(g[1] for g in grew):.4f} mm2)')
     for rid, errs in newly[:10]:
         print(f'  seated on head only: {rid}: {errs}')
     for rid, eh in still[:20]:
