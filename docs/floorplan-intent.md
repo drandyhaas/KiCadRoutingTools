@@ -325,10 +325,11 @@ is checked separately:
 
 An overlap the grade already reports may deepen, but never to double, and the
 settle and the step together are held to that. The step moves a seat 1 µm and
-the settle at most 22 µm. On #983's lattice through
-`repair_placement`, 16 of 2880 seats already overlapped the blocker by
-0.044–0.35 mm² and gained 0.0012–0.0020 mm², under 3 %. Refusing that would
-keep the along-edge error the step exists to remove.
+the settle at most 22 µm. On #983's whole lattice through
+`repair_placement` (`tests/measure_983_seat_bounds.py`, L-A1r), 16 of 2880
+seats already overlapped the blocker by 0.014–0.35 mm² and gained
+0.0002–0.0020 mm², at most 2.7 %. Refusing that would keep the along-edge
+error the step exists to remove.
 
 ### The overhang band is graded on the drawn body (#961)
 
