@@ -194,6 +194,7 @@ octilinear, so a non-orthogonal pose is outside both models today.*
 | `collapse_dives.py` | collapse short dives on a routed board (2 vias each) |
 | `cut_ledger.py` | Maley cut capacity of a plan, before any lane is routed |
 | `synth_bus.cap_floor` / `--cap-survey` | the same per-lane cap on a GENERATED channel, plus the sweep that shows the two-via directive dying with K. Uncapped it must equal `exact_dp` (different algorithm, same model) and the self-test checks that on 90 cases |
+| `synth_bus.escape_search` | the same move steered by `cap_floor` ITSELF, with `start=` to seed it from the proxy. On the bench the HYBRID wins or ties 8 of 8 (-42% floor) and the floor-alone arm SATURATES (46/46/46 at 120/240/480 calls) -- so the proxy earns its place structurally, not on compute |
 | `synth_bus.escape_move_floor` / `--escape-survey` | the ESCAPE move priced: each lane may shift `reach` slots at either end, both ends staying a permutation. Lowers the TRUE floor by a third at reach 3 and restores two-via feasibility -- but maximising its own objective (the free-rider ceiling) can make the true floor WORSE, which the survey flags. Steer by `cap_floor` |
 | `synth_bus.cap_sat_feasible` | the cap as SATISFIABILITY (CP-SAT), for when only the answer matters. Proves the real K51 channel infeasible at two vias a lane in ~1 min where the MILP ran 30+ and was killed. `UNKNOWN` is a budget, never a negative; budgeted in DETERMINISTIC time |
 | `wall_probe.py`, `copper_same.py`, `cmp_copper.py` | track-level wall census, set-compare copper |
@@ -1285,6 +1286,129 @@ LIS, which it does on 12/12 cases in the sweep and on four pinned cases in
 the self-test; widening the reach-0 window by one fails 3 of them. All
 three CP-SAT calls run `interleave_search` + deterministic time, so
 `--escape-survey` is byte-identical run to run.
+
+### Steering the escape move: the bench says HYBRID, the board says not yet (2026-09-18)
+
+The recommendation coming out of the section above was: give the planner
+more escape reach, steer it by `cap_floor`, drop the two-via directive.
+Simulated and then tried, one of those three survives unqualified.
+
+**On the bench the move is large and the steering matters.**
+`synth_bus.escape_search` proposes the same slot moves and scores each
+with `cap_floor` -- the true floor -- instead of the ceiling. Four arms,
+same cases, scored on the true floor (`--escape-survey` prints the
+ceiling arm; `escape_search(start=)` is the hybrid):
+
+| total true floor, 8 cases | none | ceiling | floor | hybrid |
+|---|---|---|---|---|
+| | 332 | 232 | 250 | **192** |
+
+**Hybrid wins or ties all eight rows**, at -42% against no move at all.
+The two single-objective arms are the interesting part: steering by the
+CEILING alone (232) beats steering by the TRUE FLOOR alone (250), because
+the floor arm is a local search on a budget and the ceiling arm is a
+global MILP -- and seeding the local search from the MILP's answer is
+better than either. So the shape is **global proxy for the coarse
+structure, `cap_floor` for the refinement**, not "replace the proxy".
+The obvious objection -- hybrid gets the MILP's work PLUS the same budget,
+so is it just more compute? -- is measured and answered NO. Giving the
+floor arm two and four times the budget changes nothing at all:
+
+```
+ K=20 seed 0 reach 2 | floor@120 46   floor@240 46   floor@480 46 | hybrid@120 34
+```
+
+The local search SATURATES: it is at a local optimum that more calls
+cannot leave, and the global seed is what escapes it. That is the reason
+to keep the proxy, not the budget.
+
+**On the real board the plan-time screen does not rank.** The standing
+rule is that no plan-time model ships without a feature correlating above
+|r| = 0.2 with routed vias. Measured over the K51 fanouts on disk, graded
+against their own routed boards:
+
+```
+33 boards -> 6 DISTINCT plans     (21 of the 33 were ONE plan under
+                                   different knob names -- dedupe by the
+                                   plan signature or every rho is inflated)
+   Spearman(inversions,    routed) = -0.03  fails
+   Spearman(LIS,           routed) = +0.10  fails
+   Spearman(2(K-LIS),      routed) = -0.10  fails
+   Spearman(channel floor, routed) = +0.85  PASSES -- and see below
+```
+
+The one that passes is **flat where it matters**: the channel floor is 61
+for every plan routing 99, 108, 110 and 116, and only moves (63, 66) on
+the two disasters. It separates a catastrophe from the field; it cannot
+rank the field. And two of the six plans routed to TWO different via
+counts (99 and 113; 116 and 123), so on this bench the plan does not even
+determine the outcome to within 14 vias -- no plan-time feature can beat
+that noise. **n = 6 with ties is not a result either way; what is solid is
+that the screen would not have picked the better plan.**
+
+**What it IS good for is a REFUSAL, and that got a held-out test.** Read
+as a threshold rather than a ranking, the plan-time channel floor is 61
+for every plan on this bench that routes in the 99-123 band, and moves
+only on the two disasters (63 -> 132 vias, 66 -> 134). A threshold fitted
+on the same eight plans it is scored against would be worthless -- but
+`DST_CLIMB=2` supplied a genuine out-of-sample case, because the plan was
+measured and the prediction WRITTEN DOWN before its braid finished:
+inversions 566 -> 692, LIS 11 -> 9, channel floor **61 -> 66**, the same
+value as the worst board on record. See the arm's result below.
+
+The reason it cannot rank is structural and was measured a section earlier: the channel
+model carries only about a THIRD of the real crossings (103-119 effective
+inversions at the array boundaries against 337-338 routed crossings). A
+floor computed on the channel is therefore a floor on a third of the
+problem.
+
+**And more reach, on its own, LOSES -- now measured at K51 too.**
+`DST_CLIMB` is exactly this move on the real chain: destination dog-bones
+whose run climbs along the array before it leaves, "the class that makes a
+B berth's rank free". It was already recorded losing at K28 (2812 berth
+candidates, 718k exclusions, the solve stopping worse and routing **42
+against 34**). Run as a paired arm at K51, `PLAN_PAGES=1`, everything else
+equal, both arms launched together:
+
+| K51 arm | vias | open | DRC | plan-time channel floor |
+|---|---|---|---|---|
+| control | **116** | **0** | 0 | 61 |
+| `DST_CLIMB=2` | 123 | **3** (SA10, SDQ0, SDQ11) | 0 | 66 |
+
+The arm is LIVE (the two fanouts differ byte-wise), so this is not a
+vacuous null. It is worse three separate ways: **not one of its four
+portfolio boards completed** (139/7 open, 154/3, 137/3, 123/3, against the
+control's 121/0 and 116/0); its braid ran five to ten times longer, well
+past edict 2's budget; and a board with open nets carries an artificially
+LOW via count, so +7 understates it.
+
+**The screen called it before the braid ran.** The plan-time channel floor
+went 61 -> 66 -- the value of the worst board on record -- on a plan whose
+inversions rose 566 -> 692 and whose LIS fell 11 -> 9. That is the held-out
+test the refusal reading needed, and it passed.
+
+The lesson is the bench's, in the real chain: reach is only worth having
+if the thing choosing among the candidates can use it. The planner's
+objective has been measured anti-correlated with the route, so handing it
+more candidates moves the solve's stopping point, not its quality.
+
+So, of the three:
+
+* **Dropping the two-via directive as an objective: SUPPORTED**, and now
+  replicated -- `cl_ctl_k51` (116 vias) is independently cap-2 infeasible
+  with the same shape as the 96-via board (10 free / 30 one-dive / 6
+  two-dive / 1 three-dive, floor 90) against the human's 13 / 33 / 1 = 70.
+  This was already the 2026-09-12 finding from the K35 side; the K51
+  infeasibility proof is the stronger form of the same thing.
+* **Steering by `cap_floor`: SUPPORTED ON THE BENCH, UNPROVEN ON THE
+  BOARD** -- and in the corrected shape (seed with the proxy, refine on
+  the floor), because the floor alone saturates. Unproven on the board
+  because the plan-time floor is computed on a third of the crossings and
+  is FLAT across the range that matters.
+* **More reach alone: REFUTED**, at K28 before and at K51 here.
+
+**Nothing from this is committed to the chain**, per edict 3. What ships
+is the bench instrument and this record.
 
 ### What the synthetic bench can and cannot do at K41+
 
