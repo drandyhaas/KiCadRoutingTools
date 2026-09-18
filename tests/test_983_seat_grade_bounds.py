@@ -39,7 +39,11 @@ that was never broken.
       C2  a part that fits the edge ONLY at its declared rotation is seated
           by stage 1 instead of being refused as wider than the edge.
       C3  a part stage 1 skips keeps its input rotation (the geometry turn
-          is a measurement, not a move).
+          is a measurement, not a move); C1 also asserts the #893 turn is
+          still made and said, which a read that turned the part would not.
+      C4  the declared START is converted at the declared angle, on and off
+          the 90-degree lattice (a 30 or 135 needs its box materialised).
+      C5  a rotation CANDIDATE set is measured at the part's own angle.
 """
 import os
 from pathlib import Path
@@ -149,8 +153,13 @@ class StageOneRotation(_Graded):
                       {'along_edge_band': {'from': 0.2, 'to': 0.3}}):
             for rot in (0, 90, 180, 270):
                 with self.subTest(claim=sorted(claim)[0], rot=rot):
-                    _, errs, _ = self.seat_j5(claim, rot)
+                    _, errs, res = self.seat_j5(claim, rot)
                     self.assertNotIn('along_edge', errs)
+                    # The turn is still #893's to make, and to say: a read
+                    # that turned the part itself would leave nothing to turn.
+                    said = [n for n in res['notes']
+                            if n.startswith('edge connector J5: seated at the declared rotation')]
+                    self.assertEqual(len(said), int(rot != 180), res['notes'])
                     _, blind, _ = self.seat_j5(claim, rot, blind=True)
                     blind_dirty += 'along_edge' in blind
         # Measured on the unfixed ladder: 0/90/270 for the centre claim and 0
@@ -185,20 +194,62 @@ class StageOneRotation(_Graded):
         # and must not have turned it: the geometry turn is a measurement.
         doc = intent_doc(dict(self.J5, along_edge_band={'from': 0.99, 'to': 1.0}),
                          blocks=[{'name': 'j5', 'refs': ['J5'], 'rotation': 90}])
-        seen = []
-        real = seeder._stage1_geometry_rot
-
-        def spy(part, claim):
-            seen.append(part.rot)
-            return real(part, claim)
-        with patch.object(seeder, '_stage1_geometry_rot', spy):
-            res = self.stage1(SPLIT, doc, seed_refs={'J5'})
+        res = self.stage1(SPLIT, doc, seed_refs={'J5'})
         self.assertTrue([n for n in res['notes']
                          if n.startswith('edge connector J5: the declared along-edge window')],
                         res['notes'])
         self.assertFalse([n for n in res['notes']
                           if n.startswith('edge connector J5: seated at the declared rotation')])
-        self.assertEqual(seen, [180.0])
+
+    #: An asymmetric part alone on a board: nothing crowds it, so its first
+    #: rung -- the declared START -- is the seat, and where it lands says
+    #: whether the start was converted at the right angle.
+    ALONE = ('(kicad_pcb (version 20241229) (generator "t983")\n'
+             '  (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts"))\n'
+             '  (footprint "t" (layer "F.Cu") (at 15 10 0)\n'
+             '    (property "Reference" "J1")\n'
+             '    (fp_rect (start -0.3 -2.6) (end 4.1 0.9) (layer "F.CrtYd"))\n'
+             '    (pad "1" smd rect (at 1.9 -0.8) (size .5 .5) (layers "F.Cu"))))\n')
+
+    def centre_of(self, path, pose):
+        """The written courtyard centre along the north edge (x)."""
+        import pose_score
+        out = str(self.root / f'c_{abs(hash((path, pose)))}.kicad_pcb')
+        write_placed_output(path, out, [{'reference': 'J1', 'new_x': round(pose[0], 3),
+                                         'new_y': round(pose[1], 3), 'new_rotation': pose[2]}])
+        st = pose_score.make_state(parse_kicad_pcb(out), out, clearance=.25,
+                                   board_edge_clearance=.55)
+        p = st.parts['J1']
+        r = p.rect(p.x, p.y, p.rot)
+        return (r[0] + r[2]) / 2.0
+
+    def test_c4_the_start_is_converted_at_the_declared_angle_on_and_off_the_lattice(self):
+        path = self.write('alone.kicad_pcb', self.ALONE)
+        entry = {'ref': 'J1', 'edge': 'north', 'overhang_mm': {'min': 0.0, 'max': 1.0},
+                 'center_on_edge': {'tolerance_mm': 1.0}}
+        for rot in (90, 270, 30, 135):
+            with self.subTest(rot=rot):
+                doc = intent_doc(entry, blocks=[{'name': 'j1', 'refs': ['J1'], 'rotation': rot}])
+                pose = self.pose(self.stage1(path, doc), 'J1')
+                self.assertAlmostEqual(pose[2] % 360.0, float(rot), delta=1e-9)
+                # On the declared start, to the grid: not merely inside the
+                # tolerance, which a start converted at 0 and then clamped
+                # into the window would also be.
+                self.assertAlmostEqual(self.centre_of(path, pose), 15.0, delta=0.0006)
+                self.assertEqual(self.graded(path, {'J1': pose}, doc)['J1'], [])
+
+    def test_c5_a_candidate_set_is_measured_at_the_parts_own_angle(self):
+        # Stage 1 does not apply a candidate SET, so it must not measure at
+        # one of its members either: identical to measuring at the input.
+        claim = {'center_on_edge': {'tolerance_mm': 1.0}}
+        doc = intent_doc(dict(self.J5, **claim),
+                         blocks=[{'name': 'j5', 'refs': ['J5'], 'rotation_candidates': [0, 90]}])
+        res = self.stage1(SPLIT, doc, seed_refs={'J5'})
+        with input_rotation():
+            base = self.stage1(SPLIT, doc, seed_refs={'J5'})
+        self.assertEqual(self.pose(res, 'J5'), self.pose(base, 'J5'))
+        self.assertEqual(seeder._stage1_geometry_rot(
+            type('P', (), {'rot': 180.0})(), (None, (0.0, 90.0))), 180.0)
 
 
 ISSUE_J1 = ('  (footprint "t" (layer "F.Cu") (at 14.15 9.0 270)\n'
@@ -249,7 +300,7 @@ class AlongEdgeWindow(_Graded):
 
     def test_a1_the_issues_two_positions_are_written_inside_the_window(self):
         # #983's own rows: the blind pose is the issue's, to the micron, and
-        # outside the window; the pulled one is inside it at both ends.
+        # outside the window; the stepped one is inside it at both ends.
         for (bx, by), issue_pose in (((0.5, 14.6), (0.468, 14.693, 270.0)),
                                      ((0.5, 15.65), (-0.04, 14.152, 270.0))):
             with self.subTest(blocker=(bx, by)):
@@ -330,7 +381,7 @@ class AlongEdgeWindow(_Graded):
         st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=.25,
                                    board_edge_clearance=.55)
         part = st.parts['J1']
-        seeder._rotated_bounds(part, rot)
+        seeder._materialise_rotation(part, rot)
         part.rot = rot
         return st, part
 
@@ -466,7 +517,7 @@ class AlongEdgeWindow(_Graded):
         stepped = 0
         for rot in (0.0, 90.0, 180.0, 270.0):
             with self.subTest(rot=rot):
-                seeder._rotated_bounds(part, rot)
+                seeder._materialise_rotation(part, rot)
                 part.rot = rot
                 for x, y in self.end_poses(st, part, entry, edge='south'):
                     nx, ny = seeder._window_nudge(st, part, entry, 'south', x, y)

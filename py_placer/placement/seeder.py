@@ -1850,10 +1850,10 @@ def _window_nudge(state, part, entry: Dict, edge: str, x: float, y: float,
     `seats(x, y)`, when given, is None for a pose that does not seat (off
     the board, crowding a neighbour) and `_floor_key` of its floor reading
     otherwise. Only a rung that already seats is moved, and the nudged pose
-    is taken only when it seats and is no shorter of the floor. A window no grid pose meets (one
-    step is not enough: `center_on_edge` with `tolerance_mm: 0` and a
-    courtyard centre off the grid) keeps the raw pose too; `_window_miss_note`
-    names what is left.
+    is taken only when it seats and is no shorter of the floor. A window no
+    grid pose meets (one step is not enough: `center_on_edge` with
+    `tolerance_mm: 0` and a courtyard centre off the grid) keeps the raw pose
+    too; `_window_miss_note` names what is left.
     """
     if not _outside_its_along_edge_claim(state, part, entry, edge, x, y):
         return x, y
@@ -1881,11 +1881,12 @@ def _window_nudge(state, part, entry: Dict, edge: str, x: float, y: float,
 
 def _window_miss_note(state, part, entry: Dict, edge: str, prefix: str):
     """The NOTE for a pose WRITTEN outside its declared along-edge window, or
-    None. What is left after `_window_frac` is a window the 0.001 mm grid a
+    None. What is left after `_window_nudge` is a window the 0.001 mm grid a
     pose is written on cannot meet (`center_on_edge` with `tolerance_mm: 0`
-    and a courtyard centre off that grid), or a pulled rung that stopped
-    seating; either way the grade reports it, and this says so at the seat
-    rather than leaving the reader to find it in the grade."""
+    and a courtyard centre off that grid), or a rung whose step would have
+    stopped it seating or deepened its floor; either way the grade reports
+    it, and this says so at the seat rather than leaving the reader to find
+    it in the grade."""
     if not _outside_its_along_edge_claim(state, part, entry, edge, part.x, part.y):
         return None
     return (f"{prefix}{part.ref}: written outside its declared along-edge "
@@ -2304,15 +2305,6 @@ def _stage1_geometry_rot(part, claim):
     if claim is not None and claim[0] is not None:
         return claim[0] % 360.0
     return part.rot
-
-
-def _rotated_bounds(part, rot):
-    """Make sure `part.rect` can answer at `rot` (the #893 cache fill)."""
-    if rot not in part.bounds_by_rot:
-        from placement.legality import rotate_local_bounds
-        part.bounds_by_rot[rot] = rotate_local_bounds(*part.bounds_by_rot[0.0], rot)
-        if part.tht_by_rot is not None:
-            part.tht_by_rot[rot] = rotate_local_bounds(*part.tht_by_rot[0.0], rot)
 
 
 def declared_to_ladder_frac(part, bounds, edge, e_lo, e_hi, declared):
@@ -3047,10 +3039,13 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # offset from its origin to its courtyard centre, so the declared
             # start and window too -- and a DECLARED rotation is only applied
             # further down (#893). `_geo` is the part at the rotation this
-            # stage will write, read-only, so a part it then skips has not
-            # been turned (`_stage1_geometry_rot` says why this matters).
+            # stage will write, read-only, so a part skipped before that
+            # block has not been turned (`_stage1_geometry_rot` says why this
+            # matters). An angle the part already has is read exactly as
+            # before, cache and all: only a declared one is materialised.
             _geo_rot = _stage1_geometry_rot(part, declared_rot.get(ref))
-            _rotated_bounds(part, _geo_rot)
+            if _geo_rot != part.rot:
+                _geo_rot = _materialise_rotation(part, _geo_rot)
             _geo = _AtRotation(part, _geo_rot)
             f_lo, f_hi = _edge_frac_bounds(_geo, bounds, edge)
             # #706/#712. A DECLARED position outranks the even distribution.
