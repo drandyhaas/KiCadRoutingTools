@@ -813,8 +813,13 @@ class GradeConjuncts(_Boards):
             if accepts is None:
                 res = call()
             else:
+                # #987 settles every rung into the band before any of this is
+                # asked; off here, so the later rung still reads 0.23 and the
+                # guard under test is the only thing that can refuse it.
                 with patch.object(seeder, '_grade_accepts', accepts), \
-                        patch.object(seeder, '_grade_worse', lambda *a, **k: ()):
+                        patch.object(seeder, '_grade_worse', lambda *a, **k: ()), \
+                        patch.object(seeder, '_band_settle',
+                                     lambda st, part, e, edge, lo, x, y, seats=None: (x, y)):
                     res = call()
             (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
             return (move['new_x'], move['new_y'], move['new_rotation']), res

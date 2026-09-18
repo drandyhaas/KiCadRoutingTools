@@ -22,6 +22,15 @@ that was never broken.
           it.
       A8  a centre claim's window end.
       A9  on a notched outline the step reads the EDGE's span.
+  B.  (#987) A RUNG WHOSE WRITTEN POSE READS OUTSIDE ITS DECLARED OVERHANG BAND
+      is moved along the edge normal until the grade's own reading is inside
+      (`_band_settle`), when the moved pose still seats, leaves the floor no
+      shorter and trades no setback; a rung the grade accepts is untouched.
+      B1  a drawn body past its courtyard, both band ends, both ladders.
+      B2  no declared max, the target ON the minimum, the body off the grid.
+      B3  a gate margin under the walk's own 0.02 mm tolerance.
+      B4  refusals keep the raw pose: a floor it would deepen, a setback it
+          would trade for, a body set back further than the cap, a raise.
   C.  STAGE 1 MEASURES AT THE ROTATION IT WRITES. The part's extents, the
       declared start fraction and the declared window are computed at the
       DECLARED rotation, not the input one (`_stage1_geometry_rot`).
@@ -391,9 +400,9 @@ class AlongEdgeWindow(_Graded):
         # both seat, the stepped one deeper under the floor: keep the raw one
         deeper = lambda sx, sy: (1, 0.682) if (sx, sy) == (x, y) else (1, 0.683)
         self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, deeper), (x, y))
-        # the raw one does not seat at all: the step is free to be taken
+        # the raw one does not seat at all: a step never makes a seat of it
         only_step = lambda sx, sy: None if (sx, sy) == (x, y) else (0, 0.0)
-        self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, only_step), stepped)
+        self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, only_step), (x, y))
         # equal floors: taken
         same = lambda sx, sy: (1, 0.5)
         self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, same), stepped)
@@ -466,6 +475,170 @@ class AlongEdgeWindow(_Graded):
                     self.assertEqual(ny, y)
                     stepped += (nx, ny) != (x, y)
         self.assertGreaterEqual(stepped, 2)
+
+
+BODY = '(fp_rect (start -3 -1) (end 1 1) (layer "F.Fab"))'
+PADS3 = ('(pad "1" smd rect (at -1.905 -0.5) (size .5 .5) (layers "F.Cu"))',
+         '(pad "2" smd rect (at -1.905 0.5) (size .5 .5) (layers "F.Cu"))',
+         '(pad "3" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu"))')
+
+
+def j1(graphics, pads=PADS3, at='10 10 0'):
+    return (f'  (footprint "t" (layer "F.Cu") (at {at})\n'
+            '    (property "Reference" "J1")\n'
+            + ''.join(f'    {g}\n' for g in graphics)
+            + ''.join(f'    {p}\n' for p in pads) + '  )\n')
+
+
+def no_settle():
+    """The blind twin of B: every rung is written where the walk left it."""
+    return patch.object(seeder, '_band_settle',
+                        lambda st, part, e, edge, lo, x, y, seats=None: (x, y))
+
+
+class OverhangBand(_Graded):
+    def both(self, path, entry, clearance=.25, edge=.55):
+        """{ladder: (blind pose, blind kinds, pose, kinds, notes)}."""
+        import pose_score
+        doc = intent_doc(entry)
+        out = {}
+        for ladder in ('seat', 'stage1'):
+            poses = []
+            for blind in (True, False):
+                if ladder == 'seat':
+                    st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=clearance,
+                                               board_edge_clearance=edge)
+                    notes = []
+                    if blind:
+                        with no_settle():
+                            ok = seeder._seat_edge(st, 'J1', dict(entry), set(), notes,
+                                                   target=(0.0, 10.0))
+                    else:
+                        ok = seeder._seat_edge(st, 'J1', dict(entry), set(), notes,
+                                               target=(0.0, 10.0))
+                    self.assertTrue(ok, notes)
+                    p = st.parts['J1']
+                    pose = (p.x, p.y, p.rot)
+                else:
+                    if blind:
+                        with no_settle():
+                            res = self.stage1(path, doc, clearance, edge)
+                    else:
+                        res = self.stage1(path, doc, clearance, edge)
+                    pose, notes = self.pose(res, 'J1'), res['notes']
+                poses.append((pose, self.graded(path, {'J1': pose}, doc, clearance, edge)['J1'],
+                              notes))
+            (bp, bk, _), (fp, fk, notes) = poses
+            out[ladder] = (bp, bk, fp, fk, notes)
+        return out
+
+    def floor(self, path, pose, edge=.55):
+        from placement import legality
+        out = str(self.root / f'fl_{abs(hash((path, pose)))}.kicad_pcb')
+        write_placed_output(path, out, [{'reference': 'J1', 'new_x': round(pose[0], 3),
+                                         'new_y': round(pose[1], 3), 'new_rotation': pose[2]}])
+        g = legality.grade_pad_edge_clearance(parse_kicad_pcb(out), edge, out)
+        short = [f['shortfall_mm'] for f in g['findings'] if f['pad_ref'].startswith('J1.')]
+        return (len(short), round(max(short, default=0.0), 6))
+
+    def assert_settled(self, path, entry, **kw):
+        """Blind dirty on the band, fixed clean on it, nothing traded, the
+        along-edge coordinate untouched, the floor no shorter."""
+        for ladder, (bp, bk, fp, fk, _notes) in self.both(path, entry, **kw).items():
+            with self.subTest(ladder=ladder):
+                self.assertIn('band', bk, (ladder, bp))
+                self.assertNotIn('band', fk, (ladder, fp))
+                self.assertTrue(all(fk.count(k) <= bk.count(k) for k in fk), (bk, fk))
+                self.assertEqual(fp[1], bp[1])
+                self.assertLessEqual(abs(fp[0] - bp[0]), seeder._BAND_SETTLE_CAP_MM + 1e-9)
+                edge = kw.get('edge', .55)
+                self.assertLessEqual(self.floor(path, fp, edge), self.floor(path, bp, edge))
+
+    def test_b1_a_drawn_body_past_its_courtyard_both_band_ends(self):
+        # The walk lands the courtyard on the target, so the body reads
+        # target - margin + (how far it reaches past the courtyard): a body
+        # 0.4918 past it reads 0.24 on {0.25, 0.35}, one 0.6601 past it
+        # reads 0.51 on {0.3, 0.5}.
+        for band, cl in (({'min': 0.25, 'max': 0.35}, -2.5082),
+                         ({'min': 0.3, 'max': 0.5}, -2.3399),
+                         ({'min': 0.0, 'max': 0.02}, -2.4317)):
+            with self.subTest(band=band, cl=cl):
+                crt = f'(fp_rect (start {cl} -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
+                path = self.write(f'b1_{cl}.kicad_pcb', board((20, 20), j1((BODY, crt))))
+                self.assert_settled(path, {'ref': 'J1', 'edge': 'west', 'overhang_mm': band})
+
+    def test_b2_no_declared_maximum_and_the_target_on_the_minimum(self):
+        g = '(fp_rect (start -4.9996 -1) (end 1 1) (layer "F.Fab"))'
+        path = self.write('b2.kicad_pcb', board((20, 20), j1((g,))))
+        self.assert_settled(path, {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.6}})
+
+    def test_b3_a_gate_margin_under_the_walks_tolerance(self):
+        crt = '(fp_rect (start -2.3 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
+        path = self.write('b3.kicad_pcb', board((20, 20), j1((crt,))))
+        self.assert_settled(path, {'ref': 'J1', 'edge': 'west',
+                                   'overhang_mm': {'min': 0.0, 'max': 0.015}},
+                            clearance=0.01, edge=0.01)
+
+    def test_b4_a_settle_that_would_trade_keeps_the_raw_pose(self):
+        cases = []
+        # The floor: 0.01 mm out to meet 0.3 would put J1.1/J1.2 inside it.
+        crt = '(fp_rect (start -2.56 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
+        cases.append(('floor', board((20, 20), j1((BODY, crt))),
+                      {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.3, 'max': 0.5}}))
+        # The setback: in to meet {0, 0} leaves no overhang on a receptacle.
+        rpads = ('(pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu"))',
+                 '(pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu"))')
+        rcrt = '(fp_rect (start -1.5 -1.0004) (end 1.5 1) (layer "F.CrtYd"))'
+        cases.append(('setback', board((20, 20), j1((rcrt,), rpads)),
+                      {'ref': 'J1', 'edge': 'north', 'overhang_mm': {'min': 0.0, 'max': 0.0},
+                       'class': 'edge_receptacle'}))
+        for name, text, entry in cases:
+            path = self.write(f'b4_{name}.kicad_pcb', text)
+            for ladder, (bp, bk, fp, fk, _n) in self.both(path, entry).items():
+                with self.subTest(case=name, ladder=ladder):
+                    self.assertIn('band', bk)                  # the fixture is broken
+                    self.assertEqual(fp, bp)                   # and stays as it was
+                    self.assertEqual(fk, bk)
+
+    def test_b4b_the_cap_and_a_raise_keep_the_raw_pose(self):
+        import pose_score
+        # A body set back 0.5 mm inside a 0.01 minimum: the reading is 0 and
+        # the move it needs is far past the cap.
+        g = '(fp_rect (start -1.2 -1) (end 1 1) (layer "F.Fab"))'
+        crt = '(fp_rect (start -2.4 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
+        path = self.write('b4b.kicad_pcb', board((20, 20), j1((g, crt))))
+        st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=.25,
+                                   board_edge_clearance=.55)
+        part = st.parts['J1']
+        entry = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.01, 'max': 0.5}}
+        x, y = 2.95, 10.0
+        amount, _b, _l = seeder._band_reading(st, part, 'west', x, y)
+        self.assertLess(amount, 0.01)                          # it IS short
+        self.assertEqual(seeder._band_settle(st, part, entry, 'west', 0.01, x, y), (x, y))
+        # And anything the reading raises leaves the pose as it was.
+        with patch.object(seeder, '_band_reading', side_effect=RuntimeError('boom')):
+            self.assertEqual(seeder._band_settle(st, part, entry, 'west', 0.01, x, y), (x, y))
+
+    def test_b6_a_rung_the_grade_accepts_is_untouched(self):
+        # Wide bands on the same body: every seat grades clean blind, and the
+        # settle must hand every rung back as it came.
+        calls = []
+        real = seeder._band_settle
+
+        def spy(st, part, e, edge, lo, x, y, seats=None):
+            out = real(st, part, e, edge, lo, x, y, seats)
+            calls.append(out == (x, y))
+            return out
+        crt = '(fp_rect (start -2.45 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
+        path = self.write('b6.kicad_pcb', board((20, 20), j1((BODY, crt))))
+        for band in ({'min': 0.0, 'max': 0.8}, {'min': 0.2, 'max': 0.7}):
+            with patch.object(seeder, '_band_settle', spy):
+                res = self.both(path, {'ref': 'J1', 'edge': 'west', 'overhang_mm': band})
+            for ladder, (bp, bk, fp, fk, _n) in res.items():
+                self.assertEqual(bk, [])
+                self.assertEqual(fp, bp)
+        self.assertTrue(calls and all(calls))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
