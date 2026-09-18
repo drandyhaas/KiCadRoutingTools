@@ -8866,8 +8866,16 @@ def write_out(a, ctx, corridors, names, log):
             log('        vmmap before: ' + _l)
         _tm.start(1)
     _res_list = [{'new_segments': list(out_segs[nm])} for nm in names]
-    _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
-        _res_list, pcb, kids, clearance=0.1, keep_input_copper=True)
+    if os.environ.get('BRAID_SMOOTH', '1') != '0':
+        _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
+            _res_list, pcb, kids, clearance=0.1, keep_input_copper=True)
+    else:
+        # BRAID_SMOOTH=0 (2026-09-18): a PROBE braid skips the smoother. It
+        # never changes a via count, and it was ~3.7 s of a ~6 s two-lane
+        # local braid at K51 (it validates against the whole board's
+        # copper). The probe's judge is (open, drc, vias); the final board
+        # is smoothed once (replan / smooth_board.py).
+        _n, _nets, _rm, _addl, stt = 0, 0, 0, 0, {}
     if a.out != os.devnull:
         # THE PACK SIDECAR (<out>.pack.json): what pack.py needs to pack
         # this board again on its own -- each lane's copper as the pack

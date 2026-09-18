@@ -30,6 +30,8 @@ reference boards):
 | `jcl`, the chain's reference arm | 34 | 60 | 80 | 115 |
 | the two-level portfolio (NOW THE DEFAULT) | 34 | 60 | 74 | 98 |
 | **+ `replan.py` on top** | **34** | **58** | **68** | **96** |
+| **+ the population's census descent (2026-09-18, `tmp/records/`)** | | | | **91** |
+| + destination climbs in the probe menus (`tmp/rpc91c`, still descending at commit time) | | | | 89 |
 | human | 46 | 58 | 70 | **81** |
 | rule (vias + mm/7.5) | 121.5 | 175.3 | 218.9 | 281.1 |
 
@@ -194,6 +196,9 @@ octilinear, so a non-orthogonal pose is outside both models today.*
 | `schedule.py`, `corridor.py`, `sched_first.py` | pages, corridors, the schedule-first planner |
 | `connect.py`, `topo_strings.py`, `taut_fast.py` | the real router and the taut relaxation |
 | `replan.py` | the ROUTE as the judge; re-plans the ends the braid paid for |
+| **`plan_loop.py`** | **the PLAN-LEVEL LOOP: the routing inside the planning iteration. Solve, fan out, braid both arms, grade; the route's verdict goes back into the next pages-first re-solve as class bans, residual prices and the incumbent plan as hint; the best routed board is kept across rounds (monotone by construction); candidates within a round are independent (`--jobs`). See *The plan-level loop*** |
+| **`evolve.py`** | **the POPULATION: descend (replan probes) / jump (a far re-solve, no holds) / cross (two parents' ends held), elitist on routed grades; K15 16 -> 14 in one generation** |
+| `plan_feedback.py` | the channel: `PLAN_LOOP_FEEDBACK` (a JSON file or inline JSON) read by `plan_state` (bans) and `pages_first._solve` (prices, hint); byte-identical unset; `--self-test` |
 | `pack.py`, `pack_board.py` | every lane a taut string against its neighbour |
 | **`ledger_cal.py`** | **per net: DP floor vs slack. The instrument that says whether to work on the plan or the realization -- but its per-net floor is CIRCULAR (each net priced against the others AS LAID); read it beside `joint_floor.py`** |
 | **`joint_floor.py`** | **the NON-circular floor: one MILP over the fixed paths that picks every path's layer at every crossing at once. Validated against the audit's independent parity+max-cut on three boards. `JOINT_FLOOR_NODES` bounds it -- no clock. `--cap N` adds a per-net via bound, so "no net over two vias" is ASKED rather than assumed: INFEASIBLE means no layer assignment over these paths can do it, and the only fix is a different plan** |
@@ -868,6 +873,232 @@ satisfies. The cross-check that should have caught it ran only over cases
 that were all feasible, so it agreed with the bug and printed ALL PASS.
 `--self-test` now pins INFEASIBLE witnesses, which is the only half that
 can fail.
+
+## The plan-level loop (`plan_loop.py`, 2026-09-18)
+
+The one judge that is right at K51 is the route itself, and the one search
+that can use it is a re-solve judged by the route -- so the routing goes
+INSIDE the planning iteration. `replan.py` judges a move with the world
+frozen, and at K51 the schedule is the cost: on 0918 its full-re-braid arm
+applied the same idea eight rounds running (SA10's south-face B climb at
+the next gap along), every apply re-braided worse, and the run ended where
+it started. This loop fixes the three things that arm named: judge by the
+FULL braid (both arms), ban by CLASS, and feed the verdict into a
+pages-first re-solve.
+
+    PLAN_PAGES=1 PLAN_JUDGE=count PLAN_JUDGE_LEN=lane \
+      python3 plan_loop.py TAG 51 [--from=tmp/s13/port] [--rounds=4] [--worst=3] \
+                                  [--cands=dst,src,both,free] [--jobs=2]
+
+**What a candidate is -- measured first, then designed.** The first cut
+hinted the incumbent plan, priced its classes by the residuals, and let
+the solve run free: at K51 it moved **33 of 48 ends and routed 125 against
+98** (the `dst` arm 108 with 2 open). A hint is only a starting point, the
+prices only cover observed classes, and the objective that chooses among
+the rest is the one measured anti-correlated with the route. A radius on
+the number of moved ends would not fix that -- the solver would still
+choose WHICH ends by the same objective. So a candidate is a NAMED
+PERTURBATION of the incumbent: every net not named is HELD at the
+incumbent's berth (a one-move menu, else its class) and its tooth as it
+stands; the named nets are freed. Round 0 is the chain as it stands (or a
+recorded run). Each round after:
+
+1. **Verdict** off the incumbent routed board: per net its class in the
+   braid's schedule, its real vias, refused; and off EVERY routed board
+   seen so far -- every portfolio arm of every candidate, kept or not --
+   the **residual** per net: real vias minus the plan's own prediction for
+   that net (the count judge, `judge_by_braid`, residual off), attributed
+   half to the class (face, layer) of each end the fanout board carries.
+2. **Base**: the incumbent's SOURCE VIEW (`replan.source_view`: its fanout
+   board with the destination copper stripped) is the chain's `BASE` for
+   the round, so the incumbent's teeth are the standing teeth and a held
+   source is literally unchanged copper -- no re-realization noise.
+3. **Feedback** (`plan_feedback.py`, env `PLAN_LOOP_FEEDBACK`): *holds*
+   (above; a freed net the holds box in gets the fewest holders of its
+   least-held candidate freed with it, PAGES_UNBLOCK's rule), *bans* (the
+   worst nets' current class at the freed end -- CLASS-level, never the
+   signature, so the search cannot re-propose the same idea one gap along;
+   a banned STANDING tooth is told to move), *prices* (the mean residual
+   per (net, end, class), in vias, on every candidate of that class;
+   negative allowed), *hint* (the incumbent plan by signature, in place of
+   the greedy seed's), and *accept_laid* -- the fanout's realize-and-confirm
+   keeps a realized source round whenever an asked tooth was laid in class
+   instead of asking its own count judge (which reverted a K15 arm's forced
+   moves 46 -> 47; under the loop the route judges, the confirm only lays),
+   and *reach* -- a free end may land only between the keys of its held
+   neighbours `--reach` ranks away in the incumbent's plan order. Measured
+   before it existed (K51, holds alone): the freed berths landed far in the
+   order (SA6 target rank 1 -> 32), the freed nets improved by 8 and ten
+   HELD nets whose pages and ranks had not changed paid 23 in rips and last
+   calls. Locality has to be in ORDER space; that is the escape move's
+   `reach` from the bench work, applied to the real plan.
+4. **Candidates** (`--cands`): `dst` / `src` / `both` free the W worst nets
+   at that end and ban their class there; `free` frees both ends with no
+   ban; `+w` also frees their CROSSERS in the braid's plan (nearest by
+   launch rank, `--crossers`); `radius` is the ablation (no holds, at most
+   r ends off the hint, the walk's trust region); `noprice` / `nohint`
+   ablate one channel; `none` holds everything (the control: it must
+   reproduce the incumbent). One full chain each (plan, fan out both ways,
+   braid both arms, grade); independent, so `--jobs` runs them side by
+   side -- that is where the parallelism goes.
+5. **Judge**: `(open, drc, vias)` of each candidate's shipped board against
+   the incumbent's; the best replaces it only when strictly better
+   (`--margin` raises the bar), so the kept board is **monotone by
+   construction**. A candidate that lost retires its hypothesis (its bans
+   and its (kind, net) pairs; the next round's worst list rotates past
+   them); its boards still feed the residuals, so a lost round still
+   teaches the prices. `--patience` rounds without improvement stops it.
+
+Flag-off parity: with the variable unset the fanout stage is copper-
+identical to the pre-patch tree (K15, measured: 550 segs / 15 vias on all
+three of HEAD, patched-unset, patched-empty). Outputs: `tmp/TAG/r<N>/<cand>_*`
+per round, `tmp/TAG/best_k<K>.kicad_pcb` (+ fanout board, sidecar, and
+`best_src_k<K>` = the round base) when the incumbent changes,
+`tmp/TAG/loop_k<K>.json` (the ledger; `--resume=1`).
+
+Run the driver under the chain's own env: its verdict rebuilds the plan
+state and the count judge in-process, and those must be the ones the
+candidates plan with (it pins `SRC_CLIMB` to the chain's value before
+importing `replan`, which would otherwise set 14).
+
+### What it measured, and why the whole-board re-braid is retired (2026-09-18)
+
+K51, round 0 = the chain as it stands (98 / 0 open, the s13 board
+reproduced on the current tree). Every candidate below is one full chain
+(plan, fan out both ways, braid both arms, keep the better), judged whole:
+
+| arm | what moved | routed |
+|---|---|---|
+| free re-solve, hint + prices, no holds | 33 of 48 ends (the solver's choice) | **125** |
+| same, worst 3 berths banned | 3 + the solver's | 108 / 2 open |
+| holds, worst 3 berths banned (`dst`) | 3 berths + 2 unblocked holders | **113** (freed nets -8, ten HELD nets +23) |
+| holds, worst 3 teeth banned (`src`) | 3 teeth | 114 (a hold leak let 7 more teeth move) |
+| holds + reach 3: `dst` / `both` / `dst+w` / `both+w` | 3 berths, windowed | 138 / 1 open (all four the same copper) |
+| holds + reach 3: `src` | 3 teeth, windowed | 114 |
+| holds + reach 3: `free` (no ban) | 3 nets re-chosen in their windows | 100 / 1 open |
+| the incumbent | -- | **98** |
+
+Read with the per-net diffs: the freed nets DO improve (SDQ5 4 -> 0, SA10
+and SA6 4 -> 2), and the loss lands on lanes whose ends, pages and ranks
+never changed -- rips and last calls when the new lanes are threaded past
+them. A whole-board re-braid re-realizes all 47 lanes every time, and the
+realization spread (20 vias between two braids of the SAME ends) swamps a
+2-4 via hypothesis; bounding the moved ends in the order (reach) only
+starved the hypothesis. **The CP-SAT re-solve is the wrong chooser and the
+full re-braid is the wrong instrument for local information.** The loop,
+its channel and its arms stay as the record of that measurement (the code
+is general and byte-identical unset); what continues is the mechanism
+below.
+
+### The coupled-set probe (`replan.py --coupled=chord --widen=N`)
+
+What the route knows that a plan can use is LOCAL and STRUCTURAL: which
+lanes are bad, which lanes each is coupled to, and that the other ~35
+lanes are a known-good realization. `replan.py`'s probe already keeps the
+good copper: it strips the moved net and the lanes its new end conflicts
+with, re-fans the end with the engine, braids only those with the rest
+frozen, grades the whole board, and in `--mode=incremental` a standing
+probe IS the next board. Its 0918 failure at K51 was the refusal case --
+a lane the local braid refused made the probe "unjudged" and handed the
+move to a full re-braid, which re-realized everything and lost the gain.
+Two additions close that:
+
+* `--coupled=chord` -- the re-lay set also takes every frozen lane whose
+  copper crosses the chord from the moved end to the net's other end (the
+  lanes the new lane must thread through, the ones that paid above).
+* `--widen=N` -- a local refusal is answered with ROOM: the frozen lanes
+  crossing the refused lane's own chord (its ends are in the refusal
+  record) are stripped and re-laid with it, up to N times, and the local
+  braid runs again. Never the full braid.
+
+K28 sanity: a berth probe re-laid the 12 chord lanes and graded 43
+(rejected); ties rejected; 3-12 s a probe. **K51: the chord set is too
+big** -- 14 probes re-laid 11-25 lanes each and graded 110-144 against 98
+while the moved net itself went 4 -> 2, and the full attempt ladder
+(`PROBE_ATTEMPTS=6`) did not change that (125 on 18 re-laid). A braid
+over a subset inside a frozen field of ~30 lanes is a far worse router
+than the full braid, so the re-lay set must stay SMALL: `--coupled=census`
+(the end's own conflicts + the braid's blocker census, one lane typical)
+with `--widen` answering refusals is the working recipe; its 1-lane
+probes grade 100 against 98 at K51 (`tmp/rpc51a`).
+
+### The population (`evolve.py`)
+
+Monotone descent finds a local optimum; to find a better basin the search
+must sometimes JUMP far, in another parallel world, and let that world
+descend on its own (Andy, 2026-09-18). `evolve.py` runs a population of
+routed worlds with three operators, each one subprocess (`--jobs`, and
+each the shape of a Modal arm):
+
+* **descend** -- one `replan.py` round, incremental, census probes.
+* **jump** -- the chain on the parent's source view with a few random nets'
+  classes banned at both ends, another CP-SAT seed, the parent as hint,
+  NO holds: another basin, usually worse at first.
+* **cross** -- the chain with the hold channel over two parents: half the
+  nets at A's ends, half at B's (B's teeth named as source holds).
+
+Selection is elitist over exact routed grades, worlds deduplicated by
+copper. Seeds are recorded worlds (chain or replan stems with a braid
+record). **K15 (`tmp/ev15x`, 40 s a generation): the chain's 16, a jump
+world at 16, descent from the jump world -> 14 (the best K15 ever
+recorded), the crossover -> 14.** K51: `tmp/ev51` (seeds 96 / 98 / two
+97s with open nets). **The first generation's descent of an OPEN-net seed
+(tmp/s9/cp, 97 with SA14 and SRST open) closed both opens and went 95 ->
+93 -> 91 in two census rounds: 91 vias, 0 open, 0 DRC** -- against 96
+before today, 95 from the census descent of the 98, and the human's 81.
+Archived as `tmp/records/k51_91_cp_lineage.*` with a render checked. The
+run then died deriving the next fanout board (a net the braid had re-laid
+from its pad had no stub to keep; `replan.salvage_missing_ends` now takes
+the pad-exit copper, and a dying round no longer loses the boards kept).
+Reseeded with the 91 (plus 95 / 96 / 98), generation 1: descend(95) ->
+94; descend(91) no gain (at 91 only two nets carry three or more lane
+vias, and with the threshold at two every probe is a TIE -- a one-dive
+lane becomes a free ride only when its crossing partners are on the other
+layer, which no single-net move can buy); jump(91) -> 102 with one open;
+cross(95 x 96) -> 112. Selection then dropped the jump world unseen, so
+`evolve.py` now DESCENDS every new jump and crossover world in the same
+generation before it is judged ("jump, then evolve to its local minimum,
+then judge"). The plateau walk (`replan --length=1`, an equal-via board
+that shortens the copper stands) found no step at 91 either.
+
+**The human-ends test (a TEST, never a seed -- this is an autorouter).**
+The braid's own board on the HUMAN's ends (87 vias, `hb0918/humA_k51`)
+descended with the same census probes goes **87 -> 83 -> 81 -> 79** in one
+round: on the right ends the braid plus descent beats the human's own
+count. So the realization is not the bottleneck; the ENDS are the whole
+91 -> 79 gap. The human's ends differ from our menus only in the CLIMB
+classes (six destination climbs, the source riders), both enumerated by
+`escape_moves` and both off in the descent's probes and the chain's
+solve, so `evolve.py` now descends with `DST_CLIMB=2` and jumps with
+`DST_CLIMB=2 SRC_CLIMB=4` (`--descend-env`, `--jump-env`). The descent
+judges by the route and can afford the menus that broke the CP-SAT; a
+jump does not care where it lands. First result: the 91 world descended
+with `DST_CLIMB=2` in its menus goes **91 -> 90 -> 89** (SDQ5's berth, then
+SDQ4's tooth) where the same descent without climbs was a plateau. The
+population runs on K28 / K35 / K41 (`tmp/ev28`, `ev35`, `ev41`, seeded from
+`s13/rp_rp_kK` and `s13/port`) and on K51 (`tmp/ev51c`) were in progress
+when this was written; their ledgers are `tmp/ev<K>/evolve_k<K>.json`.
+
+### Where a descent's time goes, and what is reused (measured 2026-09-18, K51)
+
+A descent round is its probes (350 of 360 s; plan state, ranking and the
+engine screen are 10 s). A standing probe is 7-12 s; a WIDENED probe
+(5-7 lanes re-laid, the braid run 2-3 times) is 60-180 s, never stood in
+two rounds, and is where a taut string DIVERGED to 27,715 points and one
+numpy Hausdorff matrix asked for 26 GB (fixed: `taut_fast` chunks the
+Hausdorff and freezes a string past 5,000 points; a watchdog reads top's
+MEM, since `ps rss` shows 0.1 GB for a process that is all in swap). Inside
+a two-lane probe braid: startup/parse/setup ~1 s, the in-band attempt
+~1 s (routes 0 of 2 in a frozen field), last call + rip ~4 s, the
+smoother ~3.7 s. So: probe braids skip the smoother (`BRAID_SMOOTH=0`,
+set by replan for probes; `smooth_board.py` smooths the assembled board
+once, byte-identical to the braid's own), and `replan --grade=inproc`
+runs the three checks without four process launches. Measured 9 -> 7 s a
+probe under load; the remaining cost is the rescue ladder, not reusable
+work. Next: a persistent braid worker (parse, obstacles and taut memo
+kept across probes) and a probe band that does not fail in band. The taut
+memo already spans probes; destination menus are identical every round
+and source menus change only near a moved tooth (cacheable, 10 s/round).
 
 ## TODO
 
