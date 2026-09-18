@@ -900,20 +900,27 @@ class GradeConjuncts(_Boards):
                  'along_edge_band': {'from': 0.89, 'to': 0.92}}
         intent = floorplan.intent_from_dict(intent_doc(**entry))
 
-        def repair(window=True, delta=True):
+        def repair(window=True, delta=True, pull=True):
             call = lambda: seeder.repair_placement(parse_kicad_pcb(path), path, intent,
                                                    clearance=.25, board_edge_clearance=.55)
             claim = seeder._outside_its_along_edge_claim if window else (lambda *a, **k: False)
             worse = seeder._grade_worse if delta else (lambda *a, **k: ())
+            # #983 pulls a rung whose written pose is outside the window
+            # before any of this is asked; `pull=False` puts the rung back on
+            # the window end, so the move's own window guard is what is tested.
+            pulled = (seeder._window_frac if pull else
+                      (lambda st, part, e, edge, bounds, ov, frac, ends, seats=None: frac))
             with patch.object(seeder, '_outside_its_along_edge_claim', claim), \
-                    patch.object(seeder, '_grade_worse', worse):
+                    patch.object(seeder, '_grade_worse', worse), \
+                    patch.object(seeder, '_window_frac', pulled):
                 res = call()
             (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
             return (move['new_x'], move['new_y'], move['new_rotation'])
         pose = repair()
         self.assertEqual(grade_errors_at(self, path, pose, entry), [])
-        # The window guard on the move holds on its own, with the delta off.
-        self.assertEqual(grade_errors_at(self, path, repair(delta=False), entry), [])
+        # The window guard on the move holds on its own, with the delta and the
+        # #983 pull off.
+        self.assertEqual(grade_errors_at(self, path, repair(delta=False, pull=False), entry), [])
         blind = repair(window=False, delta=False)
         self.assertTrue([m for m in grade_errors_at(self, path, blind, entry)
                          if 'outside the declared band' in m])
