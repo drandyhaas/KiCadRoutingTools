@@ -1083,9 +1083,9 @@ stopped on its round budget; continued, it took one more step (SODT0 at
 both ends) to **85** and then plateaued with three moves the frozen-world
 probe could not judge (`tmp/records/k51_85_climbs`). The
 population runs on K28 / K35 / K41 (`tmp/ev28`, `ev35`, `ev41`, seeded from
-`s13/rp_rp_kK` and `s13/port`) and on K51 (`tmp/ev51c`) were in progress
-when this was written; their ledgers are `tmp/ev<K>/evolve_k<K>.json`.
-Results so far: **K28 34 (no gain; a second 34 by crossover), K41 68 -> 67
+`s13/rp_rp_kK` and `s13/port`) and on K51 (`tmp/ev51c`, `ev51d`) ran during
+the day; their ledgers are `tmp/ev<K>/evolve_k<K>.json`.
+Results: **K28 34 (no gain; a second 34 by crossover), K41 68 -> 67
 (the 74 seed descended past the recorded 68 and the human's 70), K35 58 -> 56
 (a jump world from the 58 seed, descended in its generation -- below the
 human's 58), K51 generation 1 with the climb menus: 85 -> 83, the 91
@@ -1095,7 +1095,17 @@ Grades are the chain's own (`grade_k`, the 10% margin that filters the
 SDQ1 on B.Cu, 7 and 8 um under 0.1) and the 85 is the last board clean
 with no margin at all. At the frontier (K41 67, K51 83) no net carries
 three lane vias any more, so the population's default descent now probes
-from two (`--min-vias=2`).
+from two (`--min-vias=2`). With that threshold: **K41 67 -> 64** (`tmp/ev41b`,
+2 generations, 5430 s: the 67 descended to 64 and the 68 to 66; a jump from
+the 64 landed at 92 and descended to 77, the crossover to 90; final
+population 64 / 66 / 67), and **K51 held at 83** (`tmp/ev51e`, 3 generations,
+7503 s: every descent of 83 / 85 / 87 / 88 was null -- the 85 re-descends to
+a second 83 with the same copper -- and every jump or crossover landed at
+84..141 and descended to 88..118; the nearest, a four-ban jump from the 83
+that landed at 99, came back to 95). So 83 is the local optimum of the
+single-net move classes with the climb menus at K51, and the next lever is
+a move that re-layers a lane together with its crossing partners (the
+coupled probe already routes such a set) or jumps that land nearer.
 `evolve_movie.py TAG K` films a run from that ledger (see the tools table;
 `tmp/movie/ev51b_k51.mp4` is the two-generation K51 run), and `--runs
 TAG1,TAG2,... --descents DIR,...` films SEVERAL runs plus standalone
