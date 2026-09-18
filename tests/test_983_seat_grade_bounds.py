@@ -44,6 +44,7 @@ that was never broken.
       C4  the declared START is converted at the declared angle, on and off
           the 90-degree lattice (a 30 or 135 needs its box materialised).
       C5  a rotation CANDIDATE set is measured at the part's own angle.
+      C6  an undeclared angle is read exactly as before, cache quirks and all.
 """
 import os
 from pathlib import Path
@@ -237,6 +238,30 @@ class StageOneRotation(_Graded):
                 # into the window would also be.
                 self.assertAlmostEqual(self.centre_of(path, pose), 15.0, delta=0.0006)
                 self.assertEqual(self.graded(path, {'J1': pose}, doc)['J1'], [])
+
+    #: -31.91 is kept by the quench at `rot` 328.09 but its rotated box is
+    #: keyed one ulp away (328.09000000000003), so `rect` answers with the
+    #: 0-degree box. A pre-existing quirk this change must NOT quietly fix
+    #: for an undeclared part (the phase-3 verifier's finding): the poses
+    #: below are the base tree's own output (faa03526), recorded, not re-derived.
+    ULP = ('(kicad_pcb (version 20241229) (generator "t983")\n'
+           '  (gr_rect (start 0 0) (end 40 20) (layer "Edge.Cuts"))\n'
+           '  (footprint "t" (layer "F.Cu") (at 20 10 -31.91)\n'
+           '    (property "Reference" "J1")\n'
+           '    (fp_rect (start -2.2 -1.4) (end 3.1 0.9) (layer "F.CrtYd"))\n'
+           '    (pad "1" smd rect (at -1.2 0) (size .5 .5) (layers "F.Cu"))\n'
+           '    (pad "2" smd rect (at 1.2 0) (size .5 .5) (layers "F.Cu"))))\n')
+
+    def test_c6_an_undeclared_angle_is_read_exactly_as_before(self):
+        path = self.write('ulp.kicad_pcb', self.ULP)
+        base = {(): (20.0, 18.565, 328.09), ('center_on_edge',): (19.55, 18.565, 328.09)}
+        for extra, want in base.items():
+            with self.subTest(extra=extra):
+                entry = {'ref': 'J1', 'edge': 'south', 'overhang_mm': {'min': 0.0, 'max': 1.0}}
+                if extra:
+                    entry['center_on_edge'] = {'tolerance_mm': 2.0}
+                pose = self.pose(self.stage1(path, intent_doc(entry)), 'J1')
+                self.assertEqual(tuple(round(v, 6) for v in pose), want)
 
     def test_c5_a_candidate_set_is_measured_at_the_parts_own_angle(self):
         # Stage 1 does not apply a candidate SET, so it must not measure at
@@ -483,9 +508,18 @@ class AlongEdgeWindow(_Graded):
                         self.assertNotIn('along_edge', errs)
                         self.assertEqual(named, [])
                     else:
-                        # Unavoidable on a 1 um grid: seated, graded, and SAID.
+                        # Unavoidable on a 1 um grid: seated, graded, and SAID
+                        # -- and not moved, since a step that cannot land
+                        # inside the window buys nothing.
                         self.assertIn('along_edge', errs)
                         self.assertEqual(len(named), 1, notes)
+                        if ladder == 'seat':
+                            _, blind, _ = self.seat(path, centre, blind=True,
+                                                    target=(2.18, -0.24))
+                        else:
+                            with no_nudge():
+                                blind = self.pose(self.stage1(path, intent_doc(centre)), 'J1')
+                        self.assertEqual(pose, blind)
 
     def test_a8_a_centre_claim_window_end(self):
         centre = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0, 'max': 1.5},
@@ -666,9 +700,35 @@ class OverhangBand(_Graded):
         amount, _b, _l = seeder._band_reading(st, part, 'west', x, y)
         self.assertLess(amount, 0.01)                          # it IS short
         self.assertEqual(seeder._band_settle(st, part, entry, 'west', 0.01, x, y), (x, y))
+        # A rung that is not a seat is never moved, however short it reads:
+        # a correction does not make a seat of what the seat refused.
+        # x 1.19 puts the body's west end 0.01 past the edge: 0.01 short of a
+        # 0.02 minimum, well inside the cap.
+        self.assertAlmostEqual(seeder._band_reading(st, part, 'west', 1.19, 10.0)[0], 0.01,
+                               delta=1e-6)
+        c2 = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.02, 'max': 0.5}}
+        self.assertNotEqual(seeder._band_settle(st, part, c2, 'west', 0.02, 1.19, 10.0),
+                            (1.19, 10.0))                  # it would move ...
+        self.assertEqual(seeder._band_settle(st, part, c2, 'west', 0.02, 1.19, 10.0,
+                                             lambda sx, sy: None), (1.19, 10.0))
         # And anything the reading raises leaves the pose as it was.
         with patch.object(seeder, '_band_reading', side_effect=RuntimeError('boom')):
             self.assertEqual(seeder._band_settle(st, part, entry, 'west', 0.01, x, y), (x, y))
+
+    def test_b6b_no_declared_maximum_means_no_upper_bound(self):
+        # The seat's own `hi_eff` for a band with no `max` is max(2T, lo + 1);
+        # the grade has no upper bound at all, so neither may the settle.
+        import pose_score
+        path = self.write('b6b.kicad_pcb', board((20, 20), j1((BODY,))))
+        st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=.25,
+                                   board_edge_clearance=.55)
+        part = st.parts['J1']
+        x, y = 1.99, 10.0                                  # the body reads 1.01
+        self.assertAlmostEqual(seeder._band_reading(st, part, 'west', x, y)[0], 1.01, delta=1e-6)
+        no_max = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.0}}
+        self.assertEqual(seeder._band_settle(st, part, no_max, 'west', 0.0, x, y), (x, y))
+        capped = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.0, 'max': 1.0}}
+        self.assertNotEqual(seeder._band_settle(st, part, capped, 'west', 0.0, x, y), (x, y))
 
     def test_b6_a_rung_the_grade_accepts_is_untouched(self):
         # Wide bands on the same body: every seat grades clean blind, and the

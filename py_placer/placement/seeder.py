@@ -3233,7 +3233,6 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # named on the record and `place_seed`'s gate refuses it; trading
             # the declared edge for it would lose both.
             _fallback = None
-            _fallback_xy = None
             # #975, the order of preference, tier by tier:
             #   1. a conflict-free rung, or that rung moved inward, whose pad
             #      copper clears the board-edge floor -- the first in rung
@@ -3302,7 +3301,6 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         continue
                     if _fallback is None:
                         _fallback = (frac, _hit)
-                        _fallback_xy = (_x, _y)
             # Without a pick the only early exit leaves `_kept` set, so this is
             # the old `for ... else`: the loop ran out, or tier 2 stopped it.
             if _pick is None:
@@ -3326,12 +3324,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 # the walk above already checked this exact pose.
                 x, y = _pick
             elif converged and _kept is not None:
-                # Likewise the kept rung and the crowding one: the pose the
-                # ladder chose, not one re-derived from `frac`, which would
-                # drop a #983 window step or the raw pose it gave way to.
+                # Likewise the kept rung: the pose the ladder chose, not one
+                # re-derived from `frac`, which would drop a #983 window step
+                # or a #987 band settle. (The crowding fallback needs no such
+                # line: neither correction moves a rung that does not seat.)
                 x, y = _kept_xy
-            elif converged and _fallback_xy is not None:
-                x, y = _fallback_xy
             if not converged:
                 # The walk diverged (it drives a scalar SUM along one axis, so
                 # an along-edge overshoot never cancels). It used to
