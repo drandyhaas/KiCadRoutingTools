@@ -4508,6 +4508,7 @@ class PoseGrader:
         self._bodies = None
         self._rings = None
         self._ring_base = None
+        self._ring_at = None
 
     def interior_split(self, poses=None):
         """The cutout / milled verdict for each interior contour at `poses`.
@@ -4518,9 +4519,17 @@ class PoseGrader:
         board with no interior contour, which is most of them and costs
         nothing after the first call.
 
-        Counted over the pads of every part the search knows, because that is
-        what the parser counts on the file it reads back. Only the refs in
-        `poses` are re-measured; the others are counted once and kept.
+        Counted over the pads of every part the search knows -- the pile at its
+        input coordinates included, because the parser counts every footprint in
+        the file it reads back, and both poses of a comparison include it
+        identically. Only the refs in `poses`, and those the SEARCH has moved
+        since the last call, are re-measured; the rest are kept.
+
+        That last clause is load-bearing: caching every other part's count once
+        and never re-reading it let an `apply_move` of a DIFFERENT part mask a
+        real crossing of the threshold, which is the failure this method exists
+        to catch. Stage 1 shares one grader across every edge connector and
+        moves parts between them, so the case is not hypothetical.
         """
         gate = getattr(self.state, 'edge_gate', None)
         if self._rings is None:
@@ -4532,15 +4541,36 @@ class PoseGrader:
         if not self._rings:
             return ()
         if self._ring_base is None:
-            self._ring_base = {ref: self._ring_counts(ref, None)
-                               for ref in self.state.parts}
+            self._ring_base, self._ring_at = {}, {}
         counts = [0] * len(self._rings)
-        for ref in self.state.parts:
-            per = (self._ring_counts(ref, poses[ref])
-                   if poses and ref in poses else self._ring_base[ref])
+        for ref, part in self.state.parts.items():
+            if poses and ref in poses:
+                per = self._ring_counts(ref, poses[ref])
+            else:
+                here = (part.x, part.y, part.rot)
+                if self._ring_at.get(ref) != here:
+                    self._ring_base[ref] = self._ring_counts(ref, here)
+                    self._ring_at[ref] = here
+                per = self._ring_base[ref]
             for i, n in enumerate(per):
                 counts[i] += n
         return tuple(n >= 2 for n in counts)
+
+    def legality_at(self, *, exclude=(), poses=None):
+        """The placement's own legality numbers at `poses` -- overlap and
+        off-board -- whatever the intent declares.
+
+        `violations` cannot stand in for these. `_run_rules` skips `legality`
+        when the intent carries no `legality_budget`, and `emit_intent`
+        WITHHOLDS `overlap_area` exactly on a board that already has blocking
+        body pairs or unwaived courtyard interpenetration -- so on the boards
+        where courtyard overlap is the live risk, the rule that would catch it
+        is not armed. A caller comparing two poses therefore compares these as
+        well, or it is blind to a move that buys interpenetration: measured on
+        a fixture, 0.18 mm2 of new overlap with a LOCKED part, no pad or hole
+        predicate able to see it and no grade error raised.
+        """
+        return _PosedState(self.state, exclude, poses).legality_metrics()
 
     def _ring_counts(self, ref, pose):
         """How many of `ref`'s pad centres fall inside each interior contour.

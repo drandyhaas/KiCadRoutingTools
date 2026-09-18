@@ -1550,6 +1550,10 @@ _INWARD = {'north': (0.0, 1.0), 'south': (0.0, -1.0),
 _FLOOR_SHIFT_GUARD_MM = 0.001
 #: A record names at most this many pads; the counts beside it are complete.
 _FLOOR_RECORD_PADS = 4
+#: The same bound for `grade_delta` ROWS, which are not pads: a row is a
+#: rule the move would break, and `n_grade_delta` counts them all, so a
+#: fifth one is summarised rather than silently dropped.
+_FLOOR_ROWS = 4
 #: The reasons a first seat stays short for which the ladder WALKS to later
 #: rungs. A shortfall on another side than the seated one (a pad past its
 #: courtyard at a corner), or on a sampled outline, is one only an along-edge
@@ -1744,6 +1748,14 @@ def _grade_worse(grade, ref: str, rot: float, first, seat, exclude, memo):
     `place_seed`'s own end-of-run grade still reports that one, and still sets
     the exit code from it.
 
+    Beside the grade, the placement's own legality numbers (courtyard overlap
+    and off-board) are compared UNCONDITIONALLY through `legality_at`, because
+    the `legality` rule is skipped when the intent declares no
+    `legality_budget` -- and `emit_intent` withholds that budget on exactly the
+    boards where the risk is real. Without that, a move could buy courtyard
+    interpenetration with a locked part and raise nothing: measured on a
+    fixture, 0.18 mm2, which no pad or hole predicate can see.
+
     The two grades are comparable only while they describe the same board, and
     they stop doing so when the poses fall on opposite sides of the parser's
     two-pad-centre threshold for an interior Edge.Cuts contour: the grader
@@ -1767,9 +1779,34 @@ def _grade_worse(grade, ref: str, rot: float, first, seat, exclude, memo):
                                     "interior contours alike"},)
         if memo.get('pose') != at(first):
             memo['errors'] = grade.violations(exclude=exclude, poses={ref: at(first)})
+            memo['legality'] = grade.legality_at(exclude=exclude,
+                                                 poses={ref: at(first)})
             memo['pose'] = at(first)
         after = grade.violations(exclude=exclude, poses={ref: at(seat)})
-        return tuple(_fp.grade_delta(memo['errors'], after))
+        rows = list(_fp.grade_delta(memo['errors'], after))
+        # The grade alone is not enough: `legality` is skipped when the intent
+        # declares no `legality_budget`, and `emit_intent` withholds
+        # `overlap_area` on exactly the boards where courtyard interpenetration
+        # is the live risk, so a move could buy overlap with a LOCKED part and
+        # raise no error at all (measured on a fixture: 0.18mm2, undisclosed).
+        # These numbers are read whatever the intent says.
+        from .legality import EPS as _eps
+        moved = grade.legality_at(exclude=exclude, poses={ref: at(seat)})
+        # Whatever the armed `legality` rule already said, said once: a budget
+        # it reported growing is the same finding as the reading below.
+        said = {r.get('budget') for r in rows if r.get('rule') == 'legality'}
+        for key in ('overlap_area', 'oob_amount', 'oob_count'):
+            if key in said:
+                continue
+            was, now = memo['legality'].get(key), moved.get(key)
+            if not (isinstance(was, (int, float))
+                    and isinstance(now, (int, float))):
+                continue
+            if now > was + (0 if isinstance(now, int) else _eps):
+                rows.append({'rule': 'legality', 'budget': key,
+                             'before': round(float(was), 4),
+                             'after': round(float(now), 4)})
+        return tuple(rows)
     except Exception as exc:                                   # noqa: BLE001
         return ({'unavailable': f'{type(exc).__name__}: {exc}'},)
 
@@ -1889,8 +1926,12 @@ def _floor_note(prefix: str, ref: str, record: Dict) -> str:
         # budget this seat is already over and the move would grow -- an error
         # the seat DOES have -- and a grade that could not be asked at all.
         # Each row says which; the sentence must not overwrite them.
-        'grade_delta': ("the pose that clears it does not pass the intent "
-                        "grade beside this seat: "
+        'grade_delta': (("the pose that clears it could not be compared with "
+                         "this seat: "
+                         if any('unavailable' in d
+                                for d in record.get('grade_delta') or [])
+                         else "the pose that clears it does not pass the intent "
+                              "grade beside this seat: ")
                         + '; '.join(_grade_delta_phrase(d)
                                     for d in record.get('grade_delta') or [])),
         'nearest_edge': ("the pose that clears it would read nearest another "
@@ -2364,9 +2405,21 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                     continue
                 if first is not None and first[3] not in _SLIDE_HELPS:
                     break
-                seat, floor, why = _floor_rung(
-                    state, part, entry, edge, lo, hi_eff, x, y,
-                    lambda a, b: not conflict_free(a, b, rot))
+                try:
+                    seat, floor, why = _floor_rung(
+                        state, part, entry, edge, lo, hi_eff, x, y,
+                        lambda a, b: not conflict_free(a, b, rot))
+                except Exception as exc:               # noqa: BLE001
+                    # A PREFERENCE may not cost a seat. Anything raised while
+                    # measuring the floor leaves this rung exactly as the
+                    # ladder had it before #975 -- today's pose, kept -- rather
+                    # than propagating out of `_seat_edge` and abandoning the
+                    # part, which would be worse than the shortfall.
+                    notes.append(f"{ref}: the board-edge copper floor could "
+                                 f"not be measured at this seat "
+                                 f"({type(exc).__name__}: {exc}); the seat is "
+                                 f"unchanged")
+                    seat, floor, why = None, None, None
                 # The first seat, unmoved, is the one the ladder always chose,
                 # and is taken without asking anything more.
                 if seat is not None and first is None and seat == (x, y):
@@ -2385,7 +2438,8 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                         return seat[0], seat[1], None
                     if first is None:
                         why = dict(why or {}, why='grade_delta',
-                                   grade_delta=list(worse[:_FLOOR_RECORD_PADS]))
+                                   n_grade_delta=len(worse),
+                                   grade_delta=list(worse[:_FLOOR_ROWS]))
                 if first is None:
                     first = (x, y, _floor_record(
                         ref, edge, 'conflict_free', (x, y, rot), floor, why),
@@ -2985,7 +3039,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                                 break
                             if _kept is None:
                                 _fwhy = dict(_fwhy or {}, why='grade_delta',
-                                             grade_delta=list(_worse[:_FLOOR_RECORD_PADS]))
+                                             n_grade_delta=len(_worse),
+                                             grade_delta=list(_worse[:_FLOOR_ROWS]))
                         if _kept is None:
                             _kept = (frac, _floor, _fwhy)
                             _kept_xy = (_x, _y)

@@ -403,9 +403,10 @@ ROWS = [
      "        return tuple(n >= 1 for n in counts)",
      (TS,), 'KILLED'),
     ('split-ignores-the-asked-pose', 'fp',
-     "            per = (self._ring_counts(ref, poses[ref])\n"
-     "                   if poses and ref in poses else self._ring_base[ref])",
-     "            per = self._ring_base[ref]",
+     "            if poses and ref in poses:\n"
+     "                per = self._ring_counts(ref, poses[ref])",
+     "            if False:\n"
+     "                per = self._ring_counts(ref, poses[ref])",
      (TS,), 'KILLED'),
     ('split-forgets-the-cutouts', 'fp',
      "            rings = [r for r in (getattr(gate, 'cutouts', None) or ())\n"
@@ -429,6 +430,34 @@ ROWS = [
      "        return (v.rule, '', v.block or '',\n"
      "                tuple(sorted((v.expected or {}).keys())))",
      (TS,), 'KILLED'),
+    # ---- the pre-push review: the grade only sees the rules the intent ARMS --
+    ('legality-metrics-not-compared', 'sd',
+     "        moved = grade.legality_at(exclude=exclude, poses={ref: at(seat)})",
+     "        moved = dict(memo['legality'])",
+     (TS,), 'KILLED'),
+    ('legality-metrics-overlap-not-read', 'sd',
+     "        for key in ('overlap_area', 'oob_amount', 'oob_count'):",
+     "        for key in ('oob_amount', 'oob_count'):",
+     (TS,), 'KILLED'),
+    ('ring-base-never-re-read', 'fp',
+     "                if self._ring_at.get(ref) != here:",
+     "                if ref not in self._ring_base:",
+     (TS,), 'KILLED'),
+    ('short-list-not-worst-first', 'sd',
+     "                   key=lambda s: (-s[0], s[1]))",
+     "                   key=lambda s: (s[1],))",
+     (TS,), 'KILLED'),
+    ('delta-claim-drops-the-expected-keys', 'fp',
+     "        return (v.rule, v.ref or '', v.block or '',\n"
+     "                tuple(sorted((v.expected or {}).keys())))",
+     "        return (v.rule, v.ref or '', v.block or '', ())",
+     (TS,), 'KILLED'),
+    ('unavailable-worded-as-a-verdict', 'sd',
+     "                         if any('unavailable' in d\n"
+     "                                for d in record.get('grade_delta') or [])",
+     "                         if False",
+     (TS,), 'KILLED'),
+
     # Expected to SURVIVE, and kept for the day it stops being true: the
     # grader's floors reach `connector_copper`, whose clearance reading is
     # evidence and raises no violation, so no delta can see them. Measured

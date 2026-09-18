@@ -704,15 +704,32 @@ class SeatBasis(unittest.TestCase):
 
 class Bounded(_Boards):
     def test_a_record_names_four_pads_and_counts_the_rest(self):
+        # STAGGERED in x, 2 microns a step, so each pad is a different distance
+        # from the west edge while all twenty stay SHORT of the floor. With all
+        # of them at one x -- as this fixture had -- the worst-first ordering is
+        # degenerate, and a mutation sorting the shortfalls by pad number
+        # instead SURVIVED this whole file. A coarser stagger is no good either:
+        # at 0.02mm a step, fifteen of the twenty clear the floor outright.
         pads = '\n    '.join(
-            f'(pad "{i + 1}" smd rect (at -2.0 {-0.95 + 0.1 * i:.2f}) (size .5 .05) '
-            f'(layers "F.Cu"))' for i in range(20))
+            f'(pad "{i + 1}" smd rect (at {-2.0 + 0.002 * i:.3f} '
+            f'{-0.95 + 0.1 * i:.2f}) (size .5 .05) (layers "F.Cu"))'
+            for i in range(20))
         path = self.board('many.kicad_pcb', pads=pads)
         ok, _, record, _ = self.seat(path, west(0.25, 0.35))
         self.assertTrue(ok)
         self.assertEqual(record['n_pads_short'], 20)
         self.assertEqual(len(record['pads']), seeder._FLOOR_RECORD_PADS)
         self.assertLess(len(json.dumps(record)), 1200)
+        # WORST FIRST, and the headline numbers are that pad's: pad 1 sits
+        # furthest west, so it is the one short by the most.
+        amounts = [p['shortfall_mm'] for p in record['pads']]
+        self.assertEqual(amounts, sorted(amounts, reverse=True))
+        self.assertEqual(len(set(amounts)), len(amounts),
+                         'the stagger must make the shortfalls distinct, or '
+                         'the ordering is untested again')
+        self.assertEqual(record['shortfall_mm'], amounts[0])
+        self.assertEqual(record['min_gap_mm'], record['pads'][0]['gap_mm'])
+        self.assertEqual(record['pads'][0]['pad_ref'], 'J1.1')
 
 
 class UnreadableProject(_Boards):
@@ -1100,6 +1117,48 @@ class GradeDelta(_Boards):
         self.assertEqual(record['why'], 'grade_delta')
         self.assertEqual(record['grade_delta'][0]['rule'], 'legality')
         self.assertTrue([n for n in res['notes'] if 'the intent grade' in n])
+
+    def overlap_at(self, path, pose, ref='J1'):
+        """The written board's courtyard overlap with `ref` at `pose`."""
+        out = str(self.root / f'ovl_{abs(hash((path, pose)))}.kicad_pcb')
+        write_placed_output(path, out, [{'reference': ref, 'new_x': pose[0],
+                                         'new_y': pose[1],
+                                         'new_rotation': pose[2]}])
+        state = pose_score.make_state(parse_kicad_pcb(out), out, clearance=.25,
+                                      board_edge_clearance=.55)
+        return state.legality_metrics()['overlap_area']
+
+    def test_overlap_is_refused_even_with_no_budget_declared(self):
+        """A pre-push reviewer's blocker: the GRADE alone cannot see this.
+
+        `_run_rules` skips `legality` when the intent declares no
+        `legality_budget`, and `emit_intent` WITHHOLDS that budget on exactly
+        the boards that already carry blocking body pairs or unwaived courtyard
+        interpenetration. So where overlap is the live risk the rule that would
+        catch a move buying more of it is not armed -- and no pad or hole
+        predicate sees courtyard overlap either. Measured before the fix: the
+        same 0.301 mm inward move, 0.18 mm2 of new interpenetration with a
+        LOCKED part, no record, no error, and the exit code unmoved.
+        """
+        path = self.write('ov_nb.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 5)])
+        intent = self.intent()                     # no legality_budget at all
+        self.assertFalse(getattr(intent, 'legality_budget', None),
+                         'the fixture must declare no budget, or this arm '
+                         'tests the armed path instead')
+        blind, _ = self.repair(path, intent, delta=False)
+        pose, res = self.repair(path, intent)
+        self.assertNotEqual(blind[:2], pose[:2])
+        self.assertGreater(self.overlap_at(path, blind), L.EPS,
+                           'the unguarded pose must really buy overlap, or '
+                           'this arm asserts nothing')
+        kept = self.overlap_at(path, pose)
+        self.assertLessEqual(kept, L.EPS,
+                             f'the kept pose carries {kept}mm2 of overlap')
+        record = res['edge_floor_fallback']['J1']
+        self.assertEqual(record['why'], 'grade_delta')
+        self.assertEqual([d.get('budget') for d in record['grade_delta']],
+                         ['overlap_area'])
+        self.assertEqual(record['n_grade_delta'], len(record['grade_delta']))
 
     def test_stage_one_does_not_raise_the_overlap_budget(self):
         path = self.write('ov2.kicad_pcb', [GD_J1, gd_part('R9', 4.901, 10)])
@@ -1549,6 +1608,28 @@ class InteriorContours(_Boards):
             return sorted((v.sort_key(), v.severity)
                           for v in grader.violations(poses=poses))
         self.assertEqual(marks(.25, .55), marks(None, None))
+
+    def test_a_delta_claim_keeps_the_expected_keys_it_is_about(self):
+        """One rule, one ref, two different findings: still an error ADDED.
+
+        The claim key carries the EXPECTED keys precisely so that a finding
+        swapped for a different finding of the same rule on the same ref is not
+        read as no change. Nothing pinned that component -- a mutation dropping
+        it from the key SURVIVED the whole file, while a unit probe showed a
+        `legality` overlap error swapped for an oob error, and a connector's
+        band error swapped for its pad-copper error, both reading as [].
+        """
+        def v(**expected):
+            return floorplan.Violation(
+                rule='edge_connector', severity=floorplan.ERROR,
+                message='J1 something', ref='J1', block=None,
+                measured={'mm': 1.0}, expected=expected)
+        band = v(overhang_max_mm=0.6)
+        copper = v(required_mm=0.55)
+        added = floorplan.grade_delta([band], [copper])
+        self.assertEqual([(d['rule'], d['ref'], d['added']) for d in added],
+                         [('edge_connector', 'J1', 1)])
+        self.assertEqual(floorplan.grade_delta([band], [band]), [])
 
     def test_a_delta_claim_keeps_the_ref_it_is_about(self):
         # Two parts, one rule, the same expected keys: an error that moves from
