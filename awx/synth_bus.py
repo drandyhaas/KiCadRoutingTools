@@ -661,6 +661,169 @@ def exact_dp(ids, s, d, tooth_layer=None, berth_layer=None, cap=22, fixed=None):
 # the best routing consistent with it -- and correlate. No routing, no chain,
 # milliseconds. On a case with a known optimum the pool also brackets it.
 
+def cap_floor(ids, s, d, tooth_layer=None, berth_layer=None, cap=None):
+    """The channel's minimum vias when EVERY lane is capped at `cap` of them.
+
+    WHY THIS EXISTS. `channel_lower_bound` prices a swimmer at its own
+    floor -- 2 when its ends share a layer -- and that is a correct LOWER
+    bound. It is routinely read as a target ("if every net paid at most
+    two, the board would be 78"), and that reading is a different claim
+    altogether: that a two-via-per-net routing EXISTS. It often does not.
+    Measured on uniform-random permutations, a clean channel stops being
+    two-via-feasible at about K=16 and is never feasible from K=20 up,
+    while the same channel is always feasible at four. So the planner's
+    directive "no net may need more than two vias" is not a hard rule of
+    the channel -- it is a property a particular arrangement may or may
+    not have, and at the campaign's K it is only reachable by leaving the
+    channel (un-crossing pairs by going around an array).
+
+    THE MODEL is the same one `exact_dp` walks -- a layer per lane at each
+    crossing, opposite layers at a crossing, ends pinned to the pads --
+    written as a MILP so a per-lane bound can be added. With `cap=None` it
+    must therefore agree with `exact_dp` exactly, and the self-test checks
+    that on every small case; the two use entirely different algorithms,
+    so an agreement is real evidence.
+
+    Returns (vias, per-lane vias, status). `vias` is None when the cap
+    makes the system infeasible -- which is a RESULT, and the strongest
+    one available: no realization of this channel meets the cap.
+    """
+    try:
+        import numpy as np
+        from scipy.optimize import milp, Bounds, LinearConstraint
+        from scipy.sparse import coo_matrix
+    except ImportError as e:            # pragma: no cover - environment
+        return None, {}, f'not computed (needs scipy/numpy: {e})'
+    tl, bl = tooth_layer or {}, berth_layer or {}
+    events = crossing_events(ids, s, d)
+    sites = {n: [] for n in ids}
+    for ei, (a, b) in enumerate(events):
+        sites[ids[a]].append(ei)
+        sites[ids[b]].append(ei)
+    idx = {}
+    for n in ids:
+        for ei in sites[n]:
+            idx[(n, ei)] = len(idx)
+    ny = len(idx)
+    rows, lo, hi = [], [], []
+
+    def add(co, a, b):
+        rows.append(co); lo.append(a); hi.append(b)
+
+    for ei, (a, b) in enumerate(events):          # a crossing: opposite layers
+        add({idx[(ids[a], ei)]: 1, idx[(ids[b], ei)]: 1}, 1, 1)
+    nv = ny
+    dcost = []
+    lane_d = {n: [] for n in ids}
+    INF = float('inf')
+    for n in ids:
+        chain = sites[n]
+        p0 = 1 if tl.get(n, 'F.Cu') == 'B.Cu' else 0
+        p1 = 1 if bl.get(n, 'F.Cu') == 'B.Cu' else 0
+        for pos, ei in enumerate(chain):
+            v = idx[(n, ei)]
+            dv = nv; nv += 1; dcost.append(1.0); lane_d[n].append(dv)
+            if pos == 0:
+                add({dv: 1, v: -1}, -p0, INF); add({dv: 1, v: 1}, p0, INF)
+            else:
+                u = idx[(n, chain[pos - 1])]
+                add({dv: 1, v: -1, u: 1}, 0, INF)
+                add({dv: 1, v: 1, u: -1}, 0, INF)
+        dv = nv; nv += 1; dcost.append(1.0); lane_d[n].append(dv)
+        if chain:
+            v = idx[(n, chain[-1])]
+            add({dv: 1, v: -1}, -p1, INF); add({dv: 1, v: 1}, p1, INF)
+        else:
+            add({dv: 1}, abs(p1 - p0), INF)
+        if cap is not None:
+            add({x: 1 for x in lane_d[n]}, 0, float(cap))
+    cvec = np.concatenate([np.zeros(ny), np.asarray(dcost, float)])
+    integ = np.concatenate([np.ones(ny), np.zeros(len(dcost))])
+    ri, ci, vi = [], [], []
+    for i, co in enumerate(rows):
+        for k, v in co.items():
+            ri.append(i); ci.append(k); vi.append(float(v))
+    A = coo_matrix((vi, (ri, ci)), shape=(max(1, len(rows)), nv)).tocsr()
+    res = milp(cvec, constraints=LinearConstraint(A, np.asarray(lo, float),
+                                                  np.asarray(hi, float)),
+               integrality=integ, bounds=Bounds(0, 1))
+    if res.x is None:
+        # a missing solution is not evidence of infeasibility: say which
+        why = ('infeasible' if getattr(res, 'status', None) == 2
+               else f'no solution (status {getattr(res, "status", "?")})')
+        return None, {}, why
+    per = {n: int(round(sum(res.x[x] for x in lane_d[n]))) for n in ids}
+    return int(round(float(cvec @ res.x))), per, 'optimal'
+
+
+def cap_survey(seeds=5, ks=(8, 10, 12, 14, 16, 20, 24, 32), cap=2):
+    """Is "no lane over `cap` vias" reachable at all, as K grows?
+
+    The answer is the SOLVER STATUS, not the presence of a solution: a
+    missing answer can mean a limit was hit, and reading that as "no such
+    routing exists" would be the strongest possible claim drawn from the
+    weakest possible evidence. Anything that is neither optimal nor
+    infeasible is printed as itself.
+    """
+    print(f'clean channel, uniform-random permutation, every pad on F.Cu; '
+          f'{seeds} seed(s) a rung')
+    print(f'{"K":>4}  {"<=%d vias a lane" % cap:22s}  {"at %d" % (2 * cap):>14s}'
+          f'  {"LIS":>5}')
+    worst = 0
+    rows = []
+    for K in ks:
+        col, four, lis_ = [], [], []
+        for seed in range(seeds):
+            pi = pattern_perm('shuffle', K, seed=seed)
+            ids = list(range(K))
+            s_ = {n: float(n) for n in ids}
+            d_ = {n: float(pi[n]) for n in ids}
+            _lb, l_ = lower_bound(ids, sorted(ids, key=lambda n: d_[n]))
+            lis_.append(l_)
+            v, _p, st = cap_floor(ids, s_, d_, cap=cap)
+            if st.startswith('not computed'):
+                print(f'  {st}')
+                return 0
+            col.append('Y' if v is not None else
+                       ('N' if st == 'infeasible' else '?'))
+            v4, _p4, st4 = cap_floor(ids, s_, d_, cap=2 * cap)
+            four.append('Y' if v4 is not None else
+                        ('N' if st4 == 'infeasible' else '?'))
+        if 'N' in col:
+            first_fail = K if worst == 0 else worst
+            worst = first_fail
+        rows.append((K, col, four))
+        print(f'{K:4d}  {" ".join(col):22s}  {" ".join(four):>14s}'
+              f'  {sum(lis_) / len(lis_):5.1f}')
+    # every sentence below is read off the table just printed, so it cannot
+    # drift from it -- the first draft of this summary asserted "4 always
+    # holds" on a run whose own K=32 column had already refuted it
+    never = [K for K, col, _f in rows if 'Y' not in col]
+    ever = [K for K, col, _f in rows if 'Y' in col]
+    f_bad = [K for K, _c, four in rows if 'N' in four]
+    print(f'\n  Y = a routing with at most {cap} vias a lane EXISTS; '
+          f'N = the solver proved none does.')
+    if worst:
+        print(f'  First rung with a failing seed: K={worst}.', end=' ')
+    if never:
+        print(f'No seed succeeds from K={min(never)} up'
+              f'{" (highest rung with any feasible seed: K=%d)" % max(ever) if ever else ""}.')
+    else:
+        print('Every rung tested had a feasible seed.')
+    print(f'  So the directive is a property of the ARRANGEMENT, not a rule '
+          f'of the channel.')
+    if f_bad:
+        print(f'  A cap of {2 * cap} is not free either -- it failed at '
+              f'K={", ".join(str(k) for k in f_bad)}.')
+    else:
+        print(f'  A cap of {2 * cap} held at every rung tested.')
+    print(f'  Above the failing K the directive is reachable only by LEAVING '
+          f'the channel --')
+    print(f'  un-crossing pairs by going around an array, which this model '
+          f'does not contain.')
+    return 0
+
+
 def plan_pool(order_src, order_dst, tooth_layer=None, berth_layer=None,
               n=400, seed=0, swims=(2.0, 3.0, 6.0, 20.0, 100.0)):
     """Distinct model-feasible plans: lane id -> 'F.Cu' | 'B.Cu' | 'swim'.
@@ -1182,6 +1345,13 @@ def main(argv=None):
                          'measured 0.02 s at K=15, 0.8 s at 20, 4.5 s at 22, '
                          '12 s at 23 -- and K=28 is out of reach, so the big '
                          'cases are graded on the other two answers')
+    ap.add_argument('--cap-survey', action='store_true',
+                    help='sweep K and report whether a clean channel over a '
+                         'random permutation can be routed with at most two '
+                         'vias a lane at all -- the planner directive, asked '
+                         'rather than assumed. Prints FEASIBLE/INFEASIBLE '
+                         'from the solver status, never from a missing answer')
+    ap.add_argument('--cap-survey-seeds', type=int, default=5)
     ap.add_argument('--self-test', action='store_true',
                     help='check the truth sources against each other on '
                          'every pattern and exit')
@@ -1209,6 +1379,8 @@ def main(argv=None):
                          '(measured at K=10: 14 vias degenerate, 6..12 across '
                          'jitter seeds). Non-zero is the honest default')
     a = ap.parse_args(argv)
+    if a.cap_survey:
+        return cap_survey(seeds=a.cap_survey_seeds)
     if a.self_test:
         return self_test()
     if a.judge:
@@ -1452,6 +1624,36 @@ def self_test():
                           f'!= exact {dp} (mid-channel changes should not help '
                           f'at the seeds this loop covers)')
                     bad += 1
+                # --- `cap_floor` walks the SAME model as `exact_dp` by an
+                # entirely different algorithm (a MILP over per-crossing
+                # layer bits against a DP over the layer hypercube), so an
+                # agreement between them is real evidence about both. It
+                # is the uncapped call that is comparable; a cap can only
+                # raise the answer, never lower it.
+                cf, per_l, st = cap_floor(ids, {i: i for i in ids},
+                                          {i: pi[i] for i in ids})
+                if cf is None:
+                    if 'needs scipy' not in st:
+                        print(f'FAIL {tag}: cap_floor gave nothing ({st})')
+                        bad += 1
+                else:
+                    if cf != dp:
+                        print(f'FAIL {tag}: cap_floor {cf} != exact_dp {dp} '
+                              f'-- the same model answered two ways must agree')
+                        bad += 1
+                    if sum(per_l.values()) != cf:
+                        print(f'FAIL {tag}: cap_floor per-lane sums to '
+                              f'{sum(per_l.values())}, total says {cf}')
+                        bad += 1
+                    # a cap at the worst lane's own cost must stay feasible
+                    # and must not change the answer
+                    wide = max(per_l.values()) if per_l else 0
+                    cw, _p, sw = cap_floor(ids, {i: i for i in ids},
+                                           {i: pi[i] for i in ids}, cap=wide)
+                    if cw != cf:
+                        print(f'FAIL {tag}: cap={wide} gave {cw} ({sw}), '
+                              f'uncapped {cf} -- a non-binding cap changed it')
+                        bad += 1
                 # --- the PLANNER'S model, checked three ways. It is solved by
                 # an O(K^3) DP, so it needs an independent opinion: the
                 # brute force over F/B/swim (3**K, small K only) and Greene's

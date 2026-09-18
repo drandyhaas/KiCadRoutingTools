@@ -186,13 +186,14 @@ octilinear, so a non-orthogonal pose is outside both models today.*
 | `replan.py` | the ROUTE as the judge; re-plans the ends the braid paid for |
 | `pack.py`, `pack_board.py` | every lane a taut string against its neighbour |
 | **`ledger_cal.py`** | **per net: DP floor vs slack. The instrument that says whether to work on the plan or the realization -- but its per-net floor is CIRCULAR (each net priced against the others AS LAID); read it beside `joint_floor.py`** |
-| **`joint_floor.py`** | **the NON-circular floor: one MILP over the fixed paths that picks every path's layer at every crossing at once. Validated against the audit's independent parity+max-cut on three boards. `JOINT_FLOOR_NODES` bounds it -- no clock** |
+| **`joint_floor.py`** | **the NON-circular floor: one MILP over the fixed paths that picks every path's layer at every crossing at once. Validated against the audit's independent parity+max-cut on three boards. `JOINT_FLOOR_NODES` bounds it -- no clock. `--cap N` adds a per-net via bound, so "no net over two vias" is ASKED rather than assumed: INFEASIBLE means no layer assignment over these paths can do it, and the only fix is a different plan** |
 | `room_probe.py` | **does a plan-time feature predict a swimmer's vias?** Takes FANOUT/ROUTED board pairs, rebuilds the crossing geometry the judge sees (`braid.plan_braid`) and correlates candidate features against the routed count. Every family tried is null (|r| <= 0.13 over 97 swimmers) -- run it before building any new per-lane cost term |
 | `modal_k.py` | cloud arms. `return_board: true` returns the routed board, `return_files: [globs]` any tmp/ artifact (plan sidecar, raw logs, judge dumps) -- without these a cloud-only phenomenon cannot be diagnosed at all, and K44's regression is cloud-only |
 | `human_at_k.py` | the human's vias for a coherent K set. **Mind the label**: `coherent_nets(51)` returns 48 nets, so "K51" is a 48-net problem -- the human is 81 over those 48 and 85 over the full 51. Both are right; ours route 48 |
 | `census_vs_human.py` | per-net vias/copper/layers against the human, and where each via sits |
 | `collapse_dives.py` | collapse short dives on a routed board (2 vias each) |
 | `cut_ledger.py` | Maley cut capacity of a plan, before any lane is routed |
+| `synth_bus.cap_floor` / `--cap-survey` | the same per-lane cap on a GENERATED channel, plus the sweep that shows the two-via directive dying with K. Uncapped it must equal `exact_dp` (different algorithm, same model) and the self-test checks that on 90 cases |
 | `wall_probe.py`, `copper_same.py`, `cmp_copper.py` | track-level wall census, set-compare copper |
 | `make_bench.py`, `rotate_board.py`, `mirror_board.py`, `bend_bench.py`, `channel_bench.py` | build an article from any board, and its poses |
 | `pose_gate.sh` | the chain over FF / BF / FB / BB / R90 / R180 / R270 |
@@ -1074,6 +1075,108 @@ So the honest state of TODO item 2's mechanism: it was never running, it now
 says so, and when it does run it is five vias behind and an order of
 magnitude over budget. The berth choice is still the right lever for K51's
 fifteen weaving nets -- `_alts5` is not the affordable way to pull it.
+
+### The two-via directive is INFEASIBLE, and that is why the nets weave (2026-09-17 late)
+
+The section above reads K51's gap as "fifteen nets that weave" against a
+directive -- *no net may need more than two vias* -- taken as reachable.
+Both halves needed checking, and both moved.
+
+**The population is smaller than recorded.** That count was taken on a
+**116-via baseline**. On the arm actually shipping (`tmp/s13/rp_rp_k51`,
+96 vias, 0 open, 0 DRC, re-graded) it is **ten nets, 19 excess vias**:
+
+```
+vias  ours  human          9 of ours pay 0, 28 pay 2, ONE pays 3, NINE pay 4
+   0     9      7          the human pays more than two on NOTHING: 40 nets
+   1     1      1          at exactly 2, 7 at 0, 1 at 1, and no tail at all
+   2    28     40
+   3     1      0          ours 96, human 81, and 77 if ours were capped at 2
+   4     9      0
+```
+
+**Crossing count is not the discriminator, and the belief that it is was
+wrong.** Over the routed copper the two boards are the same: **337
+crossings against 338**, 14.3 against 14.4 a net, our worst lane 29 against
+the human's 32. The human routes a **32-crossing** net with two vias; we
+route an **8-crossing** net with four. (The "68 against our 250" in *What
+the human does* is the PLAN's berth order at K41, not routed geometry --
+two different quantities, and only the second is what gets built.)
+
+**What does decide it is an exact law.** Every pad at both ends of every
+net on this bench is on F.Cu, so at a crossing a lane must be on the
+OPPOSITE layer from its partner. Walk a lane and write down the partner's
+layer at each crossing, in path order; then
+
+> **vias = 2 x (the number of maximal blocks of partners on the lane's own
+> pad layer)**
+
+which reproduces the routed count on **47 of 47 nets on BOTH boards** (the
+handful of misses are escape vias, which cross nothing). It is the RUN
+STRUCTURE that costs, not the crossings: `B...F...B` is 2 vias whatever its
+length, `F...B...F` is 4. The human has **no net with two F-blocks**; we
+have six -- and four of ours are a *single or double* isolated crossing
+near the destination, e.g. SDQ5 pays a whole dive-and-return for **one**
+crossing of SDQ0 at 75% along, having already crossed SDQ0 at 28%.
+
+**And now the part that reframes the campaign.** `joint_floor.py` grew a
+`--cap N`, which asks the directive instead of assuming it -- minimum vias
+over the board's OWN paths subject to every net paying at most N:
+
+| over its own routed paths | ours | human |
+|---|---|---|
+| routed changes | 92 | 80 |
+| uncapped joint floor | 84 | 70 |
+| `--cap 2` | **INFEASIBLE** | 72 |
+| `--cap 4` | 84 (the cap costs nothing) | -- |
+| fewest nets that MUST exceed 2 | 1 (SA7), at 94 vias | 0, at 74 |
+
+**Over our own copper there is no layer assignment at all that gives every
+net two vias** (HiGHS status 8, asserted -- not inferred from a missing
+solution). Over the human's there is, at 72. So the weaving is a fact about
+**which way the lanes go**, not about how the braid schedules them: it
+cannot be fixed downstream of the plan, and our realization is not the
+problem -- 92 routed against an 84 floor is *tighter* than the human's 80
+against 70.
+
+**The bench says the directive is not a rule of the channel.**
+`synth_bus.cap_floor` is the same question for a generated channel, and
+`synth_bus.py --cap-survey` sweeps it. On uniform-random permutations --
+the family that calibrates to this bench -- a clean channel stops being
+two-via-feasible at about K=16 and **no seed succeeds from K=20 up**, while
+four holds nearly everywhere (it failed once, at K=32). At K=48 the channel
+carries **539 inverted pairs**; both routed boards show ~338 crossings, so
+each un-crosses about 200 pairs by going around. **That escape is the only
+reason two vias a net is available at all**, and it is the one move
+`pages_first` has no variable for: it assigns a page to a whole lane inside
+a FIXED crossing system.
+
+So three corrections to the reading above:
+
+* **"if every net paid at most two: 78 vias" is not a target.** It assumes
+  a 2-capped routing exists and that capping leaves the other nets alone.
+  Neither holds here: on our paths the cap is infeasible, and the closest
+  feasible version (one net over, SA7) costs **94 -- ten vias WORSE than
+  the 84 the same paths reach uncapped**. Minimising vias and capping every
+  net are different objectives and on this board they pull apart.
+* **`channel_lower_bound` prices a swimmer at its own floor of 2, which is
+  a correct LOWER bound and not an achievable one.** Read 76 as a bound; do
+  not read it as "78 is one via away".
+* **Work the paths, not the schedule.** The whole 15-via gap is floor
+  against floor (84 vs 70). `--cap 2` is the cheapest available test of a
+  candidate plan: it answers in seconds and INFEASIBLE means re-plan.
+
+Where the human's paths differ, measured: at 0.8-0.9 of the way along the
+U1->DU1 axis -- the approach to the destination array -- the human's bus
+copper is **87% B.Cu** against our **47%**. The human has its lanes sorted
+onto B before the destination fan-in, so those crossings are B-against-F
+and free; ours meet the fan-in with half the bus still on F, which is the
+second F-block the law charges 2 vias for.
+
+**Not yet answered**: whether the REAL K51 permutation's clean channel is
+two-via-infeasible (the 539-crossing feasibility MILP had not returned).
+The random-permutation sweep and the routed-path result above both point
+that way, but neither is that measurement.
 
 ### What the synthetic bench can and cannot do at K41+
 
