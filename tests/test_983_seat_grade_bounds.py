@@ -384,6 +384,9 @@ class AlongEdgeWindow(_Graded):
         # not "only when the blind seat was dirty", because a stepped rung can
         # now pass the #975 move's own window check and win where the blind
         # ladder walked on (measured here: (0.198, 14.422) -> (0.711, 14.153)).
+        # This arm calls `_seat_edge` BARE, as #983's recipe did, so the #975
+        # move is not asked `_grade_worse`; through `repair_placement` it is,
+        # and A10 pins that path.
         dirty_blind = {'seat': 0, 'stage1': 0}
         fired = []
         real = seeder._window_nudge

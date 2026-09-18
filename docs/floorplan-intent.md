@@ -302,8 +302,8 @@ a micron outside, and the grade's tolerance is 1 nm: 70 of 2880 blocker
 positions on #983's own board were seated there. Every rung is now asked the
 grade's along-edge question at the pose it writes, and one that is flagged is
 moved one 0.001 mm grid step along the edge, into the window. The move is kept
-only if the rung still seats and its pad copper is no further inside the
-board-edge floor. A rung the grade accepts is unchanged. Only a window
+only if the rung still seats and costs nothing the seat had (see the next
+paragraph). A rung the grade accepts is unchanged. Only a window
 narrower than that grid can still be missed, such as a
 `center_on_edge` with `tolerance_mm: 0` whose courtyard centre is off the
 grid. The seat keeps its pose and the run's notes say it was "written outside
@@ -311,6 +311,20 @@ its declared along-edge window". Stage 1 also reads the part's extents, the
 declared start and the window at the rotation it will WRITE. It used to read
 them at the input rotation and then apply a declared `rotation`, which put
 splitflap_driver's J5 10.00 mm off a centre claim at a declared 0°.
+
+**What a correction may not trade for its fix.** Both this step and the band
+settle below are compared with the pose they replace, and every count below
+is checked separately:
+- no more pads short of the board-edge floor, and the worst pad no shorter;
+- no courtyard overlap with a neighbour where there was none;
+- when the search has an intent to grade against (`repair_placement`, stage 1
+  of a seed), no intent-grade error the raw pose did not have. This also
+  refuses an existing overlap pushed past a declared `legality_budget`.
+
+An overlap the seat already has may deepen by the correction's own micron.
+On #983's lattice through `repair_placement`, 16 of 2880 seats already
+overlapped the blocker by 0.044–0.35 mm² and gained 0.0012–0.0020 mm².
+Refusing that would keep the along-edge error the step exists to remove.
 
 ### The overhang band is graded on the drawn body (#961)
 
@@ -368,9 +382,10 @@ a gate margin under 0.02 mm. Every rung is now read with the grade's own band
 reading at the pose it writes. One that reads outside is moved along the edge
 normal, by whole 0.001 mm grid steps and at most 0.022 mm, until it reads
 inside. The move is taken only for a rung that already seats, and only if the
-moved pose still seats, leaves the pad copper no further inside the floor,
-still faces its edge, and does not trade the band for a setback: an inward
-move that leaves an `edge_receptacle` no overhang is refused. Otherwise the
+moved pose still seats, costs nothing the seat had (floor, new overlap, grade
+errors: the paragraph on what a correction may not trade, above), still faces
+its edge, and does not trade the band for a setback: an inward move that
+leaves an `edge_receptacle` no overhang is refused. Otherwise the
 pose is kept and the grade reports it as before. What that leaves, measured:
 a band `min` that can only be met by moving pad copper deeper into the floor,
 and a `{min: 0, max: 0}` band on a courtyard-only receptacle at a 0.55 mm gate
