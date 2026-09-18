@@ -1233,6 +1233,45 @@ AST-scans every awx file for that shape.
 
 ## Settled -- do not re-run these
 
+**`DST_RESIDUE>=2` (the joint berth choice) is a DEAD END, measured end to
+end (2026-09-17).** It needs `BRAID_ONE_DIVE=5` to do anything at all (see
+the refusal), and with that satisfied, at K28:
+
+| | vias | wall clock |
+|---|---|---|
+| baseline | **34** | **75 s** |
+| `ONE_DIVE=5` alone -- the prerequisite | 39 | 146 s |
+| + `DST_RESIDUE=3`, CP-SAT | 40 | 551 s |
+| + a pass budget, a no-good cut and a retry cap | 42 | 359 s |
+
+The residue pass adds **+1 via over its own prerequisite**, which is itself
+**+5 over baseline**, at 5-7x the wall clock -- on K28, the *fastest* rung,
+against an edict budget of ~2 minutes for all of K41. The speedups were
+built and they worked (confirmations 11 -> 2, passes 3 -> 1, 600 s -> 359 s)
+and were then REVERTED, because correct code that makes a dead end faster is
+still a dead end. What they measured is worth keeping:
+
+* a judge at `ONE_DIVE=5` costs **~13 s** against **~0.2 s** at
+  `ONE_DIVE=0` -- 65x, and it is the level-5 model CONSTRUCTION (5565
+  samples, 907 proximity pairs), not the MILP, which is 2256 rows and
+  0.1-0.3 s;
+* `_alts5` exists to replace one-at-a-time trials with one joint solve, and
+  its REJECTION path fell straight back to the trials it replaced -- ten
+  full judges against one cheap solve, a trade that inverted when CP-SAT
+  arrived and nobody re-checked;
+* with HiGHS (the default `ALT_SOLVER`) the solve returns nothing at all,
+  exactly as the solver study fifteen lines above it predicts.
+
+**`DST_RESIDUE=1` is the arm that works, and it is the cheap one.** It uses
+`residue_search`, needs no `ONE_DIVE`, and its judges are the 0.2 s kind: 41
+judges in 7 s. Measured K35 **62 -> 60** (0 open, 0 DRC). It does NOT
+transfer to K51 (116 -> 119) and the reason is the familiar one -- of its 6
+accepted moves only 1 lowered the residue count; the other 5 were taken on
+the judged cost, which `--judge` measures as rank-uninformative. That is
+where a K51 attempt should start: the search is right, its acceptance rule
+is not.
+
+
 | arm | verdict |
 |---|---|
 | `BRAID_SOLVER=cpsat` (plain solves) | **never** -- K41 98. `BRAID_ALT_SOLVER=cpsat` (choice solves) is the good one |
