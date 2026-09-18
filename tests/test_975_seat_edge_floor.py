@@ -914,7 +914,7 @@ class GradeConjuncts(_Boards):
             # before any of this is asked; `step=False` leaves the rung on the
             # window end, so the move's own window guard is what is tested.
             stepped = (seeder._window_nudge if step else
-                      (lambda st, part, e, edge, x, y, seats=None: (x, y)))
+                      (lambda st, part, e, edge, x, y, seats=None, origin=None: (x, y)))
             with patch.object(seeder, '_outside_its_along_edge_claim', claim), \
                     patch.object(seeder, '_grade_worse', worse), \
                     patch.object(seeder, '_window_nudge', stepped):

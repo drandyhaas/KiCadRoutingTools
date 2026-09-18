@@ -1871,13 +1871,15 @@ def _no_worse(new, raw) -> bool:
 
     Only if it costs NOTHING the seat already had, each count on its own:
       * no more pads short of the #975 floor, and the worst no shorter;
-      * no courtyard overlap with a neighbour where there was none, pair by
-        pair, "none" meaning below what the grade reports
-        (`_OVERLAP_REPORTED_MM2`). An overlap a pair already has may deepen,
-        but never double (measured on #983's lattice: 16 of 2880 seats already
-        overlapping the blocker by 0.044-0.35 mm2 gained 0.0012-0.0020 mm2,
-        under 3 %); refusing that would keep the grade ERROR the correction
-        exists to remove;
+      * pair by pair, no courtyard overlap the grade would newly report: a
+        pair under `_OVERLAP_REPORTED_MM2` (the resolution `overlap_area` is
+        printed at) may not grow at all, nor cross it; one the grade already
+        reports may deepen, but never to double (measured on #983's lattice:
+        16 of 2880 seats already overlapping the blocker by 0.044-0.35 mm2
+        gained 0.0012-0.0020 mm2, under 3 %) -- refusing that would keep the
+        grade ERROR the correction exists to remove. The comparison is
+        against the rung as the ladder found it, so a settle and a step on
+        one rung together still may not double it;
       * with a grader, no intent-grade error the raw pose does not have
         (`floorplan.grade_delta`, as #975's `_grade_worse`) -- which also
         refuses an existing overlap deepened past a declared budget -- and
@@ -1891,9 +1893,11 @@ def _no_worse(new, raw) -> bool:
         return False
     for ref, grown in n_ov.items():
         was = r_ov.get(ref, 0.0)
+        if was < _OVERLAP_REPORTED_MM2 <= grown:
+            return False
         if grown <= was + EPS:
             continue
-        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:
+        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:
             return False
     if n_err is not None and r_err is not None:
         from placement import floorplan as _fp
@@ -1912,7 +1916,7 @@ def _floor_key(floor) -> Tuple[int, float]:
 
 
 def _window_nudge(state, part, entry: Dict, edge: str, x: float, y: float,
-                  seats=None) -> Tuple[float, float]:
+                  seats=None, origin=None) -> Tuple[float, float]:
     """#983: `(x, y)`, unless the pose it WRITES is outside the declared
     along-edge window; then that pose one 0.001 mm grid step along the edge,
     into the window.
@@ -1939,15 +1943,17 @@ def _window_nudge(state, part, entry: Dict, edge: str, x: float, y: float,
     too; `_window_miss_note` names what is left. So does anything raised.
     """
     try:
-        return _window_step(state, part, entry, edge, x, y, seats)
+        return _window_step(state, part, entry, edge, x, y, seats, origin)
     except Exception:                                   # noqa: BLE001
         # A preference may not cost a seat: anything raised while asking
         # leaves the rung as the ladder had it, which the grade then reports.
         return x, y
 
 
-def _window_step(state, part, entry, edge, x, y, seats):
-    """`_window_nudge`'s body, outside its catch-all."""
+def _window_step(state, part, entry, edge, x, y, seats, origin=None):
+    """`_window_nudge`'s body, outside its catch-all. `origin`, when given,
+    is the rung before `_band_settle` moved it: what the step is judged
+    against, so the two corrections together cost no more than one may."""
     if not _outside_its_along_edge_claim(state, part, entry, edge, x, y):
         return x, y
     e_lo, e_hi, _ = _declared_edge_span(state, state.board, edge)
@@ -1966,7 +1972,8 @@ def _window_step(state, part, entry, edge, x, y, seats):
     if _outside_its_along_edge_claim(state, part, entry, edge, nx, ny):
         return x, y
     if seats is not None:
-        raw, new = seats(x, y), seats(nx, ny)
+        raw = seats(*(origin or (x, y)))
+        new = seats(nx, ny)
         if raw is None or new is None or not _no_worse(new, raw):
             return x, y
     return nx, ny
@@ -2721,8 +2728,9 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                 x, y, converged = _edge_correct(state, ref, edge, x, y,
                                                 overhang, band=(lo, hi_eff))
                 if converged:
+                    rung = (x, y)
                     x, y = _band_settle(state, part, entry, edge, lo, x, y, seats)
-                    x, y = _window_nudge(state, part, entry, edge, x, y, seats)
+                    x, y = _window_nudge(state, part, entry, edge, x, y, seats, rung)
                 if not converged or not on_board(x, y):
                     continue
                 if not conflict_free(x, y, rot):
@@ -3360,8 +3368,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                     band=(lo, float(hi) if hi is not None
                           else max(2.0 * overhang, lo + 1.0)))
                 if _conv:
+                    _rung = (_x, _y)
                     _x, _y = _band_settle(state, part, c, edge, lo, _x, _y, _s1_seats)
-                    _x, _y = _window_nudge(state, part, c, edge, _x, _y, _s1_seats)
+                    _x, _y = _window_nudge(state, part, c, edge, _x, _y, _s1_seats, _rung)
                 _why = []
                 if _conv and edge_seat_ok(state, part, _x, _y, edge, lo,
                                           float(hi) if hi is not None

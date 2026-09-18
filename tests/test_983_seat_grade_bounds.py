@@ -334,7 +334,7 @@ def key(pads=0, worst=0.0, overlap=None):
 def no_nudge():
     """The blind twin of A: every rung is written where the clamp put it."""
     return patch.object(seeder, '_window_nudge',
-                        lambda st, part, e, edge, x, y, seats=None: (x, y))
+                        lambda st, part, e, edge, x, y, seats=None, origin=None: (x, y))
 
 
 class AlongEdgeWindow(_Graded):
@@ -391,8 +391,8 @@ class AlongEdgeWindow(_Graded):
         fired = []
         real = seeder._window_nudge
 
-        def spy(st, part, e, edge, x, y, seats=None):
-            out = real(st, part, e, edge, x, y, seats)
+        def spy(st, part, e, edge, x, y, seats=None, origin=None):
+            out = real(st, part, e, edge, x, y, seats, origin)
             fired.append(out != (x, y))
             return out
         for k in range(0, 120, 3):
@@ -525,13 +525,25 @@ class AlongEdgeWindow(_Graded):
         self.assertEqual(nudge(ov({}, {'R9': 0.0012})), (x, y))              # new
         self.assertEqual(nudge(ov({'R9': 0.0441}, {'R9': 0.0453})), stepped) # deeper
         # PER PAIR: an overlap R8 already has does not license a new one with R9.
-        self.assertEqual(nudge(ov({'R8': 0.002}, {'R8': 0.002, 'R9': 0.0072})), (x, y))
+        # (R8's 0.004 is over half R9's new 0.0072, so a SUM of the two would
+        # not be refused by the doubling clause either: only per pair is.)
+        self.assertEqual(nudge(ov({'R8': 0.004}, {'R8': 0.004, 'R9': 0.0072})), (x, y))
         # "Existing" means the grade would report it, and it may not double.
         self.assertEqual(nudge(ov({'R9': 1.2e-5}, {'R9': 0.0132})), (x, y))
         self.assertEqual(nudge(ov({'R9': 3e-5}, {'R9': 5.9e-5})), (x, y))    # under double,
         #                                                   but never reported before
         self.assertEqual(nudge(ov({'R9': 0.01}, {'R9': 0.0201})), (x, y))
         self.assertEqual(nudge(ov({'R9': 0.01}, {'R9': 0.0199})), stepped)
+        self.assertEqual(nudge(ov({'R9': 0.01}, {'R9': 0.02})), (x, y))       # exactly double
+        # The threshold, from both sides: 6e-5 is reported and may deepen;
+        # 4.95e-5 is not, and may not creep past it within the 1e-6 slack.
+        self.assertEqual(nudge(ov({'R9': 6e-5}, {'R9': 1.1e-4})), stepped)
+        self.assertEqual(nudge(ov({'R9': 5e-5}, {'R9': 9e-5})), stepped)     # at it: reported
+        self.assertEqual(nudge(ov({'R9': 4.95e-5}, {'R9': 5.04e-5})), (x, y))
+        self.assertEqual(nudge(ov({'R9': 1e-5}, {'R9': 1.9e-5})), (x, y))    # unreported: no growth
+        # A pair that does not change leaves the step free, reported or not.
+        self.assertEqual(nudge(ov({'R9': 3e-5}, {'R9': 3e-5})), stepped)
+        self.assertEqual(nudge(ov({'R9': 0.2}, {'R9': 0.2})), stepped)
         # the raw one does not seat at all: a step never makes a seat of it
         only_step = lambda sx, sy: None if (sx, sy) == (x, y) else key()
         self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, only_step), (x, y))
@@ -873,10 +885,11 @@ class OverhangBand(_Graded):
                 self.assertEqual(pose, blind)
                 if budget is not None:
                     self.assertEqual(self.full_grade(path, pose, doc)[1], [])
-        # A locked R8 whose courtyard already touches J1's top by 1 um must not
-        # license the new overlap with R9 (the re-review's case: a SUM of the
-        # two let it through).
-        r8_at = ('  (footprint "r" (locked yes) (layer "F.Cu") (at 1.49 7.901 0)\n'
+        # A locked R8 whose courtyard already overlaps J1's top by 4 um
+        # (0.008 mm2, more than half R9's new 0.0072, so the doubling clause
+        # alone would not refuse a SUM) must not license the new overlap with
+        # R9 (the round-2 re-review's case).
+        r8_at = ('  (footprint "r" (locked yes) (layer "F.Cu") (at 1.49 7.904 0)\n'
                  '    (property "Reference" "R8")\n'
                  '    (fp_rect (start -1 -1) (end 1 1) (layer "F.CrtYd"))\n'
                  '    (pad "1" smd rect (at -0.5 -0.6) (size .3 .3) (layers "F.Cu"))\n'
@@ -888,6 +901,48 @@ class OverhangBand(_Graded):
         alone = self.write('b7_alone.kicad_pcb', board((20, 20), j1((BODY, crt))))
         doc = intent_doc(entry)
         self.assertNotEqual(self.repair(alone, doc), self.repair(alone, doc, blind=True))
+
+    def test_b7c_a_settle_and_a_step_on_one_rung_do_not_double_together(self):
+        # The round-3 review's compound: a band settle (inward 0.011) and then
+        # a window step (+y 0.001) on ONE rung, each judged against its own
+        # input, took a locked R9's overlap 6.0e-5 -> 1.38e-4 mm2 (2.3x). The
+        # step is judged against the rung as the ladder found it.
+        import pose_score
+        from placement import legality
+        crt = '(fp_rect (start -2.3399 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
+        r9 = ('  (footprint "r" (locked yes) (layer "F.Cu") (at 4.578 11.699 0)\n'
+              '    (property "Reference" "R9")\n'
+              '    (fp_rect (start -1 -0.6) (end 1 0.6) (layer "F.CrtYd"))\n'
+              '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu"))\n'
+              '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu")))\n')
+        b1 = ('  (footprint "b" (locked yes) (layer "F.Cu") (at 3.0 11.85 0)\n'
+              '    (property "Reference" "B1")\n'
+              '    (fp_rect (start -0.25 -1.25) (end 0.25 1.25) (layer "F.CrtYd"))\n'
+              '    (pad "1" smd rect (at 0 0) (size .5 2.5) (layers "F.Cu")))\n')
+        path = self.write('b7c.kicad_pcb', board((20, 20), j1((BODY, crt)), r9, b1))
+        entry = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.3, 'max': 0.5},
+                 'along_edge_band': {'from': 0.50021, 'to': 0.50029}}
+        doc = intent_doc(entry)
+
+        def r9_overlap(pose):
+            out = str(self.root / f'b7c_{abs(hash(pose))}.kicad_pcb')
+            write_placed_output(path, out, [{'reference': 'J1', 'new_x': round(pose[0], 3),
+                                             'new_y': round(pose[1], 3),
+                                             'new_rotation': pose[2]}])
+            parts = {g.ref: g for g in pose_score.make_state(
+                parse_kicad_pcb(out), out, clearance=.25,
+                board_edge_clearance=.55).graded_parts()}
+            a, b = parts['J1'], parts['R9']
+            return legality.pair_overlap_area(a.sides, a.side, a.rect, a.tht_rect,
+                                              b.sides, b.side, b.rect, b.tht_rect)
+        blind = self.repair(path, doc, blind=True)
+        was = r9_overlap(blind)
+        self.assertGreaterEqual(was, seeder._OVERLAP_REPORTED_MM2)   # an existing pair
+        for caller in ('repair', 'stage1'):
+            with self.subTest(caller=caller):
+                pose = (self.repair(path, doc) if caller == 'repair'
+                        else self.pose(self.stage1(path, doc), 'J1'))
+                self.assertLess(r9_overlap(pose), 2.0 * was, (caller, blind, pose))
 
     def test_b7b_the_pile_is_not_a_neighbour(self):
         # What the seat ignores as meaningless coordinates -- `_seat_edge`'s

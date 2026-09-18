@@ -158,12 +158,16 @@ ROWS = [
      "        return None",
      (T983,), 'KILLED'),
     ('seat-ladder-not-stepped', 'sd',
-     "                    x, y = _window_nudge(state, part, entry, edge, x, y, seats)",
+     "                    x, y = _window_nudge(state, part, entry, edge, x, y, seats, rung)",
      "                    pass",
      (T983,), 'KILLED'),
     ('stage-one-not-stepped', 'sd',
-     "                    _x, _y = _window_nudge(state, part, c, edge, _x, _y, _s1_seats)",
+     "                    _x, _y = _window_nudge(state, part, c, edge, _x, _y, _s1_seats, _rung)",
      "                    pass",
+     (T983,), 'KILLED'),
+    ('step-judged-against-its-own-input', 'sd',
+     "        raw = seats(*(origin or (x, y)))",
+     "        raw = seats(x, y)",
      (T983,), 'KILLED'),
     ('stage-one-kept-pose-re-derived', 'sd',
      "            elif converged and _kept is not None:",
@@ -213,20 +217,44 @@ ROWS = [
      "    if n_pads > r_pads:",
      (T983,), 'KILLED'),
     ('new-overlap-allowed', 'sd',
-     "        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:",
-     "        if was > 0.0 and grown > 2.0 * was:",
+     "        if was < _OVERLAP_REPORTED_MM2 <= grown:\n"
+     "            return False\n"
+     "        if grown <= was + EPS:\n"
+     "            continue\n"
+     "        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:",
+     "        if False:\n"
+     "            return False\n"
+     "        if grown <= was + EPS:\n"
+     "            continue\n"
+     "        if was > 0.0 and grown >= 2.0 * was:",
+     (T983,), 'KILLED'),
+    ('threshold-crossing-within-the-slack', 'sd',
+     "        if was < _OVERLAP_REPORTED_MM2 <= grown:\n"
+     "            return False",
+     "        if False:\n"
+     "            return False",
+     (T983,), 'KILLED'),
+    ('unchanged-pair-not-skipped', 'sd',
+     "        if grown <= was + EPS:\n"
+     "            continue\n"
+     "        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:",
+     "        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:",
      (T983,), 'KILLED'),
     ('overlap-growth-refused-too', 'sd',
-     "        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:",
+     "        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:",
      "        if True:",
      (T983,), 'KILLED'),
     ('overlap-reported-threshold-dropped', 'sd',
-     "        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:",
-     "        if grown > 2.0 * was:",
+     "        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:",
+     "        if grown >= 2.0 * was:",
      (T983,), 'KILLED'),
     ('overlap-may-grow-past-double', 'sd',
+     "        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:",
+     "        if was < _OVERLAP_REPORTED_MM2 or grown >= 3.0 * was:",
+     (T983,), 'KILLED'),
+    ('overlap-exactly-double-allowed', 'sd',
+     "        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:",
      "        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:",
-     "        if was < _OVERLAP_REPORTED_MM2 or grown > 3.0 * was:",
      (T983,), 'KILLED'),
     ('overlap-summed-not-paired', 'sd',
      "        was = r_ov.get(ref, 0.0)",
