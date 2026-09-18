@@ -1548,11 +1548,12 @@ _INWARD = {'north': (0.0, 1.0), 'south': (0.0, -1.0),
 #: Added to a derived shift so it survives `apply_move`'s 3-dp rounding, which
 #: can take back up to half a micron per axis.
 _FLOOR_SHIFT_GUARD_MM = 0.001
-#: #983: how far inside a declared along-edge window a rung is pulled when the
-#: pose it would WRITE falls outside it. A rung clamped to a window end puts
-#: the courtyard centre exactly on it, and `round(x, 3)` then moves it up to
-#: half a micron either way against the grade's 1 nm EPS, so 1 um of EDGE
-#: leaves half a micron of slack whichever way the rounding goes.
+#: #983: the step a rung is moved along its edge when the pose it would
+#: WRITE falls outside its declared window. A rung clamped to a window end
+#: puts the courtyard centre exactly on it, and `round(x, 3)` then moves it up
+#: to half a micron either way against the grade's 1 nm EPS; one step of the
+#: 0.001 mm grid the pose is written on puts it back at least half a micron
+#: inside.
 _WINDOW_GUARD_MM = 0.001
 #: A record names at most this many pads; the counts beside it are complete.
 _FLOOR_RECORD_PADS = 4
@@ -1705,8 +1706,8 @@ def _outside_its_along_edge_claim(state, part, entry: Dict, edge: str,
     declared window, but a rung ON a window end is written to 3 decimals and
     can land half a micron outside it, where the grade's EPS is 1 nm --
     measured: a one-footprint board whose seed went rc 0 -> 4, and 70 of
-    2880 blocker positions in #983. `_window_frac` asks this of every rung
-    and pulls the ones it flags inside the window; what is still flagged at
+    2880 blocker positions in #983. `_window_nudge` asks this of every rung
+    and steps the ones it flags inside the window; what is still flagged at
     the written pose is named by `_window_miss_note`."""
     if entry.get('center_on_edge') is None and entry.get('along_edge_band') is None:
         return False
@@ -1725,58 +1726,64 @@ def _outside_its_along_edge_claim(state, part, entry: Dict, edge: str,
                                                    part.ref, probe, 'error'))
 
 
-def _window_ends(part, bounds, edge: str, e_lo: float, e_hi: float, win,
-                 f_lo: float, f_hi: float) -> Tuple[float, float]:
-    """#983: the ladder fractions a flagged rung is pulled into.
+def _floor_key(floor) -> Tuple[int, float]:
+    """(pads short of the floor, worst shortfall): smaller is better, and a
+    reading that could not be taken counts as clear -- the seat then behaves
+    as it always did."""
+    if floor is None or not floor.short:
+        return (0, 0.0)
+    return (len(floor.short), floor.short[0][0])
 
-    The DECLARED window `win` (fractions of the edge span `e_lo..e_hi`, about
-    the courtyard centre) inset by `_WINDOW_GUARD_MM` of edge at each end, in
-    the ladder's own currency, then intersected with `(f_lo, f_hi)` -- the
-    window already cut to the part's extents. The inset is added in declared
-    units BEFORE `declared_to_ladder_frac`, which is a translation along the
-    edge axis, so it is the same millimetre at every rotation and on a notched
-    outline whose edge span is not the bounding box. An end that comes from
-    the part's extents rather than the declaration is not inset: nothing
-    declared lives there. Narrower than two guards, the window has no inside
-    to pull to, so both ends are the midpoint of `(f_lo, f_hi)` -- never a
-    refusal a window that does intersect did not earn.
+
+def _window_nudge(state, part, entry: Dict, edge: str, x: float, y: float,
+                  seats=None) -> Tuple[float, float]:
+    """#983: `(x, y)`, unless the pose it WRITES is outside the declared
+    along-edge window; then that pose one 0.001 mm grid step along the edge,
+    into the window.
+
+    A rung clamped to a window END puts the courtyard centre exactly on it,
+    and `round(x, 3)` then lands it up to half a micron outside, where the
+    grade's EPS is 1 nm. The window is asked through the grade's own conjunct
+    at the written pose, so a rung the grade accepts is returned
+    BIT-IDENTICAL -- including a window-end rung that already lands on the
+    grid. Only the along-edge coordinate moves, from its written value by
+    exactly one grid step (`_WINDOW_GUARD_MM`), so it is the same micron at
+    every rotation and on a notched outline, and the normal coordinate the
+    overhang walk converged on is untouched: re-deriving it would move the
+    part by a rounding step AWAY from the edge floor as often as towards it
+    (measured: a pad already past the outline went 0.132 -> 0.133 mm).
+
+    A PREFERENCE, so it may not cost a seat or deepen the #975 floor:
+    `seats(x, y)`, when given, is None for a pose that does not seat (off
+    the board, crowding a neighbour) and `_floor_key` of its floor reading
+    otherwise, and the nudged pose is taken only when it seats and is no
+    shorter of the floor than the raw one. A window no grid pose meets (one
+    step is not enough: `center_on_edge` with `tolerance_mm: 0` and a
+    courtyard centre off the grid) keeps the raw pose too; `_window_miss_note`
+    names what is left.
     """
-    g = _WINDOW_GUARD_MM / max(1e-9, e_hi - e_lo)
-    lo = max(f_lo, declared_to_ladder_frac(part, bounds, edge, e_lo, e_hi, win[0] + g))
-    hi = min(f_hi, declared_to_ladder_frac(part, bounds, edge, e_lo, e_hi, win[1] - g))
-    if lo > hi:
-        lo = hi = (f_lo + f_hi) / 2.0
-    return lo, hi
-
-
-def _window_frac(state, part, entry: Dict, edge: str, bounds, overhang: float,
-                 frac: float, ends, seats=None) -> float:
-    """#983: `frac` itself, unless the pose it WRITES is outside the declared
-    along-edge window; then `frac` pulled into `ends` (`_window_ends`).
-
-    Asked through the grade's own conjunct at the rounded pose, so every rung
-    the grade accepts is returned bit-identical -- including the window-end
-    rungs that already land on the 1 um grid, which a blanket inset would
-    have moved. `_edge_pose` fixes the along-edge coordinate and nothing
-    after it moves along the edge (`_edge_correct`, `_body_band_correct`,
-    `_band_settle` and `_floor_rung` all move along the normal), so the pose
-    asked here is the one the rung writes on that axis.
-
-    A PREFERENCE, so it may not cost a seat: `seats(frac)`, when given, says
-    whether a fraction seats at all (converged, on the board, clear of its
-    neighbours), and a pulled rung that does not seat where the raw one did
-    gives way to the raw one -- which the grade then flags, and
-    `_window_miss_note` names.
-    """
-    if ends is None:
-        return frac
-    x, y = _edge_pose(part, bounds, edge, frac, overhang)
     if not _outside_its_along_edge_claim(state, part, entry, edge, x, y):
-        return frac
-    pulled = min(ends[1], max(ends[0], frac))
-    if seats is not None and pulled != frac and not seats(pulled) and seats(frac):
-        return frac
-    return pulled
+        return x, y
+    e_lo, e_hi, _ = _declared_edge_span(state, state.board, edge)
+    win = _declared_frac_window(entry, e_hi - e_lo)
+    if win is None:
+        return x, y
+    ax = _axis_of(edge)
+    r = part.rect(round(x, 3), round(y, 3), part.rot)
+    centre = (r[ax] + r[ax + 2]) / 2.0
+    mid = e_lo + (win[0] + win[1]) / 2.0 * (e_hi - e_lo)
+    step = _WINDOW_GUARD_MM if mid > centre else -_WINDOW_GUARD_MM
+    if ax == 0:
+        nx, ny = round(round(x, 3) + step, 3), y
+    else:
+        nx, ny = x, round(round(y, 3) + step, 3)
+    if _outside_its_along_edge_claim(state, part, entry, edge, nx, ny):
+        return x, y
+    if seats is not None:
+        raw, new = seats(x, y), seats(nx, ny)
+        if raw is not None and (new is None or new > raw):
+            return x, y
+    return nx, ny
 
 
 def _window_miss_note(state, part, entry: Dict, edge: str, prefix: str):
@@ -2400,9 +2407,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         # ladder could find a seat OUTSIDE the declared band, which
         # `rule_edge_connector` would then flag -- the search accepting a pose
         # the grade refuses is the round-trip break `edge_seat_ok` and
-        # `keepout_hit` both exist to prevent. `ends` is where a rung whose
-        # WRITTEN pose would still fall outside it is pulled to (#983).
-        ends = None
+        # `keepout_hit` both exist to prevent.
         if win is not None:
             w_lo, w_hi = to_ladder(win[0]), to_ladder(win[1])
             n_lo, n_hi = max(f_lo, w_lo), min(f_hi, w_hi)
@@ -2418,7 +2423,6 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                         f"the position it is declared at")
                 return None
             f_lo, f_hi = n_lo, n_hi
-            ends = _window_ends(part, state.board, edge, e_lo, e_hi, win, f_lo, f_hi)
         if declared is not None:
             cur = to_ladder(declared)
         else:
@@ -2440,7 +2444,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         # a whole edge. 0.8 is the ladder's own full sweep (+/-0.4), so an
         # undeclared seat has scale exactly 1.0 and is unchanged.
         step = ((f_hi - f_lo) / 0.8) if win is not None else 1.0
-        return cur, f_lo, f_hi, step, ends
+        return cur, f_lo, f_hi, step
 
     # The declared band. `hi` None means "no stated maximum" -- allow twice the
     # midpoint target, which is what `overhang` was derived from, rather than
@@ -2514,25 +2518,25 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
             geom = _geometry(rot, complain=(rot == saved))
             if geom is None:
                 return None
-            cur, f_lo, f_hi, step, ends = geom
+            cur, f_lo, f_hi, step = geom
 
-            def seats(f):
-                # Does this fraction seat at all? `_window_frac` gives a
-                # pulled rung way to the raw one only when it would not.
-                sx, sy = _edge_pose(part, state.board, edge, f, overhang)
-                sx, sy, ok = _edge_correct(state, ref, edge, sx, sy, overhang,
-                                           band=(lo, hi_eff))
-                return ok and on_board(sx, sy) and conflict_free(sx, sy, rot)
+            def seats(sx, sy):
+                # What `_window_nudge` compares: None when the pose is not a
+                # seat, else how far short of the floor it leaves the copper.
+                if not (edge_seat_ok(state, part, sx, sy, edge, lo, hi_eff)
+                        and conflict_free(sx, sy, rot)):
+                    return None
+                return _floor_key(_floor_at(state, ref, sx, sy, rot))
             first = None
             graded = {}
             for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                        0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
                 frac = min(f_hi, max(f_lo, cur + df * step))
-                frac = _window_frac(state, part, entry, edge, state.board, overhang,
-                                    frac, ends, seats)
                 x, y = _edge_pose(part, state.board, edge, frac, overhang)
                 x, y, converged = _edge_correct(state, ref, edge, x, y,
                                                 overhang, band=(lo, hi_eff))
+                if converged:
+                    x, y = _window_nudge(state, part, entry, edge, x, y, seats)
                 if not converged or not on_board(x, y):
                     continue
                 if not conflict_free(x, y, rot):
@@ -2984,7 +2988,6 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                              f"edge, so stage 1 leaves it to the later stages")
                 continue
             _win = _declared_frac_window(c, _e_hi - _e_lo)
-            _ends = None                     # #983, as in `_seat_edge`
             if _win is not None:
                 _w_lo = declared_to_ladder_frac(_geo, bounds, edge,
                                                 _e_lo, _e_hi, _win[0])
@@ -3002,7 +3005,6 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         f"later stages")
                     continue
                 f_lo, f_hi = _n_lo, _n_hi
-                _ends = _window_ends(_geo, bounds, edge, _e_lo, _e_hi, _win, f_lo, f_hi)
             frac = min(f_hi, max(f_lo, frac))
             # #893. An edge connector is the class whose rotation is most often
             # a DECISION, and stage 1 never turns a part -- it seats at
@@ -3122,14 +3124,14 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # defect `_seat_edge`'s `step` comment documents, in this path.
             _sstep = ((f_hi - f_lo) / 0.8) if _win is not None else 1.0
 
-            def _s1_seats(f):
-                # Does this fraction seat clear of what is placed? A pulled
-                # rung (#983) gives way to the raw one only when it would not.
-                _band = (lo, float(hi) if hi is not None else max(2.0 * overhang, lo + 1.0))
-                sx, sy = _edge_pose(part, bounds, edge, f, overhang)
-                sx, sy, ok = _edge_correct(state, ref, edge, sx, sy, overhang, band=_band)
-                return (ok and edge_seat_ok(state, part, sx, sy, edge, lo, _band[1])
-                        and not _shorted_by(sx, sy))
+            def _s1_seats(sx, sy):
+                # As `_seat_edge`'s `seats`, for `_window_nudge` (#983): None
+                # when the pose is not a seat clear of what is placed.
+                _hi = float(hi) if hi is not None else max(2.0 * overhang, lo + 1.0)
+                if (not edge_seat_ok(state, part, sx, sy, edge, lo, _hi)
+                        or _shorted_by(sx, sy)):
+                    return None
+                return _floor_key(_floor_at(state, ref, sx, sy, part.rot))
             _base_frac = frac
             _why: List[str] = []
             # The FIRST rung that is a legal seat but crowds a placed part --
@@ -3140,6 +3142,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # named on the record and `place_seed`'s gate refuses it; trading
             # the declared edge for it would lose both.
             _fallback = None
+            _fallback_xy = None
             # #975, the order of preference, tier by tier:
             #   1. a conflict-free rung, or that rung moved inward, whose pad
             #      copper clears the board-edge floor -- the first in rung
@@ -3161,13 +3164,13 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             _graded = {}
             for _df in _slide:
                 frac = min(f_hi, max(f_lo, _base_frac + _df * _sstep))
-                frac = _window_frac(state, part, c, edge, bounds, overhang, frac,
-                                    _ends, _s1_seats)
                 _x, _y = _edge_pose(part, bounds, edge, frac, overhang)
                 _x, _y, _conv = _edge_correct(
                     state, ref, edge, _x, _y, overhang,
                     band=(lo, float(hi) if hi is not None
                           else max(2.0 * overhang, lo + 1.0)))
+                if _conv:
+                    _x, _y = _window_nudge(state, part, c, edge, _x, _y, _s1_seats)
                 _why = []
                 if _conv and edge_seat_ok(state, part, _x, _y, edge, lo,
                                           float(hi) if hi is not None
@@ -3207,6 +3210,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         continue
                     if _fallback is None:
                         _fallback = (frac, _hit)
+                        _fallback_xy = (_x, _y)
             # Without a pick the only early exit leaves `_kept` set, so this is
             # the old `for ... else`: the loop ran out, or tier 2 stopped it.
             if _pick is None:
@@ -3229,6 +3233,13 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 # The same rung, moved inward when that is what cleared it --
                 # the walk above already checked this exact pose.
                 x, y = _pick
+            elif converged and _kept is not None:
+                # Likewise the kept rung and the crowding one: the pose the
+                # ladder chose, not one re-derived from `frac`, which would
+                # drop a #983 window step or the raw pose it gave way to.
+                x, y = _kept_xy
+            elif converged and _fallback_xy is not None:
+                x, y = _fallback_xy
             if not converged:
                 # The walk diverged (it drives a scalar SUM along one axis, so
                 # an along-edge overshoot never cancels). It used to

@@ -905,14 +905,14 @@ class GradeConjuncts(_Boards):
                                                    clearance=.25, board_edge_clearance=.55)
             claim = seeder._outside_its_along_edge_claim if window else (lambda *a, **k: False)
             worse = seeder._grade_worse if delta else (lambda *a, **k: ())
-            # #983 pulls a rung whose written pose is outside the window
-            # before any of this is asked; `pull=False` puts the rung back on
-            # the window end, so the move's own window guard is what is tested.
-            pulled = (seeder._window_frac if pull else
-                      (lambda st, part, e, edge, bounds, ov, frac, ends, seats=None: frac))
+            # #983 steps a rung whose written pose is outside the window
+            # before any of this is asked; `pull=False` leaves the rung on the
+            # window end, so the move's own window guard is what is tested.
+            pulled = (seeder._window_nudge if pull else
+                      (lambda st, part, e, edge, x, y, seats=None: (x, y)))
             with patch.object(seeder, '_outside_its_along_edge_claim', claim), \
                     patch.object(seeder, '_grade_worse', worse), \
-                    patch.object(seeder, '_window_frac', pulled):
+                    patch.object(seeder, '_window_nudge', pulled):
                 res = call()
             (move,) = [m for m in res['moves'] if m['reference'] == 'J1']
             return (move['new_x'], move['new_y'], move['new_rotation'])

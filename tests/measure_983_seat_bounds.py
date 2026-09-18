@@ -26,8 +26,9 @@ Three mechanisms, each a lattice of seats graded on the written board:
              meet -- disclosed, not fixed).
   B  overhang band. The seat accepts a band reading within +-0.02 mm
      (`_edge_correct`, `_body_band_correct`, `edge_seat_ok`); the grade
-     within EPS. A first seat can grade up to ~0.0205 mm outside its band.
-       L-B1  a drawn body 0.44 +- 0.3 mm past its courtyard, four bands.
+     within EPS. A first seat can grade outside its band by up to the
+     seat's 0.02 mm plus half a micron of rounding (0.019 mm measured).
+       L-B1  a drawn body 0.400-0.706 mm past its courtyard, four bands.
        L-B2  no declared max, `min` >= 0.6: the target IS the minimum, and a
              body edge off the 1 um grid rounds under it.
        L-B3  a courtyard-only receptacle on a {0, 0} band, courtyard edge off
@@ -40,13 +41,17 @@ Three mechanisms, each a lattice of seats graded on the written board:
              (`seed_refs`), declared at 0/90/180/270 with a centre claim and
              with a band.
 
-INPUTS, the WRITER and the GRADER come from THIS file's repo, the same bytes
-for every arm (sha256 recorded). Only the ENGINE comes from `--repo`: a
-`--worker` subprocess runs there, with that tree's `py_*` first on sys.path
-and PYTHONHASHSEED=0, and hands back poses and notes. The worker also counts,
-per case, how often each correction the fix adds CHANGED its input
-(`_window_frac`, `_band_settle`, `_stage1_geometry_rot`); on a tree without
-them the count is null.
+INPUTS, the WRITER and the GRADER come from THIS file's repo: every board's
+sha256 is recorded per row, the repo's commit as `here_sha` (a dirty tree is
+refused), and `--diff` refuses two arms graded by different commits. Only the
+ENGINE comes from `--repo`: a `--worker` subprocess runs there, with that
+tree's `py_*` first on sys.path and PYTHONHASHSEED=0, and hands back poses and
+notes. The worker also counts, per case, how often each correction the fix
+adds CHANGED its input (`_window_nudge`, `_band_settle`,
+`_stage1_geometry_rot`), binding each call's arguments BY NAME so a signature
+change cannot silently count the wrong one; on a tree without them the count
+is null. The base arm must be the fix's parent: #986's own floor preference
+moves hundreds of these seats relative to upstream main.
 
 THE RULE, written before any fix existed:
 
@@ -74,7 +79,7 @@ import time
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MARK = 'M983: '
 SPLIT = os.path.join(HERE, 'kicad_files', 'splitflap_driver.kicad_pcb')
-CORRECTIONS = ('_window_frac', '_band_settle', '_stage1_geometry_rot')
+CORRECTIONS = ('_window_nudge', '_band_settle', '_stage1_geometry_rot')
 
 
 def _here_paths():
@@ -231,22 +236,24 @@ def worker():
     from kicad_parser import parse_kicad_pcb
     from placement import floorplan, seeder
     import pose_score
+    import inspect
     fires = {}
 
     def wrap(name, changed):
         f = getattr(seeder, name, None)
         if f is None:
             return
+        sig = inspect.signature(f)
 
         def counted(*a, **k):
             r = f(*a, **k)
-            if changed(a, r):
+            if changed(sig.bind(*a, **k).arguments, r):
                 fires[name] = fires.get(name, 0) + 1
             return r
         setattr(seeder, name, counted)
-    wrap('_window_frac', lambda a, r: r != a[5])
-    wrap('_band_settle', lambda a, r: (r[0], r[1]) != (a[6], a[7]))
-    wrap('_stage1_geometry_rot', lambda a, r: r != a[0].rot)
+    wrap('_window_nudge', lambda b, r: tuple(r) != (b['x'], b['y']))
+    wrap('_band_settle', lambda b, r: tuple(r[:2]) != (b['x'], b['y']))
+    wrap('_stage1_geometry_rot', lambda b, r: r != b['part'].rot)
     present = {n: hasattr(seeder, n) for n in CORRECTIONS}
     for line in sys.stdin:
         case = json.loads(line)
@@ -336,8 +343,9 @@ def grade_row(case, row, tmp):
 def collect(repo, out_path, quick):
     _here_paths()
     repo = os.path.abspath(repo)
-    if git(repo, 'status', '--porcelain', '--untracked-files=no'):
-        sys.exit(f'REFUSED: {repo} has uncommitted changes')
+    for tree in (repo, HERE):
+        if git(tree, 'status', '--porcelain', '--untracked-files=no'):
+            sys.exit(f'REFUSED: {tree} has uncommitted changes')
     tmp = tempfile.mkdtemp(prefix='m983_')
     try:
         todo, input_sha = [], {}
@@ -416,6 +424,11 @@ def diff(a_path, b_path):
         with open(p, encoding='utf-8') as stream:
             docs.append(json.load(stream))
     base, head = docs
+    if base['here_sha'] != head['here_sha']:
+        print(f'REFUSED: the arms were graded by different commits '
+              f'({base["here_sha"][:10]} vs {head["here_sha"][:10]}); re-run both '
+              f'from one tree')
+        return 2
     for d in docs:
         summarize(d)
         print()
