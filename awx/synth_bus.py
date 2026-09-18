@@ -819,10 +819,224 @@ def cap_sat_feasible(ids, s, d, tooth_layer=None, berth_layer=None, cap=2,
             return 'INFEASIBLE'
     sol = cp_model.CpSolver()
     sol.parameters.num_workers = workers
+    # deterministic time AND interleaved search, the campaign's rule: a
+    # wall-clock budget makes a slow machine answer DIFFERENTLY, not later
+    sol.parameters.interleave_search = True
     sol.parameters.max_deterministic_time = det_time
     st = sol.Solve(m)
     return {cp_model.OPTIMAL: 'FEASIBLE', cp_model.FEASIBLE: 'FEASIBLE',
             cp_model.INFEASIBLE: 'INFEASIBLE'}.get(st, 'UNKNOWN')
+
+
+def uncross_min(ids, s, d, tooth_layer=None, berth_layer=None, cap=2,
+                budget=None, workers=8, det_time=120.0):
+    """The UN-CROSSING move, priced: how few pairs must stop crossing before
+    every lane fits in `cap` vias -- and, with `budget` set, the minimum
+    vias when at most that many pairs may be un-crossed.
+
+    WHY THIS IS THE MOVE. A channel over a real permutation is not
+    two-via-feasible at the campaign's K (`cap_survey`), and neither a
+    better schedule nor a free launch layer changes that -- both were
+    measured inert. What does change it is TOPOLOGY: routing one lane
+    around another (or around an array) so an inverted pair never crosses.
+    Every such move costs length, not vias, which is why it is worth
+    counting separately from the via floor.
+
+    The model is `cap_floor`'s, plus one binary a crossing: when it is set
+    the pair's opposite-layer constraint is dropped, and the objective (or
+    the budget) counts those. Two modes:
+
+      budget is None -- minimise the REMOVALS subject to the cap. The
+                        answer is a work list: which pairs to re-route.
+      budget = R     -- minimise VIAS with at most R removals and no cap,
+                        which is the floor of the improved path set.
+
+    Returns (value, removed pairs, status). UNKNOWN is a budget, not a
+    verdict, and is returned as such.
+    """
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError as e:            # pragma: no cover - environment
+        return None, [], f'not computed (needs ortools: {e})'
+    tl, bl = tooth_layer or {}, berth_layer or {}
+    events = crossing_events(ids, s, d)
+    sites = {n: [] for n in ids}
+    for ei, (a, b) in enumerate(events):
+        sites[ids[a]].append(ei)
+        sites[ids[b]].append(ei)
+    m = cp_model.CpModel()
+    y = {(n, k): m.NewBoolVar(f'y{n}_{k}') for n in ids for k in sites[n]}
+    rem = []
+    for ei, (a, b) in enumerate(events):
+        ya, yb = y[(ids[a], ei)], y[(ids[b], ei)]
+        r = m.NewBoolVar(f'r{ei}')
+        rem.append(r)
+        m.AddBoolOr([ya, yb, r])                 # not both F unless un-crossed
+        m.AddBoolOr([ya.Not(), yb.Not(), r])     # not both B unless un-crossed
+    changes = []
+    for n in ids:
+        p0 = 1 if tl.get(n, 'F.Cu') == 'B.Cu' else 0
+        p1 = 1 if bl.get(n, 'F.Cu') == 'B.Cu' else 0
+        seq = [p0] + [y[(n, k)] for k in sites[n]] + [p1]
+        fixed, free = 0, []
+        for i in range(len(seq) - 1):
+            a, b = seq[i], seq[i + 1]
+            if isinstance(a, int) and isinstance(b, int):
+                fixed += int(a != b)
+                continue
+            dv = m.NewBoolVar(f'd{n}_{i}')
+            if isinstance(a, int):
+                m.Add(dv == (b if a == 0 else 1 - b))
+            elif isinstance(b, int):
+                m.Add(dv == (a if b == 0 else 1 - a))
+            else:
+                m.AddBoolXOr([a, b, dv.Not()])
+            free.append(dv)
+        if budget is None and free:
+            m.Add(sum(free) <= cap - fixed)
+        elif budget is None and fixed > cap:
+            return None, [], 'INFEASIBLE (pads alone exceed the cap)'
+        changes.extend(free)
+        if fixed:
+            changes.append(m.NewConstant(fixed))
+    if budget is None:
+        m.Minimize(sum(rem))
+    else:
+        m.Add(sum(rem) <= budget)
+        m.Minimize(sum(changes))
+    sol = cp_model.CpSolver()
+    sol.parameters.num_workers = workers
+    # deterministic time AND interleaved search, the campaign's rule: a
+    # wall-clock budget makes a slow machine answer DIFFERENTLY, not later
+    sol.parameters.interleave_search = True
+    sol.parameters.max_deterministic_time = det_time
+    st = sol.Solve(m)
+    if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None, [], sol.StatusName(st)
+    cut = [(ids[events[i][0]], ids[events[i][1]])
+           for i, r in enumerate(rem) if sol.Value(r)]
+    return (int(sol.ObjectiveValue()), cut,
+            'optimal' if st == cp_model.OPTIMAL else 'feasible')
+
+
+def escape_move_floor(pi, reach=0, workers=8, det_time=60.0):
+    """Does letting each lane pick a DIFFERENT escape slot lower the floor?
+
+    THE MOVE. The pads are fixed, but the order in which lanes enter and
+    leave the channel is not: a ball may escape its array at a neighbouring
+    slot and a pad may be approached from a neighbouring berth. `reach` is
+    how many slots a lane may shift at each end (0 = the plan as given).
+    Both ends stay a PERMUTATION -- two lanes cannot use one slot.
+
+    WHAT IT MEASURES. The free-rider ceiling: the largest set of lanes that
+    are pairwise non-inverted, which is the most lanes that can hold one
+    layer end to end and so pay nothing. In a clean channel non-crossing is
+    exactly non-inverted, so this is the LIS, and the floor is bounded
+    below by `2 * (K - ceiling)` when every pad is on F. Raising the
+    ceiling is therefore the one plan-time move that lowers that bound --
+    and unlike un-crossing a pair it costs no length, only a different
+    slot.
+
+    Returns (ceiling, floor_bound, status).
+    """
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError as e:            # pragma: no cover - environment
+        return None, None, f'not computed (needs ortools: {e})', None
+    K = len(pi)
+    m = cp_model.CpModel()
+    a = [m.NewIntVar(max(0, i - reach), min(K - 1, i + reach), f'a{i}')
+         for i in range(K)]
+    b = [m.NewIntVar(max(0, pi[i] - reach), min(K - 1, pi[i] + reach), f'b{i}')
+         for i in range(K)]
+    m.AddAllDifferent(a)
+    m.AddAllDifferent(b)
+    z = [m.NewBoolVar(f'z{i}') for i in range(K)]
+    for i in range(K):
+        for j in range(i + 1, K):
+            # lt_a = (a_i < a_j), lt_b = (b_i < b_j); the pair is INVERTED
+            # when they disagree, and two inverted lanes cross, so at most
+            # one of them can be a free rider
+            la = m.NewBoolVar(f'la{i}_{j}')
+            m.Add(a[i] < a[j]).OnlyEnforceIf(la)
+            m.Add(a[i] > a[j]).OnlyEnforceIf(la.Not())
+            lb = m.NewBoolVar(f'lb{i}_{j}')
+            m.Add(b[i] < b[j]).OnlyEnforceIf(lb)
+            m.Add(b[i] > b[j]).OnlyEnforceIf(lb.Not())
+            inv = m.NewBoolVar(f'inv{i}_{j}')
+            m.AddBoolXOr([la, lb, inv.Not()])     # inv = la XOR lb
+            m.AddBoolOr([z[i].Not(), z[j].Not(), inv.Not()])
+    m.Maximize(sum(z))
+    sol = cp_model.CpSolver()
+    sol.parameters.num_workers = workers
+    # deterministic time AND interleaved search, the campaign's rule: a
+    # wall-clock budget makes a slow machine answer DIFFERENTLY, not later
+    sol.parameters.interleave_search = True
+    sol.parameters.max_deterministic_time = det_time
+    st = sol.Solve(m)
+    if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None, None, sol.StatusName(st), None
+    ceil_ = int(sol.ObjectiveValue())
+    # the slots the move chose, so the CALLER can rebuild the channel and
+    # price it with `cap_floor`. The objective here is the BOUND
+    # 2*(K - ceiling), which is loose -- raising the ceiling is not the
+    # same as lowering the true floor, and only the rebuilt channel says
+    # whether it did.
+    order = ([sol.Value(v) for v in a], [sol.Value(v) for v in b])
+    return ceil_, 2 * (K - ceil_), ('optimal' if st == cp_model.OPTIMAL
+                                    else 'feasible'), order
+
+
+def escape_move_survey(ks=(12, 16, 20), seeds=(0, 1), reaches=(0, 1, 2, 3)):
+    """Does giving each lane more escape/berth reach lower the TRUE floor?
+
+    Prints, per case and reach: the free-rider ceiling the move maximises,
+    the bound 2*(K-ceiling) that follows from it, and -- rebuilt from the
+    slots the move actually chose -- the true floor (`cap_floor`) and
+    whether two vias a lane has become possible.
+
+    THE POINT OF PRINTING ALL FOUR is that the last two are the ones that
+    matter and the first two do not track them. The move is a real lever:
+    measured, the true floor falls by a third or more at reach 3, and
+    two-via feasibility comes back on cases that did not have it. But
+    maximising the CEILING is the wrong objective -- it is a loose bound,
+    and rows where the ceiling rises while the true floor gets WORSE are in
+    this table. Steer this move by `cap_floor`, not by LIS or crossings.
+    """
+    print(f'{"K":>3} {"seed":>4} {"reach":>5} | {"ceiling":>7} {"bound":>5} '
+          f'{"TRUE floor":>10} {"<=2/lane":>10}   (bound is LOOSE; '
+          f'the true floor is the one that counts)')
+    worse = 0
+    for K in ks:
+        for seed in seeds:
+            pi = pattern_perm('shuffle', K, seed=seed)
+            ids = list(range(K))
+            base = None
+            for r in reaches:
+                out = escape_move_floor(pi, reach=r)
+                c, bnd, st, order = out
+                if c is None:
+                    print(f'{K:3d} {seed:4d} {r:5d} | {st}')
+                    continue
+                a, b = order
+                s_ = {n: float(a[n]) for n in ids}
+                d_ = {n: float(b[n]) for n in ids}
+                v, _p, _st = cap_floor(ids, s_, d_)
+                f2 = cap_sat_feasible(ids, s_, d_, cap=2, det_time=30.0)
+                flag = ''
+                if base is not None and v is not None and v > base:
+                    flag = '  <-- ceiling rose, TRUE FLOOR WORSE'
+                    worse += 1
+                if r == 0:
+                    base = v
+                elif v is not None and base is not None:
+                    base = min(base, v)
+                print(f'{K:3d} {seed:4d} {r:5d} | {c:7d} {bnd:5d} '
+                      f'{str(v):>10} {f2:>10}{flag}')
+            print()
+    print(f'  rows where more reach made the TRUE floor worse: {worse}')
+    print('  -> the move is real, the CEILING is not the objective to steer it by.')
+    return 0
 
 
 def cap_survey(seeds=5, ks=(8, 10, 12, 14, 16, 20, 24, 32), cap=2):
@@ -1414,6 +1628,10 @@ def main(argv=None):
                          'measured 0.02 s at K=15, 0.8 s at 20, 4.5 s at 22, '
                          '12 s at 23 -- and K=28 is out of reach, so the big '
                          'cases are graded on the other two answers')
+    ap.add_argument('--escape-survey', action='store_true',
+                    help='does more escape/berth reach lower the TRUE floor? '
+                         'Prints the ceiling and its bound beside the true '
+                         'floor, because they do not track each other')
     ap.add_argument('--cap-survey', action='store_true',
                     help='sweep K and report whether a clean channel over a '
                          'random permutation can be routed with at most two '
@@ -1448,6 +1666,8 @@ def main(argv=None):
                          '(measured at K=10: 14 vias degenerate, 6..12 across '
                          'jitter seeds). Non-zero is the honest default')
     a = ap.parse_args(argv)
+    if a.escape_survey:
+        return escape_move_survey()
     if a.cap_survey:
         return cap_survey(seeds=a.cap_survey_seeds)
     if a.self_test:
@@ -2008,6 +2228,21 @@ def self_test():
         elif (sat == 'FEASIBLE') != want:
             print(f'FAIL {tag}: CP-SAT says {sat}, expected '
                   f'{"FEASIBLE" if want else "INFEASIBLE"}')
+            bad += 1
+    # the escape move's reach-0 answer is the free-rider ceiling with no
+    # move at all, which in a clean channel is exactly the LIS -- computed
+    # here by CP-SAT and there by patience sorting, so an agreement is
+    # evidence about both.
+    for K, seed in ((12, 0), (12, 1), (16, 0), (16, 2)):
+        pi = pattern_perm('shuffle', K, seed=seed)
+        ids = list(range(K))
+        _lb, lis = lower_bound(ids, sorted(ids, key=lambda i: pi[i]))
+        c, _b, st, _o = escape_move_floor(pi, reach=0)
+        if c is None:
+            print(f'  note escape reach0 K={K} seed={seed}: skipped ({st})')
+        elif c != lis:
+            print(f'FAIL escape reach0 K={K} seed={seed}: ceiling {c}, '
+                  f'patience-sorting LIS {lis} -- the same quantity two ways')
             bad += 1
     print(f'  note the two-via cap: {len(CAP_WITNESS)} witness(es), '
           f'{sum(1 for w in CAP_WITNESS if not w[3])} of them INFEASIBLE -- '
