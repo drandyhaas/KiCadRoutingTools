@@ -1096,7 +1096,17 @@ with no margin at all. At the frontier (K41 67, K51 83) no net carries
 three lane vias any more, so the population's default descent now probes
 from two (`--min-vias=2`).
 `evolve_movie.py TAG K` films a run from that ledger (see the tools table;
-`tmp/movie/ev51b_k51.mp4` is the two-generation K51 run).
+`tmp/movie/ev51b_k51.mp4` is the two-generation K51 run), and `--runs
+TAG1,TAG2,... --descents DIR,...` films SEVERAL runs plus standalone
+`replan.py` descents as one continuous evolution -- a world is its routed
+copper (`dedupe_boards.fingerprint`), so a seed copied forward is the
+world it continues, not a new entry; chapters are ordered by when their
+work began; a descent that improved but left no ledger world (the crash
+that reached the 91) is registered from its transcript. The whole K51 day
+(`tmp/movie/k51_day.mp4`, 52 s: rpc51a, ev51_g1, ev51b x2, rpc91c, rpc91d,
+ev51d x2) shows the record line 98 -> 96 -> 95 -> 91 -> 90 -> 89 -> 87 ->
+85 -> 83 on its ribbon. TEST worlds are not part of the autonomous lineage
+and are not filmed.
 
 ### Where a descent's time goes, and what is reused (measured 2026-09-18, K51)
 

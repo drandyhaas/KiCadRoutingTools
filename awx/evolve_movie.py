@@ -320,7 +320,7 @@ class Step:
         self.log_net = None         # the net the run's own log named
 
 
-def descent_steps(job_dir, prefix):
+def descent_steps(job_dir, prefix, log_path=None):
     """The board chain a `replan.py` descent passed through, read off its
     `d.out` transcript; falls back to the round boards, then the final board.
 
@@ -328,7 +328,7 @@ def descent_steps(job_dir, prefix):
     were cleaned still yields at least its final board.
     """
     steps = []
-    log = os.path.join(job_dir, 'd.out')
+    log = log_path or os.path.join(job_dir, 'd.out')
     seen = set()
 
     def add(path, label, note='', grade=None, log_net=None):
@@ -603,12 +603,16 @@ class Cell:
         self.parent_world = parent_world
         self.status = ''                # set at selection
         self.rect = None                # filled by the stage layout
+        self.gworld = None              # global identity (see Registry)
+        self.gparents = []
 
     @property
     def grade(self):
         """The grade to caption with.  A descent evolve.py DROPPED has no
         ledger world, but it is not ungraded -- it ships its parent's board, so
         the parent's grade is the honest number to show."""
+        if self.gworld is not None and self.gworld.grade:
+            return self.gworld.grade
         if self.world:
             return self.world.get('grade')
         for st in reversed(self.steps):
@@ -748,6 +752,363 @@ def resolve_diffs(cells, verify=False, out=sys.stdout):
 
 
 # --------------------------------------------------------------------------
+# SEVERAL runs as ONE evolution: identity by copper, order by time
+# --------------------------------------------------------------------------
+# A day's search is not one ledger.  A run gets stopped, fixed and RESEEDED
+# from the previous run's best worlds, and standalone `replan.py` descents are
+# run beside it on whichever world looks most promising.  Filmed per ledger,
+# each of those looks like a fresh start from nowhere; filmed together they are
+# one continuous evolution, which is what they are.
+#
+# Two derivations make that possible and neither needs a name:
+#   IDENTITY  a world IS its routed copper.  A seed copied forward with
+#             copy_board has byte-identical copper, so `dedupe_boards
+#             .fingerprint` matches it back to the world it continues -- no new
+#             node, and the lineage edge comes from the world it already was.
+#             The same match deduplicates a descent that merely reproduces an
+#             earlier board (evolve.py's own dedupe, surfacing across runs).
+#   ORDER     a chapter is placed by WHEN ITS WORK BEGAN -- the earliest mtime
+#             among its own artifacts -- not by the order the tags were typed
+#             and not by the ledger's write time, which is when the run
+#             FINISHED.  Runs overlap in a day; only start times interleave
+#             them correctly.
+_FP_CACHE = {}
+
+
+def fingerprint_of(board):
+    """`dedupe_boards.fingerprint`, memoised (it parses the whole board)."""
+    fp = _FP_CACHE.get(board)
+    if fp is None:
+        import dedupe_boards
+        fp = dedupe_boards.fingerprint(board)
+        _FP_CACHE[board] = fp
+    return fp
+
+
+_START = re.compile(r'^\s+start:\s+open \[(.*?)\], drc (\d+), vias (\d+)')
+
+
+class GlobalWorld:
+    """One world in the stitched timeline, whatever run produced it."""
+
+    def __init__(self, gid, label, run, grade, kind, parents, born, origin='', detail='', stem=''):
+        self.gid, self.label, self.run = gid, label, run
+        self.grade, self.kind, self.parents = grade, kind, list(parents)
+        self.born, self.origin, self.detail, self.stem = born, origin, detail, stem
+
+
+class Registry:
+    """Copper fingerprint -> global world.  The whole stitch rests on this."""
+
+    def __init__(self):
+        self.by_fp = {}
+        self.worlds = {}
+        self.matches = 0                # seeds that continued an earlier world
+        self.fresh = 0                  # seeds nothing earlier produced
+
+    def lookup(self, board):
+        if not os.path.exists(board):
+            return None
+        try:
+            return self.worlds.get(self.by_fp.get(fingerprint_of(board)))
+        except Exception:                                       # noqa: BLE001
+            return None
+
+    def add_or_match(self, board, gid, label, run, grade, kind, parents, born,
+                     origin='', detail='', stem=''):
+        """Register a world, or return the one whose copper this already is.
+
+        Returns (world, is_new).  A caller that gets is_new False must NOT draw
+        a second node for it: the board is a world the film already has.
+        """
+        fp = None
+        if os.path.exists(board):
+            try:
+                fp = fingerprint_of(board)
+            except Exception:                                   # noqa: BLE001
+                fp = None
+        if fp is not None and fp in self.by_fp:
+            return self.worlds[self.by_fp[fp]], False
+        w = GlobalWorld(gid, label, run, grade, kind, parents, born, origin, detail, stem)
+        self.worlds[gid] = w
+        if fp is not None:
+            self.by_fp[fp] = gid
+        return w, True
+
+
+class LedgerSource:
+    """One `evolve.py` ledger; each of its generations becomes a chapter."""
+
+    def __init__(self, tag, path, K):
+        self.tag, self.K = tag, K
+        self.led = Ledger(path)
+        self.alias = {}                 # run-local world name -> global world
+        self.fresh = set()              # local names that entered as NEW worlds
+
+    def chapters(self):
+        for g in self.led.gens:
+            d = os.path.join(self.led.root, f'g{g["gen"]}')
+            yield {'kind': 'gen', 'src': self, 'gen': g['gen'], 't0': _began(d),
+                   'label': self.tag, 'title': f'{self.tag}  generation {g["gen"]}'}
+
+
+class DescentSource:
+    """A standalone `replan.py` output directory as one chapter.
+
+    Discovered, not declared: the round-0 board names the stem prefix, and the
+    transcript is whichever `*.out` in the directory carries the round grammar
+    -- so `replan.out`, `d.out` or any other spelling reads the same.
+    """
+
+    def __init__(self, path, K):
+        self.dir = os.path.abspath(path)
+        self.K = K
+        self.name = os.path.basename(self.dir.rstrip('/'))
+        r0 = sorted(glob.glob(os.path.join(self.dir, f'*_rp_k{K}_r0.kicad_pcb')))
+        self.prefix = r0[0][:-len('_r0.kicad_pcb')] if r0 else None
+        self.log = None
+        for cand in sorted(glob.glob(os.path.join(self.dir, '*.out'))):
+            try:
+                with open(cand, encoding='utf-8', errors='replace') as f:
+                    head = f.read(200000)
+                if '=== round' in head:
+                    self.log = cand
+                    break
+            except OSError:
+                continue
+        self.start_grade = None
+        if self.log:
+            with open(self.log, encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    m = _START.match(line)
+                    if m:
+                        opens = [o.strip().strip("'\"") for o in m.group(1).split(',') if o.strip()]
+                        self.start_grade = [opens, int(m.group(2)), int(m.group(3))]
+                        break
+                    if line.startswith('=== round'):
+                        break
+
+    def ok(self):
+        return bool(self.prefix) and os.path.exists(self.prefix + '_r0.kicad_pcb')
+
+    def chapters(self):
+        if not self.ok():
+            return
+        yield {'kind': 'descent', 'src': self, 'gen': 0,
+               't0': os.path.getmtime(self.prefix + '_r0.kicad_pcb'),
+               'label': self.name, 'title': f'{self.name}  standalone descent'}
+
+    def steps(self):
+        """The chain, read with the SAME transcript parser a population
+        descent uses -- `replan.py` writes one grammar, not two."""
+        return descent_steps(os.path.dirname(self.prefix), self.prefix, self.log)
+
+
+class Chapter:
+    """One generation on screen, from either kind of source."""
+
+    def __init__(self, idx, kind, title, label, cells, entering, kept, best, note=''):
+        self.idx, self.kind, self.title, self.label = idx, kind, title, label
+        self.cells, self.entering, self.kept = cells, entering, kept
+        self.best, self.note = best, note
+
+
+def register_chain(reg, cell, parent_w, chapter, run, gid_prefix, label,
+                   final_world=None):
+    """Every board a descent PASSED THROUGH that improved on the one before it
+    is a world, chained parent to child.
+
+    Two reasons this is not just the endpoint.  A descent's intermediate boards
+    are real -- they were on disk, they were graded, and later runs seeded from
+    them (one crashed mid-round on the day this was built and the board it had
+    reached by then became the seed of three later runs, so read only from the
+    ledger it is invisible and every run after it starts from nowhere).  And
+    the RECORD is a function of time, not of chapters: a descent that walks
+    98 -> 96 -> 95 set two records inside one chapter, and collapsing it to its
+    endpoint silently deletes one of them from the film's own headline.
+
+    Birth times are fractional inside the chapter -- (chapter-1, chapter] -- so
+    the ladder orders correctly against everything else in the day.
+    """
+    prev = parent_w
+    made = []
+    graded = [(i, st) for i, st in enumerate(cell.steps) if st.grade]
+    for k, (i, st) in enumerate(graded):
+        is_last = (k == len(graded) - 1)
+        if not better(st.grade, prev.grade if prev else None):
+            continue
+        born = (chapter - 1) + (k + 1) / max(1, len(graded))
+        if is_last and final_world is not None:
+            # The ledger already named this board.  Hang it off the ladder ONLY
+            # if this chapter is where it first appeared: a world's birth is the
+            # first time its copper existed, and a later run that walks the same
+            # deterministic descent again is a DEDUPE HIT, not a re-birth.
+            # (Measured: one run's recorded world is byte-identical to a
+            # standalone descent's third round two chapters earlier, and moving
+            # its birth forward dragged two records out of the record line.)
+            if final_world.born >= chapter:
+                final_world.parents = [prev.gid] if prev else final_world.parents
+                final_world.born = min(final_world.born, chapter)
+                prev = final_world
+            made.append(final_world)
+            continue
+        w, _new = reg.add_or_match(
+            st.board, f'{gid_prefix}:{i}', label, run, st.grade, 'descend',
+            [prev.gid] if prev else [], born,
+            detail=(st.note or 'a board the descent passed through'),
+            stem=st.board[:-len('.kicad_pcb')])
+        prev = w
+        made.append(w)
+    return made
+
+
+def build_timeline(sources, K, out=sys.stdout, verify=False):
+    """Every chapter, in time order, with one global identity per board."""
+    descs = []
+    for s in sources:
+        descs.extend(s.chapters())
+    descs.sort(key=lambda c: c['t0'])
+    reg = Registry()
+    chapters = []
+    for i, cd in enumerate(descs, 1):
+        src = cd['src']
+        if cd['kind'] == 'gen':
+            ch = _gen_chapter(reg, src, cd, i, out, verify)
+        else:
+            ch = _descent_chapter(reg, src, cd, i, out, verify)
+        if ch is not None:
+            chapters.append(ch)
+    return chapters, reg
+
+
+def _alias(reg, src, w, chapter, entering=False):
+    """The global world a run-local ledger world names, registering it the
+    first time.  A seed whose copper matches an earlier world IS that world."""
+    if w['name'] in src.alias:
+        return src.alias[w['name']]
+    kind, parents, detail = parse_origin(w.get('origin'))
+    # a world ENTERING a chapter was produced before that chapter's work, so it
+    # is born one step earlier -- otherwise the seeds share a birthday with the
+    # first generation's offspring and the record line has nothing to start from
+    born = max(0, chapter - 1) if entering else chapter
+    gw, is_new = reg.add_or_match(
+        w['stem'] + '.kicad_pcb', f'{src.tag}:{w["name"]}', w['name'], src.tag,
+        w.get('grade'), kind,
+        [src.alias[p].gid for p in parents if p in src.alias],
+        born, origin=w.get('origin', ''), detail=detail, stem=w['stem'])
+    if is_new:
+        reg.fresh += 1
+        src.fresh.add(w['name'])
+    else:
+        reg.matches += 1
+    src.alias[w['name']] = gw
+    return gw
+
+
+def _gen_chapter(reg, src, cd, idx, out, verify):
+    gen = cd['gen']
+    cells = build_jobs(src.led, gen)
+    resolve_diffs(cells, verify=verify, out=out)
+    entering = [_alias(reg, src, w, idx, entering=True) for w in src.led.entering_pop(gen)]
+    rec = src.led.gen(gen) or {}
+    # every world the generation RECORDED, in the ledger's own order
+    for w in rec.get('new', []):
+        _alias(reg, src, w, idx)
+    for c in cells:
+        pw = None
+        if c.parents:
+            pw = src.alias.get(c.parents[0])
+        if c.world is not None:
+            c.gworld = _alias(reg, src, c.world, idx)
+            if c.row > 0 and len(c.steps) > 1:
+                register_chain(reg, c, pw, idx, src.tag,
+                               f'{src.tag}:g{gen}r{c.row}c{c.col}', c.gworld.label,
+                               final_world=c.gworld)
+        elif c.row > 0:
+            made = register_chain(reg, c, pw, idx, src.tag,
+                                  f'{src.tag}:g{gen}r{c.row}c{c.col}',
+                                  f'g{gen}w{c.col}')
+            if made:
+                c.gworld = made[-1]
+                c.gworld.detail = 'reached, not recorded (run stopped)'
+                c.detail = c.gworld.detail
+                c.title = c.gworld.label
+        c.gparents = [src.alias[p].gid for p in c.parents if p in src.alias]
+        if c.row == 0 and c.gworld is not None:
+            # row 0 is what ENTERS: a world whose copper an earlier chapter
+            # already produced is the same world continuing, so it is captioned
+            # with the identity it continues, not with this run's local name
+            c.kind = c.gworld.kind
+            c.title = c.gworld.label
+            local = c.world.get('name') if c.world else None
+            if c.gworld.kind == 'seed' and local in src.fresh:
+                # a SEED whose copper nothing filmed produced: it enters the day
+                # from outside.  A world this run made in an earlier chapter is
+                # also "fresh" to the registry but is not a new entry -- it is
+                # the run's own previous work continuing.
+                c.detail = f'new entry: {parse_origin(c.world.get("origin"))[2]}'
+            elif c.gworld.run != src.tag:
+                c.detail = f'continues from {c.gworld.run}'
+            else:
+                c.detail = 'continues'
+    kept = {src.alias[w['name']].gid for w in (rec.get('pop') or [])
+            if w['name'] in src.alias}
+    best = src.alias.get((rec.get('best') or {}).get('name'))
+    return Chapter(idx, 'gen', cd['title'], cd['label'], cells,
+                   [w.gid for w in entering], kept, best,
+                   note='elitist on (open, drc, vias), deduplicated by copper')
+
+
+def _descent_chapter(reg, src, cd, idx, out, verify):
+    steps = src.steps()
+    if not steps:
+        print(f'  note: {src.name}: no round boards -- not filmed', file=out)
+        return None
+    parent_board = steps[0].board
+    pw = reg.lookup(parent_board)
+    if pw is None:
+        # nothing filmed so far produced this board: it enters as its own root
+        pw, _ = reg.add_or_match(
+            parent_board, f'{src.name}:from', 'from', src.name,
+            src.start_grade, 'seed', [], max(0, idx - 1),
+            detail='imported: no filmed world has this copper',
+            stem=parent_board[:-len('.kicad_pcb')])
+        reg.fresh += 1
+    else:
+        reg.matches += 1
+    p_cell = Cell(0, 0, pw.kind, pw.label, world=None, steps=[Step(parent_board, 'standing')],
+                  detail=pw.detail or pw.origin)
+    p_cell.gworld = pw
+    d_cell = Cell(1, 0, 'descend', src.name, parents=[pw.label], steps=steps,
+                  parent_world={'grade': pw.grade})
+    resolve_diffs([p_cell, d_cell], verify=verify, out=out)
+    made = register_chain(reg, d_cell, pw, idx, src.name,
+                          f'{src.name}:step', src.name)
+    res = made[-1] if made else None
+    if res is not None:
+        res.detail = 'standalone replan descent'
+    d_cell.gworld = res
+    d_cell.gparents = [pw.gid]
+    p_cell.gparents = []
+    if res is not None:
+        d_cell.title = f'{src.name} -> {res.grade[2]}v'
+    return Chapter(idx, 'descent', cd['title'], cd['label'], [p_cell, d_cell],
+                   [pw.gid], {res.gid} if res else set(), res,
+                   note='a standalone replan.py descent, folded in at its place in the day')
+
+
+def _began(path):
+    """When the work in this directory STARTED: the earliest mtime among its
+    own entries (its own mtime is when it last changed, i.e. when it ended)."""
+    try:
+        kids = [os.path.join(path, k) for k in os.listdir(path)]
+        ts = [os.path.getmtime(k) for k in kids] or [os.path.getmtime(path)]
+        return min(ts)
+    except OSError:
+        return float('inf')
+
+
+# --------------------------------------------------------------------------
 # the stage: slot geometry
 # --------------------------------------------------------------------------
 class Stage:
@@ -802,93 +1163,121 @@ class Stage:
 # the lineage ribbon: every world as (generation, via count)
 # --------------------------------------------------------------------------
 class Ribbon:
-    """The search's own trajectory.  x is the generation a world was born in,
-    y its via count (lower is higher on the plot, because lower is better);
-    edges run parent -> child in the child's operator colour.  A world with
-    open nets is drawn hollow -- it is not admissible however few vias it has.
+    """The search's own trajectory, over the WHOLE stitched day.
+
+    x is the chapter a world was born in, y its via count (lower is higher,
+    because lower is better); edges run parent -> child in the child's operator
+    colour, and they cross run boundaries because identity is copper, not which
+    ledger recorded it.  A world with open nets is drawn hollow: it is not
+    admissible however few vias it has.
+
+    The gold step-line is the RECORD -- the best admissible via count reached by
+    the end of each chapter -- labelled at every drop.  That line is the day's
+    actual result, and it is the one thing a viewer should be able to read off
+    this film without knowing anything else about it.
     """
 
-    def __init__(self, led, box):
-        self.led, self.box = led, box
-        self.nodes = {}
-        vs = []
-        for w in led.by_name.values():
-            g = w.get('grade')
-            if g:
-                vs.append(g[2])
+    def __init__(self, reg, chapters, box):
+        self.reg, self.box = reg, box
+        self.n = max([c.idx for c in chapters] + [1])
+        self.chapters = chapters
+        vs = [w.grade[2] for w in reg.worlds.values() if w.grade]
         self.vmin, self.vmax = (min(vs), max(vs)) if vs else (0, 1)
         if self.vmax - self.vmin < 1:
             self.vmax = self.vmin + 1
-        self.gmax = max([w.get('born', 0) for w in led.by_name.values()] + [1])
         x0, y0, x1, y1 = box
+        self.plot = (x0 + 54, y0 + 24, x1 - 14, y1 - 22)
+        self.nodes = {}
         per = {}
-        for w in sorted(led.by_name.values(), key=lambda w: (w.get('born', 0), w['name'])):
-            g = w.get('grade')
-            if not g:
+        for w in sorted(reg.worlds.values(), key=lambda w: (w.born, w.gid)):
+            if not w.grade:
                 continue
-            b = w.get('born', 0)
-            i = per.get(b, 0)
-            per[b] = i + 1
-            cx = x0 + 58 + (x1 - x0 - 96) * (b / max(1, self.gmax))
-            cx += (i % 3 - 1) * 9                    # spread a crowded column
-            frac = (g[2] - self.vmin) / (self.vmax - self.vmin)
-            cy = (y0 + 22) + frac * ((y1 - 26) - (y0 + 22))
-            self.nodes[w['name']] = (cx, cy, w)
+            i = per.get(round(w.born, 3), 0)
+            per[round(w.born, 3)] = i + 1
+            self.nodes[w.gid] = (self._x(w.born) + (i % 3 - 1) * 7, self._y(w.grade[2]), w)
+        # The record is a function of TIME, sampled at every instant a world was
+        # born -- not once per chapter.  A descent that walks 98 -> 96 -> 95 set
+        # two records inside one chapter, and a per-chapter sample keeps only
+        # the last of them.
+        times = sorted({w.born for w in reg.worlds.values() if w.grade})
+        self.record = []
+        best = None
+        for t in times:
+            for w in reg.worlds.values():
+                if w.born <= t and w.grade and not w.grade[0]:
+                    if best is None or w.grade[2] < best:
+                        best = w.grade[2]
+            if best is not None:
+                self.record.append((t, best))
 
-    def draw(self, d, upto_gen, upto_phase, best_name=None, pop_names=()):
+    def _x(self, chapter):
+        px0, _, px1, _ = self.plot
+        return px0 + (px1 - px0) * (chapter / max(1, self.n))
+
+    def _y(self, vias):
+        _, py0, _, py1 = self.plot
+        f = (vias - self.vmin) / max(1e-9, self.vmax - self.vmin)
+        return py0 + f * (py1 - py0)
+
+    def draw(self, d, upto, phase, best_gid=None, pop_gids=()):
         x0, y0, x1, y1 = self.box
+        px0, py0, px1, py1 = self.plot
         d.rectangle([x0, y0, x1, y1], fill=PANEL, outline=PANEL_EDGE)
         f = load_font(12)
         fs = load_font(11)
-        cap = ('lineage -- generation (x) vs vias (y, lower is better);'
-               ' hollow = has open nets')
-        # right-aligned: the interesting worlds cluster at the TOP-LEFT of this
-        # plot (few vias, early), which is where a left-aligned caption sat
-        d.text((x1 - 12 - d.textlength(cap, font=f), y0 + 5), cap, fill=DIM, font=f)
-        # axis ticks, kept clear of the caption so neither is unreadable
-        for frac in (0.0, 0.5, 1.0):
-            yy = (y0 + 22) + frac * ((y1 - 26) - (y0 + 22))
+        cap = ('lineage -- chapter (x) vs vias (y, lower is better);'
+               ' hollow = open nets;  gold = the record')
+        d.text((px1 - d.textlength(cap, font=f), y0 + 5), cap, fill=DIM, font=f)
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            yy = py0 + frac * (py1 - py0)
             val = int(round(self.vmin + frac * (self.vmax - self.vmin)))
-            d.line([x0 + 44, yy, x1 - 12, yy], fill=(34, 38, 44))
+            d.line([px0, yy, px1, yy], fill=(32, 36, 42))
             d.text((x0 + 10, yy - 6), f'{val}v', fill=FAINT, font=fs)
-        for g in range(0, self.gmax + 1):
-            cx = x0 + 58 + (x1 - x0 - 96) * (g / max(1, self.gmax))
-            d.text((cx - 8, y1 - 18), f'g{g}' if g else 'seed', fill=FAINT, font=fs)
+        for c in self.chapters:
+            d.text((self._x(c.idx) - 10, y1 - 16), str(c.idx), fill=FAINT, font=fs)
 
-        def visible(w):
-            b = w.get('born', 0)
-            if b < upto_gen:
-                return True
-            if b == upto_gen:
-                return upto_phase in ('work', 'select')
-            return False
+        def vis(w):
+            horizon = upto if phase in ('work', 'select') else upto - 1
+            return w.born <= horizon + 1e-9
 
-        for name, (cx, cy, w) in self.nodes.items():
-            if not visible(w):
+        for gid, (cx, cy, w) in self.nodes.items():
+            if not vis(w):
                 continue
-            for p in w.get('parents') or []:
-                pn = self.nodes.get(p)
-                if not pn or not visible(pn[2]):
-                    continue
-                d.line([pn[0], pn[1], cx, cy], fill=kind_colour(w.get('kind')), width=1)
-        for name, (cx, cy, w) in self.nodes.items():
-            if not visible(w):
+            for pg in w.parents:
+                pn = self.nodes.get(pg)
+                if pn and vis(pn[2]):
+                    d.line([pn[0], pn[1], cx, cy], fill=kind_colour(w.kind), width=1)
+        # the record step-line, drawn over the edges and under the nodes
+        horizon = upto if phase in ('work', 'select') else upto - 1
+        pts, last, shown = [], None, set()
+        for t, r in self.record:
+            if t > horizon + 1e-9:
+                break
+            if last is not None and r != last:
+                pts += [(self._x(t), self._y(last))]
+            pts += [(self._x(t), self._y(r))]
+            if r not in shown:
+                shown.add(r)
+                d.text((self._x(t) - 8, self._y(r) - 17), f'{r}', fill=BEST, font=fs)
+            last = r
+        if len(pts) > 1:
+            d.line([p for xy in pts for p in xy], fill=BEST, width=2)
+
+        for gid, (cx, cy, w) in self.nodes.items():
+            if not vis(w):
                 continue
-            g = w.get('grade')
-            opens = len(g[0]) if g else 0
-            col = kind_colour(w.get('kind'))
-            r = 5 if name == best_name else 4
-            if opens:
+            col = kind_colour(w.kind)
+            r = 5 if gid == best_gid else 4
+            if w.grade[0]:
                 d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=col, width=2)
             else:
                 d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col)
-            if name in pop_names:
+            if gid in pop_gids:
                 d.ellipse([cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3],
                           outline=KEPT, width=1)
-            if name == best_name:
+            if gid == best_gid:
                 d.ellipse([cx - r - 5, cy - r - 5, cx + r + 5, cy + r + 5],
                           outline=BEST, width=2)
-                d.text((cx + 9, cy - 7), name, fill=BEST, font=fs)
 
 
 # --------------------------------------------------------------------------
@@ -934,8 +1323,9 @@ class Film:
     FALLBACK here and ffmpeg over the PNG sequence is the primary path.
     """
 
-    def __init__(self, led, cam, stage, ribbon, canvas, frames_dir, out=sys.stdout):
-        self.led, self.cam, self.stage, self.ribbon = led, cam, stage, ribbon
+    def __init__(self, tagline, K, cam, stage, ribbon, canvas, frames_dir, out=sys.stdout):
+        self.tagline, self.K = tagline, K
+        self.cam, self.stage, self.ribbon = cam, stage, ribbon
         self.W, self.H = canvas
         self.dir = frames_dir
         self.n = 0
@@ -960,11 +1350,11 @@ class Film:
         d.line([0, 76, self.W, 76], fill=PANEL_EDGE)
         d.text((18, 12), title, fill=TEXT, font=f_title)
         _text_fit(d, (18, 46), subtitle, f_sub, DIM, self.W - 520)
-        if best:
-            rec = f'record  {fmt_grade(best.get("grade"))}   ({best["name"]})'
+        if best is not None:
+            rec = f'record  {fmt_grade(best.grade)}   ({best.label})'
             w = d.textlength(rec, font=f_sub)
             d.text((self.W - w - 18, 46), rec, fill=BEST, font=f_sub)
-            lab = f'{self.led.tag}   K={self.led.K}'
+            lab = f'{self.tagline}   K={self.K}'
             w2 = d.textlength(lab, font=f_title)
             d.text((self.W - w2 - 18, 12), lab, fill=DIM, font=f_title)
 
@@ -991,22 +1381,25 @@ class Film:
             bw, bh = self.stage.cell
             si = step_of(c)
             dimmed = c.status == 'dropped'
-            if si is None or not c.steps:
-                d.rectangle([bx, by, bx + bw, by + bh], fill=(18, 20, 23),
-                            outline=PANEL_EDGE)
-                _text_fit(d, (bx + 10, by + bh / 2 - 8), 'no board', f_cap, FAINT, bw - 20)
+            if si is None:
+                # a slot this chapter WILL fill reads as waiting, not as a hole:
+                # the roll-call then shows the shape of the generation to come
+                d.rectangle([bx, by, bx + bw, by + bh], fill=(16, 18, 21),
+                            outline=(kind_colour(c.kind) if c.steps else PANEL_EDGE))
+                lab = (c.kind if c.steps else 'no board')
+                _text_fit(d, (bx + 10, by + bh / 2 - 8), lab, f_cap,
+                          FAINT, bw - 20)
             else:
                 st = c.steps[si]
                 cell = self.cam.image(st, hot_of(c))
                 if dimmed and dim < 0.999:
                     cell = cell.point(lambda p, k=dim: int(p * k))
                 img.paste(cell, (bx, by))
-                col = BEST if (best and c.world and c.world['name'] == best['name']) \
-                    else (KEPT if c.status == 'kept' else
-                          (DROPPED if dimmed else kind_colour(c.kind)))
+                is_best = best is not None and c.gworld is not None and c.gworld.gid == best.gid
+                col = BEST if is_best else (KEPT if c.status == 'kept' else
+                                            (DROPPED if dimmed else kind_colour(c.kind)))
                 d.rectangle([bx - 1, by - 1, bx + bw, by + bh], outline=col,
-                            width=3 if c.status or (best and c.world and
-                                                    c.world['name'] == best['name']) else 1)
+                            width=3 if (c.status or is_best) else 1)
                 # step pips: how far through its own timeline this cell is
                 if len(c.steps) > 1:
                     for k in range(len(c.steps)):
@@ -1018,25 +1411,28 @@ class Film:
             cy = by + bh + 5
             tcol = FAINT if dimmed else TEXT
             head = c.title
-            if best and c.world and c.world['name'] == best['name']:
+            if best is not None and c.gworld is not None and c.gworld.gid == best.gid:
                 head = '* ' + head
-            _text_fit(d, (bx, cy), head, f_cap, tcol, bw)
-            _text_fit(d, (bx, cy + 16), fmt_grade(c.grade), f_small,
-                      FAINT if dimmed else DIM, bw)
+            waiting = si is None and bool(c.steps)
+            _text_fit(d, (bx, cy), head, f_cap, FAINT if waiting else tcol, bw)
+            if not waiting:      # no spoilers: an unrun slot has no result yet
+                _text_fit(d, (bx, cy + 16), fmt_grade(c.grade), f_small,
+                          FAINT if dimmed else DIM, bw)
             line3 = ''
             if si is not None and c.steps:
                 st = c.steps[si]
                 # a cell with no ledger world says WHY (the operator produced
                 # nothing) rather than narrating the board it kept
-                line3 = st.note or (c.detail if c.world is None else st.label)
+                line3 = st.note or (c.detail if (c.world is None or c.row == 0)
+                                    else st.label)
             if not line3:
                 line3 = c.detail or c.kind
             _text_fit(d, (bx, cy + 32), line3, f_small,
                       FAINT if dimmed else kind_colour(c.kind), bw)
 
         # ribbon + legend
-        self.ribbon.draw(d, gen, phase, best_name=best['name'] if best else None,
-                         pop_names=pop_names)
+        self.ribbon.draw(d, gen, phase, best_gid=best.gid if best is not None else None,
+                         pop_gids=pop_names)
         y = self.H - 30
         d.rectangle([0, y - 4, self.W, self.H], fill=PANEL)
         x = 18
@@ -1062,71 +1458,112 @@ class Film:
 # --------------------------------------------------------------------------
 # the film script
 # --------------------------------------------------------------------------
-def run(led, args, out=sys.stdout):
-    # -- the reference board fixes the camera and the substrate
-    ref_world = (led.pop0 or [w for g in led.gens for w in g.get('new', [])])[0]
-    ref_board = ref_world['stem'] + '.kicad_pcb'
-    if not os.path.exists(ref_board):
-        raise SystemExit(f'evolve_movie: reference board missing: {ref_board}')
-    ref_pcb = _pcb(ref_board)
-    # the run's nets, unioned over EVERY world's sidecar: a seed imported from
-    # a narrower recorded run names fewer nets than the bus has, and reading
-    # one world's sidecar would then aim the camera by an accident of which
-    # world the ledger happens to list first
+def open_sources(args, out=sys.stdout):
+    """Every source named on the command line that can actually be filmed.
+
+    A run with no ledger yet is NAMED and skipped rather than guessed at: its
+    worlds have no grade, so there is nothing to caption or rank them by.  That
+    is the in-flight case, and it stays a refusal.
+    """
+    srcs = []
+    for tag in args.runs:
+        lpath = os.path.join(HERE, 'tmp', tag, f'evolve_k{args.K}.json')
+        if not os.path.exists(lpath):
+            where = os.path.join(HERE, 'tmp', tag)
+            print(f'  note: {tag}: no ledger at tmp/{tag}/evolve_k{args.K}.json'
+                  + (' (run in flight)' if os.path.isdir(where) else ' (no such run)')
+                  + ' -- not filmed', file=out)
+            continue
+        srcs.append(LedgerSource(tag, lpath, args.K))
+    for d in args.descents:
+        path = d if os.path.isabs(d) else os.path.join(HERE, d)
+        src = DescentSource(path, args.K)
+        if not src.ok():
+            print(f'  note: {src.name}: no *_rp_k{args.K}_r0 board -- not filmed', file=out)
+            continue
+        srcs.append(src)
+    return srcs
+
+
+def run(args, out=sys.stdout):
+    srcs = open_sources(args, out=out)
+    if not srcs:
+        raise SystemExit('evolve_movie: nothing to film')
+    print(f'evolve_movie: K{args.K}; {len(srcs)} source(s): '
+          + ', '.join(getattr(s, "tag", None) or s.name for s in srcs), file=out)
+    for s in srcs:
+        if isinstance(s, LedgerSource) and s.led._rerooted:
+            print(f'  note: {s.tag}: {s.led._rerooted} recorded stem(s) re-rooted onto '
+                  f'{os.path.relpath(s.led.root, HERE)}/', file=out)
+        if isinstance(s, LedgerSource):
+            for d_ in s.led.unrecorded_gen_dirs():
+                print(f'  note: {s.tag}/{d_}/ on disk but not in the ledger '
+                      f'(generation in flight) -- not filmed', file=out)
+
+    chapters, reg = build_timeline(srcs, args.K, out=out, verify=args.verify)
+    if not chapters:
+        raise SystemExit('evolve_movie: no chapters')
+    if args.gens:
+        chapters = chapters[:args.gens]
+    print(f'  {len(chapters)} chapter(s), {len(reg.worlds)} distinct world(s) by copper; '
+          f'{reg.matches} seed/result(s) matched an earlier world, {reg.fresh} entered new',
+          file=out)
+    for c in chapters:
+        print(f'    ch{c.idx:<2d} {c.title:<34s} '
+              f'{len(c.cells)} cell(s)'
+              + (f'  best {c.best.label} {fmt_grade(c.best.grade)}' if c.best else ''), file=out)
+
+    # -- camera: one reference board, and the run nets unioned over every world
+    ref = None
+    for c in chapters:
+        for cell in c.cells:
+            if cell.steps:
+                ref = cell.steps[0].board
+                break
+        if ref:
+            break
+    ref_pcb = _pcb(ref)
     names = set()
-    for w in led.by_name.values():
-        names |= run_net_names(w['stem'])
+    for w in reg.worlds.values():
+        if w.stem:
+            names |= run_net_names(w.stem)
     view = args.view or derive_view(ref_pcb, names)
-    print(f'evolve_movie: {led.tag} K{led.K}; {len(led.gens)} generation(s) recorded, '
-          f'{len(led.by_name)} world(s); {len(names)} run net(s); '
-          f'view {", ".join(f"{v:.2f}" for v in view)}', file=out)
-    if led._rerooted:
-        print(f'  note: {led._rerooted} recorded stem(s) pointed at a path that no longer '
-              f'exists and were re-rooted onto {os.path.relpath(led.root, HERE)}/', file=out)
-    for d_ in led.unrecorded_gen_dirs():
-        print(f'  note: {d_}/ exists on disk but the ledger has not recorded it '
-              f'(generation in flight) -- not filmed', file=out)
+    print(f'  {len(names)} run net(s); view {", ".join(f"{v:.2f}" for v in view)}', file=out)
 
-    # -- build every generation's cells first: the layout must be stable
-    gens = [g['gen'] for g in led.gens]
-    all_cells = {}
-    for gen in gens:
-        cells = build_jobs(led, gen)
-        if args.verify:
-            print(f'\n-- verify generation {gen} --------------------------------', file=out)
-        resolve_diffs(cells, verify=args.verify, out=out)
-        all_cells[gen] = cells
-    seed_cells = []
-    for i, w in enumerate(led.pop0):
-        b = w['stem'] + '.kicad_pcb'
-        seed_cells.append(Cell(0, i, 'seed', w['name'], world=w,
-                               steps=[Step(b, 'seed')] if os.path.exists(b) else [],
-                               detail=parse_origin(w.get('origin'))[2]))
-    resolve_diffs(seed_cells)
-    all_cells[0] = seed_cells
-
-    # -- ONE stage geometry for the whole film, sized for the busiest
-    # generation, so no cell moves or resizes between scenes
-    widest = max((sum(1 for c in cs if c.row == r) for cs in all_cells.values()
-                  for r in {c.row for c in cs}), default=1)
-    rowset = sorted({c.row for cs in all_cells.values() for c in cs}) or [0]
+    # -- ONE stage geometry for the whole film, sized for the busiest chapter
+    widest = max((sum(1 for c in ch.cells if c.row == r)
+                  for ch in chapters for r in {c.row for c in ch.cells}), default=1)
+    rowset = sorted({c.row for ch in chapters for c in ch.cells}) or [0]
     row_ix = {r: i for i, r in enumerate(rowset)}
     max_w, max_h = args.canvas or (1760, 1080)
-    TITLE_H, RIBBON_H, LEGEND_H, MIN_W = 78, 172, 34, 1220
+    TITLE_H, LEGEND_H, MIN_W = 78, 34, 1220
+    ribbon_h = 172 if len(chapters) <= 3 else 240
     stage = Stage(len(rowset), widest, TITLE_H,
-                  max_h - TITLE_H - RIBBON_H - LEGEND_H, view, max_w,
-                  cell=args.cell)
+                  max_h - TITLE_H - ribbon_h - LEGEND_H, view, max_w, cell=args.cell)
     W = max(MIN_W, stage.width)
-    H = TITLE_H + stage.height + RIBBON_H + LEGEND_H
-    W += W & 1                  # even dimensions: yuv420p requires them
+    H = TITLE_H + stage.height + ribbon_h + LEGEND_H
+    W += W & 1
     H += H & 1
     stage.centre_in(W)
-    for cs in all_cells.values():
-        for c in cs:
-            c.rect = stage.rect(row_ix[c.row], c.col)
+    # each chapter's own columns are centred inside the stage, so a one-column
+    # standalone descent does not sit in a hole sized for a four-world
+    # generation -- while WITHIN a chapter the columns stay aligned, which is
+    # what puts a descent directly under its parent
+    for ch in chapters:
+        used_c = max((c.col for c in ch.cells), default=0) + 1
+        used_r = len({c.row for c in ch.cells})
+        dx = ((widest - used_c) * stage.pitch[0]) // 2
+        dy = ((len(rowset) - used_r) * stage.pitch[1]) // 2
+        for c in ch.cells:
+            r = stage.rect(row_ix[c.row], c.col)
+            c.rect = (r[0] + dx, r[1] + dy, r[2] + dx, r[3] + dy)
+
     cam = Camera(ref_pcb, view, stage.cell[0], stage.cell[1], args.supersample)
-    ribbon = Ribbon(led, (0, H - RIBBON_H - LEGEND_H, W, H - LEGEND_H))
-    film = Film(led, cam, stage, ribbon, (W, H), args.frames_dir, out=out)
+    ribbon = Ribbon(reg, chapters, (0, H - ribbon_h - LEGEND_H, W, H - LEGEND_H))
+    tagline = '+'.join(getattr(s, 'tag', None) or s.name for s in srcs)
+    if len(tagline) > 38:
+        tagline = f'{len(srcs)} runs'
+    film = Film(tagline, args.K, cam, stage, ribbon, (W, H), args.frames_dir, out=out)
     print(f'  canvas {W}x{H}, cell {stage.cell[0]}x{stage.cell[1]}, '
           f'{len(rowset)} row(s) x {widest} column(s)', file=out)
 
@@ -1136,86 +1573,77 @@ def run(led, args, out=sys.stdout):
     n_sel = max(1, int(args.select * args.fps))
     best = None
 
-    # ---- scene: the seeds
-    for w in led.pop0:
-        if better(w.get('grade'), best.get('grade') if best else None):
-            best = w
-    pop_names = {w['name'] for w in led.pop0}
-    for c in seed_cells:
-        c.status = 'kept'
-    sub = ' | '.join(f'{w["name"]} {fmt_grade(w["grade"])}' for w in led.pop0)
-    img = film.compose(seed_cells, lambda c: 0 if c.steps else None,
-                       lambda c: False, 0, 'select', 'seed population',
-                       sub, best, pop_names,
-                       note='recorded runs imported as worlds')
-    film.emit(img, n_roll)
-
-    # ---- per generation
-    for gen in gens:
-        cells = all_cells[gen]
-        rec = led.gen(gen)
-        entering = led.entering_pop(gen)
-        pop_names = {w['name'] for w in entering}
-        for c in cells:
+    spans = []
+    for ch in chapters:
+        f0 = film.n
+        for c in ch.cells:
             c.status = ''
-        sub = ' | '.join(f'{w["name"]} {fmt_grade(w["grade"])}' for w in entering)
+        ent = [reg.worlds[g] for g in ch.entering if g in reg.worlds]
+        sub = ' | '.join(f'{w.label} {fmt_grade(w.grade)}' for w in ent)
+        title = f'{ch.title}'
+        head = f'chapter {ch.idx}/{len(chapters)}'
 
-        # roll-call: the population that enters, offspring slots still empty
-        img = film.compose([c for c in cells if c.row == 0],
-                           lambda c: 0 if c.steps else None, lambda c: False,
-                           gen, 'roll', f'generation {gen}',
-                           f'population entering: {sub}', best, pop_names,
-                           note='each world descends; jumps and crossovers are created')
+        # roll-call: what enters this chapter
+        img = film.compose(ch.cells,
+                           lambda c: 0 if (c.row == 0 and c.steps) else None,
+                           lambda c: False,
+                           ch.idx, 'roll', title,
+                           f'{head} -- entering: {sub}', best, set(ch.entering),
+                           note=('the parent this descent starts from'
+                                 if ch.kind == 'descent' else
+                                 'each world descends; jumps and crossovers are created'))
         film.emit(img, n_roll)
 
         # work: every cell advances through its own steps AT THE SAME TIME
-        T = max((len(c.steps) for c in cells), default=1)
+        T = max((len(c.steps) for c in ch.cells), default=1)
         for t in range(T):
             def step_of(c, t=t):
                 return min(t, len(c.steps) - 1) if c.steps else None
 
             def age(c, t=t):
                 return t - (len(c.steps) - 1) if c.steps else 0
-            for f in range(n_step):
-                def hot_of(c, f=f, t=t):
-                    return age(c) <= 0 and f < n_hot and t > 0
-                alpha = 1.0 - (f / max(1, n_hot)) if f < n_hot else 0.0
-                # the hot image fades into the cool one over the beat
-                base = film.compose(cells, step_of, lambda c: False, gen, 'work',
-                                    f'generation {gen}', f'population: {sub}',
-                                    best, pop_names,
-                                    note=f'step {t + 1}/{T} -- bright = copper added, '
-                                         f'pink = copper removed')
-                if alpha > 0.01 and any(hot_of(c) for c in cells):
-                    hot = film.compose(cells, step_of, hot_of, gen, 'work',
-                                       f'generation {gen}', f'population: {sub}',
-                                       best, pop_names,
-                                       note=f'step {t + 1}/{T} -- bright = copper added, '
-                                            f'pink = copper removed')
+            for fr in range(n_step):
+                def hot_of(c, fr=fr, t=t):
+                    return age(c) <= 0 and fr < n_hot and t > 0
+                alpha = 1.0 - (fr / max(1, n_hot)) if fr < n_hot else 0.0
+                note = f'step {t + 1}/{T} -- bright = copper added, pink = copper removed'
+                base = film.compose(ch.cells, step_of, lambda c: False, ch.idx, 'work',
+                                    title, f'{head} -- {sub}', best, set(ch.entering),
+                                    note=note)
+                if alpha > 0.01 and any(hot_of(c) for c in ch.cells):
+                    hot = film.compose(ch.cells, step_of, hot_of, ch.idx, 'work',
+                                       title, f'{head} -- {sub}', best, set(ch.entering),
+                                       note=note)
                     base = Image.blend(base, hot, alpha)
                 film.emit(base)
 
-        # selection
-        kept = {w['name'] for w in (rec.get('pop') or [])}
-        for c in cells:
-            c.status = 'kept' if (c.world and c.world['name'] in kept) else 'dropped'
-        newbest = rec.get('best')
-        if newbest and better(newbest.get('grade'), best.get('grade') if best else None):
-            best = led.by_name.get(newbest['name'], newbest)
-        survivors = ' | '.join(f'{w["name"]} {fmt_grade(w["grade"])}'
-                               for w in (rec.get('pop') or []))
-        # the dropped worlds FADE rather than blink out, over the first part of
-        # the card, so it is visible which copies the generation discarded
+        # selection (a standalone descent "keeps" its result the same way)
+        for c in ch.cells:
+            c.status = 'kept' if (c.gworld is not None and c.gworld.gid in ch.kept) else 'dropped'
+        if ch.best is not None and better(ch.best.grade, best.grade if best else None):
+            best = ch.best
+        for w in reg.worlds.values():
+            if w.born <= ch.idx and better(w.grade, best.grade if best else None):
+                best = w
+        survivors = ' | '.join(f'{reg.worlds[g].label} {fmt_grade(reg.worlds[g].grade)}'
+                               for g in ch.kept if g in reg.worlds)
         for i in range(n_sel):
             k = min(1.0, i / max(1.0, n_sel * 0.45))
             film.emit(film.compose(
-                cells, lambda c: len(c.steps) - 1 if c.steps else None,
-                lambda c: False, gen, 'select', f'generation {gen}',
-                f'selection keeps: {survivors}', best, kept,
-                note='elitist on (open, drc, vias), deduplicated by copper',
-                dim=1.0 - 0.62 * k))
+                ch.cells, lambda c: len(c.steps) - 1 if c.steps else None,
+                lambda c: False, ch.idx, 'select', title,
+                f'{head} -- keeps: {survivors or "(nothing new)"}', best, ch.kept,
+                note=ch.note, dim=1.0 - 0.62 * k))
+        spans.append((ch, f0, film.n - 1))
         cam.clear()
 
+    for ch, f0, f1 in spans:
+        print(f'    ch{ch.idx:<2d} frames {f0}-{f1:<5d} {ch.title}', file=out)
+    chain = []
+    for _t, r in ribbon.record:
+        if not chain or r != chain[-1]:
+            chain.append(r)
+    print(f'  record chain: {" -> ".join(str(r) for r in chain)}', file=out)
     print(f'  {film.n} frame(s), {cam.renders} board render(s) -> {args.frames_dir}',
           file=out)
     return film.n, (W, H)
@@ -1350,8 +1778,17 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description='Film an evolve.py run from its ledger.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('tag', nargs='?', help='run tag: reads tmp/TAG/evolve_kK.json')
+    ap.add_argument('tag', nargs='?', help='run tag: reads tmp/TAG/evolve_kK.json '
+                    '(omit when --runs is given)')
     ap.add_argument('K', nargs='?', type=int, help='the K the run used')
+    ap.add_argument('--runs', default='', help='TAG1,TAG2,... in time order: film several '
+                    'ledgers as ONE evolution (a run reseeded from the last one continues it; '
+                    'worlds are matched by copper fingerprint, chapters ordered by when their '
+                    'work began)')
+    ap.add_argument('--descents', default='', help='DIR[,DIR...]: standalone replan.py output '
+                    'directories, folded in as descent chapters of the world they started from')
+    ap.add_argument('--name', default=None, help='basename for a stitched movie '
+                    '(default: the joined tags)')
     ap.add_argument('--out', default=None, help='movie path (default tmp/movie/TAG_kK.mp4)')
     ap.add_argument('--view', type=_view, default=None,
                     help='camera rect X0,Y0,X1,Y1 in mm (default: the run nets\' copper)')
@@ -1377,22 +1814,31 @@ def main(argv=None):
         self_test()
         return 0
     self_test()                 # cheap, and it runs on EVERY invocation
-    if not args.tag or args.K is None:
-        ap.error('TAG and K are required (or pass --self-test alone)')
+    args.runs = [t for t in args.runs.split(',') if t.strip()]
+    args.descents = [d for d in args.descents.split(',') if d.strip()]
+    # `--runs A,B 51` names its sources by flag, so the ONE positional left is K
+    if args.K is None and args.tag is not None and (args.runs or args.descents):
+        try:
+            args.K, args.tag = int(args.tag), None
+        except ValueError:
+            pass
+    if args.tag and not args.runs:
+        args.runs = [args.tag]          # the single-run form is one source
+    if args.K is None:
+        ap.error('K is required (or pass --self-test alone)')
+    if not args.runs and not args.descents:
+        ap.error('give a TAG, --runs, or --descents')
 
-    lpath = os.path.join(HERE, 'tmp', args.tag, f'evolve_k{args.K}.json')
-    if not os.path.exists(lpath):
-        raise SystemExit(f'evolve_movie: no ledger at {lpath}'
-                         + (' (the run has not written one yet)'
-                            if os.path.isdir(os.path.dirname(lpath)) else ''))
-    led = Ledger(lpath, max_gens=args.gens)
+    stitched = len(args.runs) + len(args.descents) > 1
+    base = args.name or (f'k{args.K}_day' if stitched
+                         else f'{(args.runs or args.descents)[0].strip("/").split("/")[-1]}_k{args.K}')
     outdir = os.path.join(HERE, 'tmp', 'movie')
     os.makedirs(outdir, exist_ok=True)
-    args.out = args.out or os.path.join(outdir, f'{args.tag}_k{args.K}.mp4')
-    args.frames_dir = args.frames_dir or os.path.join(outdir, f'frames_{args.tag}_k{args.K}')
+    args.out = args.out or os.path.join(outdir, f'{base}.mp4')
+    args.frames_dir = args.frames_dir or os.path.join(outdir, f'frames_{base}')
     for old in glob.glob(os.path.join(args.frames_dir, 'f*.png')):
         os.remove(old)
-    n, wh = run(led, args)
+    n, wh = run(args)
     if n and not args.no_encode:
         encode(args.frames_dir, args.out, args.fps, n, gif=args.gif)
     return 0
