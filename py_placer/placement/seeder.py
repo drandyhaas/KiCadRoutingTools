@@ -1790,7 +1790,7 @@ def _band_settle(state, part, entry: Dict, edge: str, lo: float, x: float, y: fl
         amount, _basis, _legacy = _band_reading(state, part, edge, x, y)
         if inside(amount):
             return x, y
-        raw = seats(x, y) if seats is not None else (0, 0.0, 0.0, None, None)
+        raw = seats(x, y) if seats is not None else (0, 0.0, {}, None, None)
         if raw is None:
             return x, y
         # Outward (more overhang) when short of the minimum, inward past the max.
@@ -1824,29 +1824,39 @@ def _band_settle(state, part, entry: Dict, edge: str, lo: float, x: float, y: fl
         return x, y
 
 
-def _overlap_at(state, part, x: float, y: float, others) -> float:
-    """Courtyard overlap (mm^2) of `part` at the pose `apply_move` WRITES with
-    the parts in `others` -- side-aware, pair by pair, in the currency of
-    `legality_metrics`' `overlap_area` (`legality.pair_overlap_area`)."""
+#: The courtyard overlap a pair must reach to count as one: `overlap_area`
+#: is reported to 4 decimals, so below this the grade prints 0.0000 and a
+#: pair the correction pushes past it is NEW overlap in the grade's own words.
+_OVERLAP_REPORTED_MM2 = 5e-5
+
+
+def _overlap_at(state, part, x: float, y: float, others) -> Dict[str, float]:
+    """{neighbour: courtyard overlap (mm^2)} of `part` at the pose `apply_move`
+    WRITES, for every part in `others` it touches -- side-aware, in the
+    currency of `legality_metrics`' `overlap_area`
+    (`legality.pair_overlap_area`). PER PAIR: a sum lets an overlap one
+    neighbour already has hide a new one with another."""
     from .legality import pair_overlap_area
     px, py = round(x, 3), round(y, 3)
     rect, tht = part.rect(px, py, part.rot), part.tht_rect(px, py, part.rot)
-    total = 0.0
+    out: Dict[str, float] = {}
     for ref in others:
         q = state.parts.get(ref)
         if q is None or q is part:
             continue
-        total += pair_overlap_area(part.sides, part.side, rect, tht,
-                                   q.sides, q.side, q.rect(), q.tht_rect())
-    return total
+        area = pair_overlap_area(part.sides, part.side, rect, tht,
+                                 q.sides, q.side, q.rect(), q.tht_rect())
+        if area > 0.0:
+            out[ref] = area
+    return out
 
 
 def _seat_reading(state, part, ref: str, x: float, y: float, rot: float,
                   others, grade=None, exclude=()):
     """What a #983/#987 correction compares, at the pose `apply_move` WRITES:
-    `(pads short of the floor, worst shortfall, courtyard overlap with
-    `others`, intent-grade errors, interior-contour split)`. The last two are
-    None without a grader."""
+    `(pads short of the floor, worst shortfall, {neighbour: courtyard
+    overlap} over `others`, intent-grade errors, interior-contour split)`. The
+    last two are None without a grader."""
     floor = _floor_key(_floor_at(state, ref, x, y, rot))
     overlap = _overlap_at(state, part, x, y, others)
     if grade is None:
@@ -1861,11 +1871,13 @@ def _no_worse(new, raw) -> bool:
 
     Only if it costs NOTHING the seat already had, each count on its own:
       * no more pads short of the #975 floor, and the worst no shorter;
-      * no courtyard overlap where there was none. An overlap the raw pose
-        already has may deepen by the correction's own micron-scale move
-        (measured on #983's lattice: 0.0012-0.0020 mm2 on 16 of 2880 seats
-        already overlapping the blocker by 0.044-0.35 mm2); refusing it would
-        keep the grade ERROR the correction exists to remove;
+      * no courtyard overlap with a neighbour where there was none, pair by
+        pair, "none" meaning below what the grade reports
+        (`_OVERLAP_REPORTED_MM2`). An overlap a pair already has may deepen,
+        but never double (measured on #983's lattice: 16 of 2880 seats already
+        overlapping the blocker by 0.044-0.35 mm2 gained 0.0012-0.0020 mm2,
+        under 3 %); refusing that would keep the grade ERROR the correction
+        exists to remove;
       * with a grader, no intent-grade error the raw pose does not have
         (`floorplan.grade_delta`, as #975's `_grade_worse`) -- which also
         refuses an existing overlap deepened past a declared budget -- and
@@ -1877,8 +1889,12 @@ def _no_worse(new, raw) -> bool:
     r_pads, r_worst, r_ov, r_err, r_split = raw
     if n_pads > r_pads or n_worst > r_worst + EPS:
         return False
-    if r_ov <= EPS < n_ov:
-        return False
+    for ref, grown in n_ov.items():
+        was = r_ov.get(ref, 0.0)
+        if grown <= was + EPS:
+            continue
+        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:
+            return False
     if n_err is not None and r_err is not None:
         from placement import floorplan as _fp
         if n_split != r_split or list(_fp.grade_delta(r_err, n_err)):

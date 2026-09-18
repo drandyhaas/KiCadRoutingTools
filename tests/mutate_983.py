@@ -213,16 +213,32 @@ ROWS = [
      "    if n_pads > r_pads:",
      (T983,), 'KILLED'),
     ('new-overlap-allowed', 'sd',
-     "    if r_ov <= EPS < n_ov:\n"
-     "        return False",
-     "    if False:\n"
-     "        return False",
+     "        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:",
+     "        if was > 0.0 and grown > 2.0 * was:",
      (T983,), 'KILLED'),
     ('overlap-growth-refused-too', 'sd',
-     "    if r_ov <= EPS < n_ov:\n"
-     "        return False",
-     "    if n_ov > r_ov + EPS:\n"
-     "        return False",
+     "        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:",
+     "        if True:",
+     (T983,), 'KILLED'),
+    ('overlap-reported-threshold-dropped', 'sd',
+     "        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:",
+     "        if grown > 2.0 * was:",
+     (T983,), 'KILLED'),
+    ('overlap-may-grow-past-double', 'sd',
+     "        if was < _OVERLAP_REPORTED_MM2 or grown > 2.0 * was:",
+     "        if was < _OVERLAP_REPORTED_MM2 or grown > 3.0 * was:",
+     (T983,), 'KILLED'),
+    ('overlap-summed-not-paired', 'sd',
+     "        was = r_ov.get(ref, 0.0)",
+     "        was = sum(r_ov.values())",
+     (T983,), 'KILLED'),
+    ('stage-one-grades-the-pile', 'sd',
+     "                                     pose_grader, set(unplaced) - {ref})",
+     "                                     pose_grader, ())",
+     (T983,), 'KILLED'),
+    ('seat-ladder-overlaps-the-pile', 'sd',
+     "                                     [o for o in state.parts if o != ref and o not in ex],",
+     "                                     [o for o in state.parts if o != ref],",
      (T983,), 'KILLED'),
     ('grade-errors-not-compared', 'sd',
      "        if n_split != r_split or list(_fp.grade_delta(r_err, n_err)):",
@@ -275,16 +291,12 @@ ROWS = [
      "                and not _faces_its_edge(state, part, entry, edge, nx, ny)):",
      (T983,), 'SURVIVED'),
     ('settle-raises', 'sd',
+     "        return nx, ny\n"
      "    except Exception:                                   # noqa: BLE001\n"
-     "        return x, y\n"
-     "\n"
-     "\n"
-     "def _overlap_at(",
+     "        return x, y",
+     "        return nx, ny\n"
      "    except ZeroDivisionError:\n"
-     "        return x, y\n"
-     "\n"
-     "\n"
-     "def _overlap_at(",
+     "        return x, y",
      (T983,), 'KILLED'),
     ('seat-ladder-not-settled', 'sd',
      "                    x, y = _band_settle(state, part, entry, edge, lo, x, y, seats)",

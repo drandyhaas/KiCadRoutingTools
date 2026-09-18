@@ -326,9 +326,9 @@ def board(size, *footprints):
             + ''.join(footprints) + ')\n')
 
 
-def key(pads=0, worst=0.0, overlap=0.0):
+def key(pads=0, worst=0.0, overlap=None):
     """A `_seat_reading` for a unit test: floor and overlap, no grader."""
-    return (pads, worst, overlap, None, None)
+    return (pads, worst, dict(overlap or {}), None, None)
 
 
 def no_nudge():
@@ -518,10 +518,20 @@ class AlongEdgeWindow(_Graded):
         self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, fewer_deeper), (x, y))
         # Courtyard overlap: none where there was none; an existing one may
         # deepen by the step's own micron.
-        new_ov = lambda sx, sy: key() if (sx, sy) == (x, y) else key(overlap=0.0012)
-        self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, new_ov), (x, y))
-        deeper_ov = lambda sx, sy: key(overlap=0.0441) if (sx, sy) == (x, y) else key(overlap=0.0453)
-        self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, deeper_ov), stepped)
+        def ov(raw_pairs, new_pairs):
+            return lambda sx, sy: (key(overlap=raw_pairs) if (sx, sy) == (x, y)
+                                   else key(overlap=new_pairs))
+        nudge = lambda f: seeder._window_nudge(st, part, mid, 'west', x, y, f)
+        self.assertEqual(nudge(ov({}, {'R9': 0.0012})), (x, y))              # new
+        self.assertEqual(nudge(ov({'R9': 0.0441}, {'R9': 0.0453})), stepped) # deeper
+        # PER PAIR: an overlap R8 already has does not license a new one with R9.
+        self.assertEqual(nudge(ov({'R8': 0.002}, {'R8': 0.002, 'R9': 0.0072})), (x, y))
+        # "Existing" means the grade would report it, and it may not double.
+        self.assertEqual(nudge(ov({'R9': 1.2e-5}, {'R9': 0.0132})), (x, y))
+        self.assertEqual(nudge(ov({'R9': 3e-5}, {'R9': 5.9e-5})), (x, y))    # under double,
+        #                                                   but never reported before
+        self.assertEqual(nudge(ov({'R9': 0.01}, {'R9': 0.0201})), (x, y))
+        self.assertEqual(nudge(ov({'R9': 0.01}, {'R9': 0.0199})), stepped)
         # the raw one does not seat at all: a step never makes a seat of it
         only_step = lambda sx, sy: None if (sx, sy) == (x, y) else key()
         self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, only_step), (x, y))
@@ -854,17 +864,56 @@ class OverhangBand(_Graded):
                 blind, pose = self.repair(path, doc, blind=True), self.repair(path, doc)
                 self.assertIn('band', self.full_grade(path, blind, doc)[0])
                 self.assertEqual(pose, blind)
-                self.assertEqual(self.full_grade(path, pose, doc)[1], [])
+                if budget is not None:          # the rule only runs under one
+                    self.assertEqual(self.full_grade(path, pose, doc)[1], [])
             with self.subTest(budget=budget, caller='stage1'):
                 with no_settle():
                     blind = self.pose(self.stage1(path, doc), 'J1')
                 pose = self.pose(self.stage1(path, doc), 'J1')
                 self.assertEqual(pose, blind)
-                self.assertEqual(self.full_grade(path, pose, doc)[1], [])
+                if budget is not None:
+                    self.assertEqual(self.full_grade(path, pose, doc)[1], [])
+        # A locked R8 whose courtyard already touches J1's top by 1 um must not
+        # license the new overlap with R9 (the re-review's case: a SUM of the
+        # two let it through).
+        r8_at = ('  (footprint "r" (locked yes) (layer "F.Cu") (at 1.49 7.901 0)\n'
+                 '    (property "Reference" "R8")\n'
+                 '    (fp_rect (start -1 -1) (end 1 1) (layer "F.CrtYd"))\n'
+                 '    (pad "1" smd rect (at -0.5 -0.6) (size .3 .3) (layers "F.Cu"))\n'
+                 '    (pad "2" smd rect (at 0.5 -0.6) (size .3 .3) (layers "F.Cu")))\n')
+        both = self.write('b7_r8.kicad_pcb', board((20, 20), j1((BODY, crt)), r9_at, r8_at))
+        doc = intent_doc(entry)
+        self.assertEqual(self.repair(both, doc), self.repair(both, doc, blind=True))
         # Anti-vacuity: with no neighbour in the way the same rung IS settled.
         alone = self.write('b7_alone.kicad_pcb', board((20, 20), j1((BODY, crt))))
         doc = intent_doc(entry)
         self.assertNotEqual(self.repair(alone, doc), self.repair(alone, doc, blind=True))
+
+    def test_b7b_the_pile_is_not_a_neighbour(self):
+        # What the seat ignores as meaningless coordinates -- `_seat_edge`'s
+        # `exclude`, stage 1's not-yet-placed parts -- neither refuses a
+        # correction nor is graded against it: here an UNLOCKED R7 in stage
+        # 1's pile, and the same part handed to `_seat_edge` as `exclude`,
+        # sits where the settled pose would overlap it.
+        import pose_score
+        crt = '(fp_rect (start -2.3399 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
+        r7 = ('  (footprint "r" (layer "F.Cu") (at 4.595 10 0)\n'
+              '    (property "Reference" "R7")\n'
+              '    (fp_rect (start -1 -0.6) (end 1 0.6) (layer "F.CrtYd"))\n'
+              '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu"))\n'
+              '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu")))\n')
+        path = self.write('b7b.kicad_pcb', board((20, 20), j1((BODY, crt)), r7))
+        entry = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.3, 'max': 0.5}}
+        doc = dict(intent_doc(entry), legality_budget={'overlap_area': 0.0})
+        with no_settle():
+            blind = self.pose(self.stage1(path, doc), 'J1')
+        self.assertNotEqual(self.pose(self.stage1(path, doc), 'J1'), blind)
+        st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=.25,
+                                   board_edge_clearance=.55)
+        notes = []
+        self.assertTrue(seeder._seat_edge(st, 'J1', dict(entry), set(), notes,
+                                          exclude={'R7'}, target=(0.0, 10.0)))
+        self.assertNotEqual(round(st.parts['J1'].x, 3), round(blind[0], 3))
 
     def test_b6b_no_declared_maximum_means_no_upper_bound(self):
         # The seat's own `hi_eff` for a band with no `max` is max(2T, lo + 1);

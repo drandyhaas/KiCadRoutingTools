@@ -316,15 +316,17 @@ splitflap_driver's J5 10.00 mm off a centre claim at a declared 0°.
 settle below are compared with the pose they replace, and every count below
 is checked separately:
 - no more pads short of the board-edge floor, and the worst pad no shorter;
-- no courtyard overlap with a neighbour where there was none;
+- no courtyard overlap with a neighbour where there was none, checked pair by
+  pair. An overlap below what the grade reports (0.00005 mm²) counts as none;
 - when the search has an intent to grade against (`repair_placement`, stage 1
   of a seed), no intent-grade error the raw pose did not have. This also
   refuses an existing overlap pushed past a declared `legality_budget`.
 
-An overlap the seat already has may deepen by the correction's own micron.
-On #983's lattice through `repair_placement`, 16 of 2880 seats already
-overlapped the blocker by 0.044–0.35 mm² and gained 0.0012–0.0020 mm².
-Refusing that would keep the along-edge error the step exists to remove.
+An overlap a pair already has may deepen, but never double. The step moves a
+seat 1 µm and the settle at most 22 µm. On #983's lattice through
+`repair_placement`, 16 of 2880 seats already overlapped the blocker by
+0.044–0.35 mm² and gained 0.0012–0.0020 mm², under 3 %. Refusing that would
+keep the along-edge error the step exists to remove.
 
 ### The overhang band is graded on the drawn body (#961)
 
