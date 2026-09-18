@@ -1812,7 +1812,7 @@ def _band_settle(state, part, entry: Dict, edge: str, lo: float, x: float, y: fl
             return x, y
         if seats is not None:
             new = seats(nx, ny)
-            if new is None or new > raw:
+            if new is None or (raw is not None and new > raw):
                 return x, y
         return nx, ny
     except Exception:                                   # noqa: BLE001

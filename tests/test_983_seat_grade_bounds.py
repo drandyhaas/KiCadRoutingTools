@@ -709,8 +709,19 @@ class OverhangBand(_Graded):
         c2 = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.02, 'max': 0.5}}
         self.assertNotEqual(seeder._band_settle(st, part, c2, 'west', 0.02, 1.19, 10.0),
                             (1.19, 10.0))                  # it would move ...
+        only_moved = lambda sx, sy: None if (sx, sy) == (1.19, 10.0) else (0, 0.0)
         self.assertEqual(seeder._band_settle(st, part, c2, 'west', 0.02, 1.19, 10.0,
-                                             lambda sx, sy: None), (1.19, 10.0))
+                                             only_moved), (1.19, 10.0))
+        # The cap binds on its own: a body 0.015 inside the edge against a
+        # 0.01 minimum reads 0 twice (clipped), then 0.007, and would reach
+        # the band only at 0.026 mm of travel -- past the 0.022 cap.
+        self.assertEqual(seeder._band_reading(st, part, 'west', 1.215, 10.0)[0], 0.0)
+        c3 = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.01, 'max': 0.5}}
+        self.assertEqual(seeder._band_settle(st, part, c3, 'west', 0.01, 1.215, 10.0),
+                         (1.215, 10.0))
+        with patch.object(seeder, '_BAND_SETTLE_CAP_MM', 1.0):
+            self.assertNotEqual(seeder._band_settle(st, part, c3, 'west', 0.01, 1.215, 10.0),
+                                (1.215, 10.0))
         # And anything the reading raises leaves the pose as it was.
         with patch.object(seeder, '_band_reading', side_effect=RuntimeError('boom')):
             self.assertEqual(seeder._band_settle(st, part, entry, 'west', 0.01, x, y), (x, y))
