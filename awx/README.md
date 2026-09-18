@@ -33,6 +33,7 @@ reference boards):
 | **+ the population's census descent (2026-09-18, `tmp/records/`)** | | | | **91** |
 | **+ destination climbs in the probe menus (`tmp/records/k51_85_climbs`, 5 rounds, then a plateau)** | | | | **85** |
 | **+ the population with the climb menus, generation 1 (`tmp/records/k51_83_pop`; K35 `tmp/records/k35_56_pop`: a JUMP world descended; K41 `tmp/ev41/best_k41`)** | | **56** | **67** | **83** |
+| **+ the descent threshold at two lane vias (K41 `tmp/records/k41_64_pop`)** | | | **64** | |
 | human | 46 | 58 | 70 | **81** |
 | rule (vias + mm/7.5) | 121.5 | 175.3 | 218.9 | 281.1 |
 
