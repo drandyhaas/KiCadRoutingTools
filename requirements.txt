@@ -1,7 +1,19 @@
 # KiCad Routing Tools Dependencies
 
-# Numerical computation
-numpy>=1.21.0
+# Numerical computation.
+#
+# The numpy floor is 1.22, not 1.21, and it is load-bearing rather than
+# aspirational -- the whole stack breaks below it in ways that name neither
+# numpy nor us (reported from a KiCad 10 install, 2026-09-18):
+#   * `numpy._DTypeMeta.__class_getitem__` landed in 1.22. Below that, any
+#     package whose import evaluates `np.ndarray[Any, np.dtype[...]]` dies with
+#     `TypeError: 'numpy._DTypeMeta' object is not subscriptable`.
+#   * scipy >= 1.11 warns "A NumPy version >=1.22.4 and <2.3.0 is required for
+#     this version of SciPy (detected version X)".
+# `startup_checks.requirement_floors` READS this line, so the floor here is the
+# floor the gates enforce -- see FALLBACK_FLOORS there for the stripped-install
+# case. Raising it here raises it everywhere; there is no second copy to edit.
+numpy>=1.22.0
 scipy>=1.7.0
 
 # Geometry operations

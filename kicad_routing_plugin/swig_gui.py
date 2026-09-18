@@ -3383,36 +3383,29 @@ class RoutingDialog(wx.Dialog):
                 # SystemExit here would turn the friendly dependency dialog below
                 # into a raw traceback in the plugin.
                 captured_output = captured.getvalue() if 'captured' in dir() else ''
-                # Check which dependencies are missing
-                missing = []
-                try:
-                    import numpy
-                except ImportError:
-                    missing.append('numpy')
-                try:
-                    import scipy
-                except ImportError:
-                    missing.append('scipy')
-                try:
-                    from shapely.geometry import Polygon
-                except ImportError:
-                    missing.append('shapely')
-                # Pillow is deliberately NOT probed here (#887). This block
-                # re-implements startup_checks.check_python_dependencies BY
-                # HAND, so it must mirror that list and no more -- and Pillow
-                # is not on it, because routing does not need Pillow. The GUI's
-                # only raster consumer is the movie recorder, which is inert
-                # until the Advanced tab's checkbox is ticked (unchecked by
-                # default), so blocking the whole routing dialog on it would
+                # Which dependencies are missing -- or present and TOO OLD,
+                # which is the same failure wearing a different face and used
+                # to be invisible here: this block probed with `except
+                # ImportError` alone, so a numpy from before 1.22 reported
+                # nothing and the user was left with scipy's numpy-version
+                # warning and `'numpy._DTypeMeta' object is not subscriptable`.
+                #
+                # It CALLS the shared probe rather than restating it. The list
+                # was hand-mirrored from startup_checks for exactly as long as
+                # it took to drift. Pillow stays out of it because
+                # ROUTING_PACKAGES leaves it out (#887): the GUI's only raster
+                # consumer is the movie recorder, inert until the Advanced tab's
+                # checkbox is ticked, so blocking the routing dialog on it would
                 # refuse a board this GUI can route. The raster gate lives in
-                # startup_checks.check_render_dependencies, at the render entry
-                # points.
-
-                if missing:
-                    msg = f"Missing Python dependencies: {', '.join(missing)}\n\n"
-                    msg += "Install them using KiCad's Python interpreter:\n"
-                    msg += f"  {sys.executable} -m pip install " + " ".join(missing)
-                    raise RuntimeError(msg)
+                # startup_checks.check_render_dependencies, at the render sites.
+                from startup_checks import (ROUTING_PACKAGES,
+                                            dependency_problems,
+                                            format_problems)
+                problems = dependency_problems(ROUTING_PACKAGES)
+                if problems:
+                    raise RuntimeError(format_problems(
+                        problems,
+                        "Python dependencies missing or too old:"))
 
                 # Check if Rust router is the problem
                 try:

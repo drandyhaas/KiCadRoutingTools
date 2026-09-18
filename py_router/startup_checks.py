@@ -22,8 +22,10 @@ so on a checkout without a built router the 8 test files that import a routing
 module at module level took the entire ~200-test suite down with them.
 """
 
-import sys
+import importlib
 import os
+import re
+import sys
 
 
 class StartupCheckError(RuntimeError):
@@ -49,32 +51,260 @@ class RenderDependencyError(StartupCheckError, ImportError):
     """
 
 
-def check_python_dependencies():
-    """Check that required Python libraries are available.
+# ---------------------------------------------------------------------------
+# What each dependency is, and how old is too old
+# ---------------------------------------------------------------------------
+#
+# THE TABLE IS SHARED. `kicad_routing_plugin/deps_check.py` imports IMPORT_TESTS
+# and the probes below rather than restating them -- the GUI used to carry its
+# own hand-written copy of this list (in two places), and a hand-written copy of
+# a list is a list that drifts.
 
-    Raises StartupCheckError naming the missing libraries.
+# pip distribution name -> import statement used to verify it. The specific
+# submodule imports catch broken/partial installs (e.g. shapely without its
+# native lib) better than a bare `import pkg`. Packages absent from this dict
+# fall back to `import <pip name>`, which is only right while the pip name IS
+# the import name -- Pillow imports as `PIL`, and the missing entry once made
+# the GUI unopenable on every machine (#943).
+IMPORT_TESTS = {
+    "numpy": "import numpy",
+    "scipy": "from scipy.optimize import linear_sum_assignment",
+    "shapely": "from shapely.geometry import Polygon",
+    "Pillow": "from PIL import Image",
+}
+
+# pip distribution name -> the module whose `__version__` is read to decide
+# whether it is too old. Read from the IMPORTED module, deliberately, and never
+# from `importlib.metadata`: metadata answers "what did pip install", and the
+# question here is "what will this interpreter actually import". Those differ
+# exactly when it matters -- a stale copy earlier on sys.path shadowing a newer
+# installed one is the failure this gate exists to name.
+VERSION_MODULES = {
+    "numpy": "numpy",
+    "scipy": "scipy",
+    "shapely": "shapely",
+    "Pillow": "PIL",
+}
+
+# The packages ROUTING needs. Pillow is not among them and must not become one:
+# it is the raster path, gated separately by `check_render_dependencies` (#887).
+ROUTING_PACKAGES = ("numpy", "scipy", "shapely")
+
+# Last-resort floors for an install that shipped without requirements.txt.
+# requirements.txt is the source of truth (`requirement_floors` reads it and
+# these only fill gaps); `tests/test_dependency_version_floor.py` asserts this
+# constant against the file, so bumping one without the other fails.
+#
+# numpy 1.22 is the floor that MATTERS, and it is worth knowing why, because
+# neither symptom names us and neither names the real cause:
+#   * `numpy._DTypeMeta.__class_getitem__` arrived in 1.22. Below it, any
+#     package annotating `np.ndarray[Any, np.dtype[...]]` at import time dies
+#     with `TypeError: 'numpy._DTypeMeta' object is not subscriptable`.
+#   * scipy >= 1.11 warns "A NumPy version >=1.22.4 and <2.3.0 is required for
+#     this version of SciPy (detected version X)" -- a numpy-version complaint
+#     that looks like it comes from us, and that a user checks by running
+#     `pip show numpy` against a DIFFERENT interpreter, where it is fine.
+# Both were reported together from one KiCad 10 install (2026-09-18).
+FALLBACK_FLOORS = {
+    "numpy": "1.22",
+}
+
+
+def requirements_path():
+    """Path to requirements.txt, in the repo layout or a flat PCM install."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for candidate in (os.path.join(os.path.dirname(here), 'requirements.txt'),
+                      os.path.join(here, 'requirements.txt')):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+# Package name at the start of a requirements line, then whatever specifier
+# follows it. Stops the name at the first specifier/marker character.
+_REQ_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(.*)$")
+
+# The FLOOR inside a specifier. `>=` and `==` only: this gate answers "is the
+# installed one too old", which is the failure users hit. Upper bounds are
+# pip's business -- enforcing `<2.3` here would refuse to start on a numpy that
+# merely makes one dependency grumble.
+_FLOOR_RE = re.compile(r"(?:>=|==)\s*([0-9][0-9A-Za-z.\-+]*)")
+
+
+def parse_requirements(path):
+    """Return [(pip_name, specifier)] from a requirements file.
+
+    Skips comments, blanks and pip directives (`-r ...`, URLs). The specifier is
+    kept, not stripped: it is what makes the difference between asking pip for
+    `numpy` -- which an already-installed too-old numpy satisfies -- and asking
+    for `numpy>=1.22`, which it does not.
     """
-    missing = []
+    out = []
+    if not path or not os.path.isfile(path):
+        return out
+    with open(path, 'r') as fh:
+        for raw in fh:
+            line = raw.split('#', 1)[0].strip()
+            if not line or line.startswith('-') or '://' in line:
+                continue
+            m = _REQ_LINE_RE.match(line)
+            if m:
+                out.append((m.group(1), m.group(2).strip()))
+    return out
 
-    # Check numpy (required by the Rust router module)
+
+def requirement_floors():
+    """{pip_name: minimum version string or None} from requirements.txt.
+
+    `FALLBACK_FLOORS` fills in for a package the file does not floor, and for an
+    install that shipped no requirements.txt at all -- where the old code
+    checked nothing whatsoever, because an unreadable file parsed to an empty
+    list and an empty list is a gate that passes everything.
+    """
+    floors = {}
+    for name, spec in parse_requirements(requirements_path()):
+        m = _FLOOR_RE.search(spec or '')
+        floors[name] = m.group(1) if m else None
+    for name, floor in FALLBACK_FLOORS.items():
+        if not floors.get(name):
+            floors[name] = floor
+    return floors
+
+
+def parse_version(text):
+    """Version string -> comparable tuple of ints. '1.22.4rc1' -> (1, 22, 4).
+
+    Stops at the first component with no leading digits, so a dev/rc/post
+    suffix orders with its release rather than raising.
+    """
+    parts = []
+    for chunk in str(text).split('.'):
+        digits = ''
+        for ch in chunk:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def version_satisfies(installed, floor):
+    """True when `installed` is at least `floor`.
+
+    An absent floor, or a version neither side can parse, satisfies: this gate
+    refuses to start a program, so an unrecognised version string must not be
+    the reason it refuses.
+    """
+    if not floor or not installed:
+        return True
+    have, need = parse_version(installed), parse_version(floor)
+    if not have or not need:
+        return True
+    width = max(len(have), len(need))
+    have += (0,) * (width - len(have))
+    need += (0,) * (width - len(need))
+    return have >= need
+
+
+def imported_version(pip_name):
+    """(version, file) of the module this interpreter imports for `pip_name`.
+
+    (None, None) when it cannot be imported. The FILE is returned because it is
+    the answer to the question a version complaint always raises -- "but mine is
+    up to date" -- and it is usually a path the user did not expect.
+    """
+    module_name = VERSION_MODULES.get(pip_name, pip_name)
     try:
-        import numpy
-    except ImportError:
-        missing.append('numpy')
+        module = importlib.import_module(module_name)
+    except Exception:                                          # noqa: BLE001
+        return None, None
+    return (getattr(module, '__version__', None),
+            getattr(module, '__file__', None))
 
-    # Check scipy (required for optimal target assignment and Voronoi)
-    try:
-        from scipy.optimize import linear_sum_assignment
-    except ImportError:
-        missing.append('scipy')
 
-    # Check shapely (required for polygon union in multi-net plane layers)
-    try:
-        from shapely.geometry import Polygon
-    except ImportError:
-        missing.append('shapely')
+class Problem(object):
+    """One dependency that is absent, or present and too old."""
 
-    _raise_if_missing(missing)
+    def __init__(self, name, state, installed=None, floor=None, path=None):
+        self.name = name
+        self.state = state            # 'absent' | 'outdated'
+        self.installed = installed
+        self.floor = floor
+        self.path = path
+
+    @property
+    def requirement(self):
+        """What to hand pip: `numpy>=1.22`, or bare `numpy` with no floor."""
+        return f"{self.name}>={self.floor}" if self.floor else self.name
+
+    def describe(self):
+        if self.state == 'absent':
+            return f"  {self.name}: not installed"
+        lines = [f"  {self.name}: {self.installed} is too old "
+                 f"(need >= {self.floor})"]
+        if self.path:
+            lines.append(f"      imported from {self.path}")
+        return "\n".join(lines)
+
+    def __repr__(self):                                        # pragma: no cover
+        return f"<Problem {self.name} {self.state} {self.installed}>"
+
+
+def dependency_problems(names=ROUTING_PACKAGES, floors=None):
+    """Return [Problem] for `names`: what cannot be imported, and what is stale.
+
+    The two states are separate on purpose. "Missing scipy" and "numpy 1.21.6,
+    which every one of these packages is newer than" need different sentences
+    and different pip commands, and collapsing them into one list of names is
+    how a too-old package became invisible: the old probe was `except
+    ImportError` and nothing else, so a numpy from before 1.22 passed every
+    gate, raised no dialog, and surfaced later as somebody else's error text.
+    """
+    floors = requirement_floors() if floors is None else floors
+    problems = []
+    for name in names:
+        try:
+            exec(IMPORT_TESTS.get(name, f"import {name}"), {})
+        except ImportError:
+            problems.append(Problem(name, 'absent', floor=floors.get(name)))
+            continue
+        floor = floors.get(name)
+        installed, path = imported_version(name)
+        if floor and installed and not version_satisfies(installed, floor):
+            problems.append(Problem(name, 'outdated', installed=installed,
+                                    floor=floor, path=path))
+    return problems
+
+
+def format_problems(problems, header):
+    """The user-facing block for a list of Problems: what, where, and the fix.
+
+    Names the INTERPRETER, because the whole difficulty of a version complaint
+    from inside KiCad is that the python being complained about is not the one
+    the user checks.
+    """
+    lines = [header]
+    lines += [p.describe() for p in problems]
+    lines += ["", f"Python: {sys.executable or '(embedded)'}",
+              "", "Install with:",
+              "  \"" + (sys.executable or 'python3') + "\" -m pip install "
+              "--upgrade " + " ".join(f'"{p.requirement}"' for p in problems)]
+    return "\n".join(lines)
+
+
+def check_python_dependencies():
+    """Check the libraries routing needs are importable AND new enough.
+
+    Raises StartupCheckError naming what is missing or stale.
+    """
+    problems = dependency_problems(ROUTING_PACKAGES)
+    if problems:
+        raise StartupCheckError(format_problems(
+            problems,
+            "ERROR: Python libraries missing or too old for KiCad Routing "
+            "Tools:"))
 
 
 def _raise_if_missing(missing, exc=StartupCheckError):
@@ -122,12 +352,20 @@ def check_render_dependencies():
     StartupCheckError, so the consumers that disable rendering rather than
     failing keep working. See that class.
     """
-    missing = []
     try:
         from PIL import Image, ImageDraw, ImageFont     # noqa: F401
     except ImportError:
-        missing.append('Pillow')
-    _raise_if_missing(missing, RenderDependencyError)
+        _raise_if_missing(['Pillow'], RenderDependencyError)
+        return
+
+    # Too old counts as well, and reaches the same `except ImportError`
+    # consumers -- but only ever for the RASTER feature, never for routing.
+    floor = requirement_floors().get('Pillow')
+    installed, path = imported_version('Pillow')
+    if floor and installed and not version_satisfies(installed, floor):
+        raise RenderDependencyError(format_problems(
+            [Problem('Pillow', 'outdated', installed, floor, path)],
+            "ERROR: Pillow is too old for the raster path:"))
 
 
 def get_cargo_version():

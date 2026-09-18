@@ -215,7 +215,7 @@ The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs
 
 Three ways to install:
 
-**A. KiCad Plugin and Content Manager (PCM)** — the recommended path for end users. Open the PCM from the KiCad main window, find *KiCad Routing Tools*, and click Install. (The package is in the process of being added to the official repository; once accepted, this will be available out-of-the-box.) On first launch, the plugin checks the Python packages listed in `requirements.txt` (currently `scipy` and `shapely` — KiCad already bundles `numpy`) and offers a one-click pip install for any that are missing into KiCad's Python.
+**A. KiCad Plugin and Content Manager (PCM)** — the recommended path for end users. Open the PCM from the KiCad main window, find *KiCad Routing Tools*, and click Install. (The package is in the process of being added to the official repository; once accepted, this will be available out-of-the-box.) On first launch, the plugin checks the Python packages listed in `requirements.txt` (`numpy`, `scipy`, `shapely`) and offers a one-click pip install for any that are missing **or too old** into KiCad's Python. Do not assume KiCad supplies them: what it bundles varies by version and platform, and KiCad 10 on macOS ships no `numpy` at all. The check reports the version and the file path the *running* interpreter imports — KiCad's Python is often not the one `pip show numpy` answers for in a terminal.
 
 **B. PCM "Install from File…" using the release zip** — works today, before the package lands in the official repository. Each [GitHub Release](https://github.com/drandyhaas/KiCadRoutingTools/releases) ships a ready-to-install PCM package zip named `KiCadRoutingTools-<version>.zip` (a single cross-platform archive bundling the prebuilt Rust binaries for all platforms — **not** the auto-generated "Source code (zip)"). To install it:
 
@@ -874,7 +874,10 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 - Python 3.9+ (the router is built `abi3-py39` whether it is downloaded or built
   from source, so building locally does not lower the floor — on 3.8 the module
   compiles and then fails to load with `symbol not found ... _PyCMethod_New`)
-- numpy (`pip3 install numpy`)
+- numpy **1.22 or newer** (`pip3 install "numpy>=1.22"`) — below 1.22 the stack fails
+  with errors that name neither numpy nor this tool: scipy's "A NumPy version
+  >=1.22.4 ... is required" and `TypeError: 'numpy._DTypeMeta' object is not
+  subscriptable`
 - scipy (`pip3 install scipy`) - used for optimal target assignment and Voronoi partitioning
 - shapely (`pip3 install shapely`) - used for polygon union in multi-net plane layers
 - Rust toolchain — only needed if you build the router from source (`python build_router.py --from-source`); not required when using the prebuilt binary
