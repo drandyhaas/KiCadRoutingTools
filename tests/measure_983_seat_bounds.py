@@ -64,9 +64,18 @@ review (never loosened):
     error fails); head pad-edge floor shortfall no worse on EITHER count
     (pads short, worst shortfall); per NEIGHBOUR of the seated part, no
     courtyard overlap on the written board where base had less than the
-    grade reports (5e-5 mm2), and none more than doubled. An overlap base
-    already had may deepen that far -- the user's choice for #983, see
-    seeder `_no_worse` -- and every such pair is counted and printed.
+    grade reports (5e-5 mm2), and none doubled. An overlap base already had
+    may deepen short of that -- the user's choice for #983, see seeder
+    `_no_worse` -- and every such pair is counted and printed.
+    The overlap clause was added in review, not pre-registered, and is
+    SCOPED (the user's decision, disclosed on every run): it is not judged
+    on (a) a bare `_seat_edge` call (L-A1, and the `seat` rows of L-A3/L-B),
+    because with no grader #975's floor preference compares no overlap by
+    #986's design -- L-A1r is the same lattice through the production
+    caller, and is judged; nor on (b) L-C, whose J5 sits among splitflap's
+    north-edge connectors and overlaps three of them in BOTH arms, so a
+    stage-1 geometry fix that moves it millimetres changes which. Rows not
+    judged are counted, with how many would have failed.
   a row whose written pose differs from base must have fired a correction
     (on SOME rung of that seat: the count is per seat, not per kept rung).
   a row that raised on either arm fails the run; a row seated only on head
@@ -423,7 +432,8 @@ def collect(repo, out_path, quick):
             r = rows[case['id']]
             if r['ok'] and r['poses']:
                 r.update(grade_row(case, r, tmp))
-            r.update(lattice=case['lattice'], input_sha256=input_sha[case['id']])
+            r.update(lattice=case['lattice'], ladder=case['ladder'],
+                     input_sha256=input_sha[case['id']])
         doc = {'repo': repo, 'engine_sha': git(repo, 'rev-parse', 'HEAD'),
                'here_sha': git(HERE, 'rev-parse', 'HEAD'), 'quick': quick,
                'python': sys.version.split()[0], 'worker_seconds': seconds,
@@ -482,7 +492,7 @@ def diff(a_path, b_path):
     rb = {r['id']: r for r in base['rows']}
     rh = {r['id']: r for r in head['rows']}
     violations, changed, null, fixed, still = [], 0, 0, [], []
-    grew, newly = [], []
+    grew, newly, unjudged = [], [], {'bare seat (no grader)': [0, 0], 'L-C fixture': [0, 0]}
     fired = lambda r: any((r['fires'] or {}).get(c) for c in CORRECTIONS)
     for rid in sorted(set(rb) | set(rh)):
         b, h = rb.get(rid), rh.get(rid)
@@ -513,17 +523,24 @@ def diff(a_path, b_path):
                 violations.append((rid, f'floor {b.get("floor_n")}/{b.get("floor_max")} -> '
                                         f'{h.get("floor_n")}/{h.get("floor_max")}'))
             pb, ph = b.get('pairs') or {}, h.get('pairs') or {}
+            scope = ('bare seat (no grader)' if h.get('ladder') == 'seat'
+                     else 'L-C fixture' if h.get('lattice') == 'C' else None)
+            bad = []
             for other, oh in ph.items():
                 ob = pb.get(other, 0.0)
                 if oh <= ob + 1e-9:
                     continue
                 if ob < 5e-5 <= oh:
-                    violations.append((rid, f'new courtyard overlap with {other}: {ob} -> {oh}'))
-                elif oh > 2.0 * ob:
-                    violations.append((rid, f'courtyard overlap with {other} more than '
-                                            f'doubled: {ob} -> {oh}'))
-                else:
+                    bad.append(f'new courtyard overlap with {other}: {ob} -> {oh}')
+                elif oh >= 2.0 * ob:
+                    bad.append(f'courtyard overlap with {other} doubled: {ob} -> {oh}')
+                elif scope is None:
                     grew.append((rid, ob, oh))
+            if scope is not None:
+                unjudged[scope][0] += 1
+                unjudged[scope][1] += bool(bad)
+            else:
+                violations.extend((rid, m) for m in bad)
             if b.get('written') != h.get('written'):
                 changed += 1
                 if not fired(h):
@@ -543,6 +560,8 @@ def diff(a_path, b_path):
         print(f'existing courtyard overlap deepened on {len(grew)} pairs, by at most '
               f'{worst:.4f} mm2 and {100 * (ratio - 1):.1f} % (base overlap '
               f'{min(g[1] for g in grew):.4f}-{max(g[1] for g in grew):.4f} mm2)')
+    for scope, (n, would) in unjudged.items():
+        print(f'overlap NOT JUDGED on {n} rows ({scope}); {would} of them would fail it')
     for rid, errs in newly[:10]:
         print(f'  seated on head only: {rid}: {errs}')
     for rid, eh in still[:20]:
