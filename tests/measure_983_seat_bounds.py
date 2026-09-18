@@ -21,6 +21,9 @@ Three mechanisms, each a lattice of seats graded on the written board:
              not print it, and this geometry reproduces its 70/2880 exactly.
        L-A2  the same board through stage 1 of `seed_from_intent`, blocker y
              thinned to 0.1 mm.
+       L-A1r the issue's lattice, blocker x 0.5-1.75, through
+             `repair_placement` -- the PRODUCTION caller, which hands the seat
+             a live grader (L-A1 calls `_seat_edge` bare, as the issue did).
        L-A3  a `center_on_edge` window: tolerance 0.5 over a blocker
              lattice, and tolerance 0 (a window the 1 um grid cannot always
              meet -- disclosed, not fixed).
@@ -53,12 +56,20 @@ change cannot silently count the wrong one; on a tree without them the count
 is null. The base arm must be the fix's parent: #986's own floor preference
 moves hundreds of these seats relative to upstream main.
 
-THE RULE, written before any fix existed:
+THE RULE, written before any fix existed and tightened by the pre-push
+review (never loosened):
 
-  every row: head `unseated` <= base; head edge-connector grade errors a
-    sub-multiset of base's (a band error traded for a setback error fails);
-    head pad-edge floor shortfall (count, then worst) <= base.
-  a row whose written pose differs from base must have fired a correction.
+  every row: head `unseated` <= base; head grade errors (edge-connector and
+    `legality`) a sub-multiset of base's (a band error traded for a setback
+    error fails); head pad-edge floor shortfall no worse on EITHER count
+    (pads short, worst shortfall); no courtyard overlap on the written board
+    where base had none. An overlap base already had may deepen -- the
+    user's choice for #983, see seeder `_no_worse` -- and every such row is
+    counted and its growth printed.
+  a row whose written pose differs from base must have fired a correction
+    (on SOME rung of that seat: the count is per seat, not per kept rung).
+  a row that raised on either arm fails the run; a row seated only on head
+    is printed, and must have fired too.
   SIGNAL: the A, B and C error counts fall; rows that stay dirty are named.
   Rows where nothing changed are counted as NULL rows, never dropped.
 
@@ -151,6 +162,11 @@ def cases(quick=False):
     for bx in xs[::2] if not quick else xs[:2]:
         for by in ys[::2]:
             out.append(({'id': f'A2/{bx}/{by}', 'lattice': 'A2', 'ladder': 'stage1',
+                         'entry': along, 'size': [28.3, 18.0]},
+                        _board((28.3, 18.0), ISSUE_J1, _r9(bx, by))))
+    for bx in xs[:6] if not quick else xs[:2]:
+        for by in ys if not quick else ys[::4]:
+            out.append(({'id': f'A1r/{bx}/{by}', 'lattice': 'A1r', 'ladder': 'repair',
                          'entry': along, 'size': [28.3, 18.0]},
                         _board((28.3, 18.0), ISSUE_J1, _r9(bx, by))))
     centre = dict(along)
@@ -274,6 +290,15 @@ def worker():
                     p = st.parts[ref]
                     row.update(ok=bool(ok), poses={ref: [p.x, p.y, p.rot]} if ok else {},
                                notes=notes)
+                elif case['ladder'] == 'repair':
+                    intent = floorplan.intent_from_dict(json.loads(case['intent']))
+                    res = seeder.repair_placement(pcb, case['path'], intent, clearance=clr,
+                                                  board_edge_clearance=edge)
+                    moved = {q['reference']: [q['new_x'], q['new_y'], q['new_rotation']]
+                             for q in res['moves']}
+                    row.update(ok=ref in moved and ref not in (res.get('unseated') or []),
+                               poses={ref: moved[ref]} if ref in moved else {},
+                               notes=list(res.get('notes') or []))
                 else:
                     intent = floorplan.intent_from_dict(json.loads(case['intent']))
                     kw = {}
@@ -296,9 +321,13 @@ def worker():
 # ---------------------------------------------------------------- grading (HERE)
 
 def classify(violations, ref):
-    """Edge-connector errors on `ref`, by the `measured` key the rule writes."""
+    """Edge-connector errors on `ref`, by the `measured` key the rule writes,
+    plus any board-level `legality` error (a budget the seat may have broken)."""
     kinds = []
     for v in violations:
+        if v.rule == 'legality':
+            kinds.append('legality')
+            continue
         if v.ref != ref or v.rule != 'edge_connector':
             continue
         m = v.measured or {}
@@ -337,7 +366,8 @@ def grade_row(case, row, tmp):
     fp = pcb.footprints[ref]
     return {'errors': classify(graded.errors, ref),
             'written': [round(fp.x, 4), round(fp.y, 4), round((fp.rotation or 0.0) % 360.0, 6)],
-            'floor_n': len(short), 'floor_max': round(max(short, default=0.0), 6)}
+            'floor_n': len(short), 'floor_max': round(max(short, default=0.0), 6),
+            'overlap': round(float(graded.legality.get('overlap_area') or 0.0), 6)}
 
 
 def collect(repo, out_path, quick):
@@ -424,6 +454,9 @@ def diff(a_path, b_path):
         with open(p, encoding='utf-8') as stream:
             docs.append(json.load(stream))
     base, head = docs
+    if base.get('quick') != head.get('quick'):
+        print('REFUSED: one arm is --quick and the other is not')
+        return 2
     if base['here_sha'] != head['here_sha']:
         print(f'REFUSED: the arms were graded by different commits '
               f'({base["here_sha"][:10]} vs {head["here_sha"][:10]}); re-run both '
@@ -435,6 +468,8 @@ def diff(a_path, b_path):
     rb = {r['id']: r for r in base['rows']}
     rh = {r['id']: r for r in head['rows']}
     violations, changed, null, fixed, still = [], 0, 0, [], []
+    grew, newly = [], []
+    fired = lambda r: any((r['fires'] or {}).get(c) for c in CORRECTIONS)
     for rid in sorted(set(rb) | set(rh)):
         b, h = rb.get(rid), rh.get(rid)
         if b is None or h is None:
@@ -442,21 +477,35 @@ def diff(a_path, b_path):
             continue
         if b['input_sha256'] != h['input_sha256']:
             violations.append((rid, 'inputs differ'))
+        for side, r in (('base', b), ('head', h)):
+            if r.get('error'):
+                violations.append((rid, f'raised on {side}: {r["error"]}'))
         if b['ok'] and not h['ok']:
             violations.append((rid, 'unseated on head'))
+        if h['ok'] and not b['ok']:
+            newly.append((rid, h.get('errors')))
+            if not fired(h):
+                violations.append((rid, 'seated on head only, with no correction fired'))
         eb, eh = b.get('errors') or [], h.get('errors') or []
         if h['ok'] and b['ok']:
             # A multiset SUBSET, not a count: a correction that trades a band
             # error for a setback error keeps the count and is still a trade.
             if any(eh.count(k) > eb.count(k) for k in set(eh)):
                 violations.append((rid, f'grade errors {eb} -> {eh}'))
-            if (h.get('floor_n', 0), h.get('floor_max', 0)) > (b.get('floor_n', 0),
-                                                              b.get('floor_max', 0)):
+            # Each floor count on its own: fewer pads short with a deeper
+            # worst is still deeper.
+            if (h.get('floor_n', 0) > b.get('floor_n', 0)
+                    or h.get('floor_max', 0) > b.get('floor_max', 0) + 1e-9):
                 violations.append((rid, f'floor {b.get("floor_n")}/{b.get("floor_max")} -> '
                                         f'{h.get("floor_n")}/{h.get("floor_max")}'))
+            ob, oh = b.get('overlap', 0.0), h.get('overlap', 0.0)
+            if ob <= 1e-6 < oh:
+                violations.append((rid, f'new courtyard overlap 0 -> {oh}'))
+            elif oh > ob + 1e-6:
+                grew.append((rid, ob, oh))
             if b.get('written') != h.get('written'):
                 changed += 1
-                if not any((h['fires'] or {}).get(c) for c in CORRECTIONS):
+                if not fired(h):
                     violations.append((rid, f'pose changed with no correction fired: '
                                             f'{b.get("written")} -> {h.get("written")}'))
             else:
@@ -467,6 +516,13 @@ def diff(a_path, b_path):
                 still.append((rid, eh))
     print(f'rows {len(rh)}  pose changed {changed}  NULL (unchanged) {null}  '
           f'fixed {len(fixed)}  still dirty on head {len(still)}')
+    if grew:
+        worst = max(oh - ob for _r, ob, oh in grew)
+        print(f'existing courtyard overlap deepened on {len(grew)} rows, by at most '
+              f'{worst:.4f} mm2 (base overlap {min(g[1] for g in grew):.4f}-'
+              f'{max(g[1] for g in grew):.4f} mm2)')
+    for rid, errs in newly[:10]:
+        print(f'  seated on head only: {rid}: {errs}')
     for rid, eh in still[:20]:
         print(f'  still dirty: {rid}: {eh}')
     if violations:
