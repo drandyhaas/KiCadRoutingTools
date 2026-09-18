@@ -1646,6 +1646,306 @@ def board_edge_geometry(board_info) -> Tuple[List[List[Tuple[float, float]]],
     return rings, outer, cutouts
 
 
+# -- #962: footprint graphic copper against the board outline -----------------
+#
+# `accepted: immutable-graphic` used to waive ANY footprint graphic copper at the
+# board edge, including copper hanging clean off the board. The reasoning, "no
+# routing pass can fix it", holds for a routing grade and fails for a placement
+# grade: `place_pose set U2 115.34 93.6 --rot 90` pushed esp_prog U2's F.Cu tab
+# 1.11 mm off the outline while every instrument read clean. These helpers
+# measure it. `run_drc`, `placement.legality.grade_pad_legality` and
+# `render_placement` all CALL them, so there is exactly one answer.
+
+def milled_rings_enclosing(milled, points) -> frozenset:
+    """Indices into `milled` of the milled rings enclosing any of `points`.
+
+    A part OWNS a milled relief its own pads sit inside (#628). The placement
+    channel exempts that ring from the part's off-outline test, and so does
+    the graphic-copper census here. This is the one implementation;
+    `legality.BoardOutlineGate.rings_enclosing` delegates to it.
+    """
+    owned = set()
+    for i, ring in enumerate(milled or ()):
+        for (px, py) in points:
+            if _point_in_poly(px, py, ring):
+                owned.add(i)
+                break
+    return frozenset(owned)
+
+
+def graphic_owner_state(owner_ref: str, footprints) -> str:
+    """Why a piece of graphic copper may or may not sit off the board.
+
+    - ``'board-level'``: a board-level `gr_*` (no owner). Board art: no part
+      move put it there.
+    - ``'board-outline'``: the owner draws the board's own boundary
+      (`owns_board_outline`, #829), so its copper sits on the outline by
+      design.
+    - ``'locked'`` / ``'movable'``: a part whose pose can be placed. A lock is
+      reported but is NOT a waiver: placement stamps `(locked yes)` itself
+      (`seeder.stamp_locked`, the skill's scoping rule), so the next lap would
+      launder the overrun the last lap made.
+    - ``'unresolved'``: an owner key with no footprint. A waiver must be
+      established positively, so this is graded.
+    """
+    if not owner_ref:
+        return 'board-level'
+    fp = (footprints or {}).get(owner_ref)
+    if fp is None:
+        return 'unresolved'
+    if getattr(fp, 'owns_board_outline', False):
+        return 'board-outline'
+    return 'locked' if getattr(fp, 'locked', False) else 'movable'
+
+
+#: Owner states whose off-outline copper is waived.
+GRAPHIC_WAIVED_STATES = ('board-level', 'board-outline')
+
+
+def graphic_copper_shapes(pcb_data):
+    """Graphic copper segments regrouped into their SHAPES.
+
+    Each shape is `{'owner', 'layer', 'kind', 'uuid', 'segs'}`. The parsers emit
+    a shape's outline as consecutive segments, each starting where the last
+    ended. Regrouping by that chain rather than by uuid works on both parse
+    paths (pcbnew graphic segments carry no uuid).
+    """
+    out = []
+    cur = []
+
+    def closed(chain):
+        return (len(chain) >= 2 and abs(chain[-1].end_x - chain[0].start_x) <= 1e-9
+                and abs(chain[-1].end_y - chain[0].start_y) <= 1e-9)
+    for sg in getattr(pcb_data, 'segments', None) or []:
+        if not getattr(sg, 'graphic', False):
+            if cur:
+                out.append(cur)
+                cur = []
+            continue
+        # A chain ENDS when it has closed on its own start. Otherwise a second
+        # shape that happens to start where the first closed would be merged
+        # into it: a nested poly starting at its parent's first vertex became
+        # one ring, and the even-odd test read the nested poly as a HOLE
+        # (#962 phase-1 verification, round 2).
+        if cur and (closed(cur)
+                    or cur[-1].layer != sg.layer
+                    or getattr(cur[-1], 'owner_ref', '') != getattr(sg, 'owner_ref', '')
+                    or getattr(cur[-1], 'graphic_kind', '') != getattr(sg, 'graphic_kind', '')
+                    or abs(cur[-1].end_x - sg.start_x) > 1e-9
+                    or abs(cur[-1].end_y - sg.start_y) > 1e-9):
+            out.append(cur)
+            cur = []
+        cur.append(sg)
+    if cur:
+        out.append(cur)
+    return [{'owner': getattr(s[0], 'owner_ref', ''), 'layer': s[0].layer,
+             'kind': getattr(s[0], 'graphic_kind', ''), 'uuid': s[0].uuid or '',
+             'segs': s} for s in out]
+
+
+def _graphic_samples(shape, step: float = 0.05):
+    """(x, y, half_width, seg) samples along a shape's copper.
+
+    Uses the stroke AS DRAWN (`drawn_width`), not the obstacle width: a filled
+    shape drawn at stroke 0 is modelled at TRACK_WIDTH, which would add a
+    phantom 0.15 mm reach. A circle is sampled on its TRUE curve, because the
+    16-gon's chord midpoints sit 1.9%·r inside it.
+    """
+    segs = shape['segs']
+    s0 = segs[0]
+    dw = getattr(s0, 'drawn_width', None)
+    hw = (dw if dw is not None else s0.width) / 2.0
+    circ = getattr(s0, 'graphic_circle', None)
+    if circ is not None:
+        cx, cy, r = circ
+        n = max(32, int(2 * math.pi * r / step) + 1)
+        return [(cx + r * math.cos(2 * math.pi * k / n),
+                 cy + r * math.sin(2 * math.pi * k / n), hw, s0) for k in range(n)]
+    pts = []
+    for sg in segs:
+        L = math.hypot(sg.end_x - sg.start_x, sg.end_y - sg.start_y)
+        k = max(1, int(L / step) + 1)
+        for t in range(k + 1):
+            pts.append((sg.start_x + (sg.end_x - sg.start_x) * t / k,
+                        sg.start_y + (sg.end_y - sg.start_y) * t / k, hw, sg))
+    return pts
+
+
+def graphic_outline_overrun(shape, board_info, owned_milled=frozenset(),
+                            _geom=None) -> Tuple[float, Optional[object], Optional[tuple]]:
+    """How far (mm) a graphic copper shape reaches past the board outline.
+
+    Returns `(overrun, worst_segment, worst_point)`. The overrun is signed:
+    positive means copper lies beyond an edge; negative means the whole shape
+    clears every edge by that much. Measured at margin 0 with the drawn
+    stroke:
+    - a sample OFF the board contributes `distance to the outline + half the
+      stroke`;
+    - a sample ON the board contributes `half the stroke - distance to the
+      nearest edge`, which is positive when the stroke crosses the edge.
+
+    The edges are the outer rings, the cutouts, and the milled inner contours
+    (#505), minus the milled rings the owner itself carries (`owned_milled`,
+    indices into `board_edge_contours`; #628). With no outline, the board
+    bounding box stands in.
+
+    Only the OUTLINE of a filled shape is sampled, so a cutout lying wholly
+    inside a filled tab is not seen. That is disclosed in the census basis.
+    """
+    if _geom is None:
+        _geom = _graphic_outline_geometry(board_info)
+    rings, outer, cutouts, milled, bounds = _geom
+    kept_milled = [m for i, m in enumerate(milled) if i not in owned_milled]
+    dist_rings = [r for r in rings if not any(r is m for m in milled)] + kept_milled
+    best, worst_seg, worst_pt = -float('inf'), None, None
+    for (x, y, hw, sg) in _graphic_samples(shape):
+        if dist_rings or outer:
+            d = _point_to_rings_distance(x, y, dist_rings) if dist_rings else float('inf')
+            if not _point_on_board(x, y, outer, cutouts):
+                ov = d + hw
+            else:
+                ov = hw - d
+        elif bounds:
+            x0, y0, x1, y1 = bounds
+            inside = x0 <= x <= x1 and y0 <= y <= y1
+            d = min(abs(x - x0), abs(x1 - x), abs(y - y0), abs(y1 - y))
+            if not inside:
+                d = math.hypot(max(x0 - x, 0, x - x1), max(y0 - y, 0, y - y1))
+            ov = (d + hw) if not inside else (hw - d)
+        else:
+            return (-float('inf'), None, None)
+        if ov > best:
+            best, worst_seg, worst_pt = ov, sg, (x, y)
+    return best, worst_seg, worst_pt
+
+
+def _graphic_outline_geometry(board_info):
+    rings, outer, cutouts = board_edge_geometry(board_info)
+    milled = [c for c in (getattr(board_info, 'board_edge_contours', None) or [])
+              if len(c) >= 3]
+    return rings, outer, cutouts, milled, getattr(board_info, 'board_bounds', None)
+
+
+def _reposed_shape(shape, fp):
+    """The shape moved to its owner's CURRENT pose, or None when the owner has
+    not moved since parse (or has no recorded parse pose), or False when it
+    changed side (a mirror this does not re-derive).
+
+    Graphic copper is placed at parse time. A caller that moves
+    `Footprint.x/y/rotation` in memory, as placement engines do, would
+    otherwise grade the copper where the part used to be. The transform goes
+    through the parser's own `_global_to_local` / `local_to_global` pair, the
+    one both parse paths use.
+    """
+    if fp is None:
+        return None
+    pp = getattr(fp, 'parsed_pose', None)
+    if not pp:
+        return None
+    x0, y0, r0, l0 = pp
+    x1, y1, r1 = fp.x, fp.y, (fp.rotation or 0.0)
+    if fp.layer != l0:
+        return False
+    dr = ((r1 - r0) + 180.0) % 360.0 - 180.0
+    if abs(x1 - x0) < 1e-9 and abs(y1 - y0) < 1e-9 and abs(dr) < 1e-9:
+        return None
+    from kicad_parser import _global_to_local, local_to_global
+    from types import SimpleNamespace
+
+    def mv(gx, gy):
+        lx, ly = _global_to_local(x0, y0, r0, gx, gy)
+        return local_to_global(x1, y1, r1, lx, ly)
+    segs = []
+    for sg in shape['segs']:
+        a = mv(sg.start_x, sg.start_y)
+        b = mv(sg.end_x, sg.end_y)
+        circ = getattr(sg, 'graphic_circle', None)
+        if circ is not None:
+            c = mv(circ[0], circ[1])
+            circ = (c[0], c[1], circ[2])
+        segs.append(SimpleNamespace(
+            start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1], width=sg.width,
+            layer=sg.layer, net_id=sg.net_id, uuid=sg.uuid, graphic=True,
+            owner_ref=getattr(sg, 'owner_ref', ''),
+            drawn_width=getattr(sg, 'drawn_width', None),
+            graphic_kind=getattr(sg, 'graphic_kind', ''), graphic_circle=circ,
+            _source=sg))
+    return dict(shape, segs=segs)
+
+
+def footprint_graphic_outline_census(pcb_data) -> dict:
+    """Every graphic copper shape measured against the outline (#962).
+
+    Returns `{'rows': [...], 'unmeasured': [...], 'basis': str}`. Each row has
+    owner_ref, owner_state, layer, kind, uuid, overrun_mm (signed), seg_loc
+    (the worst segment) and point (the worst sample).
+
+    `unmeasured` names copper the parser does not model, so its absence here
+    is not a pass: pad-less footprints (logos, #146) and bezier curves (the
+    parser's `graphic_copper_unmeasured`).
+    """
+    bi = pcb_data.board_info
+    geom = _graphic_outline_geometry(bi)
+    milled = geom[3]
+    fps = getattr(pcb_data, 'footprints', None) or {}
+    owned_cache = {}
+    rows = []
+    unmeasured = list(getattr(pcb_data, 'graphic_copper_unmeasured', None) or [])
+    for shape in graphic_copper_shapes(pcb_data):
+        owner = shape['owner']
+        state = graphic_owner_state(owner, fps)
+        moved = _reposed_shape(shape, fps.get(owner) if owner else None)
+        if moved is False:
+            if not any(u.get('owner_ref') == owner and u.get('kind') == 'moved-side'
+                       for u in unmeasured):
+                unmeasured.append({'owner_ref': owner, 'kind': 'moved-side',
+                                   'reason': 'the part changed SIDE in memory since '
+                                             'parse; its graphic copper is not '
+                                             're-derived (re-parse the written board)'})
+            continue
+        if moved is not None:
+            shape = moved
+        if owner not in owned_cache:
+            fp = fps.get(owner)
+            pts = [(p.global_x, p.global_y) for p in (fp.pads if fp else [])]
+            owned_cache[owner] = milled_rings_enclosing(milled, pts) if pts else frozenset()
+        ov, sg, pt = graphic_outline_overrun(shape, bi, owned_cache[owner], _geom=geom)
+        if sg is None:
+            continue
+        rows.append({
+            'owner_ref': owner, 'owner_state': state, 'layer': shape['layer'],
+            'kind': shape['kind'], 'uuid': shape['uuid'],
+            'item1': graphic_item_label(sg),
+            'overrun_mm': round(ov, 6),
+            'seg_loc': (sg.start_x, sg.start_y, sg.end_x, sg.end_y),
+            'point': (round(pt[0], 4), round(pt[1], 4)),
+            # ids of the PARSED segments (a re-posed shape carries proxies)
+            'seg_ids': [id(getattr(s, '_source', s)) for s in shape['segs']],
+        })
+    return {
+        'rows': rows,
+        'unmeasured': unmeasured,
+        'basis': ('graphic copper shapes (drawn stroke, true circles) against the '
+                  'real outline + cutouts + milled contours not owned by the part, '
+                  'at margin 0; a filled shape is sampled on its outline only'),
+    }
+
+
+def _baseline_footprint_poses(baseline):
+    """{footprint key: (x, y, rotation, layer)} of a --baseline board, or None.
+
+    `baseline` is a board path or an already-parsed PCBData. Keys are the
+    disambiguated footprint keys (#726), the same ones `owner_ref` carries.
+    """
+    if baseline is None or baseline == '':
+        return None
+    pd = baseline
+    if isinstance(baseline, str):
+        pd = parse_kicad_pcb(baseline)
+    return {k: (fp.x, fp.y, (fp.rotation or 0.0), fp.layer)
+            for k, fp in (getattr(pd, 'footprints', None) or {}).items()}
+
+
 # Sweep item 1 (#625 follow-up): the board-edge pass calls the two ring
 # distances for EVERY segment, via, and pad perimeter sample with no
 # prefilter, and a curved Edge.Cuts outline tessellates to 1-2k edges --
@@ -2167,7 +2467,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             check_sizes: bool = True, size_margin: float = 0.0,
             check_pad_edge: bool = False, print_summary: bool = True,
             net_clearances: Optional[Dict[str, float]] = None,
-            respect_edge_severity: bool = True):
+            respect_edge_severity: bool = True,
+            baseline=None):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -3242,6 +3543,57 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # reports zero), so grading it here only manufactures phantom
     # SEGMENT-BOARD-EDGE items the board deliberately suppressed. Skip to match.
     edge_ignored = respect_edge_severity and edge_clearance_severity(pcb_file) == 'ignore'
+
+    # #962: footprint graphic copper OFF the outline. Graded here, OUTSIDE the
+    # edge-clearance gate below and before any --nets filter:
+    # - copper past the board edge is not a clearance question, so an edge
+    #   clearance of 0 or a severity of `ignore` must not hide it;
+    # - graphic copper is net 0, which a --nets filter would drop.
+    # One row per SHAPE (KiCad reports one item), waived only for board-level
+    # art and board-outline owners; a lock is not a waiver (see
+    # graphic_owner_state). Its segments are then kept out of the #908
+    # `immutable-graphic` waiver below, so no accepted row can consume
+    # KiCad's matching finding in kicad_drc_compare.
+    _gcensus = footprint_graphic_outline_census(pcb_data)
+    _graphic_row_by_seg = {}
+    _graphic_flagged = set()
+    for _row in _gcensus['rows']:
+        for _sid in _row['seg_ids']:
+            _graphic_row_by_seg[_sid] = _row
+        if (_row['overrun_mm'] > 1e-6
+                and _row['owner_state'] not in GRAPHIC_WAIVED_STATES):
+            violations.append({
+                'type': 'graphic-off-board', 'net1': '<graphic>',
+                'item1': _row['item1'], 'owner_ref': _row['owner_ref'],
+                'owner_state': _row['owner_state'], 'uuid': _row['uuid'],
+                'layer': _row['layer'], 'kind': _row['kind'], 'edge': 'off-board',
+                'overrun_mm': _row['overrun_mm'], 'overlap_mm': _row['overrun_mm'],
+                'seg_loc': _row['seg_loc'],
+            })
+            _graphic_flagged.update(_row['seg_ids'])
+    _graphic_unmeasured = _gcensus['unmeasured']
+    if _graphic_unmeasured and not quiet:
+        print("Footprint copper NOT measured against the outline (not modelled): "
+              + ', '.join('%s (%s)' % (u['owner_ref'], u['kind'])
+                          for u in _graphic_unmeasured[:8])
+              + (' ...' if len(_graphic_unmeasured) > 8 else ''))
+    _baseline_poses = _baseline_footprint_poses(baseline)
+
+    def _graphic_origin(owner):
+        """Did a part move put this graze there? It takes a baseline to say."""
+        if not owner:
+            return 'board-level'
+        if _baseline_poses is None:
+            return 'unverified'
+        fp = pcb_data.footprints.get(owner)
+        old = _baseline_poses.get(owner)
+        if fp is None or old is None:
+            return 'unverified'
+        dr = (((fp.rotation or 0.0) - old[2]) + 180.0) % 360.0 - 180.0
+        same = (abs(fp.x - old[0]) < 1e-6 and abs(fp.y - old[1]) < 1e-6
+                and abs(dr) < 1e-6 and fp.layer == old[3])
+        return 'inherited' if same else 'placement'
+    _graphic_placement_grazes = {}
     if board_bounds and effective_board_edge_clearance > 0 and edge_ignored and not quiet:
         print("Skipping board edge clearances "
               "(project sets copper_edge_clearance severity to 'ignore')...")
@@ -3346,6 +3698,32 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 })
                 continue
             if getattr(seg, 'graphic', False):
+                if id(seg) in _graphic_flagged:
+                    continue    # graded once, per shape, as graphic-off-board
+                _grow = _graphic_row_by_seg.get(id(seg), {})
+                _owner = getattr(seg, 'owner_ref', '')
+                _origin = _graphic_origin(_owner)
+                if (_origin == 'placement'
+                        and _grow.get('owner_state') not in GRAPHIC_WAIVED_STATES
+                        and (s_edge == "off-board" or s_overlap > _grade_tol(
+                            effective_board_edge_clearance, clearance_margin))):
+                    # #962: a graze a PART MOVE created (the owner's pose
+                    # differs from --baseline). The #908 waiver is for
+                    # inherited art; it cannot erase a placement-created
+                    # change. Aggregated per shape after the loop.
+                    _k = '%s|%s|%s' % (_owner, _grow.get('uuid', ''), _grow.get('seg_loc'))
+                    _prev = _graphic_placement_grazes.get(_k)
+                    if _prev is None or s_overlap > _prev['overlap_mm']:
+                        _graphic_placement_grazes[_k] = {
+                            'type': 'graphic-board-edge', 'net1': net_str,
+                            'edge': s_edge, 'item1': graphic_item_label(seg),
+                            'owner_ref': _owner,
+                            'owner_state': _grow.get('owner_state', ''),
+                            'origin': 'placement',
+                            'layer': seg.layer, 'overlap_mm': s_overlap,
+                            'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                        }
+                    continue
                 # #908: a GRAPHIC near the board edge is the board author's
                 # own library art -- watchy's PCB antenna runs 0.218mm into
                 # its own edge zone. No routing pass can fix it (moving a
@@ -3354,12 +3732,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 # corpus A/B and every review-routed-board sign-off. PUBLISHED
                 # as an accepted class, not dropped -- the same
                 # publish-don't-drop contract as the pad-covered class above.
+                # #962: this now covers copper INSIDE the outline only (the
+                # off-board part is graphic-off-board above), and the row says
+                # WHY it is accepted: `origin` is inherited (unmoved against
+                # --baseline), unverified (no baseline given) or board-level.
                 _accepted_edge.append({
                     'type': 'segment-board-edge', 'net1': net_str,
                     'edge': s_edge, 'item1': graphic_item_label(seg),
                     'layer': seg.layer, 'overlap_mm': s_overlap,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                     'accepted': 'immutable-graphic',
+                    'owner_state': _grow.get('owner_state', ''),
+                    'origin': _origin,
                 })
                 continue
             # not exempt -> real only if it clears the grid-quantization margin.
@@ -3387,6 +3771,18 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                     'accepted': 'quantization-margin',
                 })
+        # #962: one row per shape for a graze a part move created
+        violations.extend(_graphic_placement_grazes.values())
+        if not quiet:
+            _acc_g = [a for a in _accepted_edge if a.get('accepted') == 'immutable-graphic']
+            if _acc_g:
+                from collections import Counter as _C962
+                _by = _C962(a.get('origin', '?') for a in _acc_g)
+                print("Footprint graphic copper grazing the edge, ACCEPTED as "
+                      "immutable-graphic: %d row(s) (%s)%s" % (
+                          len(_acc_g), ', '.join('%s %d' % kv for kv in sorted(_by.items())),
+                          '; pass --baseline <input board> to grade grazes a part '
+                          'move created' if _by.get('unverified') else ''))
 
         # Check vias
         for via in pcb_data.vias:
@@ -3818,6 +4214,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  {v['net1']}{_fmt_item(v, 'item1')} {where}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                    elif vtype == 'graphic-off-board':
+                        print(f"  {v['item1']} [{v['owner_state']}] footprint copper reaches "
+                              f"{v['overrun_mm']:.3f}mm PAST the board outline")
+                        print(f"    Layer: {v['layer']}, shape: {v['kind'] or '?'}")
+                        print(f"    Worst seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                    elif vtype == 'graphic-board-edge':
+                        where = _edge_phrase(v['edge'])
+                        print(f"  {v['item1']} [{v['owner_state']}] {where} -- the part MOVED "
+                              f"against --baseline (placement-created, not inherited)")
+                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
                     elif vtype == 'via-board-edge':
                         where = _edge_phrase(v['edge'])
                         print(f"  Via:{v['net1']} {where}")
@@ -3921,6 +4328,14 @@ if __name__ == "__main__":
                         help='Also check pad-to-board-edge clearance (issue #236). '
                              'Off by default: pad-edge violations are almost always '
                              'pre-existing edge-connector pads, not router-introduced.')
+    parser.add_argument('--baseline', metavar='BOARD', default=None,
+                        help='#962: the board this one was produced FROM (e.g. the '
+                             'placement input). Footprint graphic copper that grazes '
+                             'the edge is then graded as a violation when its part '
+                             'MOVED against the baseline (placement-created), and '
+                             'accepted as inherited when it did not. Without it such '
+                             'grazes are accepted with origin "unverified". Graphic '
+                             'copper PAST the outline is a violation either way.')
     parser.add_argument('--json', metavar='FILE', default=None,
                         help='also write the result as JSON: the graded floors '
                              'with their source, the non-accepted violation '
@@ -4099,7 +4514,8 @@ if __name__ == "__main__":
                          check_sizes=not args.no_size_checks,
                          size_margin=args.size_margin,
                          check_pad_edge=args.check_pad_edge,
-                         net_clearances=net_clearances)
+                         net_clearances=net_clearances,
+                         baseline=args.baseline)
     if args.render and any(not v.get('accepted') for v in violations):
         render_violation_panels(args.pcb, violations, args.render)
     if args.json:

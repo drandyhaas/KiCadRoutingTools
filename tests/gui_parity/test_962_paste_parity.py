@@ -155,6 +155,34 @@ def main():
     check(len(boards) >= 20, 'the tracked corpus is visible (%d boards)' % len(boards),
           'run_utils.corpus_boards() returned too few boards; git cannot see '
           'the corpus, so this gate would test nothing')
+    # Synthetic boards for what the corpus does not carry. Each goes through
+    # the same arms, the native margin oracle included:
+    # - a custom pad with a paste RATIO: KiCad sizes that term from the ANCHOR;
+    # - an explicit-0 override: unset up to file version 20240201, a real
+    #   override after it.
+    import tempfile
+    syn_dir = tempfile.mkdtemp(prefix='krt962g_')
+    for ver in ('20240108', '20241229'):
+        p = os.path.join(syn_dir, 'syn_%s.kicad_pcb' % ver)
+        with open(p, 'w', encoding='utf-8') as fh:
+            fh.write(
+                '(kicad_pcb (version %s) (generator "pcbnew") (general (thickness 1.6))\n'
+                ' (paper "A4") (layers (0 "F.Cu" signal) (31 "B.Cu" signal) '
+                '(35 "F.Paste" user) (44 "Edge.Cuts" user))\n'
+                ' (setup (pad_to_paste_clearance -0.02))\n (net 0 "") (net 1 "/A")\n'
+                ' (footprint "L:P" (layer "F.Cu") (at 20 20)\n'
+                '  (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS") '
+                '(effects (font (size 1 1) (thickness 0.15))))\n'
+                '  (solder_paste_margin 0.05) (solder_paste_margin_ratio -0.1)\n'
+                '  (pad "C" smd custom (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste") '
+                '(net 1 "/A") (solder_paste_margin -0.05) (solder_paste_margin_ratio -0.1)\n'
+                '   (options (clearance outline) (anchor rect))\n'
+                '   (primitives (gr_poly (pts (xy -1 -0.5) (xy 1 -0.5) (xy 1 0.5) (xy -1 0.5)) '
+                '(width 0) (fill yes))))\n'
+                '  (pad "Z" smd rect (at 4 0) (size 1 0.5) (layers "F.Cu" "F.Paste") '
+                '(net 1 "/A") (solder_paste_margin 0) (solder_paste_margin_ratio 0))))\n'
+                % ver)
+        boards.append(p)
 
     # -- comparator self-test: a dropped aperture must be SEEN ---------------
     esp = os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb')
@@ -231,6 +259,13 @@ def main():
         oa, ob = multiset_diff(assoc(f), assoc(g))
         check(not oa and not ob, '%s: every opening concerns the same nets' % name,
               'only text=%s only pcbnew=%s' % (oa[:2], ob[:2]))
+        if name.startswith('syn_'):
+            mz = [a.margin for a in f.paste_apertures if a.pad_number == 'Z']
+            mc = [a.margin for a in f.paste_apertures if a.pad_number == 'C']
+            want_z = (0.05 - 0.1 * 1.0, 0.05 - 0.1 * 0.5) if name.endswith('20240108') else (0.0, 0.0)
+            if (mz and all(abs(a - b) < 1e-6 for a, b in zip(mz[0], want_z))
+                    and mc and all(abs(v + 0.10) < 1e-6 for v in mc[0])):
+                witnessed['synthetic custom-anchor + explicit-zero'] += 1
         if name == 'watchy':
             panes = [a for a in f.paste_apertures
                      if a.owner_ref == 'U4' and a.source == 'paste_only_pad']
@@ -286,7 +321,8 @@ def main():
                     if (abs(sx - sy) > 1e-6 and abs(p0.size_x - sy) < 1e-6
                             and abs(p0.size_y - sx) < 1e-6):
                         nx, ny = ny, nx
-                # custom pads: the opening's margin is in the pad frame, as KiCad's
+                # A custom pad's margin stays in the PAD frame, as KiCad
+                # reports it, so it is compared unswapped.
                 natives.add((round(nx, 6), round(ny, 6)))
             mine = (round(ap.margin[0], 6), round(ap.margin[1], 6))
             # KiCad rounds `size * ratio` to whole nanometres (KiROUND); allow 1 nm.
@@ -313,6 +349,10 @@ def main():
         check(witnessed[w] == 1, 'witness present: %s' % w,
               'a named witness vanished; the parity arms above could then pass '
               'on an empty model')
+    check(witnessed['synthetic custom-anchor + explicit-zero'] == 2,
+          'witness: both synthetic boards resolve the anchor ratio and the '
+          'version-dependent zero as KiCad does',
+          str(witnessed['synthetic custom-anchor + explicit-zero']))
 
     print('\n%d failure(s)' % len(FAILURES))
     for fl in FAILURES:

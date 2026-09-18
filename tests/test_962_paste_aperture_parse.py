@@ -370,12 +370,20 @@ def main():
           len(ca) == 1 and all(_approx(m, -0.10) for m in ca[0].margin),
           str(ca and ca[0].margin))
 
-    # S2: an explicit 0 is UNSET to KiCad, so the pad inherits the footprint.
+    # S2: an explicit 0 means what the FILE VERSION's loader makes of it:
+    # unset (inherit) up to 20240201, an explicit override from 20240202.
     zero = _pad('Z', '(solder_paste_margin 0) (solder_paste_margin_ratio 0)')
-    p = _parse_text(_board(_fp(zero, header='(solder_paste_margin 0.05)'), ''))
-    za = [a for a in p.paste_apertures if a.pad_number == 'Z']
-    check('9/S2. (solder_paste_margin 0) reads as unset and inherits the footprint 0.05',
-          len(za) == 1 and _approx(za[0].margin[0], 0.05), str(za and za[0].margin))
+    fp_hdr = '(solder_paste_margin 0.05) (solder_paste_margin_ratio -0.1)'
+    old_txt = _board(_fp(zero, header=fp_hdr), '')                     # 20240108
+    new_txt = old_txt.replace('(version 20240108)', '(version 20241229)')
+    za = [a for a in _parse_text(old_txt).paste_apertures if a.pad_number == 'Z']
+    check('9/S2. version 20240108: an explicit 0 (margin AND ratio) is unset and inherits',
+          len(za) == 1 and _approx(za[0].margin[0], 0.05 + 1.0 * -0.1)
+          and _approx(za[0].margin[1], 0.05 + 0.5 * -0.1), str(za and za[0].margin))
+    zb = [a for a in _parse_text(new_txt).paste_apertures if a.pad_number == 'Z']
+    check('9/S2. version 20241229: an explicit 0 is a real override (margin 0, ratio 0)',
+          len(zb) == 1 and _approx(zb[0].margin[0], 0.0) and _approx(zb[0].margin[1], 0.0),
+          str(zb and zb[0].margin))
 
     # S5: the own-pad-lift arm. The opening covers only the TAB, which touches
     # pad 1, and does not overlap the pad. Only the lift can say it concerns /A.
@@ -392,7 +400,9 @@ def main():
 
     # S6: a thin strip CROSSING a pad has no vertex inside the pad and the pad
     # has none inside it; dense sampling must still see the overlap.
-    strip = ('   (fp_poly (pts (xy -3 0.05) (xy 3 0.05) (xy 3 0.15) (xy -3 0.15)) '
+    # OFF-CENTRE on purpose: its bounds-centre sample lands outside the pad, so
+    # only dense boundary sampling can see the crossing.
+    strip = ('   (fp_poly (pts (xy -1.5 0.55) (xy 6 0.55) (xy 6 0.65) (xy -1.5 0.65)) '
              '(stroke (width 0) (type solid)) (fill yes) (layer "F.Paste") (uuid "s"))')
     p = _parse_text(_board(_fp(_pad('1', layers='"F.Cu"', size='2 2') + '\n' + strip,
                                at='30 30')))
@@ -413,6 +423,48 @@ def main():
           idx2 is not idx1 and idx3 is not idx2)
     check('9/S4. an unchanged board reuses the index (the memo works)',
           pa.apertures_by_net(esp) is idx3)
+    # a routed TRACK added does not invalidate it (association reads only
+    # graphic copper); a graphic segment added does
+    from kicad_parser import Segment
+    esp.segments.append(Segment(0, 0, 1, 1, 0.2, 'F.Cu', 1))
+    check('9/S4. adding a routed track keeps the index (no 0.1 s rebuild per track)',
+          pa.apertures_by_net(esp) is idx3)
+    esp.segments.append(Segment(0, 0, 1, 1, 0.2, 'F.Cu', 0, graphic=True, owner_ref='U2'))
+    check('9/S4. adding graphic copper rebuilds it', pa.apertures_by_net(esp) is not idx3)
+    del esp.segments[-2:]
+    # an EMPTY container still memoises (a fresh [] per call used to miss)
+    p_empty = _parse_text(_board(_fp(_pad('1'))))
+    p_empty.segments = []
+    e1 = pa.apertures_by_net(p_empty)
+    check('9/S4. a board with NO segments still hits the memo',
+          pa.apertures_by_net(p_empty) is e1)
+
+    # S5 (round 2): a closed shape ENDS the chain. A second poly starting where
+    # the first closed must be its own shape, not merged into one ring.
+    from check_drc import graphic_copper_shapes
+    two = ('   (fp_poly (pts (xy 0 0) (xy 4 0) (xy 4 4) (xy 0 4)) (stroke (width 0.1) '
+           '(type solid)) (fill yes) (layer "F.Cu") (uuid "A"))\n'
+           '   (fp_poly (pts (xy 0 0) (xy 2 0) (xy 2 2) (xy 0 2)) (stroke (width 0.1) '
+           '(type solid)) (fill yes) (layer "F.Cu") (uuid "B"))')
+    p = _parse_text(_board(_fp(_pad('1', layers='"F.Cu"') + '\n' + two, at='40 40')))
+    shapes = [s for s in graphic_copper_shapes(p) if s['owner'] == 'U1']
+    check('9/S5. two polys, the second starting at the first\'s start: TWO shapes',
+          len(shapes) == 2 and sorted(len(s['segs']) for s in shapes) == [4, 4],
+          str([len(s['segs']) for s in shapes]))
+
+    # the opening is a SNAPSHOT: moving the live pad after parse does not move it
+    p = _parse_text(_board(_fp(_pad('M'))))
+    am = [a for a in p.paste_apertures if a.pad_number == 'M'][0]
+    pad_m = p.footprints['U1'].pads[0]
+    b0 = am.bounds
+    pad_m.global_x += 5.0
+    check('9. an opening is a copy of its pad: moving the live pad does not move it',
+          am.shape_pad is not pad_m and pa.aperture_distance(b0[0] + 0.01, (b0[1] + b0[3]) / 2, am) == 0.0)
+    # KiCad does not clamp a custom pad, so a large negative ratio keeps it
+    cust2 = cust.replace('(solder_paste_margin_ratio -0.1)', '(solder_paste_margin_ratio -0.9)')
+    p = _parse_text(_board(_fp(cust2, at='5 5')))
+    check('9. a custom pad is never closed by its margin (KiCad does not clamp it)',
+          len([a for a in p.paste_apertures if a.source == 'pad']) == 1)
 
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")
     return 1 if FAILS else 0

@@ -189,7 +189,8 @@ def run_kicad_drc(board: str):
     return out, None
 
 
-def run_check_drc(board: str, clearance: float = None, netclasses: bool = False):
+def run_check_drc(board: str, clearance: float = None, netclasses: bool = False,
+                  baseline: str = None):
     """Run check_drc.run_drc, return counted violations (post warning-split)
     as {type, nets:frozenset, pos:(x,y)}.
 
@@ -234,6 +235,8 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = False)
     # a worker thread stole other concurrent boards' prints (result lines) into
     # this buffer. print_summary=False makes run_drc emit nothing in the success
     # path, so no capture is needed.
+    if baseline:
+        kw["baseline"] = baseline    # #962: placement-created graphic grazes
     violations = run_drc(board, quiet=True, print_summary=False, **kw)
     out = []
     for v in violations or []:
@@ -308,7 +311,10 @@ def match(kicad_items, cd_items):
 # flags for edge -- has no counterpart on the other side under either pass, so it
 # is left in the remaining kicad_only / checkdrc_only and stays reported.
 EDGE_KICAD_TYPES = {"copper_edge_clearance"}
-EDGE_CD_TYPES = {"segment-board-edge", "via-board-edge", "pad-board-edge"}
+# #962: footprint graphic copper past the outline / a placement-created graze
+# is KiCad's copper_edge_clearance too (one KiCad item per shape).
+EDGE_CD_TYPES = {"segment-board-edge", "via-board-edge", "pad-board-edge",
+                 "graphic-off-board", "graphic-board-edge"}
 EDGE_MATCH_RADIUS_MM = 2.0   # generous: kicad's edge point sits on the segment,
 
 
@@ -837,7 +843,11 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             base_items = [v for v in base_items if v["type"] not in KICAD_WEB_TYPES]
             kicad, pre = _subtract_baseline(kicad, base_items)
             web_items, web_pre = _subtract_baseline(web_items, base_web)
-    cd = run_check_drc(board, clearance, netclasses=not bool(clearance))
+    # #962: the unrouted input doubles as check_drc's --baseline, so a
+    # footprint-graphic graze a PART MOVE created is graded (not accepted) and
+    # cannot consume KiCad's matching finding below.
+    cd = run_check_drc(board, clearance, netclasses=not bool(clearance),
+                       baseline=baseline if baseline and os.path.exists(baseline) else None)
     # check_drc 'accepted' edge items (track covered by an edge-exempt pad): not
     # check_drc failures -- split them out of the counted list, and use them to drop
     # the matching kicad copper_edge_clearance finding below (respect check_drc's

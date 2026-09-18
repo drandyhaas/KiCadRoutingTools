@@ -65,9 +65,13 @@ FACE_ALIASES = {'n': 'north', 'north': 'north',
                 'w': 'west', 'west': 'west'}
 
 #: The legality categories a request may not WORSEN. Board-level counts from
-#: `grade_pad_legality`.
+#: `grade_pad_legality`. #962 added `oob_graphic_copper_count`, the parts whose
+#: footprint GRAPHIC copper (a drawn SOT-89 tab, an antenna) reaches past the
+#: outline. `place_pose set U2 115.34 93.6 --rot 90` put esp_prog's tab 1.11 mm
+#: off the board with every arm here reading 0.
 LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
-                 'pad_edge_conflicts', 'pad_edge_unmeasured')
+                 'pad_edge_conflicts', 'pad_edge_unmeasured',
+                 'oob_graphic_copper_count')
 
 #: The MAGNITUDES, and they are not a nicety: a count arm alone accepts a
 #: request that keeps the tally and deepens the damage. Measured on the
@@ -77,7 +81,19 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
 #: the same mechanism at 2.008 -> 101.008 mm.) CLAUDE.md calls copper outside
 #: the
 #: outline the top-priority placement defect, so its AMOUNT is an arm too.
-MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall')
+#: The graphic-copper overrun is one for the same reason (#962).
+MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall',
+                  'oob_graphic_copper_amount')
+
+#: What `legal` does and does NOT cover, published with every summary (#962
+#: follow-up item 4). A partial claim must read as partial.
+LEGAL_SCOPE = ('pad-pad clearance', 'hole-hole clearance', 'pad copper vs the '
+               'outline', 'pad copper vs the edge-clearance floor',
+               'footprint graphic copper vs the outline')
+LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
+                    '(disclosed as graphic_edge_shortfall_refs, not gated)',
+                    'solder paste and mask openings', 'component bodies / '
+                    'courtyards', 'routing', 'zone fill')
 MAGNITUDE_EPS = 1e-6
 
 
@@ -405,6 +421,12 @@ def _legality_row(before: Dict, after: Dict) -> Dict:
     row['oob_pad_copper_count_after'] = after.get('oob_pad_copper_count')
     row['oob_pad_copper_refs_after'] = after.get('oob_pad_copper_refs')
     row['oob_pad_basis'] = after.get('oob_pad_basis')
+    # #962: which parts' graphic copper, what is waived and why, what is not
+    # measured, and the edge-floor shortfall that is disclosed but not gated.
+    row['oob_graphic_copper_refs_after'] = after.get('oob_graphic_copper_refs')
+    row['oob_graphic_copper_waived_after'] = after.get('oob_graphic_copper_waived')
+    row['oob_graphic_copper_unmeasured_after'] = after.get('oob_graphic_copper_unmeasured')
+    row['graphic_edge_shortfall_refs_after'] = after.get('graphic_edge_shortfall_refs')
     return row
 
 
@@ -844,9 +866,12 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         summary['no_worse'] = not bad
         summary['legal'] = is_clean(after)
         summary['legal_basis'] = (
-            'legal = measured pad/hole/outline channels are clean and edge '
-            'coverage is complete; no_worse = no measured category worsened '
-            'relative to the input board. Neither verifies bodies, routing or fill.')
+            'legal = measured pad/hole/outline channels (pad copper AND '
+            'footprint graphic copper) are clean and edge coverage is '
+            'complete; no_worse = no measured category worsened relative to '
+            'the input board. Neither verifies what legal_unmeasured lists.')
+        summary['legal_scope'] = list(LEGAL_SCOPE)
+        summary['legal_unmeasured'] = list(LEGAL_UNMEASURED)
 
         if face_miss:
             reason = '; '.join(
@@ -1095,8 +1120,8 @@ def _refusal_reason(bad, strict, before, after, summary) -> str:
         # than written", and `--force` reprints this text on a run that WROTE
         # -- so the finding contradicted the outcome in its own last clause.
         # What happened is the caller's line to print; this is the finding.
-        reason = ("this pose makes the board's pad legality WORSE (%s); the "
-                  "board's inherited violations are not counted against you."
+        reason = ("this pose makes the board's placement legality WORSE (%s); "
+                  "the board's inherited violations are not counted against you."
                   % parts)
     else:
         reason = ("--strict-legal was asked for and the board is not clean at "

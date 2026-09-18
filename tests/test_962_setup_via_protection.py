@@ -95,13 +95,26 @@ def main():
         '(kicad_pcb (setup (pcbplotparams (viasonmask no))))')
     check('7. (viasonmask no) keeps the tented default',
           vp['tenting'] == '(front yes) (back yes)', vp['tenting'])
+    # The LATER token wins, as pcbnew loads it (v8/v9/v10 files probed,
+    # phase-1 verification round 2): tenting BEFORE viasonmask is overridden.
     _pc, _pr, vp = extract_board_setup_paste_and_protection(
-        '(kicad_pcb (setup (tenting front back) (pcbplotparams (viasonmask yes))))')
-    check('7. an explicit (tenting ...) wins over viasonmask',
+        '(kicad_pcb (setup (tenting (front yes) (back yes)) (pcbplotparams (viasonmask yes))))')
+    check('7. (tenting yes yes) THEN (viasonmask yes) -> untented (the later token wins)',
+          vp['tenting'] == '(front no) (back no)', vp['tenting'])
+    _pc, _pr, vp = extract_board_setup_paste_and_protection(
+        '(kicad_pcb (setup (tenting none) (pcbplotparams (viasonmask no))))')
+    check('7. (tenting none) THEN (viasonmask no) -> tented',
           vp['tenting'] == '(front yes) (back yes)', vp['tenting'])
+    _pc, _pr, vp = extract_board_setup_paste_and_protection(
+        '(kicad_pcb (setup (pcbplotparams (viasonmask yes)) (tenting (front yes) (back no))))')
+    check('7. viasonmask THEN (tenting ...) -> the tenting token',
+          vp['tenting'] == '(front yes) (back no)', vp['tenting'])
     c = canonical_via_protection_setup({'tenting': '(front no)'})
     check('8. a partial nested form completes the missing side as no (pcbnew 10)',
           c['tenting'] == '(front no) (back no)', c['tenting'])
+    c = canonical_via_protection_setup({'tenting': '(back yes)'})
+    check('8. ... either side: (back yes) alone -> front no, back yes',
+          c['tenting'] == '(front no) (back yes)', c['tenting'])
     import fab_notes
     check('9. fab_notes\' factory policy equals the parser\'s (the leaf copy cannot drift)',
           fab_notes._FACTORY_VIA_PROTECTION == VIA_PROTECTION_SETUP_DEFAULTS)

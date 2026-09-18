@@ -1513,6 +1513,16 @@ def _implicated_refs(paths):
                 # contain dots; pad numbers do.
                 if v:
                     refs.add(v.split('.', 1)[0])
+            # #962: check_drc names footprint GRAPHIC copper by its owner
+            # (graphic-off-board / graphic-board-edge). Only from counted
+            # rows: an ACCEPTED immutable-graphic row is inherited art (watchy
+            # AE1), and reading it would implicate that part on every run.
+            if item.get('owner_ref') and not item.get('accepted'):
+                refs.add(str(item['owner_ref']))
+        # check_assembly's graphic-copper channel ([[ref, mm], ...])
+        for ref_mm in doc.get('oob_graphic_copper_refs') or ():
+            if isinstance(ref_mm, (list, tuple)) and ref_mm:
+                refs.add(str(ref_mm[0]))
     return refs
 
 

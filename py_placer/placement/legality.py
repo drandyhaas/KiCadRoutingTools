@@ -707,15 +707,11 @@ class BoardOutlineGate:
         """
         if not self.milled:
             return frozenset()
-        from check_drc import _point_in_poly
+        # #962: one implementation, in check_drc, which the graphic-copper
+        # census calls too. py_router must not import the placement engines.
+        from check_drc import milled_rings_enclosing
         base = len(self.cutouts)
-        owned = set()
-        for i, ring in enumerate(self.milled):
-            for (px, py) in points:
-                if _point_in_poly(px, py, ring):
-                    owned.add(base + i)
-                    break
-        return frozenset(owned)
+        return frozenset(base + i for i in milled_rings_enclosing(self.milled, points))
 
     # -- level 2b: per-rect bbox prefilter, exact
     def _edges_touching(self, rect, edges):
@@ -4051,6 +4047,7 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                        for r in rects), default=0.0)
             if amt > EPS:
                 oob_copper_refs.append([ref, round(amt, 4)])
+    graphic = _graphic_copper_channel(pcb_data, resolved_edge)
     worst.sort(key=lambda t: -t[2])
     return {'pad_conflicts': pad_conflicts,
             'pad_edge_conflicts': len(edge_grade['findings']),
@@ -4112,7 +4109,62 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             # drops the census back to the flat scalar and reports 0 conflicts
             # -- the exact silence this issue was filed for.
             'clearance_notes': clearance_notes,
-            'exact': check_exact is not None}
+            'exact': check_exact is not None,
+            # #962: FOOTPRINT GRAPHIC copper (an SOT-89 tab, an antenna)
+            # against the outline -- the second off-outline channel. See
+            # _graphic_copper_channel.
+            **graphic}
+
+
+def _graphic_copper_channel(pcb_data, edge_required: float) -> Dict[str, object]:
+    """Footprint graphic copper against the outline, as placement keys (#962).
+
+    Pads were the only off-outline channel. esp_prog U2's drawn tab went 1.11 mm
+    off the outline under `place_pose set U2 115.34 93.6 --rot 90` while
+    `oob_pad_copper_count` read 0 and every gate stayed green. This calls
+    check_drc's own census, so check_drc, this channel and render_placement
+    give one answer. It re-poses copper for parts moved in memory since
+    parse.
+
+    - `oob_graphic_copper_count/_refs/_amount` are the parts whose copper
+      reaches PAST the outline, measured at margin 0 with the drawn stroke.
+      `_amount` is the sum of the per-part maximum overrun in mm: a distance,
+      like `oob_pad_amount`, not an area (a filled shape is sampled on its
+      outline).
+    - `_waived` lists board-level art and board-outline owners, with the
+      reason. A lock is not a waiver.
+    - `_unmeasured` lists copper the parser does not model.
+    - `graphic_edge_shortfall_refs` is DISCLOSED only: copper inside the
+      outline but within the edge requirement. It is not gated, because an
+      inherited graze (watchy AE1) is library art, and check_drc --baseline is
+      what separates inherited from placement-created.
+    """
+    from check_drc import footprint_graphic_outline_census, GRAPHIC_WAIVED_STATES
+    census = footprint_graphic_outline_census(pcb_data)
+    over, waived, short = {}, {}, {}
+    for row in census['rows']:
+        key = row['owner_ref'] or '<board>'
+        ov = row['overrun_mm']
+        if ov > EPS:
+            if row['owner_state'] in GRAPHIC_WAIVED_STATES:
+                waived[key] = (max(waived.get(key, (0.0,))[0], ov), row['owner_state'])
+            else:
+                over[key] = max(over.get(key, 0.0), ov)
+        elif (row['owner_state'] not in GRAPHIC_WAIVED_STATES
+              and edge_required and edge_required + ov > EPS):
+            short[key] = max(short.get(key, 0.0), edge_required + ov)
+    return {
+        'oob_graphic_copper_count': len(over),
+        'oob_graphic_copper_amount': round(float(sum(over.values())), 4),
+        'oob_graphic_copper_refs': sorted([k, round(v, 4)] for k, v in over.items()),
+        'oob_graphic_copper_waived': sorted([k, round(v[0], 4), v[1]]
+                                            for k, v in waived.items()),
+        'oob_graphic_copper_unmeasured': [[u.get('owner_ref', ''), u.get('kind', ''),
+                                           u.get('reason', '')]
+                                          for u in census['unmeasured']],
+        'oob_graphic_copper_basis': census['basis'],
+        'graphic_edge_shortfall_refs': sorted([k, round(v, 4)] for k, v in short.items()),
+    }
 
 
 def _pad_with_copper(pads, copper_index: int, clearance: float):

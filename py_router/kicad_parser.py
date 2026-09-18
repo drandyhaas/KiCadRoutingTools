@@ -503,6 +503,13 @@ class Footprint:
     # set). Pads without their own inherit these; see Pad.paste_margin.
     paste_margin: Optional[float] = None
     paste_margin_ratio: Optional[float] = None
+    # #962: the pose (x, y, rotation, layer) the footprint had when this
+    # PCBData was PARSED. Graphic copper (Segment.graphic, owner_ref) is placed
+    # at parse time. A caller that moves `x`/`y`/`rotation` in memory would
+    # otherwise grade that copper where the part USED to be.
+    # check_drc.footprint_graphic_outline_census re-poses it from this
+    # (a side flip is reported unmeasured). None = unknown, taken as unmoved.
+    parsed_pose: Optional[Tuple[float, float, float, str]] = None
 
 
 @dataclass
@@ -631,6 +638,12 @@ class PCBData:
     #: Built by paste_apertures.build_paste_apertures on BOTH parse paths.
     #: Which ones concern a given net's vias: paste_apertures.apertures_for_net.
     paste_apertures: List[PasteAperture] = field(default_factory=list)
+    #: #962: footprint copper the parser does NOT model, named so a grade that
+    #: cannot see it says so instead of passing it:
+    #: `{'owner_ref', 'kind', 'reason'}`, kind 'logo' (a pad-less footprint's
+    #: copper, which the writer relocates to silk, #146) or 'curve' (bezier).
+    #: Filled by both parse paths.
+    graphic_copper_unmeasured: List[dict] = field(default_factory=list)
 
     def net_tie_exempt_pad_ids(self, net_id: int):
         """id()s of pads whose keep-out copper of `net_id` may IGNORE.
@@ -3271,6 +3284,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
     _blocks = list(iter_footprint_blocks(content))
     if duplicates is not None:
         duplicates.update(duplicate_reference_counts([b[3] for b in _blocks]))
+    # #962: an explicit zero paste override means different things by version
+    _file_version = detect_kicad_version(content)
 
     for start, end, fp_text, _raw_reference, _block_key in _blocks:
 
@@ -3358,7 +3373,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
         fp_clearance = max(0.0, float(fp_clr_match.group(1))) if fp_clr_match else 0.0
         # #962: footprint-level paste overrides. Same header bound as the
         # clearance above, so a PAD's own token cannot be mistaken for one.
-        fp_paste_margin, fp_paste_ratio = _paste_overrides(fp_text[:_clr_end])
+        fp_paste_margin, fp_paste_ratio = _paste_overrides(fp_text[:_clr_end],
+                                                           _file_version)
 
         # Net-tie pad groups: (net_tie_pad_groups "1, 2" "3, 4") -- each quoted
         # string is one comma-separated group of pad numbers this footprint
@@ -3408,6 +3424,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             ref_label=ref_label,
             paste_margin=fp_paste_margin,
             paste_margin_ratio=fp_paste_ratio,
+            parsed_pose=(fp_x, fp_y, fp_rotation, fp_layer),
         )
 
         # Extract pads
@@ -3568,7 +3585,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 local_clearance = fp_clearance
             # #962: the pad's own paste overrides (raw; inheritance is resolved
             # by paste_apertures, not here, so both parse paths share it).
-            _pad_paste = _paste_overrides(pad_text)
+            _pad_paste = _paste_overrides(pad_text, _file_version)
 
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
@@ -4148,34 +4165,49 @@ def extract_board_setup_paste_and_protection(content: str):
         inner = _balanced_token_text(setup, token)
         if inner is not None:
             raw[token] = inner
-    if 'tenting' not in raw:
-        # KiCad 6-8 had no (tenting ...) and expressed UNtented vias as the
-        # plot option `(viasonmask yes|true)`. pcbnew 10 migrates that to
-        # tenting (front no) (back no) on load (#962 phase-1 verification, S3).
-        plot = _balanced_token_text(setup, 'pcbplotparams') or ''
-        if re.search(r'\(viasonmask\s+(?:yes|true)\)', plot):
-            raw['tenting'] = '(front no) (back no)'
+    # KiCad 6-8 expressed via tenting as the plot option `(viasonmask
+    # yes|true)` = UNtented / `no|false` = tented. pcbnew 10 still honours it,
+    # and the LATER of the two tokens in the setup wins: a `(tenting ...)`
+    # written before `(pcbplotparams (viasonmask yes))` loads UNtented, and
+    # `(tenting none)` before `(viasonmask no)` loads tented (probed on v8,
+    # v9 and v10 files; #962 phase-1 verification, rounds 1 and 2).
+    vm = re.search(r'\(viasonmask\s+(yes|true|no|false)\)', setup)
+    tm = re.search(r'\(tenting(?=[\s)])', setup)
+    if vm and (tm is None or vm.start() > tm.start()):
+        raw['tenting'] = ('(front no) (back no)' if vm.group(1) in ('yes', 'true')
+                          else '(front yes) (back yes)')
     return (num('pad_to_paste_clearance'), num('pad_to_paste_clearance_ratio'),
             canonical_via_protection_setup(raw))
 
 
-def _paste_overrides(text: str):
+#: #962: the last file version whose loader reads an explicit
+#: `(solder_paste_margin 0)` / `(... _ratio 0)` as UNSET. From 20240202 on,
+#: KiCad reads it as an explicit 0 that overrides the footprint and the board.
+#: Probed on pcbnew 10.0.0 across ten file versions, at pad and footprint level
+#: (#962 phase-1 verification, round 2).
+PASTE_ZERO_IS_UNSET_MAX_VERSION = 20240201
+
+
+def _paste_overrides(text: str, version: int = 0):
     """`(solder_paste_margin, ratio)` written directly in `text` (a pad block, or
     a footprint HEADER the caller has already bounded); None where unset.
 
     KiCad has spelled the ratio `solder_paste_margin_ratio` (pads, and older
     footprints) and `solder_paste_ratio` (footprints), so both are read.
+
+    An explicit 0 means what the loader of THAT file version makes of it:
+    unset up to PASTE_ZERO_IS_UNSET_MAX_VERSION, an override after it.
+    `version` 0 (unknown) is read the modern way.
     """
     m = re.search(r'\(solder_paste_margin\s+(-?[\d.]+)\)', text)
     r = (re.search(r'\(solder_paste_margin_ratio\s+(-?[\d.]+)\)', text)
          or re.search(r'\(solder_paste_ratio\s+(-?[\d.]+)\)', text))
-    # An explicit 0 is UNSET to KiCad. pcbnew 10's loader returns None for
-    # `(solder_paste_margin 0)` / `(... _ratio 0)`, and the resolved margin
-    # inherits (#962 phase-1 verification, S2). KiCad writes that token itself
-    # after SetLocalSolderPasteMargin(0).
     mv = float(m.group(1)) if m else None
     rv = float(r.group(1)) if r else None
-    return (mv if mv else None, rv if rv else None)
+    if version and version <= PASTE_ZERO_IS_UNSET_MAX_VERSION:
+        mv = mv if mv else None
+        rv = rv if rv else None
+    return mv, rv
 
 
 def _shape_layer_names(blk: str) -> List[str]:
@@ -4260,6 +4292,37 @@ def _paste_shape_record(tag: str, blk: str, owner: str, transform):
     else:
         return []
     return [dict(rec, layer=ln) for ln in layers]
+
+
+_UNMODELLED_LOGO_REASON = ('pad-less footprint: its copper is decoration the '
+                           'writer relocates to silk (#146), so it is not modelled')
+_UNMODELLED_CURVE_REASON = 'bezier copper (fp_curve) is not modelled'
+
+
+def extract_unmodelled_footprint_copper(content: str) -> List[dict]:
+    """Footprint copper the parser skips, by owner (#962). See
+    `PCBData.graphic_copper_unmeasured`."""
+    if '(fp_' not in content:
+        return []
+    masked = _mask_pad_primitives(content)
+    out: List[dict] = []
+    for _fstart, _fend, _fkey in _footprint_blocks_by_key(content):
+        fp_text = masked[_fstart:_fend]
+        if '.Cu' not in fp_text:
+            continue
+        copper_tags = []
+        for tag, blk in iter_footprint_shapes(fp_text, _FP_SHAPE_TAGS + ('fp_curve',)):
+            if any(ln.endswith('.Cu') or ln == 'F&B.Cu' for ln in _shape_layer_names(blk)):
+                copper_tags.append(tag)
+        if not copper_tags:
+            continue
+        if not footprint_copper_is_functional(footprint_pad_count(fp_text)):
+            out.append({'owner_ref': _fkey, 'kind': 'logo',
+                        'reason': _UNMODELLED_LOGO_REASON})
+        elif 'fp_curve' in copper_tags:
+            out.append({'owner_ref': _fkey, 'kind': 'curve',
+                        'reason': _UNMODELLED_CURVE_REASON})
+    return out
 
 
 def extract_paste_graphics(content: str) -> List[dict]:
@@ -5088,6 +5151,7 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
      board_info.via_protection_setup) = extract_board_setup_paste_and_protection(content)
     paste_apertures = build_paste_apertures(
         footprints, board_info, extract_paste_graphics(content))
+    graphic_copper_unmeasured = extract_unmodelled_footprint_copper(content)
 
     return PCBData(
         board_info=board_info,
@@ -5105,6 +5169,7 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         duplicate_references=_dups,
         source_path=os.path.abspath(filepath) if filepath else "",
         paste_apertures=paste_apertures,
+        graphic_copper_unmeasured=graphic_copper_unmeasured,
     )
 
 
@@ -5344,6 +5409,44 @@ def _pcbnew_paste_graphics(board, live_fps, live_keys, get_layer_name, to_mm):
                 continue
     except Exception:
         pass
+    return out
+
+
+def _pcbnew_unmodelled_copper(live_fps, live_keys, get_layer_name) -> List[dict]:
+    """`extract_unmodelled_footprint_copper` for a live board (#962)."""
+    try:
+        import pcbnew as _pn
+    except Exception:
+        return []
+    _BEZ = getattr(_pn, 'SHAPE_T_BEZIER', -99)
+    out: List[dict] = []
+    for fp, key in zip(live_fps, live_keys):
+        kinds = []
+        try:
+            for d in fp.GraphicalItems():
+                if d.GetClass() not in ('PCB_SHAPE', 'FP_SHAPE'):
+                    continue
+                names = [get_layer_name(l) for l in d.GetLayerSet().Seq()]
+                if any((n or '').endswith('.Cu') for n in names):
+                    kinds.append(d.GetShape())
+        except Exception:
+            continue
+        if not kinds:
+            continue
+        npads = 0
+        for pd in fp.Pads():
+            try:
+                if pd.GetAttribute() == _pn.PAD_ATTRIB_NPTH:
+                    continue
+            except Exception:
+                pass
+            npads += 1
+        if not footprint_copper_is_functional(npads):
+            out.append({'owner_ref': key, 'kind': 'logo',
+                        'reason': _UNMODELLED_LOGO_REASON})
+        elif _BEZ in kinds:
+            out.append({'owner_ref': key, 'kind': 'curve',
+                        'reason': _UNMODELLED_CURVE_REASON})
     return out
 
 
@@ -5853,6 +5956,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             ref_label=fp_ref_label,
             paste_margin=fp_paste_margin,
             paste_margin_ratio=fp_paste_ratio,
+            parsed_pose=(fp_x, fp_y, fp_rotation, fp_layer),
         )
 
         # Extract pads
@@ -6592,6 +6696,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     _paste_apertures = build_paste_apertures(
         footprints, board_info,
         _pcbnew_paste_graphics(board, _live_fps, _live_keys, get_layer_name, to_mm))
+    _unmeasured_cu = _pcbnew_unmodelled_copper(_live_fps, _live_keys, get_layer_name)
 
     return PCBData(
         board_info=board_info,
@@ -6603,6 +6708,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         zones=zones,
         groups=groups,
         paste_apertures=_paste_apertures,
+        graphic_copper_unmeasured=_unmeasured_cu,
         duplicate_references=_dups_live,
         guide_paths=guide_paths,
         keepout_zones=keepout_zones,

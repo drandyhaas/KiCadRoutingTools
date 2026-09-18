@@ -515,38 +515,14 @@ def aperture_nets(pcb_data, ap: PasteAperture) -> FrozenSet[int]:
 
 
 def _owner_copper_shapes(pcb_data, owner_ref: str, copper_layer: str):
-    """The owner's graphic copper on `copper_layer`, regrouped into SHAPES.
+    """The owner's graphic copper on `copper_layer`, as `(ring, closed, segs)`.
 
-    Each shape is `(ring, closed, segments)`. The parsers emit a shape's
-    outline as consecutive segments, each starting where the last ended.
-    Regrouping by that chain rather than by uuid works on both paths (the
-    pcbnew path gives graphic segments no uuid). A shape counts as closed when
-    it is a poly, rect or circle.
+    The regrouping into shapes is check_drc's `graphic_copper_shapes`, the
+    same grouping the off-outline census uses, so the two cannot disagree
+    about where one shape ends. A shape counts as closed when it is a poly,
+    rect or circle.
     """
-    out = []
-    cur = []
-    for sg in getattr(pcb_data, 'segments', None) or []:
-        if (not getattr(sg, 'graphic', False)
-                or getattr(sg, 'owner_ref', '') != owner_ref
-                or sg.layer != copper_layer):
-            if cur:
-                out.append(cur)
-                cur = []
-            continue
-        if cur and (abs(cur[-1].end_x - sg.start_x) > 1e-9
-                    or abs(cur[-1].end_y - sg.start_y) > 1e-9
-                    or getattr(cur[-1], 'graphic_kind', '') != getattr(sg, 'graphic_kind', '')):
-            out.append(cur)
-            cur = []
-        cur.append(sg)
-    if cur:
-        out.append(cur)
-    shapes = []
-    for segs in out:
-        ring = [(sg.start_x, sg.start_y) for sg in segs]
-        closed = getattr(segs[0], 'graphic_kind', '') in ('poly', 'rect', 'circle')
-        shapes.append((ring, closed, segs))
-    return shapes
+    return _shapes_by_owner(pcb_data).get((owner_ref, copper_layer), [])
 
 
 def _shape_meets_opening(ring, closed, segs, ap, samples) -> bool:
@@ -563,17 +539,30 @@ def _shape_meets_opening(ring, closed, segs, ap, samples) -> bool:
     return False
 
 
+#: Stand-ins for a missing or empty container. Module constants, so a memo keyed
+#: on container IDENTITY hits on a board with no segments. A fresh `[]` per call
+#: missed on every lookup (#962 phase-1 verification, round 2: 70 ms a call on
+#: orangecrab with `segments=[]`). Never mutated.
+_EMPTY_LIST: list = []
+_EMPTY_DICT: dict = {}
+
+
+def _graphic_sig(segs):
+    """Ids of the GRAPHIC segments: the only segments the association reads."""
+    return tuple(id(sg) for sg in segs if getattr(sg, 'graphic', False))
+
+
 def _memo_sig(objs):
-    """Signature of the containers a memo depends on.
+    """Cheap signature of the containers a memo depends on.
 
     Each container is HELD by the memo entry, so its id cannot be reused while
     the entry lives (#977's `id(map)` bug class, #962 phase-1 verification S4).
     The aperture list also carries its element ids, which catches an in-place
-    replacement at unchanged length. It is ~1000 entries, so that is cheap.
-    The segment list is keyed on its length only: routing appends and removes
-    tracks, which changes the length, and never edits graphic copper in place.
-    Hashing every element of a 10k-segment list on every lookup would put an
-    O(n) cost on each `apertures_for_net` call.
+    replacement at unchanged length; it is ~1000 entries, so that is cheap.
+    The segment list is keyed on its LENGTH here. When the length moves (a
+    routed track was added), `_memo_get` checks the graphic segments
+    themselves before rebuilding. Routing adds tracks all the time and never
+    touches graphic copper, and a rebuild costs ~0.1 s.
     """
     aps, segs, fps = objs
     return (len(aps), tuple(map(id, aps)), len(segs), len(fps))
@@ -581,24 +570,35 @@ def _memo_sig(objs):
 
 def _memo_get(pcb_data, attr, objs):
     hit = getattr(pcb_data, attr, None)
-    if (hit is not None and len(hit[0]) == len(objs)
-            and all(a is b for a, b in zip(hit[0], objs))
-            and hit[1] == _memo_sig(objs)):
+    if (hit is None or len(hit[0]) != len(objs)
+            or not all(a is b for a, b in zip(hit[0], objs))):
+        return False, None
+    sig = _memo_sig(objs)
+    if hit[1] == sig:
+        return True, hit[2]
+    # Only the segment COUNT moved: if the graphic copper is the same objects,
+    # the answer still holds. Refresh the cheap key and reuse it.
+    if hit[1][:2] == sig[:2] and hit[1][3] == sig[3] and hit[3] == _graphic_sig(objs[1]):
+        try:
+            setattr(pcb_data, attr, (hit[0], sig, hit[2], hit[3]))
+        except Exception:
+            pass
         return True, hit[2]
     return False, None
 
 
 def _memo_put(pcb_data, attr, objs, value):
     try:
-        setattr(pcb_data, attr, (tuple(objs), _memo_sig(objs), value))
+        setattr(pcb_data, attr, (tuple(objs), _memo_sig(objs), value,
+                                 _graphic_sig(objs[1])))
     except Exception:
         pass
 
 
 def _memo_objs(pcb_data):
-    return (getattr(pcb_data, 'paste_apertures', None) or [],
-            getattr(pcb_data, 'segments', None) or [],
-            getattr(pcb_data, 'footprints', None) or {})
+    return (getattr(pcb_data, 'paste_apertures', None) or _EMPTY_LIST,
+            getattr(pcb_data, 'segments', None) or _EMPTY_LIST,
+            getattr(pcb_data, 'footprints', None) or _EMPTY_DICT)
 
 
 def _own_pad_lift_cache(pcb_data, fn):
@@ -611,10 +611,27 @@ def _own_pad_lift_cache(pcb_data, fn):
     return got
 
 
+def _shapes_by_owner(pcb_data):
+    """{(owner, copper layer): [(ring, closed, segs)]}, memoised like the index."""
+    objs = _memo_objs(pcb_data)
+    ok, val = _memo_get(pcb_data, '_paste_shape_index', objs)
+    if ok:
+        return val
+    from check_drc import graphic_copper_shapes
+    idx: Dict[Tuple[str, str], list] = {}
+    for sh in graphic_copper_shapes(pcb_data):
+        segs = sh['segs']
+        idx.setdefault((sh['owner'], sh['layer']), []).append(
+            ([(sg.start_x, sg.start_y) for sg in segs],
+             sh['kind'] in ('poly', 'rect', 'circle'), segs))
+    _memo_put(pcb_data, '_paste_shape_index', objs, idx)
+    return idx
+
+
 def apertures_by_net(pcb_data) -> Dict[int, List[PasteAperture]]:
     """{net_id: [the openings that concern that net's vias]}, memoised on
     `pcb_data` and revalidated against the containers it depends on (see
-    `_memo_sig`)."""
+    `_memo_sig` / `_memo_get`)."""
     objs = _memo_objs(pcb_data)
     ok, val = _memo_get(pcb_data, '_paste_net_index', objs)
     if ok:
