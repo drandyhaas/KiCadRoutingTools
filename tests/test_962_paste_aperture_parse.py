@@ -43,7 +43,18 @@ own resolved margin are gated by tests/gui_parity/test_962_paste_parity.py.
 
 8. `drawn_width` is the stroke AS DRAWN. watchy AE1's filled polys are drawn at
    0 and modelled at TRACK_WIDTH. `graphic_kind` and `graphic_circle` are
-   recorded.
+   recorded. A copper `fp_rect` at a non-cardinal angle is kind `poly`,
+   because pcbnew converts it.
+
+**Section 9 pins what the Phase-1 verifier refuted:**
+- B1: QFN windowpanes concern the net of the EP around them (watchy U4, and
+  a synthetic EP).
+- B2: KiCad's fill rule when there is no fill token.
+- S1: a custom pad's ratio is sized from its ANCHOR.
+- S2: an explicit 0 override is unset.
+- S4: the net index cannot survive an in-place aperture change.
+- S5: the own-pad-lift arm, with an opening over a pad-touching tab only.
+- S6: a strip crossing a pad.
 
 Run:
     python3 tests/test_962_paste_aperture_parse.py
@@ -206,7 +217,7 @@ def main():
           ('U1', 'D', 'F.Paste') in by and ('U1', 'D', 'B.Paste') in by)
     check('6. a B-side pad opens B.Paste only',
           ('U1', 'E', 'B.Paste') in by and ('U1', 'E', 'F.Paste') not in by)
-    F = by.get(('U1', 'F', 'F.Paste'))
+    F = by.get(('U1', '', 'F.Paste'))     # a paste-only opening carries no number
     check('6. a paste-only pad is an opening with NO margin (KiCad rule)',
           F is not None and F.source == 'paste_only_pad' and F.margin == (0.0, 0.0),
           str(F and (F.source, F.margin)))
@@ -296,6 +307,112 @@ def main():
     tracks = [s for s in esp.segments if not s.graphic]
     check('8. tracks carry no drawn_width / kind',
           all(s.drawn_width is None and s.graphic_kind == '' for s in tracks))
+    rect45 = ('   (fp_rect (start 0 0) (end 1 1) (stroke (width 0.1) (type solid)) '
+              '(fill yes) (layer "F.Cu") (uuid "r45"))')
+    p = _parse_text(_board(_fp(rect45 + '\n' + _pad('1', layers='"F.Cu"'), at='10 20 45')))
+    check('8. a copper fp_rect in a 45-degree footprint is kind poly (as pcbnew reads it)',
+          {s.graphic_kind for s in p.segments if s.graphic} == {'poly'})
+
+    # ---------------- 9: the phase-1 verification findings ----------------------
+    # B1: QFN windowpanes. Paste-only panes sit INSIDE a copper exposed pad that
+    # opens no paste of its own. The EP's centre and perimeter can miss every
+    # pane, so association must also test the pane on the pad.
+    wat = parse_kicad_pcb(os.path.join(ROOT_DIR, 'kicad_files', 'watchy.kicad_pcb'))
+    panes = [a for a in wat.paste_apertures if a.owner_ref == 'U4'
+             and a.source == 'paste_only_pad']
+    gnd_w = _net(wat, 'GND')
+    check('9/B1. watchy U4 has paste-only windowpanes', len(panes) >= 16, str(len(panes)))
+    check('9/B1. ... and EVERY pane concerns GND (the EP net)',
+          bool(panes) and all(pa.aperture_nets(wat, a) == frozenset({gnd_w}) for a in panes),
+          str([sorted(pa.aperture_nets(wat, a)) for a in panes][:4]))
+    ep = ('   (pad "EP" smd rect (at 0 0) (size 4 4) (layers "F.Cu" "F.Mask") (net 1 "/A"))')
+    pane_pads = '\n'.join(
+        '   (pad "" smd rect (at %s) (size 0.8 0.8) (layers "F.Paste"))' % at
+        for at in ('-1 -1', '1 -1', '-1 1', '1 1'))
+    p = _parse_text(_board(_fp(ep + '\n' + pane_pads, at='50 50')))
+    sp = [a for a in p.paste_apertures if a.source == 'paste_only_pad']
+    check('9/B1. synthetic: 4 panes inside a copper EP each concern the EP net',
+          len(sp) == 4 and all(pa.aperture_nets(p, a) == frozenset({1}) for a in sp),
+          str([sorted(pa.aperture_nets(p, a)) for a in sp]))
+    check('9. a paste-only opening carries no pad number (pcbnew blanks it)',
+          all(a.pad_number == '' for a in sp))
+
+    # B2: no fill token. pcbnew 10 reads a token-less poly as FILLED, and a
+    # token-less rect/circle as filled only at stroke width 0.
+    nofill = '\n'.join([
+        '   (fp_poly (pts (xy 0 0) (xy 1 0) (xy 1 1)) (stroke (width 0.1) (type solid)) '
+        '(layer "F.Paste") (uuid "p"))',
+        '   (fp_rect (start 3 0) (end 4 1) (stroke (width 0) (type solid)) '
+        '(layer "F.Paste") (uuid "r0"))',
+        '   (fp_rect (start 6 0) (end 7 1) (stroke (width 0.1) (type solid)) '
+        '(layer "F.Paste") (uuid "r1"))',
+        '   (fp_circle (center 10 0) (end 10.5 0) (stroke (width 0) (type solid)) '
+        '(layer "F.Paste") (uuid "c0"))',
+    ])
+    p = _parse_text(_board(_fp(nofill + '\n' + _pad('1', layers='"F.Cu"'), at='0 0')))
+    gg = {a.uuid: a for a in p.paste_apertures if a.source == 'graphic'}
+    check('9/B2. no fill token: poly filled, rect@0 filled, rect@0.1 a band, circle@0 filled',
+          set(gg) == {'p', 'r0', 'r1', 'c0'} and gg['p'].filled and gg['r0'].filled
+          and not gg['r1'].filled and gg['c0'].filled,
+          str({k: v.filled for k, v in gg.items()}))
+
+    # S1: a custom pad's ratio is sized from its ANCHOR, not the primitive
+    # extent. Measured against pcbnew: anchor 0.5, primitive 2x1, margin
+    # -0.05, ratio -0.1 -> (-0.10, -0.10).
+    cust = ('   (pad "1" smd custom (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste") '
+            '(net 1 "/A") (solder_paste_margin -0.05) (solder_paste_margin_ratio -0.1)\n'
+            '     (options (clearance outline) (anchor rect))\n'
+            '     (primitives (gr_poly (pts (xy -1 -0.5) (xy 1 -0.5) (xy 1 0.5) (xy -1 0.5)) '
+            '(width 0) (fill yes))))')
+    p = _parse_text(_board(_fp(cust, at='5 5')))
+    ca = [a for a in p.paste_apertures if a.source == 'pad']
+    check('9/S1. a custom pad\'s paste ratio uses the ANCHOR size (-0.10, -0.10)',
+          len(ca) == 1 and all(_approx(m, -0.10) for m in ca[0].margin),
+          str(ca and ca[0].margin))
+
+    # S2: an explicit 0 is UNSET to KiCad, so the pad inherits the footprint.
+    zero = _pad('Z', '(solder_paste_margin 0) (solder_paste_margin_ratio 0)')
+    p = _parse_text(_board(_fp(zero, header='(solder_paste_margin 0.05)'), ''))
+    za = [a for a in p.paste_apertures if a.pad_number == 'Z']
+    check('9/S2. (solder_paste_margin 0) reads as unset and inherits the footprint 0.05',
+          len(za) == 1 and _approx(za[0].margin[0], 0.05), str(za and za[0].margin))
+
+    # S5: the own-pad-lift arm. The opening covers only the TAB, which touches
+    # pad 1, and does not overlap the pad. Only the lift can say it concerns /A.
+    tab = ('   (fp_poly (pts (xy 0.5 -0.5) (xy 3 -0.5) (xy 3 0.5) (xy 0.5 0.5)) '
+           '(stroke (width 0.1) (type solid)) (fill yes) (layer "F.Cu") (uuid "t"))\n'
+           '   (fp_poly (pts (xy 1.5 -0.3) (xy 2.8 -0.3) (xy 2.8 0.3) (xy 1.5 0.3)) '
+           '(stroke (width 0) (type solid)) (fill yes) (layer "F.Paste") (uuid "tp"))')
+    p = _parse_text(_board(_fp(_pad('1', layers='"F.Cu"', size='1 1') + '\n' + tab,
+                               at='20 20')))
+    tpa = [a for a in p.paste_apertures if a.uuid == 'tp']
+    check('9/S5. an opening over a pad-touching TAB (not the pad) concerns the pad net',
+          len(tpa) == 1 and pa.aperture_nets(p, tpa[0]) == frozenset({1}),
+          str(tpa and sorted(pa.aperture_nets(p, tpa[0]))))
+
+    # S6: a thin strip CROSSING a pad has no vertex inside the pad and the pad
+    # has none inside it; dense sampling must still see the overlap.
+    strip = ('   (fp_poly (pts (xy -3 0.05) (xy 3 0.05) (xy 3 0.15) (xy -3 0.15)) '
+             '(stroke (width 0) (type solid)) (fill yes) (layer "F.Paste") (uuid "s"))')
+    p = _parse_text(_board(_fp(_pad('1', layers='"F.Cu"', size='2 2') + '\n' + strip,
+                               at='30 30')))
+    st = [a for a in p.paste_apertures if a.uuid == 's']
+    check('9/S6. a strip crossing a pad concerns the pad net',
+          len(st) == 1 and pa.aperture_nets(p, st[0]) == frozenset({1}),
+          str(st and sorted(pa.aperture_nets(p, st[0]))))
+
+    # S4: the net index must not survive a change to the aperture list, even
+    # an in-place replacement at unchanged length.
+    idx1 = pa.apertures_by_net(esp)
+    old = esp.paste_apertures[0]
+    esp.paste_apertures[0] = esp.paste_apertures[-1]
+    idx2 = pa.apertures_by_net(esp)
+    esp.paste_apertures[0] = old
+    idx3 = pa.apertures_by_net(esp)
+    check('9/S4. an in-place aperture replacement invalidates the net index',
+          idx2 is not idx1 and idx3 is not idx2)
+    check('9/S4. an unchanged board reuses the index (the memo works)',
+          pa.apertures_by_net(esp) is idx3)
 
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")
     return 1 if FAILS else 0

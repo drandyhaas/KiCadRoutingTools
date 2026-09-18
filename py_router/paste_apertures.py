@@ -127,12 +127,21 @@ def resolve_paste_margin(pad, fp, board_info) -> Tuple[float, float]:
     - margin = pad override, else footprint override, else board
       `pad_to_paste_clearance`. The ratio is resolved independently, in the
       same order.
-    - Per axis: `margin + size * ratio`.
-    - Clamped at `-size / 2` for every shape except custom.
+    - An explicit 0 counts as UNSET. The KiCad 10 loader returns None for
+      `(solder_paste_margin 0)`, and the parsers mirror that, storing None.
+    - Per axis: `margin + size * ratio`, clamped at `-size / 2` for every
+      shape except custom.
 
-    Board-space `size_x`/`size_y` are what we have. That is the right frame:
-    the margin is per axis of the pad's own frame, and the parser already swaps
-    `size_x`/`size_y` for a ~90-degree pad, so the pairing survives.
+    The size frame depends on the pad:
+    - Ordinary pads use board-space `size_x`/`size_y`. The parser swaps those
+      for a ~90-degree pad, so the pairing with KiCad's pad-frame axes
+      survives.
+    - Custom pads use the ANCHOR `(size ...)` in the PAD frame
+      (`Pad.anchor_size`), because `size_x`/`size_y` there are the primitive
+      extent. KiCad sizes the ratio term from the anchor (measured, #962 phase-1
+      verification: anchor 0.5, primitive 2x1, ratio -0.1 -> (-0.10, -0.10)).
+      So for a custom pad the returned tuple is in the pad frame, as KiCad
+      returns it.
     """
     if not pad_has_copper(pad):
         return 0.0, 0.0
@@ -147,26 +156,41 @@ def resolve_paste_margin(pad, fp, board_info) -> Tuple[float, float]:
 
     m = pick('paste_margin', 'pad_to_paste_clearance')
     r = pick('paste_margin_ratio', 'pad_to_paste_clearance_ratio')
+    if getattr(pad, 'shape', '') == 'custom':
+        ax, ay = getattr(pad, 'anchor_size', None) or (pad.size_x, pad.size_y)
+        return m + ax * r, m + ay * r
     mx = m + pad.size_x * r
     my = m + pad.size_y * r
-    if getattr(pad, 'shape', '') != 'custom':
-        mx = max(mx, -pad.size_x / 2.0)
-        my = max(my, -pad.size_y / 2.0)
+    mx = max(mx, -pad.size_x / 2.0)
+    my = max(my, -pad.size_y / 2.0)
     return mx, my
 
 
 def _inflated_pad(pad, mx: float, my: float):
-    """A copy of `pad` whose copper IS the paste opening.
+    """A COPY of `pad` whose copper IS the paste opening.
 
-    - rect / roundrect / oval / circle: the size grows by 2·margin per axis. A
-      roundrect's corner radius grows by the smaller margin (Minkowski sum of
-      a rounded rect); a stadium stays a stadium, because
-      `point_to_pad_distance` rounds ovals by min(size)/2.
-    - circle: KiCad sizes it from size.x.
-    - custom: the polygons are grown by a positive margin. A NEGATIVE margin is
-      left un-shrunk, which is a superset: a via can only be flagged more,
-      never less. The caller discloses it.
+    Always a copy, even at zero margin: the opening is a snapshot taken at
+    parse time and must not move if a later pass moves the live pad.
+
+    - rect / roundrect / oval / circle: the size grows by 2*margin per axis. A
+      roundrect's corner radius grows by the smaller margin (the Minkowski sum
+      of a rounded rect). A stadium stays a stadium, because
+      `point_to_pad_distance` rounds ovals by min(size)/2. KiCad sizes a
+      circle from size.x.
+    - custom: KiCad inflates the primitive outline uniformly by the PAD-frame x
+      margin. A positive margin grows the polygons. A negative one leaves them
+      un-shrunk, which is a superset (a via can only be flagged more, never
+      less), and the caller discloses it.
     """
+    if getattr(pad, 'shape', '') == 'custom':
+        polys = getattr(pad, 'polygons', None)
+        changes = {}
+        if polys and mx > 0:
+            from kicad_parser import _offset_polygon_outward
+            changes['polygons'] = [_offset_polygon_outward(list(p), mx) for p in polys]
+        elif not polys and mx > 0:
+            changes = {'size_x': pad.size_x + 2.0 * mx, 'size_y': pad.size_y + 2.0 * mx}
+        return dataclasses.replace(pad, **changes)
     sx = pad.size_x + 2.0 * mx
     sy = pad.size_y + 2.0 * my
     if getattr(pad, 'shape', '') == 'circle':
@@ -176,10 +200,6 @@ def _inflated_pad(pad, mx: float, my: float):
         r0 = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
         r1 = max(0.0, r0 + min(mx, my))
         changes['roundrect_rratio'] = (r1 / min(sx, sy)) if min(sx, sy) > 0 else 0.0
-    polys = getattr(pad, 'polygons', None)
-    if polys and mx > 0:
-        from kicad_parser import _offset_polygon_outward
-        changes['polygons'] = [_offset_polygon_outward(list(p), mx) for p in polys]
     return dataclasses.replace(pad, **changes)
 
 
@@ -222,18 +242,23 @@ def _pad_bounds(shape_pad):
 def pad_aperture(pad, fp, board_info, layer: str) -> Optional[PasteAperture]:
     """The opening `pad` makes on `layer`, or None when the margin closes it."""
     copper = pad_has_copper(pad)
+    custom = getattr(pad, 'shape', '') == 'custom'
     mx, my = resolve_paste_margin(pad, fp, board_info)
-    if pad.size_x + 2 * mx <= _EPS or pad.size_y + 2 * my <= _EPS:
+    # KiCad does not clamp a custom pad, and a negative margin on one is not
+    # applied here (superset, disclosed). Only an ordinary pad can close.
+    if not custom and (pad.size_x + 2 * mx <= _EPS or pad.size_y + 2 * my <= _EPS):
         return None
-    shape_pad = _inflated_pad(pad, mx, my) if (mx or my) else pad
+    shape_pad = _inflated_pad(pad, mx, my)
     approx = tuple(getattr(pad, 'geometry_approximations', ()) or ())
-    if getattr(pad, 'polygons', None) and mx < 0:
+    if custom and mx < 0:
         approx = approx + ('custom pad paste reduction not applied (superset)',)
     return PasteAperture(
         owner_ref=getattr(pad, 'component_ref', '') or '',
         layer=layer,
         source='pad' if copper else 'paste_only_pad',
-        pad_number=str(getattr(pad, 'pad_number', '') or ''),
+        # pcbnew blanks the number of a copper-less (aperture) pad on load, so
+        # the opening carries none on either path (#962 phase-1 verification).
+        pad_number=str(getattr(pad, 'pad_number', '') or '') if copper else '',
         net_id=int(getattr(pad, 'net_id', 0) or 0) if copper else 0,
         margin=(mx, my),
         shape_pad=shape_pad,
@@ -376,25 +401,63 @@ def _bounds_overlap(a, b, grow=0.0) -> bool:
                 or a[3] + grow < b[1] or b[3] + grow < a[1])
 
 
+def _boundary_samples(ap: PasteAperture, step: float = 0.05):
+    """Points along an opening's boundary, spaced <= `step` mm, plus its centre.
+
+    Dense rather than vertex-only. A strip or a stroked line that crosses a pad
+    has no vertex inside the pad and no pad vertex inside it (#962 phase-1
+    verification, S6), so a vertex test would call them disjoint.
+    """
+    from check_drc import _pad_perimeter_points
+    b = ap.bounds
+    pts = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)]
+    if ap.shape_pad is not None:
+        sp = ap.shape_pad
+        n = max(8, int(max(sp.size_x, sp.size_y) / step) + 1)
+        pts += _pad_perimeter_points(sp, n)
+        pts.append((sp.global_x, sp.global_y))
+        return pts
+    if ap.circle is not None:
+        cx, cy, r = ap.circle
+        n = max(16, int(2 * math.pi * r / step) + 1)
+        pts += [(cx + r * math.cos(2 * math.pi * k / n), cy + r * math.sin(2 * math.pi * k / n))
+                for k in range(n)]
+        pts.append((cx, cy))
+        return pts
+    for ring in ap.rings:
+        n = len(ring)
+        edges = n if ap.closed else n - 1
+        for i in range(edges):
+            (x1, y1), (x2, y2) = ring[i], ring[(i + 1) % n]
+            k = max(1, int(math.hypot(x2 - x1, y2 - y1) / step) + 1)
+            pts += [(x1 + (x2 - x1) * t / k, y1 + (y2 - y1) * t / k) for t in range(k)]
+        if not ap.closed and ring:
+            pts.append(ring[-1])
+    return pts
+
+
 def _pad_overlaps(ap: PasteAperture, pad) -> bool:
     """Does the pad's COPPER overlap the opening?
 
-    Tested three ways: the pad centre, the pad's perimeter samples, and the
-    opening's own vertices against the pad.
+    Both ways round, densely:
+    - the pad's centre and perimeter samples inside the opening;
+    - the opening's centre and boundary samples on the pad's copper.
+
+    The second direction is the one a QFN windowpane needs: the pane sits
+    entirely inside the exposed pad, and the EP's own perimeter and centre can
+    all miss it. A copper-to-opening distance within half a stroke counts as
+    overlap for a stroked shape.
     """
     from check_drc import _pad_perimeter_points, point_to_pad_distance
     if aperture_distance(pad.global_x, pad.global_y, ap) <= 1e-9:
         return True
-    for (px, py) in _pad_perimeter_points(pad, 8):
+    n = max(8, int(max(pad.size_x, pad.size_y) / 0.05) + 1)
+    for (px, py) in _pad_perimeter_points(pad, n):
         if aperture_distance(px, py, ap) <= 1e-9:
             return True
-    for ring in ap.rings:
-        for (vx, vy) in ring:
-            if point_to_pad_distance(vx, vy, pad) <= 1e-9:
-                return True
-    if ap.circle is not None:
-        cx, cy, _r = ap.circle
-        if point_to_pad_distance(cx, cy, pad) <= 1e-9:
+    reach = ap.width / 2.0 if ap.shape_pad is None else 0.0
+    for (vx, vy) in _boundary_samples(ap):
+        if point_to_pad_distance(vx, vy, pad) <= reach + 1e-9:
             return True
     return False
 
@@ -437,56 +500,130 @@ def aperture_nets(pcb_data, ap: PasteAperture) -> FrozenSet[int]:
     if owner is not None:
         from check_drc import graphic_own_pad_nets
         lifted = _own_pad_lift_cache(pcb_data, graphic_own_pad_nets)
-        for seg in getattr(pcb_data, 'segments', None) or []:
-            if (not getattr(seg, 'graphic', False)
-                    or getattr(seg, 'owner_ref', '') != ap.owner_ref
-                    or seg.layer != copper):
+        samples = None
+        for ring, closed, segs in _owner_copper_shapes(pcb_data, ap.owner_ref, copper):
+            got = set()
+            for sg in segs:
+                got |= set(lifted.get(id(sg), ()))
+            if not got or got <= nets:
                 continue
-            got = lifted.get(id(seg))
-            if not got:
-                continue
-            hw = seg.width / 2.0
-            if (aperture_distance(seg.start_x, seg.start_y, ap) <= hw
-                    or aperture_distance(seg.end_x, seg.end_y, ap) <= hw):
-                nets |= set(got)
+            if samples is None:
+                samples = _boundary_samples(ap)
+            if _shape_meets_opening(ring, closed, segs, ap, samples):
+                nets |= got
     return frozenset(nets)
 
 
-def _own_pad_lift_cache(pcb_data, fn):
-    key = (id(getattr(pcb_data, 'segments', None)),
-           len(getattr(pcb_data, 'segments', None) or []))
-    hit = getattr(pcb_data, '_paste_own_pad_lift', None)
-    if hit is not None and hit[0] == key:
-        return hit[1]
-    got = fn(pcb_data)
+def _owner_copper_shapes(pcb_data, owner_ref: str, copper_layer: str):
+    """The owner's graphic copper on `copper_layer`, regrouped into SHAPES.
+
+    Each shape is `(ring, closed, segments)`. The parsers emit a shape's
+    outline as consecutive segments, each starting where the last ended.
+    Regrouping by that chain rather than by uuid works on both paths (the
+    pcbnew path gives graphic segments no uuid). A shape counts as closed when
+    it is a poly, rect or circle.
+    """
+    out = []
+    cur = []
+    for sg in getattr(pcb_data, 'segments', None) or []:
+        if (not getattr(sg, 'graphic', False)
+                or getattr(sg, 'owner_ref', '') != owner_ref
+                or sg.layer != copper_layer):
+            if cur:
+                out.append(cur)
+                cur = []
+            continue
+        if cur and (abs(cur[-1].end_x - sg.start_x) > 1e-9
+                    or abs(cur[-1].end_y - sg.start_y) > 1e-9
+                    or getattr(cur[-1], 'graphic_kind', '') != getattr(sg, 'graphic_kind', '')):
+            out.append(cur)
+            cur = []
+        cur.append(sg)
+    if cur:
+        out.append(cur)
+    shapes = []
+    for segs in out:
+        ring = [(sg.start_x, sg.start_y) for sg in segs]
+        closed = getattr(segs[0], 'graphic_kind', '') in ('poly', 'rect', 'circle')
+        shapes.append((ring, closed, segs))
+    return shapes
+
+
+def _shape_meets_opening(ring, closed, segs, ap, samples) -> bool:
+    """Does a copper shape (area when closed, stroke otherwise) meet the opening?"""
+    for (x, y) in samples:
+        if closed and len(ring) >= 3 and _point_in_ring(x, y, ring):
+            return True
+        for sg in segs:
+            if _seg_dist(x, y, (sg.start_x, sg.start_y), (sg.end_x, sg.end_y)) <= sg.width / 2.0:
+                return True
+    for sg in segs:
+        if aperture_distance(sg.start_x, sg.start_y, ap) <= sg.width / 2.0:
+            return True
+    return False
+
+
+def _memo_sig(objs):
+    """Signature of the containers a memo depends on.
+
+    Each container is HELD by the memo entry, so its id cannot be reused while
+    the entry lives (#977's `id(map)` bug class, #962 phase-1 verification S4).
+    The aperture list also carries its element ids, which catches an in-place
+    replacement at unchanged length. It is ~1000 entries, so that is cheap.
+    The segment list is keyed on its length only: routing appends and removes
+    tracks, which changes the length, and never edits graphic copper in place.
+    Hashing every element of a 10k-segment list on every lookup would put an
+    O(n) cost on each `apertures_for_net` call.
+    """
+    aps, segs, fps = objs
+    return (len(aps), tuple(map(id, aps)), len(segs), len(fps))
+
+
+def _memo_get(pcb_data, attr, objs):
+    hit = getattr(pcb_data, attr, None)
+    if (hit is not None and len(hit[0]) == len(objs)
+            and all(a is b for a, b in zip(hit[0], objs))
+            and hit[1] == _memo_sig(objs)):
+        return True, hit[2]
+    return False, None
+
+
+def _memo_put(pcb_data, attr, objs, value):
     try:
-        pcb_data._paste_own_pad_lift = (key, got)
+        setattr(pcb_data, attr, (tuple(objs), _memo_sig(objs), value))
     except Exception:
         pass
+
+
+def _memo_objs(pcb_data):
+    return (getattr(pcb_data, 'paste_apertures', None) or [],
+            getattr(pcb_data, 'segments', None) or [],
+            getattr(pcb_data, 'footprints', None) or {})
+
+
+def _own_pad_lift_cache(pcb_data, fn):
+    objs = _memo_objs(pcb_data)
+    ok, val = _memo_get(pcb_data, '_paste_own_pad_lift', objs)
+    if ok:
+        return val
+    got = fn(pcb_data)
+    _memo_put(pcb_data, '_paste_own_pad_lift', objs, got)
     return got
-
-
-def _index_key(pcb_data):
-    aps = getattr(pcb_data, 'paste_apertures', None) or []
-    segs = getattr(pcb_data, 'segments', None) or []
-    return (id(aps), len(aps), id(segs), len(segs))
 
 
 def apertures_by_net(pcb_data) -> Dict[int, List[PasteAperture]]:
     """{net_id: [the openings that concern that net's vias]}, memoised on
-    `pcb_data` (the key covers the aperture and segment lists)."""
-    key = _index_key(pcb_data)
-    hit = getattr(pcb_data, '_paste_net_index', None)
-    if hit is not None and hit[0] == key:
-        return hit[1]
+    `pcb_data` and revalidated against the containers it depends on (see
+    `_memo_sig`)."""
+    objs = _memo_objs(pcb_data)
+    ok, val = _memo_get(pcb_data, '_paste_net_index', objs)
+    if ok:
+        return val
     index: Dict[int, List[PasteAperture]] = {}
-    for ap in getattr(pcb_data, 'paste_apertures', None) or []:
+    for ap in objs[0]:
         for nid in aperture_nets(pcb_data, ap):
             index.setdefault(nid, []).append(ap)
-    try:
-        pcb_data._paste_net_index = (key, index)
-    except Exception:
-        pass
+    _memo_put(pcb_data, '_paste_net_index', objs, index)
     return index
 
 

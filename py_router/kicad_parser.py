@@ -248,6 +248,10 @@ class Pad:
     # constructions exist.
     paste_margin: Optional[float] = None
     paste_margin_ratio: Optional[float] = None
+    # #962: a CUSTOM pad's anchor `(size w h)` in the PAD frame. `size_x` /
+    # `size_y` of a custom pad are the primitive extent, but KiCad sizes the
+    # paste ratio term from the anchor. None for every other shape.
+    anchor_size: Optional[Tuple[float, float]] = None
 
 
 _VIA_BIRTH_WATCH = None
@@ -3456,6 +3460,10 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                 size_y = max(float(sy) for _, sy in sizes)
             else:
                 size_x = size_y = 0.5  # default
+            # #962: a custom pad's ANCHOR size (the base `(size ...)`), in the
+            # pad frame. KiCad sizes the paste-ratio term from it.
+            _anchor_size = ((float(sizes[0][0]), float(sizes[0][1]))
+                            if pad_shape == 'custom' and sizes else None)
 
             # Custom pads: enclose the real primitive copper, not just the anchor
             # (size ...). Use a centred rect around the connection point that
@@ -3625,6 +3633,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
                     if re.search(r'\(' + token + r'\s', pad_text)),
                 paste_margin=_pad_paste[0],
                 paste_margin_ratio=_pad_paste[1],
+                anchor_size=_anchor_size,
             )
 
             footprint.pads.append(pad)
@@ -4084,10 +4093,18 @@ def canonical_via_protection_setup(raw: Dict[str, str]) -> Dict[str, str]:
         if tok not in out:
             continue
         inner = ' '.join((inner or '').split())
-        if tok in ('tenting', 'covering', 'plugging') and '(' not in inner:
-            words = inner.split()
-            front = 'front' in words
-            back = 'back' in words
+        if tok in ('tenting', 'covering', 'plugging'):
+            if '(' not in inner:
+                words = inner.split()
+                front = 'front' in words
+                back = 'back' in words
+            else:
+                # Nested form. A side it does not name reads as `no`, which is
+                # what pcbnew makes of `(tenting (front no))` (probed, 10.0.0).
+                fm = re.search(r'\(front\s+(\w+)\)', inner)
+                bm = re.search(r'\(back\s+(\w+)\)', inner)
+                front = bool(fm) and fm.group(1) in ('yes', 'true')
+                back = bool(bm) and bm.group(1) in ('yes', 'true')
             inner = '(front %s) (back %s)' % ('yes' if front else 'no',
                                              'yes' if back else 'no')
         out[tok] = inner
@@ -4131,6 +4148,13 @@ def extract_board_setup_paste_and_protection(content: str):
         inner = _balanced_token_text(setup, token)
         if inner is not None:
             raw[token] = inner
+    if 'tenting' not in raw:
+        # KiCad 6-8 had no (tenting ...) and expressed UNtented vias as the
+        # plot option `(viasonmask yes|true)`. pcbnew 10 migrates that to
+        # tenting (front no) (back no) on load (#962 phase-1 verification, S3).
+        plot = _balanced_token_text(setup, 'pcbplotparams') or ''
+        if re.search(r'\(viasonmask\s+(?:yes|true)\)', plot):
+            raw['tenting'] = '(front no) (back no)'
     return (num('pad_to_paste_clearance'), num('pad_to_paste_clearance_ratio'),
             canonical_via_protection_setup(raw))
 
@@ -4145,7 +4169,13 @@ def _paste_overrides(text: str):
     m = re.search(r'\(solder_paste_margin\s+(-?[\d.]+)\)', text)
     r = (re.search(r'\(solder_paste_margin_ratio\s+(-?[\d.]+)\)', text)
          or re.search(r'\(solder_paste_ratio\s+(-?[\d.]+)\)', text))
-    return (float(m.group(1)) if m else None, float(r.group(1)) if r else None)
+    # An explicit 0 is UNSET to KiCad. pcbnew 10's loader returns None for
+    # `(solder_paste_margin 0)` / `(... _ratio 0)`, and the resolved margin
+    # inherits (#962 phase-1 verification, S2). KiCad writes that token itself
+    # after SetLocalSolderPasteMargin(0).
+    mv = float(m.group(1)) if m else None
+    rv = float(r.group(1)) if r else None
+    return (mv if mv else None, rv if rv else None)
 
 
 def _shape_layer_names(blk: str) -> List[str]:
@@ -4158,11 +4188,26 @@ def _shape_layer_names(blk: str) -> List[str]:
     return re.findall(r'"([^"]*)"', lsm.group(1)) if lsm else []
 
 
-def _shape_filled(blk: str) -> bool:
-    """`(fill yes|solid|hatch|...)` is filled; `(fill no|none)` or no token is not.
-    Matches pcbnew's IsAnyFill() (solid or hatched)."""
+def _shape_filled(blk: str, kind: str, width: float) -> bool:
+    """Is the shape filled, by KiCad's loader rules?
+
+    - With a `(fill X)` token: filled unless X is `no` / `none`. Hatched counts
+      as filled, as pcbnew's IsAnyFill() does.
+    - With NO token: a poly is filled, and a rect or circle is filled only when
+      its stroke width is 0. Lines and arcs never are.
+
+    The no-token rule was probed on pcbnew 10.0.0 for file versions 20211014,
+    20221018, 20240108, 20241229 and 20260206 (#962 phase-1 verification, B2).
+    The corpus carries no token-less paste shape, so only that probe pins it.
+    """
     fm = re.search(r'\(fill\s+(\w+)\)', blk)
-    return bool(fm) and fm.group(1) not in ('no', 'none')
+    if fm:
+        return fm.group(1) not in ('no', 'none')
+    if kind == 'poly':
+        return True
+    if kind in ('rect', 'circle'):
+        return width <= 0
+    return False
 
 
 def _paste_shape_record(tag: str, blk: str, owner: str, transform):
@@ -4184,7 +4229,7 @@ def _paste_shape_record(tag: str, blk: str, owner: str, transform):
 
     kind = tag.split('_', 1)[1]
     rec = {'owner_ref': owner, 'kind': kind, 'width': width,
-           'filled': _shape_filled(blk), 'uuid': uuid}
+           'filled': _shape_filled(blk, kind, width), 'uuid': uuid}
     if kind == 'poly':
         rec['points'] = [transform(float(x), float(y)) for x, y in
                          re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
@@ -4659,9 +4704,13 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                         if a and b:
                             # all four corners transformed: under rotation the
                             # rect tilts, so start/end alone do not bound it
+                            # pcbnew turns a rect in a footprint at a
+                            # non-cardinal angle into a POLY on load, so name
+                            # it the way the live path will read it.
                             _emit_outline([_g(a[0], a[1]), _g(b[0], a[1]),
                                            _g(b[0], b[1]), _g(a[0], b[1])],
-                                          w, layer, nid, uuid, kind='rect')
+                                          w, layer, nid, uuid,
+                                          kind='rect' if _frot % 90 == 0 else 'poly')
                     elif tag == 'fp_circle':
                         c, e = _xy(blk, 'center'), _xy(blk, 'end')
                         if c and e:
@@ -5853,6 +5902,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             pad_size = pad.GetSize()
             size_x = to_mm(pad_size.x)
             size_y = to_mm(pad_size.y)
+            # #962: the anchor size, kept before the custom-pad extent
+            # override below (parity with the text parser's base `(size ...)`).
+            _anchor_size_b = (size_x, size_y)
             try:
                 cu = list(pad.GetLayerSet().CuStack())
                 if len(cu) > 1:
@@ -6040,6 +6092,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 geometry_approximations=tuple(geometry_approximations),
                 paste_margin=_pad_paste[0],
                 paste_margin_ratio=_pad_paste[1],
+                anchor_size=_anchor_size_b if shape == 'custom' else None,
             )
 
             footprint.pads.append(pad_obj)

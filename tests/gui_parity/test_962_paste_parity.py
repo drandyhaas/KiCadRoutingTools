@@ -89,12 +89,13 @@ def aperture_key(ap, nets):
 
 
 #: Aperture BOUNDS are compared with a tolerance, not exactly. Reason, measured:
-#: orangecrab U9's custom pads already carry copper polygons that differ by
-#: 2.7 um between the two parse paths. That predates #962 (their
-#: `roundrect_rratio` reads 0.0 on the text path and 0.25 on pcbnew, and the
-#: custom-pad polygon builders are separate), and the opening inherits it.
-#: 5 um admits that residue and still fails on any real difference in margin,
-#: size or position (the smallest margin in the corpus is 35 um).
+#: orangecrab U9's custom pads (an anchor rect plus a `gr_circle` primitive,
+#: `polygons` None on both paths) already carry a custom-pad EXTENT that
+#: differs by 2.7 um between the two parse paths. That predates #962, since
+#: the extent builders are separate (`_custom_pad_board_extent` vs pcbnew's
+#: bounding box), and the opening inherits it. 5 um admits that residue and
+#: still fails on any real difference in margin, size or position (the
+#: smallest margin in the corpus is 35 um).
 BOUNDS_TOL = 0.005
 
 
@@ -216,6 +217,26 @@ def main():
               '%s: aperture bounds agree within %.3f mm (worst %.4f)'
               % (name, BOUNDS_TOL, worst), where)
 
+        # Which vias each opening concerns: the answer the keep-out and the
+        # checker act on. Compared by net NAME, since net ids are per-path.
+        import paste_apertures as _pa
+
+        def assoc(P):
+            out = []
+            for a in P.paste_apertures:
+                names = sorted(P.nets[n].name for n in _pa.aperture_nets(P, a)
+                               if n in P.nets)
+                out.append((identity_key(a, P.nets), tuple(names)))
+            return out
+        oa, ob = multiset_diff(assoc(f), assoc(g))
+        check(not oa and not ob, '%s: every opening concerns the same nets' % name,
+              'only text=%s only pcbnew=%s' % (oa[:2], ob[:2]))
+        if name == 'watchy':
+            panes = [a for a in f.paste_apertures
+                     if a.owner_ref == 'U4' and a.source == 'paste_only_pad']
+            if panes and all(_pa.aperture_nets(f, a) for a in panes):
+                witnessed['watchy U4 windowpanes concern a net'] += 1
+
         ga = [graphic_key(s) for s in f.segments if s.graphic]
         gb = [graphic_key(s) for s in g.segments if s.graphic]
         oa, ob = multiset_diff(ga, gb)
@@ -251,10 +272,21 @@ def main():
                 v = lp.GetSolderPasteMargin(lid)
                 nx, ny = v.x / 1e6, v.y / 1e6
                 if ap.source == 'paste_only_pad':
-                    nx = ny = 0.0     # KiCad: no copper -> the shape IS the opening
-                rot = math.radians(lp.GetOrientationDegrees())
-                if abs(math.sin(rot)) > 0.7:
-                    nx, ny = ny, nx
+                    # KiCad resolves no margin for a copper-less pad (its shape
+                    # IS the opening). Read what pcbnew says rather than assume it.
+                    pass
+                elif src[0].shape != 'custom':
+                    # KiCad's margin is in the PAD frame. The parser swapped
+                    # size_x/size_y only when it baked a ~90-degree rotation into
+                    # them, so detect THAT swap from the sizes. A 45-degree pad
+                    # keeps pad-frame sizes plus a residual rect_rotation.
+                    ns = lp.GetSize()
+                    sx, sy = ns.x / 1e6, ns.y / 1e6
+                    p0 = src[0]
+                    if (abs(sx - sy) > 1e-6 and abs(p0.size_x - sy) < 1e-6
+                            and abs(p0.size_y - sx) < 1e-6):
+                        nx, ny = ny, nx
+                # custom pads: the opening's margin is in the pad frame, as KiCad's
                 natives.add((round(nx, 6), round(ny, 6)))
             mine = (round(ap.margin[0], 6), round(ap.margin[1], 6))
             # KiCad rounds `size * ratio` to whole nanometres (KiROUND); allow 1 nm.
@@ -277,7 +309,7 @@ def main():
             witnessed['ulx3s pad ratio -0.2'] += 1
 
     for w in ('esp_prog U2 F.Paste graphic', 'glasgow J1 pin-in-paste graphics',
-              'ulx3s pad ratio -0.2'):
+              'ulx3s pad ratio -0.2', 'watchy U4 windowpanes concern a net'):
         check(witnessed[w] == 1, 'witness present: %s' % w,
               'a named witness vanished; the parity arms above could then pass '
               'on an empty model')

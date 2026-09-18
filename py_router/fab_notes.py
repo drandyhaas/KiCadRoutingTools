@@ -24,6 +24,81 @@ VIA_IN_PAD_FAB_NOTE = (
     "state it on the fab drawing or solder wicks into the barrel")
 
 
+#: #962: the per-via spec that DECLARES Type VII, in KiCad 10's whole-via
+#: tokens (`(capping yes) (filling yes)`). This is what a tool-added via in a pad
+#: or a paste opening is stamped with. Tenting, covering and plugging are not
+#: stamped: they keep inheriting the board, and an override on them would be
+#: the redundant stamp #741 removed.
+TYPE_VII_STAMP = {'capping': 'yes', 'filling': 'yes'}
+
+#: KiCad's factory policy for a token neither the via nor the board declares.
+#: Duplicated from kicad_parser.VIA_PROTECTION_SETUP_DEFAULTS on purpose, to
+#: keep this module a leaf; test_962_setup_via_protection pins the two equal.
+_FACTORY_VIA_PROTECTION = {
+    'tenting': '(front yes) (back yes)',
+    'covering': '(front no) (back no)',
+    'plugging': '(front no) (back no)',
+    'capping': 'no',
+    'filling': 'no',
+}
+
+
+def effective_via_protection(via_spec: Optional[Dict[str, str]],
+                             setup: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """The protection a via will actually be FABRICATED with, token by token.
+
+    A via's own spec overrides the board's `(setup ...)` one token at a time.
+    KiCad writes a token only for an explicit override (probed, pcbnew
+    10.0.0), so a via carrying only `(tenting ...)` still inherits capping and
+    filling from the board. A token neither declares takes KiCad's factory
+    value.
+    """
+    out = dict(_FACTORY_VIA_PROTECTION)
+    for src in (setup or {}, via_spec or {}):
+        for tok, inner in src.items():
+            if tok in out:
+                out[tok] = ' '.join(str(inner).split())
+    return out
+
+
+def is_filled_and_capped(effective: Dict[str, str]) -> bool:
+    """Does an effective spec declare IPC-4761 Type VII (filled AND capped)?"""
+    return (effective.get('capping', '').strip() == 'yes'
+            and effective.get('filling', '').strip() == 'yes')
+
+
+def via_paste_sites(vias, pcb_data, tol: float = 1e-6):
+    """[(via, aperture, penetration_mm)] for every via whose BARREL overlaps a
+    solder-paste opening that concerns its net (#962).
+
+    The openings are `paste_apertures.apertures_for_net`. A foreign-net via
+    inside an opening is already a short, which check_drc reports as such, so
+    it is not also reported here. Uses the same barrel rule as
+    `via_in_pad_sites` (#695): an off-centre via wicks solder just the same.
+    Accepts vias as dicts or objects.
+    """
+    import paste_apertures as _pa
+    out = []
+    for via in vias or ():
+        nid = _get(via, 'net_id')
+        vx, vy = _get(via, 'x'), _get(via, 'y')
+        if nid is None or vx is None or vy is None:
+            continue
+        vsz = _get(via, 'size', 0.6) or 0.6
+        best = None
+        for ap in _pa.apertures_for_net(pcb_data, nid):
+            b = ap.bounds
+            r = vsz / 2.0
+            if vx + r < b[0] or vx - r > b[2] or vy + r < b[1] or vy - r > b[3]:
+                continue
+            pen = _pa.via_paste_penetration(vx, vy, vsz, ap)
+            if pen > tol and (best is None or pen > best[1]):
+                best = (ap, pen)
+        if best is not None:
+            out.append((via, best[0], best[1]))
+    return out
+
+
 def _get(obj, name: str, default=None):
     """Read `name` from a dict or an attribute-style object."""
     if isinstance(obj, dict):

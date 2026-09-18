@@ -84,6 +84,28 @@ def main():
           esp.board_info.pad_to_paste_clearance == -0.0508
           and esp.board_info.pad_to_paste_clearance_ratio == 0.0)
 
+    # KiCad 6-8 wrote no (tenting ...). UNtented vias were the plot option
+    # (viasonmask yes|true), which pcbnew 10 migrates to (front no) (back no).
+    for tok in ('yes', 'true'):
+        _pc, _pr, vp = extract_board_setup_paste_and_protection(
+            '(kicad_pcb (setup (pcbplotparams (viasonmask %s))))' % tok)
+        check('7. (viasonmask %s) with no tenting -> tenting (front no) (back no)' % tok,
+              vp['tenting'] == '(front no) (back no)', vp['tenting'])
+    _pc, _pr, vp = extract_board_setup_paste_and_protection(
+        '(kicad_pcb (setup (pcbplotparams (viasonmask no))))')
+    check('7. (viasonmask no) keeps the tented default',
+          vp['tenting'] == '(front yes) (back yes)', vp['tenting'])
+    _pc, _pr, vp = extract_board_setup_paste_and_protection(
+        '(kicad_pcb (setup (tenting front back) (pcbplotparams (viasonmask yes))))')
+    check('7. an explicit (tenting ...) wins over viasonmask',
+          vp['tenting'] == '(front yes) (back yes)', vp['tenting'])
+    c = canonical_via_protection_setup({'tenting': '(front no)'})
+    check('8. a partial nested form completes the missing side as no (pcbnew 10)',
+          c['tenting'] == '(front no) (back no)', c['tenting'])
+    import fab_notes
+    check('9. fab_notes\' factory policy equals the parser\'s (the leaf copy cannot drift)',
+          fab_notes._FACTORY_VIA_PROTECTION == VIA_PROTECTION_SETUP_DEFAULTS)
+
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")
     return 1 if FAILS else 0
 
