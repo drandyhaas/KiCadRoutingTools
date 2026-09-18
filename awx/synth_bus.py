@@ -987,6 +987,87 @@ def escape_move_floor(pi, reach=0, workers=8, det_time=60.0):
                                     else 'feasible'), order
 
 
+def escape_search(pi, reach=2, budget=150, tooth_layer=None, berth_layer=None,
+                  cap=None, start=None):
+    """The escape move, STEERED BY THE TRUE FLOOR instead of by the ceiling.
+
+    `escape_move_floor` maximises the free-rider ceiling, whose bound is
+    loose -- measured, it can raise the ceiling while making the true floor
+    WORSE. This one proposes the same moves and scores each with
+    `cap_floor`, the quantity that is actually wanted.
+
+    The state is a slot per lane at each end, both ends a permutation, no
+    lane further than `reach` from where it started; the move is a SWAP of
+    two lanes' slots at one end (a swap keeps the permutation without any
+    repair); the walk is first-improvement hill climbing over a
+    DETERMINISTIC candidate order, so the answer is a function of
+    (pi, reach, budget) alone -- no clock, no RNG.
+
+    `budget` is in `cap_floor` CALLS, the campaign's rule: budgets are in
+    WORK, never wall time, or a slow machine answers differently rather
+    than later.
+
+    Returns (floor, order, calls, status) where `order` is (entry slots,
+    exit slots). With reach=0 it does nothing and returns the floor as
+    given, which is the baseline every arm is compared against.
+    """
+    K = len(pi)
+    ids = list(range(K))
+    tl = tooth_layer or {}
+    bl = berth_layer or {}
+
+    def score(a, b):
+        s_ = {n: float(a[n]) for n in ids}
+        d_ = {n: float(b[n]) for n in ids}
+        v, _p, st = cap_floor(ids, s_, d_, tooth_layer=tl, berth_layer=bl,
+                              cap=cap)
+        return (None if v is None else v), st
+
+    # `start` seeds the walk from another arm's answer -- the ceiling MILP
+    # is a good coarse guess that the true objective then refines. HOME is
+    # always the lane's original slot, so `reach` still means distance from
+    # where the lane really is, not from wherever the seed put it.
+    home_a = list(range(K))
+    home_b = list(pi)
+    a = list(start[0]) if start else list(home_a)
+    b = list(start[1]) if start else list(home_b)
+    best, st = score(a, b)
+    calls = 1
+    if best is None:
+        return None, (a, b), calls, st
+    if reach <= 0:
+        return best, (a, b), calls, 'reach 0 (no move)'
+    improved = True
+    while improved and calls < budget:
+        improved = False
+        # a deterministic sweep: every (end, i, j) in index order
+        for end in (0, 1):
+            arr = a if end == 0 else b
+            home = home_a if end == 0 else home_b
+            for i in range(K):
+                for j in range(i + 1, K):
+                    if calls >= budget:
+                        break
+                    # the swap must keep both lanes inside their reach
+                    if abs(arr[j] - home[i]) > reach or \
+                       abs(arr[i] - home[j]) > reach:
+                        continue
+                    arr[i], arr[j] = arr[j], arr[i]
+                    v, _st = score(a, b)
+                    calls += 1
+                    if v is not None and v < best:
+                        best = v
+                        improved = True
+                    else:
+                        arr[i], arr[j] = arr[j], arr[i]   # undo
+                if calls >= budget:
+                    break
+            if calls >= budget:
+                break
+    return best, (a, b), calls, ('budget exhausted' if calls >= budget
+                                 else 'local optimum')
+
+
 def escape_move_survey(ks=(12, 16, 20), seeds=(0, 1), reaches=(0, 1, 2, 3)):
     """Does giving each lane more escape/berth reach lower the TRUE floor?
 
@@ -2244,6 +2325,49 @@ def self_test():
             print(f'FAIL escape reach0 K={K} seed={seed}: ceiling {c}, '
                   f'patience-sorting LIS {lis} -- the same quantity two ways')
             bad += 1
+    # `escape_search`, checked by invariants that can actually FAIL.
+    # Two earlier candidates could not: "reach 2 is never worse than reach
+    # 0" is unfireable because `best` starts at the reach-0 score and only
+    # decreases, and moving the reach-0 guard is an EQUIVALENT mutant --
+    # at reach 0 the swap guard already forbids every swap. What bites is
+    # the call count, the reach envelope, and the answer matching its own
+    # witness.
+    for K, seed in ((12, 0), (16, 1)):
+        pi = pattern_perm('shuffle', K, seed=seed)
+        ids = list(range(K))
+        base, _p, st = cap_floor(ids, {i_: float(i_) for i_ in ids},
+                                 {i_: float(pi[i_]) for i_ in ids})
+        if st.startswith('not computed'):
+            continue
+        tag = f'escape_search K={K} seed={seed}'
+        f0, order0, calls0, _s0 = escape_search(pi, reach=0)
+        if f0 != base or order0 != (list(range(K)), list(pi)):
+            print(f'FAIL {tag} reach0: floor {f0} (channel {base}) or it MOVED')
+            bad += 1
+        if calls0 != 1:
+            print(f'FAIL {tag} reach0: {calls0} cap_floor call(s) -- reach 0 '
+                  f'must score the given channel ONCE and stop')
+            bad += 1
+        for r in (1, 2):
+            fr, (ar, br), _cr, _sr = escape_search(pi, reach=r, budget=60)
+            if sorted(ar) != list(range(K)) or sorted(br) != list(range(K)):
+                print(f'FAIL {tag} reach {r}: an end stopped being a '
+                      f'permutation -- two lanes share a slot')
+                bad += 1
+                continue
+            far = [i_ for i_ in range(K) if abs(ar[i_] - i_) > r
+                   or abs(br[i_] - pi[i_]) > r]
+            if far:
+                print(f'FAIL {tag} reach {r}: {len(far)} lane(s) moved further '
+                      f'than the reach allows (e.g. lane {far[0]})')
+                bad += 1
+            wit, _p2, _s2 = cap_floor(ids, {i_: float(ar[i_]) for i_ in ids},
+                                      {i_: float(br[i_]) for i_ in ids})
+            if wit != fr:
+                print(f'FAIL {tag} reach {r}: reported {fr} but the slots it '
+                      f'returned floor at {wit} -- the answer does not match '
+                      f'its own witness')
+                bad += 1
     print(f'  note the two-via cap: {len(CAP_WITNESS)} witness(es), '
           f'{sum(1 for w in CAP_WITNESS if not w[3])} of them INFEASIBLE -- '
           f'which is the half that can fail')
