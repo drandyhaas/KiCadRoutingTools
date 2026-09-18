@@ -55,9 +55,19 @@ from ledger_cal import Judge, _cross_pair          # noqa: E402
 NODES = int(os.environ.get('JOINT_FLOOR_NODES', '200000'))
 
 
-def joint_floor(J):
+def joint_floor(J, cap=None):
     """(floor, per-net changes, status) for a ledger_cal.Judge's paths.
-    `floor` is None when the parity system is infeasible."""
+    `floor` is None when the parity system is infeasible.
+
+    `cap` (an int) additionally bounds EVERY net's layer changes, which is
+    how the planner's own directive -- "no net may need more than two
+    vias" -- is asked as a question rather than assumed. INFEASIBLE at
+    cap=2 is the strongest statement available about a board: no layer
+    assignment whatever, over these paths, gives every net two vias. That
+    is a fact about the PATHS, so it cannot be fixed by scheduling.
+
+    Mind the objective: capping is NOT the same as minimising vias, and on
+    a board where the two disagree the cap costs vias. Read both."""
     names = sorted(J.paths)
     # every crossing, as a pair of (net, arclength) sites
     sites = {m: [] for m in names}          # net -> [t] in path order
@@ -88,13 +98,14 @@ def joint_floor(J):
     # 2. the changes along each path, pads pinned at both ends
     nv = ny
     dcost = []
+    lane_d = {m: [] for m in names}      # net -> its change variables
     for m in names:
         P = J.paths[m]
         chain = sites[m]
         prev_pin = 1 if P.start_pad_lay == 'B.Cu' else 0
         for pos, t in enumerate(chain):
             v = idx[(m, t)]
-            d = nv; nv += 1; dcost.append(1.0)
+            d = nv; nv += 1; dcost.append(1.0); lane_d[m].append(d)
             if pos == 0:
                 # |y - start_pad|, a constant on one side
                 add({d: 1, v: -1}, -prev_pin, np.inf)
@@ -104,7 +115,7 @@ def joint_floor(J):
                 add({d: 1, v: -1, u: 1}, 0, np.inf)
                 add({d: 1, v: 1, u: -1}, 0, np.inf)
         end_pin = 1 if P.end_pad_lay == 'B.Cu' else 0
-        d = nv; nv += 1; dcost.append(1.0)
+        d = nv; nv += 1; dcost.append(1.0); lane_d[m].append(d)
         if chain:
             v = idx[(m, chain[-1])]
             add({d: 1, v: -1}, -end_pin, np.inf)
@@ -113,6 +124,9 @@ def joint_floor(J):
             # a path nothing crosses: it changes only if its two pads
             # disagree, which is a constant, not a decision
             add({d: 1}, abs(end_pin - prev_pin), np.inf)
+        if cap is not None:
+            # every change variable of this path, bounded by `cap`
+            add({d_: 1 for d_ in lane_d[m]}, 0, float(cap))
     cvec = np.concatenate([cost, np.asarray(dcost, float)])
     integ = np.concatenate([np.ones(ny), np.zeros(len(dcost))])
     ri, ci, vi = [], [], []
@@ -126,7 +140,9 @@ def joint_floor(J):
                integrality=integ, bounds=Bounds(0, 1),
                options={'node_limit': NODES})
     if res.x is None:
-        return None, {}, (res.message or 'no solution')
+        why = ('infeasible' if getattr(res, 'status', None) == 2
+               else f'no solution (status {getattr(res, "status", "?")})')
+        return None, {}, f'{why}: {res.message or ""}'.strip()
     x = res.x
     per = {}
     off = ny
@@ -144,6 +160,10 @@ def main():
     ap.add_argument('--src', default='U1')
     ap.add_argument('--dst', default='DU1')
     ap.add_argument('--verbose', action='store_true')
+    ap.add_argument('--cap', type=int, default=None,
+                    help='additionally bound EVERY net\'s vias by this '
+                         'many (2 = the planner\'s "no net over two vias" '
+                         'directive, asked rather than assumed)')
     a = ap.parse_args()
     nets = subprocess.run(
         # NOTE: no --board. The net list must be the one ledger_cal uses
@@ -157,7 +177,7 @@ def main():
     missing = [m for m in nets if m not in J.paths]
     for m in missing:
         print(f'  (no path for {m})')
-    floor, per, status = joint_floor(J)
+    floor, per, status = joint_floor(J, cap=a.cap)
     n_cross = sum(len(v) for v in J.seqs.values()) // 2
     print(f'{os.path.basename(a.board)} K={a.k}: {len(J.paths)} path(s), '
           f'{n_cross} crossing(s)')
@@ -165,10 +185,22 @@ def main():
     print(f'  per-net floor    {J.floor_total}   (ledger_cal: CIRCULAR -- '
           f'each net priced against the others AS LAID)')
     if floor is None:
-        print(f'  JOINT floor      INFEASIBLE ({status}) -- these paths have '
-              f'no two-layer assignment at all')
+        what = (f'at most {a.cap} via(s) a net' if a.cap is not None
+                else 'any two-layer assignment')
+        print(f'  JOINT floor      INFEASIBLE ({status})')
+        print(f'                   -- over THESE paths there is no layer '
+              f'assignment with {what}.')
+        if a.cap is not None:
+            print(f'                   That is a fact about the paths, not '
+                  f'about the schedule: no')
+            print(f'                   realization of this copper meets the '
+                  f'cap. Re-plan, do not re-solve.')
         return 2
-    print(f'  JOINT floor      {floor}   slack {J.act_total - floor}')
+    lab = 'JOINT floor' if a.cap is None else f'JOINT floor <={a.cap}'
+    print(f'  {lab:16s} {floor}   slack {J.act_total - floor}')
+    if a.cap is not None:
+        print(f'                   (the cap is a CONSTRAINT, not the via '
+              f'objective -- compare against the uncapped run)')
     if a.verbose:
         # the nets with the most headroom first: that is where a
         # realization idea has room to pay
