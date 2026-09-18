@@ -2148,6 +2148,25 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
     better on it is retried one net at a time. Sweeps until nothing
     improves. Returns the choice."""
     import time
+    # THE PREREQUISITE, checked before any of the work. The solve that
+    # chooses among these candidates is braid's `_alts5`, which runs only
+    # inside `_profiles5`, which runs only at `BRAID_ONE_DIVE >= 5`. With
+    # the default 0 this function builds hundreds of candidate berths and
+    # thousands of exclusions, calls the planner once a sweep, and hands
+    # the answer to nobody -- reporting `solve objective n/a; 0 move(s)`,
+    # which reads like a solve that declined rather than one that never
+    # ran. Measured 2026-09-17 before this check existed: ZERO moves at
+    # K28, K35 and K51, on both HiGHS and CP-SAT, with DST_RESIDUE=3.
+    # Refused rather than auto-enabled: ONE_DIVE=5 replaces the pages, the
+    # leg layers and the required stretches, so turning it on silently
+    # would change copper on every board that sets DST_RESIDUE.
+    if te.ONE_DIVE < 5:
+        log(f'  residue choice: REFUSED -- DST_RESIDUE needs BRAID_ONE_DIVE=5 '
+            f'and it is {te.ONE_DIVE}. The solve that chooses among the '
+            f'candidate berths (braid._alts5) runs only inside the level-5 '
+            f'profile solve, so every sweep would report "objective n/a; 0 '
+            f'move(s)" and change nothing.')
+        return choice
     t0 = time.time()
     c0 = _spent()
     bands = pe.sm.bands_of_boxes(st['dboxes']) if st['dboxes'] else []

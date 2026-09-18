@@ -1011,6 +1011,70 @@ place and would leave to weave". Measured this session:
 **That is the lead to pick up**: not a knob, a mechanism that is switched off
 by default and returns nothing when switched on.
 
+### The residue mechanism: diagnosed, and the silence fixed
+
+`DST_RESIDUE` aims at exactly the nets that carry K51's gap, and measured
+this session it made **zero moves at K28, K35 and K51**, reporting `solve
+objective n/a; 0 move(s)` on every sweep. Root-caused by reading the call
+path, not by inference:
+
+```
+fanout_from_plan.residue_choice        builds the candidates, sets plan['alts']
+  -> braid.plan_braid(..., plan)       the in-process judge
+    -> braid.setup                     ctx.alts = plan['alts']          OK
+    -> ...
+       braid._profiles5                the ONLY caller of _alts5
+                                       gated at line 5814:
+                                         if ONE_DIVE >= 5 and sched is not None
+```
+
+**`BRAID_ONE_DIVE` defaults to 0**, and `_alts5` is the only thing that sets
+`alt_obj` or returns a move. So the fanout builds 374 candidate berths, 788
+moves and 11418 exclusions, calls the planner once a sweep, and hands the
+answer to a consumer that is not running. Three defaults have to line up for
+this mechanism to do anything -- `PLAN_PAGES=1`, `DST_RESIDUE>=2` **and**
+`BRAID_ONE_DIVE=5` -- and only the first two are documented as the switch.
+
+**Why it was silent, which is the part worth keeping.** The first fix put the
+warning in `braid.setup`, where `ctx.alts` arrives -- and it printed nothing,
+because the braid is reached through `plan_braid`, whose logger is
+`lambda msg='': None`. A warning there goes nowhere. The refusal is therefore
+in `residue_choice`, before any of the work:
+
+```
+residue choice: REFUSED -- DST_RESIDUE needs BRAID_ONE_DIVE=5 and it is 0.
+The solve that chooses among the candidate berths (braid._alts5) runs only
+inside the level-5 profile solve, so every sweep would report "objective
+n/a; 0 move(s)" and change nothing.
+```
+
+Measured: the wasted sweeps go **2 -> 0** at K28 and the grade is unchanged
+(34 vias), which is the proof that it really was doing nothing. `_profiles5`
+also now says so when nets are offered but none is in its model -- the other
+way this arrives at an empty answer.
+
+**Refused, not auto-enabled**, for two measured reasons.
+
+1. `ONE_DIVE=5` replaces the pages, the leg layers and the required
+   stretches, so switching it on silently would change copper on every board
+   that sets `DST_RESIDUE`. At K28 with the residue search OFF it routes
+   **39 vias against the baseline's 34** -- the mechanism starts five vias
+   behind before it chooses a single berth.
+2. With the prerequisite satisfied it is **not affordable**. Every sweep of
+   the residue search calls the planner, and each of those calls now runs the
+   full level-5 profile MILP over the whole lane set. Measured: `ONE_DIVE=5
+   DST_RESIDUE=3` at **K28** ran **34 minutes of CPU at 100% in the fanout
+   stage alone and never finished it** (killed), against an edict budget of
+   ~2 minutes for the whole of K41. The control -- the same `ONE_DIVE=5`
+   with the residue search off -- completed in a couple of minutes, so the
+   cost is the residue loop calling the level-5 solve once a sweep, not
+   level 5 itself. K51 is strictly worse.
+
+So the honest state of TODO item 2's mechanism: it was never running, it now
+says so, and when it does run it is five vias behind and an order of
+magnitude over budget. The berth choice is still the right lever for K51's
+fifteen weaving nets -- `_alts5` is not the affordable way to pull it.
+
 ### What the synthetic bench can and cannot do at K41+
 
 * **It cannot be a fast screening loop there.** A generated K41 case routes in
@@ -1338,14 +1402,27 @@ way are in "Settled -- do not re-run these" and in the history.
      crossing count taken against the ACTUAL corridor rather than all
      pairs.
 
-2. **The berth menu -- but FIRST, `DST_RESIDUE` is off and inert
-   (2026-09-17).** The knob this item names, `DST_RESIDUE_CANDS`, is dead on
-   the default chain because `DST_RESIDUE` defaults to 0: 8 / 12 / 16 all
-   gave 116 vias and an identical 838 berth candidates at K51. Switched on,
-   `DST_RESIDUE=3` identifies the right nets (16 at K51, against the 15 that
-   carry the entire gap) and then makes **zero moves at K28, K35 and K51** --
-   `objective n/a` in about a second, every sweep, on both solvers. Fix that
-   before pruning rows in a menu nothing is reading.
+2. **The berth menu. `DST_RESIDUE` is DIAGNOSED and the silence is fixed;
+   the mechanism itself is not affordable (2026-09-17).** Root cause: its
+   answer is consumed by `braid._alts5`, which runs only inside
+   `_profiles5`, gated at `ONE_DIVE >= 5` -- and `BRAID_ONE_DIVE` defaults
+   to **0**. So three defaults must line up (`PLAN_PAGES=1`,
+   `DST_RESIDUE>=2`, `BRAID_ONE_DIVE=5`) and only two are documented as the
+   switch; with the third missing the fanout built 374 candidate berths and
+   11418 exclusions a sweep and handed them to nobody, reporting `objective
+   n/a; 0 move(s)` -- zero moves at K28, K35 and K51, on both solvers. It is
+   now REFUSED up front with the reason (sweeps 2 -> 0 at K28, grade
+   unchanged, which is the proof it was inert). `DST_RESIDUE_CANDS` was
+   dead for the same reason: 8 / 12 / 16 gave an identical 838 berth
+   candidates.
+
+   **And with the prerequisite satisfied it still is not the answer**:
+   `ONE_DIVE=5` alone routes 39 at K28 against the baseline's 34, and
+   `ONE_DIVE=5 DST_RESIDUE=3` burned 34 minutes of CPU on K28's fanout
+   stage without finishing it (the control finished in minutes, so the cost
+   is the residue loop calling the level-5 MILP once a sweep). The berth
+   choice is still the right lever for K51's fifteen weaving nets; `_alts5`
+   is not an affordable way to pull it.
 
    **The berth menu is the binding constraint, and the fix is ROW pruning
    -- not column generation.** Measured on the joint arm's K41 instance:

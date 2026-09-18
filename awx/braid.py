@@ -3343,6 +3343,17 @@ class Corridor:
         self.alt_choice, self.alt_note = {}, None
         alts = getattr(ctx, 'alts', None) or {}
         todo = [nm for nm in M if alts.get(nm)]      # residue nets alone (DST_RESIDUE=2) or every net (=3)
+        if alts and not todo:
+            # the other way this arrives at nothing: the nets were offered
+            # but none of them is in the level-5 model, so there is no
+            # variable to choose over. Said out loud for the same reason as
+            # the refusal at ctx.alts -- an empty `todo` is indistinguishable
+            # from a solve that declined every candidate.
+            (log or self.log)(
+                f'  profiles5 alts: {len(alts)} net(s) offered candidate berths '
+                f'and NONE is in the level-5 model ({len(M)} net(s)), so the '
+                f'choice solve has nothing to choose: '
+                f'{sorted(set(alts) - set(M))[:8]}')
         if todo:
             try:
                 self._alts5(samp, todo, x, idx, cand, mkey, cap, log)
@@ -8202,6 +8213,15 @@ def setup(board, names, dest, log, plan=None):
     # candidate berths for the plan's residue nets (a plan being RANKED
     # by the fanout loop's residue search; see L5_ALT_NODES): never in a
     # sidecar, so the braid proper sees none
+    # ...and the consumer for them is `_alts5`, which ONLY runs inside
+    # `_profiles5`, which only runs at ONE_DIVE >= 5. A caller that sets
+    # DST_RESIDUE without BRAID_ONE_DIVE=5 therefore builds the whole
+    # residue search and hands it to nobody. The refusal for that lives in
+    # `fanout_from_plan.residue_choice` and NOT here, because this code is
+    # reached through `plan_braid`, whose logger is `lambda msg='': None` --
+    # a warning printed here goes NOWHERE, which is half of why the no-op
+    # was silent in the first place (measured: the warning fired on every
+    # judge call and never appeared in a log).
     ctx.alts = (plan or {}).get('alts') or {}
     ctx.alt_excl = (plan or {}).get('alt_excl') or []
     ctx.alt_xing = (plan or {}).get('alt_xing') or []
