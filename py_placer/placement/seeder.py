@@ -2094,6 +2094,50 @@ def _centre_offset_mm(part, edge: str) -> float:
     return (a + b) / 2.0
 
 
+class _AtRotation:
+    """`part` as it would stand at `rot`, for READING its geometry only.
+
+    `_edge_frac_bounds`, `declared_to_ladder_frac` and
+    `ladder_to_declared_frac` read exactly two things off a part: `rot`, and
+    `rect(x, y, rot)`. This answers both for another angle without turning the
+    part in the state, so a caller that measures and then skips the part
+    leaves nothing to restore.
+    """
+    __slots__ = ('_part', 'rot')
+
+    def __init__(self, part, rot):
+        self._part, self.rot = part, rot
+
+    def rect(self, x, y, rot):
+        return self._part.rect(x, y, rot)
+
+
+def _stage1_geometry_rot(part, claim):
+    """The rotation stage 1 measures an edge connector's geometry at.
+
+    Stage 1 applies a DECLARED rotation (#893) only after it has converted the
+    declared window and clamped by the part's extents -- all of which turn
+    with the part. Measured at the input rotation, splitflap_driver's J5
+    (input 180, `center_on_edge` 1.0 mm) was written 10.00 mm off centre when
+    declared at 0, 5.65 mm at 90 and 4.60 mm at 270, and a part that fits the
+    edge only at its declared angle was refused as "wider than the edge". So:
+    the declared angle when one is declared, else the part's own. A candidate
+    SET is not applied by stage 1, so it measures at `part.rot` too.
+    """
+    if claim is not None and claim[0] is not None:
+        return claim[0] % 360.0
+    return part.rot
+
+
+def _rotated_bounds(part, rot):
+    """Make sure `part.rect` can answer at `rot` (the #893 cache fill)."""
+    if rot not in part.bounds_by_rot:
+        from placement.legality import rotate_local_bounds
+        part.bounds_by_rot[rot] = rotate_local_bounds(*part.bounds_by_rot[0.0], rot)
+        if part.tht_by_rot is not None:
+            part.tht_by_rot[rot] = rotate_local_bounds(*part.tht_by_rot[0.0], rot)
+
+
 def declared_to_ladder_frac(part, bounds, edge, e_lo, e_hi, declared):
     """A DECLARED fraction -> the fraction the seat ladder works in.
 
@@ -2806,7 +2850,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # 3 connectors on one edge get fracs 0.25/0.5/0.75, and a wide
             # part at 0.25 hangs off the end. This stage runs no legality
             # gate at all (by design), so nothing downstream would catch it.
-            f_lo, f_hi = _edge_frac_bounds(part, bounds, edge)
+            #
+            # Everything measured below turns with the part -- its extents, the
+            # offset from its origin to its courtyard centre, so the declared
+            # start and window too -- and a DECLARED rotation is only applied
+            # further down (#893). `_geo` is the part at the rotation this
+            # stage will write, read-only, so a part it then skips has not
+            # been turned (`_stage1_geometry_rot` says why this matters).
+            _geo_rot = _stage1_geometry_rot(part, declared_rot.get(ref))
+            _rotated_bounds(part, _geo_rot)
+            _geo = _AtRotation(part, _geo_rot)
+            f_lo, f_hi = _edge_frac_bounds(_geo, bounds, edge)
             # #706/#712. A DECLARED position outranks the even distribution.
             # Stage 1 is the from-scratch path and it never calls `_seat_edge`,
             # so without this a declared `center_on_edge` would be seated at
@@ -2829,7 +2883,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             #    that is not the bounding box -- the reason `edge_span`
             #    exists at all.
             _e_lo, _e_hi, _ = _declared_edge_span(state, bounds, edge)
-            frac = ((declared_to_ladder_frac(part, bounds, edge,
+            frac = ((declared_to_ladder_frac(_geo, bounds, edge,
                                              _e_lo, _e_hi, _dec))
                     if _dec is not None else (k + 1) / (len(specs) + 1))
             if f_lo > f_hi:
@@ -2838,9 +2892,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 continue
             _win = _declared_frac_window(c, _e_hi - _e_lo)
             if _win is not None:
-                _w_lo = declared_to_ladder_frac(part, bounds, edge,
+                _w_lo = declared_to_ladder_frac(_geo, bounds, edge,
                                                 _e_lo, _e_hi, _win[0])
-                _w_hi = declared_to_ladder_frac(part, bounds, edge,
+                _w_hi = declared_to_ladder_frac(_geo, bounds, edge,
                                                 _e_lo, _e_hi, _win[1])
                 _n_lo, _n_hi = max(f_lo, _w_lo), min(f_hi, _w_hi)
                 if _n_lo > _n_hi:
@@ -2848,8 +2902,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         f"edge connector {ref}: the declared along-edge window "
                         f"[{_win[0]:.3f}, {_win[1]:.3f}] does not intersect "
                         f"the legal one ["
-                        f"{ladder_to_declared_frac(part, bounds, edge, _e_lo, _e_hi, f_lo):.3f}, "
-                        f"{ladder_to_declared_frac(part, bounds, edge, _e_lo, _e_hi, f_hi):.3f}] "
+                        f"{ladder_to_declared_frac(_geo, bounds, edge, _e_lo, _e_hi, f_lo):.3f}, "
+                        f"{ladder_to_declared_frac(_geo, bounds, edge, _e_lo, _e_hi, f_hi):.3f}] "
                         f"on the {edge} edge, so stage 1 leaves it to the "
                         f"later stages")
                     continue
