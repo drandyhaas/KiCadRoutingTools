@@ -81,6 +81,12 @@ MEASURED at the final commit, whole battery, 2026-09-18: **87 rows, 85 KILLED,
 2 SURVIVED -- both of them the expected ones -- 0 broken.** That is the run of
 record. Every earlier number stays above because each says what it cost to
 learn, and the SHAs they name are no longer reachable in this branch.
+
+RE-RUN on the #983/#987/#988 branch stacked on this one, whole battery, at
+ab4f4854 (2026-09-18, Windows; killers unmutated and green first): **87 rows,
+84 KILLED, 3 SURVIVED, 0 broken.** Two survivors are the expected ones above.
+The third, `stage1-kept-frac-not-restored`, is expected now too; its row says
+why.
 """
 from __future__ import annotations
 
@@ -292,10 +298,17 @@ ROWS = [
      "                                or _grade_accepts(state, part, c, edge, lo, _x, _y)):",
      "                                or True):",
      (TS,), 'KILLED'),
+    # Expected to SURVIVE since #983: stage 1 now WRITES the kept rung's stored
+    # pose (`_kept_xy`) instead of re-deriving it from `frac`, which would drop
+    # a window step or band settle. `frac` still feeds the re-derivation's
+    # convergence check, which differs only when the slide's LAST rung fails
+    # to converge -- no fixture here produces that. What this row guarded (the
+    # kept rung is what is written) is `mutate_983.py`'s
+    # `stage-one-kept-pose-re-derived`, KILLED.
     ('stage1-kept-frac-not-restored', 'sd',
      "                if _kept is not None:\n                    frac = _kept[0]",
      "                if _kept is not None:\n                    pass",
-     (TS,), 'KILLED'),
+     (TS,), 'SURVIVED'),
     ('stage1-neighbours-lambda-false', 'sd',
      "                            _x, _y, lambda a, b: bool(_shorted_by(a, b)))",
      "                            _x, _y, lambda a, b: False)",
