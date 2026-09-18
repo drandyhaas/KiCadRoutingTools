@@ -194,6 +194,7 @@ octilinear, so a non-orthogonal pose is outside both models today.*
 | `collapse_dives.py` | collapse short dives on a routed board (2 vias each) |
 | `cut_ledger.py` | Maley cut capacity of a plan, before any lane is routed |
 | `synth_bus.cap_floor` / `--cap-survey` | the same per-lane cap on a GENERATED channel, plus the sweep that shows the two-via directive dying with K. Uncapped it must equal `exact_dp` (different algorithm, same model) and the self-test checks that on 90 cases |
+| `synth_bus.escape_move_floor` / `--escape-survey` | the ESCAPE move priced: each lane may shift `reach` slots at either end, both ends staying a permutation. Lowers the TRUE floor by a third at reach 3 and restores two-via feasibility -- but maximising its own objective (the free-rider ceiling) can make the true floor WORSE, which the survey flags. Steer by `cap_floor` |
 | `synth_bus.cap_sat_feasible` | the cap as SATISFIABILITY (CP-SAT), for when only the answer matters. Proves the real K51 channel infeasible at two vias a lane in ~1 min where the MILP ran 30+ and was killed. `UNKNOWN` is a budget, never a negative; budgeted in DETERMINISTIC time |
 | `wall_probe.py`, `copper_same.py`, `cmp_copper.py` | track-level wall census, set-compare copper |
 | `make_bench.py`, `rotate_board.py`, `mirror_board.py`, `bend_bench.py`, `channel_bench.py` | build an article from any board, and its poses |
@@ -1202,6 +1203,88 @@ channel read as feasible. The self-test now pins five witnesses, **three of
 them INFEASIBLE**, because that is the only half that can fail: with the
 bug in place and only feasible cases in the loop, the suite printed ALL
 PASS. Both the inverted XOR and a dropped per-lane cap are killed 3x.
+
+### The weaving nets are LOAD-BEARING, and the move that helps is the escape (2026-09-18)
+
+Three questions were put to this: add moves to pull our floor down to the
+human's, screen candidate plans, and reproduce the whole thing on the
+bench. The bench reproduced it. The first two answers are not the expected
+ones.
+
+**The directive is not just infeasible -- obeying it is WORSE.** Our K51
+path set is exactly **two un-crossings** from two-via-feasible (`SA6xSA7`
+and `SA7xSBA0`, both on SA7, the net the min-count read already named).
+Make them, and:
+
+| over our own paths | free (0v) | one dive | two dives | total |
+|---|---|---|---|---|
+| uncapped optimum | **10** | 32 | 5 | **84** |
+| after 2 un-crossings, uncapped | 10 | 33 | 4 | **82** |
+| after 2 un-crossings, capped at 2 | **2** | 45 | 0 | **90** |
+
+**The five double-diving lanes are buying eight free rides.** A lane that
+dives twice holds B across a long stretch, and that is what lets eight
+others hold F for nothing. Cap it and they all have to dive: 84 -> 90. So
+"no net more than two vias" is not a target that was missed, it is a
+target that costs six vias when met. The fifteen (ten) weaving nets are
+not a defect to remove.
+
+**Un-crossing is a weak lever anyway**: those two moves buy 2 vias
+(84 -> 82). The human's floor is 70, and the gap is not made of removable
+crossings -- the two boards carry the SAME crossing count (337 vs 338).
+
+**What the human actually has** is a better shape at the optimum:
+
+| at the uncapped optimum | free | one dive | two dives | floor |
+|---|---|---|---|---|
+| ours | 10 | 32 | 5 | 84 |
+| human | **13** | 33 | **1** | **70** |
+
+more free riders AND fewer double-divers, which are not in tension.
+
+**The free-rider ceiling is NOT the screen.** A lane pays nothing only if
+it holds F throughout, and two crossing lanes cannot both do that, so the
+free riders are a crossing-free set and its maximum -- a max independent
+set in the crossing graph, seconds by CP-SAT -- caps what a board can ever
+carry free. Ours is 13 against the human's 16, which looked like the
+lever. Over ten routed K51 boards it is **not**: Spearman(ceiling, floor)
+**+0.13**, the wrong sign, and `grpF_k51` has a HIGHER ceiling than our
+best board (15 vs 13) with a worse floor (86) and 106 vias. The ceiling
+bounds the floor from below and the bound is loose -- ours 68 against a
+floor of 84 -- so it does not rank plans.
+
+`Spearman(floor, routed) = +0.96` over the same ten boards says the JOINT
+FLOOR does rank them, but that is near-tautological (routed = floor + a
+slack that measures 8-10 on every board here). A real plan-time screen has
+to compute the floor over the PLANNED lanes and be graded against the
+final routed board. **That is not yet done, and it is the next piece.**
+
+**The bench reproduces the problem and prices a move that works.**
+`synth_bus.escape_move_floor` models the one move the fanout really has:
+the pads are fixed but the SLOT each lane escapes and berths at is not, so
+each lane may shift up to `reach` slots at each end, both ends staying a
+permutation. `--escape-survey` prints it. At reach 3 the TRUE floor falls
+by a third or more -- K=20 seed 0 **56 -> 46**, seed 1 **44 -> 26**, K=16
+seed 1 **38 -> 20** -- and two-via feasibility comes BACK on two of the
+three cases that had lost it. The move costs no length, only a different
+slot, which is what makes it different from un-crossing.
+
+**But do not steer it by the ceiling.** The move maximises the ceiling,
+whose bound `2*(K - ceiling)` is loose, and the survey prints the true
+floor beside it precisely because they disagree in DIRECTION: at K=16
+seed 0 reach 1 the ceiling rises 6 -> 7 while the true floor goes **28 ->
+32**, and reach 3 is worse than reach 2 (14 -> 18). Two such rows in
+twenty-four, flagged in the output. Worse, a TIE in ceiling hides a large
+difference in truth: the same ceiling of 9 gave true floors of 40 and 46
+on two runs before `interleave_search` was set. This is the degenerate
+judge again, one level down -- **the escape move is real, the ceiling is
+not the objective to steer it by. Steer it by `cap_floor`.**
+
+Validation: `escape_move_floor(reach=0)` must equal patience sorting's
+LIS, which it does on 12/12 cases in the sweep and on four pinned cases in
+the self-test; widening the reach-0 window by one fails 3 of them. All
+three CP-SAT calls run `interleave_search` + deterministic time, so
+`--escape-survey` is byte-identical run to run.
 
 ### What the synthetic bench can and cannot do at K41+
 
