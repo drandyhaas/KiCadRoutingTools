@@ -544,6 +544,15 @@ class AlongEdgeWindow(_Graded):
         # A pair that does not change leaves the step free, reported or not.
         self.assertEqual(nudge(ov({'R9': 3e-5}, {'R9': 3e-5})), stepped)
         self.assertEqual(nudge(ov({'R9': 0.2}, {'R9': 0.2})), stepped)
+        # One bound per RUNG: judged against `origin`, the rung before a band
+        # settle moved it. The round-3 compound -- 6e-5 at the rung, 1.15e-4
+        # settled, 1.38e-4 stepped -- is under double of the settled pose and
+        # 2.3x of the rung.
+        origin = (round(x - 0.011, 3), y)
+        readings = {origin: key(overlap={'R9': 6e-5}), (x, y): key(overlap={'R9': 1.15e-4})}
+        comp = lambda sx, sy: readings.get((sx, sy), key(overlap={'R9': 1.38e-4}))
+        self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, comp), stepped)
+        self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, comp, origin), (x, y))
         # the raw one does not seat at all: a step never makes a seat of it
         only_step = lambda sx, sy: None if (sx, sy) == (x, y) else key()
         self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, only_step), (x, y))
@@ -902,47 +911,43 @@ class OverhangBand(_Graded):
         doc = intent_doc(entry)
         self.assertNotEqual(self.repair(alone, doc), self.repair(alone, doc, blind=True))
 
-    def test_b7c_a_settle_and_a_step_on_one_rung_do_not_double_together(self):
-        # The round-3 review's compound: a band settle (inward 0.011) and then
-        # a window step (+y 0.001) on ONE rung, each judged against its own
-        # input, took a locked R9's overlap 6.0e-5 -> 1.38e-4 mm2 (2.3x). The
-        # step is judged against the rung as the ladder found it.
-        import pose_score
-        from placement import legality
+    def test_b7c_the_step_is_handed_the_rung_as_found(self):
+        # One bound per RUNG (the round-3 review): when a settle moved a rung,
+        # the step that follows is judged against the rung BEFORE the settle
+        # (A4b pins what that judgement refuses). Pinned here on the wiring, in
+        # both ladders: every step right after a settle is handed the settled
+        # pose to move and the rung as found as its `origin`.
         crt = '(fp_rect (start -2.3399 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
-        r9 = ('  (footprint "r" (locked yes) (layer "F.Cu") (at 4.578 11.699 0)\n'
-              '    (property "Reference" "R9")\n'
-              '    (fp_rect (start -1 -0.6) (end 1 0.6) (layer "F.CrtYd"))\n'
-              '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu"))\n'
-              '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu")))\n')
-        b1 = ('  (footprint "b" (locked yes) (layer "F.Cu") (at 3.0 11.85 0)\n'
-              '    (property "Reference" "B1")\n'
-              '    (fp_rect (start -0.25 -1.25) (end 0.25 1.25) (layer "F.CrtYd"))\n'
-              '    (pad "1" smd rect (at 0 0) (size .5 2.5) (layers "F.Cu")))\n')
-        path = self.write('b7c.kicad_pcb', board((20, 20), j1((BODY, crt)), r9, b1))
+        path = self.write('b7c.kicad_pcb', board((20, 20), j1((BODY, crt))))
         entry = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.3, 'max': 0.5},
-                 'along_edge_band': {'from': 0.50021, 'to': 0.50029}}
+                 'along_edge_band': {'from': 0.3, 'to': 0.7}}
         doc = intent_doc(entry)
-
-        def r9_overlap(pose):
-            out = str(self.root / f'b7c_{abs(hash(pose))}.kicad_pcb')
-            write_placed_output(path, out, [{'reference': 'J1', 'new_x': round(pose[0], 3),
-                                             'new_y': round(pose[1], 3),
-                                             'new_rotation': pose[2]}])
-            parts = {g.ref: g for g in pose_score.make_state(
-                parse_kicad_pcb(out), out, clearance=.25,
-                board_edge_clearance=.55).graded_parts()}
-            a, b = parts['J1'], parts['R9']
-            return legality.pair_overlap_area(a.sides, a.side, a.rect, a.tht_rect,
-                                              b.sides, b.side, b.rect, b.tht_rect)
-        blind = self.repair(path, doc, blind=True)
-        was = r9_overlap(blind)
-        self.assertGreaterEqual(was, seeder._OVERLAP_REPORTED_MM2)   # an existing pair
+        real_settle, real_nudge = seeder._band_settle, seeder._window_nudge
         for caller in ('repair', 'stage1'):
             with self.subTest(caller=caller):
-                pose = (self.repair(path, doc) if caller == 'repair'
-                        else self.pose(self.stage1(path, doc), 'J1'))
-                self.assertLess(r9_overlap(pose), 2.0 * was, (caller, blind, pose))
+                log = []
+
+                def settle(st, part, e, edge, lo, x, y, seats=None):
+                    out = real_settle(st, part, e, edge, lo, x, y, seats)
+                    log.append(('settle', (x, y), tuple(out)))
+                    return out
+
+                def nudge(st, part, e, edge, x, y, seats=None, origin=None):
+                    log.append(('nudge', (x, y), origin))
+                    return real_nudge(st, part, e, edge, x, y, seats, origin)
+                with patch.object(seeder, '_band_settle', settle), \
+                        patch.object(seeder, '_window_nudge', nudge):
+                    if caller == 'repair':
+                        self.repair(path, doc)
+                    else:
+                        self.stage1(path, doc)
+                pairs = [(a, b) for a, b in zip(log, log[1:])
+                         if a[0] == 'settle' and b[0] == 'nudge']
+                self.assertTrue([a for a, _b in pairs if a[2] != a[1]],
+                                'a settle must move a rung, or this arm tests nothing')
+                for a, b in pairs:
+                    self.assertEqual(b[1], a[2])        # it moves the settled pose
+                    self.assertEqual(b[2], a[1])        # judged against the rung
 
     def test_b7b_the_pile_is_not_a_neighbour(self):
         # What the seat ignores as meaningless coordinates -- `_seat_edge`'s
