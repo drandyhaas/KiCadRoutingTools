@@ -194,6 +194,7 @@ octilinear, so a non-orthogonal pose is outside both models today.*
 | `collapse_dives.py` | collapse short dives on a routed board (2 vias each) |
 | `cut_ledger.py` | Maley cut capacity of a plan, before any lane is routed |
 | `synth_bus.cap_floor` / `--cap-survey` | the same per-lane cap on a GENERATED channel, plus the sweep that shows the two-via directive dying with K. Uncapped it must equal `exact_dp` (different algorithm, same model) and the self-test checks that on 90 cases |
+| `synth_bus.cap_sat_feasible` | the cap as SATISFIABILITY (CP-SAT), for when only the answer matters. Proves the real K51 channel infeasible at two vias a lane in ~1 min where the MILP ran 30+ and was killed. `UNKNOWN` is a budget, never a negative; budgeted in DETERMINISTIC time |
 | `wall_probe.py`, `copper_same.py`, `cmp_copper.py` | track-level wall census, set-compare copper |
 | `make_bench.py`, `rotate_board.py`, `mirror_board.py`, `bend_bench.py`, `channel_bench.py` | build an article from any board, and its poses |
 | `pose_gate.sh` | the chain over FF / BF / FB / BB / R90 / R180 / R270 |
@@ -1173,10 +1174,34 @@ onto B before the destination fan-in, so those crossings are B-against-F
 and free; ours meet the fan-in with half the bus still on F, which is the
 second F-block the law charges 2 vias for.
 
-**Not yet answered**: whether the REAL K51 permutation's clean channel is
-two-via-infeasible (the 539-crossing feasibility MILP had not returned).
-The random-permutation sweep and the routed-path result above both point
-that way, but neither is that measurement.
+**And the real bench channel is infeasible too** -- the measurement the
+random-permutation sweep only pointed at. `synth_bus.cap_sat_feasible`
+asks it as SATISFIABILITY rather than optimisation, which is what scales:
+the MILP ran over thirty minutes on this instance and was killed, while
+CP-SAT proves it in about a minute. On the channel our own fanout induces
+(48 lanes, **580 inverted pairs**, LIS 11, 22 teeth on B):
+
+```
+   cap 2 vias/lane -> INFEASIBLE        cap 3 -> INFEASIBLE
+   cap 4 vias/lane -> UNKNOWN (the deterministic budget, NOT a verdict)
+```
+
+and a second K51 fanout (566 inverted pairs) proves infeasible at two in a
+second. So on this bench, in the channel, **no routing gives every net two
+vias -- nor even three**. The human's board does give every net two, which
+is the proof that its ~240 un-crossings are not a detail of its style but
+the mechanism that makes the directive reachable at all.
+
+**Two solvers, because one of them was wrong.** The first CP-SAT model
+reported the real channel FEASIBLE at cap 2 in a second, contradicting the
+MILP. The cross-check against `cap_floor` on cases whose answer was already
+proven found 11 disagreements and the cause: a hand-spelt XOR with its
+transition literal inverted, so the constraint bounded the NON-transitions
+-- which every alternating assignment satisfies, making every infeasible
+channel read as feasible. The self-test now pins five witnesses, **three of
+them INFEASIBLE**, because that is the only half that can fail: with the
+bug in place and only feasible cases in the loop, the suite printed ALL
+PASS. Both the inverted XOR and a dropped per-lane cap are killed 3x.
 
 ### What the synthetic bench can and cannot do at K41+
 
