@@ -182,7 +182,7 @@ ROWS = [
      "            return x, y",
      (T983,), 'KILLED'),
     ('settle-ignores-the-floor', 'sd',
-     "            if new is None or new > raw:",
+     "            if new is None or (raw is not None and new > raw):",
      "            if new is None:",
      (T983,), 'KILLED'),
     ('settle-may-make-a-seat', 'sd',
