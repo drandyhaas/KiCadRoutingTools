@@ -1,4 +1,4 @@
-"""#983 and its two siblings: an edge seat writes the pose its own grade accepts.
+"""#983, #987 and #988: an edge seat writes the pose its own grade accepts.
 
 Each arm seats a connector, WRITES the pose, re-parses the board and runs the
 real intent grade (`floorplan.grade`), classifying `edge_connector` errors by
@@ -31,7 +31,7 @@ that was never broken.
       B3  a gate margin under the walk's own 0.02 mm tolerance.
       B4  refusals keep the raw pose: a floor it would deepen, a setback it
           would trade for, a body set back further than the cap, a raise.
-  C.  STAGE 1 MEASURES AT THE ROTATION IT WRITES. The part's extents, the
+  C.  (#988) STAGE 1 MEASURES AT THE ROTATION IT WRITES. The part's extents, the
       declared start fraction and the declared window are computed at the
       DECLARED rotation, not the input one (`_stage1_geometry_rot`).
       C1  splitflap_driver J5 declared at 0/90/270 lands inside its centre

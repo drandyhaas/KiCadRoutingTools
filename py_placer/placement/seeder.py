@@ -2290,7 +2290,7 @@ class _AtRotation:
 
 
 def _stage1_geometry_rot(part, claim):
-    """The rotation stage 1 measures an edge connector's geometry at.
+    """#988: the rotation stage 1 measures an edge connector's geometry at.
 
     Stage 1 applies a DECLARED rotation (#893) only after it has converted the
     declared window and clamped by the part's extents -- all of which turn

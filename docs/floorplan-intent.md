@@ -294,6 +294,24 @@ rectangle, yet its east and west ring spans are identical to the bbox on all 13
 of its entries, so abstaining per *board* rather than per *edge* would throw
 away 13 correct measurements.
 
+**The seeder writes a pose the window grades (#983, #988).** Both edge-seat
+ladders (the repair seat and stage 1 of a fresh seed) clamp their rungs to the
+declared window, and a rung clamped to a window END puts the courtyard centre
+exactly on it. The pose is written to 3 decimals, which can land it up to half
+a micron outside, and the grade's tolerance is 1 nm: 70 of 2880 blocker
+positions on #983's own board were seated there. Every rung is now asked the
+grade's along-edge question at the pose it writes, and one that is flagged is
+moved one 0.001 mm grid step along the edge, into the window. The move is kept
+only if the rung still seats and its pad copper is no further inside the
+board-edge floor. A rung the grade accepts is unchanged. Only a window
+narrower than that grid can still be missed, such as a
+`center_on_edge` with `tolerance_mm: 0` whose courtyard centre is off the
+grid. The seat keeps its pose and the run's notes say it was "written outside
+its declared along-edge window". Stage 1 also reads the part's extents, the
+declared start and the window at the rotation it will WRITE. It used to read
+them at the input rotation and then apply a declared `rotation`, which put
+splitflap_driver's J5 10.00 mm off a centre claim at a declared 0°.
+
 ### The overhang band is graded on the drawn body (#961)
 
 `overhang_mm` used to be graded on `rect_outside_amount(courtyard)`, which is
@@ -340,6 +358,24 @@ seeder's `edge_seat_ok` and `_Ctx.oob_exempt` grade the band in the same
 currency as the rule, and `edge_seat_ok` refuses a pose whose pad copper
 leaves the outline for the same reason the rule names it: otherwise the
 search hands the grade a seat it will reject.
+
+The seat's own tests carry a 0.02 mm tolerance, and the grade's does not
+(#987). `edge_seat_ok` accepts a band reading within 0.02 mm of the band, and
+the overhang walk stops within 0.02 mm of its target, so a seat could be
+written up to 0.02 mm outside the band. Examples are a drawn body reaching
+past its courtyard, a band with no `max` whose target is then its `min`, and
+a gate margin under 0.02 mm. Every rung is now read with the grade's own band
+reading at the pose it writes. One that reads outside is moved along the edge
+normal, by whole 0.001 mm grid steps and at most 0.022 mm, until it reads
+inside. The move is taken only for a rung that already seats, and only if the
+moved pose still seats, leaves the pad copper no further inside the floor,
+still faces its edge, and does not trade the band for a setback: an inward
+move that leaves an `edge_receptacle` no overhang is refused. Otherwise the
+pose is kept and the grade reports it as before. What that leaves, measured:
+a band `min` that can only be met by moving pad copper deeper into the floor,
+and a `{min: 0, max: 0}` band on a courtyard-only receptacle at a 0.55 mm gate
+margin. The latter cannot meet both the band and the 0.5 mm receptacle
+setback, whatever the seat does.
 
 The board-edge FLOOR on that copper is a preference of the seat, not a
 conjunct (#975). At each rotation, when the seat the ladder always chose leaves
