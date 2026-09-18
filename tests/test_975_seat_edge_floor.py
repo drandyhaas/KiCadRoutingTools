@@ -705,13 +705,15 @@ class SeatBasis(unittest.TestCase):
 class Bounded(_Boards):
     def test_a_record_names_four_pads_and_counts_the_rest(self):
         # STAGGERED in x, 2 microns a step, so each pad is a different distance
-        # from the west edge while all twenty stay SHORT of the floor. With all
-        # of them at one x -- as this fixture had -- the worst-first ordering is
-        # degenerate, and a mutation sorting the shortfalls by pad number
-        # instead SURVIVED this whole file. A coarser stagger is no good either:
-        # at 0.02mm a step, fifteen of the twenty clear the floor outright.
+        # from the west edge while all twenty stay SHORT of the floor -- and
+        # stepped the way round that puts the WORST pad LAST by number, so
+        # worst-first ordering and pad-number ordering disagree. Both halves are
+        # load-bearing: with every pad at one x a sort by pad number SURVIVED
+        # this whole file, and with the worst pad first by number it survived
+        # again, because the two orders then agree. A coarser stagger is no good
+        # either -- at 0.02mm a step fifteen of the twenty clear the floor.
         pads = '\n    '.join(
-            f'(pad "{i + 1}" smd rect (at {-2.0 + 0.002 * i:.3f} '
+            f'(pad "{i + 1}" smd rect (at {-2.0 - 0.002 * i:.3f} '
             f'{-0.95 + 0.1 * i:.2f}) (size .5 .05) (layers "F.Cu"))'
             for i in range(20))
         path = self.board('many.kicad_pcb', pads=pads)
@@ -729,7 +731,10 @@ class Bounded(_Boards):
                          'the ordering is untested again')
         self.assertEqual(record['shortfall_mm'], amounts[0])
         self.assertEqual(record['min_gap_mm'], record['pads'][0]['gap_mm'])
-        self.assertEqual(record['pads'][0]['pad_ref'], 'J1.1')
+        # Pad 20 sits furthest west, so it is the worst -- and it is LAST by
+        # number, which is what makes this an assertion about the ordering
+        # rather than about the pad list's order of arrival.
+        self.assertEqual(record['pads'][0]['pad_ref'], 'J1.20')
 
 
 class UnreadableProject(_Boards):
@@ -1309,6 +1314,12 @@ class GradeDelta(_Boards):
         self.assertEqual(record['why'], 'grade_delta')
         self.assertIn('unavailable', record['grade_delta'][0])
         self.assertNotEqual(pose, base)
+        # The NOTE may not turn "could not be asked" into a verdict about the
+        # grade. It said "does not pass the intent grade" here once.
+        note = [n for n in res['notes'] if 'J1' in n and 'floor' in n]
+        self.assertTrue(note, f'no floor NOTE in {res["notes"]}')
+        self.assertIn('could not be compared', note[0])
+        self.assertNotIn('does not pass', note[0])
         self.assertEqual(pose[1], base[1])
 
 
@@ -1516,6 +1527,40 @@ class InteriorContours(_Boards):
         # The parser agrees, on the boards those poses would write.
         self.assertEqual(self.written_split(path, {'J1': (25.0, 16.0, 0.0)}), (1, 0))
         self.assertEqual(self.written_split(path, {'J1': (15.0, 10.0, 0.0)}), (0, 1))
+
+    def test_a_move_of_another_part_is_not_masked_by_the_cache(self):
+        """The counts of parts the caller is NOT asking about are cached, and
+        must be re-read when the search has moved one.
+
+        A reviewer's reproducer: R1 sits inside the ring at the first call, so
+        the board reads as a milled edge; the search then moves R1 out, and the
+        ring becomes a hole again. With the base cached once and never re-read,
+        `interior_split` answered the old classification for BOTH poses, the
+        guard stayed silent, and the delta compared two differently-shaped
+        boards -- exactly the failure this method exists to catch. Stage 1
+        shares one grader across every declared connector and moves parts
+        between them, so it is reachable.
+        """
+        # R1 has two pads inside the ring at its file pose, J1 none.
+        path = self.ring_board(25, 16, name='ring_other.kicad_pcb')
+        text = (self.root / 'ring_other.kicad_pcb').read_text(encoding='utf-8')
+        (self.root / 'ring_other.kicad_pcb').write_text(
+            text.replace('(at 25 4 0)\n', '(at 15 10 0)\n'), encoding='utf-8')
+        grader = self.grader(path)
+        self.assertEqual(grader.interior_split(), (True,),
+                         'R1 must start inside the ring, or this asserts nothing')
+        pcb = parse_kicad_pcb(path)
+        state = grader.state
+        state.apply_move('R1', 25.0, 4.0, 0.0)
+        self.assertEqual(grader.interior_split(), (False,),
+                         'the cached count must be re-read after the search '
+                         'moved R1 out of the ring')
+        # And the parser agrees on the two boards those states would write.
+        self.assertEqual(self.written_split(path, {'R1': (15.0, 10.0, 0.0)}),
+                         (0, 1))
+        self.assertEqual(self.written_split(path, {'R1': (25.0, 4.0, 0.0)}),
+                         (1, 0))
+        self.assertIsNotNone(pcb)
 
     def test_one_pad_inside_is_not_enough(self):
         # The parser's threshold is TWO centres; a part with one pad in the

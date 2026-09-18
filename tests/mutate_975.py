@@ -62,10 +62,24 @@ and the expected survivor itself.
 
 That run predates the SECOND rebase, which moved `place_seed.py` under three of
 these rows (#982 re-partitioned its pad-conflict counters). Every anchor still
-matches at this head -- `preflight` passes, 81 of 81 -- and the three rows that
-target that file (`ps-fresh-key-dropped`, `ps-repair-record-not-merged`,
+matches at this head -- `preflight` passes -- and the three rows that target
+that file (`ps-fresh-key-dropped`, `ps-repair-record-not-merged`,
 `ps-written-pose-filter-dropped`) were re-run on the rebased tree: 1 KILLED
 each, 0 broken.
+
+RE-RUN AGAIN after the pre-push review, which added six rows (87 in all):
+**82 KILLED, 5 SURVIVED, 0 broken.** FOUR of those survivors were not expected,
+and every one was a hole in my own work, not in the engine:
+- `ring-base-never-re-read`, `short-list-not-worst-first` and
+  `unavailable-worded-as-a-verdict` guarded three fixes that round had just
+  made and that NOTHING tested. Arms added; re-run here, 1 KILLED each.
+  `short-list-not-worst-first` took two tries: staggering the fixture's pads
+  was not enough while the worst pad was also the first BY NUMBER, since the
+  two orderings then agree.
+- `budget-growth-ignored` is now expected to survive, and says why above.
+With those arms in place the table expects 85 KILLED and 2 SURVIVED of 87. The
+whole battery was then re-run at the final commit, and the result is the line
+below -- not this paragraph, which is only what the rows declare.
 """
 from __future__ import annotations
 
@@ -383,10 +397,17 @@ ROWS = [
      "        return (v.rule, v.ref or '', v.block or '',\n"
      "                tuple(sorted((v.expected or {}).keys()))) if v.ref == 'J1' else ('',)",
      (TS,), 'KILLED'),
+    # Expected to SURVIVE since the pre-push review added the unconditional
+    # legality comparison to `_grade_worse`: `_BUDGET_KEYS` is exactly
+    # {overlap_area, oob_count, oob_amount}, which is exactly what that
+    # comparison reads, so growth in a DECLARED budget is now caught twice and
+    # no test can isolate this one. Kept as a change detector pointing the other
+    # way: if the comparison is ever narrowed, this row starts being KILLED
+    # again and the battery reports that as WRONG.
     ('budget-growth-ignored', 'fp',
      "                    and b > a + legality.EPS):",
      "                    and False):",
-     (TS,), 'KILLED'),
+     (TS,), 'SURVIVED'),
     ('posed-view-keeps-the-pile', 'fp',
      "            if ref in self._exclude:\n                continue\n            x, y, rot = self.pose(ref)",
      "            if False:\n                continue\n            x, y, rot = self.pose(ref)",
