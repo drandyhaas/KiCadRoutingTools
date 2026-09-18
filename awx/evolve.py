@@ -31,7 +31,7 @@ deduplicated by copper; the population's best is monotone.
 
 usage: evolve.py TAG K --seeds=STEM[,STEM...] [--pop=4] [--gens=3]
                  [--jumps=2] [--cross=1] [--jobs=2] [--jump-bans=4]
-                 [--descend="--rounds=2 --worst=6 --probes=2 --coupled=census --widen=0 --grade=inproc"]
+                 [--descend="--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --widen=0 --grade=inproc"]
                  [--board=BENCH] [--dest=REF] [--seed=N]
                  [--descend-env="DST_CLIMB=2"] [--jump-env="DST_CLIMB=2 SRC_CLIMB=4"]
   --seeds   recorded worlds: a chain stem (STEM_fo_kK.kicad_pcb + STEM_kK.kicad_pcb)
@@ -247,7 +247,11 @@ def main():
     CROSS = int(OPTS.get('cross', 1))
     JOBS = int(OPTS.get('jobs', 2))
     JBANS = int(OPTS.get('jump-bans', 4))
-    DESC = OPTS.get('descend', '--rounds=2 --worst=6 --probes=2 --coupled=census --widen=0 --grade=inproc')
+    # min-vias 2 (2026-09-18): at the frontier (K41 67, K51 83) no net carries
+    # three lane vias any more, and a descent with the threshold at three
+    # returns in 7 s having probed nothing. The 2-via one-dive nets are the
+    # hypotheses now (91 -> 85 came from them with the climb menus).
+    DESC = OPTS.get('descend', '--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --widen=0 --grade=inproc')
     # THE MENUS (2026-09-18, the human-ends TEST): the same descent that stalls
     # at 91 on our plan takes the human's ends 87 -> 79, and the human's ends
     # differ from our menus only in the CLIMB classes -- destination climbs

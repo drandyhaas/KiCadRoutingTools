@@ -31,7 +31,8 @@ reference boards):
 | the two-level portfolio (NOW THE DEFAULT) | 34 | 60 | 74 | 98 |
 | **+ `replan.py` on top** | **34** | **58** | **68** | **96** |
 | **+ the population's census descent (2026-09-18, `tmp/records/`)** | | | | **91** |
-| **+ destination climbs in the probe menus (`tmp/records/k51_87_climbs`, 3 rounds; still descending)** | | | | **87** |
+| **+ destination climbs in the probe menus (`tmp/records/k51_85_climbs`, 5 rounds, then a plateau)** | | | | **85** |
+| **+ the population with the climb menus, generation 1 (`tmp/records/k51_83_pop`; K35 `tmp/records/k35_56_pop`: a JUMP world descended; K41 `tmp/ev41/best_k41`)** | | **56** | **67** | **83** |
 | human | 46 | 58 | 70 | **81** |
 | rule (vias + mm/7.5) | 121.5 | 175.3 | 218.9 | 281.1 |
 
@@ -1077,11 +1078,23 @@ jump does not care where it lands. First result: the 91 world descended
 with `DST_CLIMB=2` in its menus goes **91 -> 90 -> 89 -> 87** in three rounds
 (SDQ5's berth, SDQ4's tooth, SDQ4's berth; 923 s; 0 open, 0 DRC at 0.1 with
 no margin) where the same descent without climbs was a plateau, and it
-stopped on its round budget, not on a plateau (`tmp/records/k51_87_climbs`,
-continued in `tmp/rpc91d`). The
+stopped on its round budget; continued, it took one more step (SODT0 at
+both ends) to **85** and then plateaued with three moves the frozen-world
+probe could not judge (`tmp/records/k51_85_climbs`). The
 population runs on K28 / K35 / K41 (`tmp/ev28`, `ev35`, `ev41`, seeded from
 `s13/rp_rp_kK` and `s13/port`) and on K51 (`tmp/ev51c`) were in progress
 when this was written; their ledgers are `tmp/ev<K>/evolve_k<K>.json`.
+Results so far: **K28 34 (no gain; a second 34 by crossover), K41 68 -> 67
+(the 74 seed descended past the recorded 68 and the human's 70), K35 58 -> 56
+(a jump world from the 58 seed, descended in its generation -- below the
+human's 58), K51 generation 1 with the climb menus: 85 -> 83, the 91
+lineage -> 89, a jump from the 91 landed at 92 and descended to 88.**
+Grades are the chain's own (`grade_k`, the 10% margin that filters the
+~8 um grid-quantization grazes); the 83 carries two such grazes (SA8 and
+SDQ1 on B.Cu, 7 and 8 um under 0.1) and the 85 is the last board clean
+with no margin at all. At the frontier (K41 67, K51 83) no net carries
+three lane vias any more, so the population's default descent now probes
+from two (`--min-vias=2`).
 `evolve_movie.py TAG K` films a run from that ledger (see the tools table;
 `tmp/movie/ev51b_k51.mp4` is the two-generation K51 run).
 
