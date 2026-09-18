@@ -540,6 +540,7 @@ class AlongEdgeWindow(_Graded):
         self.assertEqual(nudge(ov({'R9': 6e-5}, {'R9': 1.1e-4})), stepped)
         self.assertEqual(nudge(ov({'R9': 5e-5}, {'R9': 9e-5})), stepped)     # at it: reported
         self.assertEqual(nudge(ov({'R9': 4.95e-5}, {'R9': 5.04e-5})), (x, y))
+        self.assertEqual(nudge(ov({'R9': 4.95e-5}, {'R9': 5e-5})), (x, y))      # AT it
         self.assertEqual(nudge(ov({'R9': 1e-5}, {'R9': 1.9e-5})), (x, y))    # unreported: no growth
         # A pair that does not change leaves the step free, reported or not.
         self.assertEqual(nudge(ov({'R9': 3e-5}, {'R9': 3e-5})), stepped)
@@ -948,6 +949,55 @@ class OverhangBand(_Graded):
                 for a, b in pairs:
                     self.assertEqual(b[1], a[2])        # it moves the settled pose
                     self.assertEqual(b[2], a[1])        # judged against the rung
+
+    def test_b7d_the_compound_end_to_end(self):
+        # The round-4 review's fixture, where the step DOES fire after a
+        # settle: a pad-only blocker crowds every rung but the window's low
+        # end (written 8.004, outside {0.40021, ...}), and R9 sits on the
+        # step's side. Settle 6.0e-5 -> 1.15e-4 mm2, then the step would take
+        # it to 1.38e-4 (2.3x the rung): refused in all three callers.
+        import pose_score
+        from placement import legality
+        crt = '(fp_rect (start -2.3399 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'
+        r9 = ('  (footprint "r" (locked yes) (layer "F.Cu") (at 4.578 9.699 0)\n'
+              '    (property "Reference" "R9")\n'
+              '    (fp_rect (start -1 -0.6) (end 1 0.6) (layer "F.CrtYd"))\n'
+              '    (pad "1" smd rect (at -0.5 0) (size .5 .5) (layers "F.Cu"))\n'
+              '    (pad "2" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu")))\n')
+        b2 = ('  (footprint "b" (locked yes) (layer "F.Cu") (at 3.5 11.0 0)\n'
+              '    (property "Reference" "B2")\n'
+              '    (pad "1" smd rect (at 0 0) (size .2 4.4) (layers "F.Cu")))\n')
+        path = self.write('b7d.kicad_pcb', board((20, 20), j1((BODY, crt)), r9, b2))
+        entry = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.3, 'max': 0.5},
+                 'along_edge_band': {'from': 0.40021, 'to': 0.55}}
+        doc = intent_doc(entry)
+
+        def r9_overlap(pose):
+            out = str(self.root / f'b7d_{abs(hash(pose))}.kicad_pcb')
+            write_placed_output(path, out, [{'reference': 'J1', 'new_x': round(pose[0], 3),
+                                             'new_y': round(pose[1], 3),
+                                             'new_rotation': pose[2]}])
+            parts = {g.ref: g for g in pose_score.make_state(
+                parse_kicad_pcb(out), out, clearance=.25,
+                board_edge_clearance=.55).graded_parts()}
+            a, b = parts['J1'], parts['R9']
+            return legality.pair_overlap_area(a.sides, a.side, a.rect, a.tht_rect,
+                                              b.sides, b.side, b.rect, b.tht_rect)
+
+        def bare():
+            st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=.25,
+                                       board_edge_clearance=.55)
+            self.assertTrue(seeder._seat_edge(st, 'J1', dict(entry), set(), []))
+            p = st.parts['J1']
+            return (p.x, p.y, p.rot)
+        blind = self.repair(path, doc, blind=True)
+        was = r9_overlap(blind)
+        self.assertGreaterEqual(was, seeder._OVERLAP_REPORTED_MM2)
+        for caller, run in (('repair', lambda: self.repair(path, doc)),
+                            ('stage1', lambda: self.pose(self.stage1(path, doc), 'J1')),
+                            ('bare', bare)):
+            with self.subTest(caller=caller):
+                self.assertLess(r9_overlap(run()), 2.0 * was)
 
     def test_b7b_the_pile_is_not_a_neighbour(self):
         # What the seat ignores as meaningless coordinates -- `_seat_edge`'s

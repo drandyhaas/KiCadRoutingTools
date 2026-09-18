@@ -1766,9 +1766,9 @@ def _band_settle(state, part, entry: Dict, edge: str, lo: float, x: float, y: fl
       * the moved pose must seat, and `_no_worse` must accept it: no pad
         further inside the #975 floor (measured, moving a body 0.01 mm out to
         meet a 0.3 minimum put two pads 0.006 mm inside it), no courtyard
-        overlap where there was none (measured: 0.0072 mm2 bought with a
-        locked part), and with a grader no intent-grade error it did not
-        have;
+        overlap the grade would newly report, pair by pair, and none doubled
+        (measured: 0.0072 mm2 bought with a locked part), and with a grader
+        no intent-grade error it did not have;
       * an INWARD move that takes the occupancy reading to <= EPS is refused
         on an entry that carries a setback, because that is exactly when the
         grade starts charging it (measured: a courtyard-only receptacle on a
@@ -1873,8 +1873,9 @@ def _no_worse(new, raw) -> bool:
       * no more pads short of the #975 floor, and the worst no shorter;
       * pair by pair, no courtyard overlap the grade would newly report: a
         pair under `_OVERLAP_REPORTED_MM2` (the resolution `overlap_area` is
-        printed at) may not grow at all, nor cross it; one the grade already
-        reports may deepen, but never to double (measured on #983's lattice:
+        printed at) may not cross it, nor grow past EPS of float slack; one
+        the grade already reports may deepen, but never to double (measured
+        on #983's lattice:
         16 of 2880 seats already overlapping the blocker by 0.044-0.35 mm2
         gained 0.0012-0.0020 mm2, under 3 %) -- refusing that would keep the
         grade ERROR the correction exists to remove. The comparison is

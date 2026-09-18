@@ -236,6 +236,10 @@ ROWS = [
      "            continue\n"
      "        if was > 0.0 and grown >= 2.0 * was:",
      (T983,), 'KILLED'),
+    ('threshold-crossing-boundary-open', 'sd',
+     "        if was < _OVERLAP_REPORTED_MM2 <= grown:",
+     "        if was < _OVERLAP_REPORTED_MM2 < grown:",
+     (T983,), 'KILLED'),
     ('threshold-crossing-within-the-slack', 'sd',
      "        if was < _OVERLAP_REPORTED_MM2 <= grown:\n"
      "            return False",

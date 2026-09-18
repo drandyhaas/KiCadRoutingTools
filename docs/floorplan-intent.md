@@ -317,8 +317,8 @@ settle below are compared with the pose they replace, and every count below
 is checked separately:
 - no more pads short of the board-edge floor, and the worst pad no shorter;
 - pair by pair, no courtyard overlap the grade would newly report. A pair
-  below the 0.00005 mm² that `overlap_area` is printed to may not grow or
-  cross it;
+  below the 0.00005 mm² that `overlap_area` is printed to may not cross it,
+  and may not grow by more than 1e-6 mm² of float slack;
 - when the search has an intent to grade against (`repair_placement`, stage 1
   of a seed), no intent-grade error the raw pose did not have. This also
   refuses an existing overlap pushed past a declared `legality_budget`.

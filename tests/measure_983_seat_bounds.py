@@ -21,9 +21,9 @@ Three mechanisms, each a lattice of seats graded on the written board:
              not print it, and this geometry reproduces its 70/2880 exactly.
        L-A2  the same board through stage 1 of `seed_from_intent`, blocker y
              thinned to 0.1 mm.
-       L-A1r the issue's lattice, blocker x 0.5-1.75, through
-             `repair_placement` -- the PRODUCTION caller, which hands the seat
-             a live grader (L-A1 calls `_seat_edge` bare, as the issue did).
+       L-A1r the issue's whole lattice through `repair_placement` -- the
+             PRODUCTION caller, which hands the seat a live grader (L-A1 calls
+             `_seat_edge` bare, as the issue did).
        L-A3  a `center_on_edge` window: tolerance 0.5 over a blocker
              lattice, and tolerance 0 (a window the 1 um grid cannot always
              meet -- disclosed, not fixed).
@@ -72,10 +72,12 @@ review (never loosened):
     on (a) a bare `_seat_edge` call (L-A1, and the `seat` rows of L-A3/L-B),
     because with no grader #975's floor preference compares no overlap by
     #986's design -- L-A1r is the same lattice through the production
-    caller, and is judged; nor on (b) L-C, whose J5 sits among splitflap's
-    north-edge connectors and overlaps three of them in BOTH arms, so a
-    stage-1 geometry fix that moves it millimetres changes which. Rows not
-    judged are counted, with how many would have failed.
+    caller, and is judged; nor on (b) L-C, whose J5 is seeded ALONE among
+    splitflap's fixed north-edge connectors and overlaps several of them in
+    both arms: #988 moves it millimetres to where it was declared, and the
+    overlap with those FIXED parts grows there (stage 1 has no legality gate
+    by design). Rows not judged are counted, with how many would have failed
+    and by how much, so the exclusion hides a count, never a size.
   a row whose written pose differs from base must have fired a correction
     (on SOME rung of that seat: the count is per seat, not per kept rung).
   a row that raised on either arm fails the run; a row seated only on head
@@ -174,7 +176,7 @@ def cases(quick=False):
             out.append(({'id': f'A2/{bx}/{by}', 'lattice': 'A2', 'ladder': 'stage1',
                          'entry': along, 'size': [28.3, 18.0]},
                         _board((28.3, 18.0), ISSUE_J1, _r9(bx, by))))
-    for bx in xs[:6] if not quick else xs[:2]:
+    for bx in xs if not quick else xs[:2]:
         for by in ys if not quick else ys[::4]:
             out.append(({'id': f'A1r/{bx}/{by}', 'lattice': 'A1r', 'ladder': 'repair',
                          'entry': along, 'size': [28.3, 18.0]},
@@ -539,6 +541,8 @@ def diff(a_path, b_path):
             if scope is not None:
                 unjudged[scope][0] += 1
                 unjudged[scope][1] += bool(bad)
+                if bad:
+                    unjudged[scope].append((rid, sum(pb.values()), sum(ph.values())))
             else:
                 violations.extend((rid, m) for m in bad)
             if b.get('written') != h.get('written'):
@@ -560,8 +564,10 @@ def diff(a_path, b_path):
         print(f'existing courtyard overlap deepened on {len(grew)} pairs, by at most '
               f'{worst:.4f} mm2 and {100 * (ratio - 1):.1f} % (base overlap '
               f'{min(g[1] for g in grew):.4f}-{max(g[1] for g in grew):.4f} mm2)')
-    for scope, (n, would) in unjudged.items():
+    for scope, (n, would, *rows) in unjudged.items():
         print(f'overlap NOT JUDGED on {n} rows ({scope}); {would} of them would fail it')
+        for rid, tb, th in sorted(rows, key=lambda r: r[2] - r[1], reverse=True)[:4]:
+            print(f'    {rid}: overlap with the rest {tb:.4f} -> {th:.4f} mm2')
     for rid, errs in newly[:10]:
         print(f'  seated on head only: {rid}: {errs}')
     for rid, eh in still[:20]:
