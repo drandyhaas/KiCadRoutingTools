@@ -332,9 +332,29 @@ def _resample(P, obs, step):
     return np.array(ts.densify(ts.shortcut([tuple(p) for p in _simplify(P)], obs), step), dtype=float)
 
 
+# _hausdorff used to build the full |A| x |B| distance matrix in one numpy
+# expression. On a probe board with an OPEN net's ends a string diverged to
+# tens of thousands of points, and that one line asked for 26 GB (measured
+# 2026-09-18: a braid.py at 26 GB, all in swap, while `ps rss` read 0.1 GB).
+# The directed distances are computed in row blocks of at most HD_CELLS
+# cells, so the working set is bounded whatever the strings do.
+HD_CELLS = 2_000_000
+# ...and a string that has grown past MAX_STRING_PTS points is a relaxation
+# that has DIVERGED (a taut string between two ends on this board is a few
+# hundred points at STEP); it is frozen where it stands rather than fed
+# back into the next block. Said so on stderr, once per string.
+MAX_STRING_PTS = 5_000       # a lane between two arrays is a few hundred points at STEP; 27,715 was the runaway
+
+
 def _hausdorff(A, B):
-    d = np.hypot(A[:, None, 0] - B[None, :, 0], A[:, None, 1] - B[None, :, 1])
-    return max(d.min(1).max(), d.min(0).max())
+    def directed(X, Y):
+        rows = max(1, HD_CELLS // max(1, len(Y)))
+        best = 0.0
+        for i in range(0, len(X), rows):
+            d = np.hypot(X[i:i + rows, None, 0] - Y[None, :, 0], X[i:i + rows, None, 1] - Y[None, :, 1])
+            best = max(best, float(d.min(1).max()))
+        return best
+    return max(directed(A, B), directed(B, A))
 
 
 BLOCK = 25        # rounds between shortcut-and-densify resamples, as before
@@ -504,7 +524,13 @@ def _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, tol_h, step):
         nxt_active = []
         for k, s in enumerate(active):
             R = _resample(parts[k], obss[s], step)
-            settled = (prev[s] is not None and len(prev[s]) and _hausdorff(R, prev[s]) < tol_h) \
+            diverged = len(R) > MAX_STRING_PTS
+            if diverged:
+                import sys as _sys
+                print(f'  taut: string {s} DIVERGED ({len(R)} points at step {step}) -- frozen where it stands',
+                      file=_sys.stderr, flush=True)
+            settled = diverged \
+                or (prev[s] is not None and len(prev[s]) and _hausdorff(R, prev[s]) < tol_h) \
                 or (used[s] >= rounds) or (moved[B.off[k]:B.off[k + 1]].max() < 1e-6)
             prev[s] = R
             cur[s] = R

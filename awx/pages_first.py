@@ -55,6 +55,7 @@ import select_moves as sm
 import source_realize as sr
 from escape_moves import Move, DIRS
 from sched_first import Frame, VIA_W, CHAN_W
+import plan_feedback as pfb  # the route's verdict (PLAN_LOOP_FEEDBACK), plan_loop.py
 
 Pt = Tuple[float, float]
 
@@ -1568,6 +1569,20 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     names = [n for n in launch if st['dmenu'].get(n)]
     fr = Frame({n: launch[n] for n in names}, dbox)
     sfr = SrcFrame(fr, st['sgrid'].bbox)
+    # PLAN_LOOP_FEEDBACK holds (plan_loop.py): on the FREE first solve -- no
+    # berth fixed and no tooth held by the caller -- every net the feedback
+    # holds keeps the incumbent's berth (a one-move menu, else its class) and
+    # its tooth as it stands; a freed net keeps its whole menu. The solver's
+    # freedom is then exactly the hypothesis the loop is testing, not its own
+    # objective's taste: hinted and priced but UNHELD (K51 loop round 1,
+    # 2026-09-18) the solve moved 33 of 48 ends and routed 125 for 98.
+    # ...in EVERY solve, not only the free first one (the confirm re-plan
+    # passes `fixed`, the damped loop passes its own `hold_s` and FREES every
+    # swimmer -- measured on the K51 loop's src arm, the second solve asked
+    # for seven more teeth the loop had held). The held tooth takes
+    # precedence over a caller's hold list in the source loop below.
+    fb_hold = bool(pfb.HOLD) and trust is None
+    fb_force_s: set = set()      # nets whose source hold names a move (index 1 forced)
 
     # ---- candidates
     D: Dict[str, List[Move]] = {}
@@ -1631,6 +1646,8 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
         ms = prefilter(ms, lambda m, _n=n: price_d(_n, m), d_keep(n),
                        lambda m: (m.direction, m.layer, bool(getattr(m, 'climb', 0))))
         menu_cut[1] += len(ms)
+        if fb_hold:
+            ms = pfb.hold_dst(n, ms)
         if n in fixed:
             hit = [m for m in ms if sr.move_sig(m) == fixed[n]]
             if hit:
@@ -1679,7 +1696,15 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
         c = current_tooth(st, n)
         cur[n] = c
         opts = [c] if c is not None else []
-        if hold_s is not None and n in hold_s:
+        if fb_hold and pfb.held_src(n) and c is not None:
+            # PLAN_LOOP_FEEDBACK: held -- the tooth as it stands, or at the
+            # move the hold names (a crossover): [standing, the move], the
+            # move forced below exactly as a caller's hold_s move is
+            mv_ = pfb.held_src_move(n, st['smenu'].get(n, []))
+            if mv_ is not None and not same_tooth(mv_, c):
+                opts = [c, mv_]
+                fb_force_s.add(n)
+        elif hold_s is not None and n in hold_s:
             # held at the verified plan: its chosen tooth move, or as it stands
             if hold_s[n] is not None and not (PAGES_NOOP and c is not None and same_tooth(hold_s[n], c)):
                 opts = [c, hold_s[n]] if c is not None else [hold_s[n]]
@@ -1699,6 +1724,70 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
             menu_cut[3] += len(more)
             opts += more
         S[n] = opts
+    fb_hint = None
+    if fb_hold:
+        # UNBLOCK a freed net the holds box in: one whose EVERY candidate a
+        # held one-move berth excludes has no move at all (the damped loop's
+        # own INFEASIBLE, 132 of 251 re-solves at K41) -- the fewest holders
+        # of its least-held candidate are freed with it (PAGES_UNBLOCK's rule)
+        held1 = {n for n in names if n in pfb.HOLD and len(D[n]) == 1}
+        freed_d = [n for n in names
+                   if not (pfb.HOLD.get(n) and ('dst' in pfb.HOLD[n] or 'dst_cls' in pfb.HOLD[n]))]
+        cut_: Dict[str, Dict[int, set]] = {}
+        for (a, i, b, j) in _conflicts(D, strict=bool(PAGES_STRICT)):
+            if a in freed_d and b in held1:
+                cut_.setdefault(a, {}).setdefault(i, set()).add(b)
+            if b in freed_d and a in held1:
+                cut_.setdefault(b, {}).setdefault(j, set()).add(a)
+        unheld_: set = set()
+        boxed_ = []
+        for f_ in freed_d:
+            bm = cut_.get(f_, {})
+            if not D[f_] or len(bm) < len(D[f_]):
+                continue
+            i_best = min(bm, key=lambda i: (len(bm[i]), i))
+            unheld_ |= bm[i_best]
+            boxed_.append(f'{f_} <- {sorted(bm[i_best])}')
+        for b in sorted(unheld_):
+            ms = list(st['dmenu'][b])
+            if no_climb:
+                ms = [m for m in ms if not getattr(m, 'climb', 0)]
+            D[b] = prefilter(ms, lambda m, _n=b: price_d(_n, m), d_keep(b),
+                             lambda m: (m.direction, m.layer, bool(getattr(m, 'climb', 0))))
+        log(f'  pages-first: feedback hold: {len(held1)} berth(s) held, '
+            f'{sum(1 for n in names if pfb.held_src(n))} tooth/teeth standing; '
+            f'free at the berth {freed_d}'
+            + (f'; boxed in {boxed_} -> {len(unheld_)} holder(s) freed' if boxed_ else ''))
+    if hint is None and pfb.HINT:
+        # PLAN_LOOP_FEEDBACK: the incumbent ROUTED plan as the hint -- its
+        # berth and tooth per net matched on these menus by signature; a
+        # net the hint leaves without a tooth is hinted at the tooth as it
+        # stands (i0 = 0 in the hint block below). Replaces the seed's hint.
+        hd_, hs_ = {}, {}
+        for n in names:
+            mv_ = pfb.hint_move(n, 'dst', D[n])
+            if mv_ is not None:
+                hd_[n] = mv_
+            if S[n]:
+                mv_ = pfb.hint_move(n, 'src', S[n])
+                if mv_ is not None:
+                    hs_[n] = mv_
+        if hd_:
+            fb_hint = (hd_, hs_)
+            log(f'  pages-first: feedback hint: {len(hd_)} of {len(names)} berth(s) and '
+                f'{len(hs_)} moved tooth/teeth matched on the menus')
+            if pfb.RADIUS and trust is None and not fixed and hold_s is None:
+                # the ABLATION arm: no holds, at most RADIUS ends off the
+                # hinted plan (the walk's trust region, `moved` below)
+                ref_d = {n: sr.move_sig(mv) for n, mv in hd_.items()}
+                ref_s = {}
+                for n in names:
+                    mv_ = hs_.get(n)
+                    if mv_ is not None and cur.get(n) is not None and same_tooth(mv_, cur[n]):
+                        mv_ = None          # the hinted tooth is the one standing here
+                    ref_s[n] = mv_
+                trust = (ref_d, ref_s, int(pfb.RADIUS))
+                log(f'  pages-first: feedback trust region: at most {pfb.RADIUS} end(s) off the hinted plan')
     if menu_k or menu_top:
         log(f'  pages-first: menu pre-filter (class cap {menu_k or "-"}, top {menu_top or "-"}): '
             f'berths {menu_cut[0]} -> {menu_cut[1]}, tooth moves {menu_cut[2]} -> {menu_cut[3]}')
@@ -1750,6 +1839,56 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                     jkey[n] = [int(round(v * 1000)) for v in jkeys_b[n]]
                     jflag[n] = list(joiner_b.get(n, []))
 
+    if pfb.REACH and fb_hold:
+        # PLAN_LOOP_FEEDBACK reach: a free end may land only between the keys
+        # of its two bounding nets (its held neighbours k ranks away in the
+        # incumbent's order) -- locality in ORDER space. The keys are the
+        # braid's own slots, final here; the per-candidate lists are
+        # filtered together. A window that would empty a menu is skipped
+        # and said; index 0 of a source menu (the tooth as it stands) stays.
+        cut_lines = []
+        for n in names:
+            for end in ('dst', 'src'):
+                w = pfb.reach_window(n, end)
+                if w is None:
+                    continue
+                cands = D[n] if end == 'dst' else S[n]
+                if len(cands) <= 1:
+                    continue
+                keys = tkey[n] if end == 'dst' else lkey[n]
+                if len(keys) != len(cands):
+                    continue
+                lo_n, hi_n = w
+                bound = []
+                for b_, side in ((lo_n, 'lo'), (hi_n, 'hi')):
+                    if b_ is None or b_ not in names or corr.get(b_, -1) != corr.get(n, -1) or corr.get(n, -1) == -1:
+                        bound.append(None)
+                        continue
+                    bk = tkey[b_] if end == 'dst' else lkey[b_]
+                    bound.append(min(bk) if side == 'lo' else max(bk))
+                if bound[0] is None and bound[1] is None:
+                    continue
+                keep = [i for i, k in enumerate(keys)
+                        if (bound[0] is None or k >= bound[0]) and (bound[1] is None or k <= bound[1])
+                        or (end == 'src' and i == 0)]
+                if len(keep) == len(cands):
+                    continue
+                if not keep or (end == 'dst' and not keep) or (end == 'src' and keep == [0] and len(cands) > 1 and pfb.banned(n, 'src', cands[0])):
+                    cut_lines.append(f'{n}.{end}: window would empty the menu -- not applied')
+                    continue
+                if end == 'dst':
+                    D[n] = [cands[i] for i in keep]
+                    tkey[n] = [keys[i] for i in keep]
+                    if n in jkey:
+                        jkey[n] = [jkey[n][i] for i in keep]
+                else:
+                    S[n] = [cands[i] for i in keep]
+                    lkey[n] = [keys[i] for i in keep]
+                    if n in jflag:
+                        jflag[n] = [jflag[n][i] for i in keep]
+                cut_lines.append(f'{n}.{end} {len(cands)}->{len(keep)}')
+        if cut_lines:
+            log(f'  pages-first: feedback reach: {"; ".join(cut_lines)}')
     # the destination box's centre and the source box: the reference for a
     # tooth candidate's wrap round its own array (the rate)
     dref = ((dbox[0] + dbox[2]) / 2, (dbox[1] + dbox[3]) / 2)
@@ -1802,11 +1941,22 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     T = {n: m.NewIntVar(min(tkey[n] + jkey.get(n, [])), max(tkey[n] + jkey.get(n, [])), f'T_{n}') for n in names}
     L = {n: m.NewIntVar(min(lkey[n]), max(lkey[n]), f'L_{n}') for n in names}
     cost_terms = []
+    n_fb = [0, 0, 0]     # PLAN_LOOP_FEEDBACK: candidates priced (berths, teeth), standing teeth banned
     for n in names:
         m.AddExactlyOne(xd[n])
         m.AddExactlyOne(xs[n])
+        if pfb.BANS and len(S[n]) > 1 and cur.get(n) is not None and S[n][0] is cur[n] \
+                and pfb.banned(n, 'src', cur[n]):
+            # PLAN_LOOP_FEEDBACK: the tooth AS IT STANDS is of a banned class.
+            # The menu filter cannot remove it (it is not a menu move), so
+            # the solve is told it must move -- index 0 stays the standing
+            # tooth, which the read-out below relies on.
+            m.Add(xs[n][0] == 0)
+            n_fb[2] += 1
         if hold_s is not None and hold_s.get(n) is not None and len(S[n]) == 2:
             m.Add(xs[n][1] == 1)
+        if n in fb_force_s and len(S[n]) == 2:
+            m.Add(xs[n][1] == 1)     # PLAN_LOOP_FEEDBACK: the named tooth
         if n in jkey and n in jflag and len(jflag[n]) == len(S[n]) and any(jflag[n]) \
                 and any(a != b for a, b in zip(tkey[n], jkey[n])):
             # T = the port key, or the joined key when the chosen tooth is a
@@ -1856,6 +2006,11 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
             pr_ = (priced or {}).get(n, {}).get(sr.move_sig(mv))
             if pr_:
                 c += VIA_W * pr_                 # PLAN_PAGES_ISLAND: a berth whose lane crosses a corridor part
+            if pfb.PRICES:
+                fb_ = pfb.price(n, 'dst', mv)
+                if fb_:
+                    c += VIA_W * fb_             # PLAN_LOOP_FEEDBACK: the route's residual for this class
+                    n_fb[0] += 1
             cost_terms.append(int(round(c * SCALE)) * xd[n][j])
         if S[n]:
             for i, mv in enumerate(S[n]):
@@ -1875,6 +2030,11 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                     c = VIA_W * mv.vias + (CHAN_W * sm._length(mv) if mv.legs else 0.0)
                 if PAGES_KIND_VIP and mv.kind == 'via_in_pad':
                     c += VIA_W * PAGES_KIND_VIP
+                if pfb.PRICES:
+                    fb_ = pfb.price(n, 'src', mv)
+                    if fb_:
+                        c += VIA_W * fb_         # PLAN_LOOP_FEEDBACK: the route's residual for this class
+                        n_fb[1] += 1
                 cost_terms.append(int(round(c * SCALE)) * xs[n][i])
         else:
             cost_terms.append(int(round(VIA_W * st['tooth_vias'].get(n, 0) * SCALE)))
@@ -1987,6 +2147,8 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                         for j, sb in enumerate(sig_d[b]):
                             if {sa, sb} == set(pair):
                                 m.AddBoolOr([xd[a][i].Not(), xd[b][j].Not()]); nconf += 1
+    if hint is None and fb_hint is not None:
+        hint = fb_hint          # PLAN_LOOP_FEEDBACK: the incumbent plan, built above
     if hint is not None and hint[0]:
         # PLAN_PAGES_MENU_STAGE: the first stage's plan as the hint -- its
         # berth AND its tooth per net (a net it did not move: the tooth as
@@ -2109,6 +2271,8 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
         solver.parameters.num_workers = PAGES_WORKERS
         solver.parameters.interleave_search = True
         solver.parameters.max_deterministic_time = PAGES_DET
+    if rseed is None and pfb.SEED:
+        rseed = pfb.SEED                                # PLAN_LOOP_FEEDBACK seed: a jump
     if rseed is not None:
         solver.parameters.random_seed = int(rseed)      # PLAN_PAGES_SEEDS: another feasible point
     status = solver.Solve(m)
@@ -2235,6 +2399,9 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                   + f', {PAGES_CANON_WORKERS} worker(s), lin {PAGES_CANON_LP}, ortools {_ortools.__version__})'
                   if PAGES_CANON else
                   f' (det {PAGES_DET:g}, {PAGES_WORKERS} workers, ortools {_ortools.__version__})'))
+    if pfb.PRICES or n_fb[2]:
+        rep.append(f'  pages-first: feedback prices on {n_fb[0]} berth + {n_fb[1]} tooth candidate(s)'
+                   + (f'; {n_fb[2]} standing tooth/teeth banned (must move)' if n_fb[2] else ''))
     if strip_load:
         rep.append('  pages-first: strip loads ' + ', '.join(
             f'{sd} {"B" if p else "F"} {sum(solver.Value(v) for v in lits)}/{cap}'

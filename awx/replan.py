@@ -90,6 +90,22 @@ LENGTH_TIE = OPTS.get('length', '0') == '1'
 # in the README came from a strip run; meanwhile all 22 replan runs on
 # disk used the refan default. `--apply=refan` remains the opt-out.
 APPLY_STRIP = OPTS.get('apply', 'strip') == 'strip'
+# --coupled=chord (2026-09-18, the plan-level loop's finding): the probe's
+# re-lay set also takes every frozen lane whose copper CROSSES the chord
+# from the moved end to the net's other end -- the lanes the new lane must
+# thread through, and the ones that pay when it is squeezed past them
+# (measured on a whole-board re-braid: three freed nets improved by 8 and
+# ten lanes whose ends never moved paid 23 in rips and last calls).
+# 'census' = the recorded behaviour (the end's own conflicts + the braid's
+# blocker census).
+COUPLED = OPTS.get('coupled', 'census')
+# --widen=N: a local braid that REFUSES a lane is answered with ROOM, not
+# with the full re-braid: the frozen lanes crossing the refused lane's own
+# chord are stripped and re-laid with it, up to N times. The 0918 wide run
+# ended at round 2 with '3 unjudged moves would need the full braid'; the
+# full braid then re-realizes all 47 lanes and the gain drowns in the
+# realization spread (20 vias between two braids of the same ends).
+WIDEN = int(OPTS.get('widen', 0))
 
 
 def _dban(m):
@@ -162,8 +178,70 @@ def source_view(fo, out, names, byname, dref, pad_mm=2.0):
     fp.copy_pro(fo, out)
 
 
+# --grade=inproc (2026-09-18): the three checks of grade_k run IN THIS
+# PROCESS instead of as four python launches. Measured on a K51 probe: the
+# subprocess grade is ~3 s of a ~9 s probe, and the checks themselves are
+# 1.5 s of that. Same checkers, same clearance, same regexes on the same
+# printed verdicts -- only the process boundary is gone. 'sub' (default) is
+# the recorded path.
+GRADE_MODE = OPTS.get('grade', 'sub')
+
+
+def _grade_inproc(board, nets):
+    import contextlib
+    import io
+    import runpy
+    sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+    import check_drc as _cd
+    buf = io.StringIO()
+    argv = sys.argv
+    try:
+        sys.argv = ['check_connected.py', board]
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            try:
+                runpy.run_path(os.path.join(HERE, '..', 'py_router', 'check_connected.py'), run_name='__main__')
+            except SystemExit:
+                pass
+    finally:
+        sys.argv = argv
+    cc = buf.getvalue()
+    if not re.search(r'ALL NETS FULLY CONNECTED|FOUND \d+ ISSUE|\d+ net\(s\) with issues|unconnected', cc, re.I):
+        return None, 'BROKEN: check_connected did not report'
+    opens = []
+    for line in cc.splitlines():
+        m = re.search(r'(\S+) \(net \d+\):', line)
+        if m and m.group(1).split('/')[-1] in nets:
+            opens.append(m.group(1).split('/')[-1])
+        m2 = re.match(r'\s+(\S+) \(\d+ pads?\)\s*$', line)
+        if m2 and m2.group(1).split('/')[-1] in nets:
+            opens.append(m2.group(1).split('/')[-1])
+    clr = _rules.active().clearance
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        try:
+            _cd.run_drc(board, clearance=clr, clearance_margin=0.1, max_print=0)
+        except SystemExit:
+            pass
+    dd = buf.getvalue()
+    m = re.search(r'FOUND (\d+) DRC VIOLATIONS', dd)
+    if m is None and 'NO DRC VIOLATIONS' not in dd:
+        return None, 'BROKEN: check_drc reported no verdict'
+    ndrc = int(m.group(1)) if m else 0
+    pcb_ = parse_kicad_pcb(board)
+    ids = {i for i, n in pcb_.nets.items() if n.name.split('/')[-1] in set(nets)}
+    nvias = sum(1 for v in pcb_.vias if v.net_id in ids)
+    line = (f'GRADE {os.path.basename(board)} K={len(nets)} clr={clr} open={len(opens)} drc={ndrc} vias={nvias}'
+            + (f'  open: {",".join(sorted(opens))}' if opens else ''))
+    return [sorted(opens), ndrc, nvias, None], line
+
+
 def grade(board, K, base):
     """(opens, drc, vias) of the run's nets on `board`, by grade_k."""
+    if GRADE_MODE == 'inproc':
+        g, line = _grade_inproc(board, coherent_nets(K, base))
+        if g is None:
+            return [None, None, None, None], line
+        return g, line
     r = subprocess.run([sys.executable, os.path.join(HERE, 'grade_k.py'), board,
                         ','.join(coherent_nets(K, base))], capture_output=True, text=True)
     line = next((l for l in (r.stdout + r.stderr).splitlines() if l.startswith('GRADE')), '')
@@ -279,6 +357,54 @@ def strip_to_fanout_copper(txt, nm, nid, name, pcb_f, box):
         return not any(_near(a, (v.x, v.y)) for v in vias)
     txt = walk_blocks(txt, 'segment', rm_seg)
     return walk_blocks(txt, 'via', rm_via)
+
+
+def salvage_missing_ends(F1, R, names, byname, sbox, dbox, log=print):
+    """A derived fanout board with an END MISSING (2026-09-18): a net the
+    braid ripped and re-laid FROM THE PAD -- its stub abandoned -- has
+    routed copper that matches no fanout board's, so the strip kept
+    nothing and the net vanished from F1 (SDQ2 on the cp lineage's round
+    2, the 91-via board; `endpoints` then asserts 'no free stub end' and
+    the round dies). Its de facto stub is the lane's pad-exit copper: the
+    routed segments and vias of that net inside the array window are
+    appended to F1 for every end that has none. Returns the nets touched."""
+    pcb1 = parse_kicad_pcb(F1)
+    fixed = []
+    txt = None
+    rtxt = None
+    for nm in names:
+        nid, net = byname[nm]
+        segs = [s for s in pcb1.segments if s.net_id == nid]
+        for end, box in (('src', sbox), ('dst', dbox)):
+            if any(in_box((s.start_x, s.start_y), box) or in_box((s.end_x, s.end_y), box) for s in segs):
+                continue
+            if rtxt is None:
+                rtxt = strip_eco(open(R, encoding='utf-8').read())
+                txt = open(F1, encoding='utf-8').read()
+            keep = []
+
+            def _grab(block, _keep=keep, _box=box, _nid=nid, _name=net.name):
+                if not block_net(block, _nid, _name):
+                    return False
+                tok = 'segment' if block.startswith('(segment') else 'via'
+                a, b, _L = block_geom(block, tok)
+                if tok == 'segment':
+                    if in_box(a, _box) and in_box(b, _box):
+                        _keep.append(block)
+                elif in_box(a, _box):
+                    _keep.append(block)
+                return False
+            walk_blocks(rtxt, 'segment', _grab)
+            walk_blocks(rtxt, 'via', _grab)
+            if keep:
+                i = txt.rstrip().rfind(')')
+                txt = txt[:i] + ''.join('  ' + b + '\n' for b in keep) + txt[i:]
+                fixed.append(f'{nm}.{end} ({len(keep)} block(s) of pad-exit copper)')
+    if txt is not None and fixed:
+        with open(F1, 'w', encoding='utf-8') as f:
+            f.write(txt)
+        log(f'  derived board: ends salvaged from the routed board -- {fixed}')
+    return fixed
 
 
 def strip_window(txt, nets, byname, box):
@@ -830,6 +956,7 @@ def braid_run(board, out_stem, nets, dref, log_to, probe=False):
     if probe:
         env['BRAID_ATTEMPTS'] = PROBE_ATTEMPTS
         env['BRAID_BUDGET_X'] = PROBE_BUDGET_X
+        env['BRAID_SMOOTH'] = os.environ.get('PROBE_SMOOTH', '0')   # the smoother never moves a via
     r = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'braid.py'),
                         '--board', board, '--dest', dref, '--nets', nets, '--out', out_stem],
                        capture_output=True, text=True, env=env)
@@ -845,6 +972,19 @@ def braid_run(board, out_stem, nets, dref, log_to, probe=False):
 # SA1 lost its new berth to a later probe's strip and was routed to the
 # ball, which the derived fanout board then reported as ENDS MISS)
 FAN_PCB = None
+
+
+def chord_walls(lanes, me, a, b, exclude=()):
+    """The nets whose lane copper (any layer) crosses or grazes the chord
+    a -> b: what a lane laid between those two ends must thread through."""
+    out = set()
+    for nm, (segs, vias) in lanes.items():
+        if nm == me or nm in exclude:
+            continue
+        if any(_seg_seg_d(a, b, (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)) < TRACK_CLEAR for s_ in segs) \
+                or any(_pt_seg_d((v.x, v.y), a, b) < VIA_CLEAR for v in vias):
+            out.add(nm)
+    return out
 
 
 def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay=None):
@@ -865,6 +1005,11 @@ def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay
     C |= set(N)           # a re-fanned neighbour's lane is re-laid too
     C |= set((getattr(B, 'blockers', {}) or {}).get(nm, []))   # the braid's census: what walled it
     C |= set(extra_relay or [])
+    if COUPLED == 'chord':
+        a_ = src_move.exit_pt if src_move is not None else tuple((B.ends[nm]['src'] or {}).get('tooth') or ())
+        b_ = dst_move.exit_pt if dst_move is not None else tuple((B.ends[nm]['dst'] or {}).get('tooth') or ())
+        if len(a_) == 2 and len(b_) == 2:
+            C |= chord_walls(B.lanes, nm, a_, b_)
     C.discard(nm)
     whole = (-1e9, -1e9, 1e9, 1e9)
     for c in sorted(C):
@@ -961,6 +1106,39 @@ def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay
         return res
     rj = tag + '_rb_refusals.json'
     rf = json.load(open(rj)) if os.path.exists(rj) else {}
+    # --widen: a refusal answered with ROOM. The refusal record names the
+    # refused lane's own ends; the frozen lanes crossing that chord are
+    # stripped and re-laid with it, and the local braid runs again.
+    widened = []
+    for w_ in range(WIDEN):
+        if not rf:
+            break
+        walls = set()
+        for r_, info in rf.items():
+            t_, b_ = info.get('tooth'), info.get('berth')
+            if t_ and b_:
+                walls |= chord_walls(B.lanes, r_, tuple(t_), tuple(b_), exclude=set([nm]) | C)
+        walls -= set(rf)
+        if not walls:
+            break
+        txt3 = open(b2, encoding='utf-8').read()
+        for c in sorted(walls):
+            cid, cnet = byname[c]
+            txt3 = strip_to_fanout_copper(txt3, c, cid, cnet.name, pcb_for(c), whole)
+        write_board(txt3, b2, cur)
+        C |= walls
+        res['relaid'] = sorted(C)
+        widened.append(f'{sorted(rf)} <- {sorted(walls)}')
+        okb, tb2 = braid_run(b2, tag + '_rb', ','.join([nm] + sorted(C)), st['dref'], tag + '_rb.log',
+                             probe=True)
+        res['braid_s'] += tb2
+        if not okb:
+            res['fail'] = 'braid: no board (widened)'
+            res['seconds'] = time.time() - t0
+            return res
+        rf = json.load(open(rj)) if os.path.exists(rj) else {}
+    if widened:
+        res['widened'] = widened
     if rf:
         # a refusal with everything else frozen -- the moved net's or a
         # re-laid neighbour's -- is NOT a verdict on the move: the full
@@ -1116,614 +1294,634 @@ def main():
     import gc
     import resource
     for rnd in range(1, ROUNDS + 1):
-        t_r = time.time()
-        gc.collect()
-        log(f'\n=== round {rnd}: verdict off {os.path.basename(R)}  '
-            f'(peak rss {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576:.0f} MB)')
-        B = Board(F, names, dref, banned=frozenset(bans_s), R=R)
-        if APPLY_STRIP:
-            global FAN_PCB
-            _F_round = F
-            FAN_PCB = lambda c, _F=_F_round: _pcb_of(fan_src.get(c, _F))
-        V = verdict(R[:-len('.kicad_pcb')])
-        if prevV is not None:
-            # an incremental board's log names only the re-laid nets: the
-            # others keep the class the last full verdict gave them
+        # A ROUND THAT DIES MUST NOT LOSE THE BOARDS KEPT SO FAR (2026-09-18):
+        # the descent of an open-net seed closed both opens and reached 95 in
+        # round 1, then round 2 crashed in Board() on the derived fanout board
+        # (SDQ2 'no free stub end') and the run wrote no final -- the world was
+        # lost to evolve. The exception is logged, the run finishes with the
+        # last kept board, and the derived-board defect stays a TODO.
+        try:
+            t_r = time.time()
+            gc.collect()
+            log(f'\n=== round {rnd}: verdict off {os.path.basename(R)}  '
+                f'(peak rss {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576:.0f} MB)')
+            B = Board(F, names, dref, banned=frozenset(bans_s), R=R)
+            if APPLY_STRIP:
+                global FAN_PCB
+                _F_round = F
+                FAN_PCB = lambda c, _F=_F_round: _pcb_of(fan_src.get(c, _F))
+            V = verdict(R[:-len('.kicad_pcb')])
+            if prevV is not None:
+                # an incremental board's log names only the re-laid nets: the
+                # others keep the class the last full verdict gave them
+                for nm in names:
+                    if 'cls' not in V.get(nm, {}) and 'cls' in prevV.get(nm, {}):
+                        V.setdefault(nm, {})['cls'] = prevV[nm]['cls']
+            pcbR = parse_kicad_pcb(R)
+            real = {nm: sum(1 for v in pcbR.vias if v.net_id == B.byname[nm][0]) for nm in names}
             for nm in names:
-                if 'cls' not in V.get(nm, {}) and 'cls' in prevV.get(nm, {}):
-                    V.setdefault(nm, {})['cls'] = prevV[nm]['cls']
-        pcbR = parse_kicad_pcb(R)
-        real = {nm: sum(1 for v in pcbR.vias if v.net_id == B.byname[nm][0]) for nm in names}
-        for nm in names:
-            # the LANE's vias, off the board: the ends' vias taken off
-            ev = sum((B.ends[nm][e] or {}).get('vias', 0) for e in ('src', 'dst'))
-            V.setdefault(nm, {})['lane_vias'] = max(0, real[nm] - ev)
-        prevV = V
-        pred, bp = B.model(named)
-        # THE LEARNED PRICE: real - predicted, per net, on the plan routed
-        resid = {}
-        for nm in names:
-            if nm in pred and not V.get(nm, {}).get('refused'):
-                resid[nm] = real[nm] - pred[nm]
-        pe.RESIDUAL = resid
-        B.swimmers = {nm for nm in names if V.get(nm, {}).get('cls') == 'swim' and not V[nm].get('refused')}
-        nsw_plan = sum(1 for nm in names if nm in bp and bp[nm]['page'] is None)
-        nsw_braid = sum(1 for nm in names if V.get(nm, {}).get('cls') == 'swim')
-        log(f'  plan model on this fanout: {sum(pred.values())} vias over {len(pred)} nets, '
-            f'{nsw_plan} swimmers; the braid: {sum(real.values())} vias, {nsw_braid} swimmers, '
-            f'refused {[n for n in names if V.get(n, {}).get("refused")]}; '
-            # :+d CRASHED HERE. resid is real - pred, and the plan model's
-            # prediction is a FLOAT, so the residual always was one -- this
-            # line has never changed and raises ValueError on every round 1,
-            # which is why no replan round could run at all.
-            f'residual real-pred: total {sum(resid.values()):+.1f}, '
-            f'|.| {sum(abs(x) for x in resid.values()):.1f} over {len(resid)} nets')
-        worst = [nm for nm in names if V.get(nm, {}).get('refused')]
-        sw = sorted((nm for nm in names if not V.get(nm, {}).get('refused')
-                     and V[nm].get('lane_vias', 0) >= MIN_VIAS),
-                    key=lambda n: (-V[n]['lane_vias'], V[n].get('cls') != 'swim'))
-        worst += sw[:WORST]
-        bad = set(worst)
-        log(f'  worst: ' + '; '.join(fmt_v(nm, V[nm], real[nm]) for nm in worst))
-        # THE BLOCKER CENSUS: for each bad net, the lanes the braid found
-        # in its way (this round's log, and every earlier round's); a good
-        # net in the way of GATE_MIN bad ones is a GATEKEEPER -- not frozen:
-        # its lane is re-laid in their probes and it is re-planned itself
-        for nm in names:
-            v = V.get(nm, {})
-            bl = list(v.get('mincut', [])) + [n for n, c in sorted(v.get('frontier', []), key=lambda t: -t[1])]
-            seen_b = []
-            for b_ in bl:
-                if b_ != nm and b_ in B.byname and b_ not in seen_b:
-                    seen_b.append(b_)
-            for b_ in v.get('census_prev', []):
-                if b_ not in seen_b and b_ != nm and b_ in B.byname:
-                    seen_b.append(b_)
-            if seen_b:
-                census_hist.setdefault(nm, [])
-                census_hist[nm] = seen_b[:CENSUS] + [b_ for b_ in census_hist[nm] if b_ not in seen_b][:CENSUS]
-        blockers = {nm: [b_ for b_ in census_hist.get(nm, []) if b_ not in bad][:CENSUS] for nm in worst}
-        gate_score = Counter(b_ for nm in worst for b_ in blockers[nm])
-        gates = [g for g, c in gate_score.most_common() if c >= GATE_MIN][:GATES]
-        log('  census (the braid\'s own): ' + '; '.join(f'{nm} <- {blockers[nm]}' for nm in worst if blockers[nm]))
-        log(f'  gatekeepers (good nets in the way of >= {GATE_MIN} bad ones): '
-            + (', '.join(f'{g} ({gate_score[g]})' for g in gates) or 'none'))
-        B.blockers = blockers
-        buses = B.buses()
-        cache = {}
-        stand = {}          # net -> (src_move, dst_move, probe)
-        unjudged = {}       # net -> (end, move, probe): laid in class, refused with everything frozen
-        R_cur = R           # the routed board the probes run on (advances in incremental mode)
-        g_round0 = list(best_g)
-        for nm in worst:
-            v = V[nm]
-            ends_try = []
-            if v.get('refused'):
-                w = v.get('walled_at')
-                ends_try = ['src'] if w == 'tooth' else ['dst'] if w == 'berth' else ['dst', 'src']
-            else:
-                ends_try = ['dst', 'src']
-            if WALK_ONLY:
-                ends_try = ['dst']
-            ref_g = best_g
-            cands = []
-            if len(stand) >= WORST + 2:
-                break
-            screened = {}
-            for end in ends_try:
-                if end == 'dst':
-                    ranked, n_menu = rank_dest(B, nm, bans_d[nm], buses, cache, SCREEN_MAX)
+                # the LANE's vias, off the board: the ends' vias taken off
+                ev = sum((B.ends[nm][e] or {}).get('vias', 0) for e in ('src', 'dst'))
+                V.setdefault(nm, {})['lane_vias'] = max(0, real[nm] - ev)
+            prevV = V
+            pred, bp = B.model(named)
+            # THE LEARNED PRICE: real - predicted, per net, on the plan routed
+            resid = {}
+            for nm in names:
+                if nm in pred and not V.get(nm, {}).get('refused'):
+                    resid[nm] = real[nm] - pred[nm]
+            pe.RESIDUAL = resid
+            B.swimmers = {nm for nm in names if V.get(nm, {}).get('cls') == 'swim' and not V[nm].get('refused')}
+            nsw_plan = sum(1 for nm in names if nm in bp and bp[nm]['page'] is None)
+            nsw_braid = sum(1 for nm in names if V.get(nm, {}).get('cls') == 'swim')
+            log(f'  plan model on this fanout: {sum(pred.values())} vias over {len(pred)} nets, '
+                f'{nsw_plan} swimmers; the braid: {sum(real.values())} vias, {nsw_braid} swimmers, '
+                f'refused {[n for n in names if V.get(n, {}).get("refused")]}; '
+                # :+d CRASHED HERE. resid is real - pred, and the plan model's
+                # prediction is a FLOAT, so the residual always was one -- this
+                # line has never changed and raises ValueError on every round 1,
+                # which is why no replan round could run at all.
+                f'residual real-pred: total {sum(resid.values()):+.1f}, '
+                f'|.| {sum(abs(x) for x in resid.values()):.1f} over {len(resid)} nets')
+            worst = [nm for nm in names if V.get(nm, {}).get('refused')]
+            sw = sorted((nm for nm in names if not V.get(nm, {}).get('refused')
+                         and V[nm].get('lane_vias', 0) >= MIN_VIAS),
+                        key=lambda n: (-V[n]['lane_vias'], V[n].get('cls') != 'swim'))
+            worst += sw[:WORST]
+            bad = set(worst)
+            log(f'  worst: ' + '; '.join(fmt_v(nm, V[nm], real[nm]) for nm in worst))
+            # THE BLOCKER CENSUS: for each bad net, the lanes the braid found
+            # in its way (this round's log, and every earlier round's); a good
+            # net in the way of GATE_MIN bad ones is a GATEKEEPER -- not frozen:
+            # its lane is re-laid in their probes and it is re-planned itself
+            for nm in names:
+                v = V.get(nm, {})
+                bl = list(v.get('mincut', [])) + [n for n, c in sorted(v.get('frontier', []), key=lambda t: -t[1])]
+                seen_b = []
+                for b_ in bl:
+                    if b_ != nm and b_ in B.byname and b_ not in seen_b:
+                        seen_b.append(b_)
+                for b_ in v.get('census_prev', []):
+                    if b_ not in seen_b and b_ != nm and b_ in B.byname:
+                        seen_b.append(b_)
+                if seen_b:
+                    census_hist.setdefault(nm, [])
+                    census_hist[nm] = seen_b[:CENSUS] + [b_ for b_ in census_hist[nm] if b_ not in seen_b][:CENSUS]
+            blockers = {nm: [b_ for b_ in census_hist.get(nm, []) if b_ not in bad][:CENSUS] for nm in worst}
+            gate_score = Counter(b_ for nm in worst for b_ in blockers[nm])
+            gates = [g for g, c in gate_score.most_common() if c >= GATE_MIN][:GATES]
+            log('  census (the braid\'s own): ' + '; '.join(f'{nm} <- {blockers[nm]}' for nm in worst if blockers[nm]))
+            log(f'  gatekeepers (good nets in the way of >= {GATE_MIN} bad ones): '
+                + (', '.join(f'{g} ({gate_score[g]})' for g in gates) or 'none'))
+            B.blockers = blockers
+            buses = B.buses()
+            cache = {}
+            stand = {}          # net -> (src_move, dst_move, probe)
+            unjudged = {}       # net -> (end, move, probe): laid in class, refused with everything frozen
+            R_cur = R           # the routed board the probes run on (advances in incremental mode)
+            g_round0 = list(best_g)
+            for nm in worst:
+                v = V[nm]
+                ends_try = []
+                if v.get('refused'):
+                    w = v.get('walled_at')
+                    ends_try = ['src'] if w == 'tooth' else ['dst'] if w == 'berth' else ['dst', 'src']
                 else:
-                    ranked, n_menu = rank_src(B, nm, buses, cache, SCREEN_MAX)
-                ranked = screen(B, nm, ranked, end, PROBES + 1, log)
-                screened[end] = ranked
-                log(f'  {nm} {end}: {n_menu} move(s) in the menu, current '
-                    f'{sr.fmt(B.ends[nm][end])}; candidates: '
-                    + ('; '.join(f'{fmt_move(m)} judged {c:.1f}' for c, m in ranked[:PROBES]) or 'none'))
-                for c, m in ranked[:PROBES]:
-                    cands.append((end, m, c))
-            if 'src' in ends_try and 'dst' in ends_try and JOINT:
-                # JOINT candidates: a tooth AND a berth moved together -- a
-                # net whose launch and target ranks are both wrong looks
-                # worse after either end alone (SA12's win took two rounds,
-                # tooth south then berth east, because the first happened to
-                # pay by itself); ranked by the judged cost with both applied
-                rs_ = screened.get('src', [])
-                rd_ = screened.get('dst', [])
-                pairs = []
-                for cs, ms in rs_:
-                    for cd, md in rd_:
-                        if (sr.move_sig(ms), md.direction, md.layer) in bans_pair[nm]:
-                            continue
-                        launch = dict(B.st['launch'])
-                        launch[nm] = ms.exit_pt
-                        tl = dict(B.st['tooth0'])
-                        tl[nm] = ms.layer
-                        tv = dict(B.st['tooth_vias'])
-                        tv[nm] = ms.vias
-                        ch = dict(B.choice)
-                        ch[nm] = md
-                        pairs.append((B.cost(ch, launch, tl, tv, buses, cache), ms, md))
-                pairs.sort(key=lambda t: t[0])
-                if pairs:
-                    log(f'  {nm} both: {len(pairs)} pair(s); best: '
-                        + '; '.join(f'{fmt_move(ms)} + {fmt_move(md)} judged {c:.1f}' for c, ms, md in pairs[:PROBES]))
-                for c, ms, md in pairs[:PROBES]:
-                    cands.append(('both', (ms, md), c))
-            results = []
-            for end, m, c in cands:
-                tried[nm] += 1
-                ptag = f'{stem}_r{rnd}_{nm}_{end}{tried[nm]}'
-                if end == 'both':
-                    pr = probe(B, R_cur, nm, m[0], m[1], ptag, K, base, nets_csv, log)
-                else:
-                    pr = probe(B, R_cur, nm, m if end == 'src' else None, m if end == 'dst' else None,
-                               ptag, K, base, nets_csv, log)
-                if 'fail' in pr:
-                    log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}; '
-                        f'{pr.get("src_verdict") or pr.get("dst_verdict") or ""}) {pr["seconds"]:.0f} s')
+                    ends_try = ['dst', 'src']
+                if WALK_ONLY:
+                    ends_try = ['dst']
+                ref_g = best_g
+                cands = []
+                if len(stand) >= WORST + 2:
+                    break
+                screened = {}
+                for end in ends_try:
                     if end == 'dst':
-                        bans_d[nm].add(_dban(m))
-                    elif end == 'src':
-                        bans_s.add((nm, sr.move_sig(m)))
+                        ranked, n_menu = rank_dest(B, nm, bans_d[nm], buses, cache, SCREEN_MAX)
                     else:
-                        bans_pair[nm].add((sr.move_sig(m[0]), m[1].direction, m[1].layer))
+                        ranked, n_menu = rank_src(B, nm, buses, cache, SCREEN_MAX)
+                    ranked = screen(B, nm, ranked, end, PROBES + 1, log)
+                    screened[end] = ranked
+                    log(f'  {nm} {end}: {n_menu} move(s) in the menu, current '
+                        f'{sr.fmt(B.ends[nm][end])}; candidates: '
+                        + ('; '.join(f'{fmt_move(m)} judged {c:.1f}' for c, m in ranked[:PROBES]) or 'none'))
+                    for c, m in ranked[:PROBES]:
+                        cands.append((end, m, c))
+                if 'src' in ends_try and 'dst' in ends_try and JOINT:
+                    # JOINT candidates: a tooth AND a berth moved together -- a
+                    # net whose launch and target ranks are both wrong looks
+                    # worse after either end alone (SA12's win took two rounds,
+                    # tooth south then berth east, because the first happened to
+                    # pay by itself); ranked by the judged cost with both applied
+                    rs_ = screened.get('src', [])
+                    rd_ = screened.get('dst', [])
+                    pairs = []
+                    for cs, ms in rs_:
+                        for cd, md in rd_:
+                            if (sr.move_sig(ms), md.direction, md.layer) in bans_pair[nm]:
+                                continue
+                            launch = dict(B.st['launch'])
+                            launch[nm] = ms.exit_pt
+                            tl = dict(B.st['tooth0'])
+                            tl[nm] = ms.layer
+                            tv = dict(B.st['tooth_vias'])
+                            tv[nm] = ms.vias
+                            ch = dict(B.choice)
+                            ch[nm] = md
+                            pairs.append((B.cost(ch, launch, tl, tv, buses, cache), ms, md))
+                    pairs.sort(key=lambda t: t[0])
+                    if pairs:
+                        log(f'  {nm} both: {len(pairs)} pair(s); best: '
+                            + '; '.join(f'{fmt_move(ms)} + {fmt_move(md)} judged {c:.1f}' for c, ms, md in pairs[:PROBES]))
+                    for c, ms, md in pairs[:PROBES]:
+                        cands.append(('both', (ms, md), c))
+                results = []
+                for end, m, c in cands:
+                    tried[nm] += 1
+                    ptag = f'{stem}_r{rnd}_{nm}_{end}{tried[nm]}'
+                    if end == 'both':
+                        pr = probe(B, R_cur, nm, m[0], m[1], ptag, K, base, nets_csv, log)
+                    else:
+                        pr = probe(B, R_cur, nm, m if end == 'src' else None, m if end == 'dst' else None,
+                                   ptag, K, base, nets_csv, log)
+                    if 'fail' in pr:
+                        log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}; '
+                            f'{pr.get("src_verdict") or pr.get("dst_verdict") or ""}) {pr["seconds"]:.0f} s')
+                        if end == 'dst':
+                            bans_d[nm].add(_dban(m))
+                        elif end == 'src':
+                            bans_s.add((nm, sr.move_sig(m)))
+                        else:
+                            bans_pair[nm].add((sr.move_sig(m[0]), m[1].direction, m[1].layer))
+                        continue
+                    g = pr['grade']
+                    if end == 'both':
+                        ms, md = m
+                        faith = bool(pr.get('src_exact')) and bool(pr.get('dst_exact'))
+                        in_cls = ((pr['src_got']['direction'], pr['src_got']['layer']) == (ms.direction, ms.layer)
+                                  and (pr['dst_got']['direction'], pr['dst_got']['layer']) == (md.direction, md.layer))
+                        verdict_s = f'{pr.get("src_verdict")} / {pr.get("dst_verdict")}'
+                        laid_cls = None
+                    else:
+                        faith = ((pr.get('src_exact', True) if end == 'src' else True)
+                                 and (pr.get('dst_exact', True) if end == 'dst' else True))
+                        laid_cls = ((pr['src_got']['direction'], pr['src_got']['layer']) if end == 'src'
+                                    else (pr['dst_got']['direction'], pr['dst_got']['layer']))
+                        in_cls = laid_cls == (m.direction, m.layer)
+                        verdict_s = (pr.get('src_verdict') if end == 'src' else pr.get('dst_verdict')) or ''
+                    # the candidate's OWN net must have routed: a board that
+                    # grades better because the re-laid neighbours came out
+                    # cheaper is no verdict on the move (measured: SA11's berth
+                    # 'stood' at 107 vias with SA11 still refused)
+                    # the engine may have laid another class than asked: if the
+                    # board is better all the same, the LAID move (menu-matched)
+                    # is what the apply step asks for, and the asked class, which
+                    # the engine would not lay, is banned
+                    substitute = None
+                    if end != 'both' and not in_cls and better(g, ref_g) and not pr.get('refused') and not pr.get('unjudged'):
+                        got = pr['src_got'] if end == 'src' else pr['dst_got']
+                        menu_ = B.st['smenu'].get(nm, []) if end == 'src' else dmenu_full(B.st)[nm]
+                        substitute = fp._menu_match(menu_, got) or synth_move(nm, got)
+                        if substitute is not None:
+                            substitute.comove = list(getattr(m, 'comove', []) or [])
+                    ok = better(g, ref_g) and (in_cls or substitute is not None) and not pr.get('refused')
+                    if LENGTH_TIE and pr.get('unjudged') and in_cls and g[0] == [] and g[1] == 0 \
+                            and better(g, ref_g):
+                        # --length: the local braid refused a lane but the last
+                        # call closed it -- the board is complete and clean at
+                        # equal vias and shorter copper, which IS the verdict
+                        # asked for (K28: 14 of 15 walked probes refused locally
+                        # and every board graded 0 open / 0 DRC / 36 vias)
+                        ok = True
+                        pr['unjudged'] = False
+                    if substitute is not None:
+                        if end == 'dst':
+                            bans_d[nm].add(_dban(m))
+                        else:
+                            bans_s.add((nm, sr.move_sig(m)))
+                        m = substitute
+                    if pr.get('unjudged') and in_cls:
+                        # the best unjudged per net: its own net routed first,
+                        # then the board's opens and vias
+                        key = (pr.get('refused', False), len(g[0]), g[2])
+                        if nm not in unjudged or key < unjudged[nm][3]:
+                            unjudged[nm] = (end, m, pr, key)
+                    laid_s = (f'{sr.fmt(pr["src_got"])} + {sr.fmt(pr["dst_got"])}' if end == 'both'
+                              else sr.fmt(pr["src_got"] if end == "src" else pr["dst_got"]))
+                    log(f'    probe {end} {fmt_move(m)}: laid {laid_s} '
+                        f'[{"exact" if faith else ("in class" if in_cls else "OTHER CLASS")}]'
+                        + (f' -- {verdict_s}' if not faith else '')
+                        + (f'; REFUSED (walled at the {pr.get("walled_at")})' if pr.get('refused') else
+                           f'; routed: net {pr["vias_net"]} v (was {real[nm]})')
+                        + (f' with {pr["relaid"]} re-laid' if pr.get('relaid') else ' alone')
+                        + (f', widened {pr["widened"]}' if pr.get('widened') else '')
+                        + (f', co-moved {pr["comove"]}' if pr.get('comove') else '')
+                        + (f', refused {pr["refused_nets"]}' if pr.get('refused_nets') else '')
+                        + f'; board open {g[0]} drc {g[1]} vias {g[2]} (ref {len(ref_g[0])}/{ref_g[2]})'
+                        + (f' mm {g[3]} (ref {ref_g[3]})' if LENGTH_TIE and len(g) > 3 and len(ref_g) > 3 else '')
+                        + f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
+                        + (f' (the engine\'s substitute {fmt_move(m)} is the ask)' if substitute is not None else '')
+                        + f' ({pr["seconds"]:.0f} s)')
+                    if ok:
+                        results.append((len(g[0]), g[2], (g[3] if LENGTH_TIE and len(g) > 3
+                                                           and g[3] is not None else 0), end, m, pr))
+                    elif not (pr.get('unjudged') and in_cls) and substitute is None:
+                        if end == 'dst':
+                            bans_d[nm].add(_dban(m))
+                        elif end == 'src':
+                            bans_s.add((nm, sr.move_sig(m)))
+                        else:
+                            bans_pair[nm].add((sr.move_sig(m[0]), m[1].direction, m[1].layer))
+                if results:
+                    results.sort(key=lambda t: (t[0], t[1], t[2]))
+                    _o, _v, _mm, end, m, pr = results[0]
+                    stand[nm] = ((m[0], m[1], pr) if end == 'both'
+                                 else (m if end == 'src' else None, m if end == 'dst' else None, pr))
+                    if MODE == 'incremental':
+                        # the probe's board IS a routed board (graded whole):
+                        # the next net is probed on it, and the round ships it
+                        R_cur = pr['board']
+                        best_g = list(pr['grade'])
+                        B.lanes = lane_items(parse_kicad_pcb(R_cur), B.pcb, names, B.byname)
+                        B.advance(nm, pr)
+                        fo_b = R_cur[:-len('_rb.kicad_pcb')] + '_dst.kicad_pcb'
+                        for o in {nm} | set(pr.get('relaid') or []) | set((pr.get('comove_got') or {})):
+                            fan_src[o] = fo_b
+                        log(f'    {nm}: {os.path.basename(R_cur)} is the board now '
+                            f'(open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]})')
+            # PHASE 2: each gatekeeper tried at another class of its own,
+            # judged by the local braid with the bad nets it blocks re-laid
+            for g in gates:
+                if g in stand or g in bad:
                     continue
-                g = pr['grade']
-                if end == 'both':
-                    ms, md = m
-                    faith = bool(pr.get('src_exact')) and bool(pr.get('dst_exact'))
-                    in_cls = ((pr['src_got']['direction'], pr['src_got']['layer']) == (ms.direction, ms.layer)
-                              and (pr['dst_got']['direction'], pr['dst_got']['layer']) == (md.direction, md.layer))
-                    verdict_s = f'{pr.get("src_verdict")} / {pr.get("dst_verdict")}'
-                    laid_cls = None
-                else:
-                    faith = ((pr.get('src_exact', True) if end == 'src' else True)
-                             and (pr.get('dst_exact', True) if end == 'dst' else True))
+                blocked_by_g = [nm for nm in worst if g in blockers.get(nm, [])]
+                ref_g = best_g
+                cands = []
+                for end in ('dst', 'src'):
+                    if end == 'dst':
+                        ranked, n_menu = rank_dest(B, g, bans_d[g], buses, cache, SCREEN_MAX)
+                    else:
+                        ranked, n_menu = rank_src(B, g, buses, cache, SCREEN_MAX)
+                    ranked = screen(B, g, ranked, end, PROBES, log)
+                    log(f'  gatekeeper {g} {end}: {n_menu} move(s), current {sr.fmt(B.ends[g][end])}, blocks '
+                        f'{blocked_by_g}; candidates: '
+                        + ('; '.join(f'{fmt_move(m)} judged {c:.1f}' for c, m in ranked) or 'none'))
+                    for c, m in ranked:
+                        cands.append((end, m, c))
+                results = []
+                for end, m, c in cands:
+                    tried[g] += 1
+                    ptag = f'{stem}_r{rnd}_{g}_{end}{tried[g]}'
+                    pr = probe(B, R_cur, g, m if end == 'src' else None, m if end == 'dst' else None,
+                               ptag, K, base, nets_csv, log, extra_relay=blocked_by_g)
+                    if 'fail' in pr:
+                        log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}) {pr["seconds"]:.0f} s')
+                        if end == 'dst':
+                            bans_d[g].add(_dban(m))
+                        else:
+                            bans_s.add((g, sr.move_sig(m)))
+                        continue
+                    gg = pr['grade']
                     laid_cls = ((pr['src_got']['direction'], pr['src_got']['layer']) if end == 'src'
                                 else (pr['dst_got']['direction'], pr['dst_got']['layer']))
                     in_cls = laid_cls == (m.direction, m.layer)
-                    verdict_s = (pr.get('src_verdict') if end == 'src' else pr.get('dst_verdict')) or ''
-                # the candidate's OWN net must have routed: a board that
-                # grades better because the re-laid neighbours came out
-                # cheaper is no verdict on the move (measured: SA11's berth
-                # 'stood' at 107 vias with SA11 still refused)
-                # the engine may have laid another class than asked: if the
-                # board is better all the same, the LAID move (menu-matched)
-                # is what the apply step asks for, and the asked class, which
-                # the engine would not lay, is banned
-                substitute = None
-                if end != 'both' and not in_cls and better(g, ref_g) and not pr.get('refused') and not pr.get('unjudged'):
-                    got = pr['src_got'] if end == 'src' else pr['dst_got']
-                    menu_ = B.st['smenu'].get(nm, []) if end == 'src' else dmenu_full(B.st)[nm]
-                    substitute = fp._menu_match(menu_, got) or synth_move(nm, got)
-                    if substitute is not None:
-                        substitute.comove = list(getattr(m, 'comove', []) or [])
-                ok = better(g, ref_g) and (in_cls or substitute is not None) and not pr.get('refused')
-                if LENGTH_TIE and pr.get('unjudged') and in_cls and g[0] == [] and g[1] == 0 \
-                        and better(g, ref_g):
-                    # --length: the local braid refused a lane but the last
-                    # call closed it -- the board is complete and clean at
-                    # equal vias and shorter copper, which IS the verdict
-                    # asked for (K28: 14 of 15 walked probes refused locally
-                    # and every board graded 0 open / 0 DRC / 36 vias)
-                    ok = True
-                    pr['unjudged'] = False
-                if substitute is not None:
-                    if end == 'dst':
-                        bans_d[nm].add(_dban(m))
-                    else:
-                        bans_s.add((nm, sr.move_sig(m)))
-                    m = substitute
-                if pr.get('unjudged') and in_cls:
-                    # the best unjudged per net: its own net routed first,
-                    # then the board's opens and vias
-                    key = (pr.get('refused', False), len(g[0]), g[2])
-                    if nm not in unjudged or key < unjudged[nm][3]:
-                        unjudged[nm] = (end, m, pr, key)
-                laid_s = (f'{sr.fmt(pr["src_got"])} + {sr.fmt(pr["dst_got"])}' if end == 'both'
-                          else sr.fmt(pr["src_got"] if end == "src" else pr["dst_got"]))
-                log(f'    probe {end} {fmt_move(m)}: laid {laid_s} '
-                    f'[{"exact" if faith else ("in class" if in_cls else "OTHER CLASS")}]'
-                    + (f' -- {verdict_s}' if not faith else '')
-                    + (f'; REFUSED (walled at the {pr.get("walled_at")})' if pr.get('refused') else
-                       f'; routed: net {pr["vias_net"]} v (was {real[nm]})')
-                    + (f' with {pr["relaid"]} re-laid' if pr.get('relaid') else ' alone')
-                    + (f', co-moved {pr["comove"]}' if pr.get('comove') else '')
-                    + (f', refused {pr["refused_nets"]}' if pr.get('refused_nets') else '')
-                    + f'; board open {g[0]} drc {g[1]} vias {g[2]} (ref {len(ref_g[0])}/{ref_g[2]})'
-                    + (f' mm {g[3]} (ref {ref_g[3]})' if LENGTH_TIE and len(g) > 3 and len(ref_g) > 3 else '')
-                    + f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
-                    + (f' (the engine\'s substitute {fmt_move(m)} is the ask)' if substitute is not None else '')
-                    + f' ({pr["seconds"]:.0f} s)')
-                if ok:
-                    results.append((len(g[0]), g[2], (g[3] if LENGTH_TIE and len(g) > 3
-                                                       and g[3] is not None else 0), end, m, pr))
-                elif not (pr.get('unjudged') and in_cls) and substitute is None:
-                    if end == 'dst':
-                        bans_d[nm].add(_dban(m))
-                    elif end == 'src':
-                        bans_s.add((nm, sr.move_sig(m)))
-                    else:
-                        bans_pair[nm].add((sr.move_sig(m[0]), m[1].direction, m[1].layer))
-            if results:
-                results.sort(key=lambda t: (t[0], t[1], t[2]))
-                _o, _v, _mm, end, m, pr = results[0]
-                stand[nm] = ((m[0], m[1], pr) if end == 'both'
-                             else (m if end == 'src' else None, m if end == 'dst' else None, pr))
-                if MODE == 'incremental':
-                    # the probe's board IS a routed board (graded whole):
-                    # the next net is probed on it, and the round ships it
-                    R_cur = pr['board']
-                    best_g = list(pr['grade'])
-                    B.lanes = lane_items(parse_kicad_pcb(R_cur), B.pcb, names, B.byname)
-                    B.advance(nm, pr)
-                    fo_b = R_cur[:-len('_rb.kicad_pcb')] + '_dst.kicad_pcb'
-                    for o in {nm} | set(pr.get('relaid') or []) | set((pr.get('comove_got') or {})):
-                        fan_src[o] = fo_b
-                    log(f'    {nm}: {os.path.basename(R_cur)} is the board now '
-                        f'(open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]})')
-        # PHASE 2: each gatekeeper tried at another class of its own,
-        # judged by the local braid with the bad nets it blocks re-laid
-        for g in gates:
-            if g in stand or g in bad:
-                continue
-            blocked_by_g = [nm for nm in worst if g in blockers.get(nm, [])]
-            ref_g = best_g
-            cands = []
-            for end in ('dst', 'src'):
-                if end == 'dst':
-                    ranked, n_menu = rank_dest(B, g, bans_d[g], buses, cache, SCREEN_MAX)
-                else:
-                    ranked, n_menu = rank_src(B, g, buses, cache, SCREEN_MAX)
-                ranked = screen(B, g, ranked, end, PROBES, log)
-                log(f'  gatekeeper {g} {end}: {n_menu} move(s), current {sr.fmt(B.ends[g][end])}, blocks '
-                    f'{blocked_by_g}; candidates: '
-                    + ('; '.join(f'{fmt_move(m)} judged {c:.1f}' for c, m in ranked) or 'none'))
-                for c, m in ranked:
-                    cands.append((end, m, c))
-            results = []
-            for end, m, c in cands:
-                tried[g] += 1
-                ptag = f'{stem}_r{rnd}_{g}_{end}{tried[g]}'
-                pr = probe(B, R_cur, g, m if end == 'src' else None, m if end == 'dst' else None,
-                           ptag, K, base, nets_csv, log, extra_relay=blocked_by_g)
-                if 'fail' in pr:
-                    log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}) {pr["seconds"]:.0f} s')
-                    if end == 'dst':
-                        bans_d[g].add(_dban(m))
-                    else:
-                        bans_s.add((g, sr.move_sig(m)))
-                    continue
-                gg = pr['grade']
-                laid_cls = ((pr['src_got']['direction'], pr['src_got']['layer']) if end == 'src'
-                            else (pr['dst_got']['direction'], pr['dst_got']['layer']))
-                in_cls = laid_cls == (m.direction, m.layer)
-                ok = better(gg, ref_g) and in_cls and not pr.get('refused')
-                log(f'    probe {end} {fmt_move(m)}: laid {sr.fmt(pr["src_got"] if end == "src" else pr["dst_got"])} '
-                    f'[{"in class" if in_cls else "OTHER CLASS"}]'
-                    + (f'; REFUSED' if pr.get('refused') else f'; routed: net {pr["vias_net"]} v (was {real[g]})')
-                    + f' with {pr.get("relaid")} re-laid'
-                    + (f', refused {pr["refused_nets"]}' if pr.get('refused_nets') else '')
-                    + f'; board open {gg[0]} drc {gg[1]} vias {gg[2]} (ref {len(ref_g[0])}/{ref_g[2]})'
-                    f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
-                    f' ({pr["seconds"]:.0f} s)')
-                if ok:
-                    results.append((len(gg[0]), gg[2], end, m, pr))
-                elif not (pr.get('unjudged') and in_cls):
-                    if end == 'dst':
-                        bans_d[g].add(_dban(m))
-                    else:
-                        bans_s.add((g, sr.move_sig(m)))
-            if results:
-                results.sort(key=lambda t: (t[0], t[1]))
-                _o, _v, end, m, pr = results[0]
-                stand[g] = (m if end == 'src' else None, m if end == 'dst' else None, pr)
-                if MODE == 'incremental':
-                    R_cur = pr['board']
-                    best_g = list(pr['grade'])
-                    B.lanes = lane_items(parse_kicad_pcb(R_cur), B.pcb, names, B.byname)
-                    B.advance(g, pr)
-                    log(f'    {g}: {os.path.basename(R_cur)} is the board now '
-                        f'(open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]})')
-        if not stand and unjudged and MODE == 'incremental':
-            log(f'  round {rnd}: nothing judged better; {len(unjudged)} unjudged move(s) would need the '
-                f'full braid (--mode=rebraid) -- stopping ({time.time() - t_r:.0f} s)')
-            break
-        if not stand and unjudged:
-            # nothing judged better: the unjudged moves go to the full
-            # braid, which is the only judge left for them
-            for nm, (end, m, pr, _k) in unjudged.items():
-                stand[nm] = ((m[0], m[1], pr) if end == 'both'
-                             else (m if end == 'src' else None, m if end == 'dst' else None, pr))
-            log(f'  round {rnd}: nothing judged better; applying the unjudged moves for the full braid: '
-                + ', '.join(f'{nm} {end} {fmt_move(m)}' for nm, (end, m, pr, _k) in unjudged.items()))
-        if not stand:
-            log(f'  round {rnd}: no candidate stands -- stopping ({time.time() - t_r:.0f} s)')
-            break
-        # WHICH APPLY PATH, AND WHY. The strip branch needs four things at
-        # once and said nothing when it did not get them, so a whole
-        # --apply=strip vs refan A/B ran with the branch never firing in
-        # either arm and reported "no difference" off two identical code
-        # paths. Name the blocker instead.
-        _why = [n for n, ok_ in (('apply!=strip', APPLY_STRIP),
-                                 ('mode!=incremental', MODE == 'incremental'),
-                                 ('no candidate stands', bool(stand)),
-                                 ('no incremental board this round', R_cur != R),
-                                 ('a SOURCE move stands',
-                                  not any(s_ is not None for (s_, _d, _p) in stand.values())))
-                if not ok_]
-        log(f'  round {rnd}: apply path = ' + ('DERIVED (strip)' if not _why
-                                               else 'incremental/refan -- blocked by ' + ', '.join(_why)))
-        if not _why:
-            # --apply=strip: the fanout board IS the routed board without
-            # its lanes, net by net, each stripped to the copper of the
-            # board that last laid its ends
-            F1 = f'{stem}_r{rnd}_fo.kicad_pcb'
-            txt = strip_eco(open(R_cur, encoding='utf-8').read())
-            whole = (-1e9, -1e9, 1e9, 1e9)
-            changed = sorted(o for o in names if fan_src.get(o))
-            for nm in names:
-                nid, net = B.byname[nm]
-                txt = strip_to_fanout_copper(txt, nm, nid, net.name, _pcb_of(fan_src.get(nm, F)), whole)
-            write_board(txt, F1, F)
-            B1 = Board(F1, names, dref, banned=frozenset(bans_s))
-            named1 = (named | set(changed)) & set(B1.choice)
-            pred1, bp1, side = B1.write_sidecar(named1)
-            R1 = f'{stem}_r{rnd}.kicad_pcb'
-            copy_board(R_cur, R1, eco=True)
-            for ext in ('.log', '.pack.json', '_refusals.json'):
-                src_ = R_cur[:-len('.kicad_pcb')] + ext
-                if os.path.exists(src_):
-                    shutil.copy(src_, R1[:-len('.kicad_pcb')] + ext)
-            with open(R1[:-len('.kicad_pcb')] + '.census.json', 'w') as f:
-                json.dump(census_hist, f, indent=1, sort_keys=True)
-            g1, line = grade(R1, K, base)
-            # the derived fanout board must carry every changed net's ends
-            # where the routed board has them (the same copper, so a
-            # mismatch is a stripping error, not the engine's)
-            miss, trimmed = [], []
-            for nm in changed:
-                a, b = B1.ends[nm]['dst'], B.ends[nm]['dst']
-                if a is None:
-                    miss.append(nm)
-                elif b is None or a['layer'] != b['layer'] or a['direction'] != b['direction'] \
-                        or math.hypot(a['tooth'][0] - b['tooth'][0], a['tooth'][1] - b['tooth'][1]) > END_AGREE:
-                    # the lane joined the berth short of its tip and the
-                    # braid trimmed the bypassed tip (the #622 overshoot
-                    # trim): the derived board's end is the routed board's
-                    trimmed.append(f'{nm}: {sr.fmt(b)} -> {sr.fmt(a)}')
-            keep = better(g1, g_round0) and not miss
-            log(f'  round {rnd}: {"KEPT" if keep else "rejected"} derived -- open {g1[0]}, drc {g1[1]}, '
-                f'vias {g1[2]}' + (f' mm {g1[3]}' if LENGTH_TIE else '')
-                + f' (round start {g_round0[0]}/{g_round0[2]}); fanout board {os.path.basename(F1)} derived '
-                f'from the routed board, {len(changed)} net(s) with new ends, sidecar {len(named1)} nets named'
-                + (f'; NO END on the derived board for {miss}' if miss else '')
-                + (f'; berths trimmed by their lanes: {trimmed}' if trimmed else '')
-                + f' ({time.time() - t_r:.0f} s)')
-            if keep:
-                F, R, best_g = F1, R1, g1
-            else:
-                best_g = g_round0
-            continue
-        # standing moves must not CONFLICT with each other (two nets asked
-        # for one berth slot: the engine laid neither as asked, measured):
-        # the better-graded one keeps its move, the other waits a round
-        def _grade_key(t):
-            pr = t[2]
-            g = pr.get('grade') or [[None] * 99, 0, 10 ** 6]
-            return (pr.get('refused', False), len(g[0]), g[2])
-        kept = {}
-        for nm in sorted(stand, key=lambda n: _grade_key(stand[n])):
-            sm_, dm_, pr_ = stand[nm]
-            clash = None
-            for o, (so, do, _p) in kept.items():
-                if dm_ is not None and do is not None and pe.sm._conflict(dm_, do, strict=True):
-                    clash = o
-                if sm_ is not None and so is not None and pe.sm._conflict(sm_, so, strict=True):
-                    clash = o
-            if clash:
-                log(f'  {nm}: its move conflicts with {clash}\'s -- deferred to a later round')
-                continue
-            kept[nm] = stand[nm]
-        stand = kept
-        # ---- APPLY to the fanout board
-        src_moves = {nm: s for nm, (s, d, _) in stand.items() if s is not None}
-        dst_moves = {nm: d for nm, (s, d, _) in stand.items() if d is not None}
-        log(f'  applying to {os.path.basename(F)}: source {list(src_moves)}, destination {list(dst_moves)}')
-        F1 = f'{stem}_r{rnd}_fo.kicad_pcb'
-        txt = open(F, encoding='utf-8').read()
-        unfaithful = []
-        if src_moves:
-            # the moved nets' berths go first (one free end for the
-            # measure; the berth is re-laid with the others below)
-            txt = strip_window(txt, list(src_moves), B.byname, _pad(B.st['dgrid'].bbox))
-            f1s = f'{stem}_r{rnd}_fo_srcstrip.kicad_pcb'
-            write_board(txt, f1s, F)
-            lines = []
-            r = sr.realize(f1s, src_moves, B.st['src_pad'], B.byname, B.st['sref'],
-                           f'{stem}_r{rnd}_fo_src.kicad_pcb', log=lines.append, guard_names=names)
-            for l in lines:
-                if any(nm in l for nm in src_moves) or 'audit' in l or 'unmoved' in l or 'REJECTED' in l:
-                    log('    ' + l.strip())
-            if r['rejected']:
-                best_g = g_round0
-                log(f'  round {rnd}: source realize REJECTED ({r["rejected"]}) -- moves banned, F stays')
-                for nm, m in src_moves.items():
-                    bans_s.add((nm, sr.move_sig(m)))
-                continue
-            for nm, m in src_moves.items():
-                a = r['audit'][nm]
-                g = a.get('achieved')
-                if nm not in r['ok'] or g is None or (g['direction'], g['layer']) != (m.direction, m.layer):
-                    unfaithful.append(f'{nm} tooth: asked {fmt_move(m)}, got {sr.fmt(g)} -- {a.get("verdict")}')
-                    bans_s.add((nm, sr.move_sig(m)))
-                elif not a['exact']:
-                    log(f'    {nm} tooth laid in class, not exact: {a.get("verdict")}')
-            txt = open(r['board'], encoding='utf-8').read()
-        write_board(txt, F1, F)
-        # every changed net's berth re-laid against the rest (a source-moved
-        # net's berth was stripped above)
-        comoved = sorted({o for m in dst_moves.values() for o in (getattr(m, 'comove', []) or [])}
-                         - set(dst_moves) - set(src_moves))
-        changed = sorted(set(src_moves) | set(dst_moves) | set(comoved))
-        if comoved:
-            log(f'  co-moved berths (re-fanned with their neighbour, the engine negotiating): {comoved}')
-        choice_all = dict(B.choice)
-        choice_all.update(dst_moves)
-        harvested = []
-        for nm, (s_, d_, pr) in stand.items():
-            if d_ is None:
-                continue
-            for o, got in (pr.get('comove_got') or {}).items():
-                mv = (fp._menu_match(dmenu_full(B.st)[o], got) or synth_move(o, got)) if got else None
-                if mv is not None and sr.move_sig(mv) != sr.move_sig(choice_all.get(o, mv)):
-                    choice_all[o] = mv
-                    harvested.append(f'{o} -> {fmt_move(mv)}')
-            got = pr.get('dst_got')
-            if got and not pr.get('dst_exact'):
-                mv = fp._menu_match(dmenu_full(B.st)[nm], got) or synth_move(nm, got)
-                if mv is not None and (mv.direction, mv.layer) == (d_.direction, d_.layer):
-                    choice_all[nm] = mv
-                    dst_moves[nm] = mv
-                    harvested.append(f'{nm} -> {fmt_move(mv)} (the probe\'s own laid gap)')
-        if harvested:
-            log(f'  asks harvested from the probes\' laid berths: {harvested}')
-        ask = {nm: B.ends[nm]['dst']['direction'] for nm in changed if nm not in choice_all}
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            laid, audit_d, ok = fp.fanout_once(F1, names, choice_all, B.st['dst_pad'], dref,
-                                               B.byname, F, relay=changed,
-                                               already=[nm for nm in names if nm not in changed],
-                                               face_asks=ask or None)
-        with open(f'{stem}_r{rnd}_fo.log', 'w') as f:
-            f.write(buf.getvalue())
-        achieved = fp.fanout_once.achieved or {}
-        for nm in changed:
-            a = audit_d.get(nm, {})
-            g = achieved.get(nm)
-            want = choice_all.get(nm)
-            if g is None:
-                unfaithful.append(f'{nm} berth: engine laid none')
-            elif nm in comoved and want is not None \
-                    and (g['direction'], g['layer']) != (want.direction, want.layer):
-                log(f'    {nm} berth CO-MOVED by the engine: {fmt_move(want)} -> {sr.fmt(g)}')
-            elif want is not None and (g['direction'], g['layer']) != (want.direction, want.layer):
-                unfaithful.append(f'{nm} berth: asked {fmt_move(want)}, got {sr.fmt(g)} -- {a.get("verdict")}')
-                if nm in dst_moves:
-                    bans_d[nm].add((want.direction, want.layer))
-            elif want is not None and not a.get('exact'):
-                log(f'    {nm} berth laid in class, not exact: {a.get("verdict")}')
-            else:
-                log(f'    {nm} berth {sr.fmt(g)}' + (' exact' if a.get('exact') else ' (engine\'s own)'))
-        log(f'  fanout board {os.path.basename(F1)}: {"clean and complete" if ok else "NOT clean/complete"}'
-            + (f'; UNFAITHFUL: ' + ' | '.join(unfaithful) if unfaithful else '; every move laid in its class'))
-        if not ok or unfaithful:
-            best_g = g_round0
-            log(f'  round {rnd}: the fanout board is {"not clean" if not ok else "unfaithful"} -- '
-                f'no braid; the moves not laid as asked are banned, F stays')
-            for nm, m in dst_moves.items():
-                if not ok or any(u.startswith(nm + ' ') for u in unfaithful):
-                    bans_d[nm].add(_dban(m))
-            for nm, m in src_moves.items():
-                if not ok or any(u.startswith(nm + ' ') for u in unfaithful):
-                    bans_s.add((nm, sr.move_sig(m)))
-            continue
-        # the UNMOVED ends must be where they were
-        B1 = Board(F1, names, dref, banned=frozenset(bans_s))
-        drift = []
-        for nm in names:
-            if nm in changed:
-                continue
-            for end in ('src', 'dst'):
-                a, b = B.ends[nm][end], B1.ends[nm][end]
-                if (a is None) != (b is None) or (a and (a['tooth'] != b['tooth'] or a['layer'] != b['layer']
-                                                         or a['vias'] != b['vias'])):
-                    drift.append(f'{nm}.{end}')
-        log(f'  unmoved ends: {2 * (len(names) - len(changed)) - len(drift)}/{2 * (len(names) - len(changed))} '
-            f'unchanged' + (f'; DRIFTED {drift}' if drift else ''))
-        named1 = (named | set(changed)) & set(B1.choice)
-        pred1, bp1, side = B1.write_sidecar(named1)
-        nsw1 = sum(1 for nm in names if nm in bp1 and bp1[nm]['page'] is None)
-        log(f'  sidecar {os.path.basename(side)}: {len(named1)} nets named; plan model '
-            f'{sum(pred1.values())} vias (residual off), {nsw1} swimmers on paper')
-        if MODE == 'incremental' and stand and R_cur != R:
-            # the fanout board and the routed board must carry the SAME
-            # ends for every changed net (both laid by the engine to the
-            # same asks): then the probes' board ships as this round's
-            # the routed board's ends for the changed nets are what the
-            # probes' engine calls LAID there (measured then); the fanout
-            # board's are measured now. Same face and layer, the gap within
-            # END_AGREE (two engine runs to one ask land a gap apart)
-            laid_on_r = {}
-            for nm_, (s_, d_, pr) in stand.items():
-                if pr.get('src_got'):
-                    laid_on_r[(nm_, 'src')] = pr['src_got']
-                if pr.get('dst_got'):
-                    laid_on_r[(nm_, 'dst')] = pr['dst_got']
-                for o, g in (pr.get('comove_got') or {}).items():
-                    if g:
-                        laid_on_r[(o, 'dst')] = g
-            mismatch = []
-            for nm in changed:
-                for e in ('src', 'dst'):
-                    a = B1.ends[nm][e]
-                    b = laid_on_r.get((nm, e), B.ends[nm][e])   # unchanged at this end: as it was
-                    if a is None or b is None or a['layer'] != b['layer'] \
-                            or a['direction'] != b['direction'] \
-                            or math.hypot(a['tooth'][0] - b['tooth'][0], a['tooth'][1] - b['tooth'][1]) > END_AGREE:
-                        mismatch.append(f'{nm}.{e}: fanout {sr.fmt(a)} vs routed {sr.fmt(b)}')
-            if mismatch:
-                log(f'  ends DIFFER between the fanout board and the routed board: {mismatch} '
-                    f'-> the full braid decides')
-            else:
+                    ok = better(gg, ref_g) and in_cls and not pr.get('refused')
+                    log(f'    probe {end} {fmt_move(m)}: laid {sr.fmt(pr["src_got"] if end == "src" else pr["dst_got"])} '
+                        f'[{"in class" if in_cls else "OTHER CLASS"}]'
+                        + (f'; REFUSED' if pr.get('refused') else f'; routed: net {pr["vias_net"]} v (was {real[g]})')
+                        + f' with {pr.get("relaid")} re-laid'
+                        + (f', refused {pr["refused_nets"]}' if pr.get('refused_nets') else '')
+                        + f'; board open {gg[0]} drc {gg[1]} vias {gg[2]} (ref {len(ref_g[0])}/{ref_g[2]})'
+                        f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
+                        f' ({pr["seconds"]:.0f} s)')
+                    if ok:
+                        results.append((len(gg[0]), gg[2], end, m, pr))
+                    elif not (pr.get('unjudged') and in_cls):
+                        if end == 'dst':
+                            bans_d[g].add(_dban(m))
+                        else:
+                            bans_s.add((g, sr.move_sig(m)))
+                if results:
+                    results.sort(key=lambda t: (t[0], t[1]))
+                    _o, _v, end, m, pr = results[0]
+                    stand[g] = (m if end == 'src' else None, m if end == 'dst' else None, pr)
+                    if MODE == 'incremental':
+                        R_cur = pr['board']
+                        best_g = list(pr['grade'])
+                        B.lanes = lane_items(parse_kicad_pcb(R_cur), B.pcb, names, B.byname)
+                        B.advance(g, pr)
+                        log(f'    {g}: {os.path.basename(R_cur)} is the board now '
+                            f'(open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]})')
+            if not stand and unjudged and MODE == 'incremental':
+                log(f'  round {rnd}: nothing judged better; {len(unjudged)} unjudged move(s) would need the '
+                    f'full braid (--mode=rebraid) -- stopping ({time.time() - t_r:.0f} s)')
+                break
+            if not stand and unjudged:
+                # nothing judged better: the unjudged moves go to the full
+                # braid, which is the only judge left for them
+                for nm, (end, m, pr, _k) in unjudged.items():
+                    stand[nm] = ((m[0], m[1], pr) if end == 'both'
+                                 else (m if end == 'src' else None, m if end == 'dst' else None, pr))
+                log(f'  round {rnd}: nothing judged better; applying the unjudged moves for the full braid: '
+                    + ', '.join(f'{nm} {end} {fmt_move(m)}' for nm, (end, m, pr, _k) in unjudged.items()))
+            if not stand:
+                log(f'  round {rnd}: no candidate stands -- stopping ({time.time() - t_r:.0f} s)')
+                break
+            # WHICH APPLY PATH, AND WHY. The strip branch needs four things at
+            # once and said nothing when it did not get them, so a whole
+            # --apply=strip vs refan A/B ran with the branch never firing in
+            # either arm and reported "no difference" off two identical code
+            # paths. Name the blocker instead.
+            _why = [n for n, ok_ in (('apply!=strip', APPLY_STRIP),
+                                     ('mode!=incremental', MODE == 'incremental'),
+                                     ('no candidate stands', bool(stand)),
+                                     ('no incremental board this round', R_cur != R))
+                    if not ok_]
+                # A STANDING SOURCE MOVE NO LONGER BLOCKS THE DERIVED PATH (2026-09-18):
+                # the probe realized the tooth on its own board, so `fan_src` names
+                # copper carrying the new tooth, and salvage_missing_ends covers a net
+                # re-laid from its pad. With the block, a round whose source move stood
+                # went through the re-fan apply, the engine did not lay the moves as
+                # asked, and the round DISCARDED a probe board it had already graded
+                # (the jump world: 102 / 1 open -> 98 clean, thrown away).
+            log(f'  round {rnd}: apply path = ' + ('DERIVED (strip)' if not _why
+                                                   else 'incremental/refan -- blocked by ' + ', '.join(_why)))
+            if not _why:
+                # --apply=strip: the fanout board IS the routed board without
+                # its lanes, net by net, each stripped to the copper of the
+                # board that last laid its ends
+                F1 = f'{stem}_r{rnd}_fo.kicad_pcb'
+                txt = strip_eco(open(R_cur, encoding='utf-8').read())
+                whole = (-1e9, -1e9, 1e9, 1e9)
+                changed = sorted(o for o in names if fan_src.get(o))
+                for nm in names:
+                    nid, net = B.byname[nm]
+                    txt = strip_to_fanout_copper(txt, nm, nid, net.name, _pcb_of(fan_src.get(nm, F)), whole)
+                write_board(txt, F1, F)
+                salvage_missing_ends(F1, R_cur, names, B.byname, _pad(B.st['sgrid'].bbox), _pad(B.st['dgrid'].bbox), log)
+                B1 = Board(F1, names, dref, banned=frozenset(bans_s))
+                named1 = (named | set(changed)) & set(B1.choice)
+                pred1, bp1, side = B1.write_sidecar(named1)
                 R1 = f'{stem}_r{rnd}.kicad_pcb'
                 copy_board(R_cur, R1, eco=True)
                 for ext in ('.log', '.pack.json', '_refusals.json'):
-                    src = R_cur[:-len('.kicad_pcb')] + ext
-                    if os.path.exists(src):
-                        shutil.copy(src, R1[:-len('.kicad_pcb')] + ext)
+                    src_ = R_cur[:-len('.kicad_pcb')] + ext
+                    if os.path.exists(src_):
+                        shutil.copy(src_, R1[:-len('.kicad_pcb')] + ext)
                 with open(R1[:-len('.kicad_pcb')] + '.census.json', 'w') as f:
                     json.dump(census_hist, f, indent=1, sort_keys=True)
                 g1, line = grade(R1, K, base)
-                keep = better(g1, g_round0) and not drift
-                log(f'  round {rnd}: {"KEPT" if keep else "rejected"} incremental -- open {g1[0]}, drc {g1[1]}, '
-                    f'vias {g1[2]} (round start {g_round0[0]}/{g_round0[2]}); ends of {len(changed)} changed '
-                    f'net(s) agree on both boards ({time.time() - t_r:.0f} s)')
+                # the derived fanout board must carry every changed net's ends
+                # where the routed board has them (the same copper, so a
+                # mismatch is a stripping error, not the engine's)
+                miss, trimmed = [], []
+                for nm in changed:
+                    a, b = B1.ends[nm]['dst'], B.ends[nm]['dst']
+                    if a is None:
+                        miss.append(nm)
+                    elif b is None or a['layer'] != b['layer'] or a['direction'] != b['direction'] \
+                            or math.hypot(a['tooth'][0] - b['tooth'][0], a['tooth'][1] - b['tooth'][1]) > END_AGREE:
+                        # the lane joined the berth short of its tip and the
+                        # braid trimmed the bypassed tip (the #622 overshoot
+                        # trim): the derived board's end is the routed board's
+                        trimmed.append(f'{nm}: {sr.fmt(b)} -> {sr.fmt(a)}')
+                keep = better(g1, g_round0) and not miss
+                log(f'  round {rnd}: {"KEPT" if keep else "rejected"} derived -- open {g1[0]}, drc {g1[1]}, '
+                    f'vias {g1[2]}' + (f' mm {g1[3]}' if LENGTH_TIE else '')
+                    + f' (round start {g_round0[0]}/{g_round0[2]}); fanout board {os.path.basename(F1)} derived '
+                    f'from the routed board, {len(changed)} net(s) with new ends, sidecar {len(named1)} nets named'
+                    + (f'; NO END on the derived board for {miss}' if miss else '')
+                    + (f'; berths trimmed by their lanes: {trimmed}' if trimmed else '')
+                    + f' ({time.time() - t_r:.0f} s)')
                 if keep:
                     F, R, best_g = F1, R1, g1
                 else:
                     best_g = g_round0
                 continue
-        # ---- BRAID
-        R1 = f'{stem}_r{rnd}'
-        okb, tb = braid_run(F1, R1, nets_csv, dest, R1 + '.log')
-        R1 += '.kicad_pcb'
-        if not okb:
-            log(f'  round {rnd}: braid produced no board ({tb:.0f} s) -- F stays')
-            continue
-        g1, line = grade(R1, K, base)
-        V1 = verdict(R1[:-len('.kicad_pcb')])
-        nsw_b1 = sum(1 for nm in names if V1.get(nm, {}).get('cls') == 'swim')
-        pl = re.search(r'^plan from .*$', open(R1[:-len('.kicad_pcb')] + '.log').read(), re.M)
-        log(f'  braid {tb:.0f} s: open {g1[0]}, drc {g1[1]}, vias {g1[2]}, {nsw_b1} swimmers '
-            f'(before: open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]}, {nsw_braid}); '
-            f'{pl.group(0) if pl else "no plan line in the braid log"}')
-        for nm in changed:
-            log(f'    {fmt_v(nm, V1.get(nm, {}), count_copper(R1, B.byname[nm][0])[0])}')
-        best_g = g_round0
-        keep = better(g1, best_g) and not unfaithful and not drift
-        log(f'  round {rnd}: {"KEPT" if keep else "rejected"} '
-            f'({"better" if better(g1, best_g) else "not better"}'
-            f'{", unfaithful" if unfaithful else ""}{", drift" if drift else ""}) '
-            f'({time.time() - t_r:.0f} s)')
-        if keep:
-            F, R, best_g = F1, R1, g1
-        else:
-            for nm, m in dst_moves.items():
-                bans_d[nm].add(_dban(m))
-            for nm, m in src_moves.items():
-                bans_s.add((nm, sr.move_sig(m)))
+            # standing moves must not CONFLICT with each other (two nets asked
+            # for one berth slot: the engine laid neither as asked, measured):
+            # the better-graded one keeps its move, the other waits a round
+            def _grade_key(t):
+                pr = t[2]
+                g = pr.get('grade') or [[None] * 99, 0, 10 ** 6]
+                return (pr.get('refused', False), len(g[0]), g[2])
+            kept = {}
+            for nm in sorted(stand, key=lambda n: _grade_key(stand[n])):
+                sm_, dm_, pr_ = stand[nm]
+                clash = None
+                for o, (so, do, _p) in kept.items():
+                    if dm_ is not None and do is not None and pe.sm._conflict(dm_, do, strict=True):
+                        clash = o
+                    if sm_ is not None and so is not None and pe.sm._conflict(sm_, so, strict=True):
+                        clash = o
+                if clash:
+                    log(f'  {nm}: its move conflicts with {clash}\'s -- deferred to a later round')
+                    continue
+                kept[nm] = stand[nm]
+            stand = kept
+            # ---- APPLY to the fanout board
+            src_moves = {nm: s for nm, (s, d, _) in stand.items() if s is not None}
+            dst_moves = {nm: d for nm, (s, d, _) in stand.items() if d is not None}
+            log(f'  applying to {os.path.basename(F)}: source {list(src_moves)}, destination {list(dst_moves)}')
+            F1 = f'{stem}_r{rnd}_fo.kicad_pcb'
+            txt = open(F, encoding='utf-8').read()
+            unfaithful = []
+            if src_moves:
+                # the moved nets' berths go first (one free end for the
+                # measure; the berth is re-laid with the others below)
+                txt = strip_window(txt, list(src_moves), B.byname, _pad(B.st['dgrid'].bbox))
+                f1s = f'{stem}_r{rnd}_fo_srcstrip.kicad_pcb'
+                write_board(txt, f1s, F)
+                lines = []
+                r = sr.realize(f1s, src_moves, B.st['src_pad'], B.byname, B.st['sref'],
+                               f'{stem}_r{rnd}_fo_src.kicad_pcb', log=lines.append, guard_names=names)
+                for l in lines:
+                    if any(nm in l for nm in src_moves) or 'audit' in l or 'unmoved' in l or 'REJECTED' in l:
+                        log('    ' + l.strip())
+                if r['rejected']:
+                    best_g = g_round0
+                    log(f'  round {rnd}: source realize REJECTED ({r["rejected"]}) -- moves banned, F stays')
+                    for nm, m in src_moves.items():
+                        bans_s.add((nm, sr.move_sig(m)))
+                    continue
+                for nm, m in src_moves.items():
+                    a = r['audit'][nm]
+                    g = a.get('achieved')
+                    if nm not in r['ok'] or g is None or (g['direction'], g['layer']) != (m.direction, m.layer):
+                        unfaithful.append(f'{nm} tooth: asked {fmt_move(m)}, got {sr.fmt(g)} -- {a.get("verdict")}')
+                        bans_s.add((nm, sr.move_sig(m)))
+                    elif not a['exact']:
+                        log(f'    {nm} tooth laid in class, not exact: {a.get("verdict")}')
+                txt = open(r['board'], encoding='utf-8').read()
+            write_board(txt, F1, F)
+            # every changed net's berth re-laid against the rest (a source-moved
+            # net's berth was stripped above)
+            comoved = sorted({o for m in dst_moves.values() for o in (getattr(m, 'comove', []) or [])}
+                             - set(dst_moves) - set(src_moves))
+            changed = sorted(set(src_moves) | set(dst_moves) | set(comoved))
+            if comoved:
+                log(f'  co-moved berths (re-fanned with their neighbour, the engine negotiating): {comoved}')
+            choice_all = dict(B.choice)
+            choice_all.update(dst_moves)
+            harvested = []
+            for nm, (s_, d_, pr) in stand.items():
+                if d_ is None:
+                    continue
+                for o, got in (pr.get('comove_got') or {}).items():
+                    mv = (fp._menu_match(dmenu_full(B.st)[o], got) or synth_move(o, got)) if got else None
+                    if mv is not None and sr.move_sig(mv) != sr.move_sig(choice_all.get(o, mv)):
+                        choice_all[o] = mv
+                        harvested.append(f'{o} -> {fmt_move(mv)}')
+                got = pr.get('dst_got')
+                if got and not pr.get('dst_exact'):
+                    mv = fp._menu_match(dmenu_full(B.st)[nm], got) or synth_move(nm, got)
+                    if mv is not None and (mv.direction, mv.layer) == (d_.direction, d_.layer):
+                        choice_all[nm] = mv
+                        dst_moves[nm] = mv
+                        harvested.append(f'{nm} -> {fmt_move(mv)} (the probe\'s own laid gap)')
+            if harvested:
+                log(f'  asks harvested from the probes\' laid berths: {harvested}')
+            ask = {nm: B.ends[nm]['dst']['direction'] for nm in changed if nm not in choice_all}
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                laid, audit_d, ok = fp.fanout_once(F1, names, choice_all, B.st['dst_pad'], dref,
+                                                   B.byname, F, relay=changed,
+                                                   already=[nm for nm in names if nm not in changed],
+                                                   face_asks=ask or None)
+            with open(f'{stem}_r{rnd}_fo.log', 'w') as f:
+                f.write(buf.getvalue())
+            achieved = fp.fanout_once.achieved or {}
+            for nm in changed:
+                a = audit_d.get(nm, {})
+                g = achieved.get(nm)
+                want = choice_all.get(nm)
+                if g is None:
+                    unfaithful.append(f'{nm} berth: engine laid none')
+                elif nm in comoved and want is not None \
+                        and (g['direction'], g['layer']) != (want.direction, want.layer):
+                    log(f'    {nm} berth CO-MOVED by the engine: {fmt_move(want)} -> {sr.fmt(g)}')
+                elif want is not None and (g['direction'], g['layer']) != (want.direction, want.layer):
+                    unfaithful.append(f'{nm} berth: asked {fmt_move(want)}, got {sr.fmt(g)} -- {a.get("verdict")}')
+                    if nm in dst_moves:
+                        bans_d[nm].add((want.direction, want.layer))
+                elif want is not None and not a.get('exact'):
+                    log(f'    {nm} berth laid in class, not exact: {a.get("verdict")}')
+                else:
+                    log(f'    {nm} berth {sr.fmt(g)}' + (' exact' if a.get('exact') else ' (engine\'s own)'))
+            log(f'  fanout board {os.path.basename(F1)}: {"clean and complete" if ok else "NOT clean/complete"}'
+                + (f'; UNFAITHFUL: ' + ' | '.join(unfaithful) if unfaithful else '; every move laid in its class'))
+            if not ok or unfaithful:
+                best_g = g_round0
+                log(f'  round {rnd}: the fanout board is {"not clean" if not ok else "unfaithful"} -- '
+                    f'no braid; the moves not laid as asked are banned, F stays')
+                for nm, m in dst_moves.items():
+                    if not ok or any(u.startswith(nm + ' ') for u in unfaithful):
+                        bans_d[nm].add(_dban(m))
+                for nm, m in src_moves.items():
+                    if not ok or any(u.startswith(nm + ' ') for u in unfaithful):
+                        bans_s.add((nm, sr.move_sig(m)))
+                continue
+            # the UNMOVED ends must be where they were
+            B1 = Board(F1, names, dref, banned=frozenset(bans_s))
+            drift = []
+            for nm in names:
+                if nm in changed:
+                    continue
+                for end in ('src', 'dst'):
+                    a, b = B.ends[nm][end], B1.ends[nm][end]
+                    if (a is None) != (b is None) or (a and (a['tooth'] != b['tooth'] or a['layer'] != b['layer']
+                                                             or a['vias'] != b['vias'])):
+                        drift.append(f'{nm}.{end}')
+            log(f'  unmoved ends: {2 * (len(names) - len(changed)) - len(drift)}/{2 * (len(names) - len(changed))} '
+                f'unchanged' + (f'; DRIFTED {drift}' if drift else ''))
+            named1 = (named | set(changed)) & set(B1.choice)
+            pred1, bp1, side = B1.write_sidecar(named1)
+            nsw1 = sum(1 for nm in names if nm in bp1 and bp1[nm]['page'] is None)
+            log(f'  sidecar {os.path.basename(side)}: {len(named1)} nets named; plan model '
+                f'{sum(pred1.values())} vias (residual off), {nsw1} swimmers on paper')
+            if MODE == 'incremental' and stand and R_cur != R:
+                # the fanout board and the routed board must carry the SAME
+                # ends for every changed net (both laid by the engine to the
+                # same asks): then the probes' board ships as this round's
+                # the routed board's ends for the changed nets are what the
+                # probes' engine calls LAID there (measured then); the fanout
+                # board's are measured now. Same face and layer, the gap within
+                # END_AGREE (two engine runs to one ask land a gap apart)
+                laid_on_r = {}
+                for nm_, (s_, d_, pr) in stand.items():
+                    if pr.get('src_got'):
+                        laid_on_r[(nm_, 'src')] = pr['src_got']
+                    if pr.get('dst_got'):
+                        laid_on_r[(nm_, 'dst')] = pr['dst_got']
+                    for o, g in (pr.get('comove_got') or {}).items():
+                        if g:
+                            laid_on_r[(o, 'dst')] = g
+                mismatch = []
+                for nm in changed:
+                    for e in ('src', 'dst'):
+                        a = B1.ends[nm][e]
+                        b = laid_on_r.get((nm, e), B.ends[nm][e])   # unchanged at this end: as it was
+                        if a is None or b is None or a['layer'] != b['layer'] \
+                                or a['direction'] != b['direction'] \
+                                or math.hypot(a['tooth'][0] - b['tooth'][0], a['tooth'][1] - b['tooth'][1]) > END_AGREE:
+                            mismatch.append(f'{nm}.{e}: fanout {sr.fmt(a)} vs routed {sr.fmt(b)}')
+                if mismatch:
+                    log(f'  ends DIFFER between the fanout board and the routed board: {mismatch} '
+                        f'-> the full braid decides')
+                else:
+                    R1 = f'{stem}_r{rnd}.kicad_pcb'
+                    copy_board(R_cur, R1, eco=True)
+                    for ext in ('.log', '.pack.json', '_refusals.json'):
+                        src = R_cur[:-len('.kicad_pcb')] + ext
+                        if os.path.exists(src):
+                            shutil.copy(src, R1[:-len('.kicad_pcb')] + ext)
+                    with open(R1[:-len('.kicad_pcb')] + '.census.json', 'w') as f:
+                        json.dump(census_hist, f, indent=1, sort_keys=True)
+                    g1, line = grade(R1, K, base)
+                    keep = better(g1, g_round0) and not drift
+                    log(f'  round {rnd}: {"KEPT" if keep else "rejected"} incremental -- open {g1[0]}, drc {g1[1]}, '
+                        f'vias {g1[2]} (round start {g_round0[0]}/{g_round0[2]}); ends of {len(changed)} changed '
+                        f'net(s) agree on both boards ({time.time() - t_r:.0f} s)')
+                    if keep:
+                        F, R, best_g = F1, R1, g1
+                    else:
+                        best_g = g_round0
+                    continue
+            # ---- BRAID
+            R1 = f'{stem}_r{rnd}'
+            okb, tb = braid_run(F1, R1, nets_csv, dest, R1 + '.log')
+            R1 += '.kicad_pcb'
+            if not okb:
+                log(f'  round {rnd}: braid produced no board ({tb:.0f} s) -- F stays')
+                continue
+            g1, line = grade(R1, K, base)
+            V1 = verdict(R1[:-len('.kicad_pcb')])
+            nsw_b1 = sum(1 for nm in names if V1.get(nm, {}).get('cls') == 'swim')
+            pl = re.search(r'^plan from .*$', open(R1[:-len('.kicad_pcb')] + '.log').read(), re.M)
+            log(f'  braid {tb:.0f} s: open {g1[0]}, drc {g1[1]}, vias {g1[2]}, {nsw_b1} swimmers '
+                f'(before: open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]}, {nsw_braid}); '
+                f'{pl.group(0) if pl else "no plan line in the braid log"}')
+            for nm in changed:
+                log(f'    {fmt_v(nm, V1.get(nm, {}), count_copper(R1, B.byname[nm][0])[0])}')
+            best_g = g_round0
+            keep = better(g1, best_g) and not unfaithful and not drift
+            log(f'  round {rnd}: {"KEPT" if keep else "rejected"} '
+                f'({"better" if better(g1, best_g) else "not better"}'
+                f'{", unfaithful" if unfaithful else ""}{", drift" if drift else ""}) '
+                f'({time.time() - t_r:.0f} s)')
+            if keep:
+                F, R, best_g = F1, R1, g1
+            else:
+                for nm, m in dst_moves.items():
+                    bans_d[nm].add(_dban(m))
+                for nm, m in src_moves.items():
+                    bans_s.add((nm, sr.move_sig(m)))
+        except Exception as _e:
+            import traceback
+            log(f'  round {rnd}: ABORTED -- {type(_e).__name__}: {str(_e)[:160]} '
+                f'(the boards kept so far stand)')
+            log('    ' + traceback.format_exc().strip().splitlines()[-1][:200])
+            break
     final = stem + '.kicad_pcb'
     copy_board(R, final, eco=True)
     for ext in ('.log', '.pack.json', '_refusals.json', '.census.json'):

@@ -43,6 +43,7 @@ import schedule as sch  # noqa: E402  -- lis_keep, for plan_lis
 import source_realize as sr  # noqa: E402
 from coherent_nets import coherent_nets  # noqa: E402
 import rules as _rules  # noqa: E402  ONE source for every design rule
+import plan_feedback as pfb  # noqa: E402  the route's verdict (PLAN_LOOP_FEEDBACK), plan_loop.py
 
 # SRC_CLIMB=k (2026-09-10): the SOURCE menu also offers CLIMBS -- a dog-bone
 # or via-in-pad whose run first travels up to k pitches along a gap under
@@ -451,6 +452,8 @@ def plan_state(pcb, names, banned=frozenset()):
                       if sr.move_sig(m) not in seen]
         dmenu[nm] = [m for m in moves if (nm, sr.move_sig(m)) not in banned]
         dmenu[nm] = _force(FORCE_DST, nm, dmenu[nm], 'destination')
+        # PLAN_LOOP_FEEDBACK: the classes the route's verdict banned at this end
+        dmenu[nm] = pfb.filter_menu(nm, 'dst', dmenu[nm])
         launch[nm] = ends[nm][0]
         others = [p for p in net.pads if p.component_ref != ends[nm][2]]
         src_pad[nm] = others[0] if others else None
@@ -471,6 +474,11 @@ def plan_state(pcb, names, banned=frozenset()):
     if SRC_CLIMB_END:
         for line in end_climbs(smenu, names, src_pad, sref, sgrid, ends, menu, byname, banned):
             print(line)
+    if pfb.BANS:
+        # PLAN_LOOP_FEEDBACK: after the end climbs, so a banned class cannot
+        # come back as one; the tooth as it stands is never on this menu
+        for nm in list(smenu):
+            smenu[nm] = pfb.filter_menu(nm, 'src', smenu[nm])
     tooth0 = {}
     tooth_vias = {}
     for nm in names:
@@ -3225,6 +3233,17 @@ def plan(base, names, work):
                                 + ('' if _ok == pf_better(key2, best_key)
                                    else ', AGAINST the count') + ']')
                 _overruled = _ok and not pf_better(key2, best_key)
+                if pfb.ACCEPT_LAID and not res_r.get('rejected') and res_r.get('audit'):
+                    # PLAN_LOOP_FEEDBACK accept_laid: the hypothesis was laid --
+                    # the route judges it, not the count (after _overruled, so
+                    # this never reads as a tier verdict)
+                    _laid_cls = sorted(nm for nm, m in src_out.items()
+                                       if (res_r['audit'].get(nm) or {}).get('achieved')
+                                       and (res_r['audit'][nm]['achieved']['direction'],
+                                            res_r['audit'][nm]['achieved']['layer']) == (m.direction, m.layer))
+                    if _laid_cls:
+                        _ok = True
+                        _why += f'  [plan feedback accept_laid: {_laid_cls} laid in class -- the route judges]'
                 if _ok:
                     print(line + f'; {pf_fmt(best_key, key2)}: KEPT' + _why)
                     board, st, dst_choice, un, best_key, src_out = new_board, st2, ch2, un2, key2, src2
@@ -3329,6 +3348,8 @@ def plan(base, names, work):
         board = new_board
     f, board, choice, st, r = best
     print(f'  kept round {r}: floor {f:.2f} on {os.path.basename(board)}')
+    if pfb.ACTIVE:
+        print('  ' + pfb.summary())
     if PLAN_BATCH:
         print(f'  source moves: asked {tally["asked"]}, landed {tally["landed"]}, refused as asked '
               f'{tally["refused"]}, laid but reverted {tally["reverted"]}; {tally["calls"]} engine call(s)')
