@@ -303,11 +303,11 @@ positions on #983's own board were seated there. Every rung is now asked the
 grade's along-edge question at the pose it writes, and one that is flagged is
 moved one 0.001 mm grid step along the edge, into the window. The move is kept
 only if the rung still seats and costs nothing the seat had (see the next
-paragraph). A rung the grade accepts is unchanged. Only a window
-narrower than that grid can still be missed, such as a
-`center_on_edge` with `tolerance_mm: 0` whose courtyard centre is off the
-grid. The seat keeps its pose and the run's notes say it was "written outside
-its declared along-edge window". Stage 1 also reads the part's extents, the
+paragraph). A rung the grade accepts is unchanged. A window narrower than that
+grid can still be missed, such as a `center_on_edge` with `tolerance_mm: 0`
+whose courtyard centre is off the grid, and so can a rung whose step is
+refused. Either way the seat keeps its pose and the run's notes say it was
+"written outside its declared along-edge window". Stage 1 also reads the part's extents, the
 declared start and the window at the rotation it will WRITE. It used to read
 them at the input rotation and then apply a declared `rotation`, which put
 splitflap_driver's J5 10.00 mm off a centre claim at a declared 0°.
@@ -325,11 +325,12 @@ is checked separately:
 
 An overlap the grade already reports may deepen, but never to double, and the
 settle and the step together are held to that. The step moves a seat 1 µm and
-the settle at most 22 µm. On #983's whole lattice through
-`repair_placement` (`tests/measure_983_seat_bounds.py`, L-A1r), 16 of 2880
-seats already overlapped the blocker by 0.014–0.35 mm² and gained
-0.0002–0.0020 mm², at most 2.7 %. Refusing that would keep the along-edge
-error the step exists to remove.
+the settle at most 22 µm. On #983's whole lattice through `repair_placement`
+(`tests/measure_983_seat_bounds.py`, L-A1r), 655 of the 2880 seats already
+overlap the blocker in base. The correction deepens that overlap on 16 of
+them, each overlapping by 0.014–0.35 mm², by 0.0002–0.0020 mm² and at most
+2.7 %. Refusing that would keep the along-edge error the step exists to
+remove.
 
 ### The overhang band is graded on the drawn body (#961)
 
@@ -392,7 +393,8 @@ errors: the paragraph on what a correction may not trade, above), still faces
 its edge, and does not trade the band for a setback: an inward move that
 leaves an `edge_receptacle` no overhang is refused. Otherwise the
 pose is kept and the grade reports it as before. What that leaves, measured:
-a band `min` that can only be met by moving pad copper deeper into the floor,
+a band `min` that can only be met by moving pad copper into, or deeper into,
+the board-edge floor,
 and a `{min: 0, max: 0}` band on a courtyard-only receptacle at a 0.55 mm gate
 margin. The latter cannot meet both the band and the 0.5 mm receptacle
 setback, whatever the seat does.

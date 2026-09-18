@@ -55,6 +55,7 @@ Earlier runs, each of which changed the tests rather than the table:
   settle's three-step bound refused it first, so the cap never bound. The
   seat test's `seats` answered "not a seat" everywhere, which made the
   settle's raw-must-seat guard equivalent.
+- 33 rows at 1caa78ee: 32 KILLED, 1 expected survivor.
 - 42 rows at 21872ca6: 40 KILLED, 2 expected survivors.
 - 51 rows at 43db6c0a: 48 KILLED, 3 SURVIVED, 1 of them unexpected:
   `step-judged-against-its-own-input`. The ladder fixture meant to catch it

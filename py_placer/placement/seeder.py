@@ -1875,9 +1875,9 @@ def _no_worse(new, raw) -> bool:
         pair under `_OVERLAP_REPORTED_MM2` (the resolution `overlap_area` is
         printed at) may not cross it, nor grow past EPS of float slack; one
         the grade already reports may deepen, but never to double (measured
-        on #983's whole lattice through `repair_placement`: 16 of 2880 seats
-        already overlapping the blocker by 0.014-0.35 mm2 gained
-        0.0002-0.0020 mm2, at most 2.7 %) -- refusing that would keep the
+        on #983's whole lattice through `repair_placement`: of the 655 seats
+        already overlapping the blocker, 16 deepen, by 0.0002-0.0020 mm2 on
+        0.014-0.35 mm2, at most 2.7 %) -- refusing that would keep the
         grade ERROR the correction exists to remove. The comparison is
         against the rung as the ladder found it, so a settle and a step on
         one rung together still may not double it;

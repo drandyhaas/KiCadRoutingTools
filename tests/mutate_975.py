@@ -85,8 +85,9 @@ learn, and the SHAs they name are no longer reachable in this branch.
 RE-RUN on the #983/#987/#988 branch stacked on this one, whole battery, at
 ab4f4854 (2026-09-18, Windows; killers unmutated and green first): **87 rows,
 84 KILLED, 3 SURVIVED, 0 broken.** Two survivors are the expected ones above.
-The third, `stage1-kept-frac-not-restored`, is expected now too; its row says
-why.
+The third, `stage1-kept-frac-not-restored`, was flagged unexpected there (exit
+1) and is expected now; its row says why. Re-run alone after the re-mark, at
+e14310b3: SURVIVED, as expected.
 """
 from __future__ import annotations
 

@@ -19,8 +19,8 @@ Three mechanisms, each a lattice of seats graded on the written board:
              `_seat_edge(..., target=(2.18, -0.24))`. R9 is test_975's
              band_later R9 (courtyard +-1 x +-0.6, pads +-0.5); the issue did
              not print it, and this geometry reproduces its 70/2880 exactly.
-       L-A2  the same board through stage 1 of `seed_from_intent`, blocker y
-             thinned to 0.1 mm.
+       L-A2  the same board through stage 1 of `seed_from_intent`, blocker x
+             thinned to 0.5 mm and y to 0.1 mm.
        L-A1r the issue's whole lattice through `repair_placement` -- the
              PRODUCTION caller, which hands the seat a live grader (L-A1 calls
              `_seat_edge` bare, as the issue did).
@@ -65,10 +65,10 @@ review (never loosened):
     (pads short, worst shortfall); per NEIGHBOUR of the seated part, no
     courtyard overlap on the written board where base had less than the
     grade reports (5e-5 mm2), and none doubled. An overlap base already had
-    may deepen short of that -- the user's choice for #983, see seeder
-    `_no_worse` -- and every such pair is counted and printed.
+    may deepen short of that -- the PR author's choice for #983, see
+    seeder `_no_worse` -- and every such pair is counted and printed.
     The overlap clause was added in review, not pre-registered, and is
-    SCOPED (the user's decision, disclosed on every run): it is not judged
+    SCOPED (the PR author's decision, disclosed on every run): it is not judged
     on (a) a bare `_seat_edge` call (L-A1, and the `seat` rows of L-A3/L-B),
     because with no grader #975's floor preference compares no overlap by
     #986's design -- L-A1r is the same lattice through the production
@@ -76,14 +76,16 @@ review (never loosened):
     splitflap's fixed north-edge connectors and overlaps several of them in
     both arms: #988 moves it millimetres to where it was declared, and the
     overlap with those FIXED parts grows there (stage 1 has no legality gate
-    by design). Rows not judged are counted, with how many would have failed
-    and by how much, so the exclusion hides a count, never a size.
+    by design). Rows not judged are counted, with how many would have failed,
+    and the row totals of the four that grew most are printed; the per-part
+    figures are in the JSON.
   a row whose written pose differs from base must have fired a correction
     (on SOME rung of that seat: the count is per seat, not per kept rung).
   a row that raised on either arm fails the run; a row seated only on head
     is printed, and must have fired too.
   SIGNAL: the A, B and C error counts fall; rows that stay dirty are named.
-  Rows where nothing changed are counted as NULL rows, never dropped.
+  Rows where nothing changed are counted as NULL rows, never dropped, and
+  rows unseated on both arms are counted apart.
 
 MEASURED on the tree of `#983: cite the committed measurement's own numbers
 for the deepened overlaps` (ab4f4854, 2026-09-18, Windows), base = #986's head
@@ -101,14 +103,20 @@ predicted):
   L-B4        6  -             6 -> 0    -            0           settle
   L-C         8   4 -> 0      -          -            0           stage-1 rot
 
-  rows 8136, pose changed 4883, NULL 3171, fixed 152; VERDICT: PASS.
-  The 90 left on L-A3 are all `tolerance_mm: 0` and all NOTE'd; the 16 on L-B1
-  are refused by the floor guard; L-B3 is the {0, 0} contradiction (#987).
+  rows 8136, pose changed 4883, NULL 3171, unseated on both arms 82, fixed
+  152; VERDICT: PASS.
+  The 90 left on L-A3 are all `tolerance_mm: 0` and all NOTE'd. The 16 on
+  L-B1 are refused by the floor guard: meeting the minimum would move pad
+  copper into the floor (6) or deeper into it (10). L-B3 is the {0, 0}
+  contradiction (#987). 52 of the 70 along-edge rows on L-A1 and L-A1r, and
+  all 21 on L-A2, still grade the base's own nearest-edge error -- #983's
+  example (0.5, 14.6) among them; only the along-edge error is this fix's.
   Existing courtyard overlap deepened on 21 judged pairs, at most 0.0020 mm2
-  and 2.7 % (16 of them on L-A1r). Not judged: 3655 bare-seat rows, 196 of
-  which would fail (#975's grader-less move, up to 0.64 -> 1.43 mm2), and 8
-  L-C rows, 4 of which would fail (up to 60.69 -> 93.89 mm2 with J5's fixed
-  neighbours).
+  and 2.7 % (16 of them on L-A1r, out of 655 seats there that overlap the
+  blocker in base). Not judged: 3655 bare-seat rows, 196 of which would fail
+  (#975's grader-less move, row totals up to 0.64 -> 1.43 mm2), and 8 L-C
+  rows, 4 of which would fail (row totals up to 60.69 -> 93.89 mm2; per part
+  up to 3.9x, J12 22.39 -> 87.49, and a new 19.37 mm2 pair with J16).
 """
 import argparse
 import contextlib
@@ -516,7 +524,7 @@ def diff(a_path, b_path):
         print()
     rb = {r['id']: r for r in base['rows']}
     rh = {r['id']: r for r in head['rows']}
-    violations, changed, null, fixed, still = [], 0, 0, [], []
+    violations, changed, null, fixed, still, neither = [], 0, 0, [], [], 0
     grew, newly, unjudged = [], [], {'bare seat (no grader)': [0, 0], 'L-C fixture': [0, 0]}
     fired = lambda r: any((r['fires'] or {}).get(c) for c in CORRECTIONS)
     for rid in sorted(set(rb) | set(rh)):
@@ -531,6 +539,8 @@ def diff(a_path, b_path):
                 violations.append((rid, f'raised on {side}: {r["error"]}'))
         if b['ok'] and not h['ok']:
             violations.append((rid, 'unseated on head'))
+        if not (b['ok'] or h['ok']):
+            neither += 1
         if h['ok'] and not b['ok']:
             newly.append((rid, h.get('errors')))
             if not fired(h):
@@ -580,7 +590,8 @@ def diff(a_path, b_path):
             elif eh:
                 still.append((rid, eh))
     print(f'rows {len(rh)}  pose changed {changed}  NULL (unchanged) {null}  '
-          f'fixed {len(fixed)}  still dirty on head {len(still)}')
+          f'unseated on both arms {neither}  fixed {len(fixed)}  '
+          f'still dirty on head {len(still)}')
     if grew:
         worst = max(oh - ob for _r, ob, oh in grew)
         ratio = max(oh / ob for _r, ob, oh in grew if ob > 0)
