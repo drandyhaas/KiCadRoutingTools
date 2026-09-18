@@ -483,6 +483,24 @@ class AlongEdgeWindow(_Graded):
         same = lambda sx, sy: (1, 0.5)
         self.assertEqual(seeder._window_nudge(st, part, mid, 'west', x, y, same), stepped)
 
+    def test_a4c_a_step_that_raises_keeps_the_seat(self):
+        # The issue's two rows with the floor unreadable at every pose: the
+        # seat is kept where the ladder had it (and graded as #983 found it),
+        # rather than the error escaping the seat and unseating the part.
+        for (bx, by), issue_pose in (((0.5, 14.6), (0.468, 14.693, 270.0)),
+                                     ((0.5, 15.65), (-0.04, 14.152, 270.0))):
+            with self.subTest(blocker=(bx, by)):
+                path = self.issue_board(bx, by)
+                real = seeder._window_step
+
+                def boom(*a, **k):
+                    raise RuntimeError('boom')
+                with patch.object(seeder, '_window_step', boom):
+                    ok, pose, _ = self.seat(path, ALONG, target=(2.18, -0.24))
+                self.assertTrue(ok)
+                self.assertIs(seeder._window_step, real)
+                self.assertEqual(pose, issue_pose)
+
     def test_a5_a_zero_tolerance_centre_is_met_on_grid_and_named_off_it(self):
         centre = {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0, 'max': 1.5},
                   'center_on_edge': {'tolerance_mm': 0.0}}
@@ -656,6 +674,27 @@ class OverhangBand(_Graded):
         g = '(fp_rect (start -4.9996 -1) (end 1 1) (layer "F.Fab"))'
         path = self.write('b2.kicad_pcb', board((20, 20), j1((g,))))
         self.assert_settled(path, {'ref': 'J1', 'edge': 'west', 'overhang_mm': {'min': 0.6}})
+
+    def test_b2b_a_south_edge_moves_along_y_both_ways(self):
+        # Every other settle arm is on the west edge, where the normal is x;
+        # here it is y. The body reaches 0.4918 / 0.6601 past the courtyard's
+        # SOUTH side, as B1's west-edge pair does past its west side.
+        for band, cb in (({'min': 0.25, 'max': 0.35}, 2.5082),
+                         ({'min': 0.3, 'max': 0.5}, 2.3399)):
+            with self.subTest(band=band):
+                g = '(fp_rect (start -1 -1) (end 1 3) (layer "F.Fab"))'
+                crt = f'(fp_rect (start -1.1 -1.1) (end 1.1 {cb}) (layer "F.CrtYd"))'
+                pads = ('(pad "1" smd rect (at -0.5 1.905) (size .5 .5) (layers "F.Cu"))',
+                        '(pad "2" smd rect (at 0.5 1.905) (size .5 .5) (layers "F.Cu"))',
+                        '(pad "3" smd rect (at 0 -0.5) (size .5 .5) (layers "F.Cu"))')
+                path = self.write(f'b2b_{cb}.kicad_pcb', board((20, 20), j1((g, crt), pads)))
+                entry = {'ref': 'J1', 'edge': 'south', 'overhang_mm': band}
+                for ladder, (bp, bk, fp, fk, _n) in self.both(path, entry).items():
+                    with self.subTest(ladder=ladder):
+                        self.assertIn('band', bk, (ladder, bp))
+                        self.assertNotIn('band', fk, (ladder, fp))
+                        self.assertEqual(fp[0], bp[0])            # x untouched
+                        self.assertNotEqual(fp[1], bp[1])
 
     def test_b3_a_gate_margin_under_the_walks_tolerance(self):
         crt = '(fp_rect (start -2.3 -1.1) (end 1.1 1.1) (layer "F.CrtYd"))'

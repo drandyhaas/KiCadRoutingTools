@@ -141,6 +141,12 @@ ROWS = [
      "        if raw is None or new is None or new > raw:",
      "        if raw is None or new is None:",
      (T983,), 'KILLED'),
+    ('nudge-raises', 'sd',
+     "    except Exception:                                   # noqa: BLE001\n"
+     "        # A preference may not cost a seat: anything raised while asking",
+     "    except ZeroDivisionError:\n"
+     "        # A preference may not cost a seat: anything raised while asking",
+     (T983,), 'KILLED'),
     ('window-miss-never-said', 'sd',
      "    if not _outside_its_along_edge_claim(state, part, entry, edge, part.x, part.y):\n"
      "        return None",
@@ -170,6 +176,13 @@ ROWS = [
     ('settle-sign-flipped', 'sd',
      "        sign = 1.0 if amount > lo else -1.0",
      "        sign = -1.0 if amount > lo else 1.0",
+     (T983,), 'KILLED'),
+    ('settle-y-direction-flipped', 'sd',
+     "        ix, iy = _INWARD[edge]\n"
+     "        rx, ry = round(x, 3), round(y, 3)",
+     "        ix, iy = _INWARD[edge]\n"
+     "        iy = -iy\n"
+     "        rx, ry = round(x, 3), round(y, 3)",
      (T983,), 'KILLED'),
     ('settle-uncapped', 'sd',
      "_BAND_SETTLE_CAP_MM = 0.022",

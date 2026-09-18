@@ -1738,8 +1738,9 @@ def _outside_its_along_edge_claim(state, part, entry: Dict, edge: str,
 
 
 #: #987: the furthest `_band_settle` moves a seat along its edge normal: the
-#: seat's own 0.02 mm band tolerance, rounded up to the 0.001 mm grid, plus
-#: one grid step. It can only close the gap that tolerance opened.
+#: seat's own 0.02 mm band tolerance plus the half micron the write rounds
+#: away, rounded up to the 0.001 mm grid (0.021), plus one grid step. It can
+#: only close the gap that tolerance opened.
 _BAND_SETTLE_CAP_MM = 0.022
 
 
@@ -1853,8 +1854,18 @@ def _window_nudge(state, part, entry: Dict, edge: str, x: float, y: float,
     is taken only when it seats and is no shorter of the floor. A window no
     grid pose meets (one step is not enough: `center_on_edge` with
     `tolerance_mm: 0` and a courtyard centre off the grid) keeps the raw pose
-    too; `_window_miss_note` names what is left.
+    too; `_window_miss_note` names what is left. So does anything raised.
     """
+    try:
+        return _window_step(state, part, entry, edge, x, y, seats)
+    except Exception:                                   # noqa: BLE001
+        # A preference may not cost a seat: anything raised while asking
+        # leaves the rung as the ladder had it, which the grade then reports.
+        return x, y
+
+
+def _window_step(state, part, entry, edge, x, y, seats):
+    """`_window_nudge`'s body, outside its catch-all."""
     if not _outside_its_along_edge_claim(state, part, entry, edge, x, y):
         return x, y
     e_lo, e_hi, _ = _declared_edge_span(state, state.board, edge)
@@ -1890,8 +1901,9 @@ def _window_miss_note(state, part, entry: Dict, edge: str, prefix: str):
     if not _outside_its_along_edge_claim(state, part, entry, edge, part.x, part.y):
         return None
     return (f"{prefix}{part.ref}: written outside its declared along-edge "
-            f"window on the {edge} edge, and the grade reports it -- no "
-            f"in-window pose on the 0.001mm grid it is written on seats here")
+            f"window on the {edge} edge, and the grade reports it -- the "
+            f"window is narrower than the 0.001mm grid a pose is written on, "
+            f"or one grid step inside it would not have seated")
 
 
 def _grade_accepts(state, part, entry: Dict, edge: str, lo: float,
