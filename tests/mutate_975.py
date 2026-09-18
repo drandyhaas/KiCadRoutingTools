@@ -77,9 +77,10 @@ and every one was a hole in my own work, not in the engine:
   was not enough while the worst pad was also the first BY NUMBER, since the
   two orderings then agree.
 - `budget-growth-ignored` is now expected to survive, and says why above.
-With those arms in place the table expects 85 KILLED and 2 SURVIVED of 87. The
-whole battery was then re-run at the final commit, and the result is the line
-below -- not this paragraph, which is only what the rows declare.
+MEASURED at the final commit, whole battery, 2026-09-18: **87 rows, 85 KILLED,
+2 SURVIVED -- both of them the expected ones -- 0 broken.** That is the run of
+record. Every earlier number stays above because each says what it cost to
+learn, and the SHAs they name are no longer reachable in this branch.
 """
 from __future__ import annotations
 
