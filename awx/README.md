@@ -31,7 +31,7 @@ reference boards):
 | the two-level portfolio (NOW THE DEFAULT) | 34 | 60 | 74 | 98 |
 | **+ `replan.py` on top** | **34** | **58** | **68** | **96** |
 | **+ the population's census descent (2026-09-18, `tmp/records/`)** | | | | **91** |
-| + destination climbs in the probe menus (`tmp/rpc91c`, still descending at commit time) | | | | 89 |
+| **+ destination climbs in the probe menus (`tmp/records/k51_87_climbs`, 3 rounds; still descending)** | | | | **87** |
 | human | 46 | 58 | 70 | **81** |
 | rule (vias + mm/7.5) | 121.5 | 175.3 | 218.9 | 281.1 |
 
@@ -198,6 +198,7 @@ octilinear, so a non-orthogonal pose is outside both models today.*
 | `replan.py` | the ROUTE as the judge; re-plans the ends the braid paid for |
 | **`plan_loop.py`** | **the PLAN-LEVEL LOOP: the routing inside the planning iteration. Solve, fan out, braid both arms, grade; the route's verdict goes back into the next pages-first re-solve as class bans, residual prices and the incumbent plan as hint; the best routed board is kept across rounds (monotone by construction); candidates within a round are independent (`--jobs`). See *The plan-level loop*** |
 | **`evolve.py`** | **the POPULATION: descend (replan probes) / jump (a far re-solve, no holds) / cross (two parents' ends held), elitist on routed grades; K15 16 -> 14 in one generation** |
+| `evolve_movie.py TAG K [--view ...] [--gif]` | the MOVIE of a population run from its ledger alone: one canvas per generation (the population row, each descent under its parent, jump/cross worlds with lineage arrows), per-probe steps from the descent transcripts with the copper that CHANGED lit (added) and ghosted (removed), selection fades, a lineage ribbon; `--verify` reconciles every diff against the raw segment/via counts; `--self-test`. Outputs `tmp/movie/` |
 | `plan_feedback.py` | the channel: `PLAN_LOOP_FEEDBACK` (a JSON file or inline JSON) read by `plan_state` (bans) and `pages_first._solve` (prices, hint); byte-identical unset; `--self-test` |
 | `pack.py`, `pack_board.py` | every lane a taut string against its neighbour |
 | **`ledger_cal.py`** | **per net: DP floor vs slack. The instrument that says whether to work on the plan or the realization -- but its per-net floor is CIRCULAR (each net priced against the others AS LAID); read it beside `joint_floor.py`** |
@@ -1073,11 +1074,16 @@ solve, so `evolve.py` now descends with `DST_CLIMB=2` and jumps with
 `DST_CLIMB=2 SRC_CLIMB=4` (`--descend-env`, `--jump-env`). The descent
 judges by the route and can afford the menus that broke the CP-SAT; a
 jump does not care where it lands. First result: the 91 world descended
-with `DST_CLIMB=2` in its menus goes **91 -> 90 -> 89** (SDQ5's berth, then
-SDQ4's tooth) where the same descent without climbs was a plateau. The
+with `DST_CLIMB=2` in its menus goes **91 -> 90 -> 89 -> 87** in three rounds
+(SDQ5's berth, SDQ4's tooth, SDQ4's berth; 923 s; 0 open, 0 DRC at 0.1 with
+no margin) where the same descent without climbs was a plateau, and it
+stopped on its round budget, not on a plateau (`tmp/records/k51_87_climbs`,
+continued in `tmp/rpc91d`). The
 population runs on K28 / K35 / K41 (`tmp/ev28`, `ev35`, `ev41`, seeded from
 `s13/rp_rp_kK` and `s13/port`) and on K51 (`tmp/ev51c`) were in progress
 when this was written; their ledgers are `tmp/ev<K>/evolve_k<K>.json`.
+`evolve_movie.py TAG K` films a run from that ledger (see the tools table;
+`tmp/movie/ev51b_k51.mp4` is the two-generation K51 run).
 
 ### Where a descent's time goes, and what is reused (measured 2026-09-18, K51)
 
