@@ -32,11 +32,15 @@ the battery exits 2 if one fails there. `_uncache` is carried over from
 `tests/mutate_975.py`: several rows are same-size edits, and CPython trusts a
 `.pyc` on (mtime seconds, size).
 
-EXPECTED SURVIVOR, with the reason, rather than a deleted row:
+EXPECTED SURVIVORS, with the reason, rather than deleted rows:
 - `settle-ignores-the-facing-edge`: the settle moves a seat at most 22 um
   along its own edge's normal, and no fixture found makes a move that small
   flip which edge the part sits nearest. The guard stays as a change
   detector.
+- `interior-split-not-compared`: the split differs only when a pose carries
+  pads across an interior Edge.Cuts contour's two-pad threshold, and no
+  fixture here has one; the guard is #975's (`PoseGrader.interior_split`),
+  kept so a correction cannot compare two differently-shaped boards.
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
 
@@ -134,11 +138,11 @@ ROWS = [
      "        return x, y",
      (T983,), 'KILLED'),
     ('nudge-may-make-a-seat', 'sd',
-     "        if raw is None or new is None or new > raw:",
-     "        if new is None or (raw is not None and new > raw):",
+     "        if raw is None or new is None or not _no_worse(new, raw):",
+     "        if new is None or (raw is not None and not _no_worse(new, raw)):",
      (T983,), 'KILLED'),
-    ('nudge-ignores-the-floor', 'sd',
-     "        if raw is None or new is None or new > raw:",
+    ('nudge-ignores-what-it-costs', 'sd',
+     "        if raw is None or new is None or not _no_worse(new, raw):",
      "        if raw is None or new is None:",
      (T983,), 'KILLED'),
     ('nudge-raises', 'sd',
@@ -194,9 +198,53 @@ ROWS = [
      "        if False:\n"
      "            return x, y",
      (T983,), 'KILLED'),
-    ('settle-ignores-the-floor', 'sd',
-     "            if new is None or (raw is not None and new > raw):",
+    ('settle-ignores-what-it-costs', 'sd',
+     "            if new is None or (raw is not None and not _no_worse(new, raw)):",
      "            if new is None:",
+     (T983,), 'KILLED'),
+
+    # ---- what a correction may not trade for its fix (`_no_worse`) ---------
+    ('floor-pads-short-ignored', 'sd',
+     "    if n_pads > r_pads or n_worst > r_worst + EPS:",
+     "    if n_worst > r_worst + EPS:",
+     (T983,), 'KILLED'),
+    ('floor-worst-shortfall-ignored', 'sd',
+     "    if n_pads > r_pads or n_worst > r_worst + EPS:",
+     "    if n_pads > r_pads:",
+     (T983,), 'KILLED'),
+    ('new-overlap-allowed', 'sd',
+     "    if r_ov <= EPS < n_ov:\n"
+     "        return False",
+     "    if False:\n"
+     "        return False",
+     (T983,), 'KILLED'),
+    ('overlap-growth-refused-too', 'sd',
+     "    if r_ov <= EPS < n_ov:\n"
+     "        return False",
+     "    if n_ov > r_ov + EPS:\n"
+     "        return False",
+     (T983,), 'KILLED'),
+    ('grade-errors-not-compared', 'sd',
+     "        if n_split != r_split or list(_fp.grade_delta(r_err, n_err)):",
+     "        if n_split != r_split:",
+     (T983,), 'KILLED'),
+    ('interior-split-not-compared', 'sd',
+     "        if n_split != r_split or list(_fp.grade_delta(r_err, n_err)):",
+     "        if list(_fp.grade_delta(r_err, n_err)):",
+     (T983,), 'SURVIVED'),
+    ('reading-never-asks-the-grade', 'sd',
+     "    if grade is None:\n"
+     "        return floor + (overlap, None, None)",
+     "    if True:\n"
+     "        return floor + (overlap, None, None)",
+     (T983,), 'KILLED'),
+    ('seat-ladder-overlap-with-nobody', 'sd',
+     "                                     [o for o in state.parts if o != ref and o not in ex],",
+     "                                     [],",
+     (T983,), 'KILLED'),
+    ('stage-one-overlap-with-nobody', 'sd',
+     "                return _seat_reading(state, part, ref, sx, sy, part.rot, sorted(placed),",
+     "                return _seat_reading(state, part, ref, sx, sy, part.rot, [],",
      (T983,), 'KILLED'),
     ('settle-may-make-a-seat', 'sd',
      "        if raw is None:\n"
@@ -231,12 +279,12 @@ ROWS = [
      "        return x, y\n"
      "\n"
      "\n"
-     "def _floor_key(",
+     "def _overlap_at(",
      "    except ZeroDivisionError:\n"
      "        return x, y\n"
      "\n"
      "\n"
-     "def _floor_key(",
+     "def _overlap_at(",
      (T983,), 'KILLED'),
     ('seat-ladder-not-settled', 'sd',
      "                    x, y = _band_settle(state, part, entry, edge, lo, x, y, seats)",
