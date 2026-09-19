@@ -865,36 +865,7 @@ def p_close(a):
                 f'{type(_junk[0]).__name__}, not a clause object.\n'
                 + _regrade)
         _known = {str(r.get('id')) for r in _rows}
-        # The id is resolved AGAINST THE DOCUMENT rather than by splitting on
-        # colons: a clause id contains them (`proximity[0:Y1~U1].max_mm`) and
-        # so may a reason, so any positional split cuts one of the two in half.
-        # The document is the authority on what its own ids are.
-        _waived, _phantom, _noreason = set(), [], []
-        for _w in (a.waive or []):
-            if not _w.startswith('brief-clause:'):
-                continue
-            _rest = _w[len('brief-clause:'):]
-            # LONGEST first, and the `+ ':'` matters: without it
-            # `keepouts[batt]xyz:reason` would silently waive `keepouts[batt]`,
-            # and without longest-first a waiver for `keepouts[usb-shell]`
-            # could resolve to `keepouts[usb]` and leave the real clause open
-            # while reporting it waived. That pair is REAL -- keep-out names
-            # are the author's, so one being a prefix of another is ordinary.
-            # (`interfaces[J1].edge_band` stood here and is not a clause id any
-            # producer emits: the interface ids are `.edge`, `.along_edge`,
-            # `.user_facing`, `.overhang_mm`.)
-            _hit = next((i for i in sorted(_known, key=len, reverse=True)
-                         if _rest == i or _rest.startswith(i + ':')), None)
-            if _hit is None:
-                # The WHOLE residue, not `split(':', 1)[0]` -- that is the
-                # very bug this resolution fixed, surviving one line over in
-                # the message: a waiver for `proximity[0:Y1~U2].max_mm` was
-                # reported as naming `proximity[0`.
-                _phantom.append(_rest)
-            elif not _rest[len(_hit) + 1:].strip():
-                _noreason.append(_hit)
-            else:
-                _waived.add(_hit)
+        _waived, _phantom, _noreason = _clause_waivers(a, _known)
         if _noreason:
             return err(
                 f'--waive brief-clause:{_noreason[0]}: needs a REASON after '
@@ -1234,6 +1205,12 @@ def _guard_zone_plan(a):
             'band.)\n\n'
             'Or hand them to the seeder on the record: '
             '--waive seed-connectors:<why the seeder may choose these poses>')
+    # #959 (#1001): the declared channels, reconciled -- contradictions,
+    # unlocked mechanical refs, and drift from the brief.
+    _bf, _bp = _p1_brief(a, pcb)
+    mech_owed = _mechanical_owed(a, intent, plan, pcb, _bf, _bp)
+    if mech_owed:
+        return False, mech_owed
     # LAST, so every refusal above keeps its wording and its precedence: a plan
     # that leaves parts unzoned is told that first, not that a rule is dark.
     owed = _roster_owed(a, intent, pcb, _fp)
@@ -1313,6 +1290,186 @@ def _padless_owed(a, intent, pcb, padless, covered):
     return ''
 
 
+def _clause_waivers(a, known):
+    """`(waived, phantom, noreason)` for every `--waive brief-clause:<id>:<why>`.
+
+    Shared by P-close and P1 (#959) so a clause is waived the same way at
+    both gates.
+
+    The id is resolved AGAINST THE DOCUMENT rather than by splitting on
+    colons: a clause id contains them (`proximity[0:Y1~U1].max_mm`) and so
+    may a reason, so any positional split cuts one of the two in half. The
+    document is the authority on what its own ids are.
+    """
+    waived, phantom, noreason = set(), [], []
+    for w in (a.waive or []):
+        if not w.startswith('brief-clause:'):
+            continue
+        rest = w[len('brief-clause:'):]
+        # LONGEST first, and the `+ ':'` matters: without it
+        # `keepouts[batt]xyz:reason` would silently waive `keepouts[batt]`,
+        # and without longest-first a waiver for `keepouts[usb-shell]` could
+        # resolve to `keepouts[usb]` and leave the real clause open while
+        # reporting it waived. That pair is REAL -- keep-out names are the
+        # author's, so one being a prefix of another is ordinary.
+        # (`interfaces[J1].edge_band` stood here and is not a clause id any
+        # producer emits: the interface ids are `.edge`, `.along_edge`,
+        # `.user_facing`, `.overhang_mm`.)
+        hit = next((i for i in sorted(known, key=len, reverse=True)
+                    if rest == i or rest.startswith(i + ':')), None)
+        if hit is None:
+            # The WHOLE residue, not `split(':', 1)[0]` -- that is the very
+            # bug this resolution fixed, surviving one line over in the
+            # message: a waiver for `proximity[0:Y1~U2].max_mm` was reported
+            # as naming `proximity[0`.
+            phantom.append(rest)
+        elif not rest[len(hit) + 1:].strip():
+            noreason.append(hit)
+        else:
+            waived.add(hit)
+    return waived, phantom, noreason
+
+
+def _p1_brief(a, pcb):
+    """`(fragment, path)` for the design brief beside the board, compiled
+    the way check_floorplan compiles it, or `(None, '')`. An unreadable brief
+    is P-brief's refusal, not P1's."""
+    try:
+        from placement import design_brief as _db
+        bp = _db.discover_brief(a.board)
+        if bp:
+            frag, _rep = _db.compile_brief(
+                _db.load_brief(bp), board_refs=sorted(pcb.footprints or {}))
+            return frag, bp
+    except Exception:                                       # noqa: BLE001
+        pass
+    return None, ''
+
+
+def _p1_mechanical(a):
+    """`(mechanical, path, error_text)` -- the same discovery and refusal
+    `check_floorplan` uses (`cli_gates.load_mechanical_or_exit`)."""
+    import io
+    import contextlib
+    from placement.cli_gates import load_mechanical_or_exit
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        mech, path, rc = load_mechanical_or_exit(a, a.board)
+    if rc:
+        return None, path, (
+            f'The mechanical declaration {path} cannot be read '
+            f'({buf.getvalue().strip()}). A file by that name that reads as '
+            '"no mechanical facts" would be the silent absence #959 is '
+            'about; fix it, or pass --no-mechanical to say it is not an '
+            'input.')
+    return mech, path, ''
+
+
+def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path):
+    """#959 (#1001): P1's questions about the DECLARED channels.
+
+    1. A disagreement between two declared / recorded values (the brief and
+       `mechanical.json`, a mechanical pose and the outline) is a
+       CONTRADICTION, and the plan must say in writing which way it goes --
+       the author decides, because the losing channel may be the physically
+       right one. Run 29's brief put USB1 east while its mechanical
+       declaration put it west, and nothing compared them.
+    2. A mechanical ref the plan anchors must be FILE-locked at its declared
+       pose. The anchor is grade-only: measured, the seeder cannot seat a
+       part at an exact pose (an overhanging part has no admissible pose at
+       all), so the lock is what keeps it there. `--waive seed-connectors`
+       does not reach these: a mechanical fact is not the seeder's to choose.
+    3. The plan must not drift from the brief. Before this only P-close
+       refused brief drift, so `place_seed` seeded whatever the zone plan
+       said, and the drift surfaced laps later.
+    Returns '' when nothing is owed, else the refusal text.
+    """
+    from placement import reconcile as _rc
+    from placement import design_brief as _db
+    mech, mech_path, mech_err = _p1_mechanical(a)
+    if mech_err:
+        return mech_err
+    try:
+        from list_nets import board_floor_knobs
+        _kn = board_floor_knobs(a.board)[2]
+    except Exception:                                       # noqa: BLE001
+        _kn = None
+    rows = _rc.reconcile(pcb, a.board, brief_fragment=brief_fragment,
+                         brief_source=brief_path or None, mechanical=mech,
+                         intent_doc=plan, intent_source=a.zone_plan,
+                         floors_used=_kn)
+    answered = (intent.dispositions or {}).get('contradictions', {})
+    contra = _rc.contradictions(rows)
+    ids = {r['id'] for r in contra}
+    open_ = [r for r in contra if r['id'] not in answered]
+    stale = sorted(k for k in answered if k not in ids)
+    if open_ or stale:
+        body = ''.join(
+            f"  - {r['id']}: " + '; '.join(
+                f"{ch} {v['value']!r} [{v['authority']}, {v['source']}]"
+                for ch, v in r['values'].items() if v['value'] is not None)
+            + f" -- {r['why']}\n" for r in open_)
+        body += ''.join(
+            f"  - dispositions.contradictions.{k} answers no contradiction "
+            'this plan has; remove it\n' for k in stale)
+        head = (f'{len(open_)} contradiction(s) between DECLARED sources, '
+                'and nothing in the plan says which way each goes'
+                if open_ else
+                'The zone plan answers contradictions this board does not '
+                'have -- a stale answer reads as though something were '
+                'decided when nothing is')
+        return (
+            head + ':\n' + body
+            + '\nEach names both values and where they came from. The '
+            'strongest source wins by default, but the author decides -- in '
+            'run 29 the losing source (mechanical.json) was the physically '
+            'correct one. Write the decision IN THE ZONE PLAN:\n'
+            '  "dispositions": {"contradictions": {"<id>": "<which value '
+            'holds, and why>"}}')
+    lost = set(_rc.lost_mechanical_refs(rows))
+    anchored = sorted(
+        ref for ref, _p in (mech or {}).get('poses', {}).items()
+        if ref in pcb.footprints and pcb.footprints[ref].pads
+        and ref not in lost)
+    unlocked = [r for r in anchored
+                if not getattr(pcb.footprints[r], 'locked', False)]
+    if unlocked:
+        cmds = ''.join(
+            f"  python3 -X utf8 py_placer/place_pose.py {a.board} {a.board} "
+            f"set '{r}' {mech['poses'][r]['x']} {mech['poses'][r]['y']}"
+            + (f" --rot {mech['poses'][r]['rot']}"
+               if mech['poses'][r]['rot'] is not None else '')
+            + f" lock '{r}'\n" for r in unlocked)
+        return (
+            f'{len(unlocked)} mechanical ref(s) in {mech_path} are not '
+            f'locked in the board: {", ".join(unlocked)}. Their poses are '
+            'recorded facts, and the plan grades them against an anchor at '
+            'exactly that pose -- but only a FILE lock keeps the seeder off '
+            'a part, and measured, it cannot seat one at an exact pose. '
+            'Pin each where the declaration puts it:\n' + cmds
+            + '(`--waive seed-connectors` does not reach these: a mechanical '
+            'fact is not the seeder\'s to choose.)')
+    if brief_fragment:
+        drifted = sorted(_db.drifted_clause_ids(plan, brief_fragment))
+        waived, phantom, noreason = _clause_waivers(a, set(drifted))
+        open_d = [i for i in drifted if i not in waived]
+        if noreason:
+            return (f'--waive brief-clause:{noreason[0]}: needs a REASON '
+                    'after the colon -- why this plan may drift from what '
+                    'the brief declares.')
+        if open_d:
+            return (
+                f'The zone plan drifts from the design brief on '
+                f'{len(open_d)} clause(s): {", ".join(open_d)}. The brief is '
+                'the declaration; a plan that says something else is a '
+                'guess, and the seeder would place against the guess. Fold '
+                'the brief back in (re-emit with `check_floorplan '
+                '--emit-intent`, then edit), or waive a clause BY NAME with '
+                'the reason this board cannot hold it:\n'
+                '  --waive brief-clause:<id>:<why>')
+    return ''
+
+
 def _roster_owed(a, intent, pcb, _fp):
     """#959 (#997): the rules this plan leaves DARK, answered in writing.
 
@@ -1329,16 +1486,7 @@ def _roster_owed(a, intent, pcb, _fp):
     plan answers the same way carries no signal. Returns '' when nothing is
     owed, else the refusal text.
     """
-    brief_fragment = None
-    try:
-        from placement import design_brief as _db
-        bp = _db.discover_brief(a.board)
-        if bp:
-            brief_fragment, _rep = _db.compile_brief(
-                _db.load_brief(bp), board_refs=sorted(pcb.footprints or {}))
-    except Exception:                                       # noqa: BLE001
-        # An unreadable brief is P-brief's refusal, not this one's.
-        brief_fragment = None
+    brief_fragment, _bp = _p1_brief(a, pcb)
     try:
         from list_nets import board_floor_knobs
         clr, edge_clr, _k = board_floor_knobs(a.board, None, None)
@@ -2056,6 +2204,13 @@ def _args(argv=None):
     # it reads as a knob somebody thought about. The routability numbers are
     # REPORTED at P-close now, and 0.25 is baked nowhere.
     ap.add_argument('--waive', action='append', default=[], metavar='REF:reason')
+    ap.add_argument('--mechanical', default=None, metavar='PATH',
+                    help='mechanical.json for P1 to reconcile (#959). '
+                         'Discovered in the board\'s directory when omitted, '
+                         'as stage_unaided writes it')
+    ap.add_argument('--no-mechanical', action='store_true',
+                    help='do not read mechanical.json even if one sits '
+                         'beside the board (the OFF arm)')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--dump-all', action='store_true')
     ap.add_argument('--dump-refusals', action='store_true',
@@ -2145,7 +2300,7 @@ def _tiny_board(path, refs, unconnected=(), locked=(), padless=()):
         f'{" (locked yes)" if r in locked else ""}\n'
         f'    (property "Reference" "{r}" (at 0 0))\n'
         + _pad(r) +
-        f'  )\n' for i, r in enumerate(refs))
+        '  )\n' for i, r in enumerate(refs))
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write('(kicad_pcb (version 20241229) (generator "test")\n'
                  '  (net 0 "")\n  (net 1 "/A")\n'
@@ -2513,6 +2668,25 @@ def _refusal_scenarios(tmp):
     tiny = _tiny_board(os.path.join(tmp, 'tiny.kicad_pcb'), ('U1', 'U2'))
     logo_board = _tiny_board(os.path.join(tmp, 'logo.kicad_pcb'),
                              ('U1', 'U2', 'LOGO1'), padless=('LOGO1',))
+
+    def mech_board(name, brief_edge=None, mech=None):
+        """A tiny board in its OWN directory, optionally with a sibling
+        design brief declaring U2's edge and a `mechanical.json` (#959)."""
+        d = os.path.join(tmp, 'mech_' + name)
+        os.makedirs(d, exist_ok=True)
+        b = _tiny_board(os.path.join(d, 'board.kicad_pcb'), ('U1', 'U2'))
+        if brief_edge:
+            with open(os.path.join(d, 'board.design-brief.json'), 'w',
+                      encoding='utf-8') as fh:
+                json.dump({'schema': 1, 'kind': 'design-brief',
+                           'units': 'mm', 'board': 'board.kicad_pcb',
+                           'interfaces': [{'ref': 'U2', 'edge': brief_edge,
+                                           'user_facing': True}]}, fh)
+        if mech is not None:
+            with open(os.path.join(d, 'mechanical.json'), 'w',
+                      encoding='utf-8') as fh:
+                json.dump(mech, fh)
+        return b
     zp_ok = wrote('zp_ok.json', _zone_plan_doc(
         [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
           'note': 'both parts, one zone'}]))
@@ -2617,6 +2791,48 @@ def _refusal_scenarios(tmp):
                  [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
                    'note': 'both ICs'}],
                  dispositions={'refs': {'U1': 'wrong kind of block'}}))]
+         + damaged),
+        # #959 (#1001): the declared channels. Each board lives in its OWN
+        # directory, because `mechanical.json` is discovered per directory and
+        # one in `tmp` would change every other row's board.
+        ('a brief and mechanical.json that contradict each other',
+         ['--board', mech_board('contra', brief_edge='east',
+                                mech={'interfaces': [{'ref': 'U2',
+                                                      'edge': 'west'}]}),
+          '--zone-plan', zp_ok] + damaged),
+        ('a contradiction disposition that answers nothing',
+         ['--board', mech_board('stale', mech={'fixed': []}),
+          '--zone-plan', wrote('zp_stale_contra.json', _zone_plan_doc(
+              [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                'note': 'both parts, one zone'}],
+              dispositions={'contradictions': {'U9:edge': 'no such row'},
+                            'rules': {'envelope': 'fixture',
+                                      'legality': 'fixture'}}))]
+         + damaged),
+        ('a mechanical ref the board does not lock',
+         ['--board', mech_board('unlocked', mech={
+             'fixed': [{'ref': 'U1', 'x': 2.0, 'y': 2.0, 'rot': 0,
+                        'reason': 'the mounting datum'}]}),
+          '--zone-plan', zp_ok] + damaged),
+        ('a mechanical.json that does not read',
+         ['--board', mech_board('garbled', mech={'nonsense': 1}),
+          '--zone-plan', zp_ok] + damaged),
+        ('a zone plan that drifts from the brief',
+         ['--board', mech_board('drift', brief_edge='east'),
+          '--zone-plan', wrote('zp_drift.json', _zone_plan_doc(
+              [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                'note': 'both parts, one zone'}],
+              edge_connectors=[{'ref': 'U2', 'edge': 'west'}])),
+          '--waive', 'seed-connectors:the fixture hands U2 over']
+         + damaged),
+        ('a brief-clause waiver at P1 with no reason',
+         ['--board', mech_board('drift2', brief_edge='east'),
+          '--zone-plan', wrote('zp_drift2.json', _zone_plan_doc(
+              [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                'note': 'both parts, one zone'}],
+              edge_connectors=[{'ref': 'U2', 'edge': 'west'}])),
+          '--waive', 'seed-connectors:the fixture hands U2 over',
+          '--waive', 'brief-clause:interfaces[U2].edge:']
          + damaged),
         # #959 (#997): the roster, LAST in P1. One row carries both arms -- a
         # gating rule nothing answers for (the tiny board declares no

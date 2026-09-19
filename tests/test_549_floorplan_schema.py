@@ -594,7 +594,9 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'keepout_allow_unresolved',
                                         'decap_pin_distance_inferred',
                                         'decap_pin_uncovered',
-                                        'proximity_unresolved'}
+                                        'proximity_unresolved',
+                                        # #959 (#1001)
+                                        'mechanical_drift'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         i = intent_from_dict(_base(severity={name: WARN}))

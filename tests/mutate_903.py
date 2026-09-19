@@ -77,6 +77,7 @@ ROWS = [
     # manifest, no ledger, no refusal, UNPROVEN forever.
     ('the-unaided-stager-never-arms', 'su',
      "    _PV.start_regime(_wd, out_board, mechanical=os.path.abspath(mech),\n"
+     "                     mechanical_sha256=_PV.sha256_file(mech),\n"
      "                     prior_ledger_rows=_prior,\n"
      "                     prior_stagings=_prior_stagings)\n",
      "",

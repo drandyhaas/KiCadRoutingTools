@@ -72,6 +72,56 @@ def load_intent_or_exit(args):
         return None, 2
 
 
+def add_mechanical_arg(parser) -> None:
+    """`--mechanical` / `--no-mechanical`: the RECORDED mechanical facts (#959).
+
+    `mechanical.json` is what `stage_unaided` writes next to the staged board:
+    the poses carried over from the source because they are mechanical facts
+    a real new board would already know. Nothing read it until #959 -- run 29
+    moved a fiducial off its declared pose and no gate objected. Discovered in
+    the board's own directory, like the design brief; `--no-mechanical` is
+    the OFF arm.
+    """
+    parser.add_argument(
+        "--mechanical", metavar="JSON", default=None,
+        help="mechanical.json: poses (and, in the declaration form, edges) a "
+             "run did not choose. Auto-discovered in the board's directory "
+             "when omitted. Reconciled against the brief and the board, "
+             "compiled into grade-only anchor blocks on --emit-intent, and "
+             "graded as mechanical_drift (#959)")
+    parser.add_argument(
+        "--no-mechanical", action="store_true",
+        help="Do not read mechanical.json, even if one sits beside the board. "
+             "The OFF arm for an auto-discovered input (#959)")
+
+
+def load_mechanical_or_exit(args, board_path: str):
+    """(mechanical, path, exit_code). `exit_code` is 2 when an explicit
+    `--mechanical` names nothing, or the file found is not a mechanical
+    declaration this build reads -- a file by that name that reads as "no
+    mechanical facts" would be the silent absence #959 is about."""
+    import os
+    import sys
+    from placement import reconcile
+    if getattr(args, 'no_mechanical', False):
+        return None, '', 0
+    path = getattr(args, 'mechanical', None)
+    if path:
+        if not os.path.isfile(path):
+            print(f"cannot read mechanical declaration {path}: no such file",
+                  file=sys.stderr)
+            return None, path, 2
+    else:
+        path = reconcile.discover_mechanical(board_path)
+        if not path:
+            return None, '', 0
+    try:
+        return reconcile.load_mechanical(path), path, 0
+    except reconcile.MechanicalError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return None, path, 2
+
+
 def add_brief_arg(parser) -> None:
     """`--brief` / `--no-brief`: the DECLARED design intent (#711).
 

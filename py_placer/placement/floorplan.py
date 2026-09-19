@@ -1112,6 +1112,63 @@ def _dispositions(raw) -> Dict[str, Dict[str, str]]:
     return out
 
 
+def mechanical_drift(intent: Intent, pcb_data, mechanical: Dict, *,
+                     skip: Sequence[str] = ()) -> List[Violation]:
+    """Parts that moved off, or turned away from, their declared mechanical
+    pose (#959, #1001).
+
+    Run 29 moved `Ref*` from its declared (141.2, 95.9) to (123.65, 93.2) and
+    nothing objected at any gate: the file declaring the pose was read by
+    nothing. `skip` holds refs whose mechanical value LOST a contradiction
+    (the brief says otherwise, and the brief wins by default) -- grading them
+    against the losing value would report the winning placement as drift.
+    Pad-less refs ARE graded here: a fiducial or a logo that moved is still a
+    moved mechanical fact, even though no anchor block is compiled for it.
+    """
+    from .reconcile import POSE_TOL_MM, ROT_TOL_DEG
+    out: List[Violation] = []
+    for ref, p in sorted((mechanical.get('poses') or {}).items()):
+        fp = (pcb_data.footprints or {}).get(ref)
+        if fp is None or ref in skip:
+            continue
+        dx, dy = fp.x - p['x'], fp.y - p['y']
+        dist = math.hypot(dx, dy)
+        drot = None
+        if p.get('rot') is not None:
+            d = abs((fp.rotation or 0.0) % 360.0 - p['rot']) % 360.0
+            drot = min(d, 360.0 - d)
+        moved = dist > POSE_TOL_MM
+        turned = drot is not None and drot > ROT_TOL_DEG
+        if not (moved or turned):
+            continue
+        what = ' and '.join(x for x in (
+            f"{dist:.3f}mm from" if moved else '',
+            f"turned {drot:.1f} deg from" if turned else '') if x)
+        out.append(Violation(
+            rule='mechanical_drift',
+            severity=intent.severity_of('mechanical_drift', WARN), ref=ref,
+            message=(f"{ref} is {what} its declared mechanical pose "
+                     f"({p['x']:.3f}, {p['y']:.3f}"
+                     + (f", {p['rot']:.1f}" if p.get('rot') is not None
+                        else '') + ") -- "
+                     + (p.get('reason') or 'mechanical.json')),
+            measured={'x': round(fp.x, 4), 'y': round(fp.y, 4),
+                      'rotation': round((fp.rotation or 0.0) % 360.0, 4),
+                      'distance_mm': round(dist, 4),
+                      'rotation_off_deg': (None if drot is None
+                                           else round(drot, 4))},
+            expected={'x': p['x'], 'y': p['y'], 'rotation': p.get('rot')}))
+    return out
+
+
+def is_mechanical_anchor(z: Zone) -> bool:
+    """A block `check_floorplan --emit-intent` compiled from `mechanical.json`
+    (#959, #1001): the grader's own rect for a FILE-locked part at its
+    declared pose. Grade-only -- it answers "is the part still where the
+    mechanical declaration put it", never "where may parts go"."""
+    return (z.context or {}).get('basis') == 'mechanical'
+
+
 def validate_intent(intent: Intent) -> List[Violation]:
     """Checks that need no board: does the intent contradict itself.
 
@@ -1124,6 +1181,14 @@ def validate_intent(intent: Intent) -> List[Violation]:
 
     for z in intent.blocks:
         if z.rect is None:
+            continue
+        # #959 (#1001): a mechanical ANCHOR is the grader's own rect for a
+        # part at its declared pose, and a mechanical part is often a
+        # connector or a mounting hole that overhangs the outline by design
+        # (measured: 33 of 97 mechanical refs on 11 of 22 corpus boards). Its
+        # zone is where the part IS, not a region the plan reserves, so the
+        # envelope says nothing about it.
+        if is_mechanical_anchor(z):
             continue
         if env is not None and not _rect_contains(env, z.rect):
             out.append(Violation(
@@ -1142,6 +1207,10 @@ def validate_intent(intent: Intent) -> List[Violation]:
             if a.rect is None or b.rect is None:
                 continue
             if a.side and b.side and a.side != b.side:
+                continue
+            # An anchor claims no area (see above): a locked part sitting
+            # inside a plan block's zone is not two zones fighting over it.
+            if is_mechanical_anchor(a) or is_mechanical_anchor(b):
                 continue
             area = legality.rect_overlap_area(a.rect, b.rect)
             if area > legality.EPS:
@@ -4146,7 +4215,13 @@ _NON_RULE_SEVERITIES = frozenset({
     # different CLAIM from a distance, and severity is settable per name,
     # so a DNP-variant board legitimately missing a part can demote the
     # resolution finding without demoting the distance one.
-    'proximity_unresolved'})
+    'proximity_unresolved',
+    # #959 (#1001). Raised by `grade` itself when `mechanical.json` is read:
+    # a part that moved off (or turned away from) its declared mechanical
+    # pose. WARN by default -- a mechanical anchor block grades the POSITION
+    # at ERROR through zone_containment; this is the rotation half, and the
+    # position half for a plan that carries no anchor.
+    'mechanical_drift'})
 
 #: Every rule name an intent may set a severity for. Derived from `RULES`, so a
 #: new rule is settable the moment it is registered -- a hand-listed set would
@@ -5055,7 +5130,8 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
           group_sources: Sequence[str] = (), clearance: Optional[float] = None,
           board_edge_clearance: Optional[float] = None,
           with_health: bool = False, with_roster: bool = False,
-          brief_fragment=None) -> GradeResult:
+          brief_fragment=None, mechanical=None,
+          mechanical_skip: Sequence[str] = ()) -> GradeResult:
     """Measure a board against its declared floorplan intent.
 
     `with_roster` (#959) also builds the rule roster -- which rules the intent
@@ -5080,6 +5156,9 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                  if not _declared_by_hand(intent, str(k))}
     found, ran, skipped = _run_rules(ctx, abstained)
     violations.extend(found)
+    if mechanical:
+        violations.extend(mechanical_drift(intent, pcb_data, mechanical,
+                                           skip=mechanical_skip))
     # #712: a DECLARED along-edge claim this outline cannot support a verdict
     # on joins the same not-derivable channel the withheld budgets use. It is
     # neither a violation nor a pass, and `pass: true` beside a non-zero

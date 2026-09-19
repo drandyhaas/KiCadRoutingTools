@@ -52,7 +52,8 @@ import sys
 
 from kicad_parser import parse_kicad_pcb
 from placement.cli_gates import (add_board_state_args, add_brief_arg,
-                                 load_brief_or_exit)
+                                 add_mechanical_arg, load_brief_or_exit,
+                                 load_mechanical_or_exit)
 from placement.floorplan import (UntrustworthyOutline, emit_intent, format_text,
                                  grade, load_intent, summary, to_json)
 from placement.floorplan import (declaration_ledger, format_roster,
@@ -109,6 +110,7 @@ def build_parser():
                         'was never derived from. The tether census is '
                         'written to context.decap_census either way')
     add_brief_arg(p)
+    add_mechanical_arg(p)
     p.add_argument('--require-brief', action='store_true',
                    help='exit 4 when no design brief was found, or when the '
                         'one found declares nothing gradable. The parallel of '
@@ -240,6 +242,21 @@ def main(argv=None):
         # not-found branch says what is filling the gap instead.
         print(_db.format_absent_note(args.board))
 
+    # #959 (#1001): the recorded mechanical facts, discovered beside the board
+    # the way the brief is. Read by nothing before this.
+    from placement import reconcile as _rc
+    mech, mech_path, _mrc = load_mechanical_or_exit(args, args.board)
+    if _mrc:
+        return _mrc
+    if mech is not None and not args.quiet:
+        _prov = _rc.mechanical_provenance(mech, args.board)
+        print(f"mechanical declaration {mech_path}: {len(mech['poses'])} "
+              f"pose(s), {len(mech['edges'])} edge(s) ({mech['shape']}; "
+              f"{_prov[0]}: {_prov[1]})")
+    from list_nets import board_floor_knobs as _bfk
+    _floors_used = _bfk(args.board, args.clearance,
+                        args.board_edge_clearance)[2]
+
     _require_brief_failed = False
     if args.emit_intent:
         try:
@@ -257,6 +274,44 @@ def main(argv=None):
                       f"from a part's current pose")
                 for line in brief_report['contradictions']:
                     print(f"  CONTRADICTION {line}")
+        # #959 (#1001): every ref two channels speak to, and the mechanical
+        # facts compiled into grade-only anchors (never for a ref whose
+        # mechanical value lost a contradiction).
+        _rows = _rc.reconcile(pcb, args.board, brief_fragment=brief_fragment,
+                              brief_source=brief_path or None,
+                              mechanical=mech, floors_used=_floors_used)
+        _ctx = doc.setdefault('context', {})
+        _ctx['reconciliation'] = _rows
+        _contra = _rc.contradictions(_rows)
+        if _contra and isinstance(_ctx.get('brief'), dict):
+            _ctx['brief'].setdefault('contradictions', []).extend(
+                line.strip() for line in _rc.format_rows(_contra))
+        if mech is not None:
+            _anchors, _skipped = _rc.anchor_blocks(
+                pcb, args.board, mech,
+                lost=_rc.lost_mechanical_refs(_rows))
+            _names = {b.get('name') for b in doc.get('blocks') or []}
+            doc.setdefault('blocks', []).extend(
+                b for b in _anchors if b['name'] not in _names)
+            _prov = _rc.mechanical_provenance(mech, args.board)
+            _ctx['mechanical'] = {
+                'path': mech['path'], 'sha256': mech['sha256'],
+                'shape': mech['shape'], 'provenance': _prov[0],
+                'provenance_why': _prov[1],
+                'anchored': sorted(b['name'][len('mech:'):]
+                                   for b in _anchors),
+                'skipped': _skipped}
+        if not args.quiet:
+            for line in _rc.format_rows(_rows):
+                print(line)
+            if mech is not None:
+                _m = _ctx['mechanical']
+                _sk = ', '.join(f"{k} ({v})"
+                                for k, v in sorted(_m['skipped'].items()))
+                print(f"  {len(_m['anchored'])} mechanical anchor block(s) "
+                      f"compiled (grade-only; P1 requires each anchored ref "
+                      f"to be locked)"
+                      + (f"; skipped: {_sk}" if _sk else ''))
         if args.require_brief and not brief_fragment:
             print(f"  FAIL: --require-brief, but " + _brief_absence_reason(
                 args, brief)
@@ -360,12 +415,18 @@ def main(argv=None):
               f"({knobs['clearance']['source']}), edge {edge_clearance} "
               f"({knobs['board_edge_clearance']['source']})")
 
+    _rows = _rc.reconcile(pcb, args.board, brief_fragment=brief_fragment,
+                          brief_source=brief_path or None, mechanical=mech,
+                          intent_doc=intent_doc_for_drift(args.intent),
+                          intent_source=args.intent, floors_used=knobs)
+    _lost = _rc.lost_mechanical_refs(_rows)
     try:
         result = grade(intent, pcb, args.board, group_sources=sources or (),
                        clearance=clearance,
                        board_edge_clearance=edge_clearance,
                        with_health=args.health, with_roster=True,
-                       brief_fragment=brief_fragment or None)
+                       brief_fragment=brief_fragment or None,
+                       mechanical=mech, mechanical_skip=_lost)
     except UntrustworthyOutline as exc:
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
         print("  Refused rather than graded: with no usable outline every "
@@ -375,6 +436,10 @@ def main(argv=None):
 
     if not args.quiet:
         print(format_text(result))
+        for line in _rc.format_rows(_rows):
+            print(line)
+    _contra_ids = [r['id'] for r in _rc.contradictions(_rows)]
+    _answered = set((intent.dispositions or {}).get('contradictions', {}))
 
     # #902. Computed on the --intent path only: an --emit-intent run produces
     # no grade, so there is nothing for a clause to be covered BY, and saying
@@ -431,6 +496,7 @@ def main(argv=None):
         doc = to_json(result)
         doc['brief_coverage'] = coverage
         doc['declaration_ledger'] = ledger
+        doc['reconciliation'] = _rows
         with open(args.json, 'w', encoding='utf-8') as fh:
             json.dump(doc, fh, indent=1, sort_keys=True)
             fh.write('\n')
@@ -452,6 +518,11 @@ def main(argv=None):
         s['brief_coverage_complete'] = coverage['complete']
     s.update(ledger_s)
     s['stale_dispositions'] = list(result.stale_dispositions)
+    s['mechanical'] = mech_path or None
+    s['contradictions'] = len(_contra_ids)
+    s['contradiction_ids'] = _contra_ids
+    s['contradictions_undispositioned'] = [i for i in _contra_ids
+                                           if i not in _answered]
     s['clearance_used'] = knobs['clearance']
     s['edge_clearance_used'] = knobs['board_edge_clearance']
     print("JSON_SUMMARY: " + json.dumps(s, sort_keys=True))
