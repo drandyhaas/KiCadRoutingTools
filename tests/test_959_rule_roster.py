@@ -595,8 +595,45 @@ def test_the_withheld_debt_is_read_off_the_budget():
     rows = {r['rule']: r for r in fp.rule_roster(
         fp.intent_from_dict(answered, ''), pcb, PILE)}
     assert not rows['legality']['needs_disposition'], rows['legality']
-    print("  PASS: overlap_area is owed with the note, without it, and on a "
-          "hand-written budget; a disposition answers it")
+    # The other half: a budget with `overlap_area` but no `oob_count`.
+    rows = {r['rule']: r for r in fp.rule_roster(
+        fp.intent_from_dict(_raw(legality_budget={'overlap_area': 1.0}), ''),
+        pcb, PILE)}
+    assert 'oob_count' in rows['legality']['withheld'], rows['legality']
+    print("  PASS: overlap_area (and oob_count) are owed with the note, "
+          "without it, and on a hand-written budget; a disposition answers it")
+
+
+def test_a_suspect_overhang_records_why_oob_count_is_withheld():
+    """The emitter drops `oob_count` when an edge connector sits in a
+    SUSPECT pose; since #959 that drop is recorded in `budget_withheld`, so
+    the roster can owe it rather than miss it."""
+    from kicad_parser import iter_footprint_blocks
+    pcb = parse_kicad_pcb(ESP)
+    bx = pcb.board_info.board_bounds
+    # R1 and C2 stacked on each other, overhanging the east edge: each
+    # overhang is observed, and a part in a pad conflict is SUSPECT.
+    x, y = bx[2] - 0.4, (bx[1] + bx[3]) / 2
+    text = open(ESP, encoding='utf-8').read()
+    for ref in ('R1', 'C2'):
+        for start, end, _t, _r, key in iter_footprint_blocks(text):
+            if key == ref:
+                blk = text[start:end]
+                i = blk.index('(at ')
+                j = blk.index(')', i)
+                blk = blk[:i] + f'(at {x} {y}' + blk[j:]
+                text = text[:start] + blk + text[end:]
+                break
+    with tempfile.TemporaryDirectory() as tmp:
+        b = os.path.join(tmp, 'susp.kicad_pcb')
+        open(b, 'w', encoding='utf-8').write(text)
+        doc = fp.emit_intent(parse_kicad_pcb(b), b, declare_classes=True)
+        sus = [c for c in doc['edge_connectors'] if c.get('suspect')]
+        assert sus, [c.get('note') for c in doc['edge_connectors']]
+        assert 'oob_count' not in (doc.get('legality_budget') or {}), doc
+        held = (doc.get('context') or {}).get('budget_withheld') or {}
+        assert 'SUSPECT' in held.get('oob_count', ''), held
+    print("  PASS: a SUSPECT connector withholds oob_count and says why")
 
 
 def test_ledger_statuses_say_what_the_roster_says():
@@ -744,6 +781,7 @@ TESTS = [
     test_a_plan_that_drops_brief_declarations_is_refused_at_p1,
     test_a_malformed_brief_refuses_p1,
     test_the_withheld_debt_is_read_off_the_budget,
+    test_a_suspect_overhang_records_why_oob_count_is_withheld,
     test_ledger_statuses_say_what_the_roster_says,
     test_a_stale_only_plan_opens_with_the_true_sentence,
     test_the_roster_runs_last_at_p1,

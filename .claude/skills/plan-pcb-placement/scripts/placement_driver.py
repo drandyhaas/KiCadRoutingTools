@@ -1553,9 +1553,11 @@ def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path,
                 (drifted[r].message.split(' -- ')[0]
                  if r in drifted else f"{r} is not locked")
                 for r in owed_m)
-            + '. A declared pose is a recorded fact, and the grade compiles '
-            'an anchor at exactly that pose from the file itself -- whatever '
-            'the plan says. Only a FILE lock keeps the seeder off a part, and '
+            + '. A declared pose is a recorded fact: for a part with pads '
+            'the grade compiles an anchor at exactly that pose from the file '
+            'itself, whatever the plan says, and any part that drifted or '
+            'turned is an ERROR. Only a FILE lock keeps the seeder off a '
+            'part, and '
             'measured, it cannot seat one at an exact pose. Put each where '
             'the declaration says and lock it there:\n'
             # A part locked where it should not be takes TWO calls: one

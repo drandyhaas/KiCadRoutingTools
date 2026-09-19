@@ -222,7 +222,14 @@ def load_mechanical(path: str) -> Dict[str, object]:
             'rot': None if rot is None else _num(
                 rot, f'fixed[{i}].rot') % 360.0,
             'reason': str(row.get('reason') or '')}
-    if not poses and not edges:
+    if not poses and not edges and not (
+            raw.get('kind') == 'mechanical-declaration'
+            and isinstance(raw.get('refs'), dict)):
+        # The stager's own `kind` + an empty `refs` map is a DECLARATION
+        # that the board has no mechanical parts, and it is written on 9 of
+        # the 22 corpus boards; refusing it dead-ended every unaided run on
+        # them (round-2 verifier). A hand-written file whose sections are
+        # all empty says nothing, and that stays refused.
         raise MechanicalError(
             f"{path}: declares no pose and no edge -- a mechanical "
             f"declaration that says nothing would grade as 'no mechanical "
@@ -232,6 +239,28 @@ def load_mechanical(path: str) -> Dict[str, object]:
     return {'path': os.path.abspath(path), 'sha256': _sha256(path),
             'shape': shape, 'poses': poses, 'edges': edges,
             'floors': floors}
+
+
+def brief_authority(brief_path: Optional[str], board_path: str):
+    """`(authority, why)` for the design brief's values.
+
+    `declared` -- a human's -- except under an unaided regime that did not
+    record the brief at staging: there the placement skill's P-brief stage
+    has the RUN write it, so it is the run's reading of the requirements, a
+    hypothesis. The round-2 verifier laundered a moved mechanical ref past P1
+    and the grade with one such row (`Ref*` declared on the north edge beat
+    the recorded pose, which then anchored nothing). A manifest that records
+    `brief_sha256` vouches for the brief it names, byte for byte."""
+    man = regime_manifest(board_path)
+    if not isinstance(man, dict):
+        return 'declared', 'no unaided regime governs this board'
+    rec = man.get('brief_sha256')
+    if rec and brief_path and os.path.isfile(brief_path) \
+            and _sha256(brief_path) == rec:
+        return 'declared', 'recorded at staging by the unaided regime'
+    return 'hypothesis', ('written during an unaided run -- the regime '
+                          'recorded no brief at staging, so it is the run\'s '
+                          'reading of the requirements, not a declaration')
 
 
 def regime_manifest(board_path: str):
@@ -431,8 +460,10 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
                       for c in (intent_doc or {}).get('edge_connectors')
                       or [] if c.get('ref') and c.get('edge')}
     intent_edges = {r: c.get('edge') for r, c in intent_entries.items()}
+    brief_auth, brief_auth_why = brief_authority(brief_source, board_path)
     if brief_source and os.path.isfile(brief_source):
-        brief_source = f"{brief_source} (sha256 {_sha256(brief_source)})"
+        brief_source = (f"{brief_source} (sha256 {_sha256(brief_source)}; "
+                        f"{brief_auth_why})")
     mech = mechanical or {}
     prov, prov_why, staged_locks = ((None, None, None) if not mech else
                                     mechanical_provenance(mech, board_path))
@@ -460,7 +491,7 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
         entry = brief_entries.get(ref) or intent_entries.get(ref)
         if ref in brief_edges:
             values['brief'] = {'value': brief_edges[ref],
-                               'authority': 'declared',
+                               'authority': brief_auth,
                                'source': brief_source}
         if ref in (mech.get('edges') or {}):
             values['mechanical'] = {'value': mech['edges'][ref],
@@ -477,8 +508,10 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
             values['intent'] = {
                 'value': ie,
                 # Per value: an intent carrying the brief's own value is
-                # carrying a declaration; anything else is the run's guess.
-                'authority': ('declared' if brief_edges.get(ref) == ie
+                # carrying what the brief is -- a declaration, or under an
+                # unaided regime the run's own reading; anything else is the
+                # run's guess.
+                'authority': (brief_auth if brief_edges.get(ref) == ie
                               else 'hypothesis'),
                 'source': intent_source}
         values['board'] = {'value': _edge_of(geo.seat_rect(ref, entry),
@@ -667,15 +700,14 @@ def anchor_blocks(pcb, board_path: str, mechanical: Dict, *,
         if part is None:
             skipped[ref] = 'the placement state carries no geometry for it'
             continue
-        # A declaration with no `rot` constrains the POSITION only, so the
-        # zone must hold the part at every rotation it may take there -- the
-        # four lattice rotations and the board's own. Building it at the
-        # current rotation pinned a rotation the file never declared (the
-        # Phase-3 verifier turned CON2 90 degrees in place and got a 7.62 mm
-        # zone_containment ERROR while mechanical_drift correctly said nothing).
+        # A declaration with no `rot` constrains the POSITION only. The
+        # anchor is compiled at GRADE time from the board being graded, so
+        # the part's CURRENT rotation is the one to hold it at: that pins no
+        # rotation (the part is always at its own) and stays as tight as a
+        # declared one. The union over all rotations this replaced admitted
+        # a 16 mm move of kit-dev's SW_ONOFF201 (round-2 verifier).
         rots = ([p['rot']] if p['rot'] is not None else
-                sorted({0.0, 90.0, 180.0, 270.0,
-                        (fp.rotation or 0.0) % 360.0}))
+                [(fp.rotation or 0.0) % 360.0])
         b0 = part.bounds_by_rot[0.0]
         rects = []
         for rot in rots:

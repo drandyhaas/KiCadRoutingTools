@@ -386,13 +386,20 @@ def test_the_area_bound_is_sound_for_the_grade():
     parts and ignored that the grade allows declared overlap. And the
     skips that keep false ERRORs out, each pinned (M4, M12, M13 survived)."""
     glas = os.path.join(REPO, 'kicad_files', 'glasgow_revC.kicad_pcb')
-    raw = _raw(blocks=[{'name': 'mk', 'refs': ['MK1', 'FID1'],
-                        'zone': [49, 111, 59, 121], 'tolerance_mm': 0}],
-               legality_budget={'overlap_area': 0})
-    found, meas = _check(raw, glas)
-    assert not [v for v in found if v.rule == 'plan_zone_overfull'], found
-    row = [z for z in meas['zones'] if z['block'] == 'mk'][0]
-    assert 'MK1' not in row['members'], row
+    gpcb = parse_kicad_pcb(glas)
+    # Every member counts, locked ones too -- the grade counts a locked
+    # pair's overlap -- so glasgow's MK1 + FID1 read as the board has them:
+    # clean at the board's own budget, an ERROR at 0 (they DO overlap).
+    own = fp.emit_intent(gpcb, glas)['legality_budget'].get('overlap_area')
+    for budget, want in ((own, []), (0, ['error'])):
+        if budget is None:
+            continue
+        raw = _raw(blocks=[{'name': 'mk', 'refs': ['MK1', 'FID1'],
+                            'zone': [49, 111, 59, 121], 'tolerance_mm': 0}],
+                   legality_budget={'overlap_area': budget})
+        found, meas = _check(raw, glas)
+        got = [v.severity for v in found if v.rule == 'plan_zone_overfull']
+        assert got == want, (budget, got, meas['zones'])
     # ulx3s GPDI1 in the zone of its own courtyard, with the B-side parts
     # under its lead field (the verifier's counterexample): the far-face
     # charge is real overlap the grade counts, so at budget 0 it is an
@@ -432,9 +439,9 @@ def test_the_area_bound_is_sound_for_the_grade():
         row = meas['zones'][0]
         assert row['members'] == [] and not [
             v for v in found if v.rule == 'plan_zone_overfull'], (row, found)
-    print("  PASS: glasgow's locked MK1 is not charged; GPDI1's far face is "
-          "an ERROR at budget 0 and not at the shipped budget; waived and "
-          "anchor-graded members are skipped")
+    print("  PASS: glasgow's locked MK1+FID1 pass at the board's own "
+          "budget; GPDI1's far face is an ERROR at budget 0 and not at a "
+          "covering budget; waived and anchor-graded members are skipped")
 
 
 def test_the_edge_bound_reads_pads_not_courtyards():
@@ -496,7 +503,8 @@ def test_the_board_area_bound_is_per_face():
         parts = [(f'U{i}', 2 + 4 * (i % 4), 2 + 4 * (i // 4) % 8, big)
                  for i in range(16)]
         b = _board(tmp, 'b.kicad_pcb', parts)
-        found, _ = _check(_raw(legality_budget={'overlap_area': 0}), b)
+        found, _ = _check(_raw(legality_budget={'overlap_area': 0,
+                                                'oob_count': 0}), b)
         e = [v for v in found if v.rule == 'plan_board_overfull']
         assert e and e[0].measured['utilisation'] > 1.0, found
         assert 'None' not in e[0].message, e[0].message
@@ -711,8 +719,147 @@ def test_plan_check_refuses_no_emitted_corpus_intent():
     print(f"  PASS: plan_check refuses none of {n} emitted corpus intents")
 
 
+
+
+def test_round2_the_plan_errors_track_the_grade():
+    """Round-2 verifier on Phase 4: an exclusive zone whose owners the grade
+    cannot see (BLOCKING), a lead field reaching past its courtyard, a
+    demoted zone rule, a part allowed off the board, and a locked part that
+    already fills a zone -- each was a plan ERROR the grade disagreed with,
+    or the reverse."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # A zone exclusive to a courtyard-less logo grades nobody.
+        b = os.path.join(tmp, 'logo.kicad_pcb')
+        text = open(_fab_board(tmp), encoding='utf-8').read().replace(
+            '(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 '
+            '"/A") (uuid "p0-M1"))', '').replace(
+            '(fp_rect (start -1 -1) (end 1 1) (stroke (width 0.1) (type '
+            'solid)) (fill none) (layer "F.CrtYd") (uuid "F.CrtYd-M1"))', '')
+        open(b, 'w', encoding='utf-8').write(text)
+        assert not parse_kicad_pcb(b).footprints['M1'].pads
+        found, _ = _check(_raw(blocks=[
+            {'name': 'B', 'refs': ['P1'], 'zone': [7, 7, 13, 13],
+             'tolerance_mm': 0},
+            {'name': 'A', 'refs': ['M1'], 'zone': [0, 0, 40, 40],
+             'exclusive': True, 'tolerance_mm': 0}]), b)
+        assert not [v for v in found
+                    if v.rule == 'plan_zone_exclusive_unsatisfiable'], found
+        # A demoted zone rule demotes the plan finding that stands for it.
+        fb = _fab_board(tmp)
+        inside = [{'name': 'B', 'refs': ['P1'], 'zone': [8, 14, 12, 29],
+                   'tolerance_mm': 0},
+                  {'name': 'A', 'refs': ['M1'], 'zone': [5, 13, 15, 30],
+                   'exclusive': True, 'tolerance_mm': 0}]
+        for sev_map, want in (({}, 'error'),
+                              ({'zone_exclusive': 'warn'}, 'warn'),
+                              ({'zone_containment': 'warn'}, 'warn'),
+                              ({'zone_exclusive': 'warn',
+                                'plan_zone_exclusive_unsatisfiable': 'error'},
+                               'error')):
+            found, _ = _check(_raw(blocks=inside, severity=sev_map), fb)
+            got = [v.severity for v in found
+                   if v.rule == 'plan_zone_exclusive_unsatisfiable']
+            assert got == [want], (sev_map, got)
+        # A 45-degree pile rotation reaches the check and passes on the
+        # 0-degree lattice (the round-1 arm never overlapped A).
+        text = open(fb, encoding='utf-8').read().replace(
+            '(uuid "fp-P1") (at 10 10)', '(uuid "fp-P1") (at 10 10 45)')
+        open(fb, 'w', encoding='utf-8').write(text)
+        room = [{'name': 'B', 'refs': ['P1'], 'zone': [7.9, 8.0, 12.1, 15.0],
+                 'tolerance_mm': 0},
+                {'name': 'A', 'refs': ['M1'], 'zone': [5, 13, 15, 30],
+                 'exclusive': True, 'tolerance_mm': 0}]
+        found, _ = _check(_raw(blocks=room), fb)
+        assert any(v.rule == 'intent_zone_overlap' for v in found), found
+        assert not [v for v in found
+                    if v.rule == 'plan_zone_exclusive_unsatisfiable'], found
+        # A locked part that already fills a zone, plus a free member: no
+        # arrangement fits both at budget 0 -- the ERROR the locked
+        # exclusion had lost.
+        lb = _board(tmp, 'fill.kicad_pcb',
+                    [('L1', 10, 7.5, [(0, 0, 10, 5)], True),
+                     ('U2', 30, 5, [(0, 0, 10, 5)])], w=40, h=20)
+        found, _ = _check(_raw(blocks=[{'name': 'z', 'refs': ['L1', 'U2'],
+                                        'zone': [5, 5, 15, 10],
+                                        'tolerance_mm': 0}],
+                               legality_budget={'overlap_area': 0}), lb)
+        assert [v.severity for v in found
+                if v.rule == 'plan_zone_overfull'] == ['error'], found
+        # The board bound needs every part kept ON the board.
+        big = [(dx, dy, 0.9, 0.9) for dx in range(4) for dy in range(4)]
+        parts = [(f'U{i}', 2 + 4 * (i % 4), 2 + 4 * (i // 4) % 8, big)
+                 for i in range(16)]
+        bb = _board(tmp, 'bb.kicad_pcb', parts)
+        for budget, want in (({'overlap_area': 0}, []),
+                             ({'overlap_area': 0, 'oob_count': 3}, []),
+                             ({'overlap_area': 0, 'oob_count': 0},
+                              ['error']),
+                             ({'overlap_area': 1e6, 'oob_count': 0}, [])):
+            found, _ = _check(_raw(legality_budget=budget), bb)
+            got = [v.severity for v in found
+                   if v.rule == 'plan_board_overfull']
+            assert got == want, (budget, got)
+        # One-face assembly: the other WARN branch (M19).
+        found, _ = _check(_raw(assembly={'sides': 'F'}), bb)
+        w = [v for v in found if v.rule == 'plan_board_crowded']
+        assert any('assembly policy' in v.message for v in w), found
+        # A WARN half honours the severity map (N11/N16).
+        found, _ = _check(_raw(severity={'plan_board_crowded': 'error'}), bb)
+        assert 'error' in [v.severity for v in found
+                           if v.rule == 'plan_board_crowded'], found
+    print("  PASS: an invisible-owner exclusive zone, demoted zone rules, a "
+          "45-degree pile, a locked fill, off-board allowance and the "
+          "one-face WARN each read as the grade would")
+
+
+def test_round2_the_far_face_charge_is_what_the_courtyard_confines():
+    """A drilled-pad rect reaching past its courtyard may sit outside the
+    zone, so only its part inside the courtyard is charged."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'tht.kicad_pcb')
+        pads = ''.join(
+            f'    (pad "{i + 1}" thru_hole circle (at {x} 0) (size 1 1) '
+            f'(drill 0.6) (layers "*.Cu") (net 1 "/A") (uuid "t{i}"))\\n'
+            for i, x in enumerate((-5.5, 5.5)))
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(
+                '(kicad_pcb (version 20241229) (generator "test")\\n'
+                '  (net 0 "")\\n  (net 1 "/A")\\n'
+                '  (gr_rect (start 0 0) (end 40 40) (layer "Edge.Cuts") '
+                '(uuid "e1"))\\n'
+                '  (footprint "t:T" (layer "F.Cu") (uuid "fp-P1") '
+                '(at 20 20)\\n    (property "Reference" "P1" (at 0 0))\\n'
+                '    (fp_rect (start -5 -2) (end 5 2) (stroke (width 0.05) '
+                '(type solid)) (fill none) (layer "F.CrtYd") (uuid "c1"))\\n'
+                + pads + '  )\\n'
+                + ''.join(
+                    f'  (footprint "t:Q" (layer "B.Cu") (uuid "fp-{q}") '
+                    f'(at {x} 20)\\n    (property "Reference" "{q}" '
+                    f'(at 0 0))\\n    (pad "1" smd rect (at 0 0) (size 5 3) '
+                    f'(layers "B.Cu") (net 1 "/A") (uuid "{q}p"))\\n  )\\n'
+                    for q, x in (('Q1', 17.5), ('Q2', 22.5)))
+                + ')\\n')
+        # The zone IS P1's 10 x 4 courtyard. On B, Q1 + Q2 take 30 mm2 and
+        # the leads 10 of the 12 their drill rect spans: 40 of 40, which
+        # fits. Charging the whole 12 x 1 drill rect read 42.
+        found, meas = _check(_raw(blocks=[{'name': 'z',
+                                           'refs': ['P1', 'Q1', 'Q2'],
+                                           'zone': [15, 18, 25, 22],
+                                           'tolerance_mm': 0}],
+                                  legality_budget={'overlap_area': 0}),
+                             path)
+        row = meas['zones'][0]
+        assert sorted(row['members']) == ['P1', 'Q1', 'Q2'], row
+        assert not [v for v in found if v.rule == 'plan_zone_overfull'], (
+            found, meas['zones'])
+    print("  PASS: a lead field wider than its courtyard is charged only "
+          "inside it")
+
+
 TESTS = [
     test_run29_lap5_overlaps_are_warnings_not_errors,
+    test_round2_the_plan_errors_track_the_grade,
+    test_round2_the_far_face_charge_is_what_the_courtyard_confines,
     test_the_exclusive_check_reads_the_grades_geometry,
     test_exclusive_infeasibility_is_the_one_error,
     test_a_literal_glob_is_an_error_only_when_it_double_zones,

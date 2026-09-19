@@ -694,6 +694,13 @@ def test_p1_refuses_the_run29_move_the_plan_never_anchored():
                          run_utils.tool('place_pose.py'), b, b, 'set', 'Ref*',
                          '115.6', '92.2', 'lock', 'Ref*', 'lock', 'Ref*~2'],
                         accept=True)
+        # USB1 LOST its edge to the brief, so its mechanical pose is not a
+        # target: moved off it (parked clear of Ref*'s declared pose), it must not be
+        # demanded back (a lost ref is skipped by the drift check too).
+        run_utils.check([sys.executable, '-X', 'utf8',
+                         run_utils.tool('place_pose.py'), b, b, 'set', 'USB1',
+                         '125', '104', '--rot', '180', '--force'],
+                        accept=True)
         argv = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
                 '--board', b, '--zone-plan', pp,
                 '--waive', 'seed-connectors:the probe hands them over']
@@ -807,6 +814,16 @@ def test_stale_contradiction_answers_agree_between_grader_and_p1():
                          'P1', '--board', board, '--zone-plan', p],
                         refuse='dispositions.contradictions.BOGUS:edge '
                                'answers no contradiction', code=4)
+        # ...and the GRADE path, not only --plan-only.
+        r = subprocess.run([sys.executable, '-X', 'utf8', _check(), board,
+                            '--intent', p],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', cwd=REPO, timeout=900)
+        line = [x for x in r.stdout.splitlines()
+                if x.startswith('JSON_SUMMARY:')][-1]
+        s = json.loads(line.split('JSON_SUMMARY: ', 1)[1])
+        assert any('contradictions.BOGUS:edge' in x
+                   for x in s['stale_dispositions']), s['stale_dispositions']
     print("  PASS: a stale contradiction answer is named by the grader and "
           "refused by P1 alike")
 
@@ -901,12 +918,229 @@ def test_p1_refuses_plan_drift_and_honours_a_named_waiver():
         run_utils.check(argv + ['--waive',
                                 f'brief-clause:{cid}:the enclosure moved'],
                         accept=True)
+        # With a second dropped clause, waiving the first leaves the second
+        # refused, by name.
+        with open(os.path.join(d, 'board.design-brief.json'), 'w',
+                  encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                       'board': 'board.kicad_pcb',
+                       'interfaces': [{'ref': 'U2', 'edge': 'east',
+                                       'user_facing': True}],
+                       'proximity': [{'ref': 'U1', 'near': 'U2',
+                                      'max_mm': 5.0, 'requirement': 'R',
+                                      'why': 'test'}]}, fh)
+        r = run_utils.check(argv + ['--waive',
+                                    f'brief-clause:{cid}:the enclosure moved'],
+                            refuse='drops or contradicts 1 clause(s)',
+                            code=4)
+        assert 'proximity[' in r.stdout and cid not in r.stdout.split(
+            'of the design brief:')[1].split('The brief is')[0], r.stdout
     print(f"  PASS: P1 refuses a plan that drifts from the brief ({cid}) and "
           "passes it once waived by name with a reason")
 
 
+
+
+def test_round2_the_stagers_empty_declaration_is_a_declaration():
+    """Round-2 BLOCKING 1: `stage_unaided` writes `refs: {}` for a board with
+    no mechanical parts (9 of 22 corpus boards), the loader refused it, and
+    the regime refused every remedy -- every unaided run on those boards
+    dead-ended. A hand-written empty file is still refused."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, 'm.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'mechanical-declaration',
+                       'refs': {}, 'reasons': {}, 'note': 'x'}, fh)
+        m = R.load_mechanical(p)
+        assert m['poses'] == {} and m['edges'] == {}, m
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump({'refs': {}}, fh)
+        try:
+            R.load_mechanical(p)
+        except R.MechanicalError:
+            pass
+        else:
+            raise AssertionError('a kind-less empty refs map loaded')
+        wd = os.path.join(tmp, 'wd')
+        run_utils.check([sys.executable, '-X', 'utf8',
+                         os.path.join(REPO, 'tests', 'stress',
+                                      'stage_unaided.py'),
+                         os.path.join(REPO, 'kicad_files',
+                                      'cap_chain.kicad_pcb'), wd],
+                        accept=True)
+        run_utils.check([sys.executable, '-X', 'utf8', _check(),
+                         os.path.join(wd, 'board.kicad_pcb'),
+                         '--emit-intent', os.path.join(tmp, 'i.json'),
+                         '--allow-unplaced'], accept=True)
+    print("  PASS: the stager's empty declaration loads, and a staged board "
+          "with no mechanical parts emits; a kind-less empty file is refused")
+
+
+def test_round2_a_brief_written_in_the_run_cannot_outrank_the_record():
+    """Round-2 BLOCKING 2: under an unaided regime the placement skill has the
+    RUN write the brief, so one brief row declaring `Ref*` on another edge
+    beat the recorded mechanical pose and unanchored it. The brief is the
+    run's reading there -- a hypothesis -- unless the manifest recorded it."""
+    from placement import provenance as PV
+    with tempfile.TemporaryDirectory() as tmp:
+        wd, b, mp = _stage_regime(tmp)
+        bp = os.path.join(wd, 'board.design-brief.json')
+        with open(bp, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                       'board': 'board.kicad_pcb',
+                       'interfaces': [{'ref': 'Ref*', 'edge': 'north'}]}, fh)
+        from placement import design_brief as db
+        frag, _ = db.compile_brief(db.load_brief(bp),
+                                   board_refs=sorted(parse_kicad_pcb(
+                                       b).footprints))
+        m = R.load_mechanical(mp)
+
+        def row():
+            rows = {r['id']: r for r in R.reconcile(
+                parse_kicad_pcb(b), b, brief_fragment=frag, brief_source=bp,
+                mechanical=m)}
+            return rows.get('Ref*:edge'), R.lost_mechanical_refs(
+                list(rows.values()))
+        r, lost = row()
+        assert r['values']['brief']['authority'] == 'hypothesis', r
+        assert r['kind'] == 'drift' and r['winner'] == 'mechanical', r
+        assert 'Ref*' not in lost, lost
+        # A manifest that recorded this brief at staging makes it a
+        # declaration again -- and then a contradiction to acknowledge.
+        man_p = os.path.join(wd, PV.REGIME_NAME)
+        man = json.load(open(man_p, encoding='utf-8'))
+        man['brief_sha256'] = R._sha256(bp)
+        json.dump(man, open(man_p, 'w', encoding='utf-8'))
+        r, lost = row()
+        assert r['values']['brief']['authority'] == 'declared', r
+        assert r['kind'] == 'contradiction', r
+    print("  PASS: a brief the run wrote is a hypothesis the record outranks; "
+          "one the regime recorded is a declaration")
+
+
+def test_round2_a_moved_run_dir_keeps_its_declaration():
+    """Round-2 SHOULD-FIX: the regime bound an absolute path, so an archived
+    or relocated run dir exited 2 with a sha-matching file beside it."""
+    import shutil as _sh
+    with tempfile.TemporaryDirectory() as tmp:
+        wd, b, mp = _stage_regime(tmp)
+        wd2 = os.path.join(tmp, 'moved')
+        _sh.move(wd, wd2)
+        b2 = os.path.join(wd2, 'board.kicad_pcb')
+        r = run_utils.check([sys.executable, '-X', 'utf8', _check(), b2,
+                             '--emit-intent', os.path.join(tmp, 'x.json'),
+                             '--allow-unplaced'], accept=True)
+        assert os.path.join(wd2, 'mechanical.json') in r.stdout, r.stdout[
+            :1200]
+        # ...and a relocated file with OTHER bytes is still refused.
+        with open(os.path.join(wd2, 'mechanical.json'), 'a',
+                  encoding='utf-8') as fh:
+            fh.write(' ')
+        run_utils.check([sys.executable, '-X', 'utf8', _check(), b2,
+                         '--emit-intent', os.path.join(tmp, 'y.json'),
+                         '--allow-unplaced'],
+                        refuse='is gone -- restore it', code=2)
+    print("  PASS: a moved run dir reads its sha-matching declaration; other "
+          "bytes are refused")
+
+
+def test_round2_turns_and_padless_drift_are_errors_and_the_anchor_is_tight():
+    """Round-2 SHOULD-FIX: a symmetric body sits inside its anchor turned 180
+    (68 of 97 corpus refs), so a turn must be an ERROR on its own; a pad-less
+    ref has no anchor, so its drift must be too. And an anchor with no
+    declared `rot` is built at the part's current rotation -- the union over
+    rotations admitted a 16 mm move."""
+    pcb0 = parse_kicad_pcb(ESP)
+    con2 = pcb0.footprints['CON2']
+    logo = sorted(k for k, f in pcb0.footprints.items() if not f.pads)[0]
+    lf = pcb0.footprints[logo]
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _stage(tmp, brief=None)
+        mp = os.path.join(tmp, 'm.json')
+        with open(mp, 'w', encoding='utf-8') as fh:
+            json.dump({'fixed': [
+                {'ref': 'CON2', 'x': con2.x, 'y': con2.y},
+                {'ref': 'Ref*', 'x': pcb0.footprints['Ref*'].x,
+                 'y': pcb0.footprints['Ref*'].y,
+                 'rot': (pcb0.footprints['Ref*'].rotation or 0) % 360},
+                {'ref': logo, 'x': lf.x + 3.0, 'y': lf.y}]}, fh)
+        m = R.load_mechanical(mp)
+        _move(b, 'CON2', dy=6.0)
+        _move(b, 'Ref*', drot=180)
+        res = fp.grade(fp.intent_from_dict(_raw_intent(), ''),
+                       parse_kicad_pcb(b), b, mechanical=m)
+        zc, _ = _mech_findings(res, 'CON2')
+        assert zc and zc[0].severity == 'error', res.violations
+        _zc, md = _mech_findings(res, 'Ref*')
+        assert md and md[0].severity == 'error', md
+        _zc, md = _mech_findings(res, logo)
+        assert md and md[0].severity == 'error', md
+    print("  PASS: CON2 (no rot) moved 6 mm is an anchor ERROR; a 180-degree "
+          "turn and a pad-less drift are drift ERRORs")
+
+
+def test_round2_old_manifests_and_ledger_statuses():
+    """Mutation survivors: the sha-verified fallback for a manifest recorded
+    before `staged_lock_poses`, the reconciliation ledger statuses, floors
+    REPORT rows kept out of the ledger's carried facts, and the grade path's
+    stale contradiction answers."""
+    from placement import provenance as PV
+    with tempfile.TemporaryDirectory() as tmp:
+        wd, b, mp = _stage_regime(tmp)
+        man_p = os.path.join(wd, PV.REGIME_NAME)
+        pose = [sys.executable, '-X', 'utf8', run_utils.tool('place_pose.py'),
+                b, b]
+        run_utils.check(pose + ['lock', 'Ref*'], accept=True)
+        man = json.load(open(man_p, encoding='utf-8'))
+        man.pop('staged_lock_poses', None)
+        json.dump(man, open(man_p, 'w', encoding='utf-8'))
+        # The staged board changed (the lock), so nothing vouches for it.
+        assert R.staged_lock_poses(man) is None
+        # Were the sha still the recorded one, its locks WOULD be pre-run.
+        man['staged_sha256'] = R._sha256(b)
+        assert 'Ref*' in (R.staged_lock_poses(man) or {}), man
+    it = fp.intent_from_dict(_raw_intent(dispositions={'contradictions': {
+        'X:edge': 'the brief holds'}}), '')
+    rows = [{'id': 'X:edge', 'ref': 'X', 'field': 'edge',
+             'kind': 'contradiction', 'winner': 'brief',
+             'values': {'brief': {'value': 'east', 'authority': 'declared'},
+                        'mechanical': {'value': 'west',
+                                       'authority': 'recorded_fact'}},
+             'why': ''},
+            {'id': 'Y:edge', 'ref': 'Y', 'field': 'edge',
+             'kind': 'contradiction', 'winner': 'brief',
+             'values': {'brief': {'value': 'east', 'authority': 'declared'},
+                        'mechanical': {'value': 'west',
+                                       'authority': 'recorded_fact'}},
+             'why': ''},
+            {'id': 'Z:edge', 'ref': 'Z', 'field': 'edge', 'kind': 'drift',
+             'winner': 'brief',
+             'values': {'brief': {'value': 'east', 'authority': 'declared'},
+                        'board': {'value': 'west', 'authority': 'inferred'}},
+             'why': ''},
+            {'id': 'floors:clearance', 'ref': None, 'field': 'floors.x',
+             'kind': 'report', 'winner': 'graded',
+             'values': {'graded': {'value': 0.25,
+                                   'authority': 'assumption'}},
+             'why': ''}]
+    led = {x['id']: x for x in fp.declaration_ledger(it, [],
+                                                     reconciliation=rows)}
+    assert led['reconcile:X:edge']['status'] == 'dispositioned', led
+    assert led['reconcile:Y:edge']['status'] == 'graded_fail', led
+    assert led['reconcile:Z:edge']['status'] == 'pending', led
+    assert 'reconcile:floors:clearance' not in led, sorted(led)
+    print("  PASS: an old manifest's locks count only while its sha holds; "
+          "the ledger reads acknowledged, open and board-only rows apart, "
+          "and a floor assumption is not a carried fact")
+
+
 TESTS = [
     test_both_shapes_load_and_a_stranger_is_refused,
+    test_round2_the_stagers_empty_declaration_is_a_declaration,
+    test_round2_a_brief_written_in_the_run_cannot_outrank_the_record,
+    test_round2_a_moved_run_dir_keeps_its_declaration,
+    test_round2_turns_and_padless_drift_are_errors_and_the_anchor_is_tight,
+    test_round2_old_manifests_and_ledger_statuses,
     test_the_loader_refuses_every_stranger,
     test_a_plan_cannot_carry_or_claim_an_anchor,
     test_the_grade_anchors_from_the_file_whatever_the_plan_says,

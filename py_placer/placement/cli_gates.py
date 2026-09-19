@@ -95,6 +95,33 @@ def add_mechanical_arg(parser) -> None:
              "The OFF arm for an auto-discovered input (#959)")
 
 
+def _same(a: str, b: str) -> bool:
+    """Two spellings of one path, compared the way the filesystem does
+    (case-folded on Windows)."""
+    import os
+    return (os.path.normcase(os.path.abspath(a))
+            == os.path.normcase(os.path.abspath(b)))
+
+
+def _relocated(recorded: str, sha: str, board_path: str):
+    """The recorded mechanical file under its new home, if the run dir
+    moved: the same basename beside the regime manifest or beside the board,
+    with the recorded sha. None otherwise -- a file with other bytes is not
+    the declaration, whatever it is called."""
+    import os
+    from placement import provenance as PV
+    from placement import reconcile
+    if not sha:
+        return None
+    wd = PV.regime_for(board_path)
+    cands = [os.path.join(wd, os.path.basename(recorded)) if wd else None,
+             reconcile.discover_mechanical(board_path) or None]
+    for c in cands:
+        if c and os.path.isfile(c) and reconcile._sha256(c) == sha:
+            return c
+    return None
+
+
 def load_mechanical_or_exit(args, board_path: str):
     """(mechanical, path, exit_code). `exit_code` is 2 when an explicit
     `--mechanical` names nothing, or the file found is not a mechanical
@@ -121,12 +148,22 @@ def load_mechanical_or_exit(args, board_path: str):
             why = ("--no-mechanical: the unaided regime governing this board "
                    f"recorded {recorded} as an input at staging, and a "
                    "recorded input cannot be switched off")
-        elif asked and os.path.abspath(asked) != os.path.abspath(recorded):
+        elif asked and _same(asked, recorded) is False:
             why = (f"--mechanical {asked}: the unaided regime recorded "
                    f"{recorded} at staging; another file is not it")
         elif not os.path.isfile(recorded):
-            why = (f"the mechanical declaration the unaided regime recorded "
-                   f"at staging, {recorded}, is gone -- restore it")
+            # A run dir that was MOVED keeps its bytes: the file beside the
+            # regime manifest, or beside the board, with the recorded sha is
+            # the same declaration (round-2 verifier: an archived run exited
+            # 2 with the file sitting right there).
+            found = _relocated(recorded, man.get('mechanical_sha256'),
+                               board_path)
+            if found:
+                recorded = found
+            else:
+                why = (f"the mechanical declaration the unaided regime "
+                       f"recorded at staging, {recorded}, is gone -- "
+                       f"restore it")
         if why:
             print(f"cannot use the mechanical declaration: {why}",
                   file=sys.stderr)

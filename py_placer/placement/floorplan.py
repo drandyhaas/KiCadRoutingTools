@@ -1176,9 +1176,15 @@ def mechanical_drift(intent: Intent, pcb_data, mechanical: Dict, *,
         what = ' and '.join(x for x in (
             f"{dist:.3f}mm from" if moved else '',
             f"turned {drot:.1f} deg from" if turned else '') if x)
+        # WARN where the anchor already reports the move as an ERROR; an
+        # ERROR where nothing else can see it -- a TURN (a symmetric body
+        # sits inside its anchor turned 180: 68 of 97 anchored corpus refs)
+        # and ANY drift of a pad-less ref, which is never anchored.
+        default = ERROR if (turned or not fp.pads) else WARN
         out.append(Violation(
             rule='mechanical_drift',
-            severity=intent.severity_of('mechanical_drift', WARN), ref=ref,
+            severity=intent.severity_of('mechanical_drift', default),
+            ref=ref,
             message=(f"{ref} is {what} its declared mechanical pose "
                      f"({p['x']:.3f}, {p['y']:.3f}"
                      + (f", {p['rot']:.1f}" if p.get('rot') is not None
@@ -1227,6 +1233,8 @@ def mechanical_anchor_violations(pcb_data, pcb_file: str, mechanical: Dict,
     if state is None:
         import pose_score
         state = pose_score.make_state(pcb_data, pcb_file)
+    if outline is None:
+        outline = outline_state(pcb_data, pcb_file)
     ctx = _Ctx(it, pcb_data, pcb_file, state, blocks, set(locked), outline)
     return [dataclasses.replace(
         v, message=(f"{v.message} -- the anchor is {v.ref}'s declared pose "
@@ -4335,9 +4343,9 @@ _NON_RULE_SEVERITIES = frozenset({
     'proximity_unresolved',
     # #959 (#1001). Raised by `grade` itself when `mechanical.json` is read:
     # a part that moved off (or turned away from) its declared mechanical
-    # pose. WARN by default -- a mechanical anchor block grades the POSITION
-    # at ERROR through zone_containment; this is the rotation half, and the
-    # position half for a plan that carries no anchor.
+    # pose. WARN for a move the grade-time anchor already reports at ERROR
+    # (zone_containment on `mech:<ref>`); ERROR for a TURN, which no anchor
+    # sees, and for any drift of a pad-less ref, which has no anchor.
     'mechanical_drift',
     # #959 (#1000): raised BESIDE `edge_connector` -- the face a declared
     # viewing side puts a connector on. Settable only DOWN (an intent may
@@ -5305,6 +5313,17 @@ def grade_delta(before: Sequence[Violation],
     return out
 
 
+def _plan_severity(intent: Intent, name: str, needs) -> str:
+    """A plan-check ERROR stands for "the grade will fail", so it is only
+    an ERROR while every rule it stands for is one: a plan that demoted
+    `zone_containment` to warn is not refused for a zone its members may
+    leave (round-2 verifier). An explicit setting for the finding wins."""
+    if name in intent.severity:
+        return intent.severity[name]
+    return (ERROR if all(intent.severity_of(r) == ERROR for r in needs)
+            else WARN)
+
+
 def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
                             pcb_file: str = '', *, state=None
                             ) -> List[Violation]:
@@ -5325,8 +5344,11 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
     drawn .Fab body -- measured differing by more than 0.05 mm on 29 corpus
     parts (ulx3s U9 by 7 mm), so a satisfied board failed its own grade
     (Phase-4 verifier). A part the state does not carry is graded by neither
-    rule and is skipped here too. And ANY rotation: the part's own lattice and
-    the 0-degree one, since an author can turn a part the seeder would not.
+    rule and is skipped here too. And two rotation lattices: the part's own
+    and the 0-degree one,
+    since an author can turn a part the seeder would not. That is not every
+    angle, and it need not be for soundness: the part's current pose is on
+    its own lattice, so a board that grades clean always has a candidate.
     """
     out: List[Violation] = []
     excl = [z for z in intent.blocks if z.exclusive and z.rect is not None]
@@ -5346,6 +5368,13 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
                                           za.rect) <= legality.EPS:
                 continue
             owners = set(blocks.get(za.name, ()))
+            # #797's guard, exactly as `rule_zone_exclusive` applies it: an
+            # exclusive zone with no member the GRADE can see grades nobody,
+            # so it can make nothing unsatisfiable either (round-2 verifier:
+            # a zone exclusive to a courtyard-less logo refused a plan the
+            # grade passed).
+            if not (owners & set(state.parts)):
+                continue
             for ref in blocks.get(zb.name, ()):
                 if ref in owners:
                     continue
@@ -5372,8 +5401,9 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
                 v = dict(v, rotations=sorted(set(tried)))
                 out.append(Violation(
                     rule='plan_zone_exclusive_unsatisfiable',
-                    severity=intent.severity_of(
-                        'plan_zone_exclusive_unsatisfiable'),
+                    severity=_plan_severity(
+                        intent, 'plan_zone_exclusive_unsatisfiable',
+                        ('zone_containment', 'zone_exclusive')),
                     block=zb.name, ref=ref,
                     message=(f"{ref} must sit in zone {zb.name!r} but has no "
                              f"pose there, at any of "
@@ -5619,15 +5649,15 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     # (Bonferroni: union >= sum - pairwise), and the grade's overlap is that
     # pairwise sum over the whole board. ERROR only past a DECLARED budget;
     # with none, nothing bounds the overlap and it is a WARN about the seeder.
-    # FILE-locked members are not packed by anyone and are not charged: the
-    # Phase-4 verifier refused shipped boards on glasgow MK1+FID1 and on
-    # rp2350's locked container U8.
+    # EVERY member counts, locked ones included: the grade counts a locked
+    # pair's overlap too, so against the budget the sum is sound -- and
+    # dropping them lost a zone a locked part already fills (round-2
+    # verifier). A locked member outside its zone is `plan_fixed_outside_zone`.
     overlap_budget = (intent.legality_budget or {}).get('overlap_area')
     for z in intent.blocks:
         if z.rect is None:
             continue
-        members = [r for r in blocks.get(z.name, ())
-                   if r in state.parts and r not in ctx.locked]
+        members = [r for r in blocks.get(z.name, ()) if r in state.parts]
         if any(frozenset((a_, b_)) in waived
                for a_ in members for b_ in members if a_ < b_):
             continue
@@ -5650,9 +5680,14 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 (w + clr_used) * (h + clr_used))
             t0 = (part.tht_by_rot or {}).get(0.0)
             if t0 is not None:
+                # The drilled-pad rect's part INSIDE the courtyard: only the
+                # courtyard is confined to the zone, so a lead field reaching
+                # past it may sit outside the zone (round-2 verifier: a 12x1
+                # drill rect on a 10x4 courtyard was charged 2 mm2 the grade
+                # never counts). Pose-invariant, since both turn together.
                 far = 'B' if part.side == 'F' else 'F'
                 per_face[far] = per_face.get(far, 0.0) + (
-                    (t0[2] - t0[0]) * (t0[3] - t0[1]))
+                    legality.rect_overlap_area(t0, b0))
             counted.append(r)
         worst = max(per_face, key=lambda f_: per_face[f_])
         need = per_face[worst]
@@ -5666,10 +5701,11 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 and excess > float(overlap_budget) + legality.EPS):
             out.append(Violation(
                 rule='plan_zone_overfull',
-                severity=intent.severity_of('plan_zone_overfull'),
+                severity=_plan_severity(intent, 'plan_zone_overfull',
+                                        ('zone_containment', 'legality')),
                 block=z.name,
                 message=(f"zone {z.name!r} is {zarea:.2f}mm2 (with its "
-                         f"{tol}mm tolerance) and its {len(counted)} unlocked "
+                         f"{tol}mm tolerance) and its {len(counted)} "
                          f"member(s) on {worst}.Cu need {need:.2f}mm2 by "
                          f"courtyard alone: fitting them forces at least "
                          f"{excess:.2f}mm2 of courtyard overlap, over the "
@@ -5686,7 +5722,7 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 severity=intent.severity_of('plan_zone_crowded', WARN),
                 block=z.name,
                 message=(f"zone {z.name!r} is {zarea:.2f}mm2 and its "
-                         f"{len(counted)} unlocked member(s) on {worst}.Cu "
+                         f"{len(counted)} member(s) on {worst}.Cu "
                          f"need {need:.2f}mm2 by courtyard: they fit only by "
                          f"overlapping ({excess:.2f}mm2 at least), which the "
                          f"seeder never does -- it may leave some unseated"),
@@ -5778,11 +5814,18 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     # ERROR only when the forced overlap exceeds it.
     excess0 = ((m0.get('charged_area_mm2') or 0.0)
                - (m0.get('usable_area_mm2') or 0.0))
+    # ...and only while the plan also keeps every part ON the board: the
+    # grade confines parts to the outline through an `oob_count` budget of
+    # 0, and a part allowed off it takes its area with it (round-2
+    # verifier: two 8x8 parts on a 10x10 board graded clean with one off).
+    on_board = (intent.legality_budget or {}).get('oob_count') == 0
     if g0.get('fits_by_area') is False and overlap_budget is not None \
+            and on_board \
             and excess0 > float(overlap_budget) + legality.EPS:
         out.append(Violation(
             rule='plan_board_overfull',
-            severity=intent.severity_of('plan_board_overfull'),
+            severity=_plan_severity(intent, 'plan_board_overfull',
+                                    ('legality',)),
             message=(f"the parts do not fit on the board by AREA alone, "
                      f"even at zero clearance on the busiest face "
                      f"(utilisation {util0}): they force at least "
@@ -5801,9 +5844,10 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                      f"at zero clearance"
                      + ("" if g0.get('fits_by_area') is not False else
                         ", MORE than its usable area")
-                     + f" (the corpus's routable boards sit below "
-                       f"{_opts.CROWDED_UTILISATION:.0%}): expect to route "
-                       f"between parts with little room"),
+                     + f" -- past the {_opts.CROWDED_UTILISATION:.0%} this "
+                       f"toolchain calls comfortable to route. Several "
+                       f"shipped boards run hotter, so it is a warning: "
+                       f"expect to route between parts with little room"),
             measured={'utilisation': util0},
             expected={'utilisation': f'< {_opts.CROWDED_UTILISATION}'}))
     sides = intent.assembly_sides()
@@ -7079,6 +7123,11 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
     answered = (intent.dispositions or {}).get('contradictions', {})
     for r in reconciliation or ():
         kind = r.get('kind')
+        if kind == 'report':
+            # A floor staging ASSUMED, reported beside the one graded: not a
+            # declared fact, so not a ledger row that `carried_facts` would
+            # count as one. It stays in `context.reconciliation`.
+            continue
         winner = r.get('winner')
         wv = (r.get('values') or {}).get(winner) or {}
         losers = {v.get('authority') for ch, v in (r.get('values')
