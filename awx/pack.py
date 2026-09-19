@@ -1389,6 +1389,7 @@ def _octilinear_run(q, M, TC, hug_j, hug_d, free_tol):
     bad = [(a, b) for a, b in zip(out, out[1:]) if not _chord_clear(a, b, M, allow(a, b, OCT_GIVE))]
     if bad:
         out = _repair(out, q, M, dq)
+        out = _unkink(out, M, allow)
         # the repair's own chords cut up to REPAIR_TOL into the inflated
         # model by construction (what the true-radius validation allows):
         # judged at OCT_GIVE they failed their own check and the whole run
@@ -1408,6 +1409,39 @@ def _octilinear_run(q, M, TC, hug_j, hug_d, free_tol):
 
 _octilinear_run.repaired = 0
 _octilinear_run.arcs = 0
+
+
+def _unkink(out, M, allow):
+    """A vertex the path DOUBLES BACK at -- the turn sharper than a right
+    angle -- goes when the chord past it is clear. The repair replaces an
+    unclear leg by the string's chords between its ends, and an elbow
+    whose SECOND leg was unclear keeps its first: a 45-degree leg to the
+    elbow's corner, then the string's chord back from that corner -- K44
+    BA2, a 2.5 mm diagonal and a 0.79 mm jog back where the string ran
+    straight (2026-09-19). The corner is the artefact; the chord that
+    skips it is the string's own."""
+    out = list(out)
+    changed = True
+    while changed and len(out) > 2:
+        changed = False
+        for i in range(1, len(out) - 1):
+            a, c, b = out[i - 1], out[i], out[i + 1]
+            ux, uy = c[0] - a[0], c[1] - a[1]
+            wx, wy = b[0] - c[0], b[1] - c[1]
+            lu, lw = math.hypot(ux, uy), math.hypot(wx, wy)
+            if lu < 1e-9 or lw < 1e-9:
+                continue
+            if (ux * wx + uy * wy) / (lu * lw) >= 0.0:
+                continue                      # a corner, not a reversal
+            if _chord_clear(a, b, M, allow(a, b, REPAIR_TOL)):
+                del out[i]
+                _unkink.n += 1
+                changed = True
+                break
+    return out
+
+
+_unkink.n = 0
 
 
 def _repair(out, q, M, dq):

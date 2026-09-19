@@ -8074,6 +8074,10 @@ def note_source_joint(ctx, nm, lane, vias, board_path, log):
         if saving < 0.2:
             continue
         cands.append((saving, j, pr, run))
+    if os.environ.get('SRC_TRIM_DEBUG') == '1':
+        log(f'  source stub trim {nm}: lane {len(verts)} vertices from the tip, stub chain {arc[-1]:.1f} mm, '
+            f'{len(cands)} candidate(s): ' + ', '.join(f'depth {c[2][1]:.1f}/splice {c[2][0]:.2f}/saves {c[0]:.1f}'
+                                                       for c in sorted(cands, key=lambda c: -c[0])[:5]))
     if not cands:
         return 0.0
     # best saving first, but a splice near-identical to one already

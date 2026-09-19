@@ -188,18 +188,31 @@ things were wrong, in the order they surfaced:
   it came with. The emitter's own piece validation had let a re-emitted
   end into a via's clearance.
 
+* Two more, from the renders: a kink -- the any-angle repair replaces
+  an unclear grid leg by the string's chords between its ends, and an
+  elbow whose SECOND leg was unclear keeps its first, a 45-degree leg to
+  the corner and a jog back (K44 BA2, 2.5 mm out and 0.79 back where the
+  string ran straight). A vertex the path doubles back at now goes when
+  the chord past it is clear (`_unkink`; 23 -> 6 sharp turns at K44).
+  And the source trim runs again on the finished board before the pack
+  (its splice, its DRC), because a board the evolution assembled from
+  probes carries backtracks no braid saw whole: 34 mm at K44.
+
 | K | 9 | 18 | 26 | 32 | 38 | 42 | 44 |
 |---|---|---|---|---|---|---|---|
-| lanes, mm (best -> taut pack) | 185 -> 185 | 393 -> 386 | 662 -> 637 | 801 -> 777 | 954 -> 930 | 1054 -> 1008 | 1203 -> 1136 |
-| segments | 163 -> 141 | 1124 -> 316 | 1389 -> 630 | 3071 -> 895 | 3506 -> 964 | 3294 -> 1211 | 3854 -> 1214 |
+| lanes, mm (best -> trimmed + taut pack) | 185 -> 182 | 393 -> 384 | 662 -> 630 | 801 -> 769 | 954 -> 916 | 1054 -> 999 | 1203 -> 1116 |
+| run copper, mm | 221 -> 218 | 468 -> 459 | 774 -> 736 | 971 -> 940 | 1171 -> 1122 | 1300 -> 1238 | 1477 -> 1373 |
 
 Vias unchanged on every rung, 0 open, 0 DRC with and without the
-margin, every lane packed. The slack that remains is structural: WE at
-K44 leaves its tooth at the array's west face and cannot come inward
-because the F bundle stands between its via and the pads, and a lane
+margin, every lane packed. What remains is walled, not slack: DQ13's
+far-face tooth at K44 keeps its 11 mm backtrack because A10 runs INSIDE
+the hairpin (the trim finds the 2.5 mm splice worth 22 mm and the
+scoped DRC refuses it across A10), A13's likewise across DQS1_N --
+removing those means ripping the threaded neighbour, splicing, and
+re-laying it in the freed room, a coupled re-lay the trim does not
+attempt; the away-face ban prevents the tooth at the root. And a lane
 that wraps the long way round its bundle at the same via count is
-invisible to the chain's judge, which prices vias and never copper;
-no packer can move a lane across its neighbours.
+invisible to the chain's judge, which prices vias and never copper.
 
 **The source stub trim, the served-under-the-part rule, the away-face
 ban** (2026-09-19, the second pass over the zynq article). Three things

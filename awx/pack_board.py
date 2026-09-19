@@ -211,10 +211,57 @@ def pack_whole(a):
             continue
         sp = src_pads[0]
         tips.sort(key=lambda q: math.hypot(q[0] - sp.global_x, q[1] - sp.global_y))
+        if nm in os.environ.get('PK_WHOLE_DUMP', '').split(','):
+            print(f'  DUMP {nm}: src pad {sp.component_ref}.{sp.pad_number} at ({sp.global_x:.2f},{sp.global_y:.2f}); tips by distance {[(round(q[0],2), round(q[1],2), round(math.hypot(q[0]-sp.global_x, q[1]-sp.global_y),1)) for q in tips]}')
         ends[nm] = (tips[0], tips[1])
         corridors.append(SimpleNamespace(members=[nm], target=[nm], lane_xy={nm: [tips[0], tips[1]]},
                                          out_segs={nm: list(segs)}, out_vias={nm: list(vias)}, ctx=ctx))
     log = print
+    # THE SOURCE TRIM ON THE FINISHED BOARD (2026-09-19, Andy: "a long
+    # stub going south whose long backtrack is not removed"): the same
+    # splice as the braid's write-time note_source_joint, run here over
+    # every lane with its stub chain walked from the tip -- a board the
+    # evolution assembled from probes may carry a backtrack no braid saw
+    # whole. Vias never change; the scoped DRC decides each splice.
+    ctx.src_chain, ctx.src_trims, ctx.tooth_layer = {}, {}, {}
+    _k4 = lambda x, y: (round(x, 4), round(y, 4))          # noqa: E731
+    for c in corridors:
+        nm = c.members[0]
+        nid, net = byname[nm]
+        tip0 = ends[nm][0]
+        stubs = [s_ for s_ in pcb.segments if s_.net_id == nid and id(s_) not in {id(x) for x in c.out_segs[nm]}]
+        # the stub's end need not be the lane's first vertex to the micron
+        # (DQ13: 7 um apart, joined by the copper's own width): the nearest
+        # stub end within a track's width is the chain's start
+        best_ = None
+        for s_ in stubs:
+            for ex, ey in ((s_.start_x, s_.start_y), (s_.end_x, s_.end_y)):
+                d_ = math.hypot(ex - tip0[0], ey - tip0[1])
+                if d_ <= 0.15 and (best_ is None or d_ < best_[0]):
+                    best_ = (d_, (ex, ey), s_)
+        if best_ is None:
+            if nm in os.environ.get('PK_WHOLE_DUMP', '').split(','):
+                print(f'  DUMP {nm}: no stub end within 0.15 mm of the tip {tip0}')
+            continue
+        start_ = _k4(*best_[1])
+        lay = best_[2].layer
+        vias_n = [(v.x, v.y, v.size / 2) for v in pcb.vias if v.net_id == nid]
+        pads_n = [(p_.global_x, p_.global_y, max(p_.size_x, p_.size_y) / 2) for p_ in net.pads]
+
+        def _stop(pt, _v=vias_n, _p=pads_n):
+            return any(math.hypot(pt[0] - ax, pt[1] - ay) <= max(0.02, ar) for ax, ay, ar in _v + _p)
+        ctx.src_chain[nm] = br._walk_stub(stubs, start_, lay, _stop, _k4, max_hops=5000)
+        if nm in os.environ.get('PK_WHOLE_DUMP', '').split(','):
+            print(f'  DUMP {nm}: tip {tip0} on {lay}, {len(stubs)} stub segs, stub end {best_[0]*1000:.0f} um off, chain {len(ctx.src_chain[nm])} piece(s) '
+                  f'{sum(math.hypot(x[0].end_x - x[0].start_x, x[0].end_y - x[0].start_y) for x in ctx.src_chain[nm]):.1f} mm; lane {len(c.out_segs[nm])} segs')
+    _mm = 0.0
+    for c in corridors:
+        nm = c.members[0]
+        got = br.note_source_joint(ctx, nm, c.out_segs[nm], c.out_vias[nm], a.board, log)
+        _mm += got
+    if ctx.src_trims:
+        log(f'source stub trim (finished board): {len(ctx.src_trims)} lane(s) spliced, -{_mm:.1f} mm '
+            f'({", ".join(sorted(ctx.src_trims))})')
     L0 = sum(pk.seg_len(c.out_segs[nm]) for c in corridors for nm in c.members)
     log(f'pack_board (whole board): {len(corridors)} lane(s) of {len(names)} from the pair, {n_skip} kept as laid, '
         f'{L0:.1f} mm  (read {time.time() - t0:.1f} s)')
