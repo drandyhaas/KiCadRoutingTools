@@ -367,27 +367,20 @@ def via_protection_sexpr(tenting_attrs: dict = None,
     """The `(tenting ...)` / `(covering ...)` / ... fragment to emit for a via.
 
     `tenting_attrs` is a Via's parsed spec ({token: raw inner text}); passing it
-    keeps what the board actually specified. Without it the previous behavior
-    stands -- front+back tenting on KiCad 10 output -- since there is no
-    board-level policy to consult here (#489 §8).
+    keeps what the board actually specified. Without one, NOTHING is emitted,
+    in either dialect, so the via inherits the board's `(setup ...)` (see the
+    comment below for why the old front+back default was retired). The one
+    spec the tool itself decides is #962's Type VII on a via it added in a pad
+    or paste opening, and that arrives here as an ordinary `tenting_attrs`
+    (`fab_notes.via_protection_stamps`).
 
-    `inherit_when_unspecified` is what an EXISTING via needs, and it exists
-    because `None` and `{}` cannot answer the question on their own (#741):
+      a real spec, either way   -> emit it
+      no spec                   -> emit NOTHING (the via inherits the board)
 
-      a real spec, either way            -> emit it
-      empty + inherit_when_unspecified   -> emit NOTHING. The board said
-                                            nothing about this via, so the via
-                                            keeps inheriting
-                                            `(setup (tenting ...))` -- which is
-                                            what it had before it was lifted.
-      empty, KiCad 10 (net_name given)   -> the #489 default, front+back
-      empty, numeric net                 -> nothing, as before
-
-    Pass `inherit_when_unspecified=True` whenever you are RE-PLACING a via --
-    rip-up, sub-grid nudge, tap relocation. `{}` is exactly what
-    `Via.tenting_attrs` holds for a via that carries no spec, so handing it back
-    verbatim without this flag re-stamps the via with front+back tenting it
-    never had.
+    `inherit_when_unspecified` no longer changes the output (#741 made
+    inheriting the behaviour in all cases). Callers still pass True whenever
+    they RE-PLACE a via -- rip-up, sub-grid nudge, tap relocation -- because it
+    records at the call site that the via ALREADY EXISTED.
 
     A KEYWORD rather than a sentinel value, deliberately. A sentinel object has
     to survive being copied, and the copy idiom this repo actually uses for a
@@ -1067,7 +1060,8 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
             inherit_when_unspecified (True for a via that ALREADY EXISTED, so
             one carrying no spec keeps inheriting the board's `(setup ...)`
             rather than gaining a token). A via with neither key is new copper
-            and gets the board's prevailing convention. See
+            and gets no token, so it inherits the board's `(setup ...)` --
+            unless #962's Type VII stamp already set its `tenting_attrs`. See
             docs/api-kicad-writer.md.
         remove_vias: List of via dicts with keys: x, y (position to match for removal)
         add_teardrops: Add teardrop settings to every pad and via in the output.

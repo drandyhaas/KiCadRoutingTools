@@ -352,6 +352,21 @@ Read it off `render_placement --json-out`'s
 `checklist.a_off_outline.pad_copper` — a whole-board pass/fail verdict is the
 wrong channel for it.
 
+**Footprint GRAPHIC copper past the outline is the same defect (#962)**, and
+it used to be invisible: a drawn tab or antenna is not a pad, and check_drc's
+`immutable-graphic` waiver accepted any footprint graphic at the edge.
+`place_pose set U2 115.34 93.6 --rot 90` put esp_prog U2's F.Cu tab 1.11 mm off
+the board with place_pose `legal`, check_drc clean and check_assembly
+buildable. It is now one measurement, `check_drc.footprint_graphic_outline_census`,
+read by check_drc (`graphic-off-board`), by `grade_pad_legality`
+(`oob_graphic_copper_*`, which place_pose gates on) and by
+`render_placement`'s `checklist.a_off_outline.graphic_copper`. A LOCK is not
+a waiver: placement stamps locks itself, so a lock would launder the overrun
+the last lap made. Grazes INSIDE the outline stay accepted as library art,
+but only `check_drc --baseline <the run's starting board>` can tell an
+inherited graze from one a part move created (`graphic-board-edge`); without
+it they read `unverified`. Pass `--baseline` whenever you have that board.
+
 **Scope a placement search to the refs the gate names.** When a gate names
 specific parts, free exactly those and lock everything else. A global sweep
 orders its violators by its own priority — usually worst-off-board first — and
@@ -670,6 +685,20 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   (NOT `pcb.stackup`). Empty list if the board has no stackup section.
 - StackupLayer fields: `name`, `layer_type` ('copper', 'core', 'prepreg', ...),
   `thickness` (mm), `epsilon_r`, `loss_tangent`, `material`
+- `pcb.board_info.pad_to_paste_clearance` / `_ratio` - the board's paste
+  margin, the last term of a pad's paste-margin resolution (#962)
+- `pcb.board_info.via_protection_setup` - the board's via protection policy,
+  all five tokens, from either setup form; an undeclared token takes KiCad's
+  factory value. What a via is FABRICATED with is
+  `fab_notes.effective_via_protection(via.tenting_attrs, setup)`, token by
+  token (#962)
+- `pcb.paste_apertures` - every solder-paste OPENING (#962): pad openings
+  grown by their resolved margin, paste-only pads, and paste-layer graphics
+  (esp_prog U2's F.Paste tab around an F.Cu-only pad). Which nets an opening
+  concerns is `paste_apertures.apertures_for_net` -- a graphic opening belongs
+  to the owner's copper it overlaps, SMD or through-hole. A declared pad
+  rectangle is NOT its paste opening; anything asking "is this via under
+  solder" must read these
 
 ### Footprint Attributes
 
@@ -715,7 +744,14 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   with copper pads owns a land pattern (modelled, and NOT relocated to silk any
   more; it used to be, on every write, on both fronts), a pad-less one is a
   logo (relocated, as #146 has always done, and therefore not modelled). NPTH
-  pads do not count. Only the PERIMETER is modelled, never the interior fill.
+  pads do not count. Only the PERIMETER is modelled as an obstacle, never the
+  interior fill. #962 adds what a MEASUREMENT needs: `segment.drawn_width`
+  (the stroke as drawn -- `width` models a stroke-0 fill at the track width),
+  `graphic_kind`, `graphic_circle` (the true circle; the outline is a 16-gon)
+  and `graphic_filled`, and `pcb.graphic_copper_unmeasured` names the copper
+  the parser skips (logos, bezier curves, copper text) so a grade can say what
+  it did not see. The own-pad lift below does NOT make that copper free to
+  put vias in: its paste opening is `pcb.paste_apertures`.
   **The obstacle map's own-pad lift is the half that is not free**: net-0
   copper is foreign to every net including the pad it was drawn around, so
   `check_drc.graphic_own_pad_nets` lifts the graphic segments that touch a pad
@@ -827,7 +863,17 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
   emit **no protection token at all**, so they inherit the board's own
   `(setup ...)` policy — what pcbnew does for a via the GUI adds and KiCad for
-  one the user places. Probed against pcbnew 10.0.0: a via at
+  one the user places. **The one exception (#962):** a via THIS run added whose
+  barrel overlaps a same-net SMD pad or a paste opening of its own net DECLARES
+  Type VII, `(capping yes) (filling yes)` (`fab_notes.via_protection_stamps`),
+  at ship time after the last via-changing pass, unless the input had a via at
+  that spot (it keeps what it had -- and gets the input's spec BACK if it was
+  stripped and laid again), it has its own spec, the setup already says
+  filled+capped, or the FILE FORMAT predates the tokens (KiCad 9 cannot open a
+  20241229 board carrying them; those count `unstampable`). The record is
+  `via_in_pad` in the route step's merged `--json-out`, and `check_drc` reports
+  what still ships unprotected as `via-in-paste` (`--baseline` accepts the
+  input's own). Probed against pcbnew 10.0.0: a via at
   `*_MODE_FROM_BOARD` serialises with NO token and a token appears **only** for
   an explicit override, so anything stamped turns an inheriting via into an
   override. The old rules — a hardcoded front+back tenting, then

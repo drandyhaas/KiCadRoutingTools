@@ -227,7 +227,7 @@ still matters, because emitting the board's own dialect is right regardless.
 | `output_writer` | routed + swap vias | the via's own spec, else nothing |
 | `add_tracks_and_vias_to_pcb` | depends on caller | the via dict's `tenting_attrs` / `inherit_when_unspecified`, else nothing (#749 A) |
 | `route.py` #666 re-emit | PRE-EXISTING copper the write lost | own spec + `inherit_when_unspecified=True` |
-| `bga_fanout`, `qfn_fanout`, `route_planes` | new | nothing -> inherits `(setup ...)` |
+| `bga_fanout`, `qfn_fanout`, `route_planes` | new | nothing -> inherits `(setup ...)`, EXCEPT a via in a pad or paste opening: Type VII (see below) |
 | `kicad_oracle` (3 weld/link sites) | new | nothing, spelled out as `None` (#749 B) |
 | `plane_io.create_plane` / `repair_planes` | new | the via's own spec, else nothing |
 | `plane_io.restore_failed_reroute_nets` | RESTORED | own spec + `inherit_when_unspecified=True` (#749 C) |
@@ -250,6 +250,39 @@ CLI-only default to drift.
 
 For vias you **add**, pass nothing: no token means the via inherits the board's
 `(setup ...)`, which is what KiCad does for a via a user places.
+
+### The one exception: a via the tool adds in a pad or paste opening (#962)
+
+Solder paste printed onto a via barrel wicks into it unless the via is
+IPC-4761 Type VII, filled AND capped. So a via THIS run added whose barrel
+overlaps a same-net SMD pad or a paste opening of its own net is stamped
+`fab_notes.TYPE_VII_STAMP = {'capping': 'yes', 'filling': 'yes'}`. Tenting,
+covering and plugging are not stamped; they keep inheriting. The decision is
+`fab_notes.via_protection_stamps(vias, input_snapshot, pcb_data)`, and a via
+is left alone when:
+
+- the input board already had a via at that spot (`via_snapshot`, taken
+  before the run lays copper). If that input via carried a spec and the
+  shipped one does not, it was stripped and laid again, and the input's spec
+  is handed back (`restored`);
+- it carries a spec of its own (the designer's);
+- the board's setup already makes it filled and capped;
+- the FILE FORMAT predates per-via capping/filling. KiCad 10 added them, and
+  KiCad 9.0's parser stops on an unknown token, so a 20241229 board gets NO
+  token; the via is counted `unstampable` and the requirement goes on the fab
+  drawing.
+
+It runs at SHIP time, after the last pass that changes vias: `route.py` after
+the late orphan sweep, `create_plane` after `_finalize_plane_copper`,
+`repair_planes` after the oracle, `route_diff` after its writes, and the BGA
+and QFN fanouts over every via they return. The CLI stamps the written file by
+uuid (`kicad_writer.stamp_via_protection_in_content`); the GUI sets
+`tenting_attrs` on its in-memory vias, which `apply_via_protection` writes. The
+record is published as `via_in_pad` ({count, sites, stamped, restored,
+protected, unstampable, unprotected, note}) on the route step's merged
+`--json-out` summary (not the early `JSON_SUMMARY`, which predates the
+finalize) and on `results_data`. `check_drc` reports what still ships
+unprotected as `via-in-paste`.
 
 ## Modifying existing copper
 

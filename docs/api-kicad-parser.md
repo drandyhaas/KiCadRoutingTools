@@ -84,6 +84,8 @@ The top-level container returned by both entry points.
 | `groups` | `List` | KiCad groups (#459) — kept so writers can preserve group membership |
 | `source_path` | `str` | Absolute path this data came from (`""` = in-memory). Lets engines with no `input_file` discover sibling project files, e.g. the `.kicad_dru` per-layer clearance rules (#498) |
 | `exact_fill_provider` | `Optional[Callable]` | Zero-arg callable returning `{(net_name, layer): [island_polygon, ...]}` — KiCad-truth fill for exact-fill consumers (#424). `None` (file-parsed boards) = refill `source_path`; `build_pcb_data_from_board` sets it to a staged-save refill of the live board (live copper AND live clearances) |
+| `paste_apertures` | `List[PasteAperture]` | Every solder-paste OPENING (#962), from `paste_apertures.build_paste_apertures`. Sources: `pad` (a pad on a paste layer, grown by its resolved paste margin -- pad, then footprint, then board setup, per axis, ratio and margin independently, clamped at -size/2), `paste_only_pad` (a pad on a paste layer with no copper, e.g. windowpanes) and `graphic` (a paste-layer shape, e.g. esp_prog U2's F.Paste tab). Which nets an opening concerns is `paste_apertures.aperture_nets` / `apertures_for_net` (memoised): a pad opening its pad's net, a graphic or paste-only one the nets of the owner's copper it overlaps. Both parse paths feed the one builder |
+| `graphic_copper_unmeasured` | `List[dict]` | Footprint copper the parser does NOT model, per owner (`{owner_ref, kind, reason}`, kind `logo` / `curve` / `text`), so the off-outline grade can say what it did not measure (#962) |
 
 ### `PCBData.get_via_barrel_length`
 
@@ -144,6 +146,10 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `graphic` | bool | This copper came from a **graphic**, not a track (issue #337, extended to footprint shapes by #908). It is real copper for obstacles and DRC, and it is immutable: cleanup passes must never prune it and writers cannot strip it, because there is no `(segment …)` block to match. It never conducts — connectivity gives a graphic no credit, so KiCad will keep calling such a net unconnected (#513 item 6). |
 | `locked` | bool | KiCad `(locked yes)`: the user pinned this copper. Its net is never rip-eligible (#521, no override); locked copper was already an obstacle (#150). Both parse paths set it. |
 | `owner_ref` | str | For copper drawn **inside a footprint**, the disambiguated footprint key that owns it (`'U2'`, `'TP4~2'`); `''` for board-level graphics and every routed track (#908). It is what lets a DRC report name the object the way KiCad does — `net_0 [Polygon(U2)]` beside KiCad's *"Polygon [\<no net\>] of U2 on F.Cu"* — and what scopes the own-pad obstacle lift to the owning part. |
+| `drawn_width` | Optional[float] | Graphic copper only: the stroke AS DRAWN (#962). `width` models a filled shape drawn at stroke 0 at the fab track width, which is right for an obstacle and wrong for a measurement; the off-outline grade reads this. `None` for tracks |
+| `graphic_kind` | str | Graphic copper only: the primitive (`'line'`, `'arc'`, `'poly'`, `'rect'`, `'circle'`; a footprint rect at a non-cardinal angle reads `'poly'`, as pcbnew loads it). `''` for tracks |
+| `graphic_circle` | Optional[Tuple] | For a circle, its TRUE `(cx, cy, r)`: the outline is a 16-gon whose chord midpoints sit 1.9% of r inside the curve, so a reach measured on the chords under-reads |
+| `graphic_filled` | bool | A closed graphic (poly/rect/circle) whose interior is copper, by KiCad's loader rules (a `(fill ...)` token; without one a poly is filled and a rect or circle only at stroke 0). The segments model only the outline; the off-outline grade reads this to look inside |
 
 ### `Via`
 
@@ -156,7 +162,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `net_id` | int | Net ID |
 | `uuid` | str | UUID from the file |
 | `free` | bool | `(free yes)` flag — KiCad won't reassign the net from overlapping copper |
-| `tenting_attrs` | Dict[str, str] | Protection spec as `{token: raw inner s-expr}` for `tenting`/`covering`/`plugging`/`capping`/`filling`, e.g. `{'covering': '(front no) (back no)', 'capping': 'no'}`. `{}` = the board specified nothing (KiCad inherits its board default). Read by **both** parse paths (text and `build_pcb_data_from_board`) in the same normalized form. |
+| `tenting_attrs` | Dict[str, str] | Protection spec as `{token: raw inner s-expr}` for `tenting`/`covering`/`plugging`/`capping`/`filling`, e.g. `{'covering': '(front no) (back no)', 'capping': 'no'}`. `{}` = the board specified nothing (KiCad inherits its board default). Read by **both** parse paths (text and `build_pcb_data_from_board`) in the same normalized form. What a via is actually FABRICATED with is resolved token by token against `BoardInfo.via_protection_setup` by `fab_notes.effective_via_protection` (#962) |
 
 Pass `tenting_attrs` back to `generate_via_sexpr` for any via that already
 existed, so a ripped-and-re-placed via keeps its real spec instead of being
@@ -201,8 +207,10 @@ the two apart; `footprint_copper_is_functional(pad_count)` does, and the
 writer's silkscreen mover reads the same predicate — a footprint with copper
 pads owns a land pattern (modelled, kept on copper), a pad-less one is a logo
 (relocated to silk by the writer, as #146 has always done, and therefore not
-modelled). Only the **perimeter** is modelled, never the interior fill, which
-is the same limit board-level graphics have.
+modelled). Only the **perimeter** is modelled as an obstacle, never the
+interior fill, which is the same limit board-level graphics have; the
+off-outline grade (`check_drc.footprint_graphic_outline_census`, #962) reads
+`Segment.graphic_filled` to look inside a filled shape.
 
 ### `Zone`
 
@@ -228,6 +236,17 @@ is the same limit board-level graphics have.
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
 | `stackup` | List[StackupLayer] | Physical stackup, top to bottom (empty if the board has none) |
 | `keepouts` | List[dict] | KiCad keepout rule areas (board-level AND footprint-owned): `{'polygon': [...], 'holes': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool, 'copper_pour_allowed': bool, 'in_footprint': bool}` |
+| `pad_to_paste_clearance`, `pad_to_paste_clearance_ratio` | float | The board-level paste margin and ratio from `(setup ...)`, the last term of a pad's paste-margin resolution (#962) |
+| `via_protection_setup` | Dict[str, str] | The board's via protection policy, `{token: inner}` for all five tokens (`tenting`, `covering`, `plugging`, `capping`, `filling`), canonicalised from KiCad 10's per-token form and the legacy `(tenting front back)` form; a token the board does not declare takes KiCad's factory value (#962) |
+
+**Paste overrides** (#962). `Pad.paste_margin` / `paste_margin_ratio` and
+`Footprint.paste_margin` / `paste_margin_ratio` hold the raw
+`(solder_paste_margin ...)` / `(solder_paste_margin_ratio ...)` overrides
+(`None` = unset; an explicit 0 counts as unset only up to file version
+20240201, as KiCad reads it). `Pad.anchor_size` is a custom pad's anchor size,
+which is what KiCad sizes a paste RATIO from. `Footprint.parsed_pose` is the
+`(x, y, rotation, layer)` the footprint had at parse, so a consumer that moves
+parts in memory can re-pose their graphic copper.
 
 ### `StackupLayer`
 

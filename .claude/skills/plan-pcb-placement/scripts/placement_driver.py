@@ -327,7 +327,7 @@ Walk the ladder in order and say which rung applies:
       (which edge, where along it, which way the mating face points), the
       mechanically-fixed parts, anything a spec pins. P2 is the stage that
       enumerates them; `place_pose set/rotate/lock` is the verb, and it
-      refuses a pose that makes the board's pad legality worse.
+      refuses a pose that makes the board's placement legality worse.
    b. Seed the rest FROM THE PLAN, several seeds, and rank only the ones that
       pass their own gate (exit 4 names the rule; none passing is the PLAN's
       problem, not the seeder's -- run 26 had none pass and hand-placed
