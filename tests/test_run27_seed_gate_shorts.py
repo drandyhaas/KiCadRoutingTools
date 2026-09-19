@@ -172,24 +172,34 @@ def main():
         check('...and none of it lands in the seeded count',
               s3 is not None and s3.get('pad_conflicts_seeded') == 0,
               f"{s3 and s3.get('pad_conflicts_seeded')}")
-        # The two counts PARTITION the board's shorts. Stated here because
-        # the inherited count is derived from `pad_conflicts` rather than
-        # from `len(worst)`, which is capped: on this fixture the cap is
-        # never reached, so a mutation restoring the default cap SURVIVES
-        # this file (measured) and the arithmetic below is what keeps the
-        # totals honest if it ever does.
+        # The counts PARTITION the board's shorts. Stated here because the
+        # inherited count is derived from `pad_conflicts` rather than from
+        # `len(worst)`, which is capped: on this fixture the cap is never
+        # reached, so a mutation restoring the default cap SURVIVES this file
+        # (measured) and the arithmetic below is what keeps the totals honest
+        # if it ever does.
+        #
+        # #982: the total is `pad_conflicts_after`, which the fresh-seed path
+        # now publishes. While it did not, this row compared the sum with
+        # ITSELF whenever the key was absent -- which was every run on this
+        # path, so it asserted nothing here at all.
         for _tag, _s in (('shorted', s), ('inherited', s3), ('clean', s2)):
             if _s is None:
                 continue
-            check(f'[{_tag}] seeded + inherited accounts for every short',
+            check(f'[{_tag}] the total is published, so the partition can be '
+                  f'checked at all',
+                  _s.get('pad_conflicts_after') is not None,
+                  f'{sorted(k for k in _s if "pad_conflicts" in k)}')
+            check(f'[{_tag}] seeded + unseated + inherited accounts for every '
+                  f'short',
                   (_s.get('pad_conflicts_seeded') or 0)
+                  + (_s.get('pad_conflicts_unseated') or 0)
                   + (_s.get('pad_conflicts_inherited') or 0)
-                  == (_s.get('pad_conflicts_after')
-                      if _s.get('pad_conflicts_after') is not None
-                      else (_s.get('pad_conflicts_seeded') or 0)
-                      + (_s.get('pad_conflicts_inherited') or 0)),
+                  == _s.get('pad_conflicts_after'),
                   f'{_s.get("pad_conflicts_seeded")} + '
-                  f'{_s.get("pad_conflicts_inherited")}')
+                  f'{_s.get("pad_conflicts_unseated")} + '
+                  f'{_s.get("pad_conflicts_inherited")} vs '
+                  f'{_s.get("pad_conflicts_after")}')
 
     # ---- the stderr line names the channel that actually fired -----------
     # Two failures reach exit 4 and they are not the same failure. The

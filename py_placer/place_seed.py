@@ -33,6 +33,16 @@ Every JSON_SUMMARY also carries `connector_requirements` (#974): which declared
 edge-connector requirements were graded and on what basis, which were not
 measured, and the connector errors on each side of the pinned split. It
 reports; it never withholds the board and never changes an exit code.
+
+The pad conflicts in the written board are reported in three buckets that
+PARTITION `pad_conflicts_after` (#982): `pad_conflicts_seeded` is the seed's
+own, a pair with a part it moved on at least one side; `pad_conflicts_unseated`
+is a pair against a part it could NOT seat, which was written at the pose it
+came in with, so whether anything lands on it is incidental to the seed;
+`pad_conflicts_inherited` is the board's own. Only the first fails the gate,
+and only when nothing is unseated -- an unseated part already fails it for a
+better reason. All three are named on the console, because every one of them
+is copper a fab will see.
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -83,6 +93,77 @@ def _print_grade(own, pinned):
               "and the intent, and only their author can say which is wrong.")
         for v in pinned[:10]:
             print(f"  GRADE ERROR (pinned) [{v.rule}] {v.message}")
+
+
+def split_pad_pairs(worst, seeded, unseated):
+    """Split the written board's pad pairs into the seed's and the unseated's.
+
+    Returns `(mine, against_unseated)`, both in `worst` order. A pair is the
+    seed's when either member is a ref it MOVED, and lands in the second list
+    instead when the other member is a ref it could not seat. Pairs with
+    neither member moved are in neither list: they are the board's own, counted
+    from the total by the caller -- and a pair between TWO unseated parts is one
+    of those, since the seed moved neither of them.
+
+    #982. A part the seed cannot seat keeps the pose it came in with, and THAT
+    pose is what gets written -- `placements` has no row for it and the writer
+    leaves its block alone. Later stages pass the pile as `exclude`
+    (`seeder._try_place`: "the pile they still form at their meaningless input
+    coordinates must not veto real poses"), so they pack onto that copper, and
+    the pair then reaches the count through the partner the seed DID move. It
+    is real copper -- on ulx3s SEED 1, `py_tools/check_assembly.py` grades
+    `H4 <-> J1` a 1.5089 mm2 `pad_intersection`, BLOCKING, and the board NOT
+    BUILDABLE -- so it stays named and counted. A pair in this bucket is not
+    always that severe: ulx3s seed 0's H4-J2 is a 0.191 mm graze on a board
+    `check_assembly` still grades buildable. What it is not is the seed's answer
+    for the parts it placed: whether a hole lands on an unseated part is
+    incidental to the seed, and the count swung 0 -> 1 at seed 0 and 5 -> 8 over
+    seeds 0..9 when AUDIO1 was seated 0.386 mm further inward for a board-edge
+    copper fix (#975's A/B; a sham nudge of the same size on the unmodified
+    engine reproduces it, so the cause is the displacement, not the fix). Its
+    own bucket keeps `pad_conflicts_seeded` a number the seed can be held to.
+
+    How widespread this is, measured over seven boards at seed 0 (19 charged
+    pairs, 17 of them against a part that could not be seated) plus ulx3s at ten
+    seeds (5 of 5): ulx3s 5 of 5, rp2350 15 of 16, orangecrab 2 of 3, and
+    nothing at all on the four boards that seat everything. On rp2350 those
+    fifteen are ONE unseated part, U6, whose 75 pads sit at the designer's pose.
+    Every number here is re-measured by `tests/measure_982_unseated_pairs.py`,
+    which prepares its boards the way the issue does; read that file's
+    docstring for the recipe, because these numbers do NOT reproduce from a
+    board prepared some other way.
+
+    The exit code cannot move by this split: `gate_reason` returns the intent
+    arm whenever anything is unseated, and when nothing is unseated the second
+    list is empty by construction. A ref that is somehow BOTH moved and
+    unseated is charged to the seed, the direction that keeps the gate honest;
+    the seeder keeps the two disjoint, so this is a tie-break nothing reaches.
+
+    The alternative reading -- treat the written pose as an obstacle for later
+    stages -- was prototyped and MEASURED WORSE. It unseats parts that were
+    seated: ulx3s 20 -> 25 unseated over ten seeds (H4 at seeds 1 and 4, H1, H2
+    and H3 at seed 7), rp2350 1 -> 3, and hole conflicts up on two boards. It
+    does not even buy stability, because at ulx3s seed 7 it swapped three pairs
+    against J1/J2 for three against the H1/H2/H3 it had just unseated -- the
+    seat predicate is courtyard-level, so an unseated part's whole courtyard
+    (14.5 x 52 mm for ulx3s J1/J2) becomes a keep-out. It also ran about 20%
+    slower. Trading seats for a cleaner count is the wrong way round when an
+    unseated part's nets cannot be routed at all, so the search is left alone
+    here; this judgement is the branch's, not a rule quoted from CLAUDE.md.
+    """
+    if isinstance(unseated, str) or isinstance(seeded, str):
+        # A bare ref would split by CHARACTER and mis-sort every pair in
+        # silence, which is the kind of thing a summary key hides for a year.
+        raise TypeError('seeded and unseated are collections of refs, not a ref')
+    unseated, seeded = set(unseated), set(seeded)
+    mine, against_unseated = [], []
+    for w in worst:
+        if not (w[0] in seeded or w[1] in seeded):
+            continue
+        charged = {w[0], w[1]} & seeded
+        (against_unseated if (unseated & {w[0], w[1]}) - charged
+         else mine).append(w)
+    return mine, against_unseated
 
 
 def gate_reason(unseated, own, my_pads, hole_delta):
@@ -962,8 +1043,9 @@ Examples:
     #
     # Attribution, so the seed answers for its own work and not the board's
     # (the same split `_split_pinned` makes for the intent grade): a PAD pair
-    # is the seed's when either member is a part it placed -- precise, by ref.
-    # A hole conflict cannot be attributed that way, because
+    # is the seed's when either member is a part it placed -- precise, by ref
+    # -- and not when the other member is a part it could not seat (#982,
+    # below). A hole conflict cannot be attributed that way, because
     # `grade_pad_legality` counts holes without recording the pair, so it is
     # judged on the DELTA against the input board: a count that rose is the
     # seed's, one that was already there is not.
@@ -989,15 +1071,18 @@ Examples:
             or abs(p['new_y'] - fp_in.y) > 1e-6
             or abs((p['new_rotation'] - fp_in.rotation) % 360.0) > 1e-6)
     _seeded = {p['reference'] for p in result['placements'] if _moved(p)}
-    _my_pads = [w for w in (_pads_out.get('worst') or ())
-                if w[0] in _seeded or w[1] in _seeded]
+    # #982: the pairs against a part that could not be seated are the seed's
+    # doing only incidentally -- see `split_pad_pairs`.
+    _my_pads, _unseated_pads = split_pad_pairs(
+        _pads_out.get('worst') or (), _seeded, result['unseated'])
     # From the COUNT, not from `len(worst)`: `worst` is capped by `worst_n`
     # (10 by default, 0 above meaning uncapped), and subtracting a capped list
     # from itself would report 0 inherited on a board with 50 shorts. This way
-    # the two numbers always sum to `pad_conflicts` whatever the cap is, and a
+    # the three numbers always sum to `pad_conflicts` whatever the cap is, and a
     # cap that ever came back would cost detail in the NAMES rather than
     # silence in the totals.
-    _their_pads = max(0, (_pads_out.get('pad_conflicts') or 0) - len(_my_pads))
+    _their_pads = max(0, (_pads_out.get('pad_conflicts') or 0)
+                      - len(_my_pads) - len(_unseated_pads))
     _hole_delta = max(0, (_pads_out.get('hole_conflicts') or 0)
                       - (_pads_in.get('hole_conflicts') or 0))
     if _my_pads:
@@ -1007,6 +1092,15 @@ Examples:
                           for a, b, mm in _my_pads[:10])
               + ("" if len(_my_pads) <= 10 else
                  f" ... and {len(_my_pads) - 10} more"))
+    if _unseated_pads:
+        print(f"  {len(_unseated_pads)} pad conflict(s) against a part this "
+              f"seed could NOT seat, which was written at the pose it came in "
+              f"with: "
+              + '; '.join(f"{a} <-> {b} ({mm:.3f}mm)"
+                          for a, b, mm in _unseated_pads[:10])
+              + ("" if len(_unseated_pads) <= 10 else
+                 f" ... and {len(_unseated_pads) - 10} more")
+              + " -- reported not charged; seat the part and they go with it")
     if _their_pads:
         print(f"  {_their_pads} further pad conflict(s) between parts this seed "
               f"did not place -- the board's own, reported not charged")
@@ -1046,7 +1140,17 @@ Examples:
                'pad_conflicts_seeded': len(_my_pads),
                'pad_conflicts_seeded_pairs': [[a, b, mm]
                                               for a, b, mm in _my_pads],
+               # #982: against a part it could not seat, at that part's input
+               # pose. Real copper, reported apart so the seeded count does
+               # not swing with poses that have nothing to do with it.
+               'pad_conflicts_unseated': len(_unseated_pads),
+               'pad_conflicts_unseated_pairs': [[a, b, mm]
+                                                for a, b, mm in _unseated_pads],
                'pad_conflicts_inherited': _their_pads,
+               # The total the three buckets partition, so a reader can check
+               # the arithmetic instead of trusting it. The repair path
+               # publishes the same key from the same grade.
+               'pad_conflicts_after': _pads_out.get('pad_conflicts') or 0,
                'hole_conflicts_added': _hole_delta,
                'grade_warnings': len(graded.warnings),
                'crossings': after.get('crossings'),
