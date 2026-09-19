@@ -7982,7 +7982,7 @@ class Ctx:
     pass
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('--board', required=True,
                     help='board with BOTH arrays fanned out')
@@ -7991,7 +7991,21 @@ def main():
     ap.add_argument('--dest', required=True, metavar='REF',
                     help='destination component (its stub ends are '
                          'the targets)')
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+    return run(a.board, a.nets, a.dest, a.out)
+
+
+def run(board, nets, dest, out):
+    """The braid as a FUNCTION (2026-09-18): what `main` does for one
+    command line, callable in-process -- a resident probe worker
+    (probe_worker.py) braids one probe after another without paying the
+    interpreter, the imports, the solver priming and the taut memo's
+    load each time (~1 s of a 4 s probe braid, measured). The knobs a
+    probe sets through the environment (BRAID_ATTEMPTS, BRAID_BUDGET_X)
+    are module globals here, so a caller sets ATTEMPTS / BUDGET_X
+    itself; BRAID_SMOOTH is read at write time from the environment."""
+    import types as _types
+    a = _types.SimpleNamespace(board=board, nets=nets, dest=dest, out=out)
     names = [n.strip() for n in a.nets.split(',') if n.strip()]
 
     # MEM_TRACE=1: every log line carries the seconds since start, the

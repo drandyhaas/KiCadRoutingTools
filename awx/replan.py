@@ -44,6 +44,7 @@ usage: replan.py TAG K [--board=BASE] [--dest=REF] [--rounds=4] [--worst=3]
   writes tmp/OUT_rp_kK_r<N>_* per round, tmp/OUT_rp_kK.kicad_pcb (best)
 """
 import contextlib
+import hashlib
 import io
 import json
 import math
@@ -56,7 +57,7 @@ import time
 from collections import Counter
 
 ARGV = [a for a in sys.argv[1:] if not a.startswith('--')]
-OPTS = dict(a[2:].split('=', 1) for a in sys.argv[1:] if a.startswith('--'))
+OPTS = dict((a[2:].split('=', 1) + ['1'])[:2] for a in sys.argv[1:] if a.startswith('--'))
 # --walk=1 (2026-09-10): destination candidates are the WALKED dog-bones
 # only (escape_moves walk=; DST_WALK must be set), any face including
 # the net's current one, banned per SITE rather than per class.
@@ -99,6 +100,17 @@ APPLY_STRIP = OPTS.get('apply', 'strip') == 'strip'
 # 'census' = the recorded behaviour (the end's own conflicts + the braid's
 # blocker census).
 COUPLED = OPTS.get('coupled', 'census')
+# --perturb=N (2026-09-18): a NEAR JUMP. N random nets moved to a random
+# other class each, through the same probes a descent uses, the probe
+# board accepted whatever its grade (a jump does not care where it
+# lands; the descent from there is the point). One round; the world it
+# writes is a replan stem like any descent's. Measured need: a jump by a
+# full chain (re-solve, fan out, braid twice) cost 665 s and landed at
+# 84..141 at K51, never descending below 88; a jump of one probe lands
+# a move away.
+PERTURB = int(OPTS.get('perturb', 0) or 0)
+PERTURB_TRIES = int(OPTS.get('perturb-tries', 3))   # candidates probed per perturbed net, at most
+PERTURB_SEED = int(OPTS.get('seed', 1))
 # --widen=N: a local braid that REFUSES a lane is answered with ROOM, not
 # with the full re-braid: the frozen lanes crossing the refused lane's own
 # chord are stripped and re-laid with it, up to N times. The 0918 wide run
@@ -128,6 +140,7 @@ import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 from coherent_nets import coherent_nets  # noqa: E402
 import rules as _rules  # noqa: E402  ONE source for every design rule
+import probe_memo as pm  # noqa: E402  the probe / screen memo (never pay for one twice)
 
 from escape_moves import LAYERS  # noqa: E402,F401  -- ONE source
 
@@ -789,7 +802,45 @@ def berth_items(pcb_f, names, byname, box):
     return out
 
 
+MEMO_K = None      # set by main: the K whose memo store the probes and screens use
+
+
+def _store(kind):
+    if MEMO_K is None or not pm.ENABLED:
+        return None
+    st = _store.cache.get(kind)
+    if st is None:
+        st = _store.cache[kind] = pm.Store(MEMO_K, kind)
+    return st
+
+
+_store.cache = {}
+
+
+def _board_hash(B):
+    """The fanout board's copper as one hash, cached on the Board (its
+    copper never changes while the Board lives; engine_lays takes pieces
+    off and puts them back)."""
+    h = getattr(B, '_copper_hash', None)
+    if h is None:
+        h = B._copper_hash = pm.copper_hash(B.pcb.segments, B.pcb.vias)
+    return h
+
+
 def engine_lays(B, nm, move, end, others=None):
+    """One dry run through engine_lays_many: the screen memo, then the
+    pool or here."""
+    return engine_lays_many(B, nm, [(move, others)], end)[0]
+
+
+def _got_tuples(g):
+    """A measured end read back from JSON, its points tuples again."""
+    if not g:
+        return g
+    return dict(g, tooth=tuple(g['tooth']), site=(tuple(g['site']) if g.get('site') else None))
+
+
+def engine_lays_run(B, nm, move, end, others=None):
     """THE ENGINE'S OWN ANSWER to one candidate, in memory: the net's copper
     at that end taken off the parsed fanout board, the production fanout
     asked for the move (with `others` {net: move} laid in the same call,
@@ -891,19 +942,71 @@ def synth_move(nm, got):
                    got.get('vias', 0), [], site=(tuple(got['site']) if got.get('site') else None))
 
 
+def _others_of(B, m, end):
+    return ({o: B.cur_dst[o] for o in (getattr(m, 'comove', []) or []) if B.cur_dst.get(o)}
+            if end == 'dst' else None)
+
+
+def engine_lays_many(B, nm, items, end):
+    """The engine's dry runs of several candidates, `items` = [(move,
+    others)], each as engine_lays gives it: the screen memo first, the
+    rest in the pool side by side when one is up, else here in turn."""
+    st = _store('screen')
+    out = [None] * len(items)
+    miss = []
+    for i, (m, others) in enumerate(items):
+        key = (pm.key_of({'code': pm.code_hash(), 'knobs': pm.knob_hash(), 'F': _board_hash(B),
+                          'net': nm, 'end': end, 'move': sr.move_sig(m),
+                          'others': sorted((o, sr.move_sig(om)) for o, om in (others or {}).items())})
+               if st is not None else None)
+        doc = st.get(key) if st is not None else None
+        if doc is not None:
+            pm.bump('screen_hit')
+            out[i] = (_got_tuples(doc['got']), doc['exact'], doc['in_cls'], 0.0)
+            continue
+        pm.bump('screen_miss')
+        miss.append((i, m, others, key))
+    if POOL is not None and miss:
+        import concurrent.futures as cf
+
+        def one(t):
+            i, m, others, _key = t
+            msg = {'op': 'screen', 'net': nm, 'end': end, 'move': move_to_json(m),
+                   'others': {o: move_to_json(om) for o, om in (others or {}).items()}}
+            try:
+                r = POOL.probe(msg)
+                return i, (_got_tuples(r['got']), r['exact'], r['in_cls'], r['seconds'])
+            except RuntimeError as e:
+                sys.stderr.write(f'screen in the pool failed ({e}); run here\n')
+                return i, engine_lays_run(B, nm, m, end, others)
+        with cf.ThreadPoolExecutor(max_workers=len(POOL.workers)) as ex:
+            for i, r in ex.map(one, miss):
+                out[i] = r
+    else:
+        for i, m, others, _key in miss:
+            out[i] = engine_lays_run(B, nm, m, end, others)
+    if st is not None:
+        for i, m, others, key in miss:
+            got, exact, in_cls, dt = out[i]
+            st.put(key, {'got': got, 'exact': bool(exact), 'in_cls': bool(in_cls), 'seconds': dt})
+    return out
+
+
 def screen(B, nm, ranked, end, top, log=None):
     """The engine's dry run over the model's ranked candidates: the first
     `top` the engine lays as asked (exact or in class) go forward; where it
     lays ANOTHER class, that laid move (menu-matched) goes forward instead
-    -- the engine's own realistic version of the ask. Returns [(cost, move)]."""
+    -- the engine's own realistic version of the ask. Returns [(cost, move)].
+    The dry runs are independent: the first SCREEN_MAX candidates run at
+    once (engine_lays_many) and are read in rank order with the same
+    stopping rule, so the answer is the one-at-a-time answer."""
     out, seen, n_run, n_ok, n_sub, n_no = [], set(), 0, 0, 0, 0
-    for c, m in ranked:
+    batch = list(ranked[:SCREEN_MAX])
+    lays = engine_lays_many(B, nm, [(m, _others_of(B, m, end)) for c, m in batch], end)
+    for (c, m), (got, exact, in_cls, _dt) in zip(batch, lays):
         if len(out) >= top or n_run >= SCREEN_MAX:
             break
         n_run += 1
-        others = ({o: B.cur_dst[o] for o in (getattr(m, 'comove', []) or []) if B.cur_dst.get(o)}
-                  if end == 'dst' else None)
-        got, exact, in_cls, _dt = engine_lays(B, nm, m, end, others)
         if got is None:
             n_no += 1
             continue
@@ -987,7 +1090,304 @@ def chord_walls(lanes, me, a, b, exclude=()):
     return out
 
 
+def coupled_set(B, nm, src_move, dst_move, extra_relay=None):
+    """The lanes a probe of this move re-lays with the net: those in the
+    way of the new end, the co-moved berths' lanes, the braid's census of
+    what walled it, and what the caller names. Returns (C, N)."""
+    C = conflicts(src_move if src_move is not None else dst_move, B.lanes, nm)
+    N = list(getattr(dst_move, 'comove', []) or [])
+    C |= set(N)           # a re-fanned neighbour's lane is re-laid too
+    C |= set((getattr(B, 'blockers', {}) or {}).get(nm, []))   # the braid's census: what walled it
+    C |= set(extra_relay or [])
+    if COUPLED == 'chord':
+        a_ = src_move.exit_pt if src_move is not None else tuple((B.ends[nm]['src'] or {}).get('tooth') or ())
+        b_ = dst_move.exit_pt if dst_move is not None else tuple((B.ends[nm]['dst'] or {}).get('tooth') or ())
+        if len(a_) == 2 and len(b_) == 2:
+            C |= chord_walls(B.lanes, nm, a_, b_)
+    C.discard(nm)
+    return C, N
+
+
+_PARSED = {}
+
+
+def parsed(path):
+    """A parsed board by path, re-read when the file changes."""
+    st_ = os.stat(path)
+    k = (path, st_.st_mtime_ns, st_.st_size)
+    if k not in _PARSED:
+        if len(_PARSED) > 24:
+            _PARSED.clear()
+        _PARSED[k] = parse_kicad_pcb(path)
+    return _PARSED[k]
+
+
+PROBE_FILES = {'rb': '_rb.kicad_pcb', 'rb_pro': '_rb.kicad_pro', 'rb_log': '_rb.log',
+               'rb_pack': '_rb.pack.json', 'dst': '_dst.kicad_pcb', 'dst_pro': '_dst.kicad_pro'}
+PROBE_FILES_OPT = {'rb_ref': '_rb_refusals.json'}
+
+
+def probe_key(B, R, nm, src_move, dst_move, K, base, nets_csv, extra_relay=None):
+    """What a probe's verdict is a function of: the copper of every net
+    outside the coupled set as the routed board carries it, the fanout
+    copper the set keeps, the move(s), the co-moves and their asks, the
+    set itself, the code and the knobs."""
+    C, N = coupled_set(B, nm, src_move, dst_move, extra_relay)
+    group = [nm] + sorted(C)
+    byname = B.byname
+    gids = {byname[c][0] for c in group}
+    pcb_r = parsed(R)
+    pcb_for = FAN_PCB if FAN_PCB is not None else (lambda _c: B.pcb)
+    others = pm.copper_hash([s_ for s_ in pcb_r.segments if s_.net_id not in gids],
+                            [v for v in pcb_r.vias if v.net_id not in gids])
+    kept = {c: pm.net_copper_hash(pcb_for(c), [byname[c][0]]) for c in group}
+    asks = {}
+    for o in [nm] + N:
+        m = B.cur_dst.get(o)
+        asks[o] = sr.move_sig(m) if m is not None else ('face', (B.ends[o]['dst'] or {}).get('direction'))
+    parts = {'code': pm.code_hash(), 'knobs': pm.knob_hash(), 'K': K, 'base': os.path.basename(base),
+             'nets': hashlib.sha1(nets_csv.encode()).hexdigest()[:12], 'dref': B.st['dref'], 'sref': B.st['sref'],
+             'net': nm, 'src': sr.move_sig(src_move) if src_move is not None else None,
+             'dst': sr.move_sig(dst_move) if dst_move is not None else None,
+             'comove': N, 'asks': asks, 'set': sorted(C), 'others': others, 'kept': kept,
+             'coupled': COUPLED, 'widen': WIDEN, 'grade': GRADE_MODE}
+    return pm.key_of(parts)
+
+
+def _res_doc(res, tag):
+    doc = {k: v for k, v in res.items() if k not in ('src', 'dst')}
+    files = {}
+    if 'board' in res:
+        for k, ext in PROBE_FILES.items():
+            files[k] = tag + ext
+        for k, ext in PROBE_FILES_OPT.items():
+            if os.path.exists(tag + ext):
+                files[k] = tag + ext
+    return {'res': doc, 'files': files, 'tag': tag, 'when': time.time()}
+
+
+def _res_live(res, src_move, dst_move):
+    """A probe result read back from JSON (the memo, a worker) as
+    probe_run returns it: the moves attached, the points tuples."""
+    res = dict(res)
+    res['src'], res['dst'] = src_move, dst_move
+    for k in ('src_got', 'dst_got'):
+        res[k] = _got_tuples(res.get(k))
+    if res.get('comove_got'):
+        res['comove_got'] = {o: _got_tuples(g) for o, g in res['comove_got'].items()}
+    if res.get('comove'):
+        res['comove'] = {o: tuple(v) for o, v in res['comove'].items()}
+    return res
+
+
+def _res_of(doc, src_move, dst_move):
+    res = _res_live(doc['res'], src_move, dst_move)
+    if 'board' in res:
+        res['board'] = doc['files']['rb']
+    res['seconds'] = 0.0
+    res['memo'] = doc.get('tag')
+    return res
+
+
+def move_to_json(m):
+    """A menu move on the wire (to a probe worker): its dataclass fields
+    and the co-move list the ranker hangs on it."""
+    import dataclasses
+    if m is None:
+        return None
+    d = {f.name: getattr(m, f.name) for f in dataclasses.fields(m)}
+    d['replaces'] = move_to_json(d.get('replaces'))
+    d['comove'] = list(getattr(m, 'comove', []) or [])
+    return d
+
+
+def move_from_json(d):
+    if d is None:
+        return None
+    d = dict(d)
+    comove = d.pop('comove', [])
+    d['exit_pt'] = tuple(d['exit_pt'])
+    d['legs'] = [(tuple(p), tuple(q), L) for p, q, L in (d.get('legs') or [])]
+    d['site'] = tuple(d['site']) if d.get('site') else None
+    d['replaces'] = move_from_json(d.get('replaces'))
+    m = em.Move(**d)
+    m.comove = list(comove)
+    return m
+
+
+def _ends_of(end, m):
+    if end == 'both':
+        return m[0], m[1]
+    return (m, None) if end == 'src' else (None, m)
+
+
+# ---------------------------------------------------------- the probe pool
+# --par=N (2026-09-18): N resident probe workers (probe_worker.py), each
+# holding the round's Board and applying the parent's advances; the
+# candidates of one net -- independent by construction, the parent
+# advances only after the net's menu is judged -- probed N at a time.
+POOL = None
+WORKER_RECYCLE = int(os.environ.get('PROBE_WORKER_RECYCLE', '100') or 0)
+# a worker is 300-450 MB at K41 (measured); one whose PEAK passed this is
+# recycled at its next probe (this machine has 8 GB: six workers and two
+# parents beside a browser got the population run killed for memory)
+WORKER_MAX_MB = float(os.environ.get('PROBE_WORKER_MAX_MB', '1200') or 0)
+
+
+class _Worker:
+    def __init__(self, idx, err_path):
+        self.idx, self.err_path, self.p, self.n = idx, err_path, None, 0
+
+    def start(self):
+        self.err = open(self.err_path, 'a')
+        self.p = subprocess.Popen([sys.executable, '-u', os.path.join(HERE, 'probe_worker.py')],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
+                                  text=True, cwd=HERE, env=dict(os.environ, PROBE_MEMO='0'))
+        self.n = 0
+
+    def ask(self, msg):
+        self.p.stdin.write(json.dumps(msg, default=str) + '\n')
+        self.p.stdin.flush()
+        line = self.p.stdout.readline()
+        if not line:
+            raise RuntimeError(f'probe worker {self.idx} died (rc {self.p.poll()}; see {self.err_path})')
+        r = json.loads(line)
+        if not r.get('ok'):
+            raise RuntimeError(f'probe worker {self.idx}: {r.get("error")}')
+        return r
+
+    def stop(self):
+        if self.p is None:
+            return
+        try:
+            self.p.stdin.write(json.dumps({'op': 'quit'}) + '\n')
+            self.p.stdin.flush()
+            self.p.wait(timeout=5)
+        except Exception:                                  # noqa: BLE001
+            self.p.kill()
+        self.p = None
+
+
+class ProbePool:
+    def __init__(self, n, err_dir):
+        import queue
+        os.makedirs(err_dir, exist_ok=True)
+        self.workers = [_Worker(i, os.path.join(err_dir, f'probe_worker_{i}.err')) for i in range(n)]
+        for w in self.workers:
+            w.start()
+        self.state = []              # the messages a fresh worker replays: the round, its advances
+        self.idle = queue.Queue()
+        for w in self.workers:
+            self.idle.put(w)
+        self.restarts = 0
+
+    def _replay(self, w):
+        w.stop()
+        w.start()
+        self.restarts += 1
+        for m in self.state:
+            w.ask(m)
+
+    def _all(self, msg):
+        import concurrent.futures as cf
+
+        def one(w):
+            if msg['op'] == 'round' and WORKER_RECYCLE and w.n >= WORKER_RECYCLE:
+                w.stop()
+                w.start()
+            try:
+                return w.ask(msg)
+            except RuntimeError:
+                self._replay(w)
+                return None
+        with cf.ThreadPoolExecutor(max_workers=len(self.workers)) as ex:
+            return list(ex.map(one, self.workers))
+
+    def round(self, msg):
+        self.state = [msg]
+        return self._all(msg)
+
+    def advance(self, msg):
+        self.state.append(msg)
+        return self._all(msg)
+
+    def probe(self, msg):
+        w = self.idle.get()
+        try:
+            if getattr(w, 'fat', False):
+                self._replay(w)          # its peak passed WORKER_MAX_MB: a fresh process
+                w.fat = False
+            try:
+                r = w.ask(msg)
+            except RuntimeError as e:
+                sys.stderr.write(f'{e}; restarting\n')
+                self._replay(w)
+                r = w.ask(msg)
+            w.n += 1
+            if WORKER_MAX_MB and r.get('peak_mb', 0) > WORKER_MAX_MB:
+                w.fat = True
+            return r
+        finally:
+            self.idle.put(w)
+
+    def close(self):
+        for w in self.workers:
+            w.stop()
+
+
+def probe_many(B, R, nm, items, K, base, nets_csv, log, extra_relay=None):
+    """The probes of one net's candidates, `items` = [(end, move(s), tag)],
+    each as probe_run gives it: a memo hit read back (probe_memo), the
+    rest run -- in the pool side by side when one is up, else here one
+    after another. Returns the results in the items' order."""
+    st = _store('probe')
+    out = [None] * len(items)
+    miss = []
+    for i, (end, m, ptag) in enumerate(items):
+        sm, dm = _ends_of(end, m)
+        key = probe_key(B, R, nm, sm, dm, K, base, nets_csv, extra_relay) if st is not None else None
+        doc = st.get(key) if st is not None else None
+        if doc is not None and (not doc.get('files') or pm.files_present(doc)):
+            pm.bump('probe_hit')
+            out[i] = _res_of(doc, sm, dm)
+            continue
+        if doc is not None:
+            pm.bump('stale_files')
+        pm.bump('probe_miss')
+        miss.append((i, sm, dm, ptag, key))
+    if POOL is not None and miss:
+        import concurrent.futures as cf
+
+        def one(t):
+            i, sm, dm, ptag, _key = t
+            msg = {'op': 'probe', 'R': R, 'net': nm, 'src': move_to_json(sm), 'dst': move_to_json(dm),
+                   'tag': ptag, 'extra_relay': list(extra_relay or [])}
+            try:
+                r = POOL.probe(msg)
+                res = _res_live(r['res'], sm, dm)
+            except RuntimeError as e:
+                res = {'net': nm, 'src': sm, 'dst': dm, 'fail': f'worker: {e}', 'seconds': 0.0}
+            return i, res
+        with cf.ThreadPoolExecutor(max_workers=len(POOL.workers)) as ex:
+            for i, res in ex.map(one, miss):
+                out[i] = res
+    else:
+        for i, sm, dm, ptag, _key in miss:
+            out[i] = probe_run(B, R, nm, sm, dm, ptag, K, base, nets_csv, log, extra_relay)
+    if st is not None:
+        for i, sm, dm, ptag, key in miss:
+            st.put(key, _res_doc(out[i], ptag))
+    return out
+
+
 def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay=None):
+    """One probe through probe_many: the memo, then the pool or here."""
+    end = 'both' if (src_move is not None and dst_move is not None) else ('src' if src_move is not None else 'dst')
+    m = (src_move, dst_move) if end == 'both' else (src_move if end == 'src' else dst_move)
+    return probe_many(B, R, nm, [(end, m, tag)], K, base, nets_csv, log, extra_relay)[0]
+
+
+def probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay=None):
     """The real router's answer to ONE move on the routed board R: the
     net stripped to its tooth, the asked end(s) re-fanned against the
     frozen copper, braided alone, graded whole. Returns a dict."""
@@ -1000,17 +1400,7 @@ def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay
     txt = strip_to_fanout_copper(txt, nm, nid, net.name, pcb_for(nm), _pad(st['sgrid'].bbox))
     # the LOCAL RE-BRAID: the lanes in the way of the new end are stripped
     # (their teeth and berths stay) and re-laid with the moved net
-    C = conflicts(src_move if src_move is not None else dst_move, B.lanes, nm)
-    N = list(getattr(dst_move, 'comove', []) or [])
-    C |= set(N)           # a re-fanned neighbour's lane is re-laid too
-    C |= set((getattr(B, 'blockers', {}) or {}).get(nm, []))   # the braid's census: what walled it
-    C |= set(extra_relay or [])
-    if COUPLED == 'chord':
-        a_ = src_move.exit_pt if src_move is not None else tuple((B.ends[nm]['src'] or {}).get('tooth') or ())
-        b_ = dst_move.exit_pt if dst_move is not None else tuple((B.ends[nm]['dst'] or {}).get('tooth') or ())
-        if len(a_) == 2 and len(b_) == 2:
-            C |= chord_walls(B.lanes, nm, a_, b_)
-    C.discard(nm)
+    C, N = coupled_set(B, nm, src_move, dst_move, extra_relay)
     whole = (-1e9, -1e9, 1e9, 1e9)
     for c in sorted(C):
         cid, cnet = byname[c]
@@ -1237,6 +1627,10 @@ def main():
           f'  [{_r.source}]')
     ROUNDS = int(OPTS.get('rounds', 4))
     WORST = int(OPTS.get('worst', 3))
+    if PERTURB:
+        ROUNDS, WORST = 1, PERTURB
+        import random as _random
+        prng = _random.Random(PERTURB_SEED)
     PROBES = int(OPTS.get('probes', 1))
     MIN_VIAS = int(OPTS.get('min-vias', 3))
     MODE = OPTS.get('mode', 'incremental')      # incremental | rebraid
@@ -1247,6 +1641,13 @@ def main():
     stem = f'{out_tag}_rp_k{K}'
     log = print
     t_all = time.time()
+    global MEMO_K, POOL
+    MEMO_K = K
+    PAR = int(OPTS.get('par', 0) or 0)
+    if PAR > 0:
+        POOL = ProbePool(PAR, os.path.dirname(stem) or '.')
+        import atexit
+        atexit.register(POOL.close)
     nets_all = coherent_nets(K, base)
     nets_csv = ','.join(nets_all)
     F0 = f'{tag}_fo_k{K}.kicad_pcb'
@@ -1348,6 +1749,11 @@ def main():
                          and V[nm].get('lane_vias', 0) >= MIN_VIAS),
                         key=lambda n: (-V[n]['lane_vias'], V[n].get('cls') != 'swim'))
             worst += sw[:WORST]
+            if PERTURB:
+                # the near jump: N random nets, not the worst ones
+                worst = prng.sample(names, min(PERTURB, len(names)))
+                log(f'  perturb (seed {PERTURB_SEED}): {worst} moved to another class each, '
+                    f'{PERTURB_TRIES} candidate(s) probed per net at most')
             bad = set(worst)
             log(f'  worst: ' + '; '.join(fmt_v(nm, V[nm], real[nm]) for nm in worst))
             # THE BLOCKER CENSUS: for each bad net, the lanes the braid found
@@ -1374,6 +1780,12 @@ def main():
             log(f'  gatekeepers (good nets in the way of >= {GATE_MIN} bad ones): '
                 + (', '.join(f'{g} ({gate_score[g]})' for g in gates) or 'none'))
             B.blockers = blockers
+            if POOL is not None:
+                POOL.round({'op': 'round', 'F': F, 'R': R, 'names': names, 'dref': dref,
+                            'banned': [list(x) for x in bans_s], 'blockers': blockers,
+                            'swimmers': sorted(B.swimmers), 'resid': resid, 'fan_src': dict(fan_src),
+                            'K': K, 'base': base, 'nets_csv': nets_csv, 'apply_strip': APPLY_STRIP,
+                            'coupled': COUPLED, 'widen': WIDEN, 'grade': GRADE_MODE})
             buses = B.buses()
             cache = {}
             stand = {}          # net -> (src_move, dst_move, probe)
@@ -1396,6 +1808,24 @@ def main():
                     break
                 screened = {}
                 for end in ends_try:
+                    if PERTURB:
+                        # every class the menu offers, shuffled, the current
+                        # class out (rank_dest leaves it out already; the
+                        # source menu keeps same-class teeth for a descent)
+                        if end == 'dst':
+                            ranked, n_menu = rank_dest(B, nm, bans_d[nm], buses, cache, 10 ** 6)
+                        else:
+                            ranked, n_menu = rank_src(B, nm, buses, cache, 10 ** 6)
+                            ranked = [(c_, m_) for c_, m_ in ranked if (m_.direction, m_.layer) != B.cls(nm, 'src')]
+                        prng.shuffle(ranked)
+                        ranked = screen(B, nm, ranked[:SCREEN_MAX], end, PERTURB_TRIES, log)
+                        screened[end] = ranked
+                        log(f'  {nm} {end}: {n_menu} move(s) in the menu, current '
+                            f'{sr.fmt(B.ends[nm][end])}; random other-class candidates: '
+                            + ('; '.join(f'{fmt_move(m)}' for c, m in ranked[:PERTURB_TRIES]) or 'none'))
+                        for c, m in ranked[:PERTURB_TRIES]:
+                            cands.append((end, m, c))
+                        continue
                     if end == 'dst':
                         ranked, n_menu = rank_dest(B, nm, bans_d[nm], buses, cache, SCREEN_MAX)
                     else:
@@ -1436,14 +1866,17 @@ def main():
                     for c, ms, md in pairs[:PROBES]:
                         cands.append(('both', (ms, md), c))
                 results = []
+                routed = []         # perturb: every probe that routed, best-first at the end
+                if PERTURB:
+                    cands = [c_ for c_ in cands if c_[0] != 'both']
+                    prng.shuffle(cands)
+                    cands = cands[:PERTURB_TRIES]
+                items = []
                 for end, m, c in cands:
                     tried[nm] += 1
-                    ptag = f'{stem}_r{rnd}_{nm}_{end}{tried[nm]}'
-                    if end == 'both':
-                        pr = probe(B, R_cur, nm, m[0], m[1], ptag, K, base, nets_csv, log)
-                    else:
-                        pr = probe(B, R_cur, nm, m if end == 'src' else None, m if end == 'dst' else None,
-                                   ptag, K, base, nets_csv, log)
+                    items.append((end, m, f'{stem}_r{rnd}_{nm}_{end}{tried[nm]}'))
+                prs = probe_many(B, R_cur, nm, items, K, base, nets_csv, log)
+                for (end, m, c), pr in zip(cands, prs):
                     if 'fail' in pr:
                         log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}; '
                             f'{pr.get("src_verdict") or pr.get("dst_verdict") or ""}) {pr["seconds"]:.0f} s')
@@ -1521,7 +1954,11 @@ def main():
                         + (f' mm {g[3]} (ref {ref_g[3]})' if LENGTH_TIE and len(g) > 3 and len(ref_g) > 3 else '')
                         + f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
                         + (f' (the engine\'s substitute {fmt_move(m)} is the ask)' if substitute is not None else '')
-                        + f' ({pr["seconds"]:.0f} s)')
+                        + (' [memo]' if pr.get('memo') else f' ({pr["seconds"]:.0f} s)'))
+                    if PERTURB and not pr.get('refused') and (in_cls or substitute is not None):
+                        routed.append((len(g[0]), g[2], 0, end, m, pr))
+                        if not g[0]:
+                            break           # a jump lands on the first complete board
                     if ok:
                         results.append((len(g[0]), g[2], (g[3] if LENGTH_TIE and len(g) > 3
                                                            and g[3] is not None else 0), end, m, pr))
@@ -1532,6 +1969,10 @@ def main():
                             bans_s.add((nm, sr.move_sig(m)))
                         else:
                             bans_pair[nm].add((sr.move_sig(m[0]), m[1].direction, m[1].layer))
+                if PERTURB and routed:
+                    results = routed        # the landing: whatever it grades
+                    log(f'    {nm}: JUMPED (the probe board is the landing, graded '
+                        f'open {min(routed)[0]} vias {min(routed)[1]})')
                 if results:
                     results.sort(key=lambda t: (t[0], t[1], t[2]))
                     _o, _v, _mm, end, m, pr = results[0]
@@ -1547,11 +1988,14 @@ def main():
                         fo_b = R_cur[:-len('_rb.kicad_pcb')] + '_dst.kicad_pcb'
                         for o in {nm} | set(pr.get('relaid') or []) | set((pr.get('comove_got') or {})):
                             fan_src[o] = fo_b
+                        if POOL is not None:
+                            POOL.advance({'op': 'advance', 'net': nm, 'pr': _res_doc(pr, '')['res'],
+                                          'R_cur': R_cur, 'fan_src': dict(fan_src)})
                         log(f'    {nm}: {os.path.basename(R_cur)} is the board now '
                             f'(open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]})')
             # PHASE 2: each gatekeeper tried at another class of its own,
             # judged by the local braid with the bad nets it blocks re-laid
-            for g in gates:
+            for g in (gates if not PERTURB else []):
                 if g in stand or g in bad:
                     continue
                 blocked_by_g = [nm for nm in worst if g in blockers.get(nm, [])]
@@ -1569,11 +2013,12 @@ def main():
                     for c, m in ranked:
                         cands.append((end, m, c))
                 results = []
+                items = []
                 for end, m, c in cands:
                     tried[g] += 1
-                    ptag = f'{stem}_r{rnd}_{g}_{end}{tried[g]}'
-                    pr = probe(B, R_cur, g, m if end == 'src' else None, m if end == 'dst' else None,
-                               ptag, K, base, nets_csv, log, extra_relay=blocked_by_g)
+                    items.append((end, m, f'{stem}_r{rnd}_{g}_{end}{tried[g]}'))
+                prs = probe_many(B, R_cur, g, items, K, base, nets_csv, log, extra_relay=blocked_by_g)
+                for (end, m, c), pr in zip(cands, prs):
                     if 'fail' in pr:
                         log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}) {pr["seconds"]:.0f} s')
                         if end == 'dst':
@@ -1593,7 +2038,7 @@ def main():
                         + (f', refused {pr["refused_nets"]}' if pr.get('refused_nets') else '')
                         + f'; board open {gg[0]} drc {gg[1]} vias {gg[2]} (ref {len(ref_g[0])}/{ref_g[2]})'
                         f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
-                        f' ({pr["seconds"]:.0f} s)')
+                        + (' [memo]' if pr.get('memo') else f' ({pr["seconds"]:.0f} s)'))
                     if ok:
                         results.append((len(gg[0]), gg[2], end, m, pr))
                     elif not (pr.get('unjudged') and in_cls):
@@ -1610,6 +2055,9 @@ def main():
                         best_g = list(pr['grade'])
                         B.lanes = lane_items(parse_kicad_pcb(R_cur), B.pcb, names, B.byname)
                         B.advance(g, pr)
+                        if POOL is not None:
+                            POOL.advance({'op': 'advance', 'net': g, 'pr': _res_doc(pr, '')['res'],
+                                          'R_cur': R_cur, 'fan_src': dict(fan_src)})
                         log(f'    {g}: {os.path.basename(R_cur)} is the board now '
                             f'(open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]})')
             if not stand and unjudged and MODE == 'incremental':
@@ -1685,7 +2133,7 @@ def main():
                         # braid trimmed the bypassed tip (the #622 overshoot
                         # trim): the derived board's end is the routed board's
                         trimmed.append(f'{nm}: {sr.fmt(b)} -> {sr.fmt(a)}')
-                keep = better(g1, g_round0) and not miss
+                keep = (better(g1, g_round0) or bool(PERTURB)) and not miss
                 log(f'  round {rnd}: {"KEPT" if keep else "rejected"} derived -- open {g1[0]}, drc {g1[1]}, '
                     f'vias {g1[2]}' + (f' mm {g1[3]}' if LENGTH_TIE else '')
                     + f' (round start {g_round0[0]}/{g_round0[2]}); fanout board {os.path.basename(F1)} derived '
@@ -1935,6 +2383,9 @@ def main():
     shutil.copy(F[:-len('.kicad_pcb')] + '.plan.json', fo_final[:-len('.kicad_pcb')] + '.plan.json')
     log(f'\nreplan: best open {best_g[0]} drc {best_g[1]} vias {best_g[2]} -> {os.path.basename(final)} '
         f'(fanout {os.path.basename(fo_final)}) ({time.time() - t_all:.0f} s)')
+    log(pm.summary() + (f'; pool {PAR} worker(s), {POOL.restarts} restart(s)' if POOL is not None else ''))
+    if POOL is not None:
+        POOL.close()
     r = subprocess.run([sys.executable, os.path.join(HERE, 'grade_k.py'), final, nets_csv],
                        capture_output=True, text=True)
     print((r.stdout + r.stderr).strip())
