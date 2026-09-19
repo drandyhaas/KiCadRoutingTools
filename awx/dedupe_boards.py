@@ -12,6 +12,7 @@ Compares SEGMENTS and VIAS only -- uuids and the sibling project differ on
 every write and say nothing about the copper (the repo rule: never hash or
 whole-file-diff a .kicad_pcb to decide identity).
 """
+import contextlib
 import os
 import sys
 
@@ -21,7 +22,13 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 
 def fingerprint(board):
-    pcb = parse_kicad_pcb(board)
+    # the parser reports board warnings (net-tagged graphics, duplicate
+    # references) on STDOUT, and this CLI's stdout IS the stem list a
+    # driver word-splits: on the zynq article (#337 copper polygons on
+    # two power nets) every word of the warning became a "board" the
+    # chain then braided. The warning goes where the driver reads notes.
+    with contextlib.redirect_stdout(sys.stderr):
+        pcb = parse_kicad_pcb(board)
     segs = sorted((round(s.start_x, 4), round(s.start_y, 4), round(s.end_x, 4),
                    round(s.end_y, 4), s.layer, s.net_id, round(s.width, 4))
                   for s in pcb.segments)

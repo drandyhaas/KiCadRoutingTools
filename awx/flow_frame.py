@@ -87,12 +87,41 @@ def quarter_of(pcb, dest, names):
 
 
 def turn_text(txt, k, cx, cy):
-    """The board file turned by k quarter turns about (cx, cy)."""
+    """The board file turned by k quarter turns about (cx, cy).
+
+    What turns, and what must not (2026-09-19, the zynq article):
+
+    * OUTSIDE a footprint every point token turns, at ANY depth: a
+      segment's `start`/`end` sit two levels down, but a `gr_poly`'s
+      `xy` sit three (under `pts`) and a zone's outline four (under
+      `polygon` / `pts`). The first version turned depth 2 only, so a
+      board-level copper polygon (#337, the net-tagged `gr_poly`) and
+      every zone stayed where they were while the pads moved -- on a
+      bench with neither it was invisible, on the zynq article the
+      verifier caught the polygon (its segments) and the chain refused
+      the pair (README TODO 6).
+    * INSIDE a footprint the `fp_*` shapes are LOCAL (they travel with
+      the placement), so only the footprint's own `at` turns; a stored
+      angle that is ABSOLUTE -- the pad's, and the text's (`fp_text` /
+      `property`), both of which KiCad stores in the board frame -- goes
+      DOWN by the turn so the part keeps its geometry. A ZONE nested in
+      a footprint (#478) is the one exception: its points are BOARD
+      coordinates, so it turns like a board-level zone.
+    """
     deg = (90.0 * k) % 360.0
+    ABS_ANGLE_PARENTS = ('pad', 'fp_text', 'property')
 
     def rot(x, y):
         dx, dy = _q(x - cx, y - cy, k)
         return cx + dx, cy + dy
+
+    def nums_of(j):
+        kk = txt.index(')', j)
+        parts = txt[j:kk].split()
+        try:
+            return kk, parts, [float(v) for v in parts]
+        except ValueError:
+            return kk, parts, None
 
     out = []
     i, n = 0, len(txt)
@@ -125,50 +154,55 @@ def turn_text(txt, k, cx, cy):
         while j < n and txt[j] not in ' \t\n)(':
             j += 1
         name = txt[i + 1:j]
-        depth = len(stack)
         parent = stack[-1] if stack else None
-        if (depth == 3 and name == 'at' and parent == 'pad'
-                and len(stack) >= 2 and stack[-2] == 'footprint'):
-            # a pad's stored angle is ABSOLUTE: it turns with the part
-            kk = txt.index(')', j)
-            parts = txt[j:kk].split()
-            try:
-                nums = [float(v) for v in parts]
-            except ValueError:
-                nums = None
-            if nums and len(nums) >= 2:
-                a0 = nums[2] if len(nums) > 2 else 0.0
-                out.append(f'({name} {parts[0]} {parts[1]} {(a0 - deg) % 360:g})')
-                i = kk + 1
-                continue
-        is_global = (depth == 2 and name in POINT_TOKENS and parent != 'footprint') \
-            or (depth == 2 and name == 'at' and parent == 'footprint')
-        if is_global:
-            kk = txt.index(')', j)
-            parts = txt[j:kk].split()
-            try:
-                nums = [float(v) for v in parts]
-            except ValueError:
-                nums = None
-            if nums and len(nums) >= 2:
-                x, y = rot(nums[0], nums[1])
-                rest = ''
-                if name == 'at' and parent == 'footprint' and len(nums) == 2:
-                    rest = f' {(-deg) % 360:g}'
-                elif len(nums) > 2:
-                    if name == 'at':
-                        rest = f' {(nums[2] - deg) % 360:g}'
-                    else:
-                        rest = ' ' + ' '.join(f'{v:g}' for v in nums[2:])
-                out.append(f'({name} {_fmt(x)} {_fmt(y)}{rest})')
-                stack.append(name)
-                stack.pop()
-                i = kk + 1
-                continue
+        in_fp = 'footprint' in stack
+        if name in POINT_TOKENS:
+            if in_fp and name == 'at' and parent in ABS_ANGLE_PARENTS \
+                    and stack[-2] == 'footprint':
+                # position LOCAL, stored angle ABSOLUTE: the angle alone
+                kk, parts, nums = nums_of(j)
+                if nums and len(nums) >= 2:
+                    a0 = nums[2] if len(nums) > 2 else 0.0
+                    out.append(f'({name} {parts[0]} {parts[1]} {(a0 - deg) % 360:g})')
+                    i = kk + 1
+                    continue
+            is_global = (not in_fp) \
+                or (name == 'at' and parent == 'footprint' and len(stack) == 2) \
+                or ('zone' in stack)
+            if is_global:
+                kk, parts, nums = nums_of(j)
+                if nums and len(nums) >= 2:
+                    x, y = rot(nums[0], nums[1])
+                    rest = ''
+                    if name == 'at' and parent == 'footprint' and len(nums) == 2:
+                        rest = f' {(-deg) % 360:g}'
+                    elif len(nums) > 2:
+                        if name == 'at':
+                            rest = f' {(nums[2] - deg) % 360:g}'
+                        else:
+                            rest = ' ' + ' '.join(f'{v:g}' for v in nums[2:])
+                    out.append(f'({name} {_fmt(x)} {_fmt(y)}{rest})')
+                    i = kk + 1
+                    continue
         out.append('(')
         stack.append(name)
         i += 1
     return ''.join(out)
+
+
+def _canon_rect(sx, sy, tilt):
+    """A pad rectangle as (long, short, angle of the long axis mod 180);
+    a square is its own image under every quarter turn."""
+    if abs(sx - sy) <= 1e-3:
+        return sx, sy, 0.0
+    if sx >= sy:
+        return sx, sy, tilt % 180.0
+    return sy, sx, (tilt + 90.0) % 180.0
+
+
+def _same_rect(a, b):
+    da = (a[2] - b[2] + 90.0) % 180.0 - 90.0
+    return abs(a[0] - b[0]) <= 1e-3 and abs(a[1] - b[1]) <= 1e-3 and abs(da) <= 0.01
 
 
 SIBLINGS = ('.kicad_pro', '.ladder.txt', '.kicad_dru')
@@ -205,11 +239,24 @@ def turn_file(src, dst, k, cx, cy):
         for p0, p1 in zip(f0.pads, f1.pads):
             if not near(rot(p0.global_x, p0.global_y), (p1.global_x, p1.global_y)):
                 bad.append(f'pad {ref}.{p0.pad_number}')
-            exp = (p0.size_y, p0.size_x) if k % 2 else (p0.size_x, p0.size_y)
-            if abs(exp[0] - p1.size_x) > 1e-3 or abs(exp[1] - p1.size_y) > 1e-3:
+            # the pad as an ORIENTED rectangle: the parser folds an
+            # orthogonal pad onto the board axes (sizes swapped at ~90)
+            # and leaves a tilted one as drawn with the residual tilt,
+            # so a size-swap rule is wrong for any part at 45 (C139 on
+            # the zynq article); compare (long, short, long-axis angle)
+            # against the original's turned by 90 k
+            if not _same_rect(_canon_rect(p0.size_x, p0.size_y, p0.rect_rotation + 90.0 * k),
+                              _canon_rect(p1.size_x, p1.size_y, p1.rect_rotation)):
                 bad.append(f'pad {ref}.{p0.pad_number} extents')
     if len(pcb0.segments) != len(pcb1.segments) or len(pcb0.vias) != len(pcb1.vias):
         bad.append('segment/via counts differ')
+    if len(pcb0.zones) != len(pcb1.zones):
+        bad.append('zone counts differ')
+    for z0, z1 in zip(pcb0.zones, pcb1.zones):
+        if len(z0.polygon) != len(z1.polygon) or any(
+                not near(rot(*q0), q1) for q0, q1 in zip(z0.polygon, z1.polygon)):
+            bad.append(f'zone {z0.net_name or z0.net_id} on {z0.layer}')
+            break
     for s0, s1 in zip(pcb0.segments, pcb1.segments):
         if not near(rot(s0.start_x, s0.start_y), (s1.start_x, s1.start_y)) \
                 or not near(rot(s0.end_x, s0.end_y), (s1.end_x, s1.end_y)):

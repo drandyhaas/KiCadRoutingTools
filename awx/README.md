@@ -49,6 +49,48 @@ crossovers at K51 over two runs stood nothing, and the last run
 (`tmp/ev51f`) ended with four distinct 83s -- every jump and crossover
 world descended back to 83.
 
+**The second article: zynq** (2026-09-19). `zynq_ad9364` from the
+stress corpus (set 4), the Zynq `U1` (CLG400) to its DDR3 `U2`, built by
+`make_bench.py --two-layer` in 15 s: 46 pair nets, two refused at the
+source, 44 in seven rivers, checkpoints 9 18 26 32 38 42 44. The human
+routed this bus on F and B only (the inner layers are planes; 103 vias
+over the same 44 nets, every one F-to-B), so the two-layer article is a
+fair comparison. The pair points -y, so the chain runs it through one
+quarter turn of the flow frame; the frame article (`zynqF`) grades
+identically at every rung, and the evolution runs on that.
+
+| | K9 | K18 | K26 | K32 | K38 | K42 | K44 |
+|---|---|---|---|---|---|---|---|
+| the chain alone | 14 | 16 | 39 | 54 | 68 | 90 | 105 |
+| **the evolution** | **12** | 16 | **34** | **50** | **59** | **71** | **88** |
+| human | 25 | 45 | 57 | 74 | 86 | 97 | 103 |
+| chain wall, this laptop | 33 s | 1 min | 2 min | 3 min | 5 min | 6 min | 8 min |
+
+All 0 open, 0 DRC at 0.1 mm. Below the human at every rung but the
+top, where the chain is two over and the evolution fifteen under. The
+evolution row: K9/K18/K26/K32 by the population as the H3 ladder runs
+it (pop 3, two generations, K9 one; K18 gained nothing), K38 by both the
+population (a near-jump world descended) and the descent alone,
+K42/K44 by the descent alone carrying `--length=1 --worst=8` (three
+rounds: 90 -> 77 -> 71, 105 -> 97 -> 95), then a K44 population seeded
+from the 95 (pop 4, two generations, length rule on, 53 min): every
+descent of the 95 null, the CROSSOVER of the 95 with the chain's 105
+(seven of their fourteen differing ends) descended 108 -> 93, that 93
+descended to 89, and a near jump from the 93 (two nets) descended
+101 -> 88. Population at the end 88 / 89 / 93 / 95; the 88 is
+`tmp/records/zynq_k44_88_pop` (its board-frame copy beside it). The length tie rule -- an equal-via board that
+shortens the copper stands -- is what let the K38 descent take nine
+vias in one round where the same round without it took four. Where the
+human's board never puts more than four vias on a net (one net), the
+chain's K44 carries seven nets at four and three at six -- the
+multi-divers the descent exists for. Two defects the article shows that
+the H3 bench cannot: a net the main spine cannot reach is split into a
+one-net corridor and planned onto a FAR-FACE source tooth (a channel
+escape through seventeen rows of the Zynq, then straight back: DQ12 at
+K38, DQ13 at K44, ~24 mm of hairpin each, priced by the count judge as
+a via saved), and at K42 the whole bus becomes one 42-net corridor with
+eleven in-band refusals. Renders: `tmp/zynq/img/`.
+
 Two rules the router keeps. **It is general**: no net, face, board or
 part name anywhere in the code; every rule is geometric. **It is an
 autorouter**: the human's boards are tests, never seeds. The one test
@@ -379,10 +421,18 @@ other face, every stub on the other layer. Every isometry grades as the
 control to the via and the segment; the selector and the braid each run
 a pair in the pair's own canonical frame.*
 
-<img src="img/zynq_k28.png" alt="The second array pair at K28" width="380">
+<img src="img/zynq_k44.png" alt="The second array pair, all 44 nets" width="380"> <img src="img/zynq_k44_human.png" alt="The same 44 nets as the human routed them" width="380">
 
-*A second article (`make_bench.py --two-layer`, zynq to DDR3): complete
-at 55 vias, 17 of 28 in band -- the gap a second board shows.*
+*The second article (`make_bench.py --two-layer`, zynq to DDR3), all 44
+nets, after the evolution: 88 vias against the human's 103
+(`img/zynq_k44_human.png` is the human's, meanders and all). Three general defects had to
+be fixed before this article ran at all, none visible on the H3 bench:
+the flow frame turned point tokens at depth 2 only (a board-level copper
+polygon and every zone stayed put while the pads turned; the verifier
+also assumed orthogonal pads), `dedupe_boards.py` let the parser's
+warning onto the stdout the chain word-splits into its board list, and
+the evolution never handed `--board`/`--dest` to its descents. Each fix
+is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 
 ## The tools
 
@@ -505,10 +555,15 @@ abandoned with a measurement.
    pruning, not column generation), and a plan-time floor over the
    PLANNED LANES rather than the channel is the one untested ranker.
 
-6. **Generality.** Tuned on one bench; zynq_ad9364 at K28 is complete
-   but 17 of 28 in band; `flow_frame.py turn` does not run that article
-   through the chain; off-axis poses (R30, R45) break the plan's compass
-   faces.
+6. **Generality.** Tuned on one bench. The zynq article now runs
+   through the chain and the evolution (the table above); what it shows:
+   a singleton corridor's source tooth may be planned on the FAR face of
+   the source array (the count judge sees a via saved, the length judge
+   prices the lane from the tooth's exit and the berth's run but not the
+   tooth's own escape through the array -- `_length` of the source move
+   is the missing term), and the top rungs lose their in-band execution
+   (58 refusals at K44). Off-axis poses (R30, R45) still break the
+   plan's compass faces.
 
 7. **The corpus A/B for the `py_router` changes, then the PR to main.**
    `KICAD_SEG_DIST_EXACT` ships on and owes it.

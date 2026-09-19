@@ -56,6 +56,12 @@ from collections import Counter
 ARGV = [a for a in sys.argv[1:] if not a.startswith('--')]
 OPTS = dict(a[2:].split('=', 1) for a in sys.argv[1:] if a.startswith('--'))
 os.environ.setdefault('SRC_CLIMB', '0')        # the chain's menus for our own reading (see plan_loop)
+# THE BENCH REACHES EVERY OPERATOR (2026-09-19, the zynq article): replan
+# defaults to the H3 bench and DU1, and the three replan calls below used
+# to pass neither, so on a second article every descent re-fanned the
+# WRONG board. Set in main() from --board / --dest; on the H3 bench these
+# are replan's own defaults, so nothing there changes.
+BENCH_ARGS = []
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
@@ -148,7 +154,7 @@ def descend(world, K, out_dir, args, nets_csv, env_extra=None):
     with open(out + '.out', 'w', encoding='utf-8') as f:
         p = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'replan.py'), world['stem'], str(K),
                             f'--from={world["stem"]}', f'--out={out}', '--mode=incremental',
-                            '--apply=strip'] + args.split(), cwd=HERE, env=child_env(env_extra),
+                            '--apply=strip'] + BENCH_ARGS + args.split(), cwd=HERE, env=child_env(env_extra),
                            stdout=f, stderr=subprocess.STDOUT, text=True)
     stem = f'{out}_rp_k{K}'
     if not os.path.exists(stem + '.kicad_pcb'):
@@ -216,7 +222,7 @@ def jump_near(world, K, out_dir, n_nets, rng, nets_csv, env_extra=None, tries=3)
         p = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'replan.py'), world['stem'], str(K),
                             f'--from={world["stem"]}', f'--out={out}', '--mode=incremental', '--apply=strip',
                             f'--perturb={n_nets}', f'--perturb-tries={tries}', f'--seed={seed}',
-                            '--coupled=census', '--widen=0', '--grade=inproc'],
+                            '--coupled=census', '--widen=0', '--grade=inproc'] + BENCH_ARGS,
                            cwd=HERE, env=child_env(env_extra), stdout=f, stderr=subprocess.STDOUT, text=True)
     stem = f'{out}_rp_k{K}'
     if not os.path.exists(stem + '.kicad_pcb'):
@@ -270,7 +276,7 @@ def cross_probe(A, Bw, K, out_dir, rng, nets_csv, par, env_extra=None):
     t0 = time.time()
     args = [sys.executable, '-u', os.path.join(HERE, 'replan.py'), A['stem'], str(K),
             f'--from={A["stem"]}', f'--out={out}', f'--cross={Bw["stem"]}', f'--seed={seed}',
-            '--mode=incremental', '--apply=strip', '--coupled=census', '--widen=0', '--grade=inproc']
+            '--mode=incremental', '--apply=strip', '--coupled=census', '--widen=0', '--grade=inproc'] + BENCH_ARGS
     if par:
         args.append(f'--par={par}')
     with open(out + '.out', 'w', encoding='utf-8') as f:
@@ -339,6 +345,7 @@ def main():
     tag, K = ARGV[0], int(ARGV[1])
     bench = OPTS.get('board', os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb'))
     dest = OPTS.get('dest', 'DU1')
+    BENCH_ARGS[:] = [f'--board={os.path.abspath(bench)}', f'--dest={dest}']
     POP = int(OPTS.get('pop', 4))
     GENS = int(OPTS.get('gens', 3))
     JUMPS = int(OPTS.get('jumps', 2))
