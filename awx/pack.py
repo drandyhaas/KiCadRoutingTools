@@ -1873,6 +1873,26 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         wvia = worlds[0].grown(via_extra, via_r - br.TRACK / 2)
         for w in worlds[1:]:
             wvia = World.union(wvia, w.grown(via_extra, via_r - br.TRACK / 2))
+        # THE HOLE RULE (2026-09-19): a via's drill keeps the board's
+        # hole-to-hole clearance from every other drill, whatever the net
+        # -- KiCad's rule is net-agnostic, and on the zynq article it is
+        # 0.25 mm between drills (0.40 centre to centre for these vias)
+        # where the copper rule alone allows 0.355. Two taut-packed vias
+        # settled at the copper distance and check_drc named them (K26
+        # DM0/DQ1, K32 A7/A9). Every drilled pad and every via not this
+        # lane's own is a disc at drill/2 + h2h + this via's drill/2.
+        h2h = float(getattr(ctx.cfg, 'hole_to_hole_clearance', 0.0) or 0.0)
+        if h2h > 0:
+            own_xy = {(round(v.x, 4), round(v.y, 4)) for v in vias}
+            grow = h2h + br.VIA_DRILL / 2
+            holes = [((p.hole_x if getattr(p, 'hole_x', None) is not None else p.global_x),
+                      (p.hole_y if getattr(p, 'hole_y', None) is not None else p.global_y),
+                      p.drill / 2 + grow)
+                     for fp in ctx.pcb.footprints.values() for p in fp.pads if p.drill and p.drill > 0]
+            holes += [(v.x, v.y, v.drill / 2 + grow) for v in ctx.pcb.vias
+                      if (round(v.x, 4), round(v.y, 4)) not in own_xy]
+            if holes:
+                wvia = World.union(wvia, World([], holes, wvia.E, wvia.edge_need))
         arrs = [w.arrays(MARGIN_R) for w in worlds] + [wvia.arrays(MARGIN_R)]
         Ds = [a_ for a_, _c in arrs]
         Cs = [c_ for _a, c_ in arrs]
@@ -2036,9 +2056,14 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
 
     failed = []
     n_taut = 0
+    # PK_FOLLOW=0 (2026-09-19): every lane taut, hugging nothing -- for the
+    # whole-board pack that iterates passes: a bundle of taut strings
+    # settles into nested curves that bend where the obstacle is, where the
+    # follow copies the neighbour's jog wherever it happens to be
+    _follow = os.environ.get('PK_FOLLOW', '1') != '0'
     for nm in order:
         n_lanes += 1
-        reason = pack_one(nm)
+        reason = pack_one(nm, follow=_follow)
         if reason is not None and reason.startswith('longer'):
             # the follow would drag the lane onto a longer arc (packing
             # toward the roomy side pulls an inner lane out onto the outer
@@ -2058,7 +2083,7 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         packed.append(nm)
     still = []
     for nm in failed:
-        reason = pack_one(nm)
+        reason = pack_one(nm, follow=_follow)
         if reason is not None and reason.startswith('longer'):
             reason = pack_one(nm, follow=False)
         if reason is not None:

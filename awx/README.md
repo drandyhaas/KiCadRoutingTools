@@ -150,6 +150,44 @@ the article asked for, each general:
   652 -> 643 mm) but K35 60 -> 61 (878 -> 919 mm), K41 74 -> 82. Worse on
   three of five rungs is not a default; it stays a knob the evolution can try.
 
+**The pack, made to work on a finished board** (2026-09-19, Andy: "I
+see easy shorter paths"). Three things were wrong, in order of size:
+
+* An evolved board's `.pack.json` is the LAST PROBE braid's sidecar, and
+  a probe lays one lane and its coupled set -- on the K44 record the
+  packer saw one corridor with one lane of 44 and packed that. The
+  whole-board mode (`pack_board.py BOARD --fanout BOARD_fo --nets ...
+  --src U1 --passes 4`) derives every lane from the routed/fanout pair
+  (`replan.lane_items`), takes each lane's two ends from its own copper
+  (the trims split stubs, so the fanout board's tips need not exist on
+  the routed one), packs one corridor per lane and repeats the passes so
+  each pass sees the room the last one left.
+* The FOLLOW force -- each lane snapped into the tube of the lane packed
+  before it -- copies that lane's jogs wherever they are, and from the
+  wall inward the outer lanes copy the router's still-ragged inner ones:
+  the K18 bundle read as a wave, every lane bending at a different
+  height. Four passes with the follow grew K18's lanes 392.6 -> 394.8
+  mm. Taut (`PK_FOLLOW=0`, the whole-board default) they went 392.6 ->
+  386 mm and bend together where the cap pads are.
+* A via moved by its lane was checked against copper clearance only;
+  KiCad's hole-to-hole rule is net-agnostic and 0.25 mm between drills
+  here (0.40 mm centre to centre for these vias, where the copper rule
+  allows 0.355). Two taut-packed vias settled at the copper distance and
+  `check_drc` named them (K26, K32). Every drilled pad and every other
+  via is now a disc in the via world at drill/2 + the board's rule +
+  this via's drill/2.
+
+| K | 9 | 18 | 26 | 32 | 38 | 42 | 44 |
+|---|---|---|---|---|---|---|---|
+| lanes, mm (best -> taut pack) | 185 -> 185 | 393 -> 386 | 662 -> 637 | 801 -> 776 | 954 -> 932 | 1054 -> 1010 | 1118 -> 1058 |
+| segments | 163 -> 142 | 1124 -> 309 | 1389 -> 640 | 3071 -> 875 | 3506 -> 995 | 3294 -> 1197 | 3854 -> 1378 |
+
+Vias unchanged on every rung, 0 open, 0 DRC with and without the
+margin. What is left is the ORDER: a lane that wraps the long way round
+its bundle at the same via count is invisible to the chain's judge,
+which prices vias and never copper, and no packer can move a lane
+across its neighbours.
+
 ## How it works, end to end
 
 **The chain** (`chain_k.sh`) makes the seeds. `coherent_nets.py K` picks
