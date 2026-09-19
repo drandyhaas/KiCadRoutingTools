@@ -4138,14 +4138,20 @@ def via_protection_setup_from_design_settings(ds) -> Dict[str, str]:
     """`canonical_via_protection_setup` read off a live pcbnew
     BOARD_DESIGN_SETTINGS (#962, GUI parse path). Every field is a plain bool
     on 10.0.0 (probed), so no SWIG enum is involved."""
-    def yn(v):
+    def yn(field, factory):
+        v = getattr(ds, field, None)
+        if v is None:           # an older pcbnew without the field: factory value
+            return factory
         return 'yes' if bool(v) else 'no'
     return {
-        'tenting': '(front %s) (back %s)' % (yn(ds.m_TentViasFront), yn(ds.m_TentViasBack)),
-        'covering': '(front %s) (back %s)' % (yn(ds.m_CoverViasFront), yn(ds.m_CoverViasBack)),
-        'plugging': '(front %s) (back %s)' % (yn(ds.m_PlugViasFront), yn(ds.m_PlugViasBack)),
-        'capping': yn(ds.m_CapVias),
-        'filling': yn(ds.m_FillVias),
+        'tenting': '(front %s) (back %s)' % (yn('m_TentViasFront', 'yes'),
+                                             yn('m_TentViasBack', 'yes')),
+        'covering': '(front %s) (back %s)' % (yn('m_CoverViasFront', 'no'),
+                                              yn('m_CoverViasBack', 'no')),
+        'plugging': '(front %s) (back %s)' % (yn('m_PlugViasFront', 'no'),
+                                              yn('m_PlugViasBack', 'no')),
+        'capping': yn('m_CapVias', 'no'),
+        'filling': yn('m_FillVias', 'no'),
     }
 
 

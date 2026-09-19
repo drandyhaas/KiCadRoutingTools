@@ -27,9 +27,14 @@ Invariants, on synthetic boards (one SMD pad with an F.Paste opening, net /A):
    - a via in an F.Cu-only pad (no paste layer) is not a hit;
    - a FOREIGN-net via in the opening is not a via-in-paste row (it is a
      short and is reported as one).
-5. `--baseline`: a via the baseline board already had is accepted
-   `inherited-via-in-paste`, exit 0. A NEW via at another spot on the same
-   board still counts. A `--nets` filter excluding the via's net drops it.
+5. `--baseline`: a via the baseline board already had under solder,
+   unprotected, is accepted `inherited-via-in-paste`, exit 0 (matched by net
+   NAME across dialects); one it had outside any opening, or filled+capped,
+   is not. A NEW via at another spot still counts. A `--nets` filter excluding
+   the via's net drops it. Buried vias and wrong-side blind vias are not hits.
+   On a pre-KiCad-10 file (which cannot carry the per-via tokens) the via is
+   accepted `undeclarable-via-in-paste` and counted on the console line and in
+   the JSON (user decision).
 6. kicad_drc_compare keeps these off the copper match:
    - `via_in_paste` is its own channel;
    - the copper `check_drc` count excludes them;
@@ -64,38 +69,50 @@ def check(name, cond, detail=''):
 
 
 def board(work, name, vias, setup='', extra='', a=1,
-          pad1_layers='"F.Cu" "F.Paste" "F.Mask"'):
+          pad1_layers='"F.Cu" "F.Paste" "F.Mask"', kicad10=True):
     """A 30x20 board: U1 pad 1 (1x1 mm at 10,10) opens F.Paste on /A; U1 pad 2
-    (1x1 mm at 20,10) is F.Cu only, on /A too. `a` is /A's net NUMBER (/B takes
-    the other), so a baseline can number its nets differently."""
+    (1x1 mm at 20,10) is F.Cu only, on /A too.
+
+    `kicad10` picks the file format. A KiCad 10 file (20260206, name-only nets)
+    can DECLARE per-via capping/filling; an older one (20241229, numbered
+    nets) cannot, so there every unprotected via in paste is accepted
+    `undeclarable-via-in-paste`. `a` is /A's net NUMBER in the old dialect (/B
+    takes the other), so a baseline can number its nets differently."""
     b = 3 - a
+    num = {'/A': a, '/B': b}
+
+    def net(n):
+        return '(net "%s")' % n if kicad10 else '(net %d "%s")' % (num[n], n)
+    body = '\n'.join(vias)
+    for n in ('/A', '/B'):
+        body = body.replace('<<NET:%s>>' % n,
+                            '(net "%s")' % n if kicad10 else '(net %d)' % num[n])
+    nets = '' if kicad10 else ' (net 0 "") (net %d "%s") (net %d "%s")\n' % (
+        min(a, b), '/A' if a < b else '/B', max(a, b), '/B' if a < b else '/A')
     p = os.path.join(work, name + '.kicad_pcb')
     with open(p, 'w', encoding='utf-8') as fh:
         fh.write(
-            '(kicad_pcb (version 20241229) (generator "pcbnew")\n'
+            '(kicad_pcb (version %s) (generator "pcbnew")\n'
             ' (general (thickness 1.6)) (paper "A4")\n'
             ' (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) '
             '(31 "B.Cu" signal) (35 "F.Paste" user) '
             '(39 "F.Mask" user) (44 "Edge.Cuts" user))\n'
-            ' (setup %s)\n (net 0 "") (net %d "%s") (net %d "%s")\n'
+            ' (setup %s)\n%s'
             ' (gr_rect (start 0 0) (end 30 20) (stroke (width 0.1) (type solid)) '
             '(fill none) (layer "Edge.Cuts"))\n'
             ' (footprint "L:P" (layer "F.Cu") (at 15 10)\n'
             '  (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS") '
             '(effects (font (size 1 1) (thickness 0.15))))\n'
-            '  (pad "1" smd rect (at -5 0) (size 1 1) (layers %s) '
-            '(net %d "/A"))\n'
-            '  (pad "2" smd rect (at 5 0) (size 1 1) (layers "F.Cu" "F.Mask") '
-            '(net %d "/A")))\n'
-            '%s\n%s\n)\n' % (setup, min(a, b), '/A' if a < b else '/B',
-                             max(a, b), '/B' if a < b else '/A',
-                             pad1_layers, a, a, '\n'.join(vias), extra))
+            '  (pad "1" smd rect (at -5 0) (size 1 1) (layers %s) %s)\n'
+            '  (pad "2" smd rect (at 5 0) (size 1 1) (layers "F.Cu" "F.Mask") %s))\n'
+            '%s\n%s\n)\n' % ('20260206' if kicad10 else '20241229', setup, nets,
+                             pad1_layers, net('/A'), net('/A'), body, extra))
     return p
 
 
-def via(x, y, net=1, spec='', uid='v', layers='"F.Cu" "B.Cu"'):
+def via(x, y, net='/A', spec='', uid='v', layers='"F.Cu" "B.Cu"'):
     return (' (via (at %s %s) (size 0.4) (drill 0.2) (layers %s) %s'
-            '(net %d) (uuid "%s"))' % (x, y, layers, spec, net, uid))
+            '<<NET:%s>> (uuid "%s"))' % (x, y, layers, spec, net, uid))
 
 
 def drc(path, **kw):
@@ -169,7 +186,7 @@ def main():
         rows = drc(board(work, 'nopaste', [via(20, 10)]))
         check('4. a via in an F.Cu-only pad (no paste layer): not a hit',
               not vip(rows) and not vip(rows, 'protected-via-in-paste'), str(vip(rows)))
-        rows = drc(board(work, 'foreign', [via(10, 10, net=2)]))
+        rows = drc(board(work, 'foreign', [via(10, 10, net='/B')]))
         check('4. a FOREIGN-net via in the opening: no via-in-paste row, but reported',
               not vip(rows) and any(r.get('type') == 'pad-via' for r in rows),
               str([r.get('type') for r in rows]))
@@ -190,10 +207,29 @@ def main():
         rows = drc(b1, net_patterns=['/B'])
         check('5. a --nets filter that excludes the via\'s net drops it', not vip(rows))
         # inheritance is by net NAME: a baseline that numbers /A as net 2
-        base_renum = board(work, 'base_renum', [via(10, 10, net=2, uid='v1')], a=2)
+        # an OLDER-format baseline numbering /A as net 2: names, not ids
+        base_renum = board(work, 'base_renum', [via(10, 10, uid='v1')], a=2,
+                           kicad10=False)
         rows = drc(cur, baseline=base_renum)
-        check('5. a baseline numbering its nets differently still inherits (by NAME)',
+        check('5. a baseline in the other net dialect, numbering its nets '
+              'differently, still inherits (by NAME)',
               len(vip(rows, 'inherited-via-in-paste')) == 1, str(rows))
+        # a pre-KiCad-10 file cannot declare per-via capping/filling at all
+        old = board(work, 'old_format', [via(10, 10)], kicad10=False)
+        rows = drc(old)
+        check('5. a pre-KiCad-10 board: an unprotected via in paste is ACCEPTED '
+              'undeclarable-via-in-paste (user decision), not a violation',
+              not vip(rows) and len(vip(rows, 'undeclarable-via-in-paste')) == 1
+              and vip(rows, 'undeclarable-via-in-paste')[0]['format_can_declare'] is False,
+              str(rows))
+        jo = os.path.join(work, 'old.json')
+        r = run_check([sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'check_drc.py'),
+                       old, '--clearance', '0.1', '--clearance-margin', '0', '--no-size-checks',
+                       '--json', jo], accept=True)
+        vj = json.load(open(jo, encoding='utf-8')).get('via_in_paste') or {}
+        check('5. ... CLI exits 0, the console line and the JSON count it',
+              '1 undeclarable in this file format' in r.stdout
+              and vj.get('undeclarable') == 1 and vj.get('violations') == 0, str(vj))
         # ...and only a via that was ALREADY under solder, unprotected, there
         base_nopaste = board(work, 'base_nopaste', [via(10, 10, uid='v1')],
                              pad1_layers='"F.Cu" "F.Mask"')
@@ -233,6 +269,26 @@ def main():
               str({k: d2[k] for k in ('via_in_paste', 'checkdrc_intentional_edge')}))
         check('6. the channel is a persisted summary key',
               'via_in_paste' in kdc._SUMMARY_KEYS)
+
+        # 7 -- an ACCEPTED via-in-paste does not make its net DRC-dirty
+        # (placement.recovery.dirty_net_ids feeds PRR/NRR; every stamped via
+        # would otherwise mark its net)
+        from kicad_parser import parse_kicad_pcb
+        from placement.recovery import dirty_net_ids
+        pb = parse_kicad_pcb(b2)
+        jd = os.path.join(work, 'dirty.json')
+        with open(jd, 'w', encoding='utf-8') as fh:
+            json.dump({'items': [
+                {'type': 'via-in-paste', 'net1': '/A', 'accepted': 'protected-via-in-paste'},
+                {'type': 'pad-via', 'net1': '/B', 'net2': '/A'}]}, fh)
+        ids = {pb.nets[n].name for n in dirty_net_ids(pb, jd) if n in pb.nets}
+        jd2 = os.path.join(work, 'dirty2.json')
+        with open(jd2, 'w', encoding='utf-8') as fh:
+            json.dump({'items': [
+                {'type': 'via-in-paste', 'net1': '/A', 'accepted': 'protected-via-in-paste'}]}, fh)
+        check('7. dirty_net_ids: an accepted via-in-paste row marks nothing; a real '
+              'violation still marks its nets',
+              not dirty_net_ids(pb, jd2) and '/A' in ids, str(ids))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")

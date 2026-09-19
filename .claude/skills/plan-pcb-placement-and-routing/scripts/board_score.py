@@ -83,8 +83,8 @@ RULE_PAIR_TYPES = frozenset({'segment-segment-track-rule'})
 # beside `drc_rule_pairs`, never in `blocking`. On a KiCad 10-format board
 # the tool stamps IPC-4761 Type VII onto every via it puts under solder at ship
 # time, so what fires on a board this chain routed is almost always a via the
-# input already had -- 136 on orangecrab_ext_pll alone (a KiCad 9-format file
-# cannot carry the tokens, so there the tool's own vias fire too). No
+# input already had -- 136 on orangecrab_ext_pll alone (a pre-KiCad-10 file
+# cannot carry the tokens; check_drc accepts those as undeclarable). No
 # placement or routing lap can change a fab spec it did not write, so
 # counting them in `blocking` would make 0 unreachable there.
 # Pass --baseline <input board> and check_drc accepts those as
@@ -589,7 +589,8 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     if 'NO DRC VIOLATIONS FOUND' in out:
         return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out),
                  'graphic_grazes_unverified': _unverified_grazes(out),
-                 'via_in_paste': {'ran': True, 'count': 0, 'by_type': {}}},
+                 'via_in_paste': {'ran': True, 'count': 0, 'by_type': {},
+                                  'undeclarable': _undeclarable_vias(out)}},
                 {'ran': True, 'count': 0, 'by_type': {}},
                 {'ran': True, 'count': 0, 'by_type': {}})
     if not _DRC_TOTAL.search(out):
@@ -626,9 +627,19 @@ def score_drc(root: str, board: str, clearance=None, sizes=None,
     return ({'ran': True, 'count': sum(clear.values()), 'by_type': clear,
              'graded_at': _graded_at(out),
              'graphic_grazes_unverified': _unverified_grazes(out),
-             'via_in_paste': {'ran': True, 'count': sum(vip.values()), 'by_type': vip}},
+             'via_in_paste': {'ran': True, 'count': sum(vip.values()), 'by_type': vip,
+                              'undeclarable': _undeclarable_vias(out)}},
             {'ran': True, 'count': sum(size.values()), 'by_type': size},
             {'ran': True, 'count': sum(rule.values()), 'by_type': rule})
+
+
+def _undeclarable_vias(out: str) -> int:
+    """Vias in a paste opening on a pre-KiCad-10 file, which cannot carry
+    per-via capping/filling at all (#962). check_drc ACCEPTS them (the
+    requirement belongs on the fab drawing) and counts them on its console
+    line; this reads that count so `count` is not mistaken for all of them."""
+    m = re.search(r'(\d+) undeclarable in this file format', out)
+    return int(m.group(1)) if m else 0
 
 
 def _unverified_grazes(out: str) -> int:

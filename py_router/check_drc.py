@@ -2046,7 +2046,8 @@ def footprint_graphic_outline_census(pcb_data) -> dict:
 
 #: #962 D6 accepted classes for a via in a paste opening (published, never
 #: counted): the via is filled+capped, or the --baseline board already had it.
-VIA_IN_PASTE_ACCEPTED = ('protected-via-in-paste', 'inherited-via-in-paste')
+VIA_IN_PASTE_ACCEPTED = ('protected-via-in-paste', 'inherited-via-in-paste',
+                         'undeclarable-via-in-paste')
 
 
 def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
@@ -2071,6 +2072,10 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
       not add (#741). Not inherited: a via the baseline had OUT of any opening
       (a part this run moved put solder on it), and one the baseline had
       filled+capped (this run lost the protection) -- both are the run's.
+    - On a file older than KiCad 10 (version < 20250000), which cannot carry
+      per-via capping/filling at all -> accepted `undeclarable-via-in-paste`
+      (user decision, #962): nothing in the board can clear it, so it is
+      counted and disclosed, and Type VII belongs on the fab drawing.
     - Otherwise a `via-in-paste` violation, with `penetration_mm` (how far the
       barrel reaches into the opening) and the opening's `owner_ref`.
 
@@ -2125,6 +2130,12 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
         elif base is not None and base[3]:
             # the baseline had it here, under solder, unprotected
             row['accepted'] = 'inherited-via-in-paste'
+        elif not declarable:
+            # A pre-KiCad-10 file cannot carry per-via capping/filling at all
+            # (KiCad 9.0's parser rejects the tokens), so nothing in the board
+            # can clear it: the requirement lives on the fab drawing, where the
+            # route step's FAB NOTE lists it. Counted, not a routing defect.
+            row['accepted'] = 'undeclarable-via-in-paste'
         if row.get('accepted'):
             counts[row['accepted']] += 1
             accepted.append(row)
@@ -2134,9 +2145,12 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
     if quiet or not (n_viol or any(counts.values())):
         return
     print("Vias in a solder-paste opening: %d unprotected (violations), "
-          "%d filled+capped (accepted), %d inherited from --baseline (accepted)%s"
+          "%d filled+capped (accepted), %d inherited from --baseline (accepted), "
+          "%d undeclarable in this file format (accepted; Type VII belongs on the "
+          "fab drawing)%s"
           % (n_viol, counts['protected-via-in-paste'],
              counts['inherited-via-in-paste'],
+             counts['undeclarable-via-in-paste'],
              '; pass --baseline <input board> to accept the vias the board '
              'already had' if n_viol and baseline_pd is None else ''))
 
@@ -4568,7 +4582,9 @@ if __name__ == "__main__":
                              'MOVED against the baseline (placement-created), and '
                              'accepted as inherited when it did not. Without it such '
                              'grazes are accepted with origin "unverified". Graphic '
-                             'copper PAST the outline is a violation either way.')
+                             'copper PAST the outline is a violation either way. It '
+                             'also accepts a via the baseline already had inside a '
+                             'paste opening, unprotected, as inherited-via-in-paste.')
     parser.add_argument('--json', metavar='FILE', default=None,
                         help='also write the result as JSON: the graded floors '
                              'with their source, the non-accepted violation '
@@ -4586,6 +4602,10 @@ if __name__ == "__main__":
     from fab_tiers import add_fab_tier_args, fab_tier_from_args, set_default_fab_tier
     add_fab_tier_args(parser)
     args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
+    # A missing baseline must not cost a full DRC run and then exit 1, the
+    # same code as "violations found" (pre-push review).
+    if args.baseline and not os.path.isfile(args.baseline):
+        parser.error('--baseline: no such board file: %s' % args.baseline)
     set_default_fab_tier(*fab_tier_from_args(args))
 
     # Grade at the clearance the board was actually routed to. When -c is not
@@ -4810,6 +4830,12 @@ if __name__ == "__main__":
                 v.get('type') for v in _real
                 if isinstance(v.get('overlap_mm'), (int, float))
                 and v['overlap_mm'] >= _clearance_for(v))),
+            # #962: every via in a paste opening, by class, so a reader of the
+            # JSON sees the ACCEPTED ones too (they are not in by_type)
+            'via_in_paste': dict(
+                violations=sum(1 for v in _real if v.get('type') == 'via-in-paste'),
+                **{k.split('-')[0]: sum(1 for v in violations if v.get('accepted') == k)
+                   for k in VIA_IN_PASTE_ACCEPTED}),
             'items': [dict(item,
                            short=(isinstance(item.get('overlap_mm'), (int, float))
                                   and item['overlap_mm'] >= _clearance_for(item)))

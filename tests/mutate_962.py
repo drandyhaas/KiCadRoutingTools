@@ -50,10 +50,11 @@ SCORE = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement-and-routing'
 WRITER = os.path.join(ROOT, 'py_router', 'kicad_writer.py')
 PFC = os.path.join(ROOT, 'py_placer', 'place_fanout_clearance.py')
 PGUI = os.path.join(ROOT, 'kicad_routing_plugin', 'planes_gui.py')
+RECOV = os.path.join(ROOT, 'py_placer', 'placement', 'recovery.py')
 
 TARGETS = {'d': DRC, 'f': FAB, 'p': PASTE, 'k': PARSER, 'o': OBST, 'b': PLANE,
            'g': BGA, 'l': LEG, 'q': OPS, 'c': KDC, 'r': RENDER, 's': SCORE,
-           'w': WRITER, 'x': PFC, 'y': PGUI}
+           'w': WRITER, 'x': PFC, 'y': PGUI, 'v': RECOV}
 
 T_WAIVER = os.path.join(TESTS, 'test_962_graphic_waiver.py')
 T_OOB = os.path.join(TESTS, 'test_962_graphic_oob_channel.py')
@@ -183,8 +184,8 @@ ROWS = [
      "            if False:",
      (T_STAMP,), 'KILLED'),
     ('format-gate-off', 'f',
-     "    return not (0 < ver < PER_VIA_PROTECTION_MIN_VERSION)",
-     "    return True",
+     "        return ver >= PER_VIA_PROTECTION_MIN_VERSION",
+     "        return True",
      (T_STAMP,), 'KILLED'),
     ('bga-fanout-unstamped', 'g',
      "    _st962, _rec962 = via_protection_stamps(vias_to_add, [], pcb_data)",
@@ -232,6 +233,15 @@ ROWS = [
      "            if nid is not None:\n                was_protected",
      "            nid = bv.net_id\n"
      "            if nid is not None:\n                was_protected",
+     (T_VIP,), 'KILLED'),
+    ('undeclarable-graded-as-a-violation', 'd',
+     "        elif not declarable:",
+     "        elif False:",
+     (T_VIP, T_CENSUS), 'KILLED'),
+    ('dirty-nets-count-accepted-via-in-paste', 'v',
+     "        if (item.get('type') == 'via-in-paste'\n"
+     "                and str(item.get('accepted', '')).endswith('via-in-paste')):",
+     "        if False:",
      (T_VIP,), 'KILLED'),
     ('buried-via-under-paste', 'f',
      "            if ('F.Cu' if ap.layer.startswith('F.') else 'B.Cu') not in span:\n"

@@ -174,11 +174,22 @@ def _format_can_declare(pcb_data) -> bool:
     """Can this board's file format carry a per-via capping/filling token?
 
     A board parsed from text knows its version. One built from a live pcbnew
-    board has none (0); there the running pcbnew decides, and
-    `gui_utils.apply_via_protection` discloses a setter it lacks.
+    board has none (0); there the running pcbnew decides, by whether its
+    PCB_VIA has the capping setters.
     """
     ver = getattr(pcb_data, 'kicad_version', 0) or 0
-    return not (0 < ver < PER_VIA_PROTECTION_MIN_VERSION)
+    if ver:
+        return ver >= PER_VIA_PROTECTION_MIN_VERSION
+    # A live board (the GUI path) carries no version: the RUNNING pcbnew is
+    # what will save it, so ask whether it has the per-via setters. Without
+    # them (KiCad 9) a stamp would silently do nothing while the FAB NOTE
+    # reported it done.
+    try:
+        import pcbnew as _pn
+    except Exception:                                    # noqa: BLE001
+        return True
+    return bool(hasattr(_pn.PCB_VIA, 'SetPrimaryDrillCappedFlag')
+                or hasattr(_pn.PCB_VIA, 'SetCappingMode'))
 
 
 def via_protection_stamps(vias, input_snapshot, pcb_data):

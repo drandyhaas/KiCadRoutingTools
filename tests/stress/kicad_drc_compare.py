@@ -862,6 +862,9 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
                          and not c.get("accepted")),
         "protected": sum(1 for c in cd if c.get("accepted") == "protected-via-in-paste"),
         "inherited": sum(1 for c in cd if c.get("accepted") == "inherited-via-in-paste"),
+        # a pre-KiCad-10 file cannot declare Type VII at all (fab drawing)
+        "undeclarable": sum(1 for c in cd
+                            if c.get("accepted") == "undeclarable-via-in-paste"),
         "kicad": None,      # KiCad has no via-in-paste check
     }
     cd = [c for c in cd if c["type"] not in CD_VIA_PASTE_TYPES]
@@ -1014,9 +1017,11 @@ def compare_board(board: str, label: str = None, clearance: float = None,
         print(f"    CONNWIDTH   {'/'.join(wv.get('kinds', ())) or '?':16s} "
               f"{sorted(wv['nets'])} @ {wv['pos']}  {wv.get('desc', '')[:60]}")
     vip = data.get("via_in_paste")
-    if vip and any(vip.get(k) for k in ("check_drc", "protected", "inherited")):
+    if vip and any(vip.get(k) for k in ("check_drc", "protected", "inherited",
+                                        "undeclarable")):
         print(f"    VIA-IN-PASTE check_drc={vip['check_drc']} "
               f"protected={vip['protected']} inherited={vip['inherited']} "
+              f"undeclarable={vip.get('undeclarable', 0)} "
               f"(KiCad has no such check)")
     court = data.get("courtyard")
     if court is not None:

@@ -296,7 +296,9 @@ unstampable, site_created, unprotected, note}, plus `written` when a file
 stamp could not place every token) on the route step's merged `--json-out`
 summary (not the early `JSON_SUMMARY`, which predates the finalize) and on
 `results_data`. `check_drc` reports what still ships unprotected as
-`via-in-paste`.
+`via-in-paste` (on a pre-KiCad-10 file it accepts them as
+`undeclarable-via-in-paste` and counts them, since that file cannot declare
+Type VII at all).
 
 ## Modifying existing copper
 
