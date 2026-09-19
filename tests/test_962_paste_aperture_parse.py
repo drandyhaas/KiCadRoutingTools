@@ -213,6 +213,14 @@ def main():
     C = by.get(('U1', 'C', 'F.Paste'))
     check('6. a ratio that closes the opening yields NO opening',
           C is None, str(C and C.margin))
+    # ...and the RESOLVED margin is clamped, per axis, as KiCad's
+    # GetSolderPasteMargin reports it: 0.05 - 0.9*1 = -0.85 -> -0.5 and
+    # 0.05 - 0.9*0.5 = -0.4 -> -0.25. (The opening alone cannot show the
+    # clamp: an unclamped margin closes it too.)
+    padC = next(q for q in p.footprints['U1'].pads if q.pad_number == 'C')
+    mC = pa.resolve_paste_margin(padC, p.footprints['U1'], p.board_info)
+    check('6. the resolved margin is clamped at -size/2 on each axis',
+          _approx(mC[0], -0.5) and _approx(mC[1], -0.25), str(mC))
     check('6. *.Paste opens F.Paste and B.Paste',
           ('U1', 'D', 'F.Paste') in by and ('U1', 'D', 'B.Paste') in by)
     check('6. a B-side pad opens B.Paste only',

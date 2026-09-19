@@ -125,9 +125,15 @@ def main():
         # 0 keeps its legacy meaning (the declared pad only), as on the
         # routing path: the opening's extra 0.5 mm is NOT kept out
         vm_zero = build_via_obstacle_map(sq, cfg(0.0), exclude_net_id=1, same_net_pad_clearance=0.0)
-        free0 = sum(1 for a, b in band if not vm_zero.is_via_blocked(int(a), int(b)))
+        # A via centre 0.45 mm past the pad's east edge (x = 20.95) is INSIDE
+        # the 0.5 mm-wider opening but clear of the pad by more than a via
+        # radius plus a grid step (0.15 + 0.1): free when only the pad blocks,
+        # blocked if the opening were kept out at 0.
+        gx, gy = om.GridCoord(cfg(0.0).grid_step).to_grid(20.95, 15.0)
         check('2. at an explicit 0 the plane via map adds no opening keep-out '
-              '(only the pad blocks)', 0 < free0 < len(band), f'{free0} of {len(band)} free')
+              '(a site inside the opening, clear of the pad, stays free)',
+              not vm_zero.is_via_blocked(int(gx), int(gy))
+              and vm_on.is_via_blocked(int(gx), int(gy)))
     finally:
         shutil.rmtree(work2, ignore_errors=True)
 
