@@ -2063,10 +2063,14 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
       token: the via's own spec, then the board setup, then KiCad's factory
       value (`fab_notes.effective_via_protection`), so a via carrying only
       `(tenting ...)` still inherits the board's capping and filling.
-    - A via the `--baseline` board already had (same net NAME, within half its
-      diameter, the rule `fab_notes` uses for "pre-existing") -> accepted
-      `inherited-via-in-paste`. No routing pass can change a fab spec it did not
-      write, and the tool never re-specs a via it did not add (#741).
+    - A via the `--baseline` board already had IN THE SAME CONDITION -> accepted
+      `inherited-via-in-paste`: a via at that spot (same net NAME, within half
+      the smaller diameter, the rule `fab_notes` uses for "pre-existing") that
+      was ALREADY under solder in the baseline and was NOT filled+capped there.
+      That is the input's own defect, and no routing pass re-specs a via it did
+      not add (#741). Not inherited: a via the baseline had OUT of any opening
+      (a part this run moved put solder on it), and one the baseline had
+      filled+capped (this run lost the protection) -- both are the run's.
     - Otherwise a `via-in-paste` violation, with `penetration_mm` (how far the
       barrel reaches into the opening) and the opening's `owner_ref`.
 
@@ -2076,7 +2080,7 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
     foreign-net via in an opening is a short and is reported as one.
     """
     from fab_notes import (via_paste_sites, effective_via_protection,
-                           is_filled_and_capped, via_snapshot, _preexisting,
+                           is_filled_and_capped, _input_match,
                            _format_can_declare)
     setup = getattr(pcb_data.board_info, 'via_protection_setup', None) or {}
     # A KiCad 9 file cannot carry a per-via capping/filling token at all, so
@@ -2089,12 +2093,21 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
     snap_by_net = None
     if baseline_pd is not None:
         name_to_id = {n.name: nid for nid, n in pcb_data.nets.items()}
+        base_setup = getattr(baseline_pd.board_info, 'via_protection_setup', None) or {}
         snap_by_net = {}
-        for (bnid, x, y, sz, *_spec) in via_snapshot(baseline_pd.vias):
-            bn = baseline_pd.nets.get(bnid)
+        # "Under solder" is THIS check's question -- in a paste opening of its
+        # net, by the BASELINE's own openings -- not the stamp's (which counts
+        # bare pad copper too); protection is judged by the baseline's setup.
+        in_paste = {id(bv) for bv, _a, _pen in via_paste_sites(baseline_pd.vias,
+                                                               baseline_pd)}
+        for bv in baseline_pd.vias:
+            bn = baseline_pd.nets.get(bv.net_id)
             nid = name_to_id.get(bn.name) if bn is not None else None
             if nid is not None:
-                snap_by_net.setdefault(nid, []).append((x, y, sz))
+                was_protected = is_filled_and_capped(
+                    effective_via_protection(bv.tenting_attrs, base_setup))
+                snap_by_net.setdefault(nid, []).append(
+                    (bv.x, bv.y, bv.size, id(bv) in in_paste and not was_protected))
     counts = {k: 0 for k in VIA_IN_PASTE_ACCEPTED}
     n_viol = 0
     for v, ap, pen in via_paste_sites(vias, pcb_data):
@@ -2106,9 +2119,11 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
                'penetration_mm': round(pen, 4),
                'capping': eff.get('capping'), 'filling': eff.get('filling'),
                'format_can_declare': declarable}
+        base = _input_match(v, snap_by_net) if snap_by_net is not None else None
         if is_filled_and_capped(eff):
             row['accepted'] = 'protected-via-in-paste'
-        elif snap_by_net is not None and _preexisting(v, snap_by_net):
+        elif base is not None and base[3]:
+            # the baseline had it here, under solder, unprotected
             row['accepted'] = 'inherited-via-in-paste'
         if row.get('accepted'):
             counts[row['accepted']] += 1

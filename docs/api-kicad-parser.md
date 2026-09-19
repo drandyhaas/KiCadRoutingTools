@@ -84,7 +84,7 @@ The top-level container returned by both entry points.
 | `groups` | `List` | KiCad groups (#459) — kept so writers can preserve group membership |
 | `source_path` | `str` | Absolute path this data came from (`""` = in-memory). Lets engines with no `input_file` discover sibling project files, e.g. the `.kicad_dru` per-layer clearance rules (#498) |
 | `exact_fill_provider` | `Optional[Callable]` | Zero-arg callable returning `{(net_name, layer): [island_polygon, ...]}` — KiCad-truth fill for exact-fill consumers (#424). `None` (file-parsed boards) = refill `source_path`; `build_pcb_data_from_board` sets it to a staged-save refill of the live board (live copper AND live clearances) |
-| `paste_apertures` | `List[PasteAperture]` | Every solder-paste OPENING (#962), from `paste_apertures.build_paste_apertures`. Sources: `pad` (a pad on a paste layer, grown by its resolved paste margin -- pad, then footprint, then board setup, per axis, ratio and margin independently, clamped at -size/2), `paste_only_pad` (a pad on a paste layer with no copper, e.g. windowpanes) and `graphic` (a paste-layer shape, e.g. esp_prog U2's F.Paste tab). Which nets an opening concerns is `paste_apertures.aperture_nets` / `apertures_for_net` (memoised): a pad opening its pad's net, a graphic or paste-only one the nets of the owner's copper it overlaps. Both parse paths feed the one builder |
+| `paste_apertures` | `List[PasteAperture]` | Every solder-paste OPENING (#962), from `paste_apertures.build_paste_apertures`. Sources: `pad` (a pad on a paste layer, grown by its resolved paste margin -- pad, then footprint, then board setup, per axis, ratio and margin independently, clamped at -size/2 except for a custom pad, which KiCad does not clamp), `paste_only_pad` (a pad on a paste layer with no copper, e.g. windowpanes) and `graphic` (a paste-layer shape, e.g. esp_prog U2's F.Paste tab). Which nets an opening concerns is `paste_apertures.aperture_nets` (the per-net lists `apertures_by_net` / `apertures_for_net` are memoised): a pad opening its pad's net, a graphic or paste-only one the nets of the owner's copper it overlaps. Both parse paths feed the one builder |
 | `graphic_copper_unmeasured` | `List[dict]` | Footprint copper the parser does NOT model, per owner (`{owner_ref, kind, reason}`, kind `logo` / `curve` / `text`), so the off-outline grade can say what it did not measure (#962) |
 
 ### `PCBData.get_via_barrel_length`
@@ -165,11 +165,11 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `tenting_attrs` | Dict[str, str] | Protection spec as `{token: raw inner s-expr}` for `tenting`/`covering`/`plugging`/`capping`/`filling`, e.g. `{'covering': '(front no) (back no)', 'capping': 'no'}`. `{}` = the board specified nothing (KiCad inherits its board default). Read by **both** parse paths (text and `build_pcb_data_from_board`) in the same normalized form. What a via is actually FABRICATED with is resolved token by token against `BoardInfo.via_protection_setup` by `fab_notes.effective_via_protection` (#962) |
 
 Pass `tenting_attrs` back to `generate_via_sexpr` for any via that already
-existed, so a ripped-and-re-placed via keeps its real spec instead of being
-re-stamped with front+back tenting (#489 §8) — that matters most for via-in-pad,
-which needs IPC-4761 Type VII (filled + capped + plated). `kicad_writer.
-prevailing_via_protection(vias)` gives the board's own convention to use as the
-default for vias you ADD.
+existed, so a ripped-and-re-placed via keeps its real spec instead of losing it
+(#489 §8) — that matters most for via-in-pad, which needs IPC-4761 Type VII
+(filled + capped + plated). A via you ADD gets no token and inherits the
+board's `(setup ...)`, except one under solder, which the ship-time stamp
+declares Type VII (#962, see the writer docs).
 
 ### `Net`
 

@@ -1525,7 +1525,10 @@ def _implicated_refs(paths):
             # (graphic-off-board / graphic-board-edge). Only from counted
             # rows: an ACCEPTED immutable-graphic row is inherited art (watchy
             # AE1), and reading it would implicate that part on every run.
-            if item.get('owner_ref') and not item.get('accepted'):
+            # Graphic rows only: a via-in-paste row also carries an owner_ref
+            # (the opening's part), but it complains about a VIA, not a pose.
+            if (item.get('owner_ref') and not item.get('accepted')
+                    and item.get('type') in ('graphic-off-board', 'graphic-board-edge')):
                 refs.add(str(item['owner_ref']))
         # check_assembly's graphic-copper channel ([[ref, mm], ...])
         for ref_mm in doc.get('oob_graphic_copper_refs') or ():

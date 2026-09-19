@@ -433,21 +433,28 @@ def stamp_via_protection_in_content(content: str, stamps_by_uuid: dict):
 
     `stamps_by_uuid` is {via uuid: {token: inner}}. The tokens are inserted
     where `generate_via_sexpr` writes them, just before the block's `(net ...)`.
-    A block that already carries ANY protection token is left alone: its spec
-    is the designer's or an earlier stamp. Blocks come from the parser's own
+    Only tokens the block does NOT already carry are inserted: a token in the
+    file is the designer's or an earlier stamp and is never rewritten, so a
+    tenting-only via gains just the capping/filling it lacked (the stamp rule,
+    `fab_notes.via_protection_stamps`, has already declined any via that decides
+    capping or filling itself). Blocks come from the parser's own
     paren-balanced `_via_blocks` scan, so a stamp cannot land in the wrong via
     (#748). Returns `(content, n_stamped)`.
     """
     if not stamps_by_uuid:
         return content, 0
-    from kicad_parser import _via_blocks, VIA_PROTECTION_TOKENS
+    from kicad_parser import _via_blocks
     uuid_re = re.compile(r'\(uuid\s+"([^"]+)"\)')
     edits = []
     for start, blk in _via_blocks(content):
         um = uuid_re.search(blk)
         if not um or um.group(1) not in stamps_by_uuid:
             continue
-        if any(re.search(r'\(' + t + r'[\s)]', blk) for t in VIA_PROTECTION_TOKENS):
+        # only the tokens the block does not carry yet; one in the file is the
+        # designer's or an earlier stamp and is never rewritten
+        missing = {t: v for t, v in stamps_by_uuid[um.group(1)].items()
+                   if not re.search(r'\(' + re.escape(t) + r'[\s)]', blk)}
+        if not missing:
             continue
         k = blk.find('(net')
         if k < 0:
@@ -455,8 +462,7 @@ def stamp_via_protection_in_content(content: str, stamps_by_uuid: dict):
         if k < 0:
             continue
         # insert the tokens, then re-open the line for `(net ...)`
-        edits.append((start + k, via_protection_sexpr(stamps_by_uuid[um.group(1)]).lstrip()
-                      + '\n\t\t'))
+        edits.append((start + k, via_protection_sexpr(missing).lstrip() + '\n\t\t'))
     if not edits:
         return content, 0
     out, pos = [], 0

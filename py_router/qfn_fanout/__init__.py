@@ -1790,6 +1790,10 @@ def main():
             with _cl.redirect_stdout(_io.StringIO()):  # keep JSON_SUMMARY output clean
                 _viols = _run_drc(out_path, clearance=args.clearance,
                                   quiet=True, max_print=0, check_sizes=False)
+            # #962: via-in-paste rows (and their accepted protected/inherited
+            # twins) are a fab-protection finding, not a clearance graze; a
+            # fanout's own stamped via-in-pad would otherwise inflate `total`.
+            _viols = [_v for _v in _viols if _v.get('type') != 'via-in-paste']
             _by = {}
             for _v in _viols:
                 _by[_v['type']] = _by.get(_v['type'], 0) + 1

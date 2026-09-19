@@ -47,9 +47,13 @@ KDC = os.path.join(ROOT, 'tests', 'stress', 'kicad_drc_compare.py')
 RENDER = os.path.join(ROOT, 'py_tools', 'render_placement.py')
 SCORE = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement-and-routing',
                      'scripts', 'board_score.py')
+WRITER = os.path.join(ROOT, 'py_router', 'kicad_writer.py')
+PFC = os.path.join(ROOT, 'py_placer', 'place_fanout_clearance.py')
+PGUI = os.path.join(ROOT, 'kicad_routing_plugin', 'planes_gui.py')
 
 TARGETS = {'d': DRC, 'f': FAB, 'p': PASTE, 'k': PARSER, 'o': OBST, 'b': PLANE,
-           'g': BGA, 'l': LEG, 'q': OPS, 'c': KDC, 'r': RENDER, 's': SCORE}
+           'g': BGA, 'l': LEG, 'q': OPS, 'c': KDC, 'r': RENDER, 's': SCORE,
+           'w': WRITER, 'x': PFC, 'y': PGUI}
 
 T_WAIVER = os.path.join(TESTS, 'test_962_graphic_waiver.py')
 T_OOB = os.path.join(TESTS, 'test_962_graphic_oob_channel.py')
@@ -59,6 +63,7 @@ T_KEEP = os.path.join(TESTS, 'test_962_aperture_keepout.py')
 T_STAMP = os.path.join(TESTS, 'test_962_type_vii_stamp.py')
 T_VIP = os.path.join(TESTS, 'test_962_check_drc_via_in_paste.py')
 T_CENSUS = os.path.join(TESTS, 'test_962_census_via_in_paste.py')
+T_BGAUP = os.path.join(TESTS, 'test_bga_underpad_diff.py')
 
 #: (name, target key, anchor, replacement, tests that must notice, expectation)
 ROWS = [
@@ -165,16 +170,16 @@ ROWS = [
      (T_KEEP,), 'KILLED'),
 
     # ---- the Type VII stamp -----------------------------------------------
-    ('stamp-overrides-own-spec', 'f',
-     "        if own:\n            _unprot('own spec kept')",
-     "        if False:\n            _unprot('own spec kept')",
+    ('stamp-overrides-a-decided-spec', 'f',
+     "        if 'capping' in base or 'filling' in base:",
+     "        if False:",
      (T_STAMP,), 'KILLED'),
     ('stamp-ignores-a-filled-board', 'f',
      "        if is_filled_and_capped(effective_via_protection(own, setup)):",
      "        if False:",
      (T_STAMP,), 'KILLED'),
     ('relaid-via-loses-its-spec', 'f',
-     "            if spec:",
+     "            if not own and in_spec:",
      "            if False:",
      (T_STAMP,), 'KILLED'),
     ('format-gate-off', 'f',
@@ -184,6 +189,25 @@ ROWS = [
     ('bga-fanout-unstamped', 'g',
      "    _st962, _rec962 = via_protection_stamps(vias_to_add, [], pcb_data)",
      "    _st962, _rec962 = [], {}",
+     (T_STAMP,), 'KILLED'),
+    ('tenting-only-spec-blocks-the-stamp', 'f',
+     "        if 'capping' in base or 'filling' in base:",
+     "        if base:",
+     (T_STAMP,), 'KILLED'),
+    ('stamper-skips-a-block-with-any-token', 'w',
+     "        if not missing:\n            continue\n        k = blk.find('(net')",
+     "        if len(missing) != len(stamps_by_uuid[um.group(1)]):\n            continue\n"
+     "        k = blk.find('(net')",
+     (T_STAMP,), 'KILLED'),
+    ('place-fanout-clearance-stamp-removed', 'x',
+     "        _ship962(args.output_file, _input_vias962, context='place_fanout_clearance')",
+     "        pass",
+     (T_BGAUP,), 'KILLED'),
+    ('planes-gui-gnd-stamp-not-applied', 'y',
+     "                    apply_stamps_in_memory(_st962)\n"
+     "                    print_via_protection_record(_rec962, \"GND return vias\")",
+     "                    pass\n"
+     "                    print_via_protection_record(_rec962, \"GND return vias\")",
      (T_STAMP,), 'KILLED'),
 
     # ---- check_drc via-in-paste -------------------------------------------
@@ -196,9 +220,24 @@ ROWS = [
      "        if False:",
      (T_VIP, T_STAMP), 'KILLED'),
     ('baseline-never-inherits-a-via', 'd',
-     "        elif snap_by_net is not None and _preexisting(v, snap_by_net):",
+     "        elif base is not None and base[3]:",
      "        elif False:",
      (T_VIP, T_CENSUS), 'KILLED'),
+    ('baseline-inherits-whatever-was-there', 'd',
+     "                    (bv.x, bv.y, bv.size, id(bv) in in_paste and not was_protected))",
+     "                    (bv.x, bv.y, bv.size, True))",
+     (T_VIP,), 'KILLED'),
+    ('baseline-matched-by-net-id', 'd',
+     "            nid = name_to_id.get(bn.name) if bn is not None else None\n"
+     "            if nid is not None:\n                was_protected",
+     "            nid = bv.net_id\n"
+     "            if nid is not None:\n                was_protected",
+     (T_VIP,), 'KILLED'),
+    ('buried-via-under-paste', 'f',
+     "            if ('F.Cu' if ap.layer.startswith('F.') else 'B.Cu') not in span:\n"
+     "                continue",
+     "            if False:\n                continue",
+     (T_VIP,), 'KILLED'),
     ('compare-matches-via-in-paste-as-copper', 'c',
      '    cd = [c for c in cd if c["type"] not in CD_VIA_PASTE_TYPES]',
      '    cd = cd',

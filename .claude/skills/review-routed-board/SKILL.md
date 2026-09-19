@@ -36,13 +36,16 @@ When the board was routed from an input you have, add `--baseline <the input
 board>`. `VIA-IN-PASTE` rows are vias whose barrel sits in a solder-paste
 opening of their own net without IPC-4761 Type VII (filled AND capped); solder
 wicks into such a barrel. KiCad has no such check, so check_drc is the only
-instrument that reports them. The router stamps Type VII onto every via it adds
-in a pad or paste opening, so on a routed board these are almost always vias the
-input already had: `--baseline` accepts those as `inherited-via-in-paste` and
-the console line counts them. Report whatever still fires as a fab defect: the
+instrument that reports them. On a KiCad 10-format board the router stamps
+Type VII onto every via it adds in a pad or paste opening, so these are almost
+always vias the input already had: `--baseline` accepts those (a via the input
+had under solder, unprotected) as `inherited-via-in-paste` and the console line
+counts them. On a KiCad 9-format board (20241229) the file cannot carry the
+tokens, so the router's own vias fire too; those rows say so
+(`format_can_declare: false`). Report whatever still fires as a fab defect: the
 via needs filled+capped on the fab drawing, or it must move out of the opening.
-Without `--baseline`, every pre-existing one reads as a violation (orangecrab
-carries 136). The same flag grades a graze of footprint graphic copper that a
+Without `--baseline`, every pre-existing one reads as a violation
+(orangecrab_ext_pll carries 136). The same flag grades a graze of footprint graphic copper that a
 part MOVE created (`graphic-board-edge`); `graphic-off-board` (copper past the
 outline) is reported either way.
 

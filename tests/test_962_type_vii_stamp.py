@@ -7,8 +7,9 @@ IPC-4761 Type VII, which is what a barrel under solder needs. The rule
 (`fab_notes.via_protection_stamps`) stamps `(capping yes) (filling yes)` onto a
 via only when ALL of these hold:
 - it is in a same-net SMD pad or an associated paste opening;
-- this run ADDED it;
-- it carries no spec of its own;
+- this run ADDED it, or a part this run moved put solder on it;
+- its spec does not DECIDE capping or filling (one that only tents gets
+  Type VII merged in);
 - the board does not already declare Type VII.
 
 Invariants:
@@ -18,7 +19,9 @@ Invariants:
    - a via elsewhere gets nothing;
    - a PRE-EXISTING via in a pad is kept, and so is one the tool NUDGED
      (< size/4), and both are listed `unprotected`;
-   - a via with its own spec is kept and listed;
+   - a via whose own spec decides capping is kept and listed; a tenting-only
+     one gets Type VII merged in, and the file stamper adds only the tokens a
+     block lacks;
    - a board declaring filled+capped gets no stamp (the via inherits it);
    - a via laid again on the spot of an input via that carried a spec gets
      that spec BACK (`restored`), rather than shipping without it
@@ -175,8 +178,21 @@ def main():
     check('1. ... and on the same board as its real KiCad 9 file: no via carries a token',
           not any(v.get('tenting_attrs') for v in bvias9))
     stamps, rec = via_protection_stamps([specd], [], p)
-    check('1. a via with its own spec keeps it, and is disclosed',
-          not stamps and rec['unprotected'][0]['why'] == 'own spec kept')
+    check('1. a via whose own spec only TENTS gets Type VII merged into it '
+          '(the spec says nothing about capping or filling)',
+          [(id(v), sp) for v, sp in stamps]
+          == [(id(specd), dict(specd.tenting_attrs, **TYPE_VII_STAMP))], str(stamps))
+    decided = via(ax, ay, c1, {'capping': 'no'})
+    stamps, rec = via_protection_stamps([decided], [], p)
+    check('1. a via whose own spec DECIDES capping keeps it, and is disclosed',
+          not stamps and rec['unprotected'][0]['why'] == 'own spec kept', str(rec))
+    # a part moved onto an input via that only tents (all of orangecrab's do)
+    tent = via(pad.global_x, pad.global_y, pnet, {'tenting': '(front yes) (back yes)'})
+    stamps, rec = via_protection_stamps(
+        [tent], [(pnet, pad.global_x, pad.global_y, 0.5, dict(tent.tenting_attrs), False)], p)
+    check('1. a site a move created on a tenting-only input via: Type VII merged in',
+          [sp for _v, sp in stamps] == [dict(tent.tenting_attrs, **TYPE_VII_STAMP)]
+          and rec['site_created'] == 1, str(rec))
     p2 = parse_kicad_pcb(FIX)
     p2.board_info.via_protection_setup = dict(p2.board_info.via_protection_setup,
                                               capping='yes', filling='yes')
@@ -197,6 +213,15 @@ def main():
         specs = [_via_spec_from_block(b) for _s, b in _via_blocks(out)]
         check('2. exactly the named via gets the tokens; the other none',
               n == 1 and specs == [TYPE_VII_STAMP, {}], str(specs))
+        tb = generate_via_sexpr(ax, ay, 0.5, 0.25, ['F.Cu', 'B.Cu'], c1,
+                                tenting_attrs={'tenting': '(front no) (back no)'})
+        tu = re.findall(r'\(uuid "([^"]+)"\)', tb)[0]
+        merged = dict({'tenting': '(front no) (back no)'}, **TYPE_VII_STAMP)
+        out2, n2 = stamp_via_protection_in_content(tb, {tu: merged})
+        spec2 = [_via_spec_from_block(b) for _s, b in _via_blocks(out2)][0]
+        check('2. a tenting-only block gains ONLY the missing capping/filling; its '
+              'own tenting token is not rewritten or duplicated',
+              n2 == 1 and spec2 == merged and out2.count('(tenting') == 1, out2)
 
         # 3 -- end to end
         src = os.path.join(work, 'in.kicad_pcb')
@@ -322,7 +347,12 @@ def main():
             # a via SOURCE the GUI calls directly must be decided too: the
             # planes tab's GND return vias skipped the stamp route_planes
             # --add-gnd-vias applies (phase-3/4 verification)
-            if 'add_gnd_vias_to_existing_board(' in src and 'via_protection_stamps' not in src:
+            # a CALL, not the name: an import line alone satisfied the old
+            # substring check with the call deleted (phase-5 verification)
+            calls = {getattr(c.func, 'id', getattr(c.func, 'attr', ''))
+                     for c in ast.walk(node) if isinstance(c, ast.Call)}
+            if ('add_gnd_vias_to_existing_board' in calls
+                    and not {'via_protection_stamps', 'apply_stamps_in_memory'} <= calls):
                 missing.append('%s:%s (GND vias)' % (fn, node.name))
     check('5. every GUI function that builds a pcbnew.PCB_VIA applies its protection, '
           'and every one that adds GND return vias stamps them',

@@ -63,33 +63,39 @@ def check(name, cond, detail=''):
         FAILS.append(name)
 
 
-def board(work, name, vias, setup='', extra=''):
+def board(work, name, vias, setup='', extra='', a=1,
+          pad1_layers='"F.Cu" "F.Paste" "F.Mask"'):
     """A 30x20 board: U1 pad 1 (1x1 mm at 10,10) opens F.Paste on /A; U1 pad 2
-    (1x1 mm at 20,10) is F.Cu only, on /A too."""
+    (1x1 mm at 20,10) is F.Cu only, on /A too. `a` is /A's net NUMBER (/B takes
+    the other), so a baseline can number its nets differently."""
+    b = 3 - a
     p = os.path.join(work, name + '.kicad_pcb')
     with open(p, 'w', encoding='utf-8') as fh:
         fh.write(
             '(kicad_pcb (version 20241229) (generator "pcbnew")\n'
             ' (general (thickness 1.6)) (paper "A4")\n'
-            ' (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (35 "F.Paste" user) '
+            ' (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) '
+            '(31 "B.Cu" signal) (35 "F.Paste" user) '
             '(39 "F.Mask" user) (44 "Edge.Cuts" user))\n'
-            ' (setup %s)\n (net 0 "") (net 1 "/A") (net 2 "/B")\n'
+            ' (setup %s)\n (net 0 "") (net %d "%s") (net %d "%s")\n'
             ' (gr_rect (start 0 0) (end 30 20) (stroke (width 0.1) (type solid)) '
             '(fill none) (layer "Edge.Cuts"))\n'
             ' (footprint "L:P" (layer "F.Cu") (at 15 10)\n'
             '  (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS") '
             '(effects (font (size 1 1) (thickness 0.15))))\n'
-            '  (pad "1" smd rect (at -5 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") '
-            '(net 1 "/A"))\n'
+            '  (pad "1" smd rect (at -5 0) (size 1 1) (layers %s) '
+            '(net %d "/A"))\n'
             '  (pad "2" smd rect (at 5 0) (size 1 1) (layers "F.Cu" "F.Mask") '
-            '(net 1 "/A")))\n'
-            '%s\n%s\n)\n' % (setup, '\n'.join(vias), extra))
+            '(net %d "/A")))\n'
+            '%s\n%s\n)\n' % (setup, min(a, b), '/A' if a < b else '/B',
+                             max(a, b), '/B' if a < b else '/A',
+                             pad1_layers, a, a, '\n'.join(vias), extra))
     return p
 
 
-def via(x, y, net=1, spec='', uid='v'):
-    return (' (via (at %s %s) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") %s'
-            '(net %d) (uuid "%s"))' % (x, y, spec, net, uid))
+def via(x, y, net=1, spec='', uid='v', layers='"F.Cu" "B.Cu"'):
+    return (' (via (at %s %s) (size 0.4) (drill 0.2) (layers %s) %s'
+            '(net %d) (uuid "%s"))' % (x, y, layers, spec, net, uid))
 
 
 def drc(path, **kw):
@@ -183,6 +189,31 @@ def main():
         check('5. CLI: a board graded against itself as --baseline exits 0', True)
         rows = drc(b1, net_patterns=['/B'])
         check('5. a --nets filter that excludes the via\'s net drops it', not vip(rows))
+        # inheritance is by net NAME: a baseline that numbers /A as net 2
+        base_renum = board(work, 'base_renum', [via(10, 10, net=2, uid='v1')], a=2)
+        rows = drc(cur, baseline=base_renum)
+        check('5. a baseline numbering its nets differently still inherits (by NAME)',
+              len(vip(rows, 'inherited-via-in-paste')) == 1, str(rows))
+        # ...and only a via that was ALREADY under solder, unprotected, there
+        base_nopaste = board(work, 'base_nopaste', [via(10, 10, uid='v1')],
+                             pad1_layers='"F.Cu" "F.Mask"')
+        rows = drc(b1, baseline=base_nopaste)
+        check('5. a via the baseline had OUT of any opening (a part moved solder onto '
+              'it) is NOT inherited', len(vip(rows)) == 1
+              and not vip(rows, 'inherited-via-in-paste'), str(rows))
+        base_prot = board(work, 'base_prot', [via(10, 10, spec='(capping yes) (filling yes) ',
+                                                   uid='v1')])
+        rows = drc(b1, baseline=base_prot)
+        check('5. a via the baseline had FILLED+CAPPED, shipped bare, is NOT inherited '
+              '(the run lost the protection)', len(vip(rows)) == 1
+              and not vip(rows, 'inherited-via-in-paste'), str(rows))
+        # a via only counts under F.Paste when its barrel reaches F.Cu
+        rows = drc(board(work, 'buried', [via(10, 10, layers='"In1.Cu" "In2.Cu"')]))
+        check('5. a BURIED In1-In2 via under the F.Paste opening is not a hit',
+              not vip(rows) and not vip(rows, 'protected-via-in-paste'), str(vip(rows)))
+        rows = drc(board(work, 'blind', [via(10, 10, layers='"F.Cu" "In1.Cu"')]))
+        check('5. ...a BLIND F.Cu-In1 one is (its barrel opens under the paste)',
+              len(vip(rows)) == 1, str(vip(rows)))
 
         # 6 -- kicad_drc_compare: a labelled channel, off the copper match
         import kicad_drc_compare as kdc

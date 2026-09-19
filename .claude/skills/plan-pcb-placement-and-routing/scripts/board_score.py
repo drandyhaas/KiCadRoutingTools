@@ -80,11 +80,13 @@ SIZE_TYPES = frozenset({'track-width', 'via-size', 'via-drill-size'})
 RULE_PAIR_TYPES = frozenset({'segment-segment-track-rule'})
 
 # #962: a via in a solder-paste opening that is not filled+capped. ADVISORY,
-# beside `drc_rule_pairs`, never in `blocking`. The tool stamps IPC-4761 Type
-# VII onto every via it ADDS in a pad or paste opening at ship time, so what
-# fires on a board this chain routed is a via the input already had -- 136 on
-# orangecrab alone. No placement or routing lap can change a fab spec it did
-# not write, so counting them in `blocking` would make 0 unreachable there.
+# beside `drc_rule_pairs`, never in `blocking`. On a KiCad 10-format board
+# the tool stamps IPC-4761 Type VII onto every via it puts under solder at ship
+# time, so what fires on a board this chain routed is almost always a via the
+# input already had -- 136 on orangecrab_ext_pll alone (a KiCad 9-format file
+# cannot carry the tokens, so there the tool's own vias fire too). No
+# placement or routing lap can change a fab spec it did not write, so
+# counting them in `blocking` would make 0 unreachable there.
 # Pass --baseline <input board> and check_drc accepts those as
 # `inherited-via-in-paste`; what is left is disclosed here.
 VIA_PASTE_TYPES = frozenset({'via-in-paste'})
@@ -633,9 +635,9 @@ def _unverified_grazes(out: str) -> int:
     """Footprint graphic copper grazing the edge that check_drc ACCEPTED
     without knowing whether a part move made the graze (#962).
 
-    board_score passes check_drc no --baseline, so it cannot tell a library
-    graze (watchy AE1) from one a placement lap created; both are accepted and
-    count toward nothing. The number is disclosed so a reader knows `count`
+    Without --baseline, check_drc cannot tell a library graze (watchy AE1)
+    from one a placement lap created; both are accepted and count toward
+    nothing. The number is disclosed so a reader knows `count`
     does not cover them. Copper PAST the outline is `graphic-off-board` and is
     counted either way.
     """

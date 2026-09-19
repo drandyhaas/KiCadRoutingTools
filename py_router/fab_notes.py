@@ -76,6 +76,11 @@ def via_paste_sites(vias, pcb_data, tol: float = 1e-6):
     it is not also reported here. Uses the same barrel rule as
     `via_in_pad_sites` (#695): an off-centre via wicks solder just the same.
     Accepts vias as dicts or objects.
+
+    A via is only under an F.Paste opening when its barrel reaches F.Cu (B side
+    likewise): a buried In1-In2 via, or a blind F.Cu-In1 via under B.Paste,
+    has no barrel open to that paste. A via with no layer span is a through
+    via.
     """
     import paste_apertures as _pa
     out = []
@@ -85,8 +90,11 @@ def via_paste_sites(vias, pcb_data, tol: float = 1e-6):
         if nid is None or vx is None or vy is None:
             continue
         vsz = _get(via, 'size', 0.6) or 0.6
+        span = _get(via, 'layers', None) or ['F.Cu', 'B.Cu']
         best = None
         for ap in _pa.apertures_for_net(pcb_data, nid):
+            if ('F.Cu' if ap.layer.startswith('F.') else 'B.Cu') not in span:
+                continue
             b = ap.bounds
             r = vsz / 2.0
             if vx + r < b[0] or vx - r > b[2] or vy + r < b[1] or vy - r > b[3]:
@@ -184,8 +192,9 @@ def via_protection_stamps(vias, input_snapshot, pcb_data):
       input via at that spot carried a spec and the shipped via does not, the
       via was stripped and laid again (`--force-reroute`, a rip-up), and the
       input's spec is handed BACK rather than lost (`restored`);
-    - it carries no protection spec of its own. An explicit spec is the
-      designer's, and is never overridden;
+    - its spec (its own, or a restored one) declares neither capping nor
+      filling. A spec that does is a decision, and is never overridden; one
+      that only tents or covers is kept and Type VII is MERGED into it;
     - the board's own setup does not already make it filled AND capped;
     - the board's FILE FORMAT can carry the tokens (KiCad 10 and later, see
       `PER_VIA_PROTECTION_MIN_VERSION`). On an older format the via is
@@ -232,34 +241,53 @@ def via_protection_stamps(vias, input_snapshot, pcb_data):
         def _unprot(why):
             unprotected.append({'site': where, 'x': round(_get(v, 'x'), 4),
                                 'y': round(_get(v, 'y'), 4), 'why': why})
-        if own:
-            _unprot('own spec kept')
-            continue
+        # The spec the via ships with before any decision here: its own, or,
+        # for one stripped and laid again on an input via's spot, the spec
+        # that input via had (handed BACK, whatever it says).
+        base = dict(own)
+        restored = False
         match = _input_match(v, snap_by_net)
         if match is not None:
-            spec = match[3] if len(match) > 3 else {}
+            in_spec = match[3] if len(match) > 3 else {}
             was_site = match[4] if len(match) > 4 else None
-            if spec:
-                # Stripped and laid again on the input via's spot: give it the
-                # spec the input via had, whatever that spec says.
-                stamps.append((v, dict(spec)))
-                n_restored += 1
-                if not is_filled_and_capped(effective_via_protection(spec, setup)):
-                    _unprot("the input via's own spec, restored")
-                continue
+            if not own and in_spec:
+                base, restored = dict(in_spec), True
             if was_site is not False:
-                _unprot('at the spot of an input via, kept as the input had it')
+                # The input had it here, already under solder (or nobody
+                # knows): keep it as the input had it (#741).
+                if restored:
+                    stamps.append((v, base))
+                    n_restored += 1
+                    if not is_filled_and_capped(effective_via_protection(base, setup)):
+                        _unprot("the input via's own spec, restored")
+                else:
+                    _unprot('own spec kept' if own
+                            else 'at the spot of an input via, kept as the input had it')
                 continue
             # The via was the input's, but it was NOT under solder there: a
             # part this run moved put a pad or paste opening on it. The site
-            # is this run's, so the declaration is too (falls through).
+            # is this run's, so the declaration is too.
             n_site_created += 1
+        if 'capping' in base or 'filling' in base:
+            # Someone DECIDED capping or filling for this via; that decision is
+            # kept, never overridden.
+            if restored:
+                stamps.append((v, base))
+                n_restored += 1
+            _unprot('own spec kept')
+            continue
         if not can_declare:
             n_unstampable += 1
+            if restored:
+                stamps.append((v, base))
+                n_restored += 1
             _unprot('file format %s predates per-via capping/filling (KiCad 10)'
                     % (getattr(pcb_data, 'kicad_version', 0) or '?'))
             continue
-        stamps.append((v, dict(TYPE_VII_STAMP)))
+        # Type VII MERGED into whatever the spec already says: a tenting-only
+        # spec (every via on orangecrab and rp2350 carries one) says nothing
+        # about capping or filling, so it does not block the declaration.
+        stamps.append((v, dict(base, **TYPE_VII_STAMP)))
     record = {
         'count': len(sites), 'sites': sorted(set(sites)),
         'stamped': len(stamps) - n_restored, 'restored': n_restored,

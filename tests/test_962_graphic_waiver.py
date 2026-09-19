@@ -428,10 +428,12 @@ def main():
             json.dump({'items': [
                 {'type': 'graphic-off-board', 'owner_ref': 'U2', 'item1': 'x'},
                 {'type': 'segment-board-edge', 'owner_ref': 'AE1',
-                 'accepted': 'immutable-graphic'}]}, fh)
+                 'accepted': 'immutable-graphic'},
+                {'type': 'via-in-paste', 'owner_ref': 'C18', 'net1': 'GND'}]}, fh)
         got = pd._implicated_refs([js])
-        check('18. _implicated_refs names U2 (counted) and not AE1 (accepted)',
-              'U2' in got and 'AE1' not in got, str(got))
+        check('18. _implicated_refs names U2 (counted), not AE1 (accepted) and not '
+              'C18 (a via-in-paste row complains about a via, not a pose)',
+              'U2' in got and 'AE1' not in got and 'C18' not in got, str(got))
 
         # 19 -- kicad_drc_compare carries both types and the baseline
         sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))

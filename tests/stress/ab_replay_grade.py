@@ -344,7 +344,25 @@ def grade(pcb, clearance, baseline=None):
     # fallback below, when kicad-cli is unavailable).
     if baseline and os.path.exists(str(baseline)):
         drc_args += ["--baseline", str(baseline)]
+    # ...and its JSON names what is left: via-in-paste is kept out of
+    # `drc_real` on BOTH paths below (the kicad core splits it into its own
+    # channel), so the grade does not depend on whether kicad-cli is present.
+    import tempfile as _tf
+    _fd, _drc_json = _tf.mkstemp(suffix='.json', prefix='abgrade_')
+    os.close(_fd)
+    drc_args += ["--json", _drc_json]
     drc = subprocess.run(drc_args, capture_output=True, text=True)
+    _vip = 0
+    try:
+        with open(_drc_json, encoding='utf-8') as _fh:
+            _vip = int((json.load(_fh).get('by_type') or {}).get('via-in-paste', 0))
+    except Exception:
+        _vip = 0
+    finally:
+        try:
+            os.remove(_drc_json)
+        except OSError:
+            pass
     # NOT --quiet: the "Checking N routed nets" total (needed for completion %)
     # only prints in non-quiet mode; the unrouted/connectivity-issue counts print
     # either way.
@@ -376,11 +394,12 @@ def grade(pcb, clearance, baseline=None):
     # to raw drc for pre-#408 summaries that lack the field.
     cie = out.get("checkdrc_intentional_edge") or 0
     out["drc_intentional_edge"] = cie
+    out["drc_via_in_paste"] = _vip
     recon = out.get("checkdrc_reconciled")
     if recon is not None:
         out["drc_real"] = recon
     elif out["drc"] is not None:
-        out["drc_real"] = max(0, out["drc"] - cie)
+        out["drc_real"] = max(0, out["drc"] - cie - _vip)
     else:
         out["drc_real"] = None
     return out

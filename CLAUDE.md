@@ -859,21 +859,26 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   specified nothing. Read by BOTH parse paths in the same normalized form. Pass it
   back via `generate_via_sexpr(..., tenting_attrs=...)` for any via that already
   existed — a RE-PLACED via (rip-up, sub-grid nudge, tap relocation) otherwise
-  loses its spec and is re-stamped with front+back tenting, which is wrong for
-  via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
+  loses its spec and ships inheriting the board's setup instead, which is wrong
+  for via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
   emit **no protection token at all**, so they inherit the board's own
   `(setup ...)` policy — what pcbnew does for a via the GUI adds and KiCad for
-  one the user places. **The one exception (#962):** a via THIS run added whose
-  barrel overlaps a same-net SMD pad or a paste opening of its own net DECLARES
-  Type VII, `(capping yes) (filling yes)` (`fab_notes.via_protection_stamps`),
-  at ship time after the last via-changing pass, unless the input had a via at
-  that spot (it keeps what it had -- and gets the input's spec BACK if it was
-  stripped and laid again), it has its own spec, the setup already says
-  filled+capped, or the FILE FORMAT predates the tokens (KiCad 9 cannot open a
-  20241229 board carrying them; those count `unstampable`). The record is
-  `via_in_pad` in the route step's merged `--json-out`, and `check_drc` reports
-  what still ships unprotected as `via-in-paste` (`--baseline` accepts the
-  input's own). Probed against pcbnew 10.0.0: a via at
+  one the user places. **The one exception (#962):** a via under solder -- its
+  barrel overlaps a same-net SMD pad or a paste opening of its own net --
+  DECLARES Type VII, `(capping yes) (filling yes)`
+  (`fab_notes.via_protection_stamps`), at ship time, when THIS run created
+  the site: it added the via, or a part it moved put a pad or paste opening on
+  an input via (`site_created`; place_fanout_clearance pulls cap pads onto
+  same-net vias by design). Not stamped: a via the input already had under
+  solder (kept as it was -- and given the input's spec BACK if it was stripped
+  and laid again), a via whose spec DECIDES capping or filling (a tenting-only
+  spec gets Type VII merged in), a board whose setup already says
+  filled+capped, and a board whose FILE FORMAT predates the tokens (KiCad
+  9.0's parser has no case for them, read from its source, not probed; those
+  count `unstampable`). The record is `via_in_pad` in the route step's merged
+  `--json-out`, and `check_drc` reports what still ships unprotected as
+  `via-in-paste` (`--baseline` accepts only a via the input had under solder,
+  unprotected). Probed against pcbnew 10.0.0: a via at
   `*_MODE_FROM_BOARD` serialises with NO token and a token appears **only** for
   an explicit override, so anything stamped turns an inheriting via into an
   override. The old rules — a hardcoded front+back tenting, then
@@ -886,14 +891,13 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   tented — a fab error, hidden because KiCad's FACTORY policy is tented so the
   two agree on an ordinary board. `prevailing_via_protection` still exists and is
   still correct; it is just not a default any more. When RE-PLACING a via, also pass
-  `inherit_when_unspecified=True` (#741). `None` **and `{}`** otherwise both mean
-  "the caller has no opinion", which on KiCad 10 output stamps front+back
-  tenting (on a numeric-net board they emit nothing) — and `{}` is exactly what
-  `Via.tenting_attrs` holds for a via that carries no spec, so handing it back
-  verbatim is the bug. With the flag an empty spec emits nothing, so the via
-  keeps inheriting the board's `(setup ...)` — what it had, and what the GUI
-  side (`gui_utils.apply_via_protection`, early-return on an empty spec) has
-  always done. Spell it `tenting_attrs=v.tenting_attrs,
+  `inherit_when_unspecified=True` (#741). An empty spec now emits nothing in
+  every case (`kicad_writer.via_protection_sexpr`), so the via keeps inheriting
+  the board's `(setup ...)` — what it had, and what the GUI side
+  (`gui_utils.apply_via_protection`, early-return on an empty spec) has always
+  done; `None` and `{}` used to stamp front+back tenting on KiCad 10 output,
+  and the flag was the fix. It is still passed: it records at the call site
+  that the via ALREADY EXISTED. Spell it `tenting_attrs=v.tenting_attrs,
   inherit_when_unspecified=True` — a keyword rather than a sentinel VALUE,
   because the repo's own idiom for carrying a spec is `dict(...)`, which would
   turn any dict-shaped sentinel back into a plain `{}` and silently restore the

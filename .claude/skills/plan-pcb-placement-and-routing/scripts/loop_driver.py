@@ -2321,9 +2321,9 @@ names of the instruments that produced them:
 
 check_drc's --baseline accepts a via the original already had in a solder-paste
 opening (`inherited-via-in-paste`) and grades a graze of footprint graphic
-copper that a part MOVE created (`graphic-board-edge`). Without it both read
-against the run: every pre-existing via-in-paste is a violation and every graze
-is accepted `unverified`.
+copper that a part MOVE created (`graphic-board-edge`). Without it every
+pre-existing via-in-paste reads as a violation, and every graze is accepted
+`unverified`, so a lap can create one and grade clean.
 
 check_complete is the one that fails CLOSED: board_score exits 0 with four of
 nine components ungraded, and it has no component at all for orphan stubs,

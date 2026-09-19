@@ -127,8 +127,10 @@ def resolve_paste_margin(pad, fp, board_info) -> Tuple[float, float]:
     - margin = pad override, else footprint override, else board
       `pad_to_paste_clearance`. The ratio is resolved independently, in the
       same order.
-    - An explicit 0 counts as UNSET. The KiCad 10 loader returns None for
-      `(solder_paste_margin 0)`, and the parsers mirror that, storing None.
+    - An explicit 0 counts as UNSET only up to file version 20240201
+      (`kicad_parser.PASTE_ZERO_IS_UNSET_MAX_VERSION`), as KiCad's loader
+      reads it; after that it is a real override of 0. The parsers store
+      None for an unset override.
     - Per axis: `margin + size * ratio`, clamped at `-size / 2` for every
       shape except custom.
 
