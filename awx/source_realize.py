@@ -366,7 +366,7 @@ def audit(asked, achieved, original, laid, log, label):
                      'layer': n_lay, 'kind': n_kind, 'gap': n_gap, 'order': oa}
 
 
-def drc_pairs(board, nets=None):
+def drc_pairs(board, nets=None, pcb_data=None):
     """The DRC violation lines of `board` at the fanout's floor. `nets`
     (short names): only checks involving one of them -- sound when every
     other piece of copper was clean before, i.e. when the caller changed
@@ -383,7 +383,8 @@ def drc_pairs(board, nets=None):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             try:
-                _cd.run_drc(board, clearance=0.1, clearance_margin=0.1, net_patterns=pats, max_print=10 ** 6)
+                _cd.run_drc(board, clearance=0.1, clearance_margin=0.1, net_patterns=pats, max_print=10 ** 6,
+                            pcb_data=pcb_data)
             except SystemExit:
                 pass
         out = buf.getvalue()
@@ -433,10 +434,13 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     original copper, reported) rather than dumped somewhere the plan
     never asked for and audited as a near-miss."""
     pcb = parse_kicad_pcb(board)
-    pcb0 = parse_kicad_pcb(board)      # untouched copy for the drift guard
     n2n = {i: n.name for i, n in pcb.nets.items()}
     free = [nm for nm in dict.fromkeys(free) if nm not in src_choice]
     names = list(src_choice) + free
+    # the drift guard's BEFORE, read now, before any copper comes off (it
+    # used to parse the board a second time for an untouched copy)
+    others = [nm for nm in guard_names if nm not in src_choice and nm not in free]
+    before = te.endpoints(pcb, others, byname) if others else {}
     original = {nm: measure_tooth(pcb, nm, src_pad[nm], byname) for nm in names}
 
     removed = {}
@@ -512,10 +516,7 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
                             [n for n in ok if n in src_choice], log, 'source')
     # the teeth NOT asked to move must not have moved (the engine re-fans
     # only the stripped nets, but say so from the board, not from trust)
-    others = [nm for nm in guard_names
-              if nm not in src_choice and nm not in free]
     if others:
-        before = te.endpoints(pcb0, others, byname)
         after = te.endpoints(pcb2, others, byname)
         drift = [nm for nm in others if before[nm][0] != after[nm][0]]
         log(f'  source realize: {len(others) - len(drift)}/{len(others)} unmoved '

@@ -51,7 +51,20 @@ def _lane_spans(m: Move) -> List[Tuple[Tuple, float, float]]:
     """Every gap stretch a move occupies: a plain move's one lane
     (_lane_span); a CLIMB's (escape_moves climb=) axis-aligned runs on its
     run layer -- the gap it climbs along and the row or column it leaves
-    by -- so the conflict test prices what the copper will take."""
+    by -- so the conflict test prices what the copper will take.
+    Cached on the move (2026-09-18): a pure function of fields no code
+    rewrites after the move is made, and _conflict asked for it twice per
+    pair -- 2.7 million times for 1.3 million pair tests in one K41 plan,
+    8 of the conflict test's 14 profiled seconds."""
+    c = m.__dict__.get('_spans_c')
+    if c is not None:
+        return c
+    c = _lane_spans_compute(m)
+    m.__dict__['_spans_c'] = c
+    return c
+
+
+def _lane_spans_compute(m: Move) -> List[Tuple[Tuple, float, float]]:
     if not m.legs and m.site is None:
         # a move synthesized from copper the engine laid (replan.synth_move)
         # carries no legs: it occupies no lane the selector can price

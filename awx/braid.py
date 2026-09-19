@@ -8086,6 +8086,9 @@ def run(board, nets, dest, out):
     if ctx.rungs:
         log('re-lay rungs: ' + ', '.join(f'{st}/{r} {n}' for (st, r), n
                                          in sorted(ctx.rungs.items())))
+    _bs = cn._BASE_STATS
+    log(f'base maps: {_bs["single"]} window build(s), {_bs["miss"]} whole-board build(s), '
+        f'{_bs["hit"]} clone(s)')
     return write_out(a, ctx, corridors, names, log)
 
 

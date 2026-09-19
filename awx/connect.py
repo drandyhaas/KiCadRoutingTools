@@ -35,7 +35,8 @@ from plane_pad_tap import make_local_window  # noqa: E402
 from obstacle_map import (build_base_obstacle_map,  # noqa: E402
                           add_same_net_via_clearance,
                           add_same_net_pad_drill_via_clearance,
-                          same_net_pad_via_keepout_cells)
+                          same_net_pad_via_keepout_cells,
+                          add_board_edge_obstacles)
 from routing_context import _add_free_via_positions  # noqa: E402
 from net_rescue import _fence_window, _result_escapes_window  # noqa: E402
 from single_ended_routing import route_net_with_obstacles  # noqa: E402
@@ -103,6 +104,83 @@ def _band_cell_strips(coord: GridCoord, window: PCBData, band,
 
 
 VIRTUAL_NET = 10 ** 7      # foreign net id for virtual copper (no such net)
+
+# ---- the base map, built once per (copper, net, virtual copper), cloned per
+# connect (2026-09-18). A rescue ladder's rungs are the same net on the same
+# copper with the same virtual lines, only a wider window each; the base
+# map was rebuilt for every one (390 builds in a K41 braid, 24 in a probe
+# braid, a quarter of the braid). A whole-board build of this board costs
+# 97 ms and a clone under a millisecond (measured), so the base is built
+# over the WHOLE board and the window's fence goes on the clone: inside
+# the A* bounds the cells are the ones the window build stamped.
+# MEASURED AND LEFT OFF (2026-09-18): built for every connect, a K41 braid
+# went 42.7 -> 48.8 s; built only for a key asked twice (a ladder), 44.1 s
+# with 109 whole-board builds serving 62 clones -- the ladders are too
+# short (3-5 rungs, the first on its own window) for a 97 ms build to
+# repay 20-50 ms window builds. Copper identical either way. Kept as
+# CONNECT_MAP_CACHE=1 for a board or ladder shape where it would.
+MAP_CACHE = os.environ.get('CONNECT_MAP_CACHE', '0') == '1'
+_BASE = {}
+_BASE_MAX = 24
+_SEEN = {}          # key -> how many connects asked for it (the first builds its own window)
+_BASE_STATS = {'hit': 0, 'miss': 0, 'single': 0}
+
+
+def _copper_sig(pcb):
+    return hash((tuple((s.start_x, s.start_y, s.end_x, s.end_y, s.layer, s.net_id, s.width)
+                       for s in pcb.segments),
+                 tuple((v.x, v.y, v.size, v.drill, v.net_id, tuple(v.layers)) for v in pcb.vias)))
+
+
+def _cfg_sig(cfg):
+    return (cfg.grid_step, cfg.track_width, cfg.clearance, cfg.via_size, cfg.via_drill,
+            tuple(cfg.layers), getattr(cfg, 'board_edge_clearance', 0))
+
+
+def _base_key(pcb, net_id, cfg, virtual, virtual_vias, layer_map):
+    return (_copper_sig(pcb), net_id, _cfg_sig(cfg),
+            tuple((tuple(p), tuple(q), L) for (p, q, L) in (virtual or ()) if L in layer_map),
+            tuple(tuple(p) for p in (virtual_vias or ())))
+
+
+def _base_map(pcb, net_id, cfg, virtual, virtual_vias, layer_map, key=None):
+    """The whole-board map for `net_id` on this copper with this virtual
+    copper: static obstacles, the net's free vias and same-net clearances,
+    fenced at the board. Cached; the caller clones it. Built only when a
+    key is asked for a SECOND time (a rescue ladder's rungs): measured, a
+    whole-board build for every single connect made a K41 braid 14 percent
+    slower, its 41 first-attempt lanes each paying 97 ms for a map a 20 ms
+    window build would have served once."""
+    if key is None:
+        key = _base_key(pcb, net_id, cfg, virtual, virtual_vias, layer_map)
+    b = _BASE.get(key)
+    if b is not None:
+        _BASE_STATS['hit'] += 1
+        return b
+    _BASE_STATS['miss'] += 1
+    bb = pcb.board_info.board_bounds
+    full = make_local_window(pcb, (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2,
+                             max(bb[2] - bb[0], bb[3] - bb[1]))     # clamps to the board: the board as a window
+    if virtual:
+        w = cfg.track_width + VIRT_SLACK
+        full.segments = list(full.segments) + [
+            Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
+            for (p, q, layer) in virtual if layer in layer_map]
+    if virtual_vias:
+        full.vias = list(full.vias) + [
+            Via(p[0], p[1], cfg.via_size, cfg.via_drill, list(cfg.layers), VIRTUAL_NET) for p in virtual_vias]
+    obstacles = build_base_obstacle_map(full, cfg, [net_id], static_base=True)
+    _fence_window(obstacles, full, cfg)
+    _add_free_via_positions(obstacles, full, [net_id], cfg)
+    add_same_net_via_clearance(obstacles, full, net_id, cfg)
+    add_same_net_pad_drill_via_clearance(obstacles, full, net_id, cfg)
+    keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
+    if len(keep):
+        obstacles.add_blocked_vias_batch(keep)
+    if len(_BASE) >= _BASE_MAX:
+        _BASE.pop(next(iter(_BASE)))
+    _BASE[key] = obstacles
+    return obstacles
 VIRT_SLACK = float(os.environ.get('BRAID_VIRT_SLACK', '0') or 0)   # extra width of a virtual stamp (mm); 0 = as ever
 
 
@@ -200,20 +278,35 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     _m(f'window {len(window.segments)} segs {len(window.vias)} vias '
        f'{(window.board_info.board_bounds[2] - window.board_info.board_bounds[0]) / cfg.grid_step:.0f}x'
        f'{(window.board_info.board_bounds[3] - window.board_info.board_bounds[1]) / cfg.grid_step:.0f} cells')
-    obstacles = build_base_obstacle_map(window, cfg, [net_id],
-                                        static_base=True)
-    _m('base map')
-    _fence_window(obstacles, window, cfg)
-    # the net's own barrels are free layer changes, and its own
-    # via/drill spacing still applies (the rescue recipe, #470 and
-    # the h2h guard)
-    _add_free_via_positions(obstacles, window, [net_id], cfg)
-    add_same_net_via_clearance(obstacles, window, net_id, cfg)
-    add_same_net_pad_drill_via_clearance(obstacles, window, net_id, cfg)
-    keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
-    if len(keep):
-        obstacles.add_blocked_vias_batch(keep)
-    _m('fence, free vias, keepouts')
+    _key = _base_key(pcb, net_id, cfg, virtual, virtual_vias, layer_map) if MAP_CACHE else None
+    if MAP_CACHE:
+        n_seen = _SEEN.get(_key, 0) + 1
+        if len(_SEEN) > 4096:
+            _SEEN.clear()
+        _SEEN[_key] = n_seen
+    if MAP_CACHE and n_seen >= 2:
+        # the whole-board base for this net and copper, cloned; the window's
+        # own fence on top (what the per-window build stamped at its edge)
+        obstacles = _base_map(pcb, net_id, cfg, virtual, virtual_vias, layer_map, key=_key).clone()
+        add_board_edge_obstacles(obstacles, window, cfg)
+        _m('base map (clone) + window fence')
+    else:
+        if MAP_CACHE:
+            _BASE_STATS['single'] += 1
+        obstacles = build_base_obstacle_map(window, cfg, [net_id],
+                                            static_base=True)
+        _m('base map')
+        _fence_window(obstacles, window, cfg)
+        # the net's own barrels are free layer changes, and its own
+        # via/drill spacing still applies (the rescue recipe, #470 and
+        # the h2h guard)
+        _add_free_via_positions(obstacles, window, [net_id], cfg)
+        add_same_net_via_clearance(obstacles, window, net_id, cfg)
+        add_same_net_pad_drill_via_clearance(obstacles, window, net_id, cfg)
+        keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
+        if len(keep):
+            obstacles.add_blocked_vias_batch(keep)
+        _m('fence, free vias, keepouts')
     if band is not None and (isinstance(band, dict) or callable(band)
                              or band[0] is not None or band[1] is not None):
         # The band into the map's STATIC bitmap (#422's
