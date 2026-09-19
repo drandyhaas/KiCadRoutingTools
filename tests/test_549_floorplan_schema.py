@@ -291,7 +291,11 @@ def test_an_intent_using_every_known_key_loads():
                    'affinity_exempt_net_ids': [3], 'ignore_net_ids': [1, 2],
                    'max_fanout': 30, 'block_displacement_mm': 4.0,
                    'plane_layers': ['In1.Cu', 'In2.Cu']},
-        'severity': {name: WARN for name in sorted(_SEVERITY_KEYS)},
+        # WARN everywhere it is accepted. `mechanical_drift` is promote-only
+        # (#959: the declared pose is a recorded fact), so it takes the one
+        # value it accepts.
+        'severity': {name: (ERROR if name == 'mechanical_drift' else WARN)
+                     for name in sorted(_SEVERITY_KEYS)},
         'context': {'note': 'read-only'},
         'overlap_waivers': [{'pair': ['U1', 'U2'], 'reason': 'net tie',
                              'context': {'why': 'w'}}],
@@ -616,8 +620,13 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'edge_connector_side'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
-        i = intent_from_dict(_base(severity={name: WARN}))
-        assert i.severity_of(name) == WARN, name
+        # Two names accept one direction only, and say so at load:
+        # `edge_connector_side` cannot be raised (nothing moves a part
+        # between faces), `mechanical_drift` cannot be demoted (the pose is
+        # a recorded fact).
+        want = ERROR if name == 'mechanical_drift' else WARN
+        i = intent_from_dict(_base(severity={name: want}))
+        assert i.severity_of(name) == want, name
     print(f"  PASS: {len(expected)} settable rule names accepted, "
           f"a typo refused (RULES has {len(RULES)})")
 

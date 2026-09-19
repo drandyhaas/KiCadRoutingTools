@@ -159,7 +159,9 @@ source, suspect, suspect_reason
 `proximity`, `must_lock`, `legality`, `pins_to_edge` — plus the six findings raised outside
 the rule loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
 `block_unresolved`, `intent_zone_in_keepout`, `keepout_allow_unresolved`,
-`mechanical_drift` (#959, raised only when a `mechanical.json` is read),
+`mechanical_drift` (#959, raised only when a `mechanical.json` is read, and
+settable to `error` only -- `warn` is refused, since the pose is a recorded
+fact),
 the eleven `plan_check` findings (#959: `plan_zone_exclusive_unsatisfiable`,
 `block_glob_literal`, `plan_fixed_outside_zone`, `plan_zone_overfull`,
 `plan_zone_crowded`, `plan_edge_overfull`, `plan_edge_crowded`,
@@ -202,12 +204,15 @@ place either: it is grepped for the substring `SUSPECT`, so appending prose to
 it can change behaviour. A `context` value must still be an object; the keys
 inside it are yours.
 
-Two exceptions since #959, both on `edge_connectors[]` entries. The
-compiled keys' provenance (`context.compiled_from`, `context.basis`) is read by
-drift attribution. `context.mount_mode` in `top_mount` / `bottom_mount`
-exempts the part from the edge-receptacle seat. The second is the plan choosing
-its own clause, exactly as dropping `class` would be, and with a design brief
-a plan whose `mount_mode` differs from the brief's drifts.
+The exceptions are all on `edge_connectors[]` entries:
+- `context.mount_mode: edge_mount` makes the seat read the drawn body (#961).
+- Since #959, `top_mount` / `bottom_mount` there exempts the part from the
+  edge-receptacle seat. That is the plan choosing its own clause, exactly as
+  dropping `class` would be. With a design brief, a plan and brief that
+  disagree about a vertical mount drift.
+- `context.compiled_from` is read by drift attribution.
+
+The top-level `context.basis` labels numbers and changes no verdict.
 
 ### Versioning: `schema` is the format, `min_reader` is the vocabulary
 

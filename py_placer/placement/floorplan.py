@@ -546,11 +546,13 @@ def _entry_context(entry, where: str) -> None:
     """An entry's `context` is free-form, but it is still an OBJECT.
 
     Type-checked and otherwise untouched: a list here means the author meant
-    something else, while an unknown key inside means nothing at all. ONE
-    key is read (#959): an `edge_connectors[]` entry's `context.mount_mode`
-    in `VERTICAL_MOUNTS` exempts the part from the receptacle seat. That is
-    the plan choosing its own clause, as dropping `class` would be; with a
-    design brief, a plan whose mount_mode differs from the brief's drifts.
+    something else, while an unknown key inside means nothing at all. On an
+    `edge_connectors[]` entry a few keys ARE read: `context.mount_mode`
+    (`edge_mount` makes the seat read the drawn body, #961; a vertical mount
+    exempts the part from the receptacle seat, #959 -- the plan choosing its
+    own clause, as dropping `class` would be, and with a brief a disagreement
+    about a vertical mount drifts), and `context.compiled_from`, by drift
+    attribution.
     """
     if 'context' in entry:
         _obj(entry['context'], f"{where}.context")
@@ -971,6 +973,15 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             "be raised to error -- nothing in the placement stack moves a "
             "part between faces (#836), so an error would be a red mark no "
             "run could clear")
+    if severity.get('mechanical_drift') == WARN:
+        # #959: the pose is a recorded fact, so a turn (or a pad-less ref's
+        # drift) stays an ERROR whatever the plan says, and a move is a WARN
+        # already. `warn` would change nothing while reading like a
+        # demotion -- refused, like the impossible direction above.
+        raise IntentError(
+            "severity: mechanical_drift cannot be demoted -- the declared "
+            "pose is a recorded fact a plan cannot overrule. Only `error` "
+            "is accepted, and it promotes the move-only WARN")
 
     budget = _obj(raw.get('legality_budget'), 'legality_budget')
     if 'oob_area' in budget:
@@ -6092,15 +6103,11 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         violations.extend(mechanical_anchor_violations(
             pcb_data, pcb_file, mechanical, skip=mechanical_skip,
             state=state, locked=ctx.locked, outline=outline))
-        if 'zone_containment' in skipped and (mechanical.get('poses')
-                                              or {}):
-            # The PLAN's zones are dark, but the anchors are graded under
-            # this rule's name; say so, or one grade reads the rule as both
-            # skipped and failed (pre-push review).
-            skipped['zone_containment'] = (
-                skipped['zone_containment'] + '; the mechanical anchors '
-                '(`mech:<ref>` blocks) are graded under this name all the '
-                'same')
+        # NOT amending `skipped['zone_containment']` when the plan's zones
+        # are dark: `_is_not_asked` matches skip reasons by exact text, and
+        # an amended reason read as an armed abstention -- a clean board
+        # then exited 4 "NOT FULLY GRADED" (narrow re-review). The anchors'
+        # findings carry their own `mech:<ref>` block names instead.
     # #712: a DECLARED along-edge claim this outline cannot support a verdict
     # on joins the same not-derivable channel the withheld budgets use. It is
     # neither a violation nor a pass, and `pass: true` beside a non-zero

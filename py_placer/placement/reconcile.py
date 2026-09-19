@@ -391,12 +391,15 @@ class _Geometry:
             try:
                 self._state = pose_score.make_state(self.pcb,
                                                     self.board_path)
-            except ValueError:
-                # No outline (or none the placement state trusts): there is
-                # no edge to read a part against. The grade refuses such a
-                # board itself, at exit 3 -- reconciliation, which runs
-                # first, must not turn that into a traceback (pre-push
-                # review: exit 1 where the base exited 3).
+            except ValueError as exc:
+                # No outline: there is no edge to read a part against. The
+                # grade refuses such a board itself, at exit 3 --
+                # reconciliation, which runs first, must not turn that into
+                # a traceback (pre-push review: exit 1 where the base exited
+                # 3). Only THAT error: any other would silently drop the
+                # edge rows (and a contradiction on them) at P1.
+                if 'board boundary' not in str(exc):
+                    raise
                 self._state = False
         return self._state or None
 

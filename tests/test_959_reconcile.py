@@ -264,8 +264,17 @@ def test_a_moved_or_turned_mechanical_ref_is_graded():
         # A plan cannot DEMOTE the turn: the pose is a recorded fact (PR
         # fact-check: `severity: {mechanical_drift: warn}` read it `warn`).
         # It may promote the move-only WARN.
-        demoted = fp.intent_from_dict(dict(doc, severity={
-            'mechanical_drift': 'warn'}), '')
+        try:
+            fp.intent_from_dict(dict(doc, severity={
+                'mechanical_drift': 'warn'}), '')
+        except fp.IntentError as exc:
+            assert 'cannot be demoted' in str(exc), exc
+        else:
+            raise AssertionError('mechanical_drift: warn loaded')
+        # The ERROR stays an ERROR in the grade too (the load refusal is
+        # the first line; this is the second, for an Intent built directly).
+        import dataclasses as _dc
+        demoted = _dc.replace(it, severity={'mechanical_drift': 'warn'})
         res = fp.grade(demoted, pcb, b, mechanical=m,
                        mechanical_skip=['USB1'])
         md = [v for v in res.violations if v.rule == 'mechanical_drift'
@@ -1066,8 +1075,17 @@ def test_p1_refuses_a_run_written_value_the_record_outranks():
         assert line and "mechanical 'west'" in line[0] and (
             "brief 'east' [hypothesis" in line[0]) and (
             "intent 'east' [hypothesis" in line[0]), r.stdout[-2000:]
-        # A disposition does not answer it: acknowledging it changes nothing.
-        plan['dispositions']['contradictions'] = {'USB1:edge': 'accepted'}
+        # No disposition can answer it, by construction: this is DRIFT, not a
+        # contradiction, so a `dispositions.contradictions` key for it is
+        # stale and refused on its own (an arm asserting that could not
+        # fail, and was removed -- narrow re-review). Correcting the losing
+        # sources is the answer, and it is what clears the refusal:
+        with open(bp, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                       'board': 'board.kicad_pcb',
+                       'interfaces': [{'ref': 'USB1', 'edge': 'west',
+                                       'user_facing': True}]}, fh)
+        plan['edge_connectors'] = [{'ref': 'USB1', 'edge': 'west'}]
         with open(pp, 'w', encoding='utf-8') as fh:
             json.dump(plan, fh)
         r = subprocess.run(
@@ -1076,11 +1094,40 @@ def test_p1_refuses_a_run_written_value_the_record_outranks():
              '--waive', 'seed-connectors:the probe hands them over'],
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', cwd=REPO, timeout=900)
-        assert r.returncode == 4 and ('disagree with a RECORDED fact' in
-                                      r.stdout or 'answers contradictions'
-                                      in r.stdout), r.stdout[-1500:]
+        assert 'disagree with a RECORDED fact' not in r.stdout, \
+            r.stdout[-1500:]
     print("  PASS: a run-written brief and plan that the recorded edge "
-          "outranks are refused at P1, both values named")
+          "outranks are refused at P1, both values named; corrected, the "
+          "refusal clears")
+
+
+def test_anchors_on_a_zoneless_plan_leave_a_clean_grade_complete():
+    """Narrow re-review BLOCKING: amending `zone_containment`'s skip reason
+    when anchors were graded made `_is_not_asked` (exact-text match) read it
+    as an armed abstention, and a CLEAN board with a mechanical.json and no
+    zones -- every emit-then-grade round trip on a staged board -- exited 4
+    "NOT FULLY GRADED"."""
+    pcb = parse_kicad_pcb(ESP)
+    with tempfile.TemporaryDirectory() as tmp:
+        mp = os.path.join(tmp, 'mechanical.json')
+        fixed = [{'ref': r, 'x': pcb.footprints[r].x,
+                  'y': pcb.footprints[r].y,
+                  'rot': pcb.footprints[r].rotation or 0.0,
+                  'reason': 'at its current pose'} for r in ('U1', 'CON1')]
+        with open(mp, 'w', encoding='utf-8') as fh:
+            json.dump({'fixed': fixed}, fh)
+        m = R.load_mechanical(mp)
+        it = fp.intent_from_dict({'schema': 1, 'kind': 'floorplan-intent',
+                                  'units': 'mm', 'blocks': []}, '')
+        res = fp.grade(it, pcb, ESP, mechanical=m)
+        assert not [v for v in res.violations
+                    if v.block and v.block.startswith('mech:')], [
+            v for v in res.violations if v.block]
+        assert res.complete, (res.rules_skipped, res.budget_abstained)
+        assert res.rules_skipped.get('zone_containment') == \
+            fp._SKIP_REASON.get('zone_containment'), res.rules_skipped
+    print("  PASS: anchors at their pose on a zone-less plan: no finding, and "
+          "the grade stays complete")
 
 
 def test_a_board_with_no_outline_still_exits_3_with_a_brief():
@@ -1255,6 +1302,7 @@ TESTS = [
     test_round2_the_stagers_empty_declaration_is_a_declaration,
     test_round2_a_brief_written_in_the_run_cannot_outrank_the_record,
     test_p1_refuses_a_run_written_value_the_record_outranks,
+    test_anchors_on_a_zoneless_plan_leave_a_clean_grade_complete,
     test_a_board_with_no_outline_still_exits_3_with_a_brief,
     test_round2_a_moved_run_dir_keeps_its_declaration,
     test_round2_turns_and_padless_drift_are_errors_and_the_anchor_is_tight,
