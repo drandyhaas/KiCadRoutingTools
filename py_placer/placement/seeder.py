@@ -1548,6 +1548,13 @@ _INWARD = {'north': (0.0, 1.0), 'south': (0.0, -1.0),
 #: Added to a derived shift so it survives `apply_move`'s 3-dp rounding, which
 #: can take back up to half a micron per axis.
 _FLOOR_SHIFT_GUARD_MM = 0.001
+#: #983: the step a rung is moved along its edge when the pose it would
+#: WRITE falls outside its declared window. A rung clamped to a window end
+#: puts the courtyard centre exactly on it, and `round(x, 3)` then moves it up
+#: to half a micron either way against the grade's 1 nm EPS; one step of the
+#: 0.001 mm grid the pose is written on puts it back at least half a micron
+#: inside.
+_WINDOW_GUARD_MM = 0.001
 #: A record names at most this many pads; the counts beside it are complete.
 _FLOOR_RECORD_PADS = 4
 #: The same bound for `grade_delta` ROWS, which are not pads: a row is a
@@ -1653,6 +1660,20 @@ def _carries_setback(entry: Dict) -> bool:
             or entry.get('class') in ('edge_receptacle', 'connector_affinity'))
 
 
+def _band_reading(state, part, edge: str, x: float, y: float):
+    """`(amount, basis, occupancy)` at the pose `apply_move` WRITES: the band
+    reading `rule_edge_connector` grades -- the drawn body's overhang where it
+    can be measured, else the occupancy reading at the gate margin -- and that
+    occupancy reading itself, which is what gates the setback."""
+    from .connector_geometry import band_amount, geometry_for
+    px, py = round(x, 3), round(y, 3)
+    legacy = state.edge_gate.rect_outside_amount(part.rects(px, py, part.rot)[0])
+    amount, basis, _row = band_amount(
+        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
+        legacy, state.edge_gate.margin, pose=(px, py, part.rot))
+    return amount, basis, legacy
+
+
 def _grade_band_refuses(state, part, entry: Dict, edge: str, lo: float,
                         x: float, y: float):
     """`(reason, detail)`: would `rule_edge_connector` refuse this pose's
@@ -1660,22 +1681,19 @@ def _grade_band_refuses(state, part, entry: Dict, edge: str, lo: float,
 
     Asked of every pose the floor preference picks over the seat the ladder
     always chose. The ladder's own band test (`edge_seat_ok`) allows 0.02 mm
-    either side of the band. Its first seat can already sit in that margin
-    (a pre-existing grade error this does not touch), and a moved pose or a
-    later rung can land there where the first seat did not (measured: a later
-    rung read 0.23 on a 0.25 minimum and turned `--repair` from rc 0 to rc 4).
+    either side of the band, and a moved pose or a later rung can land in
+    that margin where the first seat did not (measured: a later rung read
+    0.23 on a 0.25 minimum and turned `--repair` from rc 0 to rc 4). A FIRST
+    seat could sit there too; since #987 every rung is settled into the band
+    at the grade's own bounds first (`_band_settle`), and this remains the
+    check on what the settle could not move.
     The setback is charged only once the occupancy reading is <= EPS, which
     an inward move is exactly what produces, so any such pose on an entry
     that carries one is refused -- conservatively, since the grade then also
     needs the body too far in.
     """
-    from .connector_geometry import band_amount, geometry_for
     from .legality import EPS
-    px, py = round(x, 3), round(y, 3)
-    legacy = state.edge_gate.rect_outside_amount(part.rects(px, py, part.rot)[0])
-    amount, basis, _row = band_amount(
-        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
-        legacy, state.edge_gate.margin, pose=(px, py, part.rot))
+    amount, basis, legacy = _band_reading(state, part, edge, x, y)
     detail = {'overhang_after_mm': round(amount, 4), 'band_min_mm': lo,
               'basis': basis}
     hi = (entry.get('overhang_mm') or {}).get('max')
@@ -1696,9 +1714,12 @@ def _outside_its_along_edge_claim(state, part, entry: Dict, edge: str,
     on the pose `apply_move` writes, with the edge span the seat ladder
     already uses (`_declared_edge_span`'s outline stand-in), so the two
     cannot disagree about the window. The ladder clamps its rungs to the
-    declared window, but a rung ON a window end is rounded to 3 decimals by
-    `apply_move` and can land half a micron outside it, where the grade's
-    EPS is 1 nm -- measured: a one-footprint board whose seed went rc 0 -> 4."""
+    declared window, but a rung ON a window end is written to 3 decimals and
+    can land half a micron outside it, where the grade's EPS is 1 nm --
+    measured: a one-footprint board whose seed went rc 0 -> 4, and 70 of
+    2880 blocker positions in #983. `_window_nudge` asks this of every rung
+    and steps the ones it flags inside the window; what is still flagged at
+    the written pose is named by `_window_miss_note`."""
     if entry.get('center_on_edge') is None and entry.get('along_edge_band') is None:
         return False
     from types import SimpleNamespace
@@ -1714,6 +1735,266 @@ def _outside_its_along_edge_claim(state, part, entry: Dict, edge: str,
     probe = SimpleNamespace(rect=part.rect(round(x, 3), round(y, 3), part.rot))
     return any(True for _ in _fp._grade_along_edge(ctx, dict(entry, edge=edge),
                                                    part.ref, probe, 'error'))
+
+
+#: #987: the furthest `_band_settle` moves a seat along its edge normal: the
+#: seat's own 0.02 mm band tolerance plus the half micron the write rounds
+#: away, rounded up to the 0.001 mm grid (0.021), plus one grid step. It can
+#: only close the gap that tolerance opened.
+_BAND_SETTLE_CAP_MM = 0.022
+
+
+def _band_settle(state, part, entry: Dict, edge: str, lo: float, x: float, y: float,
+                 seats=None) -> Tuple[float, float]:
+    """#987: `(x, y)`, unless the pose it WRITES reads outside the declared
+    overhang band; then that pose moved along the edge normal until it reads
+    inside, by whole 0.001 mm grid steps and one step more.
+
+    The seat accepts a band reading within 0.02 mm of the band
+    (`_body_band_correct`, `edge_seat_ok`) and stops the overhang walk within
+    0.02 mm of its target (`_edge_correct`); the grade accepts one only within
+    EPS. So a seat could be written up to 0.02 mm outside its band -- a drawn
+    body past its courtyard, a target ON a band end (`max(lo, 0.5)` with no
+    `max`), a gate margin under 0.02 mm. The reading here is the grade's own
+    (`_band_reading`) at the written pose, so a rung it accepts is returned
+    BIT-IDENTICAL. The along-edge coordinate is not touched.
+
+    A PREFERENCE, and a narrow one:
+      * only a rung that already seats is moved (`seats(x, y)` is not None),
+        so a correction never makes a seat of a rung the seat refused;
+      * the move is at most `_BAND_SETTLE_CAP_MM`;
+      * the moved pose must seat, and `_no_worse` must accept it: no pad
+        further inside the #975 floor (measured, moving a body 0.01 mm out to
+        meet a 0.3 minimum put two pads 0.006 mm inside it), no courtyard
+        overlap the grade would newly report, pair by pair, and none doubled
+        (measured: 0.0072 mm2 bought with a locked part), and with a grader
+        no intent-grade error it did not have;
+      * an INWARD move that takes the occupancy reading to <= EPS is refused
+        on an entry that carries a setback, because that is exactly when the
+        grade starts charging it (measured: a courtyard-only receptacle on a
+        {0, 0} band traded "past the declared maximum" for "seated 0.55mm
+        from the nearest edge with no overhang");
+      * the moved pose must still face its edge if the raw one did.
+    Anything that fails, or raises, leaves the raw pose, which the grade then
+    reports as it always did. It is not asked `_grade_worse`, whose
+    unconditional off-board reading would refuse every outward move; the
+    overlap and grade halves are asked through `_no_worse` instead.
+    """
+    from .legality import EPS
+    try:
+        hi = (entry.get('overhang_mm') or {}).get('max')
+        top = None if hi is None else float(hi) + EPS
+
+        def inside(a):
+            return a >= lo - EPS and (top is None or a <= top)
+        amount, _basis, _legacy = _band_reading(state, part, edge, x, y)
+        if inside(amount):
+            return x, y
+        raw = seats(x, y) if seats is not None else (0, 0.0, {}, None, None)
+        if raw is None:
+            return x, y
+        # Outward (more overhang) when short of the minimum, inward past the max.
+        sign = 1.0 if amount > lo else -1.0
+        ix, iy = _INWARD[edge]
+        rx, ry = round(x, 3), round(y, 3)
+        moved, reading = 0.0, amount
+        for _ in range(3):
+            gap = (reading - float(hi)) if sign > 0 else (lo - reading)
+            moved += (math.ceil(gap / _WINDOW_GUARD_MM - 1e-9) + 1) * _WINDOW_GUARD_MM
+            if moved > _BAND_SETTLE_CAP_MM + 1e-9:
+                return x, y
+            nx = round(rx + sign * ix * moved, 3) if ix else x
+            ny = round(ry + sign * iy * moved, 3) if iy else y
+            reading, _basis, legacy = _band_reading(state, part, edge, nx, ny)
+            if inside(reading):
+                break
+        else:
+            return x, y
+        if sign > 0 and _carries_setback(entry) and legacy <= EPS:
+            return x, y
+        if (_faces_its_edge(state, part, entry, edge, x, y)
+                and not _faces_its_edge(state, part, entry, edge, nx, ny)):
+            return x, y
+        if seats is not None:
+            new = seats(nx, ny)
+            if new is None or (raw is not None and not _no_worse(new, raw)):
+                return x, y
+        return nx, ny
+    except Exception:                                   # noqa: BLE001
+        return x, y
+
+
+#: The courtyard overlap a pair must reach to count as one: `overlap_area`
+#: is reported to 4 decimals, so below this the grade prints 0.0000 and a
+#: pair the correction pushes past it is NEW overlap in the grade's own words.
+_OVERLAP_REPORTED_MM2 = 5e-5
+
+
+def _overlap_at(state, part, x: float, y: float, others) -> Dict[str, float]:
+    """{neighbour: courtyard overlap (mm^2)} of `part` at the pose `apply_move`
+    WRITES, for every part in `others` it touches -- side-aware, in the
+    currency of `legality_metrics`' `overlap_area`
+    (`legality.pair_overlap_area`). PER PAIR: a sum lets an overlap one
+    neighbour already has hide a new one with another."""
+    from .legality import pair_overlap_area
+    px, py = round(x, 3), round(y, 3)
+    rect, tht = part.rect(px, py, part.rot), part.tht_rect(px, py, part.rot)
+    out: Dict[str, float] = {}
+    for ref in others:
+        q = state.parts.get(ref)
+        if q is None or q is part:
+            continue
+        area = pair_overlap_area(part.sides, part.side, rect, tht,
+                                 q.sides, q.side, q.rect(), q.tht_rect())
+        if area > 0.0:
+            out[ref] = area
+    return out
+
+
+def _seat_reading(state, part, ref: str, x: float, y: float, rot: float,
+                  others, grade=None, exclude=()):
+    """What a #983/#987 correction compares, at the pose `apply_move` WRITES:
+    `(pads short of the floor, worst shortfall, {neighbour: courtyard
+    overlap} over `others`, intent-grade errors, interior-contour split)`. The
+    last two are None without a grader."""
+    floor = _floor_key(_floor_at(state, ref, x, y, rot))
+    overlap = _overlap_at(state, part, x, y, others)
+    if grade is None:
+        return floor + (overlap, None, None)
+    pose = {ref: (round(x, 3), round(y, 3), rot)}
+    return floor + (overlap, grade.violations(exclude=exclude, poses=pose),
+                    grade.interior_split(pose))
+
+
+def _no_worse(new, raw) -> bool:
+    """May a correction trade `raw` for `new` (`_seat_reading` tuples)?
+
+    Only if it costs NOTHING the seat already had, each count on its own:
+      * no more pads short of the #975 floor, and the worst no shorter;
+      * pair by pair, no courtyard overlap the grade would newly report: a
+        pair under `_OVERLAP_REPORTED_MM2` (the resolution `overlap_area` is
+        printed at) may not cross it, nor grow past EPS of float slack; one
+        the grade already reports may deepen, but never to double (measured
+        on #983's whole lattice through `repair_placement`: of the 655 seats
+        already overlapping the blocker, 16 deepen, by 0.0002-0.0020 mm2 on
+        0.014-0.35 mm2, at most 2.7 %) -- refusing that would keep the
+        grade ERROR the correction exists to remove. The comparison is
+        against the rung as the ladder found it, so a settle and a step on
+        one rung together still may not double it;
+      * with a grader, no intent-grade error the raw pose does not have
+        (`floorplan.grade_delta`, as #975's `_grade_worse`) -- which also
+        refuses an existing overlap deepened past a declared budget -- and
+        the two poses must read the board's interior contours alike, or they
+        are not comparable at all.
+    """
+    from .legality import EPS
+    n_pads, n_worst, n_ov, n_err, n_split = new
+    r_pads, r_worst, r_ov, r_err, r_split = raw
+    if n_pads > r_pads or n_worst > r_worst + EPS:
+        return False
+    for ref, grown in n_ov.items():
+        was = r_ov.get(ref, 0.0)
+        if was < _OVERLAP_REPORTED_MM2 <= grown:
+            return False
+        if grown <= was + EPS:
+            continue
+        if was < _OVERLAP_REPORTED_MM2 or grown >= 2.0 * was:
+            return False
+    if n_err is not None and r_err is not None:
+        from placement import floorplan as _fp
+        if n_split != r_split or list(_fp.grade_delta(r_err, n_err)):
+            return False
+    return True
+
+
+def _floor_key(floor) -> Tuple[int, float]:
+    """(pads short of the floor, worst shortfall): smaller is better, and a
+    reading that could not be taken counts as clear -- the seat then behaves
+    as it always did."""
+    if floor is None or not floor.short:
+        return (0, 0.0)
+    return (len(floor.short), floor.short[0][0])
+
+
+def _window_nudge(state, part, entry: Dict, edge: str, x: float, y: float,
+                  seats=None, origin=None) -> Tuple[float, float]:
+    """#983: `(x, y)`, unless the pose it WRITES is outside the declared
+    along-edge window; then that pose one 0.001 mm grid step along the edge,
+    into the window.
+
+    A rung clamped to a window END puts the courtyard centre exactly on it,
+    and `round(x, 3)` then lands it up to half a micron outside, where the
+    grade's EPS is 1 nm. The window is asked through the grade's own conjunct
+    at the written pose, so a rung the grade accepts is returned
+    BIT-IDENTICAL -- including a window-end rung that already lands on the
+    grid. Only the along-edge coordinate moves, from its written value by
+    exactly one grid step (`_WINDOW_GUARD_MM`), so it is the same micron at
+    every rotation and on a notched outline, and the normal coordinate the
+    overhang walk converged on is untouched: re-deriving it would move the
+    part by a rounding step AWAY from the edge floor as often as towards it
+    (measured: a pad already past the outline went 0.132 -> 0.133 mm).
+
+    A PREFERENCE, so it may not cost a seat or anything else the seat had:
+    `seats(x, y)`, when given, is None for a pose that does not seat (off
+    the board, crowding a neighbour) and its `_seat_reading` otherwise. Only
+    a rung that already seats is moved, and the nudged pose is taken only
+    when it seats and `_no_worse` accepts it (floor, new overlap, grade). A window no
+    grid pose meets (one step is not enough: `center_on_edge` with
+    `tolerance_mm: 0` and a courtyard centre off the grid) keeps the raw pose
+    too; `_window_miss_note` names what is left. So does anything raised.
+    """
+    try:
+        return _window_step(state, part, entry, edge, x, y, seats, origin)
+    except Exception:                                   # noqa: BLE001
+        # A preference may not cost a seat: anything raised while asking
+        # leaves the rung as the ladder had it, which the grade then reports.
+        return x, y
+
+
+def _window_step(state, part, entry, edge, x, y, seats, origin=None):
+    """`_window_nudge`'s body, outside its catch-all. `origin`, when given,
+    is the rung before `_band_settle` moved it: what the step is judged
+    against, so the two corrections together cost no more than one may."""
+    if not _outside_its_along_edge_claim(state, part, entry, edge, x, y):
+        return x, y
+    e_lo, e_hi, _ = _declared_edge_span(state, state.board, edge)
+    win = _declared_frac_window(entry, e_hi - e_lo)
+    if win is None:
+        return x, y
+    ax = _axis_of(edge)
+    r = part.rect(round(x, 3), round(y, 3), part.rot)
+    centre = (r[ax] + r[ax + 2]) / 2.0
+    mid = e_lo + (win[0] + win[1]) / 2.0 * (e_hi - e_lo)
+    step = _WINDOW_GUARD_MM if mid > centre else -_WINDOW_GUARD_MM
+    if ax == 0:
+        nx, ny = round(round(x, 3) + step, 3), y
+    else:
+        nx, ny = x, round(round(y, 3) + step, 3)
+    if _outside_its_along_edge_claim(state, part, entry, edge, nx, ny):
+        return x, y
+    if seats is not None:
+        raw = seats(*(origin or (x, y)))
+        new = seats(nx, ny)
+        if raw is None or new is None or not _no_worse(new, raw):
+            return x, y
+    return nx, ny
+
+
+def _window_miss_note(state, part, entry: Dict, edge: str, prefix: str):
+    """The NOTE for a pose WRITTEN outside its declared along-edge window, or
+    None. What is left after `_window_nudge` is a window the 0.001 mm grid a
+    pose is written on cannot meet (`center_on_edge` with `tolerance_mm: 0`
+    and a courtyard centre off that grid), or a rung whose step was refused
+    -- it would not seat, or `_no_worse` refused it, or asking raised -- or
+    one that never seated to be stepped (a crowding fallback); either way
+    the grade reports it, and this says so at the seat rather than leaving
+    the reader to find it in the grade."""
+    if not _outside_its_along_edge_claim(state, part, entry, edge, part.x, part.y):
+        return None
+    return (f"{prefix}{part.ref}: written outside its declared along-edge "
+            f"window on the {edge} edge, and the grade reports it -- the "
+            f"window is narrower than the 0.001mm grid a pose is written on, "
+            f"or one grid step inside it would have cost the seat something")
 
 
 def _grade_accepts(state, part, entry: Dict, edge: str, lo: float,
@@ -2094,6 +2375,42 @@ def _centre_offset_mm(part, edge: str) -> float:
     return (a + b) / 2.0
 
 
+class _AtRotation:
+    """`part` as it would stand at `rot`, for READING its geometry only.
+
+    `_edge_frac_bounds`, `declared_to_ladder_frac` and
+    `ladder_to_declared_frac` read exactly two things off a part: `rot`, and
+    `rect(x, y, rot)`. This answers both for another angle without turning the
+    part in the state, so a caller that measures and then skips the part has
+    not moved it. (An off-lattice angle's rotated box is cached by
+    `_materialise_rotation` first, as the #893 block would cache it anyway.)
+    """
+    __slots__ = ('_part', 'rot')
+
+    def __init__(self, part, rot):
+        self._part, self.rot = part, rot
+
+    def rect(self, x, y, rot):
+        return self._part.rect(x, y, rot)
+
+
+def _stage1_geometry_rot(part, claim):
+    """#988: the rotation stage 1 measures an edge connector's geometry at.
+
+    Stage 1 applies a DECLARED rotation (#893) only after it has converted the
+    declared window and clamped by the part's extents -- all of which turn
+    with the part. Measured at the input rotation, splitflap_driver's J5
+    (input 180, `center_on_edge` 1.0 mm) was written 10.00 mm off centre when
+    declared at 0, 5.65 mm at 90 and 4.60 mm at 270, and a part that fits the
+    edge only at its declared angle was refused as "wider than the edge". So:
+    the declared angle when one is declared, else the part's own. A candidate
+    SET is not applied by stage 1, so it measures at `part.rot` too.
+    """
+    if claim is not None and claim[0] is not None:
+        return claim[0] % 360.0
+    return part.rot
+
+
 def declared_to_ladder_frac(part, bounds, edge, e_lo, e_hi, declared):
     """A DECLARED fraction -> the fraction the seat ladder works in.
 
@@ -2391,6 +2708,18 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
             if geom is None:
                 return None
             cur, f_lo, f_hi, step = geom
+
+            def seats(sx, sy):
+                # What `_band_settle` and `_window_nudge` compare: None when
+                # the pose is not a seat, else how far short of the floor it
+                # leaves the copper and how much courtyard it overlaps -- the
+                # neighbours `conflict_free` asks about, pile left out.
+                if not (edge_seat_ok(state, part, sx, sy, edge, lo, hi_eff)
+                        and conflict_free(sx, sy, rot)):
+                    return None
+                return _seat_reading(state, part, ref, sx, sy, rot,
+                                     [o for o in state.parts if o != ref and o not in ex],
+                                     grade, ex - {ref})
             first = None
             graded = {}
             for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
@@ -2399,6 +2728,10 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                 x, y = _edge_pose(part, state.board, edge, frac, overhang)
                 x, y, converged = _edge_correct(state, ref, edge, x, y,
                                                 overhang, band=(lo, hi_eff))
+                if converged:
+                    rung = (x, y)
+                    x, y = _band_settle(state, part, entry, edge, lo, x, y, seats)
+                    x, y = _window_nudge(state, part, entry, edge, x, y, seats, rung)
                 if not converged or not on_board(x, y):
                     continue
                 if not conflict_free(x, y, rot):
@@ -2451,6 +2784,9 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
     def keep(seat, rot):
         """Apply a seat, disclosing a floor shortfall it carries."""
         state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), rot)
+        missed = _window_miss_note(state, part, entry, edge, '')
+        if missed:
+            notes.append(missed)
         if seat[2] is not None:
             notes.append(_floor_note('', ref, seat[2]))
             if disclose is not None:
@@ -2806,7 +3142,20 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # 3 connectors on one edge get fracs 0.25/0.5/0.75, and a wide
             # part at 0.25 hangs off the end. This stage runs no legality
             # gate at all (by design), so nothing downstream would catch it.
-            f_lo, f_hi = _edge_frac_bounds(part, bounds, edge)
+            #
+            # Everything measured below turns with the part -- its extents, the
+            # offset from its origin to its courtyard centre, so the declared
+            # start and window too -- and a DECLARED rotation is only applied
+            # further down (#893). `_geo` is the part at the rotation this
+            # stage will write, read-only, so a part skipped before that
+            # block has not been turned (`_stage1_geometry_rot` says why this
+            # matters). An angle the part already has is read exactly as
+            # before, cache and all: only a declared one is materialised.
+            _geo_rot = _stage1_geometry_rot(part, declared_rot.get(ref))
+            if _geo_rot != part.rot:
+                _geo_rot = _materialise_rotation(part, _geo_rot)
+            _geo = _AtRotation(part, _geo_rot)
+            f_lo, f_hi = _edge_frac_bounds(_geo, bounds, edge)
             # #706/#712. A DECLARED position outranks the even distribution.
             # Stage 1 is the from-scratch path and it never calls `_seat_edge`,
             # so without this a declared `center_on_edge` would be seated at
@@ -2829,7 +3178,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             #    that is not the bounding box -- the reason `edge_span`
             #    exists at all.
             _e_lo, _e_hi, _ = _declared_edge_span(state, bounds, edge)
-            frac = ((declared_to_ladder_frac(part, bounds, edge,
+            frac = ((declared_to_ladder_frac(_geo, bounds, edge,
                                              _e_lo, _e_hi, _dec))
                     if _dec is not None else (k + 1) / (len(specs) + 1))
             if f_lo > f_hi:
@@ -2838,9 +3187,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 continue
             _win = _declared_frac_window(c, _e_hi - _e_lo)
             if _win is not None:
-                _w_lo = declared_to_ladder_frac(part, bounds, edge,
+                _w_lo = declared_to_ladder_frac(_geo, bounds, edge,
                                                 _e_lo, _e_hi, _win[0])
-                _w_hi = declared_to_ladder_frac(part, bounds, edge,
+                _w_hi = declared_to_ladder_frac(_geo, bounds, edge,
                                                 _e_lo, _e_hi, _win[1])
                 _n_lo, _n_hi = max(f_lo, _w_lo), min(f_hi, _w_hi)
                 if _n_lo > _n_hi:
@@ -2848,8 +3197,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         f"edge connector {ref}: the declared along-edge window "
                         f"[{_win[0]:.3f}, {_win[1]:.3f}] does not intersect "
                         f"the legal one ["
-                        f"{ladder_to_declared_frac(part, bounds, edge, _e_lo, _e_hi, f_lo):.3f}, "
-                        f"{ladder_to_declared_frac(part, bounds, edge, _e_lo, _e_hi, f_hi):.3f}] "
+                        f"{ladder_to_declared_frac(_geo, bounds, edge, _e_lo, _e_hi, f_lo):.3f}, "
+                        f"{ladder_to_declared_frac(_geo, bounds, edge, _e_lo, _e_hi, f_hi):.3f}] "
                         f"on the {edge} edge, so stage 1 leaves it to the "
                         f"later stages")
                     continue
@@ -2972,6 +3321,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # +/-0.05 rung clamps to an end -- three distinct positions, the
             # defect `_seat_edge`'s `step` comment documents, in this path.
             _sstep = ((f_hi - f_lo) / 0.8) if _win is not None else 1.0
+
+            def _s1_seats(sx, sy):
+                # As `_seat_edge`'s `seats`, for `_band_settle` (#987) and
+                # `_window_nudge` (#983): None when the pose is not a seat
+                # clear of what is placed.
+                _hi = float(hi) if hi is not None else max(2.0 * overhang, lo + 1.0)
+                if (not edge_seat_ok(state, part, sx, sy, edge, lo, _hi)
+                        or _shorted_by(sx, sy)):
+                    return None
+                return _seat_reading(state, part, ref, sx, sy, part.rot, sorted(placed),
+                                     pose_grader, set(unplaced) - {ref})
             _base_frac = frac
             _why: List[str] = []
             # The FIRST rung that is a legal seat but crowds a placed part --
@@ -3008,6 +3368,10 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                     state, ref, edge, _x, _y, overhang,
                     band=(lo, float(hi) if hi is not None
                           else max(2.0 * overhang, lo + 1.0)))
+                if _conv:
+                    _rung = (_x, _y)
+                    _x, _y = _band_settle(state, part, c, edge, lo, _x, _y, _s1_seats)
+                    _x, _y = _window_nudge(state, part, c, edge, _x, _y, _s1_seats, _rung)
                 _why = []
                 if _conv and edge_seat_ok(state, part, _x, _y, edge, lo,
                                           float(hi) if hi is not None
@@ -3069,6 +3433,12 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 # The same rung, moved inward when that is what cleared it --
                 # the walk above already checked this exact pose.
                 x, y = _pick
+            elif converged and _kept is not None:
+                # Likewise the kept rung: the pose the ladder chose, not one
+                # re-derived from `frac`, which would drop a #983 window step
+                # or a #987 band settle. (The crowding fallback needs no such
+                # line: neither correction moves a rung that does not seat.)
+                x, y = _kept_xy
             if not converged:
                 # The walk diverged (it drives a scalar SUM along one axis, so
                 # an along-edge overshoot never cancels). It used to
@@ -3099,6 +3469,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                              + ", so stage 1 left it for the later stages")
                 continue
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
+            _missed = _window_miss_note(state, part, c, edge, 'edge connector ')
+            if _missed:
+                notes.append(_missed)
             placed.add(ref)
             unplaced.discard(ref)
             if _pick is None:
