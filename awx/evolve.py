@@ -30,7 +30,7 @@ Selection is elitist over exact routed grades (open, drc, vias), worlds
 deduplicated by copper; the population's best is monotone.
 
 usage: evolve.py TAG K --seeds=STEM[,STEM...] [--pop=4] [--gens=3]
-                 [--jumps=2] [--cross=1] [--jobs=2] [--jump-bans=4]
+                 [--jumps=2] [--cross=1] [--jobs=2] [--jump=near|chain] [--jump-nets=2] [--jump-bans=4]
                  [--descend="--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --widen=0 --grade=inproc"]
                  [--board=BENCH] [--dest=REF] [--seed=N]
                  [--descend-env="DST_CLIMB=2"] [--jump-env="DST_CLIMB=2 SRC_CLIMB=4"]
@@ -66,6 +66,7 @@ import replan  # noqa: E402
 import plan_loop as pl  # noqa: E402  arm_boards, winner_pair, grade, better, fmt_g, run_chain
 from coherent_nets import coherent_nets  # noqa: E402
 import dedupe_boards  # noqa: E402
+import probe_memo as pm  # noqa: E402  closed worlds: a null descent is never re-run
 import rules as _rules  # noqa: E402
 
 log = pl.log
@@ -112,10 +113,37 @@ def child_env(extra=None, chain=False):
     return env
 
 
+def world_key(world, K, args, env_extra):
+    """What a descent of this world is a function of: its routed copper,
+    its fanout copper, the plan sidecar and the census beside it, the
+    descent's arguments and knobs, the code."""
+    stem = world['stem']
+    pr = replan.parsed(stem + '.kicad_pcb')
+    pf = replan.parsed(stem + '_fo.kicad_pcb')
+
+    def _sha(path):
+        if not os.path.exists(path):
+            return None
+        import hashlib
+        with open(path, 'rb') as f:
+            return hashlib.sha1(f.read()).hexdigest()[:16]
+    return pm.key_of({'code': pm.code_hash(), 'knobs': pm.knob_hash(env_extra), 'K': K, 'args': args,
+                      'R': pm.copper_hash(pr.segments, pr.vias), 'F': pm.copper_hash(pf.segments, pf.vias),
+                      'sidecar': _sha(stem + '_fo.plan.json'), 'census': _sha(stem + '.census.json')})
+
+
 def descend(world, K, out_dir, args, nets_csv, env_extra=None):
-    """One replan round from this world; the improved world or None."""
+    """One replan round from this world; the improved world or None.
+    A world whose descent under these arguments gained nothing before
+    is CLOSED: not descended again (probe_memo, 'closed'); the parent
+    stands."""
     out = os.path.join(out_dir, 'd')
     t0 = time.time()
+    closed = pm.Store(K, 'closed') if pm.ENABLED else None
+    key = world_key(world, K, args, env_extra) if closed else None
+    if closed and closed.get(key):
+        pm.bump('closed_hit')
+        return None, f'closed: its descent gained nothing before ({closed.get(key).get("origin")})', 0
     with open(out + '.out', 'w', encoding='utf-8') as f:
         p = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'replan.py'), world['stem'], str(K),
                             f'--from={world["stem"]}', f'--out={out}', '--mode=incremental',
@@ -125,6 +153,9 @@ def descend(world, K, out_dir, args, nets_csv, env_extra=None):
     if not os.path.exists(stem + '.kicad_pcb'):
         return None, f'no board (rc {p.returncode})', round(time.time() - t0)
     g, line = pl.grade(stem + '.kicad_pcb', nets_csv)
+    if closed and g is not None and not pl.better(g, world['grade']):
+        closed.put(key, {'origin': world.get('origin'), 'name': world.get('name'), 'grade': g,
+                         'stem': stem, 'seconds': round(time.time() - t0), 'when': time.time()})
     return {'stem': stem, 'grade': g, 'origin': f'descend<{world["name"]}>'}, line, round(time.time() - t0)
 
 
@@ -170,6 +201,36 @@ def chain_world(tagpath, K, nets_csv, dst_stem, origin):
     stage_world(dst_stem, F, R)
     g, line = pl.grade(dst_stem + '.kicad_pcb', nets_csv)
     return {'stem': dst_stem, 'grade': g, 'origin': origin}
+
+
+def jump_near(world, K, out_dir, n_nets, rng, nets_csv, env_extra=None, tries=3):
+    """A NEAR jump: `n_nets` random nets moved to a random other class
+    each through the descent's own probes (replan --perturb), the probe
+    board taken whatever its grade. One probe per net instead of a
+    chain; lands a move or two away."""
+    out = os.path.join(out_dir, 'j')
+    seed = rng.randint(1, 10 ** 6)
+    t0 = time.time()
+    with open(out + '.out', 'w', encoding='utf-8') as f:
+        p = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'replan.py'), world['stem'], str(K),
+                            f'--from={world["stem"]}', f'--out={out}', '--mode=incremental', '--apply=strip',
+                            f'--perturb={n_nets}', f'--perturb-tries={tries}', f'--seed={seed}',
+                            '--coupled=census', '--widen=0', '--grade=inproc'],
+                           cwd=HERE, env=child_env(env_extra), stdout=f, stderr=subprocess.STDOUT, text=True)
+    stem = f'{out}_rp_k{K}'
+    if not os.path.exists(stem + '.kicad_pcb'):
+        return None, round(time.time() - t0)
+    g, line = pl.grade(stem + '.kicad_pcb', nets_csv)
+    moved = []
+    try:
+        txt = open(out + '.out', encoding='utf-8').read()
+        moved = re.findall(r'^    (\S+): JUMPED', txt, re.M)
+    except OSError:
+        pass
+    if not moved:
+        return None, round(time.time() - t0)     # nothing moved: the same world, not a jump
+    return {'stem': stem, 'grade': g,
+            'origin': f'jump<{world["name"]}; near {moved}; seed {seed}>'}, round(time.time() - t0)
 
 
 def jump(world, K, out_dir, names, dref, nets_csv, n_bans, rng, dest, env_extra=None):
@@ -247,6 +308,11 @@ def main():
     CROSS = int(OPTS.get('cross', 1))
     JOBS = int(OPTS.get('jobs', 2))
     JBANS = int(OPTS.get('jump-bans', 4))
+    # --jump=near (default, 2026-09-18): a jump through the probes, a few
+    # nets moved to random other classes -- one probe each; --jump=chain:
+    # the plan-level re-solve with class bans (665 s at K51, landed 84..141)
+    JUMP = OPTS.get('jump', 'near')
+    JNETS = int(OPTS.get('jump-nets', 2))
     # min-vias 2 (2026-09-18): at the frontier (K41 67, K51 83) no net carries
     # three lane vias any more, and a descent with the threshold at three
     # returns in 7 s having probed nothing. The 2-via one-dive nets are the
@@ -273,7 +339,9 @@ def main():
     dref = Counter(ends0[nm][2] for nm in nets_all if nm in ends0).most_common(1)[0][0]
     names = [nm for nm in nets_all if nm in ends0 and ends0[nm][2] == dref]
     log(f'evolve: K{K} tag {tag}; pop {POP}, {GENS} generation(s), {JUMPS} jump(s) + {CROSS} cross per '
-        f'generation, jobs {JOBS}; descend: {DESC} {DESC_ENV}; jump env {JUMP_ENV}')
+        f'generation, jobs {JOBS}; descend: {DESC} {DESC_ENV}; jump {JUMP} '
+        f'({f"{JNETS} net(s)" if JUMP == "near" else f"{JBANS} bans"}) env {JUMP_ENV}; '
+        f'memo {"on" if pm.ENABLED else "OFF"} ({pm.MEMO_DIR}, code {pm.code_hash()})')
     # ---- the initial population
     pop = []
     g0 = os.path.join(root, 'g0')
@@ -323,7 +391,10 @@ def main():
                     nw, line, secs = descend(w, K, d, DESC, nets_csv, DESC_ENV)
                     return kind, w, nw, line, secs
                 if kind == 'jump':
-                    nw, secs = jump(w, K, d, names, dref, nets_csv, JBANS, rng, dest, JUMP_ENV)
+                    if JUMP == 'near':
+                        nw, secs = jump_near(w, K, d, JNETS, rng, nets_csv, JUMP_ENV)
+                    else:
+                        nw, secs = jump(w, K, d, names, dref, nets_csv, JBANS, rng, dest, JUMP_ENV)
                     return kind, w, nw, '', secs
                 nw, secs = cross(w[0], w[1], K, d, names, dref, nets_csv, rng, dest)
                 return kind, w, nw, '', secs
@@ -390,7 +461,8 @@ def main():
             stage_world(os.path.join(root, f'best_k{K}'), best['stem'] + '_fo.kicad_pcb', best['stem'] + '.kicad_pcb')
             log(f'  NEW BEST {best["name"]} {pl.fmt_g(best["grade"])} ({best["origin"]})')
         log(f'  generation {gen}: best {best["name"]} {pl.fmt_g(best["grade"])}; population '
-            + '; '.join(f'{w["name"]} {pl.fmt_g(w["grade"])}' for w in pop[:POP]) + f' ({time.time() - t_g:.0f} s)')
+            + '; '.join(f'{w["name"]} {pl.fmt_g(w["grade"])}' for w in pop[:POP]) + f' ({time.time() - t_g:.0f} s'
+            + (f'; {pm.stats()["closed_hit"]} closed world(s) skipped' if pm.stats()['closed_hit'] else '') + ')')
         ledger['gens'].append({'gen': gen, 'pop': [dict(w) for w in pop[:POP]], 'best': dict(best),
                                'new': [dict(w) for w in new]})
         with open(os.path.join(root, f'evolve_k{K}.json'), 'w', encoding='utf-8') as f:

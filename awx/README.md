@@ -197,7 +197,9 @@ octilinear, so a non-orthogonal pose is outside both models today.*
 | `source_realize.py` | realize a source plan with the production engine; `blockers_of` names what stands in a tooth's way |
 | `schedule.py`, `corridor.py`, `sched_first.py` | pages, corridors, the schedule-first planner |
 | `connect.py`, `topo_strings.py`, `taut_fast.py` | the real router and the taut relaxation |
-| `replan.py` | the ROUTE as the judge; re-plans the ends the braid paid for |
+| `replan.py` | the ROUTE as the judge; re-plans the ends the braid paid for; `--par=N` resident probe workers, `--perturb=N` the near jump |
+| `probe_memo.py` | the probe / screen / closed-world memo (`tmp/memo/k<K>/`), keyed on copper, move, code and knobs |
+| `probe_worker.py` | a resident probe process: holds the round's Board, braids in-process, N of them = the parallel menu |
 | **`plan_loop.py`** | **the PLAN-LEVEL LOOP: the routing inside the planning iteration. Solve, fan out, braid both arms, grade; the route's verdict goes back into the next pages-first re-solve as class bans, residual prices and the incumbent plan as hint; the best routed board is kept across rounds (monotone by construction); candidates within a round are independent (`--jobs`). See *The plan-level loop*** |
 | **`evolve.py`** | **the POPULATION: descend (replan probes) / jump (a far re-solve, no holds) / cross (two parents' ends held), elitist on routed grades; K15 16 -> 14 in one generation** |
 | `evolve_movie.py TAG K [--view ...] [--gif]` | the MOVIE of a population run from its ledger alone: one canvas per generation (the population row, each descent under its parent, jump/cross worlds with lineage arrows), per-probe steps from the descent transcripts with the copper that CHANGED lit (added) and ghosted (removed), selection fades, a lineage ribbon; `--verify` reconciles every diff against the raw segment/via counts; `--self-test`. Outputs `tmp/movie/` |
@@ -1139,6 +1141,85 @@ work. Next: a persistent braid worker (parse, obstacles and taut memo
 kept across probes) and a probe band that does not fail in band. The taut
 memo already spans probes; destination menus are identical every round
 and source menus change only near a moved tooth (cacheable, 10 s/round).
+
+### Ten times: the memo, the resident workers, the near jump (2026-09-18)
+
+Where the day's compute went, from the run logs: the K51 record line from
+98 to 83 was about an hour of wall time along its productive path, and
+the last population run spent two hours (7503 s) confirming nothing --
+21 descents (8125 s, mean 386 s) of which 16 re-descended worlds already
+known to be at their local optimum, 6 jumps (3994 s, mean 665 s, each a
+full chain) that landed at 84..141 and never descended below 88, and 3
+crossovers (1142 s). One descent round is ~31 probes at ~7 s, one after
+another; a probe is the source realize (~1 s), the destination re-fan
+(~1 s), the local braid (4.3 s: obstacle maps rebuilt 24 times from the
+same copper 1.4 s, corridor band strips 1.0 s, the A* itself 1.3 s,
+startup and imports ~1 s) and the grade (0.5 s). Three things follow,
+all generic search machinery, nothing about a board:
+
+* **Never probe the same thing twice** (`probe_memo.py`). A probe's
+  verdict is a function of the copper of every net outside its coupled
+  set, the fanout copper the set keeps, the move, the co-moves and the
+  set itself -- plus the code (a hash over every `.py` of `awx/` and
+  `py_router/` and the router binary) and the knobs (the `BRAID_`/`PROBE_`/
+  `PLAN_`/climb environment), so an edit starts a cold memo rather than
+  serving a stale verdict. `replan.probe` looks the key up in
+  `tmp/memo/k<K>/probe/` before running; a hit is read back with the
+  boards the original probe wrote (a hit whose boards are gone re-runs).
+  The engine screens are memoised the same way (`screen/`), and
+  `evolve.descend` keeps a `closed/` ledger: a world whose descent under
+  the same arguments gained nothing is not descended again. Measured on
+  the K51 record's null descent (31 probes, 31 screens): **161 s cold,
+  5 s warm**, every verdict line identical. `PROBE_MEMO=0` turns it off,
+  `PROBE_MEMO_CODE=<tag>` pins the code hash across an edit known not to
+  change copper.
+* **Resident probe workers** (`probe_worker.py`, `replan --par=N`). A
+  worker process holds the round's Board (1.7 s to build at K51) and
+  applies the same advances the parent applies; the parent hands it a
+  probe (the moves as JSON) and it runs `replan.probe_run` with the braid
+  called in-process (`braid.run`, the same function `braid.py`'s main
+  wraps) and the grade in-process. The candidates of one net are
+  independent by construction -- the descent advances only after the
+  net's whole menu is judged -- so N workers probe N of them at once; the
+  engine screens go the same way. A worker that dies is restarted and
+  replays the round's messages; every 200 probes it is recycled. Same
+  null descent, memo off: **161 s sequential, 148 s with one worker, 63 s
+  with four** (the menu is ~5 candidates a net, so four workers take two
+  waves; the parent's Board, ranking and round broadcast are the rest),
+  verdicts identical to the sequential run in every case. The in-process
+  braid alone is worth ~0.4 s a probe; the parallel menu is the lever.
+* **The near jump** (`replan --perturb=N`, `evolve --jump=near`, the
+  default). A jump used to be a plan-level re-solve with class bans and
+  a fresh seed, fanned out and braided twice by the chain: 665 s at K51,
+  landing 84..141 (seven of them today; the nearest, 99, came back to
+  95). The near jump moves N random nets to a random other class each
+  through the descent's own probes (the same coupled-set re-lay), takes
+  the probe board whatever its grade, and writes a world like any
+  descent. Measured from the K51 83: **23 s and 35 s, landing at 91 and
+  91** with every net routed, two nets moved each. The crossover is
+  still a chain (380 s); making it a probe-level exchange is the same
+  construction and the next step.
+
+Together, on a laptop with four workers: the K41 descent that took 67
+to 64 in 440 s (`tmp/ev41b`) takes **104 s cold and 13 s warm** and
+lands on the same two moves; a null descent 161 -> 63 s cold and -> 5 s
+warm; a jump 665 -> 30 s; a re-descent of a closed world 7 s -> 0.
+Memory is the budget on this machine (8 GB): a worker is 300-450 MB
+(the parent 100-300), and `evolve --jobs=2` with `--par=3` -- six
+workers and two parents beside a browser -- got the run killed for
+memory, so the pool recycles a worker whose peak passes
+`PROBE_WORKER_MAX_MB` (1200) or `PROBE_WORKER_RECYCLE` (100) probes,
+and a laptop population runs `--jobs=1` with `--par=4`. That population
+run at K41 (`tmp/ev41d`: the seeds, generations, jumps and crossover of
+`tmp/ev41b`, whose two generations took 5430 s with two jobs) took
+**1876 s** and reached the same best, 64, with a population of 64 / 65 /
+66 / 66: its descents 107 and 125 s, its near jumps 36..61 s landing at
+66..74 (the chain jump landed at 92..94), a seed's re-descent 16 s from
+the memo, and the two chain crossovers 214 s each -- now 23 percent of
+the run and the largest single item. The next lever inside a descent is
+speculation: a net's menu rarely stands at the
+frontier, so the next net's probes can start on the assumption that it
+will not, and be discarded when it does.
 
 ## TODO
 
