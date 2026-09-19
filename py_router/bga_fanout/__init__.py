@@ -2953,6 +2953,25 @@ def _generate_bga_fanout_core(footprint: Footprint,
             _direct_route_nets = set(_names)
     elif _pad_filter is None and not _single_pass:
         _direct_route_nets = set()
+    # served-under-the-part deferral (KICAD_FANOUT_SKIP_UNDER=1, 2026-09-19):
+    # a ball whose net's every off-footprint pad lies inside the ball field
+    # (a ZQ resistor, a decoupling cap on the far side) gets NO stub -- its
+    # connection is a via at the ball and a short far-side track, never an
+    # escape to the edge. Same plumbing as #472: '!' exclusions inherited by
+    # both engines and both passes, the balls kept routable by the route
+    # steps' bare-ball zone exemption through _direct_route_nets.
+    if (_pad_filter is None and not _single_pass
+            and env_knobs.FANOUT_SKIP_UNDER):
+        from bga_fanout.escape import under_part_candidates
+        _u_names, _u_notes = under_part_candidates(
+            pcb_data, footprint, net_filter=net_filter)
+        if _u_names:
+            print(f"  served-under-the-part deferral: {len(_u_names)} net(s) skip "
+                  f"fanout (their targets lie inside the ball field):")
+            for _nm, _pn, _why in _u_notes:
+                print(f"    {_nm} (ball {_pn}): {_why}")
+            net_filter = list(net_filter or ['*']) + ['!' + n for n in _u_names]
+            _direct_route_nets = set(_direct_route_nets) | set(_u_names)
 
     # Escape priority for multi-ball nets (issue #129). Escape channels are
     # the scarce resource on a dense array (#122), and a net only NEEDS one

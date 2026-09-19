@@ -51,6 +51,14 @@ import plan_feedback as pfb  # noqa: E402  the route's verdict (PLAN_LOOP_FEEDBA
 # north riders at K51; escape_moves.enumerate_moves climb=). 0 = off, the
 # menu byte-identical. replan.py runs with 14.
 SRC_CLIMB = int(os.environ.get('SRC_CLIMB', '0'))
+# SRC_AWAY_BAN=1 (2026-09-19): the source menu drops the moves that leave
+# by a face pointing AWAY from the destination (escape_moves.away_faces:
+# geometry, any frame). Measured need on the zynq article: a singleton
+# corridor's tooth planned on the far face was a channel escape through
+# seventeen rows of the Zynq and a lane straight back (DQ12 at K38, DQ13
+# at K44). Off by default -- the menu's deliberate inclusion of away moves
+# (a deep ball met on the far side) stands until the ladder says otherwise.
+SRC_AWAY_BAN = int(os.environ.get('SRC_AWAY_BAN', '0') or 0)
 # SRC_CLIMB_END=n (2026-09-15, session 12; Andy: "we don't need a full
 # north source stub to prevent the swimmers -- a stub exiting at a row
 # above the other stubs on the east would suffice"): the source menu also
@@ -474,12 +482,16 @@ def plan_state(pcb, names, banned=frozenset()):
     sref = max(refs, key=refs.get)
     sgrid = em.grid_of(pcb.footprints[sref])
     smenu = {}
+    away = em.away_faces(sgrid.bbox, dgrid.bbox) if SRC_AWAY_BAN else set()
+    if away:
+        print(f'  source menu: face(s) {sorted(away)} banned -- they point away from '
+              f'the destination (SRC_AWAY_BAN)')
     for nm in names:
         p = src_pad[nm]
         if p is None or p.component_ref != sref:
             continue
         smenu[nm] = [m for m in dedupe_climbs(menu(p, sgrid, byname[nm][0], own_only=True, climb=SRC_CLIMB))
-                     if (nm, sr.move_sig(m)) not in banned]
+                     if (nm, sr.move_sig(m)) not in banned and m.direction not in away]
     if SRC_CLIMB_END:
         for line in end_climbs(smenu, names, src_pad, sref, sgrid, ends, menu, byname, banned):
             print(line)

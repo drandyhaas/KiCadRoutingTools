@@ -109,6 +109,47 @@ different plan than the same chain here. Compare cloud to cloud, local
 to local. `PLAN_PAGES_CANON=1` is the one canonicalised solve that agrees
 across machines; it is an instrument, not a production setting.
 
+**The source stub trim, the served-under-the-part rule, the away-face
+ban** (2026-09-19, the second pass over the zynq article). Three things
+the article asked for, each general:
+
+* **The source stub trim** (`braid.note_source_joint`, on by default;
+  `SRC_TRIM_REACH=0` turns it off) is the source-side mirror of the berth
+  trim: at write time every lane is walked from its tooth, every vertex
+  projected onto the net's own stub chain, and the deepest splice that
+  shortens the copper and grades no worse on the net's scoped DRC stands
+  -- the stub's dead tail and the lane's backtrack go, one cross segment
+  joins them. Vias never change. Measured, the trim on: zynq K38 68 = 68
+  vias with DQ12 58 -> 37 mm, K44 105 = 105 (six lanes, -20 mm); H3 K28
+  34 = 34 (SA1 -3.4 mm), K35 60 = 60 (SDQ10 + SDQ13 -28 mm), K41 74 = 74
+  (-13 mm), K51 98 = 98 (SBA1 + SDQ11 + SDQ13 -57 mm). A dead-copper
+  audit of every board finds no dangling tail at either end -- the berth
+  trim is complete on these boards; what it does not catch is a lane that
+  never touches its stub again (DQ13 at K44 climbs six millimetres up the
+  far face before turning back, and the 3.6 mm splice the trim found took
+  5 mm, not 20).
+* **The served-under-the-part rule** (`py_router`, `KICAD_FANOUT_SKIP_UNDER=1`,
+  `bga_fanout.escape.under_part_candidates`): a ball whose net's every
+  off-footprint pad lies inside the ball field -- a ZQ resistor or a
+  decoupling cap on the far side, straight under it -- gets no escape
+  stub; its connection is a via at the ball and a short far-side track.
+  The H3 bench's `SZQ` (ball V10 to R6.2, 0.09 mm away on B.Cu, drawn a
+  2.4 mm stub toward the edge) is the case; on the corpus H3 board the
+  switch drops exactly that stub and touches no bus net. It rides #472's
+  deferral plumbing, so the balls stay routable through the route steps'
+  zone exemption. Opt-in: the always-on form is a fanout-laid pad drop
+  (via at the ball, track to the pad), not built. A bench rebuilt with it
+  loses `SZQ` from the K51 ladder, which is right: it is not a bus net.
+* **The away-face ban** (`SRC_AWAY_BAN=1`, `escape_moves.away_faces`: the
+  source faces whose outward direction runs against the source-to-
+  destination vector, in any frame) removes the far-face teeth at the
+  menu. It is what stops the hairpins rather than trimming them (zynq
+  K38: DQ12 58 -> 25 mm, the run 1172 -> 1139 mm) -- and it is not a
+  default, because the menu's deep-ball-met-on-the-far-side move is real:
+  with the ban zynq K38 68 = 68 but K44 105 -> 106, H3 K28 34 = 34 (copper
+  652 -> 643 mm) but K35 60 -> 61 (878 -> 919 mm), K41 74 -> 82. Worse on
+  three of five rungs is not a default; it stays a knob the evolution can try.
+
 ## How it works, end to end
 
 **The chain** (`chain_k.sh`) makes the seeds. `coherent_nets.py K` picks

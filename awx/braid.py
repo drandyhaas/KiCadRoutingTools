@@ -58,13 +58,13 @@ import os
 import time as _time
 import shutil
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
-from kicad_parser import parse_kicad_pcb, _global_to_local  # noqa: E402
+from kicad_parser import parse_kicad_pcb, _global_to_local, Segment  # noqa: E402
 import topo_strings as ts  # noqa: E402
 import connect as cn  # noqa: E402
 import corridor as cr  # noqa: E402
@@ -7957,6 +7957,201 @@ def net_walks(pcb, nid, net):
     return len(roots) <= 1
 
 
+def _walk_stub(segs_n, start, lay, _stop, _k, max_hops=24):
+    """The stub polyline from `start` on `lay` toward the pad, as
+    (segment, near point, far point) triples; stops at a junction, a
+    same-net via or a pad. Empty when `start` is itself anchored (see
+    the dest chain's SODT1 note)."""
+    if _stop(start):
+        return []
+    chain, cur, prev = [], start, None
+    for _hop in range(max_hops):
+        nxt = [s for s in segs_n if s.layer == lay
+               and (id(s) != id(prev))
+               and (_k(s.start_x, s.start_y) == cur
+                    or _k(s.end_x, s.end_y) == cur)]
+        if len(nxt) != 1:
+            break
+        s = nxt[0]
+        other = _k(s.end_x, s.end_y) \
+            if _k(s.start_x, s.start_y) == cur \
+            else _k(s.start_x, s.start_y)
+        chain.append((s, cur, other))
+        cur, prev = other, s
+        if _stop(other):
+            break
+    return chain
+
+
+SRC_TRIM_REACH = float(os.environ.get('SRC_TRIM_REACH', '4.0') or 0)  # mm: the longest splice tried (K44 DQ13 came back three channels over, 2.5 mm)
+SRC_TRIM_TRIES = 6                                                     # candidates graded per lane, best saving first
+SRC_TRIM_MIN = 0.3                                                     # mm: the least stub depth worth a splice
+
+
+def note_source_joint(ctx, nm, lane, vias, board_path, log):
+    """AT WRITE TIME ONLY, the source-side mirror of note_joint: a lane
+    that left its tooth and ran BACK along its own stub is spliced onto
+    the stub where it departs -- the stub's tip-side tail and the lane's
+    backtrack go, one short cross segment joins them -- and the splice
+    ships only when the net's scoped DRC is no worse than before.
+
+    Measured need (2026-09-19, the zynq article): a singleton corridor's
+    tooth planned on the FAR face of the source array is a channel
+    escape through seventeen rows of the BGA, and the lane launched from
+    it runs straight back up the next channel: DQ12 at K38 carried 58 mm
+    of copper for a 25 mm connection, DQ13 at K44 the same. Pure output
+    economy: the routed world is untouched (the same reason note_joint
+    is deferred). Returns the mm saved, 0.0 when nothing was done."""
+    chain = ctx.src_chain.get(nm) or []
+    if not chain or len(lane) < 2 or SRC_TRIM_REACH <= 0:
+        return 0.0
+    lay = chain[0][0].layer
+    pcb = ctx.pcb
+    nid = ctx.byname[nm][0]
+
+    def k3(x, y):
+        return (round(x, 3), round(y, 3))
+
+    tip = k3(*ctx.ends[nm][0])
+    adj = defaultdict(list)
+    for s in lane:
+        a_, b_ = k3(s.start_x, s.start_y), k3(s.end_x, s.end_y)
+        if a_ != b_:
+            adj[a_].append((b_, s))
+            adj[b_].append((a_, s))
+    if tip not in adj:
+        return 0.0
+    verts, path, used, cur = [tip], [], set(), tip
+    while True:
+        nxt = [(q, s) for (q, s) in adj[cur] if id(s) not in used]
+        if len(nxt) != 1:
+            break
+        q, s = nxt[0]
+        used.add(id(s))
+        path.append(s)
+        verts.append(q)
+        cur = q
+    if len(path) < 2:
+        return 0.0
+    # the stub chain, tip -> pad, with arc positions
+    cpts = [chain[0][1]] + [p_ for (_s, _t, p_) in chain]
+    arc = [0.0]
+    for p_, q_ in zip(cpts, cpts[1:]):
+        arc.append(arc[-1] + math.hypot(q_[0] - p_[0], q_[1] - p_[1]))
+    if arc[-1] < SRC_TRIM_MIN:
+        return 0.0
+
+    def project(v):
+        best = None
+        for i, (p_, q_) in enumerate(zip(cpts, cpts[1:])):
+            dx, dy = q_[0] - p_[0], q_[1] - p_[1]
+            L2 = dx * dx + dy * dy
+            if L2 < 1e-12:
+                continue
+            t = max(0.0, min(1.0, ((v[0] - p_[0]) * dx + (v[1] - p_[1]) * dy) / L2))
+            px, py = p_[0] + t * dx, p_[1] + t * dy
+            d = math.hypot(v[0] - px, v[1] - py)
+            if best is None or d < best[0]:
+                best = (d, arc[i] + t * math.sqrt(L2), (px, py), i, t)
+        return best
+
+    via_pts = [k3(v.x, v.y) for v in vias]
+    cands = []
+    run = 0.0
+    for j in range(1, len(verts) - 1):
+        seg = path[j - 1]
+        if seg.layer != lay:
+            break                      # the lane left the stub's layer: nothing past here rides it
+        run += math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y)
+        if verts[j] in via_pts and path[j].layer == lay:
+            continue                   # a via the splice would strand
+        if path[j].layer != lay and verts[j] not in via_pts:
+            break
+        pr = project(verts[j])
+        if pr is None or pr[0] > SRC_TRIM_REACH or pr[1] < SRC_TRIM_MIN:
+            continue
+        saving = run + pr[1] - pr[0]
+        if saving < 0.2:
+            continue
+        cands.append((saving, j, pr, run))
+    if not cands:
+        return 0.0
+    # best saving first, but a splice near-identical to one already
+    # refused (same length, same stub depth: the router's grid steps
+    # give a dozen such vertices in a row) is not a new question --
+    # K44 DQ13 spent every try on 4 mm splices through the ball field
+    # while its 2.5 mm one waited
+    cands.sort(key=lambda c: -c[0])
+    tried = []
+    for saving, j, pr, run in cands:
+        if any(abs(pr[0] - d_) < 0.1 and abs(pr[1] - s_) < 0.5 for d_, s_ in tried):
+            continue
+        if len(tried) >= SRC_TRIM_TRIES:
+            break
+        tried.append((pr[0], pr[1]))
+        got = _apply_source_splice(ctx, nm, lane, chain, verts, path, j, pr, run, saving, board_path, log)
+        if got:
+            return got
+    return 0.0
+
+
+def _apply_source_splice(ctx, nm, lane, chain, verts, path, j, pr, run, saving, board_path, log):
+    """One candidate of note_source_joint, graded and applied. Returns
+    the mm saved, 0.0 when the splice would add DRC."""
+    pcb = ctx.pcb
+    nid = ctx.byname[nm][0]
+    lay = chain[0][0].layer
+    d, s_at, proj, ci, t = pr
+    # the chain cut: segments tip-side of the projection go; the one
+    # holding the projection keeps its pad-side part
+    gone = [c[0] for c in chain[:ci]]
+    keep_part = None
+    seg_i, near_i, far_i = chain[ci]
+    if t >= 1.0 - 1e-6:
+        gone.append(seg_i)
+        proj = far_i
+    elif t > 1e-6:
+        gone.append(seg_i)
+        fx, fy = (seg_i.end_x, seg_i.end_y) \
+            if math.hypot(seg_i.end_x - far_i[0], seg_i.end_y - far_i[1]) \
+            <= math.hypot(seg_i.start_x - far_i[0], seg_i.start_y - far_i[1]) \
+            else (seg_i.start_x, seg_i.start_y)
+        keep_part = Segment(proj[0], proj[1], fx, fy, seg_i.width, lay, nid)
+    else:
+        proj = near_i
+    v = verts[j]
+    splice = None
+    if math.hypot(v[0] - proj[0], v[1] - proj[1]) > 0.001:
+        # the stub's own width: it already runs this channel at it
+        splice = Segment(proj[0], proj[1], v[0], v[1], min(path[j].width, seg_i.width), lay, nid)
+    drop = {id(x) for x in gone} | {id(x) for x in path[:j]}
+    before = pcb.segments
+    cand = [x for x in before if id(x) not in drop]
+    cand += [x for x in (keep_part, splice) if x is not None]
+    try:
+        import source_realize as _sr
+        pcb.segments = before
+        v0 = _sr.drc_pairs(board_path, nets=[nm], pcb_data=pcb)
+        pcb.segments = cand
+        v1 = _sr.drc_pairs(board_path, nets=[nm], pcb_data=pcb)
+        n0, n1 = len(v0), len(v1)
+    except Exception as e:                                  # noqa: BLE001
+        pcb.segments = before
+        log(f'  source stub trim {nm}: no verdict ({e}) -- kept as laid')
+        return 0.0
+    if n1 > n0:
+        pcb.segments = before
+        log(f'  source stub trim {nm}: splice {d:.2f} mm at stub depth {s_at:.1f} would add DRC ({n0} -> {n1}): '
+            + '; '.join(x[:110] for x in v1 if x not in v0)[:330] + ' -- not this one')
+        return 0.0
+    lane[:] = [x for x in lane if id(x) not in drop] + ([splice] if splice else [])
+    ctx.src_trims[nm] = (saving, len(gone), j, d)
+    log(f'  source stub trim {nm}: lane rode its stub {s_at:.1f} mm back toward '
+        f'the pad; {len(gone)} stub + {j} lane segment(s) dropped, splice {d:.2f} mm, '
+        f'-{saving:.1f} mm')
+    return saving
+
+
 def note_joint(ctx, nm, new_segs):
     """AT WRITE TIME ONLY: which dest-chain vertex the net's FINAL
     lane reached; the bypassed tip-side stub segments are removed
@@ -8276,6 +8471,8 @@ def setup(board, names, dest, log, plan=None):
     # so they cannot dangle as dead copper.
     ctx.dest_chain = {}
     ctx.dest_alts = {}
+    ctx.src_chain = {}
+    ctx.src_trims = {}
     ctx.trim_spans = {}
     ctx.refusal_info = {}
     ctx.landed = set()            # nets whose lane is on the board
@@ -8329,6 +8526,15 @@ def setup(board, names, dest, log, plan=None):
         ctx.dest_chain[nm] = chain
         ctx.dest_alts[nm] = [(p_[0], p_[1], lay)
                              for (_s, _t, p_) in chain]
+        # THE SOURCE STUB CHAIN (2026-09-19): the same walk from the
+        # tooth tip toward the pad, for the write-time source trim
+        # (note_source_joint) -- a lane that ran back along its own
+        # tooth is spliced onto the stub where it left it.
+        # no hop cap to speak of: a channel escape through the array is
+        # hundreds of grid steps, and the berth chain's 24 reached 3 mm of
+        # DQ13's 15 (K44) -- the deep return point was never a candidate
+        ctx.src_chain[nm] = _walk_stub(segs_n, _k(*ends[nm][0]),
+                                       ctx.tooth_layer[nm], _stop, _k, max_hops=5000)
     ctx.src_ref = {}
     for nm in names:
         nid, net = byname[nm]
@@ -8866,6 +9072,14 @@ def write_out(a, ctx, corridors, names, log):
     for nm in names:
         if out_segs.get(nm) and nm not in refused:
             note_joint(ctx, nm, out_segs[nm])
+    # deferred SOURCE trim (2026-09-19): a lane that rode back along its
+    # own tooth is spliced onto the stub where it departed; the lane list
+    # is edited in place so the smoother below sees the spliced lane
+    _mm = sum(note_source_joint(ctx, nm, out_segs[nm], out_vias.get(nm, []), a.board, log)
+              for nm in names if out_segs.get(nm) and nm not in refused)
+    if ctx.src_trims:
+        log(f'source stub trim: {len(ctx.src_trims)} lane(s) spliced onto their stubs, '
+            f'-{_mm:.1f} mm ({", ".join(sorted(ctx.src_trims))})')
 
     # ---- repo octolinear smoothing (#536): collapse the distributed 45
     # nudges into single elbows, clearance-validated against ALL copper.

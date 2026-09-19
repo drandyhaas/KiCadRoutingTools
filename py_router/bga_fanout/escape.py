@@ -1039,3 +1039,72 @@ def direct_route_candidates(pcb_data, footprint, net_filter=None,
         names.add(nm)
     notes = [n for n in notes if n[0] in names]
     return names, notes
+
+
+UNDER_PART_PLANE_BALLS = 6   # a net with this many balls here is the plane drop's business
+
+
+def under_part_candidates(pcb_data, footprint, net_filter=None):
+    """Nets to DEFER from fanout because they are SERVED UNDER THE PART
+    (2026-09-19): every same-net pad off this footprint lies inside the
+    ball field itself -- a ZQ resistor or a decoupling cap on the far side,
+    straight under the ball (the H3 bench's SZQ: ball V10 to R6.2, 0.1 mm
+    away on B.Cu, and the fanout had drawn it a 2.4 mm stub toward the
+    edge). An escape to the field's edge is copper the connection never
+    uses; the right connection is a via at the ball and a short far-side
+    track, which the route step lays -- the deferred balls stay routable
+    through the same bare-ball zone exemption as #472's.
+
+    A ball qualifies when its net has at least one off-footprint pad and
+    every one of them lies within half a pitch of the ball field's extent;
+    a net qualifies when every one of its balls here does, and it carries
+    fewer than UNDER_PART_PLANE_BALLS balls (a plane-class net is dropped
+    to its plane instead). Returns (net_names_set, per_ball_notes), the
+    shape of direct_route_candidates. Purely advisory."""
+    from bga_fanout.grid import analyze_bga_grid
+    grid = analyze_bga_grid(footprint)
+    if grid is None:
+        return set(), []
+    cols, rows = list(grid.cols), list(grid.rows)
+    if len(cols) < 2 or len(rows) < 2:
+        return set(), []
+    pitch = max(min(b - a for a, b in zip(cols, cols[1:])),
+                min(b - a for a, b in zip(rows, rows[1:])))
+    m = pitch / 2.0
+    x0, y0, x1, y1 = min(cols) - m, min(rows) - m, max(cols) + m, max(rows) + m
+    ref = footprint.reference
+    by_net = {}
+    for fp in pcb_data.footprints.values():
+        if fp.reference == ref:
+            continue
+        for p in fp.pads:
+            if p.net_id > 0:
+                by_net.setdefault(p.net_id, []).append(p)
+    balls = {}
+    for pad in footprint.pads:
+        if pad.net_id > 0 and not pad.drill:
+            balls.setdefault(pad.net_id, []).append(pad)
+    names, notes = set(), []
+    for nid, pads in balls.items():
+        nm = pads[0].net_name
+        if not nm or nm.lower().startswith('unconnected-'):
+            continue
+        if len(pads) >= UNDER_PART_PLANE_BALLS:
+            continue
+        targets = by_net.get(nid)
+        if not targets:
+            continue
+        if not all(x0 <= t.global_x <= x1 and y0 <= t.global_y <= y1 for t in targets):
+            continue
+        if net_filter:
+            from net_queries import matches_net_filter
+            if not matches_net_filter(nm, net_filter):
+                continue
+        names.add(nm)
+        for pad in pads:
+            tp = min(targets, key=lambda t: (t.global_x - pad.global_x) ** 2 + (t.global_y - pad.global_y) ** 2)
+            d = math.hypot(tp.global_x - pad.global_x, tp.global_y - pad.global_y)
+            notes.append((nm, pad.pad_number,
+                          f"served under the part: {tp.component_ref}.{tp.pad_number} {d:.2f}mm away, "
+                          f"{len(targets)} target pad(s) all inside the field"))
+    return names, notes

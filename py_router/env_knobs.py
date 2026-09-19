@@ -205,6 +205,9 @@ def refresh() -> None:
     g['DYNAMIC_ITERATIONS_GRACE'] = _i('KICAD_DYNAMIC_ITERATIONS_GRACE', 0)
     g['MULTIPOINT_DENSE_FIRST'] = _opt_in('KICAD_MULTIPOINT_DENSE_FIRST')
     g['FANOUT_DIRECT'] = _opt_in('KICAD_FANOUT_DIRECT')
+    # served-under-the-part deferral (2026-09-19): a ball whose net's every
+    # off-footprint pad lies inside the ball field gets no escape stub
+    g['FANOUT_SKIP_UNDER'] = _opt_in('KICAD_FANOUT_SKIP_UNDER')
     g['FANOUT_TOWARD_TARGETS'] = _opt_in('KICAD_FANOUT_TOWARD_TARGETS')
     # '' = follow the --plane-drop param (default auto); '0'/'off' forces the
     # plane-ball drop pass OFF, '1'/'auto' forces it ON -- the manifest-replay

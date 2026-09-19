@@ -202,6 +202,20 @@ def bands_of(blocks: List[Grid]) -> List[Tuple[float, float, float, float]]:
 
 
 DIRS = {'left': (-1, 0), 'right': (1, 0), 'up': (0, -1), 'down': (0, 1)}
+
+
+def away_faces(src_bbox, dst_bbox, frac: float = 0.25):
+    """The faces of the SOURCE array that point AWAY from the destination:
+    those whose outward direction has a component against the source-to-
+    destination vector larger than `frac` of its length (a face square to
+    the flow is a side, not away). Geometry only, in whatever frame the
+    boxes are in."""
+    sx, sy = (src_bbox[0] + src_bbox[2]) / 2.0, (src_bbox[1] + src_bbox[3]) / 2.0
+    dx, dy = (dst_bbox[0] + dst_bbox[2]) / 2.0 - sx, (dst_bbox[1] + dst_bbox[3]) / 2.0 - sy
+    n = (dx * dx + dy * dy) ** 0.5
+    if n < 1e-9:
+        return set()
+    return {d for d, (ux, uy) in DIRS.items() if (ux * dx + uy * dy) / n < -frac}
 LAYERS = ('F.Cu', 'B.Cu')
 # escape_moves owns both: it imports nothing of ours, so every module
 # can take them from here instead of keeping its own copy
