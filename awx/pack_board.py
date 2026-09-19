@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 
-from kicad_parser import parse_kicad_pcb  # noqa: E402
+from kicad_parser import parse_kicad_pcb, Segment  # noqa: E402
 import braid as br  # noqa: E402
 import pack as pk  # noqa: E402
 import rules as _rules  # noqa: E402  ONE source for every design rule
@@ -62,6 +62,8 @@ def pack_whole(a):
         print('whole-board pack: --nets named no net on the board')
         return 2
     kids = {byname[nm][0] for nm in names}
+    import source_realize as _sr
+    v0 = set(_sr.drc_pairs(a.board, nets=names, pcb_data=pcb))   # the board as it came, before any edit
     lanes = replan.lane_items(pcb, pcb_f, names, byname)
 
     def k3(x, y):
@@ -75,19 +77,134 @@ def pack_whole(a):
                           dest_chain={}, trim_spans={})
     n_skip = 0
     for nm in names:
-        segs, vias = lanes[nm]
-        if not segs:
+        lane_segs, lane_vias = lanes[nm]
+        if not lane_segs:
             n_skip += 1
             continue
-        deg = {}
+        nid, net = byname[nm]
+        allsegs = [s_ for s_ in pcb.segments if s_.net_id == nid]
+        allvias = [v for v in pcb.vias if v.net_id == nid]
+        # a run that meets its via INSIDE the annulus rather than at the
+        # centre (22 um off, a 12 um crumb) reads as a break: BRIDGE such
+        # an end to the via centre with a link segment. Not a snap of the
+        # end itself -- moving one end of a 2.1 mm segment by 0.106 mm
+        # tilted it into a foreign via's clearance (K32 DQ8 vs DQ14).
+        # ...and a link piece is not free either: the emitter's octilinear
+        # build refuses a run that starts with a 20 um stub at an odd angle
+        # and falls back to the string's raw chords (K44: 1205 -> 2176
+        # segments, 1134 -> 1168 mm). So a TINY gap is snapped (a 22 um
+        # move of a 0.5 mm piece tilts nothing) and only a large one is
+        # bridged.
+        SNAP = float(os.environ.get('PK_VIA_SNAP', '0.03') or 0)
+        linked = set()
+        for v in allvias:
+            r_v = v.size / 2
+            for s_ in list(allsegs):
+                for end in ('start', 'end'):
+                    ex, ey = getattr(s_, end + '_x'), getattr(s_, end + '_y')
+                    d = math.hypot(ex - v.x, ey - v.y)
+                    if d <= 0.001 or d > r_v:
+                        continue
+                    if d <= SNAP:
+                        setattr(s_, end + '_x', v.x)
+                        setattr(s_, end + '_y', v.y)
+                        continue
+                    key_ = (k3(ex, ey), k3(v.x, v.y))
+                    if key_ not in linked:
+                        linked.add(key_)
+                        link = Segment(ex, ey, v.x, v.y, s_.width, s_.layer, nid)
+                        allsegs.append(link)
+                        pcb.segments.append(link)
+        crumbs = {id(s_) for s_ in allsegs if math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y) < 1e-3}
+        if crumbs:
+            pcb.segments = [s_ for s_ in pcb.segments if id(s_) not in crumbs]
+            allsegs = [s_ for s_ in allsegs if id(s_) not in crumbs]
+        # THE LANE = everything outside the two STUB CHAINS. An evolved
+        # world's fanout board is DERIVED from a routed one and keeps lane
+        # fragments as the berth's copper, so "routed minus fanout" cut
+        # WE and A3 (K44) into pieces with fanout-matched gaps between.
+        # The stub chain is the copper reachable from a pad through
+        # fanout-matched segments only; its tips are the lane's ends.
+        lane_ids = {id(s_) for s_ in lane_segs}
+        adj = {}
+        for s_ in allsegs:
+            a_, b_ = k3(s_.start_x, s_.start_y), k3(s_.end_x, s_.end_y)
+            adj.setdefault(a_, []).append((b_, s_))
+            adj.setdefault(b_, []).append((a_, s_))
+        seeds = [q for q in adj if any(math.hypot(q[0] - p_.global_x, q[1] - p_.global_y)
+                                        <= max(p_.size_x, p_.size_y) / 2 + 0.001 for p_ in net.pads)]
+        stub, seen_v, stack = set(), set(seeds), list(seeds)
+        while stack:
+            q = stack.pop()
+            for q2, s_ in adj.get(q, ()):
+                if id(s_) in lane_ids or id(s_) in stub:
+                    continue
+                stub.add(id(s_))
+                if q2 not in seen_v:
+                    seen_v.add(q2)
+                    stack.append(q2)
+        segs = [s_ for s_ in allsegs if id(s_) not in stub]
+        # SPURS: a short dead-end piece hanging off a branch vertex (a
+        # 35 um crumb at K44 A0) leaves the packer's chaining with one
+        # segment over, and "unchained" keeps the whole lane as laid (112
+        # of 44 lanes' passes at K44). Dead copper anyway: dropped.
+        for _rep in range(3):
+            dg = {}
+            for s_ in segs:
+                for q in (k3(s_.start_x, s_.start_y), k3(s_.end_x, s_.end_y)):
+                    dg[q] = dg.get(q, 0) + 1
+            spurs = [s_ for s_ in segs
+                     if math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y) < 0.2
+                     and sorted((dg[k3(s_.start_x, s_.start_y)], dg[k3(s_.end_x, s_.end_y)])) [0] == 1
+                     and sorted((dg[k3(s_.start_x, s_.start_y)], dg[k3(s_.end_x, s_.end_y)]))[1] >= 3]
+            if not spurs:
+                break
+            drop = {id(x) for x in spurs}
+            segs = [s_ for s_ in segs if id(s_) not in drop]
+            pcb.segments = [s_ for s_ in pcb.segments if id(s_) not in drop]
+        # the ends as the EXACT coordinates of the segment end, not the
+        # rounded key: the packer chains on four decimals, and a fanout
+        # tip at 80.0703 never matched its 80.070 key (112 lanes
+        # "unchained" at K44 once the links carried such ends)
+        deg, exact = {}, {}
         for s_ in segs:
-            for q in (k3(s_.start_x, s_.start_y), k3(s_.end_x, s_.end_y)):
+            for x_, y_ in ((s_.start_x, s_.start_y), (s_.end_x, s_.end_y)):
+                q = k3(x_, y_)
                 deg[q] = deg.get(q, 0) + 1
-        tips = [q for q, d in deg.items() if d == 1]
+                exact.setdefault(q, (x_, y_))
+        tips = [exact[q] for q, d in deg.items() if d == 1]
         if len(tips) != 2:
             n_skip += 1
             print(f'  {nm}: lane has {len(tips)} free end(s), not 2 -- kept as laid')
             continue
+        # LOOPS: a leftover of the chaining whose BOTH ends lie on the
+        # chain (a 35 um duplicate diagonal at K44 A0, both ends on the
+        # path) is copper the chain already provides; a leftover with an
+        # end off the chain is a real branch and the lane is left alone
+        pts_, _l, _o, left_ = pk.chain_segs(segs, tips[0])
+        if left_:
+            onchain = {(round(x_, 4), round(y_, 4)) for x_, y_ in pts_}
+            loops = [l for l in left_ if (round(l.start_x, 4), round(l.start_y, 4)) in onchain
+                     and (round(l.end_x, 4), round(l.end_y, 4)) in onchain]
+            if len(loops) == len(left_):
+                drop = {id(x) for x in loops}
+                segs = [s_ for s_ in segs if id(s_) not in drop]
+                pcb.segments = [s_ for s_ in pcb.segments if id(s_) not in drop]
+            else:
+                n_skip += 1
+                print(f'  {nm}: {len(left_) - len(loops)} branch piece(s) off the lane -- kept as laid')
+                continue
+        if nm in os.environ.get('PK_WHOLE_DUMP', '').split(','):
+            print(f'  DUMP {nm}: {len(allsegs)} segs, {len(stub)} in the stub chains, {len(segs)} lane; tips {tips}')
+            pts_, lays_, objs_, left_ = pk.chain_segs(segs, tips[0])
+            print(f'    chain from tips[0]: {len(pts_)} points, {len(left_)} left')
+            for s_ in left_[:6]:
+                print(f'      left {s_.layer} ({s_.start_x:.4f},{s_.start_y:.4f})->({s_.end_x:.4f},{s_.end_y:.4f})')
+            if pts_:
+                print(f'    chain end {pts_[-1]}')
+        fan_via_xy = {k3(v.x, v.y) for v in pcb_f.vias if v.net_id == nid}
+        vias = [v for v in allvias if k3(v.x, v.y) not in fan_via_xy]
+        lanes[nm] = (segs, vias)
         src_pads = [p_ for p_ in byname[nm][1].pads if p_.component_ref == a.src]
         if not src_pads:
             n_skip += 1
@@ -101,11 +218,43 @@ def pack_whole(a):
     L0 = sum(pk.seg_len(c.out_segs[nm]) for c in corridors for nm in c.members)
     log(f'pack_board (whole board): {len(corridors)} lane(s) of {len(names)} from the pair, {n_skip} kept as laid, '
         f'{L0:.1f} mm  (read {time.time() - t0:.1f} s)')
+    orig = {c.members[0]: (list(c.out_segs[c.members[0]]), list(c.out_vias[c.members[0]])) for c in corridors}
     for p_ in range(a.passes):
         for c in corridors:
             pk.pack_corridor(c, log)
         L1 = sum(pk.seg_len(c.out_segs[nm]) for c in corridors for nm in c.members)
         log(f'  pass {p_ + 1}: lanes {L0:.1f} -> {L1:.1f} mm')
+    # THE GRADE IS THE GATE: the emitter validates piece by piece and
+    # still let a re-emitted end into a via's clearance (K32 DQ8 against
+    # DQ14's via, 0.073 mm). Every violation the pack ADDED names its
+    # nets; those lanes go back to the copper they came with, until the
+    # scoped DRC is what it was before the pack.
+    import re as _re
+    by_nm = {c.members[0]: c for c in corridors}
+    for _round in range(6):
+        new = [ln for ln in _sr.drc_pairs(a.board, nets=names, pcb_data=pcb) if ln not in v0]
+        if not new:
+            break
+        culprits = set()
+        for ln in new:
+            for tok in _re.findall(r'(?:Seg|Via|Pad):(\S+)', ln):
+                tok = tok.split('/')[-1]
+                if tok in by_nm and tok in orig:
+                    culprits.add(tok)
+        if not culprits:
+            log(f'  pack gate: {len(new)} new violation(s) name no packed lane -- {new[0][:100]}')
+            break
+        for nm in sorted(culprits):
+            c = by_nm[nm]
+            cur_s = {id(x) for x in c.out_segs.get(nm, [])}
+            cur_v = {id(x) for x in c.out_vias.get(nm, [])}
+            pcb.segments = [x for x in pcb.segments if id(x) not in cur_s] + orig[nm][0]
+            pcb.vias = [x for x in pcb.vias if id(x) not in cur_v] + orig[nm][1]
+            c.out_segs[nm], c.out_vias[nm] = list(orig[nm][0]), list(orig[nm][1])
+            del orig[nm]
+        log(f'  pack gate: {len(new)} new violation(s) -> {sorted(culprits)} back to the copper they came with')
+    L2 = sum(pk.seg_len(c.out_segs[nm]) for c in corridors for nm in c.members)
+    log(f'  lanes {L0:.1f} -> {L2:.1f} mm after the gate')
     txt = open(a.board, encoding='utf-8').read()
     kid_names = {pcb.nets[i].name for i in kids if i in pcb.nets}
     txt = br.strip_net_segments(txt, kids, kid_names)

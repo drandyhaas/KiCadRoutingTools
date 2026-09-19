@@ -151,6 +151,98 @@ the article asked for, each general:
   three of five rungs is not a default; it stays a knob the evolution can try.
 
 **The pack, made to work on a finished board** (2026-09-19, Andy: "I
+see easy shorter paths", then "still slack in the outer lanes"). Six
+things were wrong, in the order they surfaced:
+
+* An evolved board's `.pack.json` is the LAST PROBE braid's sidecar, and
+  a probe lays one lane and its coupled set -- on the K44 record the
+  packer saw one corridor with one lane of 44. The whole-board mode
+  (`pack_board.py BOARD --fanout BOARD_fo --nets ... --src U1 --passes 4`)
+  packs every lane of the run, one corridor per lane, the passes
+  repeated so each sees the room the last one left.
+* The FOLLOW force -- each lane snapped into the tube of the lane packed
+  before it -- copies that lane's jogs, and from the wall inward the outer
+  lanes copy the router's still-ragged inner ones: the K18 bundle read as
+  a wave. Four passes with the follow grew K18's lanes 392.6 -> 394.8 mm;
+  taut (`PK_FOLLOW=0`, the whole-board default) they went to 386 and bend
+  together at the cap pads.
+* A via moved by its lane was checked against copper only; the hole-to-
+  hole rule (net-agnostic, 0.25 mm here = 0.40 centre to centre for these
+  vias against copper's 0.355) is now a disc per drilled pad and per
+  other via in the via world, read off the board.
+* "Routed minus fanout" is not the lane on an evolved board: the derive
+  step keeps lane fragments as the berth's copper, so WE and A3 came out
+  in pieces with fanout-matched gaps and were skipped. The lane is now
+  everything outside the two STUB CHAINS -- the copper reachable from a
+  pad through fanout-matched segments only -- with the chains' tips as
+  its ends, taken at their exact coordinates (the packer chains on four
+  decimals; a rounded 80.070 never met its 80.0703).
+* A run that meets its via inside the annulus reads as a break: a tiny
+  gap (WE: 22 um) is snapped onto the centre, a larger one bridged with a
+  link -- not snapped, since moving one end of a 2.1 mm segment by 0.106
+  mm tilted it into a foreign via's clearance (K32 DQ8 vs DQ14). A 35 um
+  duplicate whose both ends lie on the chain (A0) is dropped as a loop;
+  112 lanes had come back "unchained" over it.
+* The grade is the gate: a scoped DRC before any edit and after the
+  passes, and every lane a new violation names goes back to the copper
+  it came with. The emitter's own piece validation had let a re-emitted
+  end into a via's clearance.
+
+| K | 9 | 18 | 26 | 32 | 38 | 42 | 44 |
+|---|---|---|---|---|---|---|---|
+| lanes, mm (best -> taut pack) | 185 -> 185 | 393 -> 386 | 662 -> 637 | 801 -> 777 | 954 -> 930 | 1054 -> 1008 | 1203 -> 1136 |
+| segments | 163 -> 141 | 1124 -> 316 | 1389 -> 630 | 3071 -> 895 | 3506 -> 964 | 3294 -> 1211 | 3854 -> 1214 |
+
+Vias unchanged on every rung, 0 open, 0 DRC with and without the
+margin, every lane packed. The slack that remains is structural: WE at
+K44 leaves its tooth at the array's west face and cannot come inward
+because the F bundle stands between its via and the pads, and a lane
+that wraps the long way round its bundle at the same via count is
+invisible to the chain's judge, which prices vias and never copper;
+no packer can move a lane across its neighbours.
+
+**The source stub trim, the served-under-the-part rule, the away-face
+ban** (2026-09-19, the second pass over the zynq article). Three things
+the article asked for, each general:
+
+* **The source stub trim** (`braid.note_source_joint`, on by default;
+  `SRC_TRIM_REACH=0` turns it off) is the source-side mirror of the berth
+  trim: at write time every lane is walked from its tooth, every vertex
+  projected onto the net's own stub chain, and the deepest splice that
+  shortens the copper and grades no worse on the net's scoped DRC stands
+  -- the stub's dead tail and the lane's backtrack go, one cross segment
+  joins them. Vias never change. Measured, the trim on: zynq K38 68 = 68
+  vias with DQ12 58 -> 37 mm, K44 105 = 105 (six lanes, -20 mm); H3 K28
+  34 = 34 (SA1 -3.4 mm), K35 60 = 60 (SDQ10 + SDQ13 -28 mm), K41 74 = 74
+  (-13 mm), K51 98 = 98 (SBA1 + SDQ11 + SDQ13 -57 mm). A dead-copper
+  audit of every board finds no dangling tail at either end -- the berth
+  trim is complete on these boards; what it does not catch is a lane that
+  never touches its stub again (DQ13 at K44 climbs six millimetres up the
+  far face before turning back, and the 3.6 mm splice the trim found took
+  5 mm, not 20).
+* **The served-under-the-part rule** (`py_router`, `KICAD_FANOUT_SKIP_UNDER=1`,
+  `bga_fanout.escape.under_part_candidates`): a ball whose net's every
+  off-footprint pad lies inside the ball field -- a ZQ resistor or a
+  decoupling cap on the far side, straight under it -- gets no escape
+  stub; its connection is a via at the ball and a short far-side track.
+  The H3 bench's `SZQ` (ball V10 to R6.2, 0.09 mm away on B.Cu, drawn a
+  2.4 mm stub toward the edge) is the case; on the corpus H3 board the
+  switch drops exactly that stub and touches no bus net. It rides #472's
+  deferral plumbing, so the balls stay routable through the route steps'
+  zone exemption. Opt-in: the always-on form is a fanout-laid pad drop
+  (via at the ball, track to the pad), not built. A bench rebuilt with it
+  loses `SZQ` from the K51 ladder, which is right: it is not a bus net.
+* **The away-face ban** (`SRC_AWAY_BAN=1`, `escape_moves.away_faces`: the
+  source faces whose outward direction runs against the source-to-
+  destination vector, in any frame) removes the far-face teeth at the
+  menu. It is what stops the hairpins rather than trimming them (zynq
+  K38: DQ12 58 -> 25 mm, the run 1172 -> 1139 mm) -- and it is not a
+  default, because the menu's deep-ball-met-on-the-far-side move is real:
+  with the ban zynq K38 68 = 68 but K44 105 -> 106, H3 K28 34 = 34 (copper
+  652 -> 643 mm) but K35 60 -> 61 (878 -> 919 mm), K41 74 -> 82. Worse on
+  three of five rungs is not a default; it stays a knob the evolution can try.
+
+**The pack, made to work on a finished board** (2026-09-19, Andy: "I
 see easy shorter paths"). Three things were wrong, in order of size:
 
 * An evolved board's `.pack.json` is the LAST PROBE braid's sidecar, and
