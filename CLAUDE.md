@@ -878,7 +878,7 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   count `unstampable`). The record is `via_in_pad` in the route step's merged
   `--json-out`, and `check_drc` reports what still ships unprotected as
   `via-in-paste` (`--baseline` accepts only a via the input had under solder,
-  unprotected; on a pre-KiCad-10 file every such via is accepted
+  unprotected; on a pre-KiCad-10 file every other such via is accepted
   `undeclarable-via-in-paste` and counted, since the file cannot declare it).
   Probed against pcbnew 10.0.0: a via at
   `*_MODE_FROM_BOARD` serialises with NO token and a token appears **only** for

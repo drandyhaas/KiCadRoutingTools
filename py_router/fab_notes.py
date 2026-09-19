@@ -188,8 +188,9 @@ def _format_can_declare(pcb_data) -> bool:
         import pcbnew as _pn
     except Exception:                                    # noqa: BLE001
         return True
-    return bool(hasattr(_pn.PCB_VIA, 'SetPrimaryDrillCappedFlag')
-                or hasattr(_pn.PCB_VIA, 'SetCappingMode'))
+    via_cls = getattr(_pn, 'PCB_VIA', None)
+    return bool(hasattr(via_cls, 'SetPrimaryDrillCappedFlag')
+                or hasattr(via_cls, 'SetCappingMode'))
 
 
 def via_protection_stamps(vias, input_snapshot, pcb_data):

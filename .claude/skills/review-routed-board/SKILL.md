@@ -41,9 +41,9 @@ Type VII onto every via it adds in a pad or paste opening, so these are almost
 always vias the input already had: `--baseline` accepts those (a via the input
 had under solder, unprotected) as `inherited-via-in-paste` and the console line
 counts them. A file older than KiCad 10 (version < 20250000) cannot carry
-the tokens at all, so there every such via is accepted
-`undeclarable-via-in-paste` and counted on the same line: Type VII belongs on
-the fab drawing. Report whatever still fires as a fab defect: the
+the tokens at all, so there every such via `--baseline` does not inherit is
+accepted `undeclarable-via-in-paste` and counted on the same line: Type VII
+belongs on the fab drawing. Report whatever still fires as a fab defect: the
 via needs filled+capped on the fab drawing, or it must move out of the opening.
 Without `--baseline`, every pre-existing one reads as a violation
 (orangecrab_ext_pll carries 136). The same flag grades a graze of footprint graphic copper that a

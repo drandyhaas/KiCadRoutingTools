@@ -103,7 +103,7 @@ def _grade(pcb, clr=0.09):
     # paste openings, unprotected; they are the input's, not the chain's.
     r = subprocess.run(['python3', os.path.join(REPO, 'py_router', 'check_drc.py'), pcb,
                         '--clearance', str(clr), '--hole-to-hole-clearance', '0.2',
-                        '--clearance-margin', '0.1', '--baseline', BOARD],
+                        '--clearance-margin', '0.1', '--baseline', START_BOARD],
                        capture_output=True, text=True)
     m = re.search(r'FOUND (\d+) DRC', r.stdout)
     return 0 if 'NO DRC' in r.stdout else (int(m.group(1)) if m else -1)

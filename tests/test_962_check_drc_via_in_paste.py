@@ -230,6 +230,46 @@ def main():
         check('5. ... CLI exits 0, the console line and the JSON count it',
               '1 undeclarable in this file format' in r.stdout
               and vj.get('undeclarable') == 1 and vj.get('violations') == 0, str(vj))
+        # ...and board_score reads that count off the same console line
+        import importlib.util as _ilu
+        _sp = _ilu.spec_from_file_location('bs962d', os.path.join(
+            ROOT, '.claude', 'skills', 'plan-pcb-placement-and-routing', 'scripts',
+            'board_score.py'))
+        _bs = _ilu.module_from_spec(_sp)
+        _sp.loader.exec_module(_bs)
+        check('5. ... board_score reads the undeclarable count off that line',
+              _bs._undeclarable_vias(r.stdout) == 1
+              and _bs._undeclarable_vias('NO DRC VIOLATIONS FOUND!') == 0)
+        # a missing --baseline is refused up front, not after a full run
+        run_check([sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'check_drc.py'),
+                   b1, '--baseline', os.path.join(work, 'no_such_board.kicad_pcb')],
+                  refuse='--baseline: no such board file', code=2,
+                  allow=('usage:', 'error:'))
+        check('5. a --baseline that does not exist: exit 2 with the reason', True)
+        # a LIVE board (no file version) asks the running pcbnew for the setters
+        import types
+        import fab_notes as _fn
+        from kicad_parser import parse_kicad_pcb as _pk
+        live = _pk(b1)
+        live.kicad_version = 0
+        saved = sys.modules.get('pcbnew')
+        try:
+            for label, attrs, want in (('with the capping setter', ('SetPrimaryDrillCappedFlag',), True),
+                                       ('without it (KiCad 9)', (), False)):
+                fake = types.ModuleType('pcbnew')
+                fake.PCB_VIA = type('PCB_VIA', (), {a: (lambda *x: None) for a in attrs})
+                sys.modules['pcbnew'] = fake
+                check('5. a live board, running pcbnew %s: can declare = %s' % (label, want),
+                      _fn._format_can_declare(live) is want)
+            fake = types.ModuleType('pcbnew')
+            sys.modules['pcbnew'] = fake
+            check('5. ...a pcbnew with no PCB_VIA at all does not crash (cannot declare)',
+                  _fn._format_can_declare(live) is False)
+        finally:
+            if saved is None:
+                sys.modules.pop('pcbnew', None)
+            else:
+                sys.modules['pcbnew'] = saved
         # ...and only a via that was ALREADY under solder, unprotected, there
         base_nopaste = board(work, 'base_nopaste', [via(10, 10, uid='v1')],
                              pad1_layers='"F.Cu" "F.Mask"')
