@@ -44,10 +44,10 @@ EXPECTED SURVIVORS: none declared.
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
 
-MEASURED on the tree of `#1002: the Phase-6 round-2 verifier's findings,
-fixed` (dd0892dc3, 2026-09-20, Windows; every killer test run unmutated
-first, and green): **24 rows, 24 KILLED, 0 SURVIVED, 0 broken.** That is the
-run of record.
+MEASURED on the tree of `#959: the narrow re-review's findings, fixed`
+(c96dadd8c, 2026-09-20, Windows; every killer test run unmutated first, and
+green): **24 rows, 24 KILLED, 0 SURVIVED, 0 broken.** That is the run of
+record, and it reproduces the same score at dd0892dc3.
 
 The earlier run, which changed the tests rather than the table: 24 rows at
 07bd82b25, 23 KILLED. `p1-never-checks-the-plan` SURVIVED -- nothing drove
