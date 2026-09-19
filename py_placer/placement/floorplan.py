@@ -139,7 +139,12 @@ EDGE_BAND_SANITY_MM = 5.0
 #: justification naming a grader nobody wrote is worse than a shorter one. Contrast `blocks[].side`, which is declarable and
 #: whose rule docs/floorplan-intent.md calls "vacuous, not conservative"
 #: because no search move carries a side: rotation is carried by every nudge.
-READER_VERSION = 5
+#: 6 (#959, #1000): `edge_connectors[].side` -- the face a connector is on,
+#: compiled from the brief's `user_top_side` with a user-facing or
+#: perpendicular-cable connector. Declarable and graded (`edge_connector_side`,
+#: an advisory WARN), so the rule above mandates the bump -- and an older
+#: build refuses the key by name, which is the safety the bump does not add.
+READER_VERSION = 6
 
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
@@ -207,7 +212,13 @@ _KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'note',
 _EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
                         'class', 'source', 'note', 'suspect', 'suspect_reason',
                         'overhang_capped', 'observed_overhang_mm', 'context',
-                        'center_on_edge', 'along_edge_band'}
+                        'center_on_edge', 'along_edge_band', 'side'}
+#: #959 (#1000): mount modes where a connector stands OFF a face, so its mating
+#: face points away from the board and reaching the edge is not what makes it
+#: usable. The edge-receptacle seat does not apply to one: measured on the
+#: as-built boards, it false-failed 8 vertical headers (esp_prog CON2 0.69 mm,
+#: tigard J2-J6 2.4-3.0 mm, glasgow J2/J3/J5).
+VERTICAL_MOUNTS = ('top_mount', 'bottom_mount')
 _OVERHANG_KEYS = {'min', 'max'}
 #: #712. `tolerance_mm` is REQUIRED and has no default: "centred within what?"
 #: is the whole claim, and a defaulted tolerance is a threshold this tool
@@ -910,6 +921,10 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             _reject_unknown(oh, _OVERHANG_KEYS,
                             f"edge_connectors[{i}] ({c['ref']}).overhang_mm")
         _along_edge_claim(c, i)
+        if c.get('side') is not None and c['side'] not in ('F', 'B'):
+            raise IntentError(
+                f"edge_connectors[{i}] ({c['ref']}): side {c['side']!r}, "
+                f"expected 'F' or 'B'")
         conns.append(c)
 
     proximity = _proximity_claims(raw)
@@ -922,6 +937,12 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     # load clean and leave the rule at its default -- a demotion the author
     # believes they made and the exit code never reflects.
     _reject_unknown(severity, _SEVERITY_KEYS, 'severity')
+    if severity.get('edge_connector_side') == ERROR:
+        raise IntentError(
+            "severity: edge_connector_side is advisory by design and cannot "
+            "be raised to error -- nothing in the placement stack moves a "
+            "part between faces (#836), so an error would be a red mark no "
+            "run could clear")
 
     budget = _obj(raw.get('legality_budget'), 'legality_budget')
     if 'oob_area' in budget:
@@ -2944,6 +2965,18 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                 ref=ref, message=f"edge connector {ref} is not on this board",
                 measured={'found': False})
             continue
+        # #959 (#1000): the face the brief's viewing side puts it on. A
+        # fixed WARN, never the configured severity: nothing moves a part
+        # between faces (#836), and the seat search and quench do not read
+        # it, so it can steer nothing.
+        if c.get('side') and part.side != c['side']:
+            yield Violation(
+                rule='edge_connector_side', severity=WARN, ref=ref,
+                message=(f"{ref} is on {part.side}.Cu, but the declared "
+                         f"viewing face puts it on {c['side']}.Cu -- advisory:"
+                         f" nothing in the placement stack moves a part "
+                         f"between faces"),
+                measured={'side': part.side}, expected={'side': c['side']})
         amount = ctx.gate.rect_outside_amount(part.rect)
         lim = c.get('overhang_mm') or {}
         lo = float(lim.get('min', 0.0))
@@ -3044,7 +3077,12 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # CHARGEABLE by place_seed --repair.
         setback = c.get('max_setback_mm')
         _sev = ctx.sev('edge_connector')
-        if setback is None and c.get('class') == 'edge_receptacle':
+        # #959 (#1000): a connector standing off a face is not held to the
+        # receptacle seat -- its declared edge and overhang still grade it.
+        vertical = ((c.get('context') or {}).get('mount_mode')
+                    in VERTICAL_MOUNTS)
+        if setback is None and c.get('class') == 'edge_receptacle' \
+                and not vertical:
             from .part_class import SEAT_TOL_MM
             setback = SEAT_TOL_MM
         if setback is None and c.get('class') == 'connector_affinity':
@@ -4301,6 +4339,11 @@ _NON_RULE_SEVERITIES = frozenset({
     # at ERROR through zone_containment; this is the rotation half, and the
     # position half for a plan that carries no anchor.
     'mechanical_drift',
+    # #959 (#1000): raised BESIDE `edge_connector` -- the face a declared
+    # viewing side puts a connector on. Settable only DOWN (an intent may
+    # say `warn`; `error` is refused at load), because it is advisory by
+    # design.
+    'edge_connector_side',
     # #959 (#998). Raised by `plan_check`, the zone plan checked against
     # itself and the board BEFORE the first pose write, and (the first) by
     # `grade` too. Every ERROR among them is sound: the plan cannot be seeded
@@ -6902,7 +6945,8 @@ LEDGER_STATUSES = ('pending', 'graded_pass', 'graded_fail', 'carried',
 
 def declaration_ledger(intent: Intent, rows, *, result=None,
                        coverage=None, brief_source=None,
-                       reconciliation=None) -> List[Dict[str, object]]:
+                       reconciliation=None,
+                       consequences=None) -> List[Dict[str, object]]:
     """One row per REQUIREMENT, whoever declared it (#959 comment §3.1).
 
     Joins the rule roster (what the intent arms and leaves dark) with the
@@ -6987,6 +7031,8 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
                 refs = by_rule_err.get(c.get('rule') or '', set())
                 status = ('graded_fail'
                           if (c.get('ref') or '') in refs else 'graded_pass')
+        elif c.get('unmeasured'):
+            status = 'unmeasured'
         else:
             status = state_map.get(st, st)
         out.append({
@@ -6998,6 +7044,32 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
             'attribution': 'rule+ref',
             'why': c.get('why') or '', 'drifted': bool(c.get('drifted')),
             'disposition': None,
+        })
+    # #959 (#1000): what the brief's connector declarations COMPILED to,
+    # with the basis of each number -- a `derived_default` is listed apart
+    # from a declared value so it is never read as a validated claim.
+    for r in consequences or ():
+        grader = r.get('grader')
+        refs_err = by_rule_err.get(
+            'edge_connector' if grader == 'edge_connector_side' else grader,
+            set())
+        if r.get('status') == 'unmeasured':
+            status = 'unmeasured'
+        elif r.get('status') != 'compiled':
+            status = 'abstained'
+        else:
+            status = ('pending' if result is None
+                      else 'graded_fail' if (
+                          grader != 'edge_connector_side'
+                          and (r.get('ref') or '') in refs_err)
+                      else 'graded_pass')
+        out.append({
+            'id': f"derived:{r['id']}", 'kind': 'derived_clause',
+            'source': brief_source, 'authority': 'declared',
+            'consequence': r.get('compiled_to'), 'grader': grader,
+            'status': status, 'basis': r.get('basis') or 'declared',
+            'attribution': 'rule+ref', 'why': r.get('why') or '',
+            'value': r.get('value'), 'disposition': None,
         })
     # #959 (#1001): every ref two channels speak to. A contradiction is
     # failed until the plan acknowledges it; drift the BOARD alone loses is
@@ -7050,6 +7122,9 @@ def ledger_summary(ledger) -> Dict[str, object]:
                                 if r['status'] == 'carried'),
         'unmeasured_facts': sorted(r['id'] for r in ledger
                                    if r['status'] == 'unmeasured'),
+        'derived_default_clauses': sorted(
+            r['id'] for r in ledger if r.get('kind') == 'derived_clause'
+            and r.get('basis') == 'derived_default'),
     }
 
 

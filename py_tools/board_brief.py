@@ -721,8 +721,8 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
         # with --requirements" -- a channel nothing reads. This is where that
         # advice now lands, structured.
         from placement import design_brief as _db
-        _frag, _rep = _db.compile_brief(
-            design_brief, board_refs=sorted(pcb.footprints or {}))
+        _frag, _rep = _db.compile_with_consequences(
+            design_brief, pcb, pcb_file)
         brief['design_brief'] = {
             'path': design_brief_path,
             'declared': _rep['declared'],
@@ -733,6 +733,7 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
             'product': _rep['product'],
             'fixed': _rep['fixed'],
             'counts': _rep['counts'],
+            'consequences': _rep.get('consequences') or [],
             'note': ('DECLARED, not measured. Read this beside `mechanical`, '
                      'which is INFERENCE from part class: where the two '
                      'disagree the declaration is the authority, and '

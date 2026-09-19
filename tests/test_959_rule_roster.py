@@ -418,7 +418,8 @@ def test_the_cli_prints_the_roster_and_the_carried_facts():
             doc = json.load(fh)
         ledger = doc['declaration_ledger']
         kinds = {row['kind'] for row in ledger}
-        assert kinds == {'rule', 'brief_clause', 'reconciliation'}, kinds
+        assert kinds == {'rule', 'brief_clause', 'reconciliation',
+                         'derived_clause'}, kinds
         statuses = {row['status'] for row in ledger}
         for s in ('graded_pass', 'carried', 'unknown', 'dark', 'inapplicable'):
             assert s in statuses, (s, statuses)
@@ -427,9 +428,15 @@ def test_the_cli_prints_the_roster_and_the_carried_facts():
         # In RULES order, which is the order the roster reports in.
         assert s['rules_dark_undispositioned'] == ['zone_containment',
                                                    'decap_distance'], s
-        assert len(s['carried_facts']) == 8, s['carried_facts']
-        assert s['ledger_status']['carried'] == 8, s['ledger_status']
-    print("  PASS: the CLI prints the roster, names the 8 carried facts, and "
+        # 8 before #1000; the four connector clauses (USB1 and CON2's
+        # mount_mode and cable_entry) now COMPILE, and the product facts are
+        # what is left carried.
+        assert s['carried_facts'] == [
+            'product.form_factor', 'product.held_by',
+            'product.primary_axis', 'product.user_top_side'], s[
+                'carried_facts']
+        assert s['ledger_status']['carried'] == 4, s['ledger_status']
+    print("  PASS: the CLI prints the roster, names the 4 carried facts, and "
           "writes the ledger")
 
 

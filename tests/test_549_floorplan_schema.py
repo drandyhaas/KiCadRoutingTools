@@ -143,7 +143,10 @@ KEY_SETS = {
         'observed_overhang_mm', 'context',
         # #712: WHERE ALONG the edge. Mutually exclusive, absent by default,
         # and never written by `emit_intent`.
-        'center_on_edge', 'along_edge_band'},
+        'center_on_edge', 'along_edge_band',
+        # #959 (#1000): the face, compiled from the brief. Absent by
+        # default and never written by `emit_intent` itself.
+        'side'},
     '_OVERHANG_KEYS': {'min', 'max'},
     '_CENTER_ON_EDGE_KEYS': {'tolerance_mm'},
     '_ALONG_EDGE_BAND_KEYS': {'from', 'to'},
@@ -608,7 +611,9 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'plan_board_overfull',
                                         'plan_board_crowded',
                                         'plan_fixed_overlap',
-                                        'plan_fixed_overlap_budget'}
+                                        'plan_fixed_overlap_budget',
+                                        # #959 (#1000)
+                                        'edge_connector_side'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         i = intent_from_dict(_base(severity={name: WARN}))

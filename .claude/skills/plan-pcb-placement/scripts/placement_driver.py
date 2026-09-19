@@ -1429,8 +1429,8 @@ def _p1_brief(a, pcb):
     if not bp:
         return None, '', None, None
     try:
-        frag, rep = _db.compile_brief(
-            _db.load_brief(bp), board_refs=sorted(pcb.footprints or {}))
+        frag, rep = _db.compile_with_consequences(
+            _db.load_brief(bp), pcb, a.board)
     except Exception as exc:                                # noqa: BLE001
         return None, bp, None, f'{type(exc).__name__}: {exc}'
     return frag, bp, rep, None

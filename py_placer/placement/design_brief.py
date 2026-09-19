@@ -62,6 +62,7 @@ than ignored, because an author who wrote one believes it is being honoured:
 from __future__ import annotations
 
 import fnmatch
+import glob
 import json
 import math
 import os
@@ -119,7 +120,14 @@ _REFUSED_TOP_LEVEL = {
 _PRODUCT_KEYS = {'form_factor', 'primary_axis', 'held_by', 'user_top_side'}
 _INTERFACE_KEYS = {'ref', 'role', 'user_facing', 'edge', 'along_edge',
                    'along_edge_tolerance_mm', 'overhang_mm', 'mount_mode',
-                   'cable_entry', 'requirement', 'why', 'note', 'context'}
+                   'cable_entry', 'cable_envelope_mm', 'requirement', 'why',
+                   'note', 'context'}
+#: #959 (#1000): the space a cable needs, declared. `depth` is how far an
+#: in-plane plug reaches in from the edge; `clear` is the margin around a
+#: perpendicular one. There are NO defaults: measured on five as-built boards
+#: (Phase-0 P3), no clearance passed every control and the in-plane band was
+#: vacuous, so an undeclared envelope is reported unmeasured, never guessed.
+_ENVELOPE_KEYS = {'depth', 'clear'}
 #: The intent's own keep-out shape, plus two slots for reasoning that has
 #: nowhere else to go. Both land in the compiled entry's `context`.
 _KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'kind', 'why',
@@ -170,6 +178,12 @@ _MOUNT_MODES = ('edge_mount', 'top_mount', 'bottom_mount', 'through_edge',
                 UNKNOWN)
 _CABLE_ENTRY = ('in_plane', 'perpendicular_top', 'perpendicular_bottom',
                 'none', UNKNOWN)
+
+#: #959 (#1000): what an `edge_mount` part's drawn body must sit within of its
+#: edge. Measured, not mapped: the literal mapping would reuse the receptacle
+#: seat tolerance (0.5 mm), and tigard's J7 -- an edge-mount header on a
+#: shipping board -- sits 0.60 mm in (Phase-0 P3, five as-built boards).
+EDGE_MOUNT_SETBACK_MM = 0.75
 
 #: The tier-0 questions. Named so a report can say which were answered, which
 #: were answered "I do not know", and which nobody touched -- the three states
@@ -627,6 +641,25 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
         _enum(c.get('edge'), fp._EDGES + (UNKNOWN,), f"{where}.edge")
         _enum(c.get('mount_mode'), _MOUNT_MODES, f"{where}.mount_mode")
         _enum(c.get('cable_entry'), _CABLE_ENTRY, f"{where}.cable_entry")
+        env = c.get('cable_envelope_mm')
+        if env is not None and env != UNKNOWN:
+            if not isinstance(env, dict) or not env:
+                raise BriefError(
+                    f"{where}.cable_envelope_mm: expected {{'depth': mm, "
+                    f"'clear': mm}} or {UNKNOWN!r}, got {env!r}")
+            fp._reject_unknown(env, _ENVELOPE_KEYS,
+                               f"{where}.cable_envelope_mm")
+            for k_ in sorted(env):
+                v_ = fp._number(env[k_], f"{where}.cable_envelope_mm.{k_}")
+                if v_ <= 0:
+                    raise BriefError(
+                        f"{where}.cable_envelope_mm.{k_}: {v_:g} is not a "
+                        f"dimension -- write {UNKNOWN!r} if it is not known")
+        if env is not None and c.get('cable_entry') in (None, 'none',
+                                                         UNKNOWN):
+            raise BriefError(
+                f"{where}.cable_envelope_mm describes a cable, and this "
+                f"interface declares no cable_entry it could apply to")
         uf = c.get('user_facing')
         if uf is not None and uf is not True and uf is not False \
                 and uf != UNKNOWN:
@@ -819,6 +852,16 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
             ctx[key] = v
             declared.append(f"interfaces[{ref}].{key}")
             not_graded.append(f"interfaces[{ref}].{key}")
+        env = c.get('cable_envelope_mm')
+        if env == UNKNOWN:
+            # Kept in context so the consequence step can tell "the author
+            # looked and does not know" from "nobody said".
+            ctx['cable_envelope_mm'] = UNKNOWN
+            unknown.append(f"interfaces[{ref}].cable_envelope_mm")
+        elif env is not None:
+            ctx['cable_envelope_mm'] = dict(env)
+            declared.append(f"interfaces[{ref}].cable_envelope_mm")
+            not_graded.append(f"interfaces[{ref}].cable_envelope_mm")
 
         if c.get('note'):
             entry['note'] = ((entry.get('note', '') + '; ') if entry.get('note')
@@ -997,6 +1040,251 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
     return fragment, report
 
 
+def connector_consequences(fragment: Dict, report: Dict, pcb=None,
+                           board_path: str = ''):
+    """The connector declarations `compile_brief` only CARRIES, compiled
+    into clauses a rule grades (#959, #1000). `(fragment, report)`, both NEW
+    -- `compile_brief` stays the pure compile -- with `report['consequences']`
+    listing one row per consequence:
+
+      `{id, ref, status: compiled|unmeasured|withheld, compiled_to, grader,
+        basis: declared|derived_default|None, value, why}`
+
+    Measured on five as-built boards before it was built (Phase-0 P3), and
+    therefore NOT the issue's literal mapping:
+
+      * `mount_mode: edge_mount` -> `max_setback_mm` 0.75 on the drawn body
+        (`derived_default`; tigard J7 sits 0.60 in);
+      * `mount_mode: through_edge` -> the body reaches the edge
+        (`overhang_mm.min` 0, no maximum);
+      * `mount_mode: top_mount` / `bottom_mount` -> the part stands off a
+        face, so the edge-receptacle seat does not apply to it
+        (`floorplan.VERTICAL_MOUNTS`; the default seat false-failed 8
+        vertical headers on the as-built boards);
+      * `cable_entry: perpendicular_*` or `user_facing` with a declared
+        `product.user_top_side` -> the face the part is on, graded as
+        `edge_connector_side` at a fixed WARN that steers no search;
+      * `cable_entry: in_plane` -> graded on the declared edge, and
+        unmeasured without one;
+      * a cable keep-out ONLY from a declared `cable_envelope_mm`, and only
+        for a FILE-locked part (a keep-out off an unlocked part moves with
+        every seed). No default dimension: none passed the controls.
+
+    A value the brief declares itself always wins over a derived one. z-height
+    and insertion travel are never measured -- a keep-out is a 2D projection
+    -- and the rows say so.
+    """
+    import copy
+    frag = copy.deepcopy(fragment or {})
+    rep = copy.deepcopy(report or {})
+    rows: List[Dict[str, object]] = []
+    uts = (rep.get('product') or {}).get('user_top_side')
+    uts = uts if uts in ('F', 'B') else None
+    other = {'F': 'B', 'B': 'F'}
+    declared = set(rep.get('declared') or ())
+    locked = ({k for k, f in (pcb.footprints or {}).items()
+               if getattr(f, 'locked', False)} if pcb is not None else set())
+    keeps = list(frag.get('keepouts') or [])
+    need_side = False
+    geo = None
+
+    def _row(ref, key, status, why, *, compiled_to=None, grader=None,
+             basis=None, value=None):
+        rows.append({'id': f"interfaces[{ref}].{key}", 'ref': ref,
+                     'status': status, 'compiled_to': compiled_to,
+                     'grader': grader, 'basis': basis, 'value': value,
+                     'why': why})
+
+    for e in frag.get('edge_connectors') or []:
+        ref = str(e['ref'])
+        ctx = e.setdefault('context', {})
+        basis = ctx.setdefault('basis', {})
+        src = ctx.setdefault('compiled_from', {})
+        mm, ce = ctx.get('mount_mode'), ctx.get('cable_entry')
+        if mm == 'edge_mount':
+            if 'max_setback_mm' not in e:
+                e['max_setback_mm'] = EDGE_MOUNT_SETBACK_MM
+                basis['max_setback_mm'] = 'derived_default'
+            src['max_setback_mm'] = 'mount_mode'
+            _row(ref, 'mount_mode', 'compiled',
+                 'the drawn body must sit within this of its edge (tigard '
+                 'J7, an edge-mount header on a shipping board, sits 0.60 '
+                 'mm in)',
+                 compiled_to=f"edge_connectors[{ref}].max_setback_mm",
+                 grader='edge_connector',
+                 basis=basis.get('max_setback_mm', 'declared'),
+                 value=e['max_setback_mm'])
+        elif mm == 'through_edge':
+            # "Reaches the edge": past it (an overhang floor of 0, no cap)
+            # or within the edge-mount setback of it. The floor ALONE is
+            # vacuous -- a body well inside the board reads 0 overhang and
+            # passes it -- so the setback is what makes the claim bite.
+            oh = dict(e.get('overhang_mm') or {})
+            if 'min' not in oh:
+                oh['min'] = 0.0
+                e['overhang_mm'] = oh
+                basis['overhang_mm.min'] = 'derived_default'
+                src['overhang_mm'] = 'mount_mode'
+            if 'max_setback_mm' not in e:
+                e['max_setback_mm'] = EDGE_MOUNT_SETBACK_MM
+                basis['max_setback_mm'] = 'derived_default'
+            src['max_setback_mm'] = 'mount_mode'
+            _row(ref, 'mount_mode', 'compiled',
+                 'the body reaches the edge: past it, or within the '
+                 'edge-mount setback of it',
+                 compiled_to=f"edge_connectors[{ref}].max_setback_mm",
+                 grader='edge_connector',
+                 basis=basis.get('max_setback_mm', 'declared'),
+                 value={'max_setback_mm': e['max_setback_mm'],
+                        'overhang_mm.min': oh['min']})
+        elif mm in fp.VERTICAL_MOUNTS:
+            _row(ref, 'mount_mode', 'compiled',
+                 'the part stands off a face, so the edge-receptacle seat '
+                 '(the mating face reaching the edge) does not apply; its '
+                 'declared edge and overhang still do',
+                 compiled_to=f"edge_connectors[{ref}].context.mount_mode",
+                 grader='edge_connector', basis='declared', value=mm)
+
+        # The face. From the cable when it is perpendicular (the cable
+        # leaves the face it is plugged into), else from `user_facing`.
+        perp = ce in ('perpendicular_top', 'perpendicular_bottom')
+        facing = f"interfaces[{ref}].user_facing" in declared
+        side_key = 'cable_entry' if perp else 'user_facing'
+        if perp or facing:
+            if uts is None:
+                _row(ref, side_key, 'unmeasured',
+                     'which face is the top is not declared '
+                     '(product.user_top_side), so no face follows from it')
+            else:
+                side = (uts if (not perp or ce == 'perpendicular_top')
+                        else other[uts])
+                if 'side' not in e:
+                    e['side'] = side
+                    basis['side'] = 'declared'
+                    need_side = True
+                src['side'] = side_key
+                _row(ref, side_key, 'compiled',
+                     f"product.user_top_side {uts} is the face the user "
+                     f"sees; the finding is advisory (WARN) and steers no "
+                     f"search",
+                     compiled_to=f"edge_connectors[{ref}].side",
+                     grader='edge_connector_side', basis='declared',
+                     value=e['side'])
+        if ce == 'in_plane' and not perp:
+            if not e.get('edge'):
+                _row(ref, 'cable_entry', 'unmeasured',
+                     'an in-plane cable leaves by an edge, and this '
+                     'interface declares none (edge "unknown")')
+            else:
+                _row(ref, 'cable_entry', 'compiled',
+                     'the cable leaves in the board plane, so the part is '
+                     'graded on its declared edge',
+                     compiled_to=f"edge_connectors[{ref}].edge",
+                     grader='edge_connector', basis='declared',
+                     value=e['edge'])
+
+        # The cable keep-out, only from a declared envelope.
+        if ce in ('in_plane', 'perpendicular_top', 'perpendicular_bottom'):
+            env = ctx.get('cable_envelope_mm')
+            dim = 'depth' if ce == 'in_plane' else 'clear'
+            tail = ('; z-height and insertion travel are not measured either '
+                    '-- a keep-out is a 2D projection')
+            if env is None or env == UNKNOWN:
+                _row(ref, 'cable_envelope_mm', 'unmeasured',
+                     ('declared "unknown"' if env == UNKNOWN else
+                      'no cable_envelope_mm is declared, and no default is '
+                      'used: none passed the as-built controls (#959 P3)')
+                     + f" -- the cable's {dim} is not measured" + tail)
+                continue
+            if dim not in env:
+                _row(ref, 'cable_envelope_mm', 'unmeasured',
+                     f"cable_envelope_mm declares no `{dim}`, which a {ce} "
+                     f"cable needs" + tail)
+                continue
+            face = None
+            if ce != 'in_plane':
+                face = (uts if ce == 'perpendicular_top'
+                        else other[uts]) if uts else None
+                if face is None:
+                    _row(ref, 'cable_envelope_mm', 'unmeasured',
+                         'which face the cable leaves from needs '
+                         'product.user_top_side' + tail)
+                    continue
+            if ce == 'in_plane' and not e.get('edge'):
+                _row(ref, 'cable_envelope_mm', 'unmeasured',
+                     'an in-plane band runs in from a declared edge, and '
+                     'none is declared' + tail)
+                continue
+            if pcb is None or ref not in (pcb.footprints or {}):
+                _row(ref, 'cable_envelope_mm', 'withheld',
+                     'no board to place the keep-out against' + tail)
+                continue
+            if ref not in locked:
+                _row(ref, 'cable_envelope_mm', 'withheld',
+                     f"lock {ref} to derive its cable keep-out: a keep-out "
+                     f"off an unlocked part would move with every seed"
+                     + tail)
+                continue
+            if geo is None:
+                from .reconcile import _Geometry
+                geo = _Geometry(pcb, board_path)
+            body = geo.body_rect(ref)
+            bounds = pcb.board_info.board_bounds if pcb.board_info else None
+            if body is None or (ce == 'in_plane' and bounds is None):
+                _row(ref, 'cable_envelope_mm', 'withheld',
+                     'the part or the outline has no measurable geometry'
+                     + tail)
+                continue
+            d = float(env[dim])
+            if ce == 'in_plane':
+                edge = e['edge']
+                rect = {'west': [bounds[0], body[1], bounds[0] + d, body[3]],
+                        'east': [bounds[2] - d, body[1], bounds[2], body[3]],
+                        'north': [body[0], bounds[1], body[2], bounds[1] + d],
+                        'south': [body[0], bounds[3] - d, body[2],
+                                  bounds[3]]}[edge]
+                sides = ['F', 'B']
+            else:
+                rect = [body[0] - d, body[1] - d, body[2] + d, body[3] + d]
+                sides = [face]
+            rect = [round(v, 4) for v in rect]
+            name = f"cable:{ref}"
+            keeps = [k for k in keeps if k.get('name') != name]
+            keeps.append({'name': name, 'rect': rect, 'sides': sides,
+                          'allow': [glob.escape(ref)],
+                          'context': {'source': 'brief',
+                                      'derived_from':
+                                      f"interfaces[{ref}].cable_envelope_mm",
+                                      'basis': 'declared',
+                                      'dimension': {dim: d}}})
+            _row(ref, 'cable_envelope_mm', 'compiled',
+                 f"the {ce} cable's declared {dim} of {d:g} mm around "
+                 f"{ref}'s drawn body" + tail,
+                 compiled_to=f"keepouts[{name}]", grader='keepout',
+                 basis='declared', value=rect)
+    if keeps:
+        frag['keepouts'] = keeps
+    if need_side:
+        frag['min_reader'] = max(int(frag.get('min_reader') or 0), 6)
+    compiled = {r['id'] for r in rows if r['status'] == 'compiled'}
+    rep['not_graded'] = [x for x in (rep.get('not_graded') or ())
+                         if x not in compiled]
+    rep['consequences'] = rows
+    return frag, rep
+
+
+def compile_with_consequences(brief: 'Brief', pcb=None,
+                              board_path: str = ''):
+    """`compile_brief` and then `connector_consequences`: what every CLI
+    that reads a brief against a board calls, so the emit path, the grade
+    path, `--plan-only`, `board_brief` and P1 derive the SAME clauses -- a
+    consequence only the emit path derived would never reach drift."""
+    frag, rep = compile_brief(
+        brief, board_refs=sorted((pcb.footprints or {}) if pcb else ()),
+        refs_known=pcb is not None)
+    return connector_consequences(frag, rep, pcb, board_path)
+
+
 def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
     """Merge a compiled fragment over an EMITTED intent. Declared wins.
 
@@ -1092,6 +1380,8 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
                     ('path', 'declared', 'unknown', 'absent', 'not_graded',
                      'unmatched', 'unmatched_checked', 'contradictions',
                      'counts', 'fixed', 'product')}
+    if report.get('consequences') is not None:
+        ctx['brief']['consequences'] = report['consequences']
     if fragment.get('keepouts'):
         ctx['keepouts_note'] = (
             f"{len(fragment['keepouts'])} keep-out(s) DECLARED by the design "
@@ -1126,6 +1416,14 @@ def _drift_clause_id(kind, ref, key, *, near=None, fragment=None):
         # claim the brief calls `along_edge`, and the report names that.
         if key in ('center_on_edge', 'along_edge_band'):
             key = 'along_edge'
+        # #959 (#1000): a key the consequence step COMPILED belongs to the
+        # declaration it came from -- the setback to `mount_mode`, the face
+        # to `cable_entry` or `user_facing`, a derived overhang floor to
+        # `mount_mode`.
+        entry = next((c for c in ((fragment or {}).get('edge_connectors')
+                                  or ()) if c.get('ref') == ref), None)
+        src = ((entry or {}).get('context') or {}).get('compiled_from') or {}
+        key = src.get(key, key)
         return f"interfaces[{ref}].{key}"
     if kind == 'proximity' and fragment is not None:
         for p in (fragment.get('proximity') or ()):
@@ -1160,17 +1458,49 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
             out.append(('', f"{ref}: the brief declares this connector; "
                             f"the intent has no entry for it"))
             continue
-        for key in ('edge', 'center_on_edge', 'along_edge_band', 'overhang_mm'):
+        for key in ('edge', 'center_on_edge', 'along_edge_band',
+                    'overhang_mm', 'max_setback_mm', 'side'):
             if key in c and cur.get(key) != c[key]:
                 out.append((
-                    _drift_clause_id('interfaces', ref, key),
+                    _drift_clause_id('interfaces', ref, key,
+                                     fragment=fragment),
                     f"{ref}.{key}: brief says {c[key]!r}, the intent "
                     f"{'says ' + repr(cur[key]) if key in cur else 'does not declare it'}"))
-    names = {k.get('name') for k in (intent_doc.get('keepouts') or [])}
+        # #959 (#1000): a compiled key the brief no longer produces, or a
+        # vertical mount the two read differently, is drift too -- the
+        # intent would grade a declaration the brief stopped making.
+        csrc = ((cur.get('context') or {}).get('compiled_from') or {})
+        for key in ('max_setback_mm', 'side'):
+            if key in cur and key not in c and key in csrc:
+                out.append((f"interfaces[{ref}].{csrc[key]}",
+                            f"{ref}.{key}: the intent carries "
+                            f"{cur[key]!r}, which the brief no longer "
+                            f"compiles"))
+        bm = (c.get('context') or {}).get('mount_mode')
+        im = (cur.get('context') or {}).get('mount_mode')
+        if bm != im and (bm in fp.VERTICAL_MOUNTS
+                         or im in fp.VERTICAL_MOUNTS):
+            out.append((f"interfaces[{ref}].mount_mode",
+                        f"{ref}.mount_mode: brief says {bm!r}, the intent "
+                        f"{im!r}"))
+    have_k = {k.get('name'): k for k in (intent_doc.get('keepouts') or [])}
     for k in (fragment.get('keepouts') or []):
-        if k.get('name') not in names:
-            out.append(('', f"keepout {k.get('name')!r}: declared by the "
-                            f"brief, absent from the intent"))
+        kctx = k.get('context') or {}
+        # A keep-out the consequence step derived belongs to the interface
+        # clause it came from; a declared one to its own id.
+        kid = (kctx.get('derived_from') or f"keepouts[{k.get('name')}]")
+        cur = have_k.get(k.get('name'))
+        if cur is None:
+            out.append((kid if kctx.get('derived_from') else '',
+                        f"keepout {k.get('name')!r}: declared by the "
+                        f"brief, absent from the intent"))
+            continue
+        # By SHAPE, not only by name: a face change keeps the name (#959).
+        for field_name in ('rect', 'circle', 'sides', 'allow'):
+            if field_name in k and cur.get(field_name) != k[field_name]:
+                out.append((kid, f"keepout {k.get('name')!r}.{field_name}: "
+                                 f"brief says {k[field_name]!r}, the intent "
+                                 f"{cur.get(field_name)!r}"))
     # #902. Keyed on the ORDERED (ref, near) pair, which is the row's identity
     # in the brief too, so the two halves cannot disagree about what "the same
     # claim" means. The list `ref` was expanded by `compile_brief`, so both
@@ -1240,7 +1570,7 @@ _CLAUSE_RULE = {'interfaces': 'edge_connector',
 #: Interface keys that are CARRIED and graded by nothing, by design. They are
 #: already in `report['not_graded']`; naming them here too keeps the coverage
 #: verdict from depending on a list that exists for a different purpose.
-_CLAUSE_CARRIED = {'mount_mode', 'cable_entry'}
+_CLAUSE_CARRIED = {'mount_mode', 'cable_entry', 'cable_envelope_mm'}
 
 _CLAUSE_RE = re.compile(
     r'^(?P<kind>interfaces|keepouts|proximity|product)'
@@ -1288,7 +1618,29 @@ def parse_clause_id(cid: str) -> Optional[Dict[str, object]]:
     return out
 
 
-def _clause_state(rec, intent_doc, rules_run, abstained):
+def _intent_has(intent_doc, path: str) -> bool:
+    """Does the intent carry `edge_connectors[REF].key[.sub]` or
+    `keepouts[NAME]` -- the path a consequence row compiled to."""
+    m = re.match(r'^(edge_connectors|keepouts)\[(.*?)\](?:\.(.*))?$',
+                 path or '')
+    if not m:
+        return False
+    kind, name, rest = m.groups()
+    if kind == 'keepouts':
+        return any(k.get('name') == name
+                   for k in (intent_doc.get('keepouts') or ()))
+    node = next((c for c in (intent_doc.get('edge_connectors') or ())
+                 if c.get('ref') == name), None)
+    for part in (rest or '').split('.'):
+        if not part:
+            continue
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return node is not None
+
+
+def _clause_state(rec, intent_doc, rules_run, abstained, cons=None):
     """The verdict for ONE declared clause. Five states, kept apart.
 
     `graded` is the only one that means a rule reached a verdict. Collapsing
@@ -1298,7 +1650,26 @@ def _clause_state(rec, intent_doc, rules_run, abstained):
     """
     kind, ref, near, key = rec['kind'], rec['ref'], rec['near'], rec['key']
     rule = _CLAUSE_RULE.get(kind)
-    if rule is None or (kind == 'interfaces' and key in _CLAUSE_CARRIED):
+    if kind == 'interfaces' and key in _CLAUSE_CARRIED:
+        # #959 (#1000): graded when `connector_consequences` compiled it
+        # and the intent carries what it compiled to; otherwise carried,
+        # and an UNMEASURED one says which dimension nobody declared.
+        row = (cons or {}).get(f"interfaces[{ref}].{key}")
+        if row is None:
+            return 'carried', '', rule
+        if row['status'] != 'compiled':
+            return 'carried', f"{row['status']}: {row['why']}", None
+        if not _intent_has(intent_doc, row['compiled_to']):
+            return ('uncovered', f"the intent does not carry "
+                                 f"{row['compiled_to']}, which the brief's "
+                                 f"{key} compiles to", rule)
+        rule = 'edge_connector' if row['grader'] in (
+            'edge_connector', 'edge_connector_side') else row['grader']
+        if rule not in rules_run:
+            return ('uncovered', f"`{rule}`, which grades what {key} "
+                                 f"compiles to, did not run", rule)
+        return 'graded', '', rule
+    if rule is None:
         return 'carried', '', rule
     if kind == 'interfaces':
         entry = next((c for c in (intent_doc.get('edge_connectors') or [])
@@ -1386,6 +1757,7 @@ def clause_coverage(report: Dict, intent_doc: Dict, *,
     the same reason -- it is testable against a hand-built intent document.
     """
     drift_set = set(drifted_ids or ())
+    cons = {r['id']: r for r in (report.get('consequences') or ())}
     clauses = []
     counts = {'graded': 0, 'abstained': 0, 'uncovered': 0,
               'not_claimed': 0, 'carried': 0, 'drifted': 0}
@@ -1394,10 +1766,12 @@ def clause_coverage(report: Dict, intent_doc: Dict, *,
         if rec is None:
             continue
         state, why, rule = _clause_state(rec, intent_doc, tuple(rules_run),
-                                         abstained)
+                                         abstained, cons)
         row = {'id': cid, 'kind': rec['kind'], 'ref': rec['ref'],
                'rule': rule, 'state': state, 'why': why,
                'drifted': cid in drift_set}
+        if why.startswith(('unmeasured: ', 'withheld: ')):
+            row['unmeasured'] = why.split(': ', 1)[1]
         clauses.append(row)
         counts[state] += 1
         if row['drifted']:

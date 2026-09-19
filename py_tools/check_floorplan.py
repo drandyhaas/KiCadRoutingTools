@@ -202,7 +202,7 @@ def intent_doc_for_drift(path):
 
 
 def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
-               mech=None):
+               mech=None, brief_report=None):
     """`--plan-only` (#959, #998): the plan, checked before any pose.
 
     `plan_check` plus the rule roster, with the declaration ledger in its
@@ -234,7 +234,9 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
                           intent_doc=intent_doc_for_drift(args.intent),
                           intent_source=args.intent, floors_used=knobs)
     stale = stale_dispositions(intent, rows, pcb, reconciliation=recon)
-    ledger = declaration_ledger(intent, rows, reconciliation=recon)
+    ledger = declaration_ledger(
+        intent, rows, reconciliation=recon,
+        consequences=(brief_report or {}).get('consequences'))
     answered_c = (intent.dispositions or {}).get('contradictions', {})
     open_c = [r['id'] for r in _rc.contradictions(recon)
               if r['id'] not in answered_c]
@@ -318,8 +320,11 @@ def main(argv=None):
     brief_report = {}
     brief_fragment = {}
     if brief is not None:
-        brief_fragment, brief_report = _db.compile_brief(
-            brief, board_refs=sorted(pcb.footprints or {}))
+        # #959 (#1000): compiled WITH the connector consequences, here and
+        # before the emit/grade branch, so both paths -- and drift -- see the
+        # same clauses.
+        brief_fragment, brief_report = _db.compile_with_consequences(
+            brief, pcb, args.board)
         if not args.quiet:
             print(_db.format_report(brief_report, path=brief_path))
             for line in brief_report['unmatched']:
@@ -329,6 +334,11 @@ def main(argv=None):
             if brief_report['not_graded']:
                 print(f"  carried, NOT graded: "
                       f"{', '.join(brief_report['not_graded'])}")
+            for _r in brief_report.get('consequences') or ():
+                print(f"  {_r['status'].upper():10s} {_r['id']}"
+                      + (f" -> {_r['compiled_to']}"
+                         f" [{_r['basis']}]" if _r['compiled_to'] else '')
+                      + f": {_r['why']}")
     elif not args.quiet and not getattr(args, 'no_brief', False):
         # A SILENT absence is the failure this channel exists to fix, so the
         # not-found branch says what is filling the gap instead.
@@ -484,7 +494,7 @@ def main(argv=None):
 
     if args.plan_only:
         return _plan_only(args, intent, pcb, sources, brief_fragment,
-                          brief_path, mech)
+                          brief_path, mech, brief_report)
 
     # #711. On the --intent path the brief REPORTS DRIFT; it does not merge.
     # Merging would make the graded document differ from the file on disk, so
@@ -581,7 +591,9 @@ def main(argv=None):
     # `complete`.
     ledger = declaration_ledger(result.intent, result.roster, result=result,
                                 coverage=coverage, brief_source=brief_path,
-                                reconciliation=_rows)
+                                reconciliation=_rows,
+                                consequences=(brief_report or {}).get(
+                                    'consequences'))
     ledger_s = ledger_summary(ledger)
     if not args.quiet and ledger_s['carried_facts']:
         print(f"  {len(ledger_s['carried_facts'])} declared fact(s) are "

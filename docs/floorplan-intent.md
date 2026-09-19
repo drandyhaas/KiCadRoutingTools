@@ -138,7 +138,7 @@ source, suspect, suspect_reason
 | `defaults` | `zone_tolerance_mm` |
 | `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `rotation`, `rotation_candidates`, `note`, `context` |
 | `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `note`, `context` |
-| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
+| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `side` (#959: `F`/`B`, the connector's face, graded as the advisory `edge_connector_side`; needs `min_reader` 6), `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
 | `edge_connectors[].overhang_mm` | `min`, `max` |
 | `edge_connectors[].center_on_edge` | `tolerance_mm` (required — see below) |
 | `edge_connectors[].along_edge_band` | `from`, `to` |
@@ -148,7 +148,7 @@ source, suspect, suspect_reason
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 34 rule names below |
+| `severity` | any of the 35 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `dispositions` | `rules`, `withheld`, `refs`, `contradictions` -- each `{key: why}`, a non-empty written reason (#959; see "The rule roster" below) |
 | `must_lock` | a list of reference globs (no nested keys) |
@@ -164,7 +164,8 @@ the eleven `plan_check` findings (#959: `plan_zone_exclusive_unsatisfiable`,
 `block_glob_literal`, `plan_fixed_outside_zone`, `plan_zone_overfull`,
 `plan_zone_crowded`, `plan_edge_overfull`, `plan_edge_crowded`,
 `plan_board_overfull`, `plan_board_crowded`, `plan_fixed_overlap`,
-`plan_fixed_overlap_budget`),
+`plan_fixed_overlap_budget`), `edge_connector_side` (#959, settable to `warn`
+only -- `error` is refused, because nothing moves a part between faces),
 plus three more raised BESIDE a rule's own name —
 `decap_pin_distance_inferred` and `decap_pin_uncovered` (#705), and
 `proximity_unresolved` (#902). One measurement can support several claims, and
