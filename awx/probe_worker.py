@@ -97,6 +97,7 @@ class Worker:
         te.ATTEMPTS = int(replan.PROBE_ATTEMPTS)
         te.BUDGET_X = int(replan.PROBE_BUDGET_X)
         os.environ['BRAID_SMOOTH'] = os.environ.get('PROBE_SMOOTH', '0')
+        te.LADDER_MODE = replan.PROBE_LADDER
         replan.braid_run = self.braid_inproc
         self.K, self.base, self.nets_csv = int(q['K']), q['base'], q['nets_csv']
         self.names = list(q['names'])
@@ -131,7 +132,8 @@ class Worker:
         dst = replan.move_from_json(q.get('dst'))
         t0 = time.time()
         res = replan.probe_run(self.B, q['R'], q['net'], src, dst, q['tag'], self.K, self.base,
-                               self.nets_csv, log=lambda *a: None, extra_relay=q.get('extra_relay'))
+                               self.nets_csv, log=lambda *a: None, extra_relay=q.get('extra_relay'),
+                               ref=q.get('ref'))
         self.n_probes += 1
         out = _res_json(res)
         out['worker_s'] = time.time() - t0

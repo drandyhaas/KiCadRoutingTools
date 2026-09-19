@@ -366,7 +366,33 @@ def audit(asked, achieved, original, laid, log, label):
                      'layer': n_lay, 'kind': n_kind, 'gap': n_gap, 'order': oa}
 
 
-def drc_pairs(board):
+def drc_pairs(board, nets=None):
+    """The DRC violation lines of `board` at the fanout's floor. `nets`
+    (short names): only checks involving one of them -- sound when every
+    other piece of copper was clean before, i.e. when the caller changed
+    only those nets on a clean board (2026-09-18: a probe's fanout board
+    is such a board; the whole-board check was 0.47 s of a 6.6 s probe).
+    In-process when scoped (the checker imported once), a subprocess
+    otherwise, as ever."""
+    if nets:
+        import contextlib
+        import io
+        sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+        import check_drc as _cd
+        pats = [f'*/{n}' for n in nets] + list(nets)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            try:
+                _cd.run_drc(board, clearance=0.1, clearance_margin=0.1, net_patterns=pats, max_print=10 ** 6)
+            except SystemExit:
+                pass
+        out = buf.getvalue()
+        if 'NO DRC VIOLATIONS' not in out and 'DRC VIOLATION' not in out:
+            raise RuntimeError(f'check_drc (scoped to {nets}) gave no verdict for {board}: '
+                               + ((out.strip().splitlines() or ['(no output)'])[-1])[:200])
+        if 'NO DRC VIOLATIONS' in out:
+            return []
+        return [ln.strip() for ln in out.splitlines() if '<->' in ln]
     r = subprocess.run([sys.executable,
                         os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
                         board, '--clearance', '0.1', '--clearance-margin', '0.1'],
@@ -387,7 +413,7 @@ def drc_pairs(board):
 
 
 def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
-            guard_names=(), free=(), strict=False):
+            guard_names=(), free=(), strict=False, clean_base=False):
     """Strip the chosen nets' source copper, re-fan them in the asked
     faces, write `out_path`, audit every tooth. Returns a dict with the
     per-net audit, `ok` (laid) / `restored` (refused), and `rejected` (a
@@ -494,7 +520,7 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
         drift = [nm for nm in others if before[nm][0] != after[nm][0]]
         log(f'  source realize: {len(others) - len(drift)}/{len(others)} unmoved '
             f'teeth unchanged' + (f'; DRIFTED: {", ".join(drift)}' if drift else ''))
-    pairs = drc_pairs(out_path)
+    pairs = drc_pairs(out_path, nets=list(src_choice) if clean_base else None)
     rejected = None
     if pairs:
         rejected = f'{len(pairs)} DRC pair(s) on the realized source board'
