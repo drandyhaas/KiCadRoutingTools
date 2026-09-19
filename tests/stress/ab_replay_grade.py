@@ -338,6 +338,12 @@ def grade(pcb, clearance, baseline=None):
             _recorded = None
     if _recorded is None:
         drc_args[-1:-1] = ["-c", clearance]
+    # #962: the unrouted input is check_drc's --baseline too, so a via the input
+    # already had in a paste opening is accepted `inherited-via-in-paste`
+    # instead of counting against the router in `drc` (and in the `drc_real`
+    # fallback below, when kicad-cli is unavailable).
+    if baseline and os.path.exists(str(baseline)):
+        drc_args += ["--baseline", str(baseline)]
     drc = subprocess.run(drc_args, capture_output=True, text=True)
     # NOT --quiet: the "Checking N routed nets" total (needed for completion %)
     # only prints in non-quiet mode; the unrouted/connectivity-issue counts print

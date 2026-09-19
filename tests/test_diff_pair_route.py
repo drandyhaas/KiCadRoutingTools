@@ -66,8 +66,11 @@ def is_connected(board, pattern):
 
 def drc_clean(board, pattern):
     """True if the pair has no DRC violations (scoped to its own nets)."""
+    # --baseline BOARD (#962): routed_output ships 339 human vias in BGA paste
+    # openings, 4 of them on these pairs' nets. They are the input's, not this
+    # route's, so they are accepted as inherited rather than failing the pair.
     cmd = [sys.executable, "py_router/check_drc.py", board, "--clearance", CLEARANCE,
-           "--nets", f"*{pattern}*", "--clearance-margin", "0.1"]
+           "--nets", f"*{pattern}*", "--clearance-margin", "0.1", "--baseline", BOARD]
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     return "NO DRC VIOLATIONS" in (r.stdout + r.stderr)
 

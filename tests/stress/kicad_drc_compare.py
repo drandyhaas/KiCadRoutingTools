@@ -76,6 +76,11 @@ KICAD_COPPER_TYPES = {
 # below its min_track_width is a check_drc size item AND a KiCad size item,
 # both outside this comparator's copper-clearance match.
 CD_SIZE_TYPES = {"track-width", "via-size", "via-drill-size"}
+# #962 D6: a via in a solder-paste opening. KiCad has NO such check (probed on
+# 10.0.0: no finding at any severity), so these never enter the copper match,
+# where every one would read checkdrc_only. They get a labelled channel of
+# their own, `via_in_paste`, and never count as edge accepts.
+CD_VIA_PASTE_TYPES = {"via-in-paste"}
 
 # Min-copper-web class (#406): graded SEPARATELY from the copper-clearance
 # classes -- check_drc has no counterpart (the artifact lives in KiCad's own
@@ -852,6 +857,14 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
     # check_drc failures -- split them out of the counted list, and use them to drop
     # the matching kicad copper_edge_clearance finding below (respect check_drc's
     # authority instead of alarming it as a false negative).
+    via_in_paste = {
+        "check_drc": sum(1 for c in cd if c["type"] in CD_VIA_PASTE_TYPES
+                         and not c.get("accepted")),
+        "protected": sum(1 for c in cd if c.get("accepted") == "protected-via-in-paste"),
+        "inherited": sum(1 for c in cd if c.get("accepted") == "inherited-via-in-paste"),
+        "kicad": None,      # KiCad has no via-in-paste check
+    }
+    cd = [c for c in cd if c["type"] not in CD_VIA_PASTE_TYPES]
     cd_accepted = [c for c in cd if c.get("accepted")]
     cd = [c for c in cd if not c.get("accepted")]
     # Symmetric baseline subtraction (#405): drop the input's own check_drc
@@ -864,6 +877,7 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             cd_base = run_check_drc(baseline, clearance, netclasses=not bool(clearance))
         except Exception:  # noqa: BLE001 -- best-effort, tolerate a bad input
             cd_base = None
+        cd_base = [c for c in (cd_base or []) if c["type"] not in CD_VIA_PASTE_TYPES]
         cd, cd_pre = _subtract_baseline(cd, cd_base or [])
     kicad_intentional = checkdrc_intentional = 0
     # Static footprint-geometry conditions (#450 kbic65): a hole_clearance
@@ -951,6 +965,8 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             "connection_width_items": web_items,
             # run-6: the labeled courtyard channel (never silently filtered)
             "courtyard": courtyard,
+            # #962 D6: check_drc-only by construction (KiCad has no check)
+            "via_in_paste": via_in_paste,
             "kicad_only_items": kicad_only, "checkdrc_only_items": cd_only}
 
 
@@ -960,7 +976,7 @@ _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "matched", "kicad_only", "checkdrc_only",
                  "pairs_kicad_only", "pairs_checkdrc_only",
                  "kicad_connection_width", "connection_width_min",
-                 "courtyard")
+                 "courtyard", "via_in_paste")
 
 
 def compare_board(board: str, label: str = None, clearance: float = None,
@@ -997,6 +1013,11 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     for wv in data.get("connection_width_items", []):
         print(f"    CONNWIDTH   {'/'.join(wv.get('kinds', ())) or '?':16s} "
               f"{sorted(wv['nets'])} @ {wv['pos']}  {wv.get('desc', '')[:60]}")
+    vip = data.get("via_in_paste")
+    if vip and any(vip.get(k) for k in ("check_drc", "protected", "inherited")):
+        print(f"    VIA-IN-PASTE check_drc={vip['check_drc']} "
+              f"protected={vip['protected']} inherited={vip['inherited']} "
+              f"(KiCad has no such check)")
     court = data.get("courtyard")
     if court is not None:
         if "error" in court:

@@ -2018,6 +2018,83 @@ def footprint_graphic_outline_census(pcb_data) -> dict:
     }
 
 
+#: #962 D6 accepted classes for a via in a paste opening (published, never
+#: counted): the via is filled+capped, or the --baseline board already had it.
+VIA_IN_PASTE_ACCEPTED = ('protected-via-in-paste', 'inherited-via-in-paste')
+
+
+def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
+                       accepted, quiet):
+    """#962 D6: a via whose BARREL overlaps a solder-paste opening that
+    concerns its net.
+
+    The opening prints paste onto the barrel, and without IPC-4761 Type VII
+    (filled AND capped) the solder wicks into it. KiCad has no such check
+    (probed on 10.0.0: no finding at any severity), so this is check_drc's own
+    class, and kicad_drc_compare reports it on a labelled channel of its own.
+
+    - Filled and capped -> accepted `protected-via-in-paste`. Resolved token by
+      token: the via's own spec, then the board setup, then KiCad's factory
+      value (`fab_notes.effective_via_protection`), so a via carrying only
+      `(tenting ...)` still inherits the board's capping and filling.
+    - A via the `--baseline` board already had (same net NAME, within half its
+      diameter, the rule `fab_notes` uses for "pre-existing") -> accepted
+      `inherited-via-in-paste`. No routing pass can change a fab spec it did not
+      write, and the tool never re-specs a via it did not add (#741).
+    - Otherwise a `via-in-paste` violation, with `penetration_mm` (how far the
+      barrel reaches into the opening) and the opening's `owner_ref`.
+
+    Which openings concern a net, and the barrel test, are
+    `fab_notes.via_paste_sites`, the same call the ship-time Type VII stamp
+    makes, so the stamp and this check cannot disagree about a site. A
+    foreign-net via in an opening is a short and is reported as one.
+    """
+    from fab_notes import (via_paste_sites, effective_via_protection,
+                           is_filled_and_capped, via_snapshot, _preexisting)
+    setup = getattr(pcb_data.board_info, 'via_protection_setup', None) or {}
+    vias = [v for v in pcb_data.vias
+            if matching_via_nets is None or v.net_id in matching_via_nets]
+    if not vias or not getattr(pcb_data, 'paste_apertures', None):
+        return
+    snap_by_net = None
+    if baseline_pd is not None:
+        name_to_id = {n.name: nid for nid, n in pcb_data.nets.items()}
+        snap_by_net = {}
+        for (bnid, x, y, sz) in via_snapshot(baseline_pd.vias):
+            bn = baseline_pd.nets.get(bnid)
+            nid = name_to_id.get(bn.name) if bn is not None else None
+            if nid is not None:
+                snap_by_net.setdefault(nid, []).append((x, y, sz))
+    counts = {k: 0 for k in VIA_IN_PASTE_ACCEPTED}
+    n_viol = 0
+    for v, ap, pen in via_paste_sites(vias, pcb_data):
+        eff = effective_via_protection(v.tenting_attrs, setup)
+        n = pcb_data.nets.get(v.net_id)
+        row = {'type': 'via-in-paste', 'net1': n.name if n else str(v.net_id),
+               'via_loc': (v.x, v.y), 'owner_ref': ap.owner_ref,
+               'item2': ap.label(), 'source': ap.source, 'layer': ap.layer,
+               'penetration_mm': round(pen, 4),
+               'capping': eff.get('capping'), 'filling': eff.get('filling')}
+        if is_filled_and_capped(eff):
+            row['accepted'] = 'protected-via-in-paste'
+        elif snap_by_net is not None and _preexisting(v, snap_by_net):
+            row['accepted'] = 'inherited-via-in-paste'
+        if row.get('accepted'):
+            counts[row['accepted']] += 1
+            accepted.append(row)
+        else:
+            n_viol += 1
+            violations.append(row)
+    if quiet or not (n_viol or any(counts.values())):
+        return
+    print("Vias in a solder-paste opening: %d unprotected (violations), "
+          "%d filled+capped (accepted), %d inherited from --baseline (accepted)%s"
+          % (n_viol, counts['protected-via-in-paste'],
+             counts['inherited-via-in-paste'],
+             '; pass --baseline <input board> to accept the vias the board '
+             'already had' if n_viol and baseline_pd is None else ''))
+
+
 def _baseline_footprint_poses(baseline):
     """{footprint key: (x, y, rotation, layer)} of a --baseline board, or None.
 
@@ -3672,7 +3749,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
               + ', '.join('%s (%s)' % (u['owner_ref'], u['kind'])
                           for u in _graphic_unmeasured[:8])
               + (' ...' if len(_graphic_unmeasured) > 8 else ''))
-    _baseline_poses = _baseline_footprint_poses(baseline)
+    # Parsed ONCE: the graphic-graze origin and the via-in-paste inheritance
+    # below both read it.
+    _baseline_pd = (parse_kicad_pcb(baseline) if isinstance(baseline, str) and baseline
+                    else (baseline or None))
+    _baseline_poses = _baseline_footprint_poses(_baseline_pd)
 
     def _graphic_origin(owner):
         """Did a part move put this graze there? It takes a baseline to say."""
@@ -4133,6 +4214,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'via_loc': (via.x, via.y),
                     })
 
+    _via_in_paste_pass(pcb_data, matching_via_nets, _baseline_pd, violations,
+                       _accepted_edge, quiet)
+
     # Same-net COPPER overlaps are not DRC failures: same-net copper is allowed
     # to overlap (KiCad's own DRC permits it -- it only enforces clearance between
     # DIFFERENT nets). This covers both same-net segment crossings AND same-net
@@ -4320,6 +4404,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               f"against --baseline (placement-created, not inherited)")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                    elif vtype == 'via-in-paste':
+                        print(f"  Via:{v['net1']} in paste opening {v['item2']} -- "
+                              f"barrel {v['penetration_mm']:.3f}mm into it, not "
+                              f"filled+capped (capping {v['capping']}, filling {v['filling']})")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     elif vtype == 'via-board-edge':
                         where = _edge_phrase(v['edge'])
                         print(f"  Via:{v['net1']} {where}")

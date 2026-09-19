@@ -155,6 +155,16 @@ def main():
         check('3. --json-out via_in_pad: count == stamped == sites, nothing unprotected',
               vip.get('count') == vip.get('stamped') == len(sites) and vip.get('unprotected') == [],
               str({k: vip.get(k) for k in ('count', 'stamped', 'unprotected')}))
+        # D6 on the shipped board: the stamp and check_drc share
+        # fab_notes.via_paste_sites, so a stamped via reads as protected
+        from check_drc import run_drc
+        rows = run_drc(out_b, clearance=0.1, clearance_margin=0.1, quiet=True,
+                       print_summary=False, baseline=src)
+        vv = [r for r in rows if r.get('type') == 'via-in-paste' and not r.get('accepted')]
+        vp = [r for r in rows if r.get('accepted') == 'protected-via-in-paste']
+        check('3. check_drc on the shipped board: no via-in-paste violation, and the '
+              'stamped vias in paste read protected-via-in-paste',
+              not vv and len(vp) >= 1, f'{len(vv)} violations, {len(vp)} protected')
 
         # 4 -- --write-fill's pcbnew re-save keeps them
         from kicad_exact_fill import write_filled_board
