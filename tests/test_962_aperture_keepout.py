@@ -122,6 +122,12 @@ def main():
         freed = sum(1 for a, b in band if not vm_off.is_via_blocked(int(a), int(b)))
         check('2. ... and without it they are free (positive control)',
               freed == len(band) > 0, f'{freed} of {len(band)}')
+        # 0 keeps its legacy meaning (the declared pad only), as on the
+        # routing path: the opening's extra 0.5 mm is NOT kept out
+        vm_zero = build_via_obstacle_map(sq, cfg(0.0), exclude_net_id=1, same_net_pad_clearance=0.0)
+        free0 = sum(1 for a, b in band if not vm_zero.is_via_blocked(int(a), int(b)))
+        check('2. at an explicit 0 the plane via map adds no opening keep-out '
+              '(only the pad blocks)', 0 < free0 < len(band), f'{free0} of {len(band)} free')
     finally:
         shutil.rmtree(work2, ignore_errors=True)
 

@@ -110,6 +110,10 @@ def main():
                   and g[0]['owner_state'] == 'movable', str(g[0]))
             check('1. ... carries a location (seg_loc) for --render / kicad_drc_compare',
                   len(g[0].get('seg_loc') or ()) == 4)
+            # kicad_drc_compare pairs by net; KiCad names this item <no net>
+            check('1. ... net1 is the net-0 name (pairable), and no overlap_mm (not a '
+                  'clearance quantity, so "in CONTACT" cannot count it)',
+                  g[0]['net1'] == '' and 'overlap_mm' not in g[0], str(g[0]))
         check('1. 115.34: none of its segments is ALSO an accepted row (no double publish)',
               not [v for v in accepted_graphic(vb) if 'U2' in str(v.get('item1'))])
         for nm, bd in (('original', orig), ('116.70', ok)):
@@ -275,6 +279,36 @@ def main():
         un = footprint_graphic_outline_census(parse_kicad_pcb(txt))['unmeasured']
         check('9. VISIBLE copper text is listed unmeasured (kind text); hidden text is not',
               [(u['owner_ref'], u['kind']) for u in un] == [('T1', 'text')], str(un))
+        # the forms the cheap pre-skip must not drop (phase-2 verification, round 2)
+        odd = board(
+            '(footprint "L:G" (layer "F.Cu") (at 5 5) (property "Reference" "G1")\n'
+            ' (fp_poly (pts (xy 0 0) (xy 1 0) (xy 1 1)) (stroke (width 0) (type solid)) '
+            '(fill yes) (layers "F.Cu" "F.Mask")))\n'
+            '(footprint "L:Q" (layer "F.Cu") (at 15 5) (property "Reference" "Q1")\n'
+            ' %s\n (pad "2" smd rect (at 2 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "/A"))\n'
+            ' (fp_curve (pts (xy 0 1) (xy 1 2) (xy 2 2) (xy 3 1)) (stroke (width 0.2) '
+            '(type solid)) (layers "F.Cu" "F.Mask")))\n'
+            '(footprint "L:K" (layer "F.Cu") (at 25 5) (property "Reference" "K1")\n'
+            ' %s\n (fp_text user "KO" (at 0 2) (layer "F.Cu" knockout) '
+            '(effects (font (size 1 1) (thickness 0.15)))))\n'
+            '(footprint "L:H" (layer "F.Cu") (at 35 5) (property "Reference" "H2")\n'
+            ' %s\n (fp_text user "do not hide me" (at 0 2) (layer "F.Cu") '
+            '(effects (font (size 1 1) (thickness 0.15)))))'
+            % (pad, pad, pad), 'odd_unmodelled')
+        un = footprint_graphic_outline_census(parse_kicad_pcb(odd))['unmeasured']
+        check('9. plural-layer logo and curve, knockout text and text SAYING "hide" '
+              'are all listed', sorted((u['owner_ref'], u['kind']) for u in un)
+              == [('G1', 'logo'), ('H2', 'text'), ('K1', 'text'), ('Q1', 'curve')], str(un))
+        nob = os.path.join(work, 'no_outline.kicad_pcb')
+        with open(nob, 'w', encoding='utf-8') as fh:
+            fh.write('(kicad_pcb (version 20240108) (generator "t")\n'
+                     ' (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+                     ' (setup)\n (net 0 "")\n (net 1 "/A")\n%s\n)' % fp_off)
+        cen = footprint_graphic_outline_census(parse_kicad_pcb(nob))
+        check('9. a board with NO outline: no rows, and its graphic copper is listed '
+              'unmeasured (no-outline)', not cen['rows']
+              and ('U9', 'no-outline') in [(u['owner_ref'], u['kind']) for u in cen['unmeasured']],
+              str(cen))
 
         # 10 -- the B side, graded absolutely (not only "the three agree")
         fp_b = ('(footprint "L:P" (layer "B.Cu") (at 38.5 10) (property "Reference" "U6")\n'
@@ -368,6 +402,19 @@ def main():
                           'graphic-off-board')
         check('17. control: the same outline UNFILLED is not over the cutout',
               not vh, str(vh))
+        # a filled KEYHOLE (a +-2 square with a slit into a +-1 hole) whose
+        # outline starts on its bridge vertex: it revisits vertex 0 mid-outline,
+        # and splitting it there read the copper-free hole as copper
+        key = ('(footprint "L:H" (layer "F.Cu") (at 20 15) (property "Reference" "H3")\n'
+               ' (pad "1" smd rect (at -1.5 1.5) (size 0.4 0.4) (layers "F.Cu") (net 1 "/A"))\n'
+               ' (fp_poly (pts (xy 1 0) (xy 2 0) (xy 2 2) (xy -2 2) (xy -2 -2) (xy 2 -2) '
+               '(xy 2 0) (xy 1 0) (xy 1 -1) (xy -1 -1) (xy -1 1) (xy 1 1)) '
+               '(stroke (width 0.1) (type solid)) (fill yes) (layer "F.Cu") (uuid "k1")))')
+        pk = parse_kicad_pcb(board(hole + '\n' + key, 'keyhole'))
+        kr = [r for r in footprint_graphic_outline_census(pk)['rows'] if r['owner_ref'] == 'H3']
+        check('17. a filled keyhole around a cutout: ONE shape, graded inside the '
+              'board (the hole is not copper)',
+              len(kr) == 1 and kr[0]['overrun_mm'] < 0, str(kr))
 
         # 18 -- the placement driver implicates the owner of a COUNTED row only
         import importlib.util

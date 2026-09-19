@@ -99,34 +99,78 @@ def via_paste_sites(vias, pcb_data, tol: float = 1e-6):
     return out
 
 
-def via_snapshot(vias) -> List[Tuple[int, float, float, float]]:
-    """`(net, x, y, size)` of every via, taken BEFORE a run lays copper. It is
-    what `via_protection_stamps` uses to tell a via this run ADDED from one
-    the board already had."""
+#: The first file format that can carry per-via `(capping ...)` /
+#: `(filling ...)`. KiCad 10 added IPC-4761 via protection; KiCad 9.0's parser
+#: has no case for either token and stops on an unknown one, so a stamped
+#: 20241229 board would not open in KiCad 9. Duplicated from
+#: kicad_parser.KICAD_10_MIN_VERSION to keep this module a leaf;
+#: test_962_type_vii_stamp pins the two equal.
+PER_VIA_PROTECTION_MIN_VERSION = 20250000
+
+
+def via_snapshot(vias, pcb_data=None) -> List[tuple]:
+    """`(net, x, y, size, spec, in_site)` of every via, taken BEFORE a run
+    changes the board.
+
+    It is what `via_protection_stamps` uses to tell a via this run ADDED from
+    one the board already had. `spec` is the via's own protection spec, so a
+    via stripped and re-laid on the same spot can get it back. `in_site` is
+    whether the via was already in a same-net pad or paste opening, and is
+    only known when `pcb_data` (the board BEFORE the run) is given, else
+    None. A run that MOVES PARTS passes it: a cap pulled onto a same-net via
+    turns a via nobody needed to protect into one under solder, and the run
+    that did that owes it the Type VII declaration.
+    """
+    sites = None
+    if pcb_data is not None:
+        sites = {id(v) for v, _p in via_in_pad_sites(vias, pcb_data.pads_by_net)}
+        sites |= {id(v) for v, _a, _pen in via_paste_sites(vias, pcb_data)}
     out = []
     for v in vias or ():
         nid = _get(v, 'net_id')
         x, y = _get(v, 'x'), _get(v, 'y')
         if nid is None or x is None or y is None:
             continue
-        out.append((int(nid), float(x), float(y), float(_get(v, 'size', 0.6) or 0.6)))
+        out.append((int(nid), float(x), float(y), float(_get(v, 'size', 0.6) or 0.6),
+                    dict(_get(v, 'tenting_attrs', None) or {}),
+                    None if sites is None else (id(v) in sites)))
     return out
 
 
-def _preexisting(via, snap_by_net) -> bool:
-    """Is `via` one the input board already had?
+def _input_match(via, snap_by_net):
+    """The input via at `via`'s spot, as its snapshot entry `(x, y, size[,
+    spec])`, or None.
 
-    Same net, and within half its own diameter of an input via. The sub-grid
-    nudge moves a via by at most size/4, so a nudged input via still reads as
-    itself; a via the tool re-placed somewhere new is the tool's placement.
+    Same net, and within half the smaller diameter. The sub-grid nudge moves a
+    via by at most size/4, so a nudged input via still reads as itself. A via
+    the tool stripped and laid again on the same spot matches too: the file
+    cannot tell the two apart, which is why the caller hands the input via's
+    spec back rather than calling the new via the tool's own.
     """
     nid = _get(via, 'net_id')
     x, y = _get(via, 'x'), _get(via, 'y')
     sz = _get(via, 'size', 0.6) or 0.6
-    for (ix, iy, isz) in snap_by_net.get(nid, ()):
+    for ent in snap_by_net.get(nid, ()):
+        ix, iy, isz = ent[0], ent[1], ent[2]
         if math.hypot(x - ix, y - iy) <= max(1e-3, min(sz, isz) / 2.0):
-            return True
-    return False
+            return ent
+    return None
+
+
+def _preexisting(via, snap_by_net) -> bool:
+    """Is `via` at the spot of one the input board already had?"""
+    return _input_match(via, snap_by_net) is not None
+
+
+def _format_can_declare(pcb_data) -> bool:
+    """Can this board's file format carry a per-via capping/filling token?
+
+    A board parsed from text knows its version. One built from a live pcbnew
+    board has none (0); there the running pcbnew decides, and
+    `gui_utils.apply_via_protection` discloses a setter it lacks.
+    """
+    ver = getattr(pcb_data, 'kicad_version', 0) or 0
+    return not (0 < ver < PER_VIA_PROTECTION_MIN_VERSION)
 
 
 def via_protection_stamps(vias, input_snapshot, pcb_data):
@@ -135,27 +179,41 @@ def via_protection_stamps(vias, input_snapshot, pcb_data):
     A via is stamped with `TYPE_VII_STAMP` when ALL of these hold:
     - its barrel overlaps a same-net SMD pad (`via_in_pad_sites`) or a paste
       opening that concerns its net (`via_paste_sites`);
-    - this run ADDED it: it is not in `input_snapshot` (see `_preexisting`).
-      A via the board already had keeps whatever it had (#741);
+    - this run ADDED it: no input via sits at its spot (see `_input_match`).
+      A via the board already had keeps whatever it had (#741). When the
+      input via at that spot carried a spec and the shipped via does not, the
+      via was stripped and laid again (`--force-reroute`, a rip-up), and the
+      input's spec is handed BACK rather than lost (`restored`);
     - it carries no protection spec of its own. An explicit spec is the
       designer's, and is never overridden;
-    - the board's own setup does not already make it filled AND capped.
+    - the board's own setup does not already make it filled AND capped;
+    - the board's FILE FORMAT can carry the tokens (KiCad 10 and later, see
+      `PER_VIA_PROTECTION_MIN_VERSION`). On an older format the via is
+      counted `unstampable` and listed, so the requirement is disclosed for
+      the fab drawing instead of written into a file KiCad 9 cannot open.
+
+    One more way a via the input HAD is stamped: when the snapshot says it was
+    NOT in a pad or paste opening before (`via_snapshot(..., pcb_data)`), and it
+    is now. A part this run moved put solder on it (place_fanout_clearance
+    pulls cap pads onto same-net vias by design), so this run created the site
+    and declares it (`site_created`, counted inside `stamped`).
 
     Returns `(stamps, record)`:
     - `stamps` is a list of `(via, spec)`;
     - `record` is the machine-readable note: {count, sites, stamped,
-      protected, unprotected, note}, where `unprotected` names each via-in-pad
-      or via-in-paste that ships without Type VII (a pre-existing one, or one
-      with its own non-Type-VII spec) so it is disclosed, not silent.
+      restored, protected, unstampable, unprotected, note}, where
+      `unprotected` names each via-in-pad or via-in-paste that ships without
+      Type VII, and why, so it is disclosed, not silent.
     """
     setup = getattr(getattr(pcb_data, 'board_info', None), 'via_protection_setup', None) or {}
+    can_declare = _format_can_declare(pcb_data)
     snap_by_net: Dict[int, list] = {}
-    for (nid, x, y, sz) in input_snapshot or ():
-        snap_by_net.setdefault(nid, []).append((x, y, sz))
+    for ent in input_snapshot or ():
+        snap_by_net.setdefault(ent[0], []).append(tuple(ent[1:]))
     pad_sites = {id(v): p for v, p in via_in_pad_sites(vias, pcb_data.pads_by_net)}
     paste_sites = {id(v): ap for v, ap, _pen in via_paste_sites(vias, pcb_data)}
     stamps, sites, unprotected = [], [], []
-    n_protected = 0
+    n_protected = n_restored = n_unstampable = n_site_created = 0
     for v in vias or ():
         vid = id(v)
         if vid not in pad_sites and vid not in paste_sites:
@@ -170,15 +228,43 @@ def via_protection_stamps(vias, input_snapshot, pcb_data):
         if is_filled_and_capped(effective_via_protection(own, setup)):
             n_protected += 1
             continue
-        if own or _preexisting(v, snap_by_net):
+
+        def _unprot(why):
             unprotected.append({'site': where, 'x': round(_get(v, 'x'), 4),
-                                'y': round(_get(v, 'y'), 4),
-                                'why': 'own spec kept' if own else 'pre-existing via kept'})
+                                'y': round(_get(v, 'y'), 4), 'why': why})
+        if own:
+            _unprot('own spec kept')
+            continue
+        match = _input_match(v, snap_by_net)
+        if match is not None:
+            spec = match[3] if len(match) > 3 else {}
+            was_site = match[4] if len(match) > 4 else None
+            if spec:
+                # Stripped and laid again on the input via's spot: give it the
+                # spec the input via had, whatever that spec says.
+                stamps.append((v, dict(spec)))
+                n_restored += 1
+                if not is_filled_and_capped(effective_via_protection(spec, setup)):
+                    _unprot("the input via's own spec, restored")
+                continue
+            if was_site is not False:
+                _unprot('at the spot of an input via, kept as the input had it')
+                continue
+            # The via was the input's, but it was NOT under solder there: a
+            # part this run moved put a pad or paste opening on it. The site
+            # is this run's, so the declaration is too (falls through).
+            n_site_created += 1
+        if not can_declare:
+            n_unstampable += 1
+            _unprot('file format %s predates per-via capping/filling (KiCad 10)'
+                    % (getattr(pcb_data, 'kicad_version', 0) or '?'))
             continue
         stamps.append((v, dict(TYPE_VII_STAMP)))
     record = {
         'count': len(sites), 'sites': sorted(set(sites)),
-        'stamped': len(stamps), 'protected': n_protected,
+        'stamped': len(stamps) - n_restored, 'restored': n_restored,
+        'protected': n_protected, 'unstampable': n_unstampable,
+        'site_created': n_site_created,
         'unprotected': unprotected,
         'note': VIA_IN_PAD_FAB_NOTE,
     }
@@ -225,8 +311,9 @@ def ship_via_protection_file(output_file: str, input_snapshot, context: str = ''
         with open(output_file, 'w', encoding='utf-8') as fh:
             fh.write(content)
         if n != len(stamps):
-            record['unstampable'] = len(stamps) - n
-            record['stamped'] = n
+            # a via with no uuid, or a block the stamper would not touch
+            record['unstampable'] = record.get('unstampable', 0) + (len(stamps) - n)
+            record['written'] = n
     print_via_protection_record(record, context, quiet=quiet)
     return record
 
@@ -242,7 +329,12 @@ def print_via_protection_record(record, context: str = '', quiet: bool = False):
           f"{', +%d more' % (len(record['sites']) - 8) if len(record['sites']) > 8 else ''}]"
           f" -- {record['stamped']} stamped (capping yes) (filling yes), "
           f"{record.get('protected', 0)} already filled+capped"
-          + (f", {len(unp)} shipped WITHOUT Type VII (kept as they were)" if unp else "")
+          + (f", {record['restored']} given back the input via's own spec"
+             if record.get('restored') else "")
+          + (f", {record['unstampable']} NOT stampable (the file format cannot "
+             f"declare it per via: put it on the fab drawing)"
+             if record.get('unstampable') else "")
+          + (f", {len(unp)} shipped WITHOUT Type VII" if unp else "")
           + f". {VIA_IN_PAD_FAB_NOTE}.")
 
 

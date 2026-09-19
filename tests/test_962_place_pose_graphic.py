@@ -158,6 +158,15 @@ def main():
               worsened(b, a) == ['oob_graphic_copper_refs'], str(worsened(b, a)))
         check('7. control: the same part, the same overrun: not worsened',
               worsened(b, dict(b)) == [], str(worsened(b, dict(b))))
+        b2 = {'oob_graphic_copper_count': 2, 'oob_graphic_copper_amount': 2.2,
+              'oob_graphic_copper_refs': [['A', 1.1], ['B', 1.1]]}
+        a2 = {'oob_graphic_copper_count': 1, 'oob_graphic_copper_amount': 0.01,
+              'oob_graphic_copper_refs': [['C', 0.01]]}
+        check('7. a STRICT improvement (2 parts at 1.1 -> 1 part at 0.01) is not refused '
+              'for where the remainder landed', worsened(b2, a2) == [], str(worsened(b2, a2)))
+        old = {k: v for k, v in b.items() if k != 'oob_graphic_copper_refs'}
+        check('7. a before report with no refs cannot name new parts: arm off',
+              worsened(old, dict(b)) == [], str(worsened(old, dict(b))))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")

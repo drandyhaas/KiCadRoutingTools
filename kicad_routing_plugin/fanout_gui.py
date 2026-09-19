@@ -2144,6 +2144,10 @@ class FanoutTab(wx.Panel):
             wx.Yield()
 
             pcb_data = build_pcb_data_from_board(board)
+            # #962: which vias are under solder BEFORE any cap moves (the
+            # CLI twin is in place_fanout_clearance.main).
+            from fab_notes import via_snapshot as _via_snapshot962
+            _input_vias962 = _via_snapshot962(pcb_data.vias, pcb_data)
             # #966: routing retains a declared zero then fab-floors it, but
             # placement treats that declaration as unset (fallback 0.25).
             # Preserve omission so the cap engine resolves its own contract;
@@ -2358,6 +2362,30 @@ class FanoutTab(wx.Panel):
                 nt.SetLayer(_layer_id(nsd['layer']))
                 nt.SetNetCode(nsd['net_id'])
                 board.Add(nt)
+
+            # #962: a via the moves put under a pad or paste opening declares
+            # Type VII, as place_fanout_clearance.main does for the file. Decided
+            # on the board AS MOVED, and applied to the live via at that spot.
+            try:
+                from fab_notes import (via_protection_stamps,
+                                       print_via_protection_record)
+                from .gui_utils import apply_via_protection
+                _post962 = build_pcb_data_from_board(board)
+                _st962, _rec962 = via_protection_stamps(
+                    _post962.vias, _input_vias962, _post962)
+                _live962 = [t for t in board.GetTracks()
+                            if t.GetClass() == 'PCB_VIA']
+                for _v962, _spec962 in _st962:
+                    for _t962 in _live962:
+                        _p962 = _t962.GetPosition()
+                        if (_t962.GetNetCode() == _v962.net_id
+                                and abs(pcbnew.ToMM(_p962.x) - _v962.x) < 1e-3
+                                and abs(pcbnew.ToMM(_p962.y) - _v962.y) < 1e-3):
+                            apply_via_protection(_t962, _spec962)
+                            break
+                print_via_protection_record(_rec962, "cap optimization")
+            except Exception as _e962:
+                print(f"  Via protection after the cap moves: skipped ({_e962})")
 
             if via_moves:
                 # Re-placed vias sit under the (now stale) pours; a bare

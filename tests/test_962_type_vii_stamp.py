@@ -19,7 +19,15 @@ Invariants:
    - a PRE-EXISTING via in a pad is kept, and so is one the tool NUDGED
      (< size/4), and both are listed `unprotected`;
    - a via with its own spec is kept and listed;
-   - a board declaring filled+capped gets no stamp (the via inherits it).
+   - a board declaring filled+capped gets no stamp (the via inherits it);
+   - a via laid again on the spot of an input via that carried a spec gets
+     that spec BACK (`restored`), rather than shipping without it
+     (`--force-reroute` / rip-up lost 5 Type VII specs that way);
+   - a board whose FILE FORMAT predates per-via capping/filling (KiCad 9,
+     20241229) gets no token -- KiCad 9 cannot open it -- and the via is
+     counted `unstampable` and listed;
+   - the BGA fanout's CHANNEL escape (in-pad vias centred on the ball) is
+     stamped, not only its under-pad escape.
 2. The text stamper inserts the tokens into exactly the via named by uuid, and
    the parser reads them back.
 3. End to end, route.py on the fixture:
@@ -30,6 +38,11 @@ Invariants:
    without KiCad).
 5. Structure (AST):
    - every via producer reaches the core;
+   - route.py stamps AFTER its last via-changing pass (`_late_orphan_sweep659`)
+     and create_plane AFTER `_finalize_plane_copper` (source order: the
+     esp_prog run exercises neither ordering, since its finalize adds no
+     in-pad via);
+   - check_join passes each via's `tenting_attrs` to the writer;
    - every `pcbnew.PCB_VIA(` in the GUI plugin is followed by
      `apply_via_protection` in the same function.
 
@@ -106,8 +119,61 @@ def main():
     stamps, rec = via_protection_stamps([pre, nudged], snap, p)
     check('1. a PRE-EXISTING via in a pad is never stamped, and is disclosed',
           not stamps and len(rec['unprotected']) == 2
-          and {u['why'] for u in rec['unprotected']} == {'pre-existing via kept'},
+          and {u['why'] for u in rec['unprotected']}
+          == {'at the spot of an input via, kept as the input had it'},
           str(rec['unprotected']))
+    # stripped and laid again: the input via here carried Type VII
+    snap_spec = via_snapshot([via(pad.global_x, pad.global_y, pnet, TYPE_VII_STAMP)])
+    relaid = via(pad.global_x + 0.1, pad.global_y, pnet)
+    stamps, rec = via_protection_stamps([relaid], snap_spec, p)
+    check("1. a via laid again on an input via's spot gets that via's own spec back",
+          [(id(v), sp) for v, sp in stamps] == [(id(relaid), TYPE_VII_STAMP)]
+          and rec['restored'] == 1 and rec['stamped'] == 0 and not rec['unprotected'],
+          str(rec))
+    # a part moved ONTO an input via (place_fanout_clearance pulls cap pads
+    # onto same-net vias by design): the site is this run's, so it is stamped
+    onto = via(pad.global_x, pad.global_y, pnet)
+    snap_off = [(pnet, pad.global_x, pad.global_y, 0.5, {}, False)]
+    stamps, rec = via_protection_stamps([onto], snap_off, p)
+    check('1. an input via NOT under solder before, under a pad now: stamped '
+          '(site_created)', [(id(v), sp) for v, sp in stamps] == [(id(onto), TYPE_VII_STAMP)]
+          and rec['site_created'] == 1 and rec['stamped'] == 1, str(rec))
+    snap_on = [(pnet, pad.global_x, pad.global_y, 0.5, {}, True)]
+    stamps, rec = via_protection_stamps([onto], snap_on, p)
+    check('1. ... and one that was ALREADY under solder keeps what it had',
+          not stamps and rec['site_created'] == 0, str(rec))
+    snap_p = via_snapshot([via(pad.global_x, pad.global_y, pnet), via(1, 1, c1)], p)
+    check('1. via_snapshot(vias, pcb_data) records who was under solder',
+          [e[5] for e in snap_p] == [True, False], str(snap_p))
+    # the format gate
+    import kicad_parser as _kp
+    check("1. the format gate is the parser's KiCad 10 threshold",
+          fab_notes.PER_VIA_PROTECTION_MIN_VERSION == _kp.KICAD_10_MIN_VERSION)
+    p9 = parse_kicad_pcb(FIX)
+    p9.kicad_version = 20241229
+    stamps, rec = via_protection_stamps([via(ax, ay, c1), via(pad.global_x, pad.global_y, pnet)],
+                                        [], p9)
+    check('1. a KiCad 9 (20241229) board: NO token written, both counted unstampable '
+          'and listed', not stamps and rec['unstampable'] == 2
+          and len(rec['unprotected']) == 2
+          and all('predates' in u['why'] for u in rec['unprotected']), str(rec))
+    # the BGA channel escape (haasoscope U3, the phase-3/4 verifier's repro)
+    from bga_fanout import generate_bga_fanout
+    hpath = os.path.join(ROOT, 'kicad_files', 'haasoscope_pro_max_test.kicad_pcb')
+    hb = parse_kicad_pcb(hpath)
+    hb.kicad_version = 20260206      # as if the file were KiCad 10
+    kw = dict(net_filter=['*U2A*DATA*'], primary_escape='horizontal',
+              force_escape_direction=True, layers=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
+              track_width=0.1, clearance=0.1, via_size=0.3, via_drill=0.2)
+    _t, bvias, _vr, _f = generate_bga_fanout(hb.footprints['U3'], hb, **kw)
+    bsites = fab_notes.via_in_pad_sites(bvias, hb.pads_by_net)
+    bad = [v for v, _pd in bsites if (v.get('tenting_attrs') or {}) != TYPE_VII_STAMP]
+    check('1. BGA fanout: every in-pad via it returns is stamped (channel escape too)',
+          len(bsites) >= 10 and not bad, f'{len(bsites)} in-pad, {len(bad)} unstamped')
+    h9 = parse_kicad_pcb(hpath)
+    _t, bvias9, _vr, _f = generate_bga_fanout(h9.footprints['U3'], h9, **kw)
+    check('1. ... and on the same board as its real KiCad 9 file: no via carries a token',
+          not any(v.get('tenting_attrs') for v in bvias9))
     stamps, rec = via_protection_stamps([specd], [], p)
     check('1. a via with its own spec keeps it, and is disclosed',
           not stamps and rec['unprotected'][0]['why'] == 'own spec kept')
@@ -181,6 +247,20 @@ def main():
             print('  NOT RUN: 4. write_filled_board unavailable here (%s) -- this is '
                   'not a pass' % getattr(st, 'reason', st))
 
+        # 3c -- route_diff's CLI file stamp, end to end
+        out_d = os.path.join(work, 'diff.kicad_pcb')
+        run_check([sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'route_diff.py'),
+                   src, out_d, '--nets', '/D_*'], accept=True, timeout=1200)
+        qd = parse_kicad_pcb(out_d)
+        dn = {n for n, v in qd.nets.items() if v.name.startswith('/D_')}
+        dv = [v for v in qd.vias if v.net_id in dn]
+        dsites = {id(v): v for v, _pd in fab_notes.via_in_pad_sites(dv, qd.pads_by_net)}
+        dsites.update({id(v): v for v, _a, _p in fab_notes.via_paste_sites(dv, qd)})
+        check('3. route_diff: its via-in-pad/paste ships filled+capped (file stamp)',
+              dsites and all(is_filled_and_capped(effective_via_protection(
+                  v.tenting_attrs, qd.board_info.via_protection_setup))
+                  for v in dsites.values()), f'{len(dsites)} sites')
+
         # 3b -- repair_planes' post-pass stamps a written board end to end too
         rec = ship_via_protection_file(out_b, via_snapshot(parse_kicad_pcb(out_b).vias), quiet=True)
         check('3. re-running the file stamp on a shipped board changes nothing '
@@ -195,7 +275,7 @@ def main():
         'py_router/route_diff.py': 'via_protection_stamps',
         'py_router/route_planes.py': 'via_protection_stamps',
         'py_router/repair_planes.py': 'ship_via_protection_file',
-        'py_router/bga_fanout/underpad.py': 'via_protection_stamps',
+        'py_router/bga_fanout/__init__.py': 'via_protection_stamps',
         'py_router/qfn_fanout/__init__.py': 'via_protection_stamps',
         'py_tools/check_join.py': 'via_protection_stamps',
         'kicad_routing_plugin/gui_utils.py': 'via_protection_stamps',
@@ -208,6 +288,25 @@ def main():
             or (isinstance(n.func, ast.Name) and n.func.id.startswith('_vps962')))
             for n in ast.walk(tree))
         check('5. via producer %s calls %s' % (rel, fn), called)
+    # the stamp runs after the last via-changing pass, by source order
+    rsrc = open(os.path.join(ROOT, 'py_router', 'route.py'), encoding='utf-8').read()
+    # the LAST call of each: the sweep also runs on an early path
+    i_sweep = rsrc.rfind('_late_orphan_sweep659(')
+    i_ship = rsrc.rfind('_ship_via_protection962(')
+    check('5. route.py calls the stamp AFTER its last _late_orphan_sweep659',
+          0 < i_sweep < i_ship, f'sweep {i_sweep}, stamp {i_ship}')
+    psrc = open(os.path.join(ROOT, 'py_router', 'route_planes.py'), encoding='utf-8').read()
+    i_fin = psrc.find('_finalize_plane_copper(', psrc.find('def create_plane'))
+    i_vps = psrc.find('_vps962(all_new_vias', psrc.find('def create_plane'))
+    check('5. create_plane stamps AFTER _finalize_plane_copper',
+          0 < i_fin < i_vps, f'finalize {i_fin}, stamp {i_vps}')
+    jtree = ast.parse(open(os.path.join(ROOT, 'py_tools', 'check_join.py'), encoding='utf-8').read())
+    jcalls = [n for n in ast.walk(jtree) if isinstance(n, ast.Call)
+              and getattr(n.func, 'id', getattr(n.func, 'attr', '')) == 'generate_via_sexpr']
+    check('5. check_join passes a real tenting_attrs= to every generate_via_sexpr call',
+          jcalls and all(any(k.arg == 'tenting_attrs' and not (
+              isinstance(k.value, ast.Constant) and k.value.value is None)
+              for k in c.keywords) for c in jcalls), str(len(jcalls)))
     plugin = os.path.join(ROOT, 'kicad_routing_plugin')
     missing = []
     for fn in sorted(os.listdir(plugin)):
@@ -220,7 +319,13 @@ def main():
             src = ast.get_source_segment(open(os.path.join(plugin, fn), encoding='utf-8').read(), node) or ''
             if 'pcbnew.PCB_VIA(' in src and 'apply_via_protection' not in src:
                 missing.append('%s:%s' % (fn, node.name))
-    check('5. every GUI function that builds a pcbnew.PCB_VIA applies its protection',
+            # a via SOURCE the GUI calls directly must be decided too: the
+            # planes tab's GND return vias skipped the stamp route_planes
+            # --add-gnd-vias applies (phase-3/4 verification)
+            if 'add_gnd_vias_to_existing_board(' in src and 'via_protection_stamps' not in src:
+                missing.append('%s:%s (GND vias)' % (fn, node.name))
+    check('5. every GUI function that builds a pcbnew.PCB_VIA applies its protection, '
+          'and every one that adds GND return vias stamps them',
           not missing, str(missing))
 
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")

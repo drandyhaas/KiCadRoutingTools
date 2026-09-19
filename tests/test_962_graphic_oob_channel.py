@@ -195,6 +195,67 @@ def main():
               and abs(f['refs'][0][1] - 1.11) <= 0.005, str(f))
         check('7. ... and with no proposal the original board is clean',
               _graphic_copper_findings(model, None)['refs'] == [])
+
+        # 8 -- the disclosure plumbing
+        import copy as _copy
+        from kicad_parser import compare_pcb_data
+        oc = parse_kicad_pcb(os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb'))
+        oc2 = _copy.copy(oc)
+        oc2.graphic_copper_unmeasured = oc.graphic_copper_unmeasured[1:]
+        diffs = compare_pcb_data(oc2, oc)
+        check('8. compare_pcb_data names a front that misses an unmeasured entry',
+              oc.graphic_copper_unmeasured
+              and any('Unmeasured graphic copper' in d for d in diffs)
+              and not any('Unmeasured' in d for d in compare_pcb_data(oc, oc)), str(diffs[:3]))
+        import importlib.util as _ilu
+        _sp = _ilu.spec_from_file_location('bs962', os.path.join(
+            ROOT, '.claude', 'skills', 'plan-pcb-placement-and-routing', 'scripts', 'board_score.py'))
+        bs = _ilu.module_from_spec(_sp)
+        _sp.loader.exec_module(bs)
+        # the line check_drc prints (the watchy form)
+        line = ("Footprint graphic copper grazing the edge, ACCEPTED as immutable-graphic: "
+                "9 row(s) (unverified 9); pass --baseline <input board> to grade grazes "
+                "a part move created")
+        check('8. board_score reads the unverified-graze count off check_drc\'s line',
+              bs._unverified_grazes(line) == 9
+              and bs._unverified_grazes(line.replace('unverified 9', 'inherited 9')) == 0
+              and bs._unverified_grazes('NO DRC VIOLATIONS FOUND!') == 0)
+        # via-in-paste is ADVISORY in board_score: never in the drc count that
+        # sums into `blocking`, and --baseline reaches check_drc
+        canned = ("FOUND 3 DRC VIOLATIONS:\n\n"
+                  "VIA-IN-PASTE violations (2):\n----\n  x\n\n"
+                  "PAD-PAD violations (1):\n----\n  y\n")
+        seen_bs = []
+        _real_rt = bs.run_tool
+
+        def _rt(root, tool, *args):
+            seen_bs.append(args)
+            return 1, canned
+        bs.run_tool = _rt
+        try:
+            d, _u, _r = bs.score_drc(ROOT, ESP, baseline=ESP)
+        finally:
+            bs.run_tool = _real_rt
+        check('8. board_score: via-in-paste is its own advisory count, NOT in the drc '
+              'count that sums into blocking, and --baseline reaches check_drc',
+              d['count'] == 1 and d['via_in_paste']['count'] == 2
+              and seen_bs and list(seen_bs[0][-2:]) == ['--baseline', ESP], str(d))
+        sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
+        import qualify_subject as qs
+        seen = []
+        _real_run = qs.subprocess.run
+
+        def _spy(argv, **kw):
+            seen.append(list(argv))
+            return _real_run([sys.executable, '-c', 'print("NO DRC VIOLATIONS FOUND!")'], **kw)
+        qs.subprocess.run = _spy
+        try:
+            qs._gates(ESP, 0.25, baseline=ESP)
+        finally:
+            qs.subprocess.run = _real_run
+        drc_argv = [a for a in seen if any('check_drc.py' in str(x) for x in a)]
+        check('8. qualify_subject hands the unperturbed board to check_drc as --baseline',
+              drc_argv and drc_argv[0][-2:] == ['--baseline', ESP], str(drc_argv[:1]))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")

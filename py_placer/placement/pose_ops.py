@@ -95,6 +95,9 @@ LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     'footprint copper the parser does not model: pad-less '
                     'logos, bezier curves, copper text (named per part in '
                     'oob_graphic_copper_unmeasured)',
+                    'footprint graphic copper on a board with no outline, and '
+                    'on a part that changed side in memory (listed as '
+                    'no-outline / moved-side in oob_graphic_copper_unmeasured)',
                     'solder paste and mask openings', 'component bodies / '
                     'courtyards', 'routing', 'zone fill')
 MAGNITUDE_EPS = 1e-6
@@ -402,10 +405,20 @@ def worsened(before: Dict, after: Dict) -> List[str]:
             if (after.get(k) or 0.0) > ((before.get(k) or 0.0) + MAGNITUDE_EPS)]
     # #962: a SWAP can hold the graphic-copper count and summed amount level
     # while moving the overrun onto a part that was clean. A part newly past
-    # the outline is new damage even when the totals tie.
-    was = {r[0] for r in (before.get('oob_graphic_copper_refs') or ())}
-    if any(r[0] not in was for r in (after.get('oob_graphic_copper_refs') or ())):
-        out.append('oob_graphic_copper_refs')
+    # the outline is new damage when the totals merely TIE; a request that
+    # strictly lowers the count or the amount is an improvement and is not
+    # refused for where the remainder landed. A `before` that carries no refs
+    # (an older report) cannot say which parts are new, so the arm is off.
+    if 'oob_graphic_copper_refs' in before:
+        was = {r[0] for r in (before.get('oob_graphic_copper_refs') or ())}
+        new = [r[0] for r in (after.get('oob_graphic_copper_refs') or ())
+               if r[0] not in was]
+        improved = ((after.get('oob_graphic_copper_count') or 0)
+                    < (before.get('oob_graphic_copper_count') or 0)
+                    or (after.get('oob_graphic_copper_amount') or 0.0)
+                    < (before.get('oob_graphic_copper_amount') or 0.0) - MAGNITUDE_EPS)
+        if new and not improved:
+            out.append('oob_graphic_copper_refs')
     return out
 
 

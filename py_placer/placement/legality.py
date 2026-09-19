@@ -4129,8 +4129,8 @@ def _graphic_copper_channel(pcb_data, edge_required: float) -> Dict[str, object]
     - `oob_graphic_copper_count/_refs/_amount` are the parts whose copper
       reaches PAST the outline, measured at margin 0 with the drawn stroke.
       `_amount` is the sum of the per-part maximum overrun in mm: a distance,
-      like `oob_pad_amount`, not an area (a filled shape is sampled on its
-      outline).
+      like `oob_pad_amount`, not an area. An edge running inside a FILLED
+      shape counts by its depth in the copper.
     - `_waived` lists board-level art and board-outline owners, with the
       reason. A lock is not a waiver.
     - `_unmeasured` lists copper the parser does not model.

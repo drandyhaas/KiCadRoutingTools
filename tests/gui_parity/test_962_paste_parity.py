@@ -214,6 +214,32 @@ def main():
             '  (fp_poly (pts (xy -1 -5) (xy 1 -5) (xy 0 -4)) (stroke (width 0.1) (type solid)) '
             '(layer "F.Cu"))\n'
             '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "/A")))\n'
+            # the forms a text-path pre-skip once dropped: a plural-layer logo
+            # and curve, knockout text, a text that SAYS "hide"
+            ' (footprint "L:G" (layer "F.Cu") (at 45 10)\n'
+            '  (property "Reference" "T3" (at 0 -3 0) (layer "F.SilkS") '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (fp_poly (pts (xy 0 0) (xy 1 0) (xy 1 1)) (stroke (width 0) (type solid)) '
+            '(fill yes) (layers "F.Cu" "F.Mask")))\n'
+            ' (footprint "L:Q" (layer "F.Cu") (at 10 25)\n'
+            '  (property "Reference" "T4" (at 0 -3 0) (layer "F.SilkS") '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "/A"))\n'
+            '  (pad "2" smd rect (at 3 0) (size 1 1) (layers "F.Cu") (net 1 "/A"))\n'
+            '  (fp_curve (pts (xy 0 1) (xy 1 2) (xy 2 2) (xy 3 1)) (stroke (width 0.2) '
+            '(type solid)) (layers "F.Cu" "F.Mask")))\n'
+            ' (footprint "L:K" (layer "F.Cu") (at 25 25)\n'
+            '  (property "Reference" "T5" (at 0 -3 0) (layer "F.SilkS") '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (fp_text user "KO" (at 0 3 0) (layer "F.Cu" knockout) '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "/A")))\n'
+            ' (footprint "L:H" (layer "F.Cu") (at 40 25)\n'
+            '  (property "Reference" "T6" (at 0 -3 0) (layer "F.SilkS") '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (fp_text user "do not hide me" (at 0 3 0) (layer "F.Cu") '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "/A")))\n'
             ')\n')
     boards.append(p)
 
@@ -322,7 +348,9 @@ def main():
         witnessed['an unmeasured-copper entry'] += len(ua)
         if name == 'syn_copper':
             # the text is unmeasured on BOTH paths, the hidden one on neither
-            if ua == [('T1', 'text')] and ub == [('T1', 'text')]:
+            want_u = [('T1', 'text'), ('T3', 'logo'), ('T4', 'curve'),
+                      ('T5', 'text'), ('T6', 'text')]
+            if sorted(ua) == want_u and sorted(ub) == want_u:
                 witnessed['syn_copper: visible copper text only'] += 1
             fill = {}
             for s in f.segments:

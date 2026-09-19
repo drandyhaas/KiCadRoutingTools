@@ -1120,15 +1120,25 @@ class PlanesTab(wx.Panel):
                     )
 
                     # Add to new vias list
-                    for gv in gnd_vias:
-                        self._new_vias.append({
-                            'x': gv.x,
-                            'y': gv.y,
-                            'size': gv.size,
-                            'drill': gv.drill,
-                            'net_id': gv.net_id,
-                            'layers': gv.layers if hasattr(gv, 'layers') else ['F.Cu', 'B.Cu']
-                        })
+                    _gnd_dicts = [{
+                        'x': gv.x,
+                        'y': gv.y,
+                        'size': gv.size,
+                        'drill': gv.drill,
+                        'net_id': gv.net_id,
+                        'layers': gv.layers if hasattr(gv, 'layers') else ['F.Cu', 'B.Cu']
+                    } for gv in gnd_vias]
+                    # #962: the same Type VII stamp route_planes --add-gnd-vias
+                    # applies (all new here); the apply loop below writes it
+                    # through apply_via_protection.
+                    from fab_notes import (via_protection_stamps,
+                                           apply_stamps_in_memory,
+                                           print_via_protection_record)
+                    _st962, _rec962 = via_protection_stamps(_gnd_dicts, [],
+                                                            self.pcb_data)
+                    apply_stamps_in_memory(_st962)
+                    print_via_protection_record(_rec962, "GND return vias")
+                    self._new_vias.extend(_gnd_dicts)
                     total_vias += len(gnd_vias)
 
                 except Exception as e:

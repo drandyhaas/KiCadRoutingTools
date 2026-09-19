@@ -4305,14 +4305,17 @@ _UNMODELLED_LOGO_REASON = ('pad-less footprint: its copper is decoration the '
 _UNMODELLED_CURVE_REASON = 'bezier copper (fp_curve) is not modelled'
 _UNMODELLED_TEXT_REASON = 'visible text on a copper layer is not modelled'
 
-# A singular copper `(layer ...)` token. Pads use the PLURAL `(layers ...)`,
-# so in a footprint block this matches the footprint's own header plus any
-# copper shape or copper text. One match means there is nothing but the header.
-_SINGULAR_CU_LAYER_RE = re.compile(r'\(layer\s+"?[^"\s)]*\.Cu"?\s*\)')
+# A singular copper `(layer ...)` token, `knockout` or not. Text always uses
+# the singular form, so a footprint block with only ONE such token (its own
+# header) carries no copper text. Shapes may use the PLURAL `(layers ...)`, so
+# this is never the test for copper SHAPES.
+_SINGULAR_CU_LAYER_RE = re.compile(r'\(layer\s+"?[^"\s)]*\.Cu\b')
 _FP_TEXT_OPEN_RE = re.compile(r'\((?:fp_text|fp_text_box|property)\s')
 _TEXT_LAYER_RE = re.compile(r'\(layer\s+"?([^"\s)]+)"?')
 # `(hide yes)`, `(hide)`, or KiCad 6/7's bare `hide` token -- never `(hide no)`.
+# Read with the quoted strings blanked, so a text SAYING "hide" is not hidden.
 _TEXT_HIDDEN_RE = re.compile(r'\(hide\s+yes\)|\(hide\)|(?<![\w(])hide(?=[\s)])')
+_QUOTED_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
 def _has_visible_copper_text(fp_text: str) -> bool:
@@ -4321,7 +4324,8 @@ def _has_visible_copper_text(fp_text: str) -> bool:
         j = find_matching_paren(fp_text, m.start())
         blk = fp_text[m.start():j]
         lm = _TEXT_LAYER_RE.search(blk)
-        if lm and lm.group(1).endswith('.Cu') and not _TEXT_HIDDEN_RE.search(blk):
+        if (lm and lm.group(1).endswith('.Cu')
+                and not _TEXT_HIDDEN_RE.search(_QUOTED_RE.sub('""', blk))):
             return True
     return False
 
@@ -4331,9 +4335,11 @@ def extract_unmodelled_footprint_copper(content: str) -> List[dict]:
     `PCBData.graphic_copper_unmeasured`.
 
     Three kinds: a pad-less footprint's copper (`logo`), bezier copper
-    (`curve`) and visible copper text (`text`). A footprint with only a header
-    copper layer token is skipped before any shape is walked, which keeps this
-    pass cheap on a board of ordinary parts.
+    (`curve`) and visible copper text (`text`). An ordinary part -- pads, no
+    `fp_curve`, no second singular copper layer token (text is always
+    singular) -- is skipped before any shape is walked, which keeps this pass
+    cheap. A pad-less footprint is always walked: its shapes may name their
+    layers in the plural form.
     """
     if '(fp_' not in content and '(property' not in content:
         return []
@@ -4341,9 +4347,10 @@ def extract_unmodelled_footprint_copper(content: str) -> List[dict]:
     out: List[dict] = []
     for _fstart, _fend, _fkey in _footprint_blocks_by_key(content):
         fp_text = masked[_fstart:_fend]
-        if len(_SINGULAR_CU_LAYER_RE.findall(fp_text)) < 2:
-            continue
         functional = footprint_copper_is_functional(footprint_pad_count(fp_text))
+        may_have_text = len(_SINGULAR_CU_LAYER_RE.findall(fp_text)) >= 2
+        if functional and 'fp_curve' not in fp_text and not may_have_text:
+            continue
         copper_tags = []
         if not functional or 'fp_curve' in fp_text:
             for tag, blk in iter_footprint_shapes(fp_text, _FP_SHAPE_TAGS + ('fp_curve',)):
@@ -4357,7 +4364,7 @@ def extract_unmodelled_footprint_copper(content: str) -> List[dict]:
         if 'fp_curve' in copper_tags:
             out.append({'owner_ref': _fkey, 'kind': 'curve',
                         'reason': _UNMODELLED_CURVE_REASON})
-        if _has_visible_copper_text(fp_text):
+        if may_have_text and _has_visible_copper_text(fp_text):
             out.append({'owner_ref': _fkey, 'kind': 'text',
                         'reason': _UNMODELLED_TEXT_REASON})
     return out

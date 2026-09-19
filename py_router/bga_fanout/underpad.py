@@ -2684,16 +2684,8 @@ def generate_underpad_escape(footprint: Footprint,
                   f" a smaller --via-drill, a fab tier whose floor this pitch"
                   f" can meet, or the board's own min_hole_to_hole")
     # The FAB requirement under-pad escape creates (#489 §8): via-in-pad needs
-    # IPC-4761 Type VII. Emitted from the shared engine so both fronts report it.
-    # #962: DECLARED on each via-in-pad, (capping yes) (filling yes), rather
-    # than only printed. The dicts carry it to the CLI writer and to the GUI
-    # fanout tab (both honour `tenting_attrs`). Every via in `vias_to_add` is
-    # this escape's own, hence the empty input snapshot: the engine appends its
-    # vias to pcb_data.vias as it goes, so a snapshot taken here would call
-    # them pre-existing.
-    from fab_notes import (via_protection_stamps, apply_stamps_in_memory,
-                           print_via_protection_record)
-    _st962, _rec962 = via_protection_stamps(vias_to_add, [], pcb_data)
-    apply_stamps_in_memory(_st962)
-    print_via_protection_record(_rec962, "BGA under-pad escape")
+    # IPC-4761 Type VII. #962: it is DECLARED once, on every via the BGA fanout
+    # returns, at the end of `generate_bga_fanout` -- the channel escape's
+    # in-pad vias, this escape's and the plane drops alike. Stamping here
+    # alone left the channel path's via-in-pad unstamped.
     return tracks, vias_to_add, failed

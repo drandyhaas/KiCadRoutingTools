@@ -1726,8 +1726,15 @@ def graphic_copper_shapes(pcb_data):
         # shape that happens to start where the first closed would be merged
         # into it: a nested poly starting at its parent's first vertex became
         # one ring, and the even-odd test read the nested poly as a HOLE
-        # (#962 phase-1 verification, round 2).
-        if cur and (closed(cur)
+        # (#962 phase-1 verification, round 2). EXCEPT when the next segment
+        # carries the SAME uuid: that is one polygon revisiting its start, a
+        # keyhole whose bridge begins at vertex 0, and splitting it made the
+        # filled-interior test read the keyhole's copper-free hole as copper
+        # (phase-2 verification, round 2). pcbnew-built segments carry no
+        # uuid, so there the closure rule alone decides.
+        same_shape = bool(cur and getattr(sg, 'uuid', '')
+                          and getattr(sg, 'uuid', '') == getattr(cur[-1], 'uuid', ''))
+        if cur and ((closed(cur) and not same_shape)
                     or cur[-1].layer != sg.layer
                     or getattr(cur[-1], 'owner_ref', '') != getattr(sg, 'owner_ref', '')
                     or getattr(cur[-1], 'graphic_kind', '') != getattr(sg, 'graphic_kind', '')
@@ -1801,7 +1808,10 @@ def _filled_interior_edge_depth(shape, rings, step: float = 0.05):
         by0 = min(p[1] for p in poly)
         bx1 = max(p[0] for p in poly)
         by1 = max(p[1] for p in poly)
-    best = none
+    # Edge samples inside the shape's box, then the inside test and the
+    # distance to the outline, vectorised: an 800-vertex filled polygon over
+    # three cutouts took ~1 s one sample at a time (phase-2 verification N2).
+    pts = []
     for ring in rings:
         n = len(ring)
         for i in range(n):
@@ -1812,30 +1822,46 @@ def _filled_interior_edge_depth(shape, rings, step: float = 0.05):
                 continue
             L = math.hypot(qx - ax, qy - ay)
             k = max(1, int(L / step) + 1)
-            for t in range(k + 1):
-                x = ax + (qx - ax) * t / k
-                y = ay + (qy - ay) * t / k
-                if poly is None:
-                    inner = r - math.hypot(x - cx, y - cy)
-                    if inner <= 1e-9:
-                        continue
-                    near = s0
-                else:
-                    if not _point_in_poly(x, y, poly):
-                        continue
-                    inner, near = float('inf'), None
-                    for sg in segs:
-                        px, py = closest_point_on_segment(
-                            x, y, sg.start_x, sg.start_y, sg.end_x, sg.end_y)
-                        dd = math.hypot(x - px, y - py)
-                        if dd < inner:
-                            inner, near = dd, sg
-                    if inner <= 1e-9:
-                        continue
-                depth = inner + hw
-                if depth > best[0]:
-                    best = (depth, near, (x, y))
-    return best
+            t = np.arange(k + 1) / k
+            pts.append(np.column_stack((ax + (qx - ax) * t, ay + (qy - ay) * t)))
+    if not pts:
+        return none
+    P = np.concatenate(pts)
+    P = P[(P[:, 0] >= bx0) & (P[:, 0] <= bx1) & (P[:, 1] >= by0) & (P[:, 1] <= by1)]
+    if not len(P):
+        return none
+    if poly is None:
+        inner = r - np.hypot(P[:, 0] - cx, P[:, 1] - cy)
+        near_idx = None
+    else:
+        V = np.asarray(poly, dtype=float)
+        Vj = np.roll(V, 1, axis=0)                 # (poly[j], poly[i]) pairs
+        px, py = P[:, 0:1], P[:, 1:2]
+        yi, yj, xi, xj = V[:, 1], Vj[:, 1], V[:, 0], Vj[:, 0]
+        straddle = (yi > py) != (yj > py)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            xcross = (xj - xi) * (py - yi) / (yj - yi) + xi
+        inside = (np.count_nonzero(straddle & (px < xcross), axis=1) % 2) == 1
+        P = P[inside]
+        if not len(P):
+            return none
+        A = np.array([(sg.start_x, sg.start_y) for sg in segs])
+        B = np.array([(sg.end_x, sg.end_y) for sg in segs])
+        D = B - A
+        dd = np.einsum('ij,ij->i', D, D)
+        dd[dd == 0] = 1.0
+        rel = P[:, None, :] - A[None, :, :]
+        tt = np.clip(np.einsum('pij,ij->pi', rel, D) / dd, 0.0, 1.0)
+        C = A[None, :, :] + tt[:, :, None] * D[None, :, :]
+        dist = np.hypot(P[:, None, 0] - C[:, :, 0], P[:, None, 1] - C[:, :, 1])
+        near_idx = np.argmin(dist, axis=1)
+        inner = dist[np.arange(len(P)), near_idx]
+    keep = inner > 1e-9
+    if not np.any(keep):
+        return none
+    k = int(np.argmax(np.where(keep, inner, -np.inf)))
+    near = s0 if near_idx is None else segs[int(near_idx[k])]
+    return (float(inner[k]) + hw, near, (float(P[k, 0]), float(P[k, 1])))
 
 
 def graphic_outline_overrun(shape, board_info, owned_milled=frozenset(),
@@ -2050,8 +2076,12 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
     foreign-net via in an opening is a short and is reported as one.
     """
     from fab_notes import (via_paste_sites, effective_via_protection,
-                           is_filled_and_capped, via_snapshot, _preexisting)
+                           is_filled_and_capped, via_snapshot, _preexisting,
+                           _format_can_declare)
     setup = getattr(pcb_data.board_info, 'via_protection_setup', None) or {}
+    # A KiCad 9 file cannot carry a per-via capping/filling token at all, so
+    # there the only remedies are the fab drawing and moving the via.
+    declarable = _format_can_declare(pcb_data)
     vias = [v for v in pcb_data.vias
             if matching_via_nets is None or v.net_id in matching_via_nets]
     if not vias or not getattr(pcb_data, 'paste_apertures', None):
@@ -2060,7 +2090,7 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
     if baseline_pd is not None:
         name_to_id = {n.name: nid for nid, n in pcb_data.nets.items()}
         snap_by_net = {}
-        for (bnid, x, y, sz) in via_snapshot(baseline_pd.vias):
+        for (bnid, x, y, sz, *_spec) in via_snapshot(baseline_pd.vias):
             bn = baseline_pd.nets.get(bnid)
             nid = name_to_id.get(bn.name) if bn is not None else None
             if nid is not None:
@@ -2074,7 +2104,8 @@ def _via_in_paste_pass(pcb_data, matching_via_nets, baseline_pd, violations,
                'via_loc': (v.x, v.y), 'owner_ref': ap.owner_ref,
                'item2': ap.label(), 'source': ap.source, 'layer': ap.layer,
                'penetration_mm': round(pen, 4),
-               'capping': eff.get('capping'), 'filling': eff.get('filling')}
+               'capping': eff.get('capping'), 'filling': eff.get('filling'),
+               'format_can_declare': declarable}
         if is_filled_and_capped(eff):
             row['accepted'] = 'protected-via-in-paste'
         elif snap_by_net is not None and _preexisting(v, snap_by_net):
@@ -4408,7 +4439,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  Via:{v['net1']} in paste opening {v['item2']} -- "
                               f"barrel {v['penetration_mm']:.3f}mm into it, not "
                               f"filled+capped (capping {v['capping']}, filling {v['filling']})")
-                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})"
+                              + ("" if v.get('format_can_declare', True) else
+                                 "  [this file format cannot declare it per via: "
+                                 "state Type VII on the fab drawing, or move the via]"))
                     elif vtype == 'via-board-edge':
                         where = _edge_phrase(v['edge'])
                         print(f"  Via:{v['net1']} {where}")
