@@ -247,6 +247,17 @@ reports only -- it never withholds the board or moves the exit code.
 `.claude/skills/plan-pcb-placement-and-routing/references/evidence-map.md`
 section I.
 
+Before anything is written, the PLAN is checked against itself and the board
+(`floorplan.plan_check`, #959). An area bound no arrangement can meet, a part
+longer than its edge, or a real reference used as a glob refuses at **exit 5**
+with nothing written and `JSON_SUMMARY.refused: 'plan_check'`
+(`floorplan.PLAN_SEED_REFUSES`). Every other plan finding is printed as
+`PLAN [...]` and the seed proceeds, so the seeder can name the member it could
+not seat. `--repair` and `--reseat` only report. Exit 5 is distinct from 3
+(the BOARD cannot be seeded) and 4 (a seed was written and its grade failed).
+`check_floorplan --intent PLAN --plan-only` runs the same check without
+seeding.
+
 Rotations: the input rotation is tried in full first and kept when it fits; a
 part with no contained legal pose at it falls back to its 90° lattice (noted
 in the output — measured: an LDO with 0 legal poses at rot 0 and 3 at rot 90

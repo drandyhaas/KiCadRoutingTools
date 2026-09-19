@@ -1290,9 +1290,9 @@ def _padless_owed(a, intent, pcb, padless, covered):
     #   * a block that draws none is graded by nothing, so the zone is only a
     #     claim when the author NAMED it (the key, its escaped form, or a
     #     pattern with no wildcard). A class glob sweeping one in -- `R*`
-    #     catching glasgow's `REF**` logos, `D*` catching ulx3s's `D&M` --
-    #     asks nothing of it (round-2 verification: a normal glob plan on
-    #     glasgow was refused with advice place_pose then refused).
+    #     catching a `REF**` logo, `D*` catching a `D&M` mark -- asks
+    #     nothing of it (round-2 verification: a normal glob plan on a
+    #     shipping board was refused with advice place_pose then refused).
     import fnmatch as _fnm
     import glob as _glob
     _nc = os.path.normcase

@@ -204,6 +204,18 @@ Validate routed boards against the *real* spec, with the right checker — most
   `height` are refused BY NAME -- the outline is not ours to change, and nothing
   in the placement stack measures z, so a declared height limit would grade
   nothing at all. See `docs/design-brief.md`.
+  **Since #959 the connector declarations COMPILE** (`design_brief.
+  compile_with_consequences`, which every brief reader calls, so emit, grade
+  and drift see the same clauses). `edge_mount` / `through_edge` compile to a
+  0.75 mm body setback. A vertical mount is exempt from the receptacle seat.
+  A perpendicular cable plus `user_top_side` compiles to an advisory face.
+  A declared `cable_envelope_mm` compiles to a keep-out, off a FILE-locked
+  part only. Each derived number is labelled `derived_default` rather than
+  passed off as a declaration. `mechanical.json` beside the board is read the
+  same way (`--mechanical` / `--no-mechanical`): reconciled against the brief
+  and the outline, value by value with an authority, and compiled into
+  grade-only anchors over locked refs. `docs/floorplan-intent.md` has the
+  authority table.
 - **Protected nets (#521): matched groups and routed diff pairs are recorded in
   the sibling `.kicad_pro`** (`kicad_routing_tools.protected_nets`, written next
   to the DRC-floor writeback, carried down chains by the project copy) and later

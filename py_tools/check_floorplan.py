@@ -63,9 +63,11 @@ from placement.placement_state import UNPLACED_EXIT, gate_or_exit
 from placement.groups import GroupError, parse_sources
 
 #: What `--emit-intent` does about a decap limit when no flag says (#959,
-#: #1002): 'off' | 'strict' | 'auto'. Flipped only on the A/B gate in
-#: tests/test_placement_ab.py (rows `decaps-auto-*`): improve on N-1 boards,
-#: regress on none.
+#: #1002): 'off' | 'strict' | 'auto'. 'auto' was put to the A/B gate in
+#: tests/test_placement_ab.py (rows `decaps-auto-*`, improve on N-1 boards,
+#: regress on none) and REJECTED: it improved no board and regressed all
+#: three with zones. The rows stay as change detectors; flip this only when
+#: they say otherwise.
 DECLARE_DECAPS_DEFAULT = 'off'
 from placement.floorplan import IntentError
 

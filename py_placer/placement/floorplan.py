@@ -5634,16 +5634,18 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
          shipped board carried a 1.0 mm2 fiducial-in-connector overlap -- so
          the ERROR fires only when the locked pairs ALONE exceed that budget,
          which no arrangement of the other parts can undo.
-      5. `plan_zone_overfull` / `_crowded`: per FACE, the UNLOCKED
-         members' areas (courtyard, else pad bbox; a through-hole member's
-         drilled footprint charged to the far face) against the zone's area.
+      5. `plan_zone_overfull` / `_crowded`: per FACE, the members' areas,
+         locked ones included (courtyard, else pad bbox; a through-hole
+         member's drilled footprint, clipped to its courtyard, charged to the
+         far face) against the zone's area.
          Fitting area A into a zone of area Z forces at least A - Z of
          pairwise courtyard overlap, which the grade counts against a
          DECLARED `legality_budget.overlap_area`: past it, ERROR. With no
          budget declared nothing bounds the overlap, and it is the WARN (the
          seeder never overlaps courtyards, so it may leave members unseated).
-         Locked members, anchor-graded members and zones holding a waived
-         pair are not charged.
+         Anchor-graded members and zones holding a waived pair are not
+         charged; a locked member is, because the grade counts its overlap
+         too.
       6. `plan_edge_overfull` / `_crowded`: one edge-claimed part whose PAD
          extent in its own frame, at its best 90-degree rotation, is longer
          than the edge (ERROR); the claimed parts' summed extents against the
