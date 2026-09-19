@@ -129,7 +129,8 @@ def graphic_key(s):
     c = s.graphic_circle
     return (s.owner_ref, s.layer, s.graphic_kind,
             None if s.drawn_width is None else _r(s.drawn_width, 6),
-            None if c is None else (_r(c[0]), _r(c[1]), _r(c[2])))
+            None if c is None else (_r(c[0]), _r(c[1]), _r(c[2])),
+            bool(s.graphic_filled))
 
 
 def multiset_diff(a, b):
@@ -183,6 +184,38 @@ def main():
                 '(net 1 "/A") (solder_paste_margin 0) (solder_paste_margin_ratio 0))))\n'
                 % ver)
         boards.append(p)
+    # - copper the off-outline grade reads: visible and hidden copper TEXT
+    #   (only the visible one is `unmeasured`), and closed shapes filled and
+    #   unfilled by token AND by the no-token rule (`Segment.graphic_filled`).
+    #   No tracked board carries copper text, so only this board tests the
+    #   live path's text reading.
+    p = os.path.join(syn_dir, 'syn_copper.kicad_pcb')
+    with open(p, 'w', encoding='utf-8') as fh:
+        fh.write(
+            '(kicad_pcb (version 20240108) (generator "pcbnew") (general (thickness 1.6))\n'
+            ' (paper "A4") (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+            ' (setup)\n (net 0 "") (net 1 "/A")\n'
+            ' (gr_rect (start 0 0) (end 60 40) (stroke (width 0.1) (type solid)) (fill none) '
+            '(layer "Edge.Cuts"))\n'
+            ' (footprint "L:T" (layer "F.Cu") (at 10 10)\n'
+            '  (property "Reference" "T1" (at 0 -3 0) (layer "F.Cu") (hide yes) '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (fp_text user "CU" (at 0 3 0) (layer "F.Cu") '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "/A")))\n'
+            ' (footprint "L:S" (layer "F.Cu") (at 30 10)\n'
+            '  (property "Reference" "T2" (at 0 -3 0) (layer "F.SilkS") '
+            '(effects (font (size 1 1) (thickness 0.15))))\n'
+            '  (fp_rect (start -3 -2) (end -1 2) (stroke (width 0.2) (type solid)) '
+            '(fill none) (layer "F.Cu"))\n'
+            '  (fp_rect (start 1 -2) (end 3 2) (stroke (width 0) (type solid)) (layer "F.Cu"))\n'
+            '  (fp_circle (center 0 4) (end 1 4) (stroke (width 0.1) (type solid)) '
+            '(fill solid) (layer "F.Cu"))\n'
+            '  (fp_poly (pts (xy -1 -5) (xy 1 -5) (xy 0 -4)) (stroke (width 0.1) (type solid)) '
+            '(layer "F.Cu"))\n'
+            '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "/A")))\n'
+            ')\n')
+    boards.append(p)
 
     # -- comparator self-test: a dropped aperture must be SEEN ---------------
     esp = os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb')
@@ -276,8 +309,29 @@ def main():
         gb = [graphic_key(s) for s in g.segments if s.graphic]
         oa, ob = multiset_diff(ga, gb)
         check(not oa and not ob,
-              '%s: graphic-copper drawn_width/kind/circle agree (%d)' % (name, len(ga)),
+              '%s: graphic-copper drawn_width/kind/circle/filled agree (%d)' % (name, len(ga)),
               'only text=%s only pcbnew=%s' % (oa, ob))
+        witnessed['a FILLED graphic-copper segment'] += sum(1 for s in f.segments
+                                                           if s.graphic and s.graphic_filled)
+        ua = [(u['owner_ref'], u['kind']) for u in f.graphic_copper_unmeasured]
+        ub = [(u['owner_ref'], u['kind']) for u in g.graphic_copper_unmeasured]
+        oa, ob = multiset_diff(ua, ub)
+        check(not oa and not ob,
+              '%s: unmeasured graphic copper agrees (%d)' % (name, len(ua)),
+              'only text=%s only pcbnew=%s' % (oa, ob))
+        witnessed['an unmeasured-copper entry'] += len(ua)
+        if name == 'syn_copper':
+            # the text is unmeasured on BOTH paths, the hidden one on neither
+            if ua == [('T1', 'text')] and ub == [('T1', 'text')]:
+                witnessed['syn_copper: visible copper text only'] += 1
+            fill = {}
+            for s in f.segments:
+                if s.graphic and s.owner_ref == 'T2':
+                    fill.setdefault(s.graphic_kind, set()).add(bool(s.graphic_filled))
+            # rect: one unfilled (fill none, 0.2) + one filled (no token, 0);
+            # circle filled by token; poly filled by the no-token rule
+            if fill == {'rect': {True, False}, 'circle': {True}, 'poly': {True}}:
+                witnessed['syn_copper: fill by token and by the no-token rule'] += 1
 
         # -- native oracle: every pad opening's margin is KiCad's own --------
         live = {}
@@ -345,7 +399,9 @@ def main():
             witnessed['ulx3s pad ratio -0.2'] += 1
 
     for w in ('esp_prog U2 F.Paste graphic', 'glasgow J1 pin-in-paste graphics',
-              'ulx3s pad ratio -0.2', 'watchy U4 windowpanes concern a net'):
+              'ulx3s pad ratio -0.2', 'watchy U4 windowpanes concern a net',
+              'syn_copper: visible copper text only',
+              'syn_copper: fill by token and by the no-token rule'):
         check(witnessed[w] == 1, 'witness present: %s' % w,
               'a named witness vanished; the parity arms above could then pass '
               'on an empty model')

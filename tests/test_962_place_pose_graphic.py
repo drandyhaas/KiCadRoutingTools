@@ -146,6 +146,18 @@ def main():
         else:
             check('6. --snap from 115.34 refused rather than writing an overrun',
                   s.get('output') is None)
+
+        # 7 -- a swap cannot launder an overrun onto a clean part by keeping
+        # the totals level
+        from placement.pose_ops import worsened
+        b = {'oob_graphic_copper_count': 1, 'oob_graphic_copper_amount': 1.0,
+             'oob_graphic_copper_refs': [['A', 1.0]]}
+        a = {'oob_graphic_copper_count': 1, 'oob_graphic_copper_amount': 1.0,
+             'oob_graphic_copper_refs': [['B', 1.0]]}
+        check('7. overrun moved from A to B at level totals: worsened names the refs',
+              worsened(b, a) == ['oob_graphic_copper_refs'], str(worsened(b, a)))
+        check('7. control: the same part, the same overrun: not worsened',
+              worsened(b, dict(b)) == [], str(worsened(b, dict(b))))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")

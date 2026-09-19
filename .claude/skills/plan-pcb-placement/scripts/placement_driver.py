@@ -551,10 +551,18 @@ broken at the cap is NAMED with its measurement, not carried silently.
 
 MEASURE (all four, every lap, on the copper-free board):
 
-  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0
+  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0 --baseline <the board this RUN started from>
   python3 -X utf8 py_tools/check_assembly.py {a.board} --baseline <the board this RUN started from>
   python3 -X utf8 py_tools/check_channels.py {a.board} --baseline <the board this RUN started from> --gate
   python3 -X utf8 check_rigid_consistency.py {a.before} {a.board}
+
+check_drc's --baseline is what tells a graze of footprint graphic copper
+(a drawn tab or antenna) against the board edge apart: a part that has not
+moved since the baseline keeps its library graze as accepted `inherited`, and
+a part this run MOVED into one is a `graphic-board-edge` violation. Without
+it every such graze reads `unverified` and is accepted, so a lap can create
+one and grade clean. Copper past the outline is a `graphic-off-board`
+violation either way.
 
 check_assembly and check_channels now READ THE BOARD's own clearance (and
 check_channels its track width too) and print each value with its source, so

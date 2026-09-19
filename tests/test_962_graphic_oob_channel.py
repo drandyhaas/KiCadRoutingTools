@@ -183,6 +183,18 @@ def main():
             parse_kicad_pcb(bad))['rows'] if r['owner_ref'] == 'U2']
         check('6. a part moved in memory grades as the written board does',
               m and w and abs(max(m) - max(w)) <= 1e-6, f'{m} vs {w}')
+
+        # 7 -- render_placement grades the PROPOSED poses, not the file's
+        from types import SimpleNamespace as NS
+        from render_placement import _graphic_copper_findings
+        model = NS(pcb=parse_kicad_pcb(ESP))
+        prop = NS(parts={'U2': NS(x=115.34, y=93.6, rot=90.0, side='F')})
+        f = _graphic_copper_findings(model, prop)
+        check('7. render_placement at a proposed U2 115.34: [[U2, 1.11]]',
+              len(f['refs']) == 1 and f['refs'][0][0] == 'U2'
+              and abs(f['refs'][0][1] - 1.11) <= 0.005, str(f))
+        check('7. ... and with no proposal the original board is clean',
+              _graphic_copper_findings(model, None)['refs'] == [])
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED'}")

@@ -1771,6 +1771,73 @@ def _graphic_samples(shape, step: float = 0.05):
     return pts
 
 
+def _filled_interior_edge_depth(shape, rings, step: float = 0.05):
+    """(depth, nearest segment, edge point) of the edge deepest inside a
+    FILLED closed shape, or (-inf, None, None).
+
+    `depth` is the edge point's distance to the shape's outline plus half the
+    drawn stroke: the copper surrounds that edge point to at least that
+    radius. Only edge samples strictly inside the shape count. Rings are
+    skipped when their bounding box misses the shape's.
+    """
+    segs = shape['segs']
+    s0 = segs[0]
+    none = (-float('inf'), None, None)
+    if not getattr(s0, 'graphic_filled', False):
+        return none
+    dw = getattr(s0, 'drawn_width', None)
+    hw = (dw if dw is not None else s0.width) / 2.0
+    circ = getattr(s0, 'graphic_circle', None)
+    if circ is not None:
+        cx, cy, r = circ
+        bx0, by0, bx1, by1 = cx - r, cy - r, cx + r, cy + r
+        poly = None
+    else:
+        if (len(segs) < 3 or abs(segs[-1].end_x - s0.start_x) > 1e-9
+                or abs(segs[-1].end_y - s0.start_y) > 1e-9):
+            return none
+        poly = [(sg.start_x, sg.start_y) for sg in segs]
+        bx0 = min(p[0] for p in poly)
+        by0 = min(p[1] for p in poly)
+        bx1 = max(p[0] for p in poly)
+        by1 = max(p[1] for p in poly)
+    best = none
+    for ring in rings:
+        n = len(ring)
+        for i in range(n):
+            ax, ay = ring[i]
+            qx, qy = ring[(i + 1) % n]
+            if (max(ax, qx) < bx0 or min(ax, qx) > bx1
+                    or max(ay, qy) < by0 or min(ay, qy) > by1):
+                continue
+            L = math.hypot(qx - ax, qy - ay)
+            k = max(1, int(L / step) + 1)
+            for t in range(k + 1):
+                x = ax + (qx - ax) * t / k
+                y = ay + (qy - ay) * t / k
+                if poly is None:
+                    inner = r - math.hypot(x - cx, y - cy)
+                    if inner <= 1e-9:
+                        continue
+                    near = s0
+                else:
+                    if not _point_in_poly(x, y, poly):
+                        continue
+                    inner, near = float('inf'), None
+                    for sg in segs:
+                        px, py = closest_point_on_segment(
+                            x, y, sg.start_x, sg.start_y, sg.end_x, sg.end_y)
+                        dd = math.hypot(x - px, y - py)
+                        if dd < inner:
+                            inner, near = dd, sg
+                    if inner <= 1e-9:
+                        continue
+                depth = inner + hw
+                if depth > best[0]:
+                    best = (depth, near, (x, y))
+    return best
+
+
 def graphic_outline_overrun(shape, board_info, owned_milled=frozenset(),
                             _geom=None) -> Tuple[float, Optional[object], Optional[tuple]]:
     """How far (mm) a graphic copper shape reaches past the board outline.
@@ -1789,8 +1856,13 @@ def graphic_outline_overrun(shape, board_info, owned_milled=frozenset(),
     indices into `board_edge_contours`; #628). With no outline, the board
     bounding box stands in.
 
-    Only the OUTLINE of a filled shape is sampled, so a cutout lying wholly
-    inside a filled tab is not seen. That is disclosed in the census basis.
+    A FILLED shape (`Segment.graphic_filled`) is copper inside too, so an edge
+    can run through it without coming near its outline: a cutout lying wholly
+    inside a filled tab. Every edge sample strictly inside the filled shape
+    contributes how deep inside the copper it runs (distance to the shape's
+    outline + half the stroke). The copper reaches at least that far past the
+    edge, so this is a lower bound; an outline sample off the board still
+    gives the exact reach.
     """
     if _geom is None:
         _geom = _graphic_outline_geometry(board_info)
@@ -1798,6 +1870,8 @@ def graphic_outline_overrun(shape, board_info, owned_milled=frozenset(),
     kept_milled = [m for i, m in enumerate(milled) if i not in owned_milled]
     dist_rings = [r for r in rings if not any(r is m for m in milled)] + kept_milled
     best, worst_seg, worst_pt = -float('inf'), None, None
+    if dist_rings:
+        best, worst_seg, worst_pt = _filled_interior_edge_depth(shape, dist_rings)
     for (x, y, hw, sg) in _graphic_samples(shape):
         if dist_rings or outer:
             d = _point_to_rings_distance(x, y, dist_rings) if dist_rings else float('inf')
@@ -1869,6 +1943,7 @@ def _reposed_shape(shape, fp):
             owner_ref=getattr(sg, 'owner_ref', ''),
             drawn_width=getattr(sg, 'drawn_width', None),
             graphic_kind=getattr(sg, 'graphic_kind', ''), graphic_circle=circ,
+            graphic_filled=getattr(sg, 'graphic_filled', False),
             _source=sg))
     return dict(shape, segs=segs)
 
@@ -1891,8 +1966,19 @@ def footprint_graphic_outline_census(pcb_data) -> dict:
     owned_cache = {}
     rows = []
     unmeasured = list(getattr(pcb_data, 'graphic_copper_unmeasured', None) or [])
+    no_outline = not (geom[0] or geom[1] or geom[4])
     for shape in graphic_copper_shapes(pcb_data):
         owner = shape['owner']
+        if no_outline:
+            # Nothing to measure against. Say so rather than return an empty,
+            # clean-looking row list.
+            if owner and not any(u.get('owner_ref') == owner
+                                 and u.get('kind') == 'no-outline'
+                                 for u in unmeasured):
+                unmeasured.append({'owner_ref': owner, 'kind': 'no-outline',
+                                   'reason': 'the board has no Edge.Cuts outline '
+                                             'to measure graphic copper against'})
+            continue
         state = graphic_owner_state(owner, fps)
         moved = _reposed_shape(shape, fps.get(owner) if owner else None)
         if moved is False:
@@ -1927,7 +2013,8 @@ def footprint_graphic_outline_census(pcb_data) -> dict:
         'unmeasured': unmeasured,
         'basis': ('graphic copper shapes (drawn stroke, true circles) against the '
                   'real outline + cutouts + milled contours not owned by the part, '
-                  'at margin 0; a filled shape is sampled on its outline only'),
+                  'at margin 0; an edge running inside a filled shape counts by '
+                  'its depth in the copper'),
     }
 
 
@@ -3557,17 +3644,25 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     _gcensus = footprint_graphic_outline_census(pcb_data)
     _graphic_row_by_seg = {}
     _graphic_flagged = set()
+    # net1 is the NET-0 name ('' on a name-net board), as every other graphic
+    # row carries it: kicad_drc_compare pairs by net, and KiCad's item names
+    # `<no net>`. A made-up label ('<graphic>') refused every pairing
+    # (#962 phase-2 verification). No `overlap_mm` on purpose: it is a
+    # clearance quantity, and the report's "in CONTACT" count would read an
+    # overrun as one.
+    _net0 = pcb_data.nets.get(0)
+    _net0_name = _net0.name if _net0 else ''
     for _row in _gcensus['rows']:
         for _sid in _row['seg_ids']:
             _graphic_row_by_seg[_sid] = _row
         if (_row['overrun_mm'] > 1e-6
                 and _row['owner_state'] not in GRAPHIC_WAIVED_STATES):
             violations.append({
-                'type': 'graphic-off-board', 'net1': '<graphic>',
+                'type': 'graphic-off-board', 'net1': _net0_name,
                 'item1': _row['item1'], 'owner_ref': _row['owner_ref'],
                 'owner_state': _row['owner_state'], 'uuid': _row['uuid'],
                 'layer': _row['layer'], 'kind': _row['kind'], 'edge': 'off-board',
-                'overrun_mm': _row['overrun_mm'], 'overlap_mm': _row['overrun_mm'],
+                'overrun_mm': _row['overrun_mm'],
                 'seg_loc': _row['seg_loc'],
             })
             _graphic_flagged.update(_row['seg_ids'])

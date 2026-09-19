@@ -384,6 +384,12 @@ class Segment:
     # measurement taken on the chords under-reads a circle's reach.
     graphic_kind: str = ""
     graphic_circle: Optional[Tuple[float, float, float]] = None
+    # #962: a closed graphic (poly/rect/circle) whose INTERIOR is copper, by
+    # KiCad's loader rules (`_shape_filled` / pcbnew IsAnyFill). The segments
+    # model only the outline, so a board cutout lying wholly inside a filled
+    # tab is invisible to them; the off-outline census reads this to look
+    # inside.
+    graphic_filled: bool = False
 
 
 @dataclass
@@ -4297,31 +4303,63 @@ def _paste_shape_record(tag: str, blk: str, owner: str, transform):
 _UNMODELLED_LOGO_REASON = ('pad-less footprint: its copper is decoration the '
                            'writer relocates to silk (#146), so it is not modelled')
 _UNMODELLED_CURVE_REASON = 'bezier copper (fp_curve) is not modelled'
+_UNMODELLED_TEXT_REASON = 'visible text on a copper layer is not modelled'
+
+# A singular copper `(layer ...)` token. Pads use the PLURAL `(layers ...)`,
+# so in a footprint block this matches the footprint's own header plus any
+# copper shape or copper text. One match means there is nothing but the header.
+_SINGULAR_CU_LAYER_RE = re.compile(r'\(layer\s+"?[^"\s)]*\.Cu"?\s*\)')
+_FP_TEXT_OPEN_RE = re.compile(r'\((?:fp_text|fp_text_box|property)\s')
+_TEXT_LAYER_RE = re.compile(r'\(layer\s+"?([^"\s)]+)"?')
+# `(hide yes)`, `(hide)`, or KiCad 6/7's bare `hide` token -- never `(hide no)`.
+_TEXT_HIDDEN_RE = re.compile(r'\(hide\s+yes\)|\(hide\)|(?<![\w(])hide(?=[\s)])')
+
+
+def _has_visible_copper_text(fp_text: str) -> bool:
+    """Does this footprint block carry VISIBLE text on a copper layer?"""
+    for m in _FP_TEXT_OPEN_RE.finditer(fp_text):
+        j = find_matching_paren(fp_text, m.start())
+        blk = fp_text[m.start():j]
+        lm = _TEXT_LAYER_RE.search(blk)
+        if lm and lm.group(1).endswith('.Cu') and not _TEXT_HIDDEN_RE.search(blk):
+            return True
+    return False
 
 
 def extract_unmodelled_footprint_copper(content: str) -> List[dict]:
     """Footprint copper the parser skips, by owner (#962). See
-    `PCBData.graphic_copper_unmeasured`."""
-    if '(fp_' not in content:
+    `PCBData.graphic_copper_unmeasured`.
+
+    Three kinds: a pad-less footprint's copper (`logo`), bezier copper
+    (`curve`) and visible copper text (`text`). A footprint with only a header
+    copper layer token is skipped before any shape is walked, which keeps this
+    pass cheap on a board of ordinary parts.
+    """
+    if '(fp_' not in content and '(property' not in content:
         return []
     masked = _mask_pad_primitives(content)
     out: List[dict] = []
     for _fstart, _fend, _fkey in _footprint_blocks_by_key(content):
         fp_text = masked[_fstart:_fend]
-        if '.Cu' not in fp_text:
+        if len(_SINGULAR_CU_LAYER_RE.findall(fp_text)) < 2:
             continue
+        functional = footprint_copper_is_functional(footprint_pad_count(fp_text))
         copper_tags = []
-        for tag, blk in iter_footprint_shapes(fp_text, _FP_SHAPE_TAGS + ('fp_curve',)):
-            if any(ln.endswith('.Cu') or ln == 'F&B.Cu' for ln in _shape_layer_names(blk)):
-                copper_tags.append(tag)
-        if not copper_tags:
-            continue
-        if not footprint_copper_is_functional(footprint_pad_count(fp_text)):
+        if not functional or 'fp_curve' in fp_text:
+            for tag, blk in iter_footprint_shapes(fp_text, _FP_SHAPE_TAGS + ('fp_curve',)):
+                if any(ln.endswith('.Cu') or ln == 'F&B.Cu'
+                       for ln in _shape_layer_names(blk)):
+                    copper_tags.append(tag)
+        if not functional and copper_tags:
             out.append({'owner_ref': _fkey, 'kind': 'logo',
                         'reason': _UNMODELLED_LOGO_REASON})
-        elif 'fp_curve' in copper_tags:
+            continue
+        if 'fp_curve' in copper_tags:
             out.append({'owner_ref': _fkey, 'kind': 'curve',
                         'reason': _UNMODELLED_CURVE_REASON})
+        if _has_visible_copper_text(fp_text):
+            out.append({'owner_ref': _fkey, 'kind': 'text',
+                        'reason': _UNMODELLED_TEXT_REASON})
     return out
 
 
@@ -4561,7 +4599,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     # "never miss real copper" pass. Lines/arcs need a real stroke (width>0);
     # filled poly/rect/circle default the outline to the fab track width.
     def _emit_outline(pts, w, layer, nid, uuid, closed=True, kind='poly',
-                      circle=None):
+                      circle=None, filled=False):
         if len(pts) < 2:
             return
         ew = w if w > 0 else defaults.TRACK_WIDTH
@@ -4579,7 +4617,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
                 width=ew, layer=layer, net_id=nid, uuid=uuid, graphic=True,
                 drawn_width=max(0.0, w), graphic_kind=kind,
-                graphic_circle=circle))
+                graphic_circle=circle, graphic_filled=bool(filled and closed)))
 
     def _blk_fields(blk):
         # BOTH layer tokens (#659 follow-up). KiCad writes the singular
@@ -4664,13 +4702,14 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 elif tag == 'gr_poly':
                     pts = [(float(x), float(y)) for x, y in
                            re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
-                    _emit_outline(pts, w, layer, nid, uuid)
+                    _emit_outline(pts, w, layer, nid, uuid,
+                                  filled=_shape_filled(blk, 'poly', w))
                 elif tag == 'gr_rect':
                     a, b = _xy(blk, 'start'), _xy(blk, 'end')
                     if a and b:
                         _emit_outline([(a[0], a[1]), (b[0], a[1]),
                                        (b[0], b[1]), (a[0], b[1])], w, layer, nid, uuid,
-                                      kind='rect')
+                                      kind='rect', filled=_shape_filled(blk, 'rect', w))
                 elif tag == 'gr_circle':
                     c, e = _xy(blk, 'center'), _xy(blk, 'end')
                     if c and e:
@@ -4678,7 +4717,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                         _emit_outline([(c[0] + r * math.cos(k * math.pi / 8),
                                         c[1] + r * math.sin(k * math.pi / 8))
                                        for k in range(16)], w, layer, nid, uuid,
-                                      kind='circle', circle=(c[0], c[1], r))
+                                      kind='circle', circle=(c[0], c[1], r),
+                                      filled=_shape_filled(blk, 'circle', w))
 
     # #908: the same model for copper drawn INSIDE a footprint -- the drawn tab
     # of a SOT89/DPAK, a PCB antenna, a solder-jumper bridge. The scan above
@@ -4761,7 +4801,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                         pts = [_g(float(x), float(y)) for x, y in
                                re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)',
                                           blk)]
-                        _emit_outline(pts, w, layer, nid, uuid)
+                        _emit_outline(pts, w, layer, nid, uuid,
+                                      filled=_shape_filled(blk, 'poly', w))
                     elif tag == 'fp_rect':
                         a, b = _xy(blk, 'start'), _xy(blk, 'end')
                         if a and b:
@@ -4773,7 +4814,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                             _emit_outline([_g(a[0], a[1]), _g(b[0], a[1]),
                                            _g(b[0], b[1]), _g(a[0], b[1])],
                                           w, layer, nid, uuid,
-                                          kind='rect' if _frot % 90 == 0 else 'poly')
+                                          kind='rect' if _frot % 90 == 0 else 'poly',
+                                          filled=_shape_filled(blk, 'rect', w))
                     elif tag == 'fp_circle':
                         c, e = _xy(blk, 'center'), _xy(blk, 'end')
                         if c and e:
@@ -4783,7 +4825,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                                 [_g(c[0] + r * math.cos(k * math.pi / 8),
                                     c[1] + r * math.sin(k * math.pi / 8))
                                  for k in range(16)], w, layer, nid, uuid,
-                                kind='circle', circle=(_gc[0], _gc[1], r))
+                                kind='circle', circle=(_gc[0], _gc[1], r),
+                                filled=_shape_filled(blk, 'circle', w))
             # Tag afterwards rather than threading an owner through
             # `_emit_outline`, whose signature the board-level pass shares.
             for _s in segments[_mark_from:]:
@@ -5419,6 +5462,23 @@ def _pcbnew_unmodelled_copper(live_fps, live_keys, get_layer_name) -> List[dict]
     except Exception:
         return []
     _BEZ = getattr(_pn, 'SHAPE_T_BEZIER', -99)
+    _TEXT_CLASSES = ('PCB_TEXT', 'FP_TEXT', 'PCB_TEXTBOX', 'FP_TEXTBOX', 'PCB_FIELD')
+
+    def _visible_copper_text(fp):
+        items = list(fp.GraphicalItems())
+        try:
+            items += list(fp.GetFields())
+        except Exception:
+            items += [fp.Reference(), fp.Value()]     # pre-8 pcbnew
+        for t in items:
+            try:
+                if t.GetClass() not in _TEXT_CLASSES or not t.IsVisible():
+                    continue
+                if (get_layer_name(t.GetLayer()) or '').endswith('.Cu'):
+                    return True
+            except Exception:
+                continue
+        return False
     out: List[dict] = []
     for fp, key in zip(live_fps, live_keys):
         kinds = []
@@ -5431,8 +5491,6 @@ def _pcbnew_unmodelled_copper(live_fps, live_keys, get_layer_name) -> List[dict]
                     kinds.append(d.GetShape())
         except Exception:
             continue
-        if not kinds:
-            continue
         npads = 0
         for pd in fp.Pads():
             try:
@@ -5441,12 +5499,16 @@ def _pcbnew_unmodelled_copper(live_fps, live_keys, get_layer_name) -> List[dict]
             except Exception:
                 pass
             npads += 1
-        if not footprint_copper_is_functional(npads):
+        if kinds and not footprint_copper_is_functional(npads):
             out.append({'owner_ref': key, 'kind': 'logo',
                         'reason': _UNMODELLED_LOGO_REASON})
-        elif _BEZ in kinds:
+            continue
+        if _BEZ in kinds:
             out.append({'owner_ref': key, 'kind': 'curve',
                         'reason': _UNMODELLED_CURVE_REASON})
+        if _visible_copper_text(fp):
+            out.append({'owner_ref': key, 'kind': 'text',
+                        'reason': _UNMODELLED_TEXT_REASON})
     return out
 
 
@@ -6399,6 +6461,15 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 _w = to_mm(_d.GetWidth())
             except Exception:
                 continue
+            # #962 Segment.graphic_filled: pcbnew already applied the loader's
+            # no-token rule, so its answer is the text path's `_shape_filled`.
+            try:
+                _filled_b = bool(_d.IsAnyFill())
+            except AttributeError:
+                try:
+                    _filled_b = bool(_d.IsFilled())
+                except Exception:
+                    _filled_b = False
             _nid = _d.GetNetCode() if hasattr(_d, 'GetNetCode') else 0
             _POLY = getattr(_pcbnew_g, 'SHAPE_T_POLY', -10)
             _RECT = getattr(_pcbnew_g, 'SHAPE_T_RECT', -11)
@@ -6414,7 +6485,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                             start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
                             width=ew, layer=_ln, net_id=_nid, graphic=True,
                             owner_ref=_owner, drawn_width=max(0.0, _w),
-                            graphic_kind=kind, graphic_circle=circle))
+                            graphic_kind=kind, graphic_circle=circle,
+                            graphic_filled=_filled_b))
 
                 if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
                     if _w <= 0:
@@ -7363,14 +7435,16 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 # it is what scopes the own-pad obstacle lift -- so the two
                 # fronts disagreeing about it is exactly the drift this
                 # comparator exists to catch.
-                # #962: drawn_width / graphic_kind are compared too. The
-                # off-outline grade measures from them, so a front that reads
-                # a different stroke grades a different overrun.
+                # #962: drawn_width / graphic_kind / graphic_filled are
+                # compared too. The off-outline grade measures from them, so a
+                # front that reads a different stroke or fill grades a
+                # different overrun.
                 _dw = getattr(s, 'drawn_width', None)
                 return (ends, _q(s.width), s.layer, '<graphic>',
                         getattr(s, 'owner_ref', ''),
                         None if _dw is None else _q(_dw),
-                        getattr(s, 'graphic_kind', ''))
+                        getattr(s, 'graphic_kind', ''),
+                        bool(getattr(s, 'graphic_filled', False)))
             return (ends, _q(s.width), s.layer, _net_label(pcb, s.net_id))
         return _seg_sig
 
@@ -7512,6 +7586,16 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                     or not all(close(x, y) for x, y in zip(a.margin, b.margin))):
                 diffs.append(f"Paste aperture {a.label()}: bounds/margin "
                              f"board={a.bounds}/{a.margin} file={b.bounds}/{b.margin}")
+
+    # #962: what the off-outline grade discloses it could NOT measure. A front
+    # that misses an entry reports a narrower blind spot than the other.
+    def _um(pcb):
+        return _Counter((u.get('owner_ref', ''), u.get('kind', ''))
+                        for u in (pcb.graphic_copper_unmeasured or []))
+    _ub, _uf = _um(from_board), _um(from_file)
+    if _ub != _uf:
+        diffs.append(f"Unmeasured graphic copper: only board={sorted((_ub - _uf).elements())[:6]} "
+                     f"only file={sorted((_uf - _ub).elements())[:6]}")
 
     return diffs
 

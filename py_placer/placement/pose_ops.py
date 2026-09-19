@@ -92,6 +92,9 @@ LEGAL_SCOPE = ('pad-pad clearance', 'hole-hole clearance', 'pad copper vs the '
                'footprint graphic copper vs the outline')
 LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     '(disclosed as graphic_edge_shortfall_refs, not gated)',
+                    'footprint copper the parser does not model: pad-less '
+                    'logos, bezier curves, copper text (named per part in '
+                    'oob_graphic_copper_unmeasured)',
                     'solder paste and mask openings', 'component bodies / '
                     'courtyards', 'routing', 'zone fill')
 MAGNITUDE_EPS = 1e-6
@@ -397,6 +400,12 @@ def worsened(before: Dict, after: Dict) -> List[str]:
            if (after.get(k) or 0) > (before.get(k) or 0)]
     out += [k for k in MAGNITUDE_KEYS
             if (after.get(k) or 0.0) > ((before.get(k) or 0.0) + MAGNITUDE_EPS)]
+    # #962: a SWAP can hold the graphic-copper count and summed amount level
+    # while moving the overrun onto a part that was clean. A part newly past
+    # the outline is new damage even when the totals tie.
+    was = {r[0] for r in (before.get('oob_graphic_copper_refs') or ())}
+    if any(r[0] not in was for r in (after.get('oob_graphic_copper_refs') or ())):
+        out.append('oob_graphic_copper_refs')
     return out
 
 

@@ -572,7 +572,8 @@ def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
     args += ['--max-print', '0']
     rc, out = run_tool(root, 'check_drc.py', *args)
     if 'NO DRC VIOLATIONS FOUND' in out:
-        return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out)},
+        return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out),
+                 'graphic_grazes_unverified': _unverified_grazes(out)},
                 {'ran': True, 'count': 0, 'by_type': {}},
                 {'ran': True, 'count': 0, 'by_type': {}})
     if not _DRC_TOTAL.search(out):
@@ -605,9 +606,27 @@ def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
     clear = {t: n for t, n in by_type.items()
              if t not in SIZE_TYPES and t not in RULE_PAIR_TYPES}
     return ({'ran': True, 'count': sum(clear.values()), 'by_type': clear,
-             'graded_at': _graded_at(out)},
+             'graded_at': _graded_at(out),
+             'graphic_grazes_unverified': _unverified_grazes(out)},
             {'ran': True, 'count': sum(size.values()), 'by_type': size},
             {'ran': True, 'count': sum(rule.values()), 'by_type': rule})
+
+
+def _unverified_grazes(out: str) -> int:
+    """Footprint graphic copper grazing the edge that check_drc ACCEPTED
+    without knowing whether a part move made the graze (#962).
+
+    board_score passes check_drc no --baseline, so it cannot tell a library
+    graze (watchy AE1) from one a placement lap created; both are accepted and
+    count toward nothing. The number is disclosed so a reader knows `count`
+    does not cover them. Copper PAST the outline is `graphic-off-board` and is
+    counted either way.
+    """
+    m = re.search(r'ACCEPTED as immutable-graphic: \d+ row\(s\) \(([^)]*)\)', out)
+    if not m:
+        return 0
+    u = re.search(r'unverified (\d+)', m.group(1))
+    return int(u.group(1)) if u else 0
 
 
 def _graded_at(out: str):

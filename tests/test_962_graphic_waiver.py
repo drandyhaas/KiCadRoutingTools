@@ -215,12 +215,22 @@ def main():
 
         pro_ignore = {'board': {'design_settings': {'rule_severities': {
             'copper_edge_clearance': 'ignore'}}}}
-        v = drc(board(fp_off, 'ignored', pro=pro_ignore))
+        # The severity leg is the one that switches the edge pass OFF: an edge
+        # clearance of 0 is pinned up to the fab floor (fab_edge_floor), so
+        # the edge pass still runs there and cannot show the grade is outside
+        # it. That leg was dropped as vacuous (#962 phase-2 verification).
+        ign = board(fp_off, 'ignored', pro=pro_ignore)
+        v = drc(ign)
         check('7. copper_edge_clearance severity ignore: STILL graphic-off-board',
               any(r['owner_ref'] == 'U9' for r in graphic_rows(v, 'graphic-off-board')))
-        v = drc(board(fp_off, 'zero_edge'), board_edge_clearance=0.0, clearance=0.0)
-        check('7. edge clearance 0: STILL graphic-off-board',
-              any(r['owner_ref'] == 'U9' for r in graphic_rows(v, 'graphic-off-board')))
+        import io
+        import contextlib
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            run_drc(ign, clearance=0.25, clearance_margin=0.0, quiet=False,
+                    print_summary=False)
+        check('7. ... and that board really skips the edge pass (the leg is not vacuous)',
+              "Skipping board edge clearances" in _buf.getvalue())
         v = drc(board(fp_off, 'netsfilter'), net_patterns=['/NOSUCH*'])
         check('7. a --nets filter that drops net 0: STILL graphic-off-board',
               any(r['owner_ref'] == 'U9' for r in graphic_rows(v, 'graphic-off-board')))
@@ -253,9 +263,148 @@ def main():
         oc = footprint_graphic_outline_census(
             parse_kicad_pcb(os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')))
         check('9. orangecrab\'s pad-less G*** logo copper is listed unmeasured',
-              {u['owner_ref'] for u in oc['unmeasured']} >= {'G***'}
-              and all(u['kind'] == 'logo' for u in oc['unmeasured']),
+              {u['owner_ref'] for u in oc['unmeasured'] if u['kind'] == 'logo'} >= {'G***'},
               str(oc['unmeasured']))
+        txt = board('(footprint "L:T" (layer "F.Cu") (at 10 10) (property "Reference" "T1")\n'
+                    ' %s\n (fp_text user "HI" (at 0 2) (layer "F.Cu") (uuid "x1") '
+                    '(effects (font (size 1 1) (thickness 0.15)))))\n'
+                    '(footprint "L:T" (layer "F.Cu") (at 20 10) (property "Reference" "T2")\n'
+                    ' %s\n (fp_text user "HI" (at 0 2) (layer "F.Cu") (hide yes) (uuid "x2") '
+                    '(effects (font (size 1 1) (thickness 0.15)))))'
+                    % (pad, pad), 'copper_text')
+        un = footprint_graphic_outline_census(parse_kicad_pcb(txt))['unmeasured']
+        check('9. VISIBLE copper text is listed unmeasured (kind text); hidden text is not',
+              [(u['owner_ref'], u['kind']) for u in un] == [('T1', 'text')], str(un))
+
+        # 10 -- the B side, graded absolutely (not only "the three agree")
+        fp_b = ('(footprint "L:P" (layer "B.Cu") (at 38.5 10) (property "Reference" "U6")\n'
+                ' %s\n %s)' % (pad.replace('"F.Cu"', '"B.Cu"'),
+                               tab_off.replace('"F.Cu"', '"B.Cu"')))
+        v = graphic_rows(drc(board(fp_b, 'bside_off')), 'graphic-off-board')
+        check('10. a B.Cu tab 1.5 mm past the edge: graphic-off-board, overrun 1.55 '
+              '(1.5 + half the 0.1 stroke), layer B.Cu',
+              len(v) == 1 and abs(v[0]['overrun_mm'] - 1.55) <= 0.005
+              and v[0]['layer'] == 'B.Cu', str(v))
+
+        # 11 / 12 -- --baseline compares the WHOLE pose: rotation and side too.
+        # A tab symmetric about the part origin looks identical after 180
+        # degrees and after a top-bottom flip, so only the pose says it moved.
+        sym = ('(fp_poly (pts (xy -1.4 -0.5) (xy 1.4 -0.5) (xy 1.4 0.5) (xy -1.4 0.5)) '
+               '(stroke (width 0.1) (type solid)) (fill yes) (layer "%s") (uuid "s1"))')
+        pad0 = '(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "%s") (net 1 "/A"))'
+
+        def symfp(side, rot):
+            cu = side + '.Cu'
+            # copper reach 38.45 + 1.4 + 0.05 = 39.9: 0.1 mm inside x=40
+            return ('(footprint "L:S" (layer "%s") (at 38.45 10 %s) '
+                    '(property "Reference" "S1")\n %s\n %s)'
+                    % (cu, rot, pad0 % cu, sym % cu))
+        b_f0 = board(symfp('F', 0), 'sym_f0')
+        for nm, cur in (('rotated 180', board(symfp('F', 180), 'sym_f180')),
+                        ('flipped to the B side', board(symfp('B', 0), 'sym_b0'))):
+            pl = graphic_rows(drc(cur, baseline=b_f0, board_edge_clearance=0.3),
+                              'graphic-board-edge')
+            check('11. the same copper, %s against --baseline: origin placement' % nm,
+                  pl and all(r.get('origin') == 'placement' and r['owner_ref'] == 'S1'
+                             for r in pl), str(pl))
+        vi = drc(b_f0, baseline=b_f0, board_edge_clearance=0.3)
+        check('12. control: unmoved against itself, the graze is accepted inherited',
+              not graphic_rows(vi)
+              and {r.get('origin') for r in accepted_graphic(vi)} == {'inherited'},
+              str([(r['type'], r.get('origin')) for r in vi if 'graphic' in str(r.get('item1'))]))
+
+        # 13 / 14 -- the placement channel: waivers never count, an owner the
+        # board cannot resolve always does
+        from placement.legality import _graphic_copper_channel
+        for nm, p, key in (('owner of the outline', po, 'J9'),
+                           ('board-level art', board(gr, 'boardlevel_leg'), '<board>')):
+            ch = _graphic_copper_channel(parse_kicad_pcb(p), 0.0)
+            check('13. %s: count 0, listed in _waived instead' % nm,
+                  ch['oob_graphic_copper_count'] == 0 and ch['oob_graphic_copper_amount'] == 0
+                  and key in [w[0] for w in ch['oob_graphic_copper_waived']],
+                  str({k: ch[k] for k in ch if k != 'oob_graphic_copper_basis'}))
+        pu = parse_kicad_pcb(board(fp_off, 'unresolved'))
+        pu.footprints.pop('U9')
+        cen = footprint_graphic_outline_census(pu)
+        ch = _graphic_copper_channel(pu, 0.0)
+        check('14. an owner with no footprint is `unresolved` and COUNTED, not waived',
+              [r['owner_state'] for r in cen['rows'] if r['owner_ref'] == 'U9'] == ['unresolved']
+              and ch['oob_graphic_copper_count'] == 1, str(ch['oob_graphic_copper_refs']))
+
+        # 15 -- a side change in memory is not graded on the old side's copper
+        pm = parse_kicad_pcb(board(fp_off, 'memflip'))
+        pm.footprints['U9'].layer = 'B.Cu'
+        cen = footprint_graphic_outline_census(pm)
+        check('15. a part flipped IN MEMORY: no row graded from stale copper, listed '
+              'unmeasured (moved-side)',
+              not [r for r in cen['rows'] if r['owner_ref'] == 'U9']
+              and ('U9', 'moved-side') in [(u['owner_ref'], u['kind']) for u in cen['unmeasured']],
+              str(cen['unmeasured']))
+
+        # 16 -- a circle is measured on its TRUE curve. At 11.25 degrees the
+        # 16-gon's chord midpoint faces the edge, 1.9% of r short of it.
+        circ = ('(footprint "L:C" (layer "F.Cu") (at 37.97 15 11.25) (property "Reference" "C7")\n'
+                ' %s\n (fp_circle (center 0 0) (end 2 0) (stroke (width 0.1) (type solid)) '
+                '(fill no) (layer "F.Cu") (uuid "c7")))' % pad0 % 'F.Cu')
+        rows = [r for r in footprint_graphic_outline_census(
+            parse_kicad_pcb(board(circ, 'true_circle')))['rows'] if r['owner_ref'] == 'C7']
+        check('16. the true circle reaches 0.02 mm past the edge (the 16-gon would not)',
+              len(rows) == 1 and abs(rows[0]['overrun_mm'] - 0.02) <= 0.001, str(rows))
+
+        # 17 -- a board cutout lying wholly inside a FILLED tab
+        hole = ('(gr_circle (center 20 15) (end 20.5 15) (stroke (width 0.1) (type solid)) '
+                '(fill no) (layer "Edge.Cuts"))')
+        filled_tab = ('(footprint "L:H" (layer "F.Cu") (at 20 15) (property "Reference" "H1")\n'
+                      ' (pad "1" smd rect (at -1.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "/A"))\n'
+                      ' (fp_poly (pts (xy -2 -1) (xy 2 -1) (xy 2 1) (xy -2 1)) (stroke (width 0.1) '
+                      '(type solid)) (fill %s) (layer "F.Cu") (uuid "h1")))')
+        vh = graphic_rows(drc(board(hole + '\n' + filled_tab % 'yes', 'hole_filled')),
+                          'graphic-off-board')
+        check('17. a FILLED tab over a cutout wholly inside it: graphic-off-board, '
+              'depth 1.05 (1.0 in the copper + half the stroke)',
+              len(vh) == 1 and vh[0]['owner_ref'] == 'H1'
+              and abs(vh[0]['overrun_mm'] - 1.05) <= 0.01, str(vh))
+        vh = graphic_rows(drc(board(hole + '\n' + filled_tab % 'no', 'hole_unfilled')),
+                          'graphic-off-board')
+        check('17. control: the same outline UNFILLED is not over the cutout',
+              not vh, str(vh))
+
+        # 18 -- the placement driver implicates the owner of a COUNTED row only
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'pd962', os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement',
+                                  'scripts', 'placement_driver.py'))
+        pd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pd)
+        js = os.path.join(work, 'drc_items.json')
+        with open(js, 'w', encoding='utf-8') as fh:
+            json.dump({'items': [
+                {'type': 'graphic-off-board', 'owner_ref': 'U2', 'item1': 'x'},
+                {'type': 'segment-board-edge', 'owner_ref': 'AE1',
+                 'accepted': 'immutable-graphic'}]}, fh)
+        got = pd._implicated_refs([js])
+        check('18. _implicated_refs names U2 (counted) and not AE1 (accepted)',
+              'U2' in got and 'AE1' not in got, str(got))
+
+        # 19 -- kicad_drc_compare carries both types and the baseline
+        sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
+        import kicad_drc_compare as kdc
+        check('19. kicad_drc_compare pairs both new types with copper_edge_clearance',
+              {'graphic-off-board', 'graphic-board-edge'} <= kdc.EDGE_CD_TYPES)
+        import check_drc as _cd
+        seen = {}
+        _real = _cd.run_drc
+
+        def _spy(*a, **kw):
+            seen.update(kw)
+            return []
+        _cd.run_drc = _spy
+        try:
+            kdc.run_check_drc(ign, baseline=b_f0)
+        finally:
+            _cd.run_drc = _real
+        check('19. run_check_drc hands --baseline to run_drc', seen.get('baseline') == b_f0,
+              str(seen))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
