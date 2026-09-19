@@ -67,7 +67,7 @@ import itertools
 import math
 import random
 import re
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 # Ring-search enumeration: nearest-first out to this radius, then a FINE ring
 # near the target, then a coarse whole-board sweep. The fine pass exists
@@ -1523,6 +1523,456 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     return True
 
 
+# ---- #975: the pad-copper edge floor, as a PREFERENCE of the edge seat ------
+#
+# `edge_seat_ok` never measured pad copper against the board-edge floor: its
+# pad conjunct asks whether each pad CENTRE is on the board at the gate margin,
+# so a seat could leave a connector's shield tabs inside the floor that
+# `grade_pad_legality`'s `pad_edge` then reports (tigard J7 0.073 mm short,
+# ulx3s AUDIO1 0.385). It is not added as a fifth conjunct. A refusal turns a
+# DRC shortfall into an unseated connector, and an unseated connector is an
+# unrouted one, so the seat PREFERS a pose whose copper clears the floor and
+# otherwise keeps the pose it always chose, disclosed in `edge_floor_fallback`.
+#
+# The reading is `legality.EdgeCopperContext.pose_copper`, the grader's own
+# per-pad arithmetic at the trial pose with the board's files read once per
+# state, so the seat and `pad_edge` agree by construction. A pad whose amount
+# cannot be measured (an unsupported shape) keeps only the checks it had.
+
+#: The grader names sides by coordinate (min-y is 'bottom'); the seeder names
+#: them by compass (min-y is north). One table, so no call site re-derives it.
+_GRADE_SIDE = {'left': 'west', 'right': 'east', 'bottom': 'north', 'top': 'south'}
+#: The unit step that moves a part INTO the board from each edge.
+_INWARD = {'north': (0.0, 1.0), 'south': (0.0, -1.0),
+           'west': (1.0, 0.0), 'east': (-1.0, 0.0)}
+#: Added to a derived shift so it survives `apply_move`'s 3-dp rounding, which
+#: can take back up to half a micron per axis.
+_FLOOR_SHIFT_GUARD_MM = 0.001
+#: A record names at most this many pads; the counts beside it are complete.
+_FLOOR_RECORD_PADS = 4
+#: The same bound for `grade_delta` ROWS, which are not pads: a row is a
+#: rule the move would break, and `n_grade_delta` counts them all, so a
+#: fifth one is summarised rather than silently dropped.
+_FLOOR_ROWS = 4
+#: The reasons a first seat stays short for which the ladder WALKS to later
+#: rungs. A shortfall on another side than the seated one (a pad past its
+#: courtyard at a corner), or on a sampled outline, is one only an along-edge
+#: rung can change. Every other reason -- the inward move refused by the band,
+#: a setback, a keep-out, a neighbour, still short, the grade's nearest edge
+#: or along-edge window -- is about the MOVE. A later rung can still help
+#: there, by having a different move accepted: away from a corner its gap to
+#: the seated edge is the same, but near one `_edge_correct` converges on the
+#: sum of every side and the gap varies from rung to rung. A random search
+#: found grade-clean seats given up on 153 of 20,000 inputs (51 of them within
+#: 1 mm; 102 were nearest-edge refusals, 23 still short). But walking trades
+#: the connector's along-edge position for 0.1 mm-scale copper, and the first
+#: version of this ladder, walking on every reason, slid one connector 10 mm
+#: to clear 0.03 mm. So this is a CHOICE to stay put, not a claim that nothing
+#: along the edge would do.
+_SLIDE_HELPS = frozenset(('along_edge', 'outline_sampled'))
+
+
+class _Floor(NamedTuple):
+    """The floor reading of one pose: `short` is `(amount, index, side,
+    gap, pad_number)` per measured pad over the floor, worst first."""
+    required: float
+    short: Tuple
+    unmeasured: Tuple[int, ...]
+
+
+def _floor_at(state, ref: str, x: float, y: float, rot: float):
+    """`_Floor` for `ref` at the pose `apply_move` would WRITE, or None when the
+    board's constants cannot be read (the seat then behaves as it always did).
+    """
+    from .legality import EPS, edge_copper_for
+    ctx, _err = edge_copper_for(state, state.pcb_data, state.pcb_file,
+                                state.clearance, state.board_edge_clearance)
+    fp = state.pcb_data.footprints.get(ref) if ctx is not None else None
+    if fp is None:
+        return None
+    reading = ctx.pose_copper(fp, (round(x, 3), round(y, 3), rot))
+    short = sorted(((r.amount_mm, r.index, _GRADE_SIDE.get(r.edge), r.gap_mm,
+                     r.pad.pad_number)
+                    for r in reading.pads
+                    if r.amount_mm is not None and r.amount_mm > EPS),
+                   key=lambda s: (-s[0], s[1]))
+    return _Floor(ctx.required, tuple(short), reading.fallback)
+
+
+def _floor_context_note(state, notes: List[str]) -> None:
+    """Say ONCE per state that the floor preference is off, and why."""
+    from .legality import edge_copper_for
+    ctx, err = edge_copper_for(state, state.pcb_data, state.pcb_file,
+                               state.clearance, state.board_edge_clearance)
+    if ctx is None and not getattr(state, '_edge_floor_noted', False):
+        state._edge_floor_noted = True
+        notes.append(f"edge seats: the board-edge copper floor could not be "
+                     f"read ({err}), so seats were chosen without it")
+
+
+def _faces_its_edge(state, part, entry: Dict, edge: str, x: float, y: float) -> bool:
+    """Does `rule_edge_connector` read this pose as nearest its declared edge?
+
+    Asked of every pose the floor preference picks over the seat the ladder
+    always chose, because that seat is the only one the grade has already been
+    measured against. The rect and its basis are the rule's own
+    (`floorplan.edge_seat_rect`, the drawn body of a receptacle) at the pose
+    `apply_move` writes."""
+    from .floorplan import _nearest_edge, drawn_body_rect, edge_seat_rect
+    bounds = state.pcb_data.board_info.board_bounds
+    if not bounds:
+        return True
+    px, py = round(x, 3), round(y, 3)
+
+    def body():
+        bodies = getattr(state, '_edge_seat_bodies', None)
+        if bodies is None:
+            from .body import board_bodies
+            try:
+                bodies = board_bodies(state.pcb_data, state.pcb_file)
+            except Exception:                                 # noqa: BLE001
+                bodies = {}
+            state._edge_seat_bodies = bodies
+        fp = state.pcb_data.footprints.get(part.ref)
+        if fp is None:
+            return None, 'none'
+        from copy import copy
+        moved = copy(fp)
+        moved.x, moved.y, moved.rotation = px, py, part.rot
+        return drawn_body_rect(bodies.get(part.ref), moved)
+
+    rect, _basis = edge_seat_rect(entry, part.rect(px, py, part.rot), body)
+    return _nearest_edge(rect, tuple(round(v, 6) for v in bounds)) == edge
+
+
+def _carries_setback(entry: Dict) -> bool:
+    """Does `rule_edge_connector` grade this entry's SETBACK? It does for an
+    explicit `max_setback_mm` and for the `edge_receptacle` and
+    `connector_affinity` classes, and only once the part has no overhang."""
+    return (entry.get('max_setback_mm') is not None
+            or entry.get('class') in ('edge_receptacle', 'connector_affinity'))
+
+
+def _grade_band_refuses(state, part, entry: Dict, edge: str, lo: float,
+                        x: float, y: float):
+    """`(reason, detail)`: would `rule_edge_connector` refuse this pose's
+    overhang band, or charge its setback? `reason` is None when it would not.
+
+    Asked of every pose the floor preference picks over the seat the ladder
+    always chose. The ladder's own band test (`edge_seat_ok`) allows 0.02 mm
+    either side of the band. Its first seat can already sit in that margin
+    (a pre-existing grade error this does not touch), and a moved pose or a
+    later rung can land there where the first seat did not (measured: a later
+    rung read 0.23 on a 0.25 minimum and turned `--repair` from rc 0 to rc 4).
+    The setback is charged only once the occupancy reading is <= EPS, which
+    an inward move is exactly what produces, so any such pose on an entry
+    that carries one is refused -- conservatively, since the grade then also
+    needs the body too far in.
+    """
+    from .connector_geometry import band_amount, geometry_for
+    from .legality import EPS
+    px, py = round(x, 3), round(y, 3)
+    legacy = state.edge_gate.rect_outside_amount(part.rects(px, py, part.rot)[0])
+    amount, basis, _row = band_amount(
+        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
+        legacy, state.edge_gate.margin, pose=(px, py, part.rot))
+    detail = {'overhang_after_mm': round(amount, 4), 'band_min_mm': lo,
+              'basis': basis}
+    hi = (entry.get('overhang_mm') or {}).get('max')
+    if amount < lo - EPS:
+        return 'band_min', detail
+    if hi is not None and amount > float(hi) + EPS:
+        return 'band_max', detail
+    if _carries_setback(entry) and legacy <= EPS:
+        return 'setback', detail
+    return None, detail
+
+
+def _outside_its_along_edge_claim(state, part, entry: Dict, edge: str,
+                                  x: float, y: float) -> bool:
+    """Would `rule_edge_connector`'s along-edge conjunct flag this pose?
+
+    Asked by CALLING the rule's own conjunct (`floorplan._grade_along_edge`)
+    on the pose `apply_move` writes, with the edge span the seat ladder
+    already uses (`_declared_edge_span`'s outline stand-in), so the two
+    cannot disagree about the window. The ladder clamps its rungs to the
+    declared window, but a rung ON a window end is rounded to 3 decimals by
+    `apply_move` and can land half a micron outside it, where the grade's
+    EPS is 1 nm -- measured: a one-footprint board whose seed went rc 0 -> 4."""
+    if entry.get('center_on_edge') is None and entry.get('along_edge_band') is None:
+        return False
+    from types import SimpleNamespace
+    from placement import floorplan as _fp
+    bounds = state.pcb_data.board_info.board_bounds
+    if not bounds:
+        return False
+    outline = {'simple_rectangle': not getattr(state.edge_gate, 'rings', None),
+               'cutouts': 0, 'edge_segments': 0}
+    ctx = SimpleNamespace(gate=state.edge_gate, outline=outline,
+                          outline_bounds=tuple(round(v, 6) for v in bounds),
+                          edge_seating=[], abstain=lambda key, why: None)
+    probe = SimpleNamespace(rect=part.rect(round(x, 3), round(y, 3), part.rot))
+    return any(True for _ in _fp._grade_along_edge(ctx, dict(entry, edge=edge),
+                                                   part.ref, probe, 'error'))
+
+
+def _grade_accepts(state, part, entry: Dict, edge: str, lo: float,
+                   x: float, y: float) -> bool:
+    """The grade's own conjuncts a preferred pose must pass beyond the seat
+    predicate (which already holds the pad copper past the outline): the band
+    and setback at the grade's bounds, the nearest edge, and the declared
+    along-edge window."""
+    return (_grade_band_refuses(state, part, entry, edge, lo, x, y)[0] is None
+            and _faces_its_edge(state, part, entry, edge, x, y)
+            and not _outside_its_along_edge_claim(state, part, entry, edge, x, y))
+
+
+def _grade_worse(grade, ref: str, rot: float, first, seat, exclude, memo):
+    """What the intent grade adds when `ref` sits at `seat` instead of `first`
+    -- the seat the ladder always chose -- or () when nothing.
+
+    Asked of every pose the floor preference would take over that seat, after
+    its own conjuncts pass, because those conjuncts are a LIST and a list
+    misses a rule: a move that clears the floor can raise the courtyard
+    overlap budget, leave the part's own zone, or break a proximity claim, and
+    place_seed then exits 4 on a board the first seat would have passed. The
+    grade is `floorplan.PoseGrader`: the RULES `grade` runs, on this search's
+    own board at the two poses, with `exclude` (the pile, whose coordinates
+    mean nothing yet) left out of both so the difference is this part's. A
+    pose the grade cannot be asked about is not taken. `memo` keeps the first
+    seat's grade for one rotation.
+
+    It is asked PER SEAT, at the moment of that seat, so an error only a later
+    part's seat will produce -- two connectors sharing an edge, where this
+    move leaves room the next one then wants -- is outside it by construction.
+    `place_seed`'s own end-of-run grade still reports that one, and still sets
+    the exit code from it.
+
+    Beside the grade, the placement's own legality numbers (courtyard overlap
+    and off-board) are compared UNCONDITIONALLY through `legality_at`, because
+    the `legality` rule is skipped when the intent declares no
+    `legality_budget` -- and `emit_intent` withholds that budget on exactly the
+    boards where the risk is real. Without that, a move could buy courtyard
+    interpenetration with a locked part and raise nothing: measured on a
+    fixture, 0.18 mm2, which no pad or hole predicate can see.
+
+    The two grades are comparable only while they describe the same board, and
+    they stop doing so when the poses fall on opposite sides of the parser's
+    two-pad-centre threshold for an interior Edge.Cuts contour: the grader
+    holds the classification its state was built with, while a grade of the
+    board that would be WRITTEN re-derives it (`PoseGrader.interior_split`).
+    That is not a delta of zero, it is a delta of nothing, so it is reported
+    unavailable and the seat is kept. Measured by a verifier on a synthetic
+    board: a sub-millimetre move of the declared connector (0.5 mm on each
+    axis) took the written board's `oob_count` 2 -> 0 while the masked reading
+    held at 2."""
+    if grade is None:
+        return ()
+    from placement import floorplan as _fp
+
+    def at(pose):
+        return (round(pose[0], 3), round(pose[1], 3), rot)
+    try:
+        if (grade.interior_split({ref: at(first)})
+                != grade.interior_split({ref: at(seat)})):
+            return ({'unavailable': "the two poses do not classify the board's "
+                                    "interior contours alike"},)
+        if memo.get('pose') != at(first):
+            memo['errors'] = grade.violations(exclude=exclude, poses={ref: at(first)})
+            memo['legality'] = grade.legality_at(exclude=exclude,
+                                                 poses={ref: at(first)})
+            memo['pose'] = at(first)
+        after = grade.violations(exclude=exclude, poses={ref: at(seat)})
+        rows = list(_fp.grade_delta(memo['errors'], after))
+        # The grade alone is not enough: `legality` is skipped when the intent
+        # declares no `legality_budget`, and `emit_intent` withholds
+        # `overlap_area` on exactly the boards where courtyard interpenetration
+        # is the live risk, so a move could buy overlap with a LOCKED part and
+        # raise no error at all (measured on a fixture: 0.18mm2, undisclosed).
+        # These numbers are read whatever the intent says.
+        from .legality import EPS as _eps
+        moved = grade.legality_at(exclude=exclude, poses={ref: at(seat)})
+        # Whatever the armed `legality` rule already said, said once: a budget
+        # it reported growing is the same finding as the reading below.
+        said = {r.get('budget') for r in rows if r.get('rule') == 'legality'}
+        for key in ('overlap_area', 'oob_amount', 'oob_count'):
+            if key in said:
+                continue
+            was, now = memo['legality'].get(key), moved.get(key)
+            if not (isinstance(was, (int, float))
+                    and isinstance(now, (int, float))):
+                continue
+            if now > was + (0 if isinstance(now, int) else _eps):
+                rows.append({'rule': 'legality', 'budget': key,
+                             'before': round(float(was), 4),
+                             'after': round(float(now), 4)})
+        return tuple(rows)
+    except Exception as exc:                                   # noqa: BLE001
+        return ({'unavailable': f'{type(exc).__name__}: {exc}'},)
+
+
+def _floor_rung(state, part, entry: Dict, edge: str, lo: float, hi: float,
+                x: float, y: float, crowds):
+    """One ladder rung, already a legal conflict-free seat, asked about the
+    floor. Returns `(seat, floor, why)`:
+
+    * `seat` -- `(x, y)` when this rung, or this rung moved inward, clears the
+      floor, else None;
+    * `floor` -- the reading at the rung itself (None: no floor context);
+    * `why` -- when `seat` is None, a dict saying why moving inward did not
+      help, for the disclosure.
+
+    The inward move is DERIVED, not searched. On a rectangular outline every
+    copper gap to the seated edge grows by exactly the distance the part moves
+    inward, so the largest shortfall on that edge is the distance to move.
+    Nothing else about the pose changes, and the move is then re-checked: the
+    band and setback at the grade's own bounds (`_grade_band_refuses`),
+    `edge_seat_ok`, the neighbours, the floor again, the grade's nearest edge
+    and along-edge window. The caller then asks the whole intent grade
+    (`_grade_worse`), which is what a list of conjuncts cannot promise.
+    """
+    floor = _floor_at(state, part.ref, x, y, part.rot)
+    if floor is None or not floor.short:
+        return (x, y), floor, None
+    sides = {s[2] for s in floor.short}
+    if sides != {edge}:
+        return None, floor, {'why': ('along_edge' if None not in sides
+                                     else 'outline_sampled'),
+                             'sides': sorted(str(s) for s in sides)}
+    shift = max(s[0] for s in floor.short) + _FLOOR_SHIFT_GUARD_MM
+    ux, uy = _INWARD[edge]
+    sx, sy = round(x + ux * shift, 3), round(y + uy * shift, 3)
+    reason, detail = _grade_band_refuses(state, part, entry, edge, lo, sx, sy)
+    why = dict({'shift_mm': round(shift, 4)}, **detail)
+    if reason is not None:
+        return None, floor, dict(why, why=reason)
+    refused: List[str] = []
+    if not edge_seat_ok(state, part, sx, sy, edge, lo, hi, reasons=refused):
+        return None, floor, dict(why, why='refused',
+                                 refused_by=sorted(set(refused))[:3])
+    if crowds(sx, sy):
+        return None, floor, dict(why, why='crowds')
+    moved = _floor_at(state, part.ref, sx, sy, part.rot)
+    if moved is None or moved.short:
+        return None, floor, dict(why, why='still_short')
+    if not _faces_its_edge(state, part, entry, edge, sx, sy):
+        return None, floor, dict(why, why='nearest_edge')
+    if _outside_its_along_edge_claim(state, part, entry, edge, sx, sy):
+        return None, floor, dict(why, why='along_edge_window')
+    return (sx, sy), floor, None
+
+
+def _floor_record(ref: str, edge: str, kept: str, pose, floor: _Floor,
+                  why: Optional[Dict]) -> Optional[Dict]:
+    """The `edge_floor_fallback` record for a KEPT pose that is short on a
+    measured pad, or None when it is not. Bounded: at most
+    `_FLOOR_RECORD_PADS` pads by name, with the full counts beside them."""
+    if floor is None or not floor.short:
+        return None
+    worst = floor.short[0]
+    record = {
+        'edge': edge, 'kept': kept,
+        'pose': [round(pose[0], 3), round(pose[1], 3), pose[2]],
+        'required_mm': floor.required,
+        'shortfall_mm': worst[0], 'min_gap_mm': worst[3],
+        'n_pads_short': len(floor.short),
+        'pads': [{'pad_ref': f'{ref}.{num}', 'pad_index': index, 'side': side,
+                  'gap_mm': gap, 'shortfall_mm': amount}
+                 for amount, index, side, gap, num
+                 in floor.short[:_FLOOR_RECORD_PADS]],
+        'n_unmeasured_pads': len(floor.unmeasured),
+        'unmeasured_pads': list(floor.unmeasured[:_FLOOR_RECORD_PADS]),
+    }
+    record.update(why or {'why': kept})
+    return record
+
+
+def _grade_delta_phrase(entry: Dict) -> str:
+    """One `grade_delta` row in words."""
+    if 'unavailable' in entry:
+        return f"the grade could not be asked ({entry['unavailable']})"
+    if 'budget' in entry:
+        return (f"{entry['rule']} {entry['budget']} {entry['before']} -> "
+                f"{entry['after']}")
+    who = entry.get('ref') or entry.get('block') or 'board'
+    return f"{entry['added']} more {entry['rule']} on {who}"
+
+
+def _floor_note(prefix: str, ref: str, record: Dict) -> str:
+    """One NOTE for a disclosed floor shortfall, shared by every seat path."""
+    pad = record['pads'][0]
+    gap = ('' if pad['gap_mm'] is None
+           else f" is {pad['gap_mm']:.3f}mm from the {pad['side']} edge")
+    why = record.get('why')
+    because = {
+        'band_min': (f"clearing it would take the overhang to "
+                     f"{record.get('overhang_after_mm', 0.0):.3f}mm, under the "
+                     f"declared minimum {record.get('band_min_mm', 0.0):g}mm"),
+        'setback': ("clearing it would leave the part with no overhang, where "
+                    "its seat setback is graded"),
+        'along_edge': ("the short copper faces a side that moving the part "
+                       "inward does not clear"),
+        'outline_sampled': ("the outline is sampled, so no inward distance can "
+                            "be derived"),
+        'refused': ("the pose that clears it is refused by "
+                    + ', '.join(record.get('refused_by') or ['the seat'])),
+        'crowds': "the pose that clears it crowds a part already placed",
+        'still_short': "moving the part inward did not clear it",
+        'band_max': ("the pose that clears it would overhang past the declared "
+                     "maximum"),
+        'along_edge_window': ("the pose that clears it would sit outside the "
+                              "declared along-edge window"),
+        # Not "error(s) this seat does not have": the same channel carries a
+        # budget this seat is already over and the move would grow -- an error
+        # the seat DOES have -- and a grade that could not be asked at all.
+        # Each row says which; the sentence must not overwrite them.
+        'grade_delta': (("the pose that clears it could not be compared with "
+                         "this seat: "
+                         if any('unavailable' in d
+                                for d in record.get('grade_delta') or [])
+                         else "the pose that clears it does not pass the intent "
+                              "grade beside this seat: ")
+                        + '; '.join(_grade_delta_phrase(d)
+                                    for d in record.get('grade_delta') or [])),
+        'nearest_edge': ("the pose that clears it would read nearest another "
+                         "edge than the declared one"),
+        'crowding': ("no seat on this band clears the parts already placed, so "
+                     "the floor was not searched"),
+    }.get(why, str(why))
+    return (f"{prefix}{ref}: its seat on the {record['edge']} edge leaves pad "
+            f"copper inside the {record['required_mm']:g}mm board-edge floor -- "
+            f"{pad['pad_ref']}{gap} ({record['shortfall_mm']:.3f}mm short); "
+            f"{because}. Kept the seat rather than leave the connector "
+            f"unseated, which leaves its nets unrouted (edge_floor_fallback)")
+
+
+def _floor_records_at_final_pose(state, records: Dict[str, Dict]) -> Dict[str, Dict]:
+    """The records whose part still sits at the pose each describes. A later
+    stage (stage 3b's anchor rounds) can re-seat a part, and a record about a
+    pose that was not written would describe copper that is not there."""
+    return floor_records_at_poses(
+        records, {ref: (p.x, p.y, p.rot) for ref, p in state.parts.items()})
+
+
+def floor_records_at_poses(records: Dict[str, Dict], poses) -> Dict[str, Dict]:
+    """The `edge_floor_fallback` records whose ref sits, in `poses`
+    ({ref: (x, y, rot)}), at the pose the record describes. `place_seed` asks
+    it of the WRITTEN board, after passes the seeder never saw."""
+    out = {}
+    for ref, record in sorted((records or {}).items()):
+        pose = poses.get(ref)
+        if pose is None:
+            continue
+        x, y, rot = record['pose']
+        turn = ((pose[2] or 0.0) - rot) % 360.0
+        # 1e-3 degrees, not float equality: the writer prints an angle with
+        # `%g`, so a part seated at 0.1234567 degrees is WRITTEN at 0.123457.
+        if ((round(pose[0], 3), round(pose[1], 3)) == (x, y)
+                and min(turn, 360.0 - turn) < 1e-3):
+            out[ref] = record
+    return out
+
+
 def _edge_frac_bounds(part, bounds, edge: str) -> Tuple[float, float]:
     """The fractions along `edge` at which the part is still ON the board.
 
@@ -1733,7 +2183,7 @@ def _already_on_its_edge(state, part) -> bool:
 
 def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                notes: List[str], target=None, exclude=None,
-               rotations=None) -> bool:
+               rotations=None, disclose=None, grade=None) -> bool:
     """Seat a DECLARED edge part on its edge band, minimal-move (run-4 B-6).
 
     Repair could never do this: `_try_place._ok` demands full containment,
@@ -1748,7 +2198,15 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
     REPLACES the part's incoming angle rather than backing it up: the seat is
     tried at each declared angle in the author's order and the part is refused
     by name if none of them seats. The part's own angle is a candidate only
-    when the author declared it."""
+    when the author declared it.
+
+    #975: at each rotation the ladder PREFERS a seat whose pad copper clears
+    the board-edge floor -- a rung, or a rung moved inward by the derived
+    distance (`_floor_rung`) -- and otherwise keeps the first seat it would
+    always have kept. A rotation is never changed to clear the floor, so which
+    rotations seat is exactly what it was. A kept seat that is short of the
+    floor gets a NOTE and, when `disclose` is a dict, an `edge_floor_fallback`
+    record under `ref`."""
     part = state.parts[ref]
     edge = entry['edge']
     band = entry.get('overhang_mm') or {}
@@ -1896,7 +2354,22 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                             reasons=refused)
 
     def try_rot(rot):
-        """The seat ladder at one rotation. (x, y) or None.
+        """The seat ladder at one rotation. (x, y, record) or None; `record` is
+        the `edge_floor_fallback` record when the seat is short of the floor.
+
+        #975: ONE walk. Every rung is tested as it always was, and the first
+        conflict-free one is the seat the ladder always chose. It is kept if
+        its copper clears the floor, or replaced by its inward move when that
+        move passes every re-check (`_floor_rung`). Otherwise the walk goes on
+        only when the shortfall is one a later rung can change
+        (`_SLIDE_HELPS`), and takes a later rung, or its move, only when it
+        clears the floor and passes the grade's edge conjuncts
+        (`_grade_accepts`: band, setback, nearest edge, along-edge window).
+        Every pose other than the first seat must then add no intent-grade
+        error to that seat's (`_grade_worse`). Failing all that, the first
+        seat is kept and disclosed. A rung that is not already a conflict-free
+        seat is never asked, so a rotation that seated nowhere still seats
+        nowhere.
 
         `part.rot` is SET for the duration, and that is the whole point rather
         than a shortcut. `_edge_pose`, `_edge_correct` and `edge_seat_ok` all
@@ -1918,6 +2391,8 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
             if geom is None:
                 return None
             cur, f_lo, f_hi, step = geom
+            first = None
+            graded = {}
             for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                        0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
                 frac = min(f_hi, max(f_lo, cur + df * step))
@@ -1926,11 +2401,62 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                                                 overhang, band=(lo, hi_eff))
                 if not converged or not on_board(x, y):
                     continue
-                if conflict_free(x, y, rot):
-                    return x, y
-            return None
+                if not conflict_free(x, y, rot):
+                    continue
+                if first is not None and first[3] not in _SLIDE_HELPS:
+                    break
+                try:
+                    seat, floor, why = _floor_rung(
+                        state, part, entry, edge, lo, hi_eff, x, y,
+                        lambda a, b: not conflict_free(a, b, rot))
+                except Exception as exc:               # noqa: BLE001
+                    # A PREFERENCE may not cost a seat. Anything raised while
+                    # measuring the floor leaves this rung exactly as the
+                    # ladder had it before #975 -- today's pose, kept -- rather
+                    # than propagating out of `_seat_edge` and abandoning the
+                    # part, which would be worse than the shortfall.
+                    notes.append(f"{ref}: the board-edge copper floor could "
+                                 f"not be measured at this seat "
+                                 f"({type(exc).__name__}: {exc}); the seat is "
+                                 f"unchanged")
+                    seat, floor, why = None, None, None
+                # The first seat, unmoved, is the one the ladder always chose,
+                # and is taken without asking anything more.
+                if seat is not None and first is None and seat == (x, y):
+                    return x, y, None
+                # Anything else is a pose the grade has not been measured on:
+                # the grade's own edge conjuncts are asked of it (a move asked
+                # them already), then the whole intent grade against the
+                # first seat's.
+                if seat is not None and (first is None or seat != (x, y)
+                                         or _grade_accepts(state, part, entry,
+                                                           edge, lo, x, y)):
+                    worse = _grade_worse(grade, ref, rot,
+                                         (x, y) if first is None else first[:2],
+                                         seat, ex - {ref}, graded)
+                    if not worse:
+                        return seat[0], seat[1], None
+                    if first is None:
+                        why = dict(why or {}, why='grade_delta',
+                                   n_grade_delta=len(worse),
+                                   grade_delta=list(worse[:_FLOOR_ROWS]))
+                if first is None:
+                    first = (x, y, _floor_record(
+                        ref, edge, 'conflict_free', (x, y, rot), floor, why),
+                        (why or {}).get('why'))
+            return first[:3] if first is not None else None
         finally:
             part.rot = saved
+
+    def keep(seat, rot):
+        """Apply a seat, disclosing a floor shortfall it carries."""
+        state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), rot)
+        if seat[2] is not None:
+            notes.append(_floor_note('', ref, seat[2]))
+            if disclose is not None:
+                disclose[ref] = seat[2]
+
+    _floor_context_note(state, notes)
 
     # #893, the REPAIR half, and it has to run before the minimal-move seat
     # below rather than after it. Wiring `rotations` into the #706 fallback
@@ -1967,7 +2493,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
             seat = try_rot(rot)
             if seat is None:
                 continue
-            state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), rot)
+            keep(seat, rot)
             if abs((rot - was_rot) % 360.0) > 1e-9:
                 notes.append(
                     f"{ref}: seated on the declared {edge} edge at the "
@@ -1991,7 +2517,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
 
     seat = try_rot(part.rot)
     if seat is not None:
-        state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), part.rot)
+        keep(seat, part.rot)
         return True
 
     # #706, the rotation half. THREE gates, and the third is a deliberate
@@ -2034,7 +2560,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
             seat = try_rot(rot)
             if seat is None:
                 continue
-            state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), rot)
+            keep(seat, rot)
             notes.append(
                 f"{ref}: no seat existed on the declared {edge} edge at its "
                 f"own rotation {was_rot:g}deg; seated at {rot:g}deg. CHECK "
@@ -2158,6 +2684,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         # #916. Reaches `pose_ok` through the state, which is the search
         # this issue is actually about. False by default.
         body_model=body_model)
+    # #975: the grade a preferred edge seat is compared on (`_grade_worse`).
+    # Reads nothing until a seat is short of the floor.
+    pose_grader = floorplan.PoseGrader(
+        intent, state, blocks=blocks, clearance=clearance,
+        board_edge_clearance=board_edge_clearance)
     bounds = state.board
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
@@ -2213,6 +2744,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # both "nothing is near it" and "everything near it is locked".
     no_pose_verdict: Dict[str, str] = {}
     no_pose_census: Dict[str, Dict] = {}
+    # #975: stage 1's edge seats that keep pad copper inside the board-edge
+    # floor because no pose the ladder tried clears it -- see `_floor_rung`.
+    edge_floor_fallback: Dict[str, Dict] = {}
     # A part locked IN THE FILE is already authoritatively placed -- a caller
     # that pre-placed its spec-fixed parts and stamped them (locked yes) must
     # not have the seeder re-derive them. Treated as placed from the start:
@@ -2257,6 +2791,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                              f"to south) -- the centroid stage places it")
                 continue
             by_edge.setdefault(c['edge'], []).append(c)
+    if by_edge:
+        _floor_context_note(state, notes)
     for edge in sorted(by_edge):
         specs = sorted(by_edge[edge], key=lambda c: c['ref'])
         for k, c in enumerate(specs):
@@ -2446,6 +2982,25 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # named on the record and `place_seed`'s gate refuses it; trading
             # the declared edge for it would lose both.
             _fallback = None
+            # #975, the order of preference, tier by tier:
+            #   1. a conflict-free rung, or that rung moved inward, whose pad
+            #      copper clears the board-edge floor -- the first in rung
+            #      order (`_pick`);
+            #   2. the first conflict-free rung, which is what this ladder
+            #      always kept (`_kept`), disclosed when it is short;
+            #   3. the crowding `_fallback` above, unchanged: with no clear
+            #      seat anywhere the floor is not searched, only reported.
+            # A floor shortfall does not ARM the slide (an unarmed slide has
+            # one rung and no later ones), a later rung is only walked to when
+            # the first seat's shortfall is one a rung can change
+            # (`_SLIDE_HELPS`), and any pose other than the first seat must
+            # also pass the grade's edge conjuncts (`_grade_accepts`) and add
+            # no intent-grade error to the first seat's (`_grade_worse`, with
+            # the pile -- everything stage 1 has not placed -- left out).
+            _kept = None
+            _kept_xy = None
+            _pick = None
+            _graded = {}
             for _df in _slide:
                 frac = min(f_hi, max(f_lo, _base_frac + _df * _sstep))
                 _x, _y = _edge_pose(part, bounds, edge, frac, overhang)
@@ -2460,11 +3015,44 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                                           reasons=_why):
                     _hit = _shorted_by(_x, _y)
                     if not _hit:
-                        break
+                        if (_kept is not None and (_kept[2] or {}).get('why')
+                                not in _SLIDE_HELPS):
+                            break
+                        _seat, _floor, _fwhy = _floor_rung(
+                            state, part, c, edge, lo,
+                            float(hi) if hi is not None
+                            else max(2.0 * overhang, lo + 1.0),
+                            _x, _y, lambda a, b: bool(_shorted_by(a, b)))
+                        if _seat is not None and _kept is None and _seat == (_x, _y):
+                            _pick = _seat
+                            break
+                        if _seat is not None and (
+                                _kept is None or _seat != (_x, _y)
+                                or _grade_accepts(state, part, c, edge, lo, _x, _y)):
+                            # The pile is everything stage 1 has not placed.
+                            _worse = _grade_worse(
+                                pose_grader, ref, part.rot,
+                                (_x, _y) if _kept is None else _kept_xy, _seat,
+                                set(unplaced) - {ref}, _graded)
+                            if not _worse:
+                                _pick = _seat
+                                break
+                            if _kept is None:
+                                _fwhy = dict(_fwhy or {}, why='grade_delta',
+                                             n_grade_delta=len(_worse),
+                                             grade_delta=list(_worse[:_FLOOR_ROWS]))
+                        if _kept is None:
+                            _kept = (frac, _floor, _fwhy)
+                            _kept_xy = (_x, _y)
+                        continue
                     if _fallback is None:
                         _fallback = (frac, _hit)
-            else:
-                if _fallback is not None:
+            # Without a pick the only early exit leaves `_kept` set, so this is
+            # the old `for ... else`: the loop ran out, or tier 2 stopped it.
+            if _pick is None:
+                if _kept is not None:
+                    frac = _kept[0]
+                elif _fallback is not None:
                     frac, _hit = _fallback
                     notes.append(
                         f"edge connector {ref}: no seat on the {edge} band "
@@ -2477,6 +3065,10 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 state, ref, edge, x, y, overhang,
                 band=(lo, float(hi) if hi is not None
                       else max(2.0 * overhang, lo + 1.0)))
+            if converged and _pick is not None:
+                # The same rung, moved inward when that is what cleared it --
+                # the walk above already checked this exact pose.
+                x, y = _pick
             if not converged:
                 # The walk diverged (it drives a scalar SUM along one axis, so
                 # an along-edge overshoot never cancels). It used to
@@ -2509,6 +3101,18 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
             placed.add(ref)
             unplaced.discard(ref)
+            if _pick is None:
+                if _kept is not None:
+                    _record = _floor_record(ref, edge, 'conflict_free',
+                                            (x, y, part.rot), _kept[1], _kept[2])
+                else:
+                    _record = _floor_record(
+                        ref, edge, 'crowding', (x, y, part.rot),
+                        _floor_at(state, ref, x, y, part.rot),
+                        {'why': 'crowding'} if _fallback is not None else None)
+                if _record is not None:
+                    edge_floor_fallback[ref] = _record
+                    notes.append(_floor_note('edge connector ', ref, _record))
 
     # ---- 1.5 must_lock parts seat FIRST, in place when possible ------------
     # Under --force, previously-good must_lock parts used to be re-derived at
@@ -3262,7 +3866,13 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 r: (declared_rot[r][0] if declared_rot[r][0] is not None
                     else list(declared_rot[r][1]))
                 for r in unseated if r in declared_rot},
-            'no_pose_census': no_pose_census}
+            'no_pose_census': no_pose_census,
+            # #975. Declared edge connectors seated with pad copper inside the
+            # board-edge floor because no pose the ladder tried clears it, by ref: the
+            # pose, the floor, the worst pads and why the seat could not move.
+            # Only records still describing the written pose are kept.
+            'edge_floor_fallback': _floor_records_at_final_pose(
+                state, edge_floor_fallback)}
 
 
 def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
@@ -3447,6 +4057,11 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         # the quench lacks and why the quench's gate has to be monotone.
         exclusive_zones=(floorplan.zone_entries(intent, blocks)
                          if intent else ()))
+    # #975: see `seed_from_intent`. Without an intent there is no grade to
+    # compare on, and an edge seat keeps today's preference guards only.
+    pose_grader = (floorplan.PoseGrader(
+        intent, state, blocks=blocks, clearance=clearance,
+        board_edge_clearance=board_edge_clearance) if intent else None)
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock
@@ -3739,6 +4354,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     failed: List[str] = []
     zero_move: List[str] = []   # run-7 A2: honesty re-grade candidates
     moves: List[Dict] = []
+    edge_floor_fallback: Dict[str, Dict] = {}   # #975, see `_floor_rung`
     for ref in violators:
         part = state.parts[ref]
         was_locked = part.locked      # always False here: locked refs are
@@ -3766,7 +4382,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                 tgt = ((zt.rect[0] + zt.rect[2]) / 2.0,
                        (zt.rect[1] + zt.rect[3]) / 2.0)
             ok = _seat_edge(state, ref, ec, must_lock, notes, target=tgt,
-                            rotations=_rot_ladder(ref))
+                            rotations=_rot_ladder(ref),
+                            disclose=edge_floor_fallback, grade=pose_grader)
             if ok:
                 d = math.hypot(part.x - part.seed_x, part.y - part.seed_y)
                 moves.append({'reference': ref, 'new_x': part.x,
@@ -3929,7 +4546,10 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             'pad_report_before': {k: pads[k] for k in
                                   ('pad_conflicts', 'hole_conflicts',
                                    'oob_pad_count')},
-            'grade_errors_before': len(graded.errors) if graded else None}
+            'grade_errors_before': len(graded.errors) if graded else None,
+            # #975: edge seats kept short of the board-edge floor, by ref.
+            'edge_floor_fallback': _floor_records_at_final_pose(
+                state, edge_floor_fallback)}
 
 
 def eviction_licence_ok(before: Sequence[float],
@@ -4503,7 +5123,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                 # different schemas and a reader could not tell "the census
                 # found nothing" from "no census ran".
                 'no_pose_blockers': {}, 'no_pose_verdict': {},
-                'no_pose_census': {}, 'evicted': [],
+                'no_pose_census': {}, 'evicted': [], 'edge_floor_fallback': {},
                 'evictions': 0, 'evictions_reverted': 0,
                 'gate_before': list(_empty_gate),
                 'gate_after': list(_empty_gate),
@@ -4791,6 +5411,13 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
             'no_pose_census': {r: v for r, v in
                                (res.get('no_pose_census') or {}).items()
                                if r in scope},
+            # #975, same filter, and only for a board this pass wrote. Empty
+            # in practice: re-seat drops its scope's edge declarations, so no
+            # stage-1 seat reaches a scope ref. Carried so both paths, and
+            # every place_seed summary, have the key.
+            'edge_floor_fallback': ({r: v for r, v in
+                                     (res.get('edge_floor_fallback') or {}).items()
+                                     if r in scope} if accepted else {}),
             'evictions': sum(1 for e in (res.get('evictions') or [])
                              if e.get('accepted')),
             'evictions_reverted': sum(1 for e in (res.get('evictions') or [])

@@ -1,0 +1,8 @@
+{
+ "source": "kicad_files/esp_prog.kicad_pcb",
+ "pose": [129.875, 98.25, 0.0],
+ "refs": ["#00000000-0000-0000-0000-00005a3b5201", "#00000000-0000-0000-0000-00005d8c51dd",
+          "#00000000-0000-0000-0000-00005e7dd057", "C1", "C2", "C3", "C4", "CON1", "CON2",
+          "Q1", "Q2", "R1", "R2", "R3", "R4", "U1", "U2", "Y1"],
+ "why": "run 27's esp_prog input: the tracked board with these parts piled at one point and USB1 left where it is. Regenerate with placement.writer.write_placed_output. The run-27 file itself differs only in text/property angles, which #948 changed in the writer after run 27."
+}

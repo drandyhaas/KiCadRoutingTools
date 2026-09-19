@@ -341,6 +341,44 @@ currency as the rule, and `edge_seat_ok` refuses a pose whose pad copper
 leaves the outline for the same reason the rule names it: otherwise the
 search hands the grade a seat it will reject.
 
+The board-edge FLOOR on that copper is a preference of the seat, not a
+conjunct (#975). At each rotation, when the seat the ladder always chose leaves
+copper inside the floor, the ladder tries that seat moved inward by the largest
+shortfall on the seated edge. Such a move is kept
+only if it passes the band at the grade's own bounds, the seat predicate
+(keep-outs, other blocks' exclusive zones, pad copper), the neighbours, the
+floor itself, and the grade's nearest-edge and along-edge-window conjuncts;
+for an entry that carries a setback, a move that leaves no overhang is
+refused outright. Then, because a list of conjuncts misses rules, the WHOLE
+intent grade is asked at both poses (`floorplan.PoseGrader`, the same rules
+over the search's own board with the not-yet-placed pile left out): the move
+is refused if it adds an error the first seat does not have, or grows a
+board-level budget already over. Warnings do not count, as they do not count
+in `place_seed`'s exit gate.
+
+Two limits of that comparison, written here because nothing in the output
+says them. It is asked per seat, at the moment of the seat, so an error only a
+LATER part's seat produces -- the knock-on of two connectors sharing an edge
+-- is invisible to it by construction; the grade `place_seed` runs at the end
+still reports that one, and it still sets the exit code. And two poses are
+comparable only while they describe the same board: a pose carrying pads into
+or out of an interior Edge.Cuts contour changes whether the parser reads that
+contour as a hole or as a milled edge, so there the comparison is reported
+unavailable and the seat is kept, rather than being made across two
+differently-shaped boards. When the shortfall is
+on another side of the part, which moving inward cannot fix, or the outline
+is sampled, the ladder walks on to later rungs instead -- where there are any:
+stage 1 of a fresh seed tries one along-edge position unless something arms
+its slide -- and keeps a later rung only when it clears the floor and passes
+the same checks, the whole-grade comparison included. It does not walk when the move was refused for any
+other reason, although a move from a later rung might pass: trading the
+connector's along-edge position for a fraction of a millimetre of copper is
+not the ladder's call. Otherwise it keeps the seat it always chose. Refusing would turn
+a clearance shortfall into an unseated connector, which is an unrouted one.
+The kept shortfall is reported in `place_seed`'s `edge_floor_fallback`, with the
+pads and the reason the seat could not move; the copper itself is graded in
+`pad_edge_after` as before. A rotation is never changed to clear the floor.
+
 Every declared connector on the board gets a row in `edge_connector_evidence`
 (`--json`), including passing ones. Each row carries:
 - `overhang_mm` and `overhang_basis` (`body:<layer>`, e.g. `body:F.Fab`,

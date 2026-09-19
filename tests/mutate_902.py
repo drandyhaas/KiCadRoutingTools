@@ -389,9 +389,10 @@ ROWS = [
      "            subset = copy(self.pcb)\n            subset.footprints = {",
      "            subset = self.pcb\n            _unused = {",
      (T961,), KILLED),
+    # #975: the loop moved into `EdgeCopperContext.grade`, one indent in; same mutation.
     ('per-part-minimum-last-wins', 'lg',
-     "            minimum_by_ref[ref] = min(minimum_by_ref.get(ref, gap), gap)",
-     "            minimum_by_ref[ref] = gap",
+     "                minimum_by_ref[ref] = min(minimum_by_ref.get(ref, gap), gap)",
+     "                minimum_by_ref[ref] = gap",
      (T961,), KILLED),
     # Round 3: five branches round 2 covered with a test but no row.
     ('fab-falls-back-to-silk', 'cg',

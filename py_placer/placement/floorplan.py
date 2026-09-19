@@ -1881,6 +1881,28 @@ def _nearest_edge(rect, bounds) -> str:
     return min(d, key=lambda k: d[k])
 
 
+def edge_seat_rect(entry: Dict, part_rect, body_rect):
+    """`(rect, basis)` on which `rule_edge_connector` asks where a declared
+    edge part's MATING FACE is: its nearest-edge and setback conjuncts.
+
+    The drawn body for an `edge_receptacle`, or an entry whose context says
+    `mount_mode: edge_mount`, when the library drew one (fab or silk);
+    otherwise the part's courtyard rect. `body_rect` is a zero-argument
+    callable returning `(rect, source)`, called only when the entry asks for
+    a body, so a board with no receptacle never reads its bodies.
+
+    Lifted out of the rule (#975) so an edge seat that picks a pose the rule
+    has not seen can ask the rule's own question of it, rather than a copy.
+    """
+    ctxd = entry.get('context') or {}
+    if (entry.get('class') == 'edge_receptacle'
+            or ctxd.get('mount_mode') == 'edge_mount'):
+        brect, src = body_rect()
+        if brect is not None and src in ('fab', 'silk'):
+            return brect, f'body:{src}'
+    return part_rect, 'courtyard'
+
+
 #: The axis a part slides along when it moves ALONG the named edge: x for a
 #: horizontal edge, y for a vertical one.
 _EDGE_AXIS = {'north': 0, 'south': 0, 'east': 1, 'west': 1}
@@ -2778,14 +2800,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # courtyard. (The OVERHANG conjunct above no longer does: since #961
         # it reads the drawn body wherever one can be measured, because the
         # edge-margin graze read a flush body as a 0.55 mm overhang.)
-        basis = 'courtyard'
-        seat_rect = part.rect
-        ctxd = c.get('context') or {}
-        if (c.get('class') == 'edge_receptacle'
-                or ctxd.get('mount_mode') == 'edge_mount'):
-            brect, src = ctx.body_rect(ref)
-            if brect is not None and src in ('fab', 'silk'):
-                seat_rect, basis = brect, f'body:{src}'
+        seat_rect, basis = edge_seat_rect(c, part.rect,
+                                          lambda: ctx.body_rect(ref))
         edge = c.get('edge')
         if edge and ctx.outline_bounds:
             # Run 27's replay measured the courtyard reading on the same
@@ -4366,6 +4382,282 @@ class UntrustworthyOutline(ValueError):
         super().__init__('; '.join(self.problems))
 
 
+def _run_rules(ctx, abstained=None):
+    """`(violations, ran, skipped)`: every rule in RULES over one `_Ctx`.
+
+    The one loop both `grade` and `PoseGrader` run, so a grade asked about a
+    pose nothing has written yet cannot drift from the grade of the board.
+    `abstained` is the emitter's withheld-budget map, used only to word a
+    skip reason."""
+    found: List[Violation] = []
+    ran: List[str] = []
+    skipped: Dict[str, str] = {}
+    for name, fn in RULES:
+        if not _wants(ctx.intent, name):
+            reason = _SKIP_REASON.get(name, 'not requested')
+            # "declares no X" is true but reads as "nobody wanted one". Say
+            # that the emitter refused to DERIVE it, on whichever rule the
+            # withheld key disarms -- not only on `legality` (#704).
+            mine = {k: v for k, v in (abstained or {}).items()
+                    if name in (_WITHHELD_RULE.get(k) or ((),))[0]}
+            if mine:
+                reason += ('; the emitter WITHHELD ' + ', '.join(
+                    f'{k} ({v})' for k, v in sorted(mine.items())))
+            skipped[name] = reason
+            continue
+        arm = _ARM.get(name)
+        why = arm(ctx) if arm is not None else None
+        if why is not None:
+            skipped[name] = why
+            continue
+        ran.append(name)
+        found.extend(fn(ctx))
+    return found, ran, skipped
+
+
+class _PosedState:
+    """What `_Ctx` reads off a `QuenchState`, answered for the board a seat
+    search is ASKING about rather than one it has written: the search state's
+    own parts at its current poses, `poses` overriding some, `exclude` (the
+    pile) left out. Each answer calls the state's own code on that part set."""
+
+    def __init__(self, state, exclude=(), poses=None):
+        self._s = state
+        self._exclude = frozenset(exclude)
+        self._poses = dict(poses or {})
+        self.edge_gate = state.edge_gate
+
+    def pose(self, ref):
+        if ref in self._poses:
+            return self._poses[ref]
+        part = self._s.parts[ref]
+        return (part.x, part.y, part.rot)
+
+    def graded_parts(self):
+        out = []
+        for ref, part in self._s.parts.items():
+            if ref in self._exclude:
+                continue
+            x, y, rot = self.pose(ref)
+            out.append(legality.GradedPart(ref=ref, side=part.side,
+                                           rect=part.rect(x, y, rot),
+                                           tht_rect=part.tht_rect(x, y, rot),
+                                           has_tht=part.has_tht))
+        return out
+
+    def _owned_rings(self, ref):
+        """Ring ownership at the pose this board would be WRITTEN at: a grade
+        of the written board takes its seed pose from the file."""
+        part = self._s.parts[ref]
+        x, y, rot = self.pose(ref)
+        pts = [(gx, gy) for (gx, gy, _net) in part.pad_globals(x, y, rot)]
+        return self.edge_gate.rings_enclosing(pts) if pts else frozenset()
+
+    def hpwl(self):          # no rule reads it
+        return 0.0
+
+    def pad_legality_metrics(self):   # no rule reads it; the gate grades pads itself
+        return {}
+
+    def legality_metrics(self):
+        from .quench import QuenchState
+        return QuenchState.legality_metrics(self)
+
+    def board(self):
+        from copy import copy
+        view = copy(self._s.pcb_data)
+        view.footprints = {
+            ref: (legality.footprint_at_pose(fp, self.pose(ref))
+                  if ref in self._s.parts else fp)
+            for ref, fp in self._s.pcb_data.footprints.items()
+            if ref not in self._exclude}
+        return view
+
+
+class PoseGrader:
+    """The intent grade of a seat search's board at poses it has not written
+    (#975's grade delta). Constructing one reads nothing; the pose-invariant
+    inputs (outline, locked refs, drawn bodies) are read on first use and kept.
+
+    Every violation comes from the same RULES loop `grade` runs (`_run_rules`)
+    over a `_Ctx` built on `_PosedState`. The violations `grade` adds outside
+    that loop (intent validation, block resolution, keep-out allows) read only
+    the intent and the footprint SET, so they cannot differ between two poses
+    of one part and are left out of a delta.
+
+    ONE cached input is NOT pose-invariant, which is why `interior_split`
+    exists: the state's `edge_gate` carries the PARSER's split of interior
+    Edge.Cuts contours into cutouts (holes, which put anything inside them off
+    the board) and milled rings (edges copper holds clearance from). A contour
+    enclosing >= 2 pad CENTRES is reclassified from the first to the second
+    (`kicad_parser.drop_pad_containing_cutouts`), so a pose that carries pads
+    into or out of one changes the classification -- and a grade of the board
+    that would be WRITTEN, which re-parses, then reads different off-board
+    numbers than this grader does. Measured on a synthetic board: a
+    sub-millimetre move of a declared connector (0.5 mm on each axis) took
+    `board_cutouts` 1 -> 0 and the written board's `oob_count` 2 -> 0 while
+    this grader's reading held at 2. A caller comparing two poses asks `interior_split` for each and
+    does not compare grades across a difference."""
+
+    def __init__(self, intent, state, *, blocks, clearance=None,
+                 board_edge_clearance=None):
+        self.intent, self.state, self.blocks = intent, state, blocks
+        self.floors = (clearance, board_edge_clearance)
+        self._outline = None
+        self._locked = None
+        self._bodies = None
+        self._rings = None
+        self._ring_base = None
+        self._ring_at = None
+
+    def interior_split(self, poses=None):
+        """The cutout / milled verdict for each interior contour at `poses`.
+
+        A tuple of bools, one per interior contour in a fixed order: True when
+        at least two pad centres fall inside it, which is the parser's own
+        threshold for calling it a milled ring rather than a hole. `()` on a
+        board with no interior contour, which is most of them and costs
+        nothing after the first call.
+
+        Counted over the pads of every part the search knows -- the pile at its
+        input coordinates included, because the parser counts every footprint in
+        the file it reads back, and both poses of a comparison include it
+        identically. Only the refs in `poses`, and those the SEARCH has moved
+        since the last call, are re-measured; the rest are kept.
+
+        That last clause is load-bearing: caching every other part's count once
+        and never re-reading it let an `apply_move` of a DIFFERENT part mask a
+        real crossing of the threshold, which is the failure this method exists
+        to catch. Stage 1 shares one grader across every edge connector and
+        moves parts between them, so the case is not hypothetical.
+        """
+        gate = getattr(self.state, 'edge_gate', None)
+        if self._rings is None:
+            rings = [r for r in (getattr(gate, 'cutouts', None) or ())
+                     if len(r) >= 3]
+            rings += [r for r in (getattr(gate, 'milled', None) or ())
+                      if len(r) >= 3 and r not in rings]
+            self._rings = rings
+        if not self._rings:
+            return ()
+        if self._ring_base is None:
+            self._ring_base, self._ring_at = {}, {}
+        counts = [0] * len(self._rings)
+        for ref, part in self.state.parts.items():
+            if poses and ref in poses:
+                per = self._ring_counts(ref, poses[ref])
+            else:
+                here = (part.x, part.y, part.rot)
+                if self._ring_at.get(ref) != here:
+                    self._ring_base[ref] = self._ring_counts(ref, here)
+                    self._ring_at[ref] = here
+                per = self._ring_base[ref]
+            for i, n in enumerate(per):
+                counts[i] += n
+        return tuple(n >= 2 for n in counts)
+
+    def legality_at(self, *, exclude=(), poses=None):
+        """The placement's own legality numbers at `poses` -- overlap and
+        off-board -- whatever the intent declares.
+
+        `violations` cannot stand in for these. `_run_rules` skips `legality`
+        when the intent carries no `legality_budget`, and `emit_intent`
+        WITHHOLDS `overlap_area` exactly on a board that already has blocking
+        body pairs or unwaived courtyard interpenetration -- so on the boards
+        where courtyard overlap is the live risk, the rule that would catch it
+        is not armed. A caller comparing two poses therefore compares these as
+        well, or it is blind to a move that buys interpenetration: measured on
+        a fixture, 0.18 mm2 of new overlap with a LOCKED part, no pad or hole
+        predicate able to see it and no grade error raised.
+        """
+        return _PosedState(self.state, exclude, poses).legality_metrics()
+
+    def _ring_counts(self, ref, pose):
+        """How many of `ref`'s pad centres fall inside each interior contour.
+
+        `pose` None means the pose the search holds for it right now, which is
+        the file's for anything the seeder has not moved.
+        """
+        from kicad_parser import _pt_in_ring
+        fp = (self.state.pcb_data.footprints or {}).get(ref)
+        if fp is None:
+            return [0] * len(self._rings)
+        if pose is None:
+            part = self.state.parts[ref]
+            pose = (part.x, part.y, part.rot)
+        pads = [(p.global_x, p.global_y)
+                for p in legality.pads_at_pose(fp, pose)]
+        return [sum(1 for (px, py) in pads if _pt_in_ring(px, py, r))
+                for r in self._rings]
+
+    def violations(self, *, exclude=(), poses=None) -> List[Violation]:
+        state = self.state
+        if getattr(state, 'body_model', False):
+            raise ValueError('a body_model search state grades occupancy rects, '
+                             'not the courtyards the grade reads')
+        if self._outline is None:
+            self._outline = outline_state(state.pcb_data, state.pcb_file)
+        if not self._outline['trustworthy']:
+            raise UntrustworthyOutline(self._outline['problems'])
+        if self._locked is None:
+            try:
+                from .parser import extract_locked_refs
+                self._locked = (extract_locked_refs(state.pcb_file)
+                                if state.pcb_file else set())
+            except (OSError, ValueError):
+                self._locked = set()
+        if self._bodies is None:
+            from .body import board_bodies
+            self._bodies = board_bodies(state.pcb_data, state.pcb_file)
+        view = _PosedState(state, exclude, poses)
+        ctx = _Ctx(self.intent, view.board(), state.pcb_file, view, self.blocks,
+                   self._locked, self._outline)
+        ctx.requested_floors = self.floors
+        ctx._bodies = self._bodies
+        found, _ran, _skipped = _run_rules(ctx)
+        return found
+
+
+def grade_delta(before: Sequence[Violation],
+                after: Sequence[Violation]) -> List[Dict[str, object]]:
+    """What `after` adds to `before`, in the exit gate's currency: ERRORS only.
+
+    A claim is `(rule, ref, block, expected keys)`, compared as a multiset, so
+    an error the first pose does not have is added whatever its message says.
+    A board-level budget has no ref and stays ONE error however far it is
+    over, so for those the measured value must not grow either -- with the
+    pile left out of both grades, only the moved part can have grown it.
+
+    What a claim deliberately cannot see, since the currency is the exit gate's
+    and the gate counts errors: an error SWAPPED for another error of the same
+    rule, ref, block and expected keys (one keep-out for another) reads as no
+    change, and a ref-carrying error that merely gets worse (0.10mm -> 9.90mm)
+    is still one error. The value check above is for the ref-less budgets only,
+    where one error is all there ever is."""
+    from collections import Counter
+
+    def claim(v):
+        return (v.rule, v.ref or '', v.block or '',
+                tuple(sorted((v.expected or {}).keys())))
+    was = [v for v in before if v.severity == ERROR]
+    now = [v for v in after if v.severity == ERROR]
+    out: List[Dict[str, object]] = [
+        {'rule': rule, 'ref': ref or None, 'block': block or None, 'added': n}
+        for (rule, ref, block, _keys), n
+        in sorted((Counter(map(claim, now)) - Counter(map(claim, was))).items())]
+    budgets = {claim(v): v for v in was if not v.ref}
+    for v in now:
+        if v.ref or claim(v) not in budgets:
+            continue
+        for key in sorted(v.expected or {}):
+            a = budgets[claim(v)].measured.get(key)
+            b = (v.measured or {}).get(key)
+            if (isinstance(a, (int, float)) and isinstance(b, (int, float))
+                    and b > a + legality.EPS):
+                out.append({'rule': v.rule, 'budget': key, 'before': a, 'after': b})
+    return out
+
+
 def grade(intent: Intent, pcb_data, pcb_file: str, *,
           group_sources: Sequence[str] = (), clearance: Optional[float] = None,
           board_edge_clearance: Optional[float] = None,
@@ -4403,34 +4695,14 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                   + list(unresolved_keepout_allows(intent, pcb_data))
                   + list(intent_zone_keepout_problems(
                       intent, blocks, pcb_data, pcb_file)))
-    ran: List[str] = []
-    skipped: Dict[str, str] = {}
     # Budget keys the emitter withheld and that are therefore NOT graded.
     # A key present in the budget was declared (by hand, deliberately) and
     # overrides its withholding note.
     abstained = {str(k): str(v)
                  for k, v in (intent.budget_withheld or {}).items()
                  if not _declared_by_hand(intent, str(k))}
-    for name, fn in RULES:
-        if not _wants(intent, name):
-            reason = _SKIP_REASON.get(name, 'not requested')
-            # "declares no X" is true but reads as "nobody wanted one". Say
-            # that the emitter refused to DERIVE it, on whichever rule the
-            # withheld key disarms -- not only on `legality` (#704).
-            mine = {k: v for k, v in abstained.items()
-                    if name in (_WITHHELD_RULE.get(k) or ((),))[0]}
-            if mine:
-                reason += ('; the emitter WITHHELD ' + ', '.join(
-                    f'{k} ({v})' for k, v in sorted(mine.items())))
-            skipped[name] = reason
-            continue
-        arm = _ARM.get(name)
-        why = arm(ctx) if arm is not None else None
-        if why is not None:
-            skipped[name] = why
-            continue
-        ran.append(name)
-        violations.extend(fn(ctx))
+    found, ran, skipped = _run_rules(ctx, abstained)
+    violations.extend(found)
     # #712: a DECLARED along-edge claim this outline cannot support a verdict
     # on joins the same not-derivable channel the withheld budgets use. It is
     # neither a violation nor a pass, and `pass: true` beside a non-zero
