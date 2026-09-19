@@ -531,13 +531,27 @@ ROWS += [
         'ignore_nets': ['GND'],
         'signal': 'intent_errors',
         'guard': ('crossings', 'hpwl', 'inversions', 'body_blocking'),
+        # REJECTED (#1002): the default flip improved no board. On the flat
+        # boards the limit moves nothing; on the zoned ones it pulls the
+        # tethered caps out of zone packing, which regressed every one. So
+        # `check_floorplan.DECLARE_DECAPS_DEFAULT` stays 'off'. Kept as a
+        # change detector with its measured mark; the numbers are in the
+        # baseline, not here.
+        'rejected': True,
+        'expect': ('neutral' if b in ('esp_prog.kicad_pcb',
+                                      'splitflap_driver.kicad_pcb',
+                                      'tigard.kicad_pcb') else 'regress'),
         'why': ('MECHANISM: the ON arm seeds from an intent carrying the '
                 'observed decap limit, so seeder stage 2.5 seats each '
                 'tethered cap at its supply pin; the OFF arm packs them '
-                'with their zone. Graded under ONE auto intent. On trial.'),
+                'with their zone. Graded under ONE auto intent.'),
     }
+    # The first three emit NO zoned block (flat schematics); the last three
+    # do, which is where the doc says a decap limit moves caps: out of zone
+    # packing into the pin stage.
     for b in ('esp_prog.kicad_pcb', 'splitflap_driver.kicad_pcb',
-              'tigard.kicad_pcb')
+              'tigard.kicad_pcb', 'ulx3s.kicad_pcb',
+              'orangecrab_ext_pll.kicad_pcb', 'glasgow_revC.kicad_pcb')
 ]
 
 QUENCH_BASE = dict(
