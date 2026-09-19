@@ -1295,6 +1295,15 @@ def _padless_owed(a, intent, pcb, padless, covered):
     #     glasgow was refused with advice place_pose then refused).
     import fnmatch as _fnm
     import glob as _glob
+    _nc = os.path.normcase
+
+    def _explicit(pat, key):
+        # The key itself (glasgow's `REF**` as the board spells it), its
+        # escaped form, or a wildcard-free pattern -- compared the way
+        # `fnmatch` compares, so on Windows `ref[*][*]` names `REF**` for
+        # this check exactly as it does for `resolve_blocks`.
+        return (_nc(pat) == _nc(key) or _nc(pat) == _nc(_glob.escape(key))
+                or not any(ch in pat for ch in '*?['))
     cover = {}
     for _z in intent.blocks:
         if _z.rect is None:
@@ -1303,9 +1312,7 @@ def _padless_owed(a, intent, pcb, padless, covered):
             for _r in padless:
                 if _fnm.fnmatch(_r, _pat):
                     cover.setdefault(_r, []).append(
-                        (_z.name, _pat,
-                         _pat == _glob.escape(_r)
-                         or not any(ch in _pat for ch in '*?[')))
+                        (_z.name, _pat, _explicit(_pat, _r)))
     answered = file_locked | set(ref_disp)
     zoned = padless & covered
     named = {r for r, hits in cover.items() if any(e for _b, _p, e in hits)}
@@ -3058,12 +3065,14 @@ def _refusal_scenarios(tmp):
           '--waive', 'brief-clause:interfaces[U2].edge:']
          + damaged),
         # #959 (#998): a plan no arrangement can satisfy -- two 0.6 x 0.8 mm
-        # parts need 0.96 mm2 and their zone (tolerance 0) holds 0.81.
+        # parts need 0.96 mm2 and their zone (tolerance 0) holds 0.81, so
+        # they overlap by at least 0.15 mm2, over a declared budget of 0.
         ('a zone plan whose zone cannot hold its members',
          ['--board', tiny, '--zone-plan', wrote('zp_overfull.json',
                                                  _zone_plan_doc(
              [{'name': 'all', 'refs': ['U*'], 'zone': [1.5, 1.5, 2.4, 2.4],
-               'tolerance_mm': 0, 'note': 'both parts, one tiny zone'}]))]
+               'tolerance_mm': 0, 'note': 'both parts, one tiny zone'}],
+             legality_budget={'overlap_area': 0}))]
          + damaged),
         # #959 (#997): the roster, LAST in P1. One row carries both arms -- a
         # gating rule nothing answers for (the tiny board declares no

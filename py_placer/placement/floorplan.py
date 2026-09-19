@@ -1263,15 +1263,25 @@ def validate_intent(intent: Intent) -> List[Violation]:
                 continue
             area = legality.rect_overlap_area(a.rect, b.rect)
             if area > legality.EPS:
+                ex = [z.name for z in (a, b) if z.exclusive]
                 out.append(Violation(
                     rule='intent_zone_overlap',
                     severity=intent.severity_of('intent_zone_overlap', WARN),
                     block=a.name,
                     message=(f"zones {a.name!r} and {b.name!r} overlap by "
-                             f"{area:.2f}mm2 on the same side; a member of "
-                             f"either may be placed there -- declare "
-                             f"`exclusive` on one of them if the area is not "
-                             f"meant to be shared"),
+                             f"{area:.2f}mm2 on the same side; "
+                             + (f"the shared area belongs to the EXCLUSIVE "
+                                f"zone {ex[0]!r}, so no member of the other "
+                                f"may sit in it -- "
+                                f"`plan_zone_exclusive_unsatisfiable` says "
+                                f"whether each still has room"
+                                if len(ex) == 1 else
+                                "both are EXCLUSIVE, so the shared area is "
+                                "closed to the members of each"
+                                if ex else
+                                "a member of either may be placed there -- "
+                                "declare `exclusive` on one of them if the "
+                                "area is not meant to be shared")),
                     measured={'overlap_area_mm2': round(area, 4),
                               'other_block': b.name},
                     expected={'overlap_area_mm2': 0.0}))
@@ -5253,7 +5263,8 @@ def grade_delta(before: Sequence[Violation],
 
 
 def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
-                            pcb_file: str = '') -> List[Violation]:
+                            pcb_file: str = '', *, state=None
+                            ) -> List[Violation]:
     """Members that cannot fit in their own zone clear of a stranger's
     EXCLUSIVE zone (#959, #998) -- the one overlap no placement can satisfy.
 
@@ -5264,12 +5275,23 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
     `intent_zone_in_keepout` uses, judged by the same `zone_escape` /
     `keepout_hit` the grade uses, so the verdict cannot drift from the grade.
     Anything else about two overlapping zones is satisfiable.
+
+    THE GRADE'S GEOMETRY, from the grade's own placement state: the rect
+    `rule_zone_containment` and `rule_zone_exclusive` test (courtyard, else
+    pad bbox), never `legality.part_local_bounds`' occupancy, which adds the
+    drawn .Fab body -- measured differing by more than 0.05 mm on 29 corpus
+    parts (ulx3s U9 by 7 mm), so a satisfied board failed its own grade
+    (Phase-4 verifier). A part the state does not carry is graded by neither
+    rule and is skipped here too. And ANY rotation: the part's own lattice and
+    the 0-degree one, since an author can turn a part the seeder would not.
     """
     out: List[Violation] = []
     excl = [z for z in intent.blocks if z.exclusive and z.rect is not None]
     if not excl:
         return out
-    locals_ = legality.part_local_bounds(pcb_data, pcb_file or None)
+    if state is None:
+        import pose_score
+        state = pose_score.make_state(pcb_data, pcb_file)
     for zb in intent.blocks:
         if zb.rect is None:
             continue
@@ -5285,17 +5307,26 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
                 if ref in owners:
                     continue
                 fp = (pcb_data.footprints or {}).get(ref)
-                lb = locals_.get(ref)
-                if fp is None or lb is None or lb.synthetic:
+                sp = state.parts.get(ref)
+                if fp is None or sp is None:
                     continue
-                if za.side and legality.footprint_side(fp) != za.side:
+                if za.side and sp.side != za.side:
                     continue
-                part = _LocalPart(fp.rotation or 0.0, lb.local, None)
-                v = zone_pose_feasibility(
-                    zb.rect, tol, part, [{'name': za.name, 'rect': za.rect,
-                                          'sides': ('F', 'B'), 'allow': ()}])
-                if v['feasible']:
+                local0 = sp.bounds_by_rot[0.0]
+                tried = []
+                feasible = False
+                for base in sorted({(fp.rotation or 0.0) % 360.0, 0.0}):
+                    v = zone_pose_feasibility(
+                        zb.rect, tol, _LocalPart(base, local0, None),
+                        [{'name': za.name, 'rect': za.rect,
+                          'sides': ('F', 'B'), 'allow': ()}])
+                    tried += list(v['rotations'])
+                    if v['feasible']:
+                        feasible = True
+                        break
+                if feasible:
                     continue
+                v = dict(v, rotations=sorted(set(tried)))
                 out.append(Violation(
                     rule='plan_zone_exclusive_unsatisfiable',
                     severity=intent.severity_of(
@@ -5328,6 +5359,17 @@ def _glob_literal_findings(intent: Intent, blocks, pcb_data
     """
     out: List[Violation] = []
     refs = set(pcb_data.footprints or {})
+    zmap = {z.name: z for z in intent.blocks}
+
+    def _disjoint(names):
+        # Two zones a part must sit in at once are a CONTRADICTION only when
+        # they share no area (with tolerance). Nested or overlapping ones --
+        # `Ref*` board-wide beside a tight `Ref[*]~2` -- are satisfiable.
+        rs = [_inflate(zmap[n].rect, intent.zone_tolerance(zmap[n]))
+              for n in names if zmap.get(n) is not None
+              and zmap[n].rect is not None]
+        return any(legality.rect_overlap_area(a_, b_) <= legality.EPS
+                   for i_, a_ in enumerate(rs) for b_ in rs[i_ + 1:])
     zoned_owner: Dict[str, List[str]] = {}
     for z in intent.blocks:
         if z.rect is not None:
@@ -5342,7 +5384,10 @@ def _glob_literal_findings(intent: Intent, blocks, pcb_data
     lists.append(('decaps.exempt',
                   list((intent.decaps or {}).get('exempt') or ()), None))
     for where, pats, zone in lists:
-        named = {p_ for p_ in pats}
+        # A block the same list NAMES -- literally, or by its escaped form
+        # (`Ref[*]~2`) -- was meant, whatever else also matches it.
+        esc = set(pats)
+        named = esc | {r for r in refs if glob_escape(r) in esc}
         for pat in pats:
             if pat not in refs or not any(ch in pat for ch in '*?['):
                 continue
@@ -5355,7 +5400,8 @@ def _glob_literal_findings(intent: Intent, blocks, pcb_data
                 continue
             conflict = [r for r in unnamed
                         if zone is not None and zone.rect is not None
-                        and len(zoned_owner.get(r, ())) > 1]
+                        and len(zoned_owner.get(r, ())) > 1
+                        and _disjoint(zoned_owner[r])]
             out.append(Violation(
                 rule='block_glob_literal',
                 severity=(intent.severity_of('block_glob_literal')
@@ -5363,9 +5409,9 @@ def _glob_literal_findings(intent: Intent, blocks, pcb_data
                 block=(zone.name if zone is not None else None),
                 message=(f"{where}: {pat!r} is a real reference AND, as a "
                          f"glob, also matches {', '.join(unnamed)}"
-                         + (f" -- which another zoned block also claims, so "
-                            f"the plan puts {', '.join(conflict)} in two "
-                            f"zones" if conflict else '')
+                         + (f" -- which another zoned block also claims, "
+                            f"so the plan puts {', '.join(conflict)} in two "
+                            f"zones that share no area" if conflict else '')
                          + f". Write {glob_escape(pat)!r} to mean the one "
                          f"block"),
                 measured={'pattern': pat, 'matches': [pat] + extra},
@@ -5425,20 +5471,25 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
          shipped board carried a 1.0 mm2 fiducial-in-connector overlap -- so
          the ERROR fires only when the locked pairs ALONE exceed that budget,
          which no arrangement of the other parts can undo.
-      5. `plan_zone_overfull` / `_crowded`: per FACE, the members' areas
-         (courtyard, else pad bbox; a through-hole member's drilled footprint
-         charged to the far face) exceed the zone's area. Sound relative to
-         the SEEDER, which packs members without courtyard overlap. Members
-         a zone cannot hold anyway (anchor-graded) and zones holding a waived
-         pair are skipped.
+      5. `plan_zone_overfull` / `_crowded`: per FACE, the UNLOCKED
+         members' areas (courtyard, else pad bbox; a through-hole member's
+         drilled footprint charged to the far face) against the zone's area.
+         Fitting area A into a zone of area Z forces at least A - Z of
+         pairwise courtyard overlap, which the grade counts against a
+         DECLARED `legality_budget.overlap_area`: past it, ERROR. With no
+         budget declared nothing bounds the overlap, and it is the WARN (the
+         seeder never overlaps courtyards, so it may leave members unseated).
+         Locked members, anchor-graded members and zones holding a waived
+         pair are not charged.
       6. `plan_edge_overfull` / `_crowded`: one edge-claimed part whose PAD
-         extent, at its best 90-degree rotation, is longer than the edge
-         (ERROR); the claimed parts' summed extents against the edge's span
-         (WARN -- flanges legitimately overhang corners).
-      7. `plan_board_overfull` / `_crowded`: `options.grow_board` at clearance
-         0 on the per-face basis says the parts do not fit by area (ERROR);
-         the one-face basis a declared `assembly.sides` implies, or the
-         crowded threshold, is a WARN.
+         extent in its own frame, at its best 90-degree rotation, is longer
+         than the edge (ERROR); the claimed parts' summed extents against the
+         edge's span (WARN -- flanges legitimately overhang corners).
+      7. `plan_board_overfull` / `_crowded`: `options.grow_board` at
+         clearance 0 on the per-face basis. The same argument as row 5: an
+         ERROR when the overlap it forces exceeds a declared budget; a WARN
+         past `options.CROWDED_UTILISATION` or on the one-face basis a
+         declared `assembly.sides` implies.
     """
     from . import options as _opts
     ctx, outline, state, blocks, block_problems = _grade_ctx(
@@ -5449,7 +5500,8 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                             + list(intent_zone_keepout_problems(
                                 intent, blocks, pcb_data, pcb_file))
                             + exclusive_unsatisfiable(intent, blocks,
-                                                      pcb_data, pcb_file)
+                                                      pcb_data, pcb_file,
+                                                      state=state)
                             + _glob_literal_findings(intent, blocks,
                                                      pcb_data))
     measured: Dict[str, object] = {}
@@ -5460,7 +5512,11 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         if v.ref in ctx.locked:
             out.append(Violation(
                 rule='plan_fixed_outside_zone',
-                severity=intent.severity_of('plan_fixed_outside_zone'),
+                # The zone's OWN severity unless this finding is set apart:
+                # a plan that demoted zone_containment to warn must not be
+                # refused by its plan check for the same fact.
+                severity=intent.severity.get('plan_fixed_outside_zone',
+                                             v.severity),
                 ref=v.ref, block=v.block,
                 message=(f"{v.ref} is LOCKED in the board and already "
                          f"outside its zone: {v.message}. Nothing the seeder "
@@ -5514,10 +5570,21 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     clr_used = float(clearance if clearance is not None else _rd.CLEARANCE)
     waived = {frozenset(p_) for p_ in intent.waiver_pairs()}
     zone_rows = []
+    # Sound for the GRADE, not only for the seeder: courtyards may overlap
+    # there up to a declared `legality_budget.overlap_area`, so members
+    # whose areas exceed the zone by A must overlap by at least A in total
+    # (Bonferroni: union >= sum - pairwise), and the grade's overlap is that
+    # pairwise sum over the whole board. ERROR only past a DECLARED budget;
+    # with none, nothing bounds the overlap and it is a WARN about the seeder.
+    # FILE-locked members are not packed by anyone and are not charged: the
+    # Phase-4 verifier refused shipped boards on glasgow MK1+FID1 and on
+    # rp2350's locked container U8.
+    overlap_budget = (intent.legality_budget or {}).get('overlap_area')
     for z in intent.blocks:
         if z.rect is None:
             continue
-        members = [r for r in blocks.get(z.name, ()) if r in state.parts]
+        members = [r for r in blocks.get(z.name, ())
+                   if r in state.parts and r not in ctx.locked]
         if any(frozenset((a_, b_)) in waived
                for a_ in members for b_ in members if a_ < b_):
             continue
@@ -5549,24 +5616,47 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         zone_rows.append({'block': z.name, 'face': worst,
                           'members_area_mm2': round(need, 3),
                           'zone_area_mm2': round(zarea, 3),
+                          'overlap_budget_mm2': overlap_budget,
                           'members': counted})
-        if need > zarea + legality.EPS:
+        excess = need - zarea
+        if (overlap_budget is not None
+                and excess > float(overlap_budget) + legality.EPS):
             out.append(Violation(
                 rule='plan_zone_overfull',
                 severity=intent.severity_of('plan_zone_overfull'),
                 block=z.name,
                 message=(f"zone {z.name!r} is {zarea:.2f}mm2 (with its "
-                         f"{tol}mm tolerance) and the {len(counted)} "
+                         f"{tol}mm tolerance) and its {len(counted)} unlocked "
                          f"member(s) on {worst}.Cu need {need:.2f}mm2 by "
-                         f"courtyard alone: the seeder packs members without "
-                         f"overlap, so it cannot seed them all inside it"),
+                         f"courtyard alone: fitting them forces at least "
+                         f"{excess:.2f}mm2 of courtyard overlap, over the "
+                         f"declared legality_budget.overlap_area "
+                         f"{float(overlap_budget):g}"),
                 measured={'members_area_mm2': round(need, 4),
-                          'face': worst, 'members': counted},
+                          'face': worst, 'members': counted,
+                          'forced_overlap_mm2': round(excess, 4)},
+                expected={'zone_area_mm2': round(zarea, 4),
+                          'overlap_area': float(overlap_budget)}))
+        elif excess > legality.EPS:
+            out.append(Violation(
+                rule='plan_zone_crowded',
+                severity=intent.severity_of('plan_zone_crowded', WARN),
+                block=z.name,
+                message=(f"zone {z.name!r} is {zarea:.2f}mm2 and its "
+                         f"{len(counted)} unlocked member(s) on {worst}.Cu "
+                         f"need {need:.2f}mm2 by courtyard: they fit only by "
+                         f"overlapping ({excess:.2f}mm2 at least), which the "
+                         f"seeder never does -- it may leave some unseated"),
+                measured={'members_area_mm2': round(need, 4),
+                          'face': worst, 'forced_overlap_mm2':
+                          round(excess, 4)},
                 expected={'zone_area_mm2': round(zarea, 4)}))
         elif max(per_face_c.values()) > zarea + legality.EPS:
             face_c = max(per_face_c, key=lambda f_: per_face_c[f_])
             out.append(Violation(
-                rule='plan_zone_crowded', severity=WARN, block=z.name,
+                rule='plan_zone_crowded',
+                severity=intent.severity_of('plan_zone_crowded', WARN),
+                block=z.name,
                 message=(f"zone {z.name!r} holds its members by courtyard "
                          f"but not with {clr_used}mm clearance around each "
                          f"({per_face_c[face_c]:.2f}mm2 needed on "
@@ -5589,12 +5679,12 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             fp = (pcb_data.footprints or {}).get(ref)
             if fp is None or edge not in blen or not fp.pads:
                 continue
-            xs = [(p_.global_x - p_.size_x / 2.0, p_.global_x + p_.size_x / 2.0)
-                  for p_ in fp.pads]
-            ys = [(p_.global_y - p_.size_y / 2.0, p_.global_y + p_.size_y / 2.0)
-                  for p_ in fp.pads]
-            ext = min(max(v[1] for v in xs) - min(v[0] for v in xs),
-                      max(v[1] for v in ys) - min(v[0] for v in ys))
+            # In the footprint's OWN frame, so the answer is the part's and
+            # not its current pose's: board-frame extents of a part at 45
+            # degrees read a 9x9 array as 11.91 mm (Phase-4 verifier).
+            from .utility import compute_footprint_bbox_local
+            lb = compute_footprint_bbox_local(fp)
+            ext = min(lb[2] - lb[0], lb[3] - lb[1])
             row = edge_rows.setdefault(edge, {'edge': edge,
                                               'bbox_length_mm':
                                               round(blen[edge], 3),
@@ -5619,7 +5709,8 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             row['span_basis'] = basis
             if row['claimed_mm'] > span + legality.EPS:
                 out.append(Violation(
-                    rule='plan_edge_crowded', severity=WARN,
+                    rule='plan_edge_crowded',
+                    severity=intent.severity_of('plan_edge_crowded', WARN),
                     message=(f"the {edge} edge's claimed parts "
                              f"({', '.join(row['parts'])}) span "
                              f"{row['claimed_mm']:.2f}mm by pads against a "
@@ -5636,17 +5727,42 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                               board_edge_clearance=0.0, assembly_sides=None)
     except Exception as exc:                                # noqa: BLE001
         g0 = {'error': f"{type(exc).__name__}: {exc}"}
-    measured['utilisation_per_face_clearance0'] = g0.get('utilisation')
-    if g0.get('fits_by_area') is False:
+    m0 = g0.get('measured') or {}
+    util0 = m0.get('utilisation')
+    measured['utilisation_per_face_clearance0'] = util0
+    # The same soundness argument as the zone bound: parts may overlap in
+    # the grade up to a declared budget, so "does not fit by area" is an
+    # ERROR only when the forced overlap exceeds it.
+    excess0 = ((m0.get('charged_area_mm2') or 0.0)
+               - (m0.get('usable_area_mm2') or 0.0))
+    if g0.get('fits_by_area') is False and overlap_budget is not None \
+            and excess0 > float(overlap_budget) + legality.EPS:
         out.append(Violation(
             rule='plan_board_overfull',
             severity=intent.severity_of('plan_board_overfull'),
             message=(f"the parts do not fit on the board by AREA alone, "
                      f"even at zero clearance on the busiest face "
-                     f"(utilisation {g0.get('utilisation')}): no plan can "
-                     f"place them"),
-            measured={'utilisation': g0.get('utilisation')},
-            expected={'utilisation': '<= 1.0'}))
+                     f"(utilisation {util0}): they force at least "
+                     f"{excess0:.2f}mm2 of courtyard overlap, over the "
+                     f"declared legality_budget.overlap_area "
+                     f"{float(overlap_budget):g}"),
+            measured={'utilisation': util0,
+                      'forced_overlap_mm2': round(excess0, 4)},
+            expected={'utilisation': '<= 1.0',
+                      'overlap_area': float(overlap_budget)}))
+    elif util0 is not None and util0 >= _opts.CROWDED_UTILISATION:
+        out.append(Violation(
+            rule='plan_board_crowded',
+            severity=intent.severity_of('plan_board_crowded', WARN),
+            message=(f"the busiest face is {util0:.0%} covered by courtyard "
+                     f"at zero clearance"
+                     + ("" if g0.get('fits_by_area') is not False else
+                        ", MORE than its usable area")
+                     + f" (the corpus's routable boards sit below "
+                       f"{_opts.CROWDED_UTILISATION:.0%}): expect to route "
+                       f"between parts with little room"),
+            measured={'utilisation': util0},
+            expected={'utilisation': f'< {_opts.CROWDED_UTILISATION}'}))
     sides = intent.assembly_sides()
     if sides in ('F', 'B'):
         try:
@@ -5655,16 +5771,18 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                                   assembly_sides=sides)
         except Exception:                                   # noqa: BLE001
             g1 = {}
-        measured['utilisation_one_face_clearance0'] = g1.get('utilisation')
+        util1 = (g1.get('measured') or {}).get('utilisation')
+        measured['utilisation_one_face_clearance0'] = util1
         if g1.get('fits_by_area') is False:
             out.append(Violation(
-                rule='plan_board_crowded', severity=WARN,
+                rule='plan_board_crowded',
+                severity=intent.severity_of('plan_board_crowded', WARN),
                 message=(f"the declared assembly policy puts every part on "
                          f"{sides}.Cu, and on that one face they do not fit "
-                         f"by area (utilisation {g1.get('utilisation')}). "
-                         f"Nothing moves a part between faces (#836), so "
-                         f"this is the policy's problem, not the plan's"),
-                measured={'utilisation': g1.get('utilisation')},
+                         f"by area (utilisation {util1}). Nothing moves a "
+                         f"part between faces (#836), so this is the "
+                         f"policy's problem, not the plan's"),
+                measured={'utilisation': util1},
                 expected={'utilisation': '<= 1.0'}))
     out.sort(key=lambda v: v.sort_key())
     return out, measured
@@ -5738,7 +5856,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     found, ran, skipped = _run_rules(ctx, abstained)
     violations.extend(found)
     violations.extend(exclusive_unsatisfiable(intent, blocks, pcb_data,
-                                              pcb_file))
+                                              pcb_file, state=state))
     if mechanical:
         violations.extend(mechanical_drift(intent, pcb_data, mechanical,
                                            skip=mechanical_skip))

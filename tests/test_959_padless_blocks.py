@@ -172,8 +172,30 @@ def test_a_glob_that_sweeps_in_an_answered_logo_asks_nothing():
                   'zone': [0, 0, 10, 10], 'note': 'names the logo'}]), fh)
         run_utils.check(argv + [named],
                         refuse="LOGO1 (block 'all', refs 'LOGO1')", code=4)
+        # The board's own spelling IS a naming, wildcards and all -- glasgow
+        # keys its logos `REF**` (Phase-4 verifier SF7) -- and the check
+        # folds case exactly where `fnmatch` does (Windows).
+        import fnmatch
+        board2 = drv._tiny_board(os.path.join(tmp, 'c.kicad_pcb'),
+                                 ('U1', 'U2', 'REF**'), padless=('REF**',),
+                                 locked=('REF**',))
+        for pat in ('REF**', 'ref[*][*]'):
+            plan = os.path.join(tmp, f'n{len(pat)}.json')
+            with open(plan, 'w', encoding='utf-8') as fh:
+                json.dump(drv._zone_plan_doc(
+                    [{'name': 'all', 'refs': ['U*', pat],
+                      'zone': [0, 0, 10, 10], 'note': 'names the logo'}]),
+                    fh)
+            argv3 = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+                     '--board', board2, '--zone-plan', plan]
+            if fnmatch.fnmatch('REF**', pat):
+                run_utils.check(argv3, refuse=f"(block 'all', refs '{pat}')",
+                                code=4)
+            else:
+                run_utils.check(argv3, accept=True)
     print("  PASS: a glob sweeping in an answered courtyard-less logo passes; "
-          "naming it is refused")
+          "naming it -- escaped, literal, or case-folded as fnmatch folds -- "
+          "is refused")
 
 
 def test_a_padless_block_with_a_courtyard_is_graded_once_locked():

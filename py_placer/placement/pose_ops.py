@@ -899,6 +899,12 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 raise PoseRefusal(summary['refused'], summary=summary)
             summary['forced'] = True
 
+        if intent is not None and not placements:
+            summary['zone_check'] = {
+                'intent': getattr(intent, 'source_path', '') or None,
+                'refs': [], 'rows': [], 'worse': [],
+                'skipped': 'no op in this call moves a part, so no zone '
+                           'can get worse'}
         if intent is not None and placements:
             zc = zone_check(intent, pcb, board_path, cand_pcb, cand,
                             [p_['reference'] for p_ in placements],
