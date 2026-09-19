@@ -890,7 +890,7 @@ it, never what the value calls itself:
 | authority | the value |
 |---|---|
 | `declared` | matches the compiled design brief. Under an unaided regime, where the run writes the brief, it counts as declared only when the manifest recorded the brief's sha at staging; otherwise the brief is the run's own reading, a `hypothesis` |
-| `recorded_fact` | existed before the run: the outline, an existing `.kicad_pro`, and a `mechanical.json` -- under a regime manifest, the staged locks and a file whose sha matches the one the manifest recorded (a mismatch makes the file a `hypothesis`). Without a manifest the file is still `recorded_fact`, and its provenance is reported `unverified` |
+| `recorded_fact` | existed before the run: the outline, an existing `.kicad_pro`, the staged locks under a regime manifest, and a `mechanical.json`. Only a manifest that recorded a sha for this very file and finds different bytes makes it a `hypothesis`; with no manifest, a manifest naming another file, or one that recorded no sha, it stays `recorded_fact` and its provenance is reported `unverified` |
 | `hypothesis` | anything the run wrote: zone plans, `--intent` files, locks added during the run |
 | `inferred` | re-derived from the board |
 | `assumption` | a staging default (a floor `stage_unaided` fixed) or a code default dimension |
@@ -1213,10 +1213,15 @@ never fire on an auto-emitted intent. With `--declare-decaps` it derives
   `context.decap_census.auto_withheld`, never in `budget_withheld`, so an
   auto emit moves no exit code.
 - **The number is labelled** `observed_baseline` in `context.basis`, alongside
-  every other number the emitter chose (the legality budget, the observed edges
-  and overhangs, block sides). The `decap_distance` message says "an observed
-  regression baseline read off a board, not an electrical requirement". A
-  brief merged over the intent re-labels whatever it declares.
+  every other number the emitter read off the board (the legality budget, the
+  observed edges and overhangs, block sides and zones, `assembly.sides`); the
+  module's own tolerances (`envelope.tolerance_mm`,
+  `defaults.zone_tolerance_mm`) are `derived_default`. The `decap_distance`
+  message says "an observed regression baseline read off a board, not an
+  electrical requirement" -- only while the limit is still the one the census
+  recorded (`emitted_max_distance_mm`): a hand-edited limit loses the label
+  when the intent is read. A brief merged over the intent re-labels whatever it
+  declares.
 - **A declared relation supersedes the inferred tether.** A `proximity` claim
   the BRIEF makes that names the cap's pads on the cap's rail, and that the
   graded intent carries unchanged (same partner, limit, basis and pads), takes
@@ -1224,8 +1229,10 @@ never fire on an auto-emitted intent. With `--declare-decaps` it derives
   supersedes nothing, and neither does a brief row the plan dropped or
   changed. `decaps.exempt` is never written, because exempting the cap would
   turn a declared `max_pin_distance_mm` on its rail into `decap_pin_uncovered`.
-  When every cap is superseded, an armed decap rule abstains, and a dark one is
-  not applicable.
+  When every cap is superseded, an armed decap rule runs and skips each one
+  (the grade stays complete), and a dark one is not applicable. The census
+  lists the superseded caps under `superseded`; the emitted limit is still
+  read off every cap, because the placement engines grade without the brief.
 
 **The default stays `off`, by measurement.** `tests/test_placement_ab.py`
 seeds each of six boards twice, OFF and AUTO (rows `decaps-auto-*`), and grades

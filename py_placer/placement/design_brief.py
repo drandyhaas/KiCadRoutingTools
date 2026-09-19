@@ -188,7 +188,8 @@ _CABLE_ENTRY = ('in_plane', 'perpendicular_top', 'perpendicular_bottom',
 #: is asked only of a part whose courtyard sits a margin inside), so no
 #: as-built grade tells 0.75 from 0.5; this is the margin that admits those
 #: bodies wherever the seat does bind. `test_959_connector_clauses` checks
-#: that it still admits the widest measured one.
+#: that it still admits the widest body on its five as-built boards (J7;
+#: rp2350 is not one of them).
 EDGE_MOUNT_SETBACK_MM = 0.75
 
 #: The tier-0 questions. Named so a report can say which were answered, which
@@ -1062,9 +1063,10 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
       * `mount_mode: edge_mount` -> `max_setback_mm` 0.75 on the drawn body
         (`derived_default`; two shipping edge-mount bodies sit 0.60 and
         0.614 in);
-      * `mount_mode: through_edge` -> the same setback: the body reaches
-        the edge (how far PAST it is `overhang_mm`, declared or emitted,
-        never derived);
+      * `mount_mode: through_edge` -> the same setback: the part reaches
+        the edge, read on the drawn body for an edge receptacle and on the
+        courtyard otherwise (how far PAST it is `overhang_mm`, declared or
+        emitted, never derived);
       * `mount_mode: top_mount` / `bottom_mount` -> an EXEMPTION, carried:
         the edge-receptacle seat does not apply to a part standing off a
         face (`floorplan.VERTICAL_MOUNTS`; the default seat false-failed 8
@@ -1148,9 +1150,10 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
             src['max_setback_mm'] = 'mount_mode'
             _row(ref, 'mount_mode', 'compiled',
                  'the body reaches the edge: past it, or within the '
-                 'edge-mount setback of it -- graded exactly as edge_mount; '
-                 'how far past the edge it may reach is declared by '
-                 'overhang_mm, never derived',
+                 'edge-mount setback of it (read on the drawn body for an '
+                 'edge receptacle, on the courtyard otherwise); how far '
+                 'past the edge it may reach is declared by overhang_mm, '
+                 'never derived',
                  compiled_to=f"edge_connectors[{ref}].max_setback_mm",
                  grader='edge_connector',
                  basis=basis.get('max_setback_mm', 'declared'),

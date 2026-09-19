@@ -208,8 +208,8 @@ Validate routed boards against the *real* spec, with the right checker — most
   compile_with_consequences`, which `check_floorplan`, `board_brief` and the
   placement skill's P1 call, so emit, grade and drift see the same clauses).
   `edge_mount` / `through_edge` compile to a 0.75 mm setback, read on the drawn
-  body for an edge-mount part or a user-facing receptacle and on the courtyard
-  otherwise. A vertical mount is exempt from the receptacle seat.
+  body for an edge-mount part or an edge receptacle (a class `user_facing`,
+  the emitter or a declared edge assigns) and on the courtyard otherwise. A vertical mount is exempt from the receptacle seat.
   A perpendicular cable plus `user_top_side` compiles to an advisory face.
   A declared `cable_envelope_mm` compiles to a keep-out, off a FILE-locked
   part only. Each derived number is labelled `derived_default` rather than

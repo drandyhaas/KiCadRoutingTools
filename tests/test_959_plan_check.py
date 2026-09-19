@@ -862,6 +862,42 @@ def test_round2_the_far_face_charge_is_what_the_courtyard_confines():
           "inside it")
 
 
+def test_p1_itself_refuses_a_plan_error():
+    """The DRIVER's P1, not only `plan_check`: run 27's plan with the logos
+    answered and one zone shrunk so its members cannot fit under a declared
+    overlap budget of 0. Each member still fits alone -- a zone smaller than
+    a member is an anchor, which is not charged. Without this, P1 could stop
+    asking and every other test would still pass (the #959 battery's
+    `p1-never-checks-the-plan` survived)."""
+    logos = ['#00000000-0000-0000-0000-00005a3b5201',
+             '#00000000-0000-0000-0000-00005d8c51dd',
+             '#00000000-0000-0000-0000-00005e7dd057']
+    with open(PLAN_975, encoding='utf-8') as fh:
+        plan = json.load(fh)
+    plan['dispositions'] = {'refs': {k: 'a back-side logo; cosmetic'
+                                     for k in logos}}
+    plan['legality_budget'] = {'overlap_area': 0.0, 'oob_count': 0}
+    for b in plan['blocks']:
+        if b['name'] == 'ldo':          # U2, C1, C3
+            b['zone'] = [114.5, 91.5, 118.4, 93.1]
+            b['tolerance_mm'] = 0.0
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, 'overfull.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump(plan, fh)
+        r = run_utils.check(
+            [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+             '--board', ESP, '--zone-plan', p, '--waive',
+             'seed-connectors:the probe hands them over'],
+            refuse='in the zone plan that no arrangement can satisfy',
+            code=4)
+    assert 'plan_zone_overfull' in r.stdout and "'ldo'" in r.stdout, \
+        r.stdout[-1500:]
+    assert '--plan-only' in r.stdout, r.stdout[-800:]
+    print("  PASS: the driver's P1 refuses the overfull plan by name, and "
+          "points at --plan-only")
+
+
 TESTS = [
     test_run29_lap5_overlaps_are_warnings_not_errors,
     test_round2_the_plan_errors_track_the_grade,
@@ -879,6 +915,7 @@ TESTS = [
     test_plan_only_on_a_pile,
     test_plan_only_on_a_true_pile_and_its_exit_4,
     test_plan_check_refuses_no_emitted_corpus_intent,
+    test_p1_itself_refuses_a_plan_error,
 ]
 
 

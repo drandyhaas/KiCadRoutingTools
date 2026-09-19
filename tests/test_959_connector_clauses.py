@@ -10,7 +10,7 @@ not by the issue's literal mapping:
   * `edge_mount` -> the drawn body within 0.75 mm of its edge (two shipping
     edge-mount bodies sit 0.60 and 0.614 mm in);
   * `through_edge` -> the same setback, on the courtyard unless the entry is
-    a user-facing receptacle;
+    an edge receptacle;
   * `top_mount` / `bottom_mount` -> NOT held to the receptacle seat (8
     vertical headers on the as-built boards failed it);
   * `perpendicular_*` with `product.user_top_side` -> the face the cable

@@ -774,7 +774,7 @@ order:
    can satisfy the plan (members that cannot fit their zone within the
    overlap budget the plan DECLARES, a part longer than its edge, an
    exclusive zone a member cannot avoid, a real reference used as a glob
-   that lands a part in two zones), and WARNs for the same quantities with a
+   that lands a part in two disjoint zones), and WARNs for the same quantities with a
    margin. P1 refuses every ERROR. `place_seed` refuses only the area,
    edge and glob ones, at exit 5 with nothing written; for the rest it seeds
    and names the member it could not seat. P1 also counts every footprint
@@ -786,8 +786,9 @@ order:
    that drops or contradicts a design-brief clause is refused by clause id,
    and `--waive brief-clause:<id>:<why>` answers it. A `mechanical.json`
    beside the board is read: each of its refs that carries pads must be
-   locked at its recorded pose, unless its value lost a contradiction, and
-   a contradiction between two recorded channels is answered under
+   locked at its recorded pose, unless its value lost a contradiction; a
+   pad-less one is refused only if it has drifted from that pose; and a
+   contradiction between two recorded channels is answered under
    `contradictions`. Every refusal names its measured values and the key
    that answers it. Answer with a fact, never an invented limit.
 

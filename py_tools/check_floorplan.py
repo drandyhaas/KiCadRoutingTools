@@ -197,8 +197,10 @@ def build_parser():
     add_board_state_args(p)
     # The three decap flags share one dest, and argparse takes a shared
     # dest's default from the FIRST action that declares it -- so a
-    # `default=` on any one of them is dead (the Phase-6 verifier set
-    # the constant to 'auto' and still parsed None). Set it here.
+    # `default=` on either later flag is dead (the Phase-6 verifier set the
+    # constant to 'auto' on the third and still parsed None), and one on the
+    # first ties the default to the order the flags are declared in. Set it
+    # on the parser instead.
     p.set_defaults(declare_decaps=DECLARE_DECAPS_DEFAULT)
     return p
 
