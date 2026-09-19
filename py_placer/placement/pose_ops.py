@@ -464,9 +464,14 @@ def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
     st = pose_score.make_state(pcb, board_path, clearance=clearance,
                                board_edge_clearance=board_edge_clearance)
     diag: Dict = {}
-    ranked = pose_score.rank_poses(pcb, board_path, ref, radius=radius,
-                                   step=step, limit=24, state=st,
-                                   rotations=(rot,), diagnostics=diag)
+    try:
+        ranked = pose_score.rank_poses(pcb, board_path, ref, radius=radius,
+                                       step=step, limit=24, state=st,
+                                       rotations=(rot,), diagnostics=diag)
+    except pose_score.PoseUnrankable as exc:
+        # #959 (#999): `place_pose` catches PoseRefusal only, so a pad-less
+        # block reached a traceback here. The code carries over unchanged.
+        raise PoseRefusal(exc.reason, code=exc.code, ref=ref) from exc
     # The Euclidean bound, because `_offsets` walks SQUARE rings: a corner of
     # the r=4 ring sits 5.66 mm out, and a caller who typed `--radius 4` read
     # it as a distance (measured: a snap moved a part 5.0 mm under 4).

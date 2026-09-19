@@ -307,10 +307,11 @@ print('no outline:', p.board_info.board_bounds is None)
 print('stacked at defaults:', len({{(round(f.x,3), round(f.y,3))
       for f in p.footprints.values()}}) < len(p.footprints) / 2)"
 
-ZONE PLAN {a.zone_plan}: {plan['zoned']} zoned block(s) cover all {plan['movable']}
-movable part(s); {plan['locked']} claimed by must_lock or pinned in the file
-({plan['pinned']} pinned, the only kind the seeder cannot move), {plan['edge']}
-declared edge connector(s) of which {plan['seeded_edge']} are the seeder's to choose.
+ZONE PLAN {a.zone_plan}: all {plan['blocks']} footprint block(s) accounted for.
+{plan['zoned']} zoned block(s) cover the {plan['movable']} the seeder places; {plan['locked']} claimed
+by must_lock or pinned in the file ({plan['pinned']} pinned, the only kind the seeder
+cannot move); {plan['edge']} declared edge connector(s), {plan['seeded_edge']} of them the seeder's to
+choose; {plan['padless']} pad-less, placed by hand ({plan['padless_locked']} locked, {plan['padless_disposed']} dispositioned).
 
 THE SEEDER PLACES THE RESIDUE. It is a greedy first-fit that packs declared
 zones and drops everything else at its connectivity centroid, at the first
@@ -1083,8 +1084,11 @@ def _guard_zone_plan(a):
     zoned or must_lock too) minus `must_lock` patterns (fnmatch, as the
     seeder resolves them) minus the intent's `edge_claims()` (exact refs,
     as the grader looks them up; a `connector_affinity` entry claims no
-    edge and IS seeded at its centroid, so it needs a zone). Returns
-    (True, {counts}) or (False, why)."""
+    edge and IS seeded at its centroid, so it needs a zone). The COVERAGE
+    DENOMINATOR is every footprint block (#959): a PAD-LESS block is not
+    the seeder's to move, so it is answered separately -- placed and locked
+    by hand, or dispositioned in `dispositions.refs` -- rather than left
+    out of the count. Returns (True, {counts}) or (False, why)."""
     import fnmatch
     plan, perr = _load(a.zone_plan, 'The zone plan (--zone-plan)')
     if perr:
@@ -1137,6 +1141,16 @@ def _guard_zone_plan(a):
     covered = set()
     for z in zoned:
         covered.update(members.get(z.name, ()))
+    # #959 (#999): the denominator is every footprint BLOCK (#726 keys:
+    # `#<uuid>` for a reference-less block, `Ref*~2` for a second block
+    # sharing a reference). It was `if fp_.pads`, which is what the seeder
+    # moves -- and so exactly what hid run 29's three pad-less logos: "6 zoned
+    # blocks cover all 13 movable" on a 21-block board, while one logo sat at
+    # the pile origin printing silk across CON2's apertures for 12 laps.
+    # A pad-less block is not the seeder's (it is not in its state at all),
+    # so it is answered separately below: placed and locked by hand, or
+    # dispositioned in writing. Never excluded.
+    padless = {ref for ref, fp_ in pcb.footprints.items() if not fp_.pads}
     movable = {ref for ref, fp_ in pcb.footprints.items() if fp_.pads}
     # TWO DIFFERENT LOCKS, and they answer two different questions.
     #
@@ -1163,12 +1177,15 @@ def _guard_zone_plan(a):
     left = sorted(movable - locked - edge - covered)
     if left:
         return False, (
-            f'{len(left)} movable part(s) sit in no zoned block: '
+            f'{len(left)} movable block(s) sit in no zoned block: '
             f'{", ".join(left)}. A part the plan does not place is a part '
             'the seeder puts at its connectivity centroid, at the first '
             'rotation that fits -- the pose nobody decided. Add each to a '
             'block with a zone, or declare it must_lock / an edge connector '
             'if that is what it is.')
+    padless_msg = _padless_owed(a, intent, pcb, padless, covered)
+    if padless_msg:
+        return False, padless_msg
     # THE SEEDER PLACES THE RESIDUE, NOT THE DECISIONS (run 27).
     #
     # A declared edge connector states its EDGE and nothing else that matters:
@@ -1222,9 +1239,78 @@ def _guard_zone_plan(a):
     owed = _roster_owed(a, intent, pcb, _fp)
     if owed:
         return False, owed
-    return True, {'zoned': len(zoned), 'movable': len(movable - locked - edge),
+    padless_locked = {r for r in padless
+                      if getattr(pcb.footprints[r], 'locked', False)}
+    return True, {'blocks': len(pcb.footprints),
+                  'zoned': len(zoned), 'movable': len(movable - locked - edge),
                   'locked': len(locked), 'pinned': len(file_locked),
-                  'edge': len(edge), 'seeded_edge': len(free_edge)}
+                  'edge': len(edge), 'seeded_edge': len(free_edge),
+                  'padless': len(padless),
+                  'padless_locked': len(padless_locked),
+                  'padless_disposed': len(padless - padless_locked)}
+
+
+def _padless_owed(a, intent, pcb, padless, covered):
+    """#959 (#999): every PAD-LESS block answered for, or the refusal text.
+
+    The seeder never places a block with no pads -- it is not in the
+    placement state at all -- so on a pile it stays where the input left it.
+    The answers that work today are the author's: place it (`place_pose set`
+    has no pad requirement) and lock it, or write why it may stay where it
+    is. `must_lock` is NOT an answer: it stamps a lock the seeder writes after
+    seating, and the seeder never seats this block.
+
+    `dispositions.refs` keys are EXACT block keys, never globs: `Ref*` as a
+    pattern also matches `Ref*~2`, and a disposition that silently covered a
+    second block would excuse a part nobody looked at.
+    """
+    board = a.board
+    ref_disp = (intent.dispositions or {}).get('refs', {})
+    unknown = sorted(k for k in ref_disp if k not in pcb.footprints)
+    if unknown:
+        return (
+            f'dispositions.refs names {len(unknown)} block(s) this board does '
+            f'not have: {", ".join(unknown)}. Keys are EXACT block keys as the '
+            'board parses them -- `#<uuid>` for a reference-less block, '
+            '`Ref*~2` for a second block sharing a reference -- never globs.')
+    padded = sorted(k for k in ref_disp if k not in padless)
+    if padded:
+        return (
+            f'dispositions.refs answers PAD-LESS blocks only, and '
+            f'{", ".join(padded)} carr{"ies" if len(padded) == 1 else "y"} '
+            'pads. A block with pads is the seeder\'s to place: zone it, '
+            'must_lock it, or declare it an edge connector.')
+    file_locked = {r for r in padless
+                   if getattr(pcb.footprints[r], 'locked', False)}
+    inert = sorted((padless & covered) - file_locked)
+    if inert:
+        return (
+            f'{len(inert)} pad-less block(s) sit in a zoned block: '
+            f'{", ".join(inert)}. The seeder never places a block with no '
+            'pads, so the zone is inert and the block stays wherever the '
+            'input left it -- on a pile, the pile origin. Place it yourself '
+            'and lock it; the zone then grades the pose you chose:\n'
+            f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
+            "set '<KEY>' <X> <Y> --rot <DEG>\n"
+            f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
+            "lock '<KEY>'")
+    open_ = sorted(padless - file_locked - set(ref_disp))
+    if open_:
+        return (
+            f'{len(open_)} pad-less block(s) are answered for by nothing: '
+            f'{", ".join(open_)}. A logo or a graphic has no pads, so the '
+            'seeder never moves it: on a pile it stays at the pile origin, '
+            'which is where run 29 left one printing silk across CON2\'s '
+            'apertures for 12 laps (10 pairs, max 0.986 mm). Place each one '
+            'yourself and lock it:\n'
+            f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
+            "set '<KEY>' <X> <Y> --rot <DEG>\n"
+            f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
+            "lock '<KEY>'\n"
+            'or write why it may stay where it is, in the zone plan: '
+            '"dispositions": {"refs": {"<KEY>": "<why>"}}. `must_lock` does '
+            'not place a block the seeder never seats.')
+    return ''
 
 
 def _roster_owed(a, intent, pcb, _fp):
@@ -1954,11 +2040,13 @@ def _args(argv=None):
     ap.add_argument('--zone-plan', default=None, metavar='PATH',
                     help='the floorplan intent P1 seeds FROM: a block with a '
                          '`zone` rectangle and a `note` for every movable '
-                         'part (must_lock and declared edge connectors '
-                         'excepted). P1 refuses without one and names the '
-                         'parts a plan leaves out: run 26 seeded from a '
-                         'single zone and then hand-placed most of its '
-                         'parts, one pose at a time, with no plan anywhere.')
+                         'block (must_lock and declared edge connectors '
+                         'excepted; a pad-less block is placed and locked by '
+                         'hand, or named in `dispositions.refs`). P1 refuses '
+                         'without one and names the blocks a plan leaves '
+                         'out: run 26 seeded from a single zone and then '
+                         'hand-placed most of its parts, one pose at a time, '
+                         'with no plan anywhere.')
     # --congestion-ratio is GONE. It set a threshold P-close refused on, and the
     # calibration withdrew that refusal (docs/placement-calibration.md): the
     # premise inverts on 1 of 3 corpus boards, where a perfect repair scores a
@@ -2037,19 +2125,26 @@ def _fake_render(board, halo=100.0, crossings=100.0, hpwl=1000.0, moved=3):
     }
 
 
-def _tiny_board(path, refs, unconnected=(), locked=()):
+def _tiny_board(path, refs, unconnected=(), locked=(), padless=()):
     """A board `parse_kicad_pcb` reads: an outline and one part per ref, each
     with one pad -- connected, except for the refs in `unconnected` (a
     mounting hole, a fiducial), which the seeder moves all the same. Refs in
     `locked` carry `(locked yes)`, which is what `place_pose lock` writes and
-    what the zone-plan guard reads as "the author decided this one". On disk,
-    because the guard reads the file the flag names."""
+    what the zone-plan guard reads as "the author decided this one". Refs in
+    `padless` carry NO pad at all -- a logo or a graphic, which the seeder
+    never moves (#959). On disk, because the guard reads the file the flag
+    names."""
+    def _pad(r):
+        if r in padless:
+            return ''
+        return (f'    (pad "1" smd rect (at 0 0) (size 0.6 0.8) (layers "F.Cu") '
+                f'(net {0 if r in unconnected else 1} '
+                f'"{"" if r in unconnected else "/A"}") (uuid "p1-{r}"))\n')
     fps = ''.join(
         f'  (footprint "test:FP" (layer "F.Cu") (uuid "fp-{r}") (at {2 + 3 * i} 2)'
         f'{" (locked yes)" if r in locked else ""}\n'
         f'    (property "Reference" "{r}" (at 0 0))\n'
-        f'    (pad "1" smd rect (at 0 0) (size 0.6 0.8) (layers "F.Cu") '
-        f'(net {0 if r in unconnected else 1} "{"" if r in unconnected else "/A"}") (uuid "p1-{r}"))\n'
+        + _pad(r) +
         f'  )\n' for i, r in enumerate(refs))
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write('(kicad_pcb (version 20241229) (generator "test")\n'
@@ -2416,6 +2511,8 @@ def _refusal_scenarios(tmp):
                            'complete': True}})]
 
     tiny = _tiny_board(os.path.join(tmp, 'tiny.kicad_pcb'), ('U1', 'U2'))
+    logo_board = _tiny_board(os.path.join(tmp, 'logo.kicad_pcb'),
+                             ('U1', 'U2', 'LOGO1'), padless=('LOGO1',))
     zp_ok = wrote('zp_ok.json', _zone_plan_doc(
         [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
           'note': 'both parts, one zone'}]))
@@ -2496,6 +2593,30 @@ def _refusal_scenarios(tmp):
                    'note': 'the ICs'}],
                  edge_connectors=[{'ref': 'U2', 'edge': 'west'}])),
             '--waive', 'seed-connectors:']
+         + damaged),
+        # #959 (#999): the PAD-LESS block arms, one row per text. The board
+        # adds a logo with no pad to the two ICs.
+        ('a pad-less block nothing answers for',
+         ['--board', logo_board, '--zone-plan', zp_ok] + damaged),
+        ('a pad-less block inside a zoned block',
+         ['--board', logo_board, '--zone-plan', wrote(
+             'zp_logo_zoned.json', _zone_plan_doc(
+                 [{'name': 'all', 'refs': ['U*', 'LOGO1'],
+                   'zone': [0, 0, 10, 10], 'note': 'ICs and the logo'}]))]
+         + damaged),
+        ('a pad-less disposition naming a block the board lacks',
+         ['--board', logo_board, '--zone-plan', wrote(
+             'zp_logo_unknown.json', _zone_plan_doc(
+                 [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                   'note': 'both ICs'}],
+                 dispositions={'refs': {'LOGO9': 'no such block'}}))]
+         + damaged),
+        ('a pad-less disposition naming a block with pads',
+         ['--board', logo_board, '--zone-plan', wrote(
+             'zp_logo_padded.json', _zone_plan_doc(
+                 [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                   'note': 'both ICs'}],
+                 dispositions={'refs': {'U1': 'wrong kind of block'}}))]
          + damaged),
         # #959 (#997): the roster, LAST in P1. One row carries both arms -- a
         # gating rule nothing answers for (the tiny board declares no
@@ -2941,9 +3062,9 @@ def _self_test():
         out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
             'half.json', [{'name': 'a', 'refs': ['U1'], 'zone': [0, 0, 5, 5],
                            'note': 'U1 only'}])]))
-        want(out.startswith('<error>') and '3 movable part(s)' in out
+        want(out.startswith('<error>') and '3 movable block(s)' in out
              and 'H1, J1, U2' in out,
-             'P1 names every movable part the plan leaves out')
+             'P1 names every movable block the plan leaves out')
         # A declared edge connector is exempt from ZONING only when it CLAIMS
         # an edge (`edge_claims()`, what the seeder's edge stage seats); a
         # connector_affinity entry is seeded at its centroid like any part.
@@ -2965,8 +3086,9 @@ def _self_test():
                                   '--waive',
                                   'seed-connectors:the west edge is clear']))
         want(out.startswith('<stage_instructions')
-             and '1 zoned block(s) cover all 2' in out
-             and 'of which 1 are the seeder' in out,
+             and '1 zoned block(s) cover the 2 the seeder places' in out
+             and '1 of them the seeder' in out
+             and 'all 4 footprint block(s) accounted for' in out,
              'P1 proceeds once the hand-over is on the record, and says how '
              'many connectors the seeder is choosing')
         # `must_lock` DOES NOT SATISFY THIS, and the review is why the arm
@@ -3002,7 +3124,7 @@ def _self_test():
                           'note': 'the two ICs'}],
             must_lock=['H*'],
             edge_connectors=[{'ref': 'J1', 'class': 'connector_affinity'}])]))
-        want(out.startswith('<error>') and '1 movable part(s)' in out
+        want(out.startswith('<error>') and '1 movable block(s)' in out
              and ': J1.' in out,
              'P1 does not exempt a connector_affinity entry -- it claims no '
              'edge and the seeder seats it at its centroid')
@@ -3026,7 +3148,7 @@ def _self_test():
         out = STAGES['P1'](_args(['--board', _tb2, '--zone-plan', _zp(
             'fid.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
                           'note': 'the two ICs'}])]))
-        want(out.startswith('<error>') and '1 movable part(s)' in out
+        want(out.startswith('<error>') and '1 movable block(s)' in out
              and ': FID1.' in out,
              'P1 demands a part with no connected pin too -- the seeder moves it')
         out = STAGES['P1'](_args(['--board', _tb2, '--zone-plan', _zp(
@@ -3041,7 +3163,7 @@ def _self_test():
             'group.json', [{'name': 'a', 'group': 'nosuch',
                             'zone': [0, 0, 5, 5], 'note': 'by group'}],
             must_lock=['H*'], edge_connectors=[{'ref': 'J1', 'edge': 'west'}])]))
-        want(out.startswith('<error>') and '2 movable part(s)' in out
+        want(out.startswith('<error>') and '2 movable block(s)' in out
              and 'U1, U2' in out,
              'P1 resolves a group block the way the seeder does, and an '
              'unknown group covers nobody')

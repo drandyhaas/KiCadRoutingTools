@@ -691,10 +691,23 @@ def cmd_poses(a):
         st = pose_score.make_state(pcb, a.board, clearance=clearance,
                                    board_edge_clearance=board_edge_clearance)
     diag = {}
-    with _StdoutToStderr():
-        poses = pose_score.rank_poses(pcb, a.board, a.ref, radius=a.radius,
-                                      step=a.step, limit=a.limit, state=st,
-                                      diagnostics=diag)
+    try:
+        with _StdoutToStderr():
+            poses = pose_score.rank_poses(pcb, a.board, a.ref,
+                                          radius=a.radius, step=a.step,
+                                          limit=a.limit, state=st,
+                                          diagnostics=diag)
+    except pose_score.PoseUnrankable as exc:
+        # #959 (#999): a graded refusal, not a traceback. Exit 4 for both
+        # kinds -- 1 is this command's "no legal pose" verdict and 2 its "the
+        # sweep stopped early", so neither may carry a refusal -- and
+        # `refused_kind` says which it was.
+        print(json.dumps({'ref': a.ref, 'poses': [], 'knobs': knobs,
+                          'refused': exc.reason,
+                          'refused_kind': ('not_on_board' if exc.code == 2
+                                           else 'unrankable')},
+                         indent=1))
+        return 4
     if not poses:
         # The dropped-pose census is the difference between "this part has
         # nowhere to go" and "your knobs veto even staying put" (run-7 S4:
