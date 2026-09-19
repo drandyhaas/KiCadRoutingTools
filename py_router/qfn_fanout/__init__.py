@@ -983,8 +983,14 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
               f"before, those shipped unclamped")
     # The FAB requirement this escape may have just created (#489 §8). Emitted
     # from the shared engine path so the GUI fanout tab reports it too.
-    from fab_notes import print_via_in_pad_note
-    print_via_in_pad_note(vias, pcb_data.pads_by_net, context="QFN underpad escape")
+    # #962: DECLARED on each via-in-pad, (capping yes) (filling yes), not only
+    # printed. The dicts carry it to the CLI writer and the GUI fanout tab.
+    # `vias` are all this escape's own (empty input snapshot).
+    from fab_notes import (via_protection_stamps, apply_stamps_in_memory,
+                           print_via_protection_record)
+    _st962, _rec962 = via_protection_stamps(vias, [], pcb_data)
+    apply_stamps_in_memory(_st962)
+    print_via_protection_record(_rec962, "QFN underpad escape")
     if escalated_n:
         warn_fab_escalation(f"{escalated_n} via-in-pad(s) (sub-0.45mm pads)")
     if floor_n:

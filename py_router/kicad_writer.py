@@ -435,6 +435,46 @@ def via_protection_sexpr(tenting_attrs: dict = None,
     return "".join(f"\n\t\t{p}" for p in parts)
 
 
+def stamp_via_protection_in_content(content: str, stamps_by_uuid: dict):
+    """Insert a protection spec into the `(via ...)` blocks named by uuid (#962).
+
+    `stamps_by_uuid` is {via uuid: {token: inner}}. The tokens are inserted
+    where `generate_via_sexpr` writes them, just before the block's `(net ...)`.
+    A block that already carries ANY protection token is left alone: its spec
+    is the designer's or an earlier stamp. Blocks come from the parser's own
+    paren-balanced `_via_blocks` scan, so a stamp cannot land in the wrong via
+    (#748). Returns `(content, n_stamped)`.
+    """
+    if not stamps_by_uuid:
+        return content, 0
+    from kicad_parser import _via_blocks, VIA_PROTECTION_TOKENS
+    uuid_re = re.compile(r'\(uuid\s+"([^"]+)"\)')
+    edits = []
+    for start, blk in _via_blocks(content):
+        um = uuid_re.search(blk)
+        if not um or um.group(1) not in stamps_by_uuid:
+            continue
+        if any(re.search(r'\(' + t + r'[\s)]', blk) for t in VIA_PROTECTION_TOKENS):
+            continue
+        k = blk.find('(net')
+        if k < 0:
+            k = blk.find('(uuid')
+        if k < 0:
+            continue
+        # insert the tokens, then re-open the line for `(net ...)`
+        edits.append((start + k, via_protection_sexpr(stamps_by_uuid[um.group(1)]).lstrip()
+                      + '\n\t\t'))
+    if not edits:
+        return content, 0
+    out, pos = [], 0
+    for at, text in sorted(edits):
+        out.append(content[pos:at])
+        out.append(text)
+        pos = at
+    out.append(content[pos:])
+    return ''.join(out), len(edits)
+
+
 def via_net_name(net_id: int, net_id_to_name: dict) -> Optional[str]:
     """This board's name for a net id, or None to mean "use the numeric dialect".
 

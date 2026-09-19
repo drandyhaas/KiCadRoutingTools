@@ -349,6 +349,39 @@ def main():
         check(witnessed[w] == 1, 'witness present: %s' % w,
               'a named witness vanished; the parity arms above could then pass '
               'on an empty model')
+    # -- GUI WRITE side (#962): apply_via_protection must reach the saved
+    # board. The shipping 10.0.0 SWIG exports no *_MODE_* constants (#751),
+    # so it can only get there through the bool flag setters.
+    sys.path.insert(0, os.path.join(REPO, 'kicad_routing_plugin'))
+    try:
+        from gui_utils import apply_via_protection
+        from fab_notes import TYPE_VII_STAMP
+        import re as _re
+        wb = pcbnew.LoadBoard(os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb'))
+        for x, spec in ((10, TYPE_VII_STAMP), (12, {})):
+            v = pcbnew.PCB_VIA(wb)
+            v.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(10)))
+            v.SetWidth(pcbnew.FromMM(0.6))
+            v.SetDrill(pcbnew.FromMM(0.3))
+            apply_via_protection(v, spec)
+            wb.Add(v)
+        wp = os.path.join(syn_dir, 'write_side.kicad_pcb')
+        pcbnew.SaveBoard(wp, wb)
+        txt = open(wp, encoding='utf-8').read()
+
+        def blk(x):
+            k = txt.find('(at %d 10)' % x)
+            return txt[txt.rfind('(via', 0, k):txt.find('(uuid', k)]
+        # NOTE this gate's check() takes (cond, what) -- the reverse of the
+        # wx-free tests' -- and a swapped call passes on a truthy string.
+        check('(capping yes)' in blk(10) and '(filling yes)' in blk(10),
+              'GUI write side: a TYPE_VII spec saves (capping yes) (filling yes)', blk(10))
+        check(not _re.search(r'\((capping|filling|tenting|covering|plugging)', blk(12)),
+              'GUI write side: an EMPTY spec saves no protection token (inherits)',
+              blk(12))
+    except Exception as e:
+        check(False, 'GUI write side ran', '%s: %s' % (type(e).__name__, e))
+
     check(witnessed['synthetic custom-anchor + explicit-zero'] == 2,
           'witness: both synthetic boards resolve the anchor ratio and the '
           'version-dependent zero as KiCad does',

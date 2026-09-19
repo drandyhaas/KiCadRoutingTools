@@ -99,6 +99,153 @@ def via_paste_sites(vias, pcb_data, tol: float = 1e-6):
     return out
 
 
+def via_snapshot(vias) -> List[Tuple[int, float, float, float]]:
+    """`(net, x, y, size)` of every via, taken BEFORE a run lays copper. It is
+    what `via_protection_stamps` uses to tell a via this run ADDED from one
+    the board already had."""
+    out = []
+    for v in vias or ():
+        nid = _get(v, 'net_id')
+        x, y = _get(v, 'x'), _get(v, 'y')
+        if nid is None or x is None or y is None:
+            continue
+        out.append((int(nid), float(x), float(y), float(_get(v, 'size', 0.6) or 0.6)))
+    return out
+
+
+def _preexisting(via, snap_by_net) -> bool:
+    """Is `via` one the input board already had?
+
+    Same net, and within half its own diameter of an input via. The sub-grid
+    nudge moves a via by at most size/4, so a nudged input via still reads as
+    itself; a via the tool re-placed somewhere new is the tool's placement.
+    """
+    nid = _get(via, 'net_id')
+    x, y = _get(via, 'x'), _get(via, 'y')
+    sz = _get(via, 'size', 0.6) or 0.6
+    for (ix, iy, isz) in snap_by_net.get(nid, ()):
+        if math.hypot(x - ix, y - iy) <= max(1e-3, min(sz, isz) / 2.0):
+            return True
+    return False
+
+
+def via_protection_stamps(vias, input_snapshot, pcb_data):
+    """Which shipped vias need IPC-4761 Type VII DECLARED on them (#962).
+
+    A via is stamped with `TYPE_VII_STAMP` when ALL of these hold:
+    - its barrel overlaps a same-net SMD pad (`via_in_pad_sites`) or a paste
+      opening that concerns its net (`via_paste_sites`);
+    - this run ADDED it: it is not in `input_snapshot` (see `_preexisting`).
+      A via the board already had keeps whatever it had (#741);
+    - it carries no protection spec of its own. An explicit spec is the
+      designer's, and is never overridden;
+    - the board's own setup does not already make it filled AND capped.
+
+    Returns `(stamps, record)`:
+    - `stamps` is a list of `(via, spec)`;
+    - `record` is the machine-readable note: {count, sites, stamped,
+      protected, unprotected, note}, where `unprotected` names each via-in-pad
+      or via-in-paste that ships without Type VII (a pre-existing one, or one
+      with its own non-Type-VII spec) so it is disclosed, not silent.
+    """
+    setup = getattr(getattr(pcb_data, 'board_info', None), 'via_protection_setup', None) or {}
+    snap_by_net: Dict[int, list] = {}
+    for (nid, x, y, sz) in input_snapshot or ():
+        snap_by_net.setdefault(nid, []).append((x, y, sz))
+    pad_sites = {id(v): p for v, p in via_in_pad_sites(vias, pcb_data.pads_by_net)}
+    paste_sites = {id(v): ap for v, ap, _pen in via_paste_sites(vias, pcb_data)}
+    stamps, sites, unprotected = [], [], []
+    n_protected = 0
+    for v in vias or ():
+        vid = id(v)
+        if vid not in pad_sites and vid not in paste_sites:
+            continue
+        if vid in paste_sites:
+            where = paste_sites[vid].label()
+        else:
+            p = pad_sites[vid]
+            where = '%s.%s' % (_get(p, 'component_ref', '?'), _get(p, 'pad_number', '?'))
+        sites.append(where)
+        own = _get(v, 'tenting_attrs', None) or {}
+        if is_filled_and_capped(effective_via_protection(own, setup)):
+            n_protected += 1
+            continue
+        if own or _preexisting(v, snap_by_net):
+            unprotected.append({'site': where, 'x': round(_get(v, 'x'), 4),
+                                'y': round(_get(v, 'y'), 4),
+                                'why': 'own spec kept' if own else 'pre-existing via kept'})
+            continue
+        stamps.append((v, dict(TYPE_VII_STAMP)))
+    record = {
+        'count': len(sites), 'sites': sorted(set(sites)),
+        'stamped': len(stamps), 'protected': n_protected,
+        'unprotected': unprotected,
+        'note': VIA_IN_PAD_FAB_NOTE,
+    }
+    return stamps, record
+
+
+def apply_stamps_in_memory(stamps) -> int:
+    """Set each stamped via's `tenting_attrs` (object or dict). The GUI path
+    applies them to its pcbnew vias through `gui_utils.apply_via_protection`;
+    the CLI writers emit them through `generate_via_sexpr`."""
+    n = 0
+    for v, spec in stamps:
+        if isinstance(v, dict):
+            v['tenting_attrs'] = dict(spec)
+        else:
+            v.tenting_attrs = dict(spec)
+        n += 1
+    return n
+
+
+def ship_via_protection_file(output_file: str, input_snapshot, context: str = '',
+                             quiet: bool = False):
+    """Stamp Type VII onto the vias of a WRITTEN board that need it, and return
+    the record (#962).
+
+    For the CLI fronts, whose passes write through to the file: the board on
+    disk is the final state. It re-parses it, decides with
+    `via_protection_stamps`, and inserts the tokens into exactly those `(via
+    ...)` blocks, matched by uuid. Nothing else in the file changes. Returns
+    None when the file cannot be read.
+    """
+    import os
+    if not output_file or not os.path.exists(output_file):
+        return None
+    from kicad_parser import parse_kicad_pcb
+    from kicad_writer import stamp_via_protection_in_content
+    pcb = parse_kicad_pcb(output_file)
+    stamps, record = via_protection_stamps(pcb.vias, input_snapshot, pcb)
+    if stamps:
+        with open(output_file, 'r', encoding='utf-8') as fh:
+            content = fh.read()
+        content, n = stamp_via_protection_in_content(
+            content, {v.uuid: spec for v, spec in stamps if getattr(v, 'uuid', '')})
+        with open(output_file, 'w', encoding='utf-8') as fh:
+            fh.write(content)
+        if n != len(stamps):
+            record['unstampable'] = len(stamps) - n
+            record['stamped'] = n
+    print_via_protection_record(record, context, quiet=quiet)
+    return record
+
+
+def print_via_protection_record(record, context: str = '', quiet: bool = False):
+    """One FAB NOTE line for the run, when it shipped any via-in-pad/paste."""
+    if quiet or not record or not record.get('count'):
+        return
+    where = f" ({context})" if context else ""
+    unp = record.get('unprotected') or []
+    print(f"\n  FAB NOTE{where}: {record['count']} via(s) in a pad or paste "
+          f"opening [{', '.join(record['sites'][:8])}"
+          f"{', +%d more' % (len(record['sites']) - 8) if len(record['sites']) > 8 else ''}]"
+          f" -- {record['stamped']} stamped (capping yes) (filling yes), "
+          f"{record.get('protected', 0)} already filled+capped"
+          + (f", {len(unp)} shipped WITHOUT Type VII (kept as they were)" if unp else "")
+          + f". {VIA_IN_PAD_FAB_NOTE}.")
+
+
 def _get(obj, name: str, default=None):
     """Read `name` from a dict or an attribute-style object."""
     if isinstance(obj, dict):

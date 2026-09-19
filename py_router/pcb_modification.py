@@ -6103,6 +6103,18 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                 if (abs(p.global_x - x) <= WINDOW + p.size_x / 2
                         and abs(p.global_y - y) <= WINDOW + p.size_y / 2):
                     near_pads.append(p)
+        # #962: under #581 the via's own net's paste OPENINGS count too, or
+        # the nudge could push a via off a pad and into the paste around it.
+        if same_net_pad_clearance > 0:
+            try:
+                from obstacle_map import paste_keepout_apertures
+                for ap in paste_keepout_apertures(pcb_data, v.net_id):
+                    b = ap.bounds
+                    if (b[0] - WINDOW <= x <= b[2] + WINDOW
+                            and b[1] - WINDOW <= y <= b[3] + WINDOW):
+                        near_pads.append(ap)
+            except ImportError:
+                pass
         for hid, hx, hy, hr in hole_list:
             if hid != me and abs(hx - x) <= WINDOW and abs(hy - y) <= WINDOW:
                 near_holes.append((hx, hy, hr))
@@ -6139,6 +6151,13 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             d = math.hypot(x - o.x, y - o.y)
             consider(d - (r + o.size / 2.0 + pair_clr(own, o.net_id)), o.x, o.y)
         for p in near_pads:
+            if getattr(p, 'source', None) is not None:     # #962 paste opening
+                from paste_apertures import aperture_distance as _apd
+                g = _apd(x, y, p)
+                b = p.bounds
+                consider(g - (r + same_net_pad_clearance),
+                         (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
+                continue
             tp, g = _nearest_pad_point(x, y, p)
             if p.net_id == v.net_id:
                 _need = same_net_pad_clearance  # #581 (only gathered when > 0)
