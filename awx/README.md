@@ -660,11 +660,14 @@ is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 
 ## What this adds to `py_router`
 
-**`KICAD_SEG_DIST_EXACT`** (default on, changes every board): the
-segment-to-segment distance in `single_ended_routing` is exact -- four
-point-to-segment distances -- instead of a 0.02 mm sampled sweep whose
-minimum was always at or above the truth. Only ever more conservative.
-Owes the corpus A/B before it reaches main.
+**`KICAD_SEG_DIST_EXACT=1`** (default OFF since 2026-09-19; changes every
+board when on): the segment-to-segment distance in `single_ended_routing`
+is exact -- four point-to-segment distances -- instead of a 0.02 mm
+sampled sweep whose minimum was always at or above the truth. Only ever
+more conservative. It ran ON by default while the ladder records up to
+2026-09-19 were measured, so a replay of those needs `=1`; it is off now
+so that merging this branch does not change main's behaviour, and it
+owes the corpus A/B before it becomes the default anywhere.
 
 **`generate_bga_fanout(..., escape_dir_hints=...)`**: a per-pad planned
 escape, a bare face or a full move; the under-pad engine follows a full
@@ -766,7 +769,8 @@ abandoned with a measurement.
    plan's compass faces.
 
 7. **The corpus A/B for the `py_router` changes, then the PR to main.**
-   `KICAD_SEG_DIST_EXACT` ships on and owes it.
+   `KICAD_SEG_DIST_EXACT` ships OFF (2026-09-19) so the merge leaves
+   main's copper alone; the A/B decides whether it turns on.
 
 8. **The `.kicad_dru` is read with real layer names inside the turned
    frame**; a per-layer rule lands on the opposite face for a back-side

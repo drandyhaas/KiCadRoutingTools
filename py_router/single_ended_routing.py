@@ -59,9 +59,11 @@ def _unblock_debug() -> bool:
 # kernels skip the bulk of the board's pads. Generous (~10x the largest realistic
 # margin) so routing stays byte-for-byte identical.
 _FOREIGN_PAD_WINDOW = 5.0  # mm
-# KICAD_SEG_DIST_EXACT=0 restores the sampled sweep in _seg_foreign_seg_dist
-# (the exact distance is the default; a corpus A/B is owed before this reaches main)
-_SEG_DIST_EXACT = os.environ.get('KICAD_SEG_DIST_EXACT', '1') != '0'
+# KICAD_SEG_DIST_EXACT=1 replaces the sampled sweep in _seg_foreign_seg_dist
+# with the exact segment-to-segment distance. Default OFF (2026-09-19): the
+# sweep is main's behaviour, and the exact distance changes copper on every
+# board, so it stays opt-in until a corpus A/B has graded it.
+_SEG_DIST_EXACT = os.environ.get('KICAD_SEG_DIST_EXACT', '0') == '1'
 # The sample-by-foreign sweeps below (_seg_foreign_pad_dist,
 # _seg_foreign_seg_dist) run in ROW CHUNKS so that no matrix exceeds this
 # many elements (512 KB of float64). Every element is computed from its own
