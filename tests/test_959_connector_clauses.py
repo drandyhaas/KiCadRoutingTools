@@ -7,14 +7,15 @@ all three were carried into `context` and graded by nothing. This compiles
 them -- by the evidence the Phase-0 control measured on five as-built boards,
 not by the issue's literal mapping:
 
-  * `edge_mount` -> the drawn body within 0.75 mm of its edge (tigard J7, an
-    edge-mount header on a shipping board, sits 0.60 mm in);
-  * `through_edge` -> the body reaches the edge (past it, or within 0.75);
+  * `edge_mount` -> the drawn body within 0.75 mm of its edge (two shipping
+    edge-mount bodies sit 0.60 and 0.614 mm in);
+  * `through_edge` -> the same setback, on the courtyard unless the entry is
+    a user-facing receptacle;
   * `top_mount` / `bottom_mount` -> NOT held to the receptacle seat (8
     vertical headers on the as-built boards failed it);
-  * `perpendicular_*` / `user_facing` with `product.user_top_side` -> the
-    face, graded as `edge_connector_side` at a fixed WARN that steers no
-    search;
+  * `perpendicular_*` with `product.user_top_side` -> the face the cable
+    plugs into, graded as `edge_connector_side` at a fixed WARN that steers
+    no search (`user_facing` names no face);
   * a cable keep-out ONLY from a declared `cable_envelope_mm`, and only for a
     FILE-locked part -- there is no default: none passed the controls.
 
@@ -159,9 +160,12 @@ def test_through_edge_keeps_the_emitted_overhang_cap():
 def test_the_as_built_briefs_gain_no_error():
     """The control: five boards graded against briefs that describe them as
     they ship. Compiling the connector declarations may add WARNs; it must
-    add no ERROR. (Before the evidence revision, the literal mapping's 0.5 mm
-    seat failed tigard J7, and `user_facing` failed 8 vertical headers.)"""
+    add no ERROR. (Before the evidence revision, `user_facing` held 8
+    vertical headers to the receptacle seat and failed them. tigard J7's body
+    sits 0.60 mm in, past the literal mapping's 0.5 mm -- but its courtyard
+    reaches the edge, so the seat does not bind on it as built.)"""
     checked = 0
+    worst = (0.0, '')
     for name in ('esp_prog', 'glasgow_revC', 'splitflap_driver', 'tigard',
                  'ulx3s'):
         board = os.path.join(REPO, 'kicad_files', f'{name}.kicad_pcb')
@@ -178,19 +182,32 @@ def test_the_as_built_briefs_gain_no_error():
         assert not new, (name, new)
         assert any('max_setback_mm' in c or 'side' in c
                    for c in doc.get('edge_connectors') or ()), name
-        # ABSOLUTE, not only a delta (verifier S7): the plain arm already
-        # holds a user-facing part to the 0.5 mm seat, so a delta cannot see
-        # the setback shrink. Every part declared edge- or through-mounted
-        # must SEAT on its shipping board.
+        # ABSOLUTE, not only a delta (verifier S7): every part declared
+        # edge- or through-mounted must SEAT on its shipping board...
         mounted = {i['ref'] for i in brief.interfaces
                    if i.get('mount_mode') in ('edge_mount', 'through_edge')}
         unseated = sorted({v.ref for v in after.errors
                            if v.rule == 'edge_connector' and v.ref in mounted
                            and 'seated' in v.message})
         assert not unseated, (name, unseated)
+        # ...and the default must ADMIT every such body the grade measures.
+        # The seat binds only where the courtyard sits a margin inside the
+        # board, and on the as-built boards it does not bind on either body
+        # that lies past 0.5 mm (tigard J7 0.60, a courtyard reaching the
+        # edge) -- so "seats" alone could not see the setback shrink
+        # (Phase-7 fact-check). The body setback is measured either way.
+        for e in after.edge_seating or ():
+            if e.get('ref') in mounted and e.get('body_setback_mm') is not None:
+                worst = max(worst, (e['body_setback_mm'], f"{name} {e['ref']}"))
         checked += 1
+    assert worst[0] <= db.EDGE_MOUNT_SETBACK_MM, worst
+    assert worst[0] > 0.5, (
+        f"the widest as-built body setback is {worst}: the 0.75 default has "
+        f"no as-built body past 0.5 mm left to admit -- re-derive it")
     print(f"  PASS: {checked} as-built boards gain no ERROR from the compiled "
-          f"connector clauses, and every edge/through-mounted part seats")
+          f"connector clauses, every edge/through-mounted part seats, and "
+          f"the {db.EDGE_MOUNT_SETBACK_MM} mm default admits the widest "
+          f"measured body ({worst[1]}, {worst[0]} mm)")
 
 
 def test_a_vertical_mount_is_not_held_to_the_seat():
@@ -347,8 +364,17 @@ def test_a_cable_keepout_needs_a_declared_envelope_and_a_lock():
             _brief(rawb, keepouts=[mine]), lpcb, lb)
         k = [x for x in f3['keepouts'] if x['name'] == 'cable:CON2']
         assert len(k) == 1 and k[0]['rect'] == mine['rect'], k
+        # CARRIED: the declared keep-out is its own clause, and the
+        # envelope's dimension grades nothing (round-2 verifier).
         row = _rows((f3, r3))['interfaces[CON2].cable_envelope_mm']
-        assert row['status'] == 'compiled' and 'declares' in row['why'], row
+        assert row['status'] == 'carried' and 'declares' in row['why'], row
+        # ...unlocked too: a declared keep-out needs no lock to win.
+        f3u, r3u = db.compile_with_consequences(
+            _brief(rawb, keepouts=[mine]), pcb, ESP)
+        assert _rows((f3u, r3u))['interfaces[CON2].cable_envelope_mm'][
+            'status'] == 'carried'
+        assert [x['rect'] for x in f3u['keepouts']
+                if x['name'] == 'cable:CON2'] == [mine['rect']], f3u
         # A derived keep-out the brief stops deriving drifts, and so does
         # one whose envelope changed shape (verifier S5, M15).
         base_doc = db.merge_into_intent(
@@ -359,10 +385,19 @@ def test_a_cable_keepout_needs_a_declared_envelope_and_a_lock():
                 iface.pop('cable_envelope_mm')
             else:
                 iface['cable_envelope_mm'] = env2
-            f4, _r4 = db.compile_with_consequences(
+            f4, r4 = db.compile_with_consequences(
                 _brief(rawb, interfaces=[iface]), lpcb, lb)
             ids = db.drifted_clause_ids(base_doc, f4)
             assert 'interfaces[CON2].cable_envelope_mm' in ids, (env2, ids)
+            # ...and the drift REACHES coverage, which P1 and P-close read:
+            # removed or "unknown", the clause has no declared row of its
+            # own, and without one no gate refused (round-2 verifier).
+            cov = db.clause_coverage(r4, base_doc, rules_run=('keepout',),
+                                     drifted_ids=ids)
+            row = [c for c in cov['clauses']
+                   if c['id'] == 'interfaces[CON2].cable_envelope_mm']
+            assert row and row[0]['drifted'] and not cov['complete'], (
+                env2, row, cov['drifted'])
     # Unlocked, the envelope is WITHHELD: an abstention, so coverage is not
     # complete and the ledger agrees on both rows (verifier S6).
     cov, led, _d = _ledger(ESP, frag_u, rep_u, pcb=pcb)
@@ -551,8 +586,75 @@ def test_an_in_plane_band_sits_on_the_declared_edge_or_not_at_all():
             'why'], row
         assert not any(x['name'] == 'cable:USB1'
                        for x in frag.get('keepouts') or ()), frag
-    print("  PASS: the in-plane band runs in from the declared west edge, and "
-          "is withheld when the part does not reach its declared east edge")
+        # The same for north / south: CON2 ships on the north edge.
+        lc = _locked_copy(tmp, 'CON2')
+        cpcb = parse_kicad_pcb(lc)
+        cb = cpcb.board_info.board_bounds
+        rawc = {'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                'board': 'esp_prog.kicad_pcb',
+                'interfaces': [{'ref': 'CON2', 'edge': 'north',
+                                'cable_entry': 'in_plane',
+                                'cable_envelope_mm': {'depth': 2.5}}]}
+        frag, rep = db.compile_with_consequences(_brief(rawc), cpcb, lc)
+        k = [x for x in frag['keepouts'] if x['name'] == 'cable:CON2'][0]
+        assert abs(k['rect'][1] - cb[1]) < 1e-3 and abs(
+            k['rect'][3] - (cb[1] + 2.5)) < 1e-3, (k, cb)
+        rawc['interfaces'][0]['edge'] = 'south'
+        frag, rep = db.compile_with_consequences(_brief(rawc), cpcb, lc)
+        assert _rows((frag, rep))['interfaces[CON2].cable_envelope_mm'][
+            'status'] == 'withheld'
+    print("  PASS: the in-plane band runs in from the declared edge (west, "
+          "north), and is withheld when the part does not reach it (east, "
+          "south)")
+
+
+def test_a_missing_part_fails_its_clauses_and_a_stale_overhang_drifts():
+    """A connector not on the board fails every clause about it, the side
+    clause included -- the side finding only WARNs, so it read a missing part
+    as a pass. And an intent written before through_edge stopped deriving an
+    overhang floor carries `{min: 0}` with no `max`, which drifts (round-2
+    verifier)."""
+    pcb = parse_kicad_pcb(ESP)
+    rawb = {'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+            'board': 'esp_prog.kicad_pcb', 'product': {'user_top_side': 'F'},
+            'interfaces': [{'ref': 'CON2', 'edge': 'north',
+                            'cable_entry': 'perpendicular_bottom'}]}
+    frag, rep = db.compile_with_consequences(_brief(rawb), pcb, ESP)
+    doc = db.merge_into_intent(fp.emit_intent(pcb, ESP, declare_classes=True),
+                               frag, rep)
+    from kicad_parser import iter_footprint_blocks
+    text = open(ESP, encoding='utf-8').read()
+    with tempfile.TemporaryDirectory() as tmp:
+        for start, end, _t, _r, key in iter_footprint_blocks(text):
+            if key == 'CON2':
+                text = text[:start] + text[end:]
+                break
+        gone = os.path.join(tmp, 'no_con2.kicad_pcb')
+        with open(gone, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        gpcb = parse_kicad_pcb(gone)
+        assert 'CON2' not in gpcb.footprints
+        res = fp.grade(fp.intent_from_dict(doc, ''), gpcb, gone)
+        cov = db.clause_coverage(rep, doc, rules_run=res.rules_run)
+        led = {r['id']: r for r in fp.declaration_ledger(
+            res.intent, res.roster, result=res, coverage=cov,
+            consequences=rep['consequences'])}
+    assert led['derived:interfaces[CON2].cable_entry']['status'] == \
+        'graded_fail', led['derived:interfaces[CON2].cable_entry']
+    assert led['interfaces[CON2].cable_entry']['status'] == 'graded_fail'
+    # The stale overhang floor.
+    stale = json.loads(json.dumps(doc))
+    for c in stale['edge_connectors']:
+        if c['ref'] == 'CON2':
+            c['overhang_mm'] = {'min': 0.0}
+            c.setdefault('context', {}).setdefault(
+                'compiled_from', {})['overhang_mm'] = 'mount_mode'
+    rawb['interfaces'][0]['mount_mode'] = 'through_edge'
+    f2, _r2 = db.compile_with_consequences(_brief(rawb), pcb, ESP)
+    ids = db.drifted_clause_ids(stale, f2)
+    assert 'interfaces[CON2].mount_mode' in ids, ids
+    print("  PASS: a missing connector fails its side clause; a stale "
+          "derived overhang floor drifts")
 
 
 def test_an_envelope_needs_a_cable():
@@ -595,6 +697,7 @@ TESTS = [
     test_through_edge_keeps_the_emitted_overhang_cap,
     test_the_ledger_reads_the_face_and_the_viewing_side_honestly,
     test_an_in_plane_band_sits_on_the_declared_edge_or_not_at_all,
+    test_a_missing_part_fails_its_clauses_and_a_stale_overhang_drifts,
     test_an_envelope_needs_a_cable,
     test_coverage_is_graded_only_when_the_intent_carries_the_clause,
     test_the_as_built_briefs_gain_no_error,

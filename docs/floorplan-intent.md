@@ -837,9 +837,9 @@ pose for any movable part:
 python3 py_tools/check_floorplan.py board.kicad_pcb --intent plan.json --plan-only
 ```
 
-It prints each finding, the rule roster, and the declaration ledger in its
-before-placement view (armed rows are `pending`). It needs no placed board and
-exits 4 on an ERROR.
+It prints each finding and the rule roster; `JSON_SUMMARY` counts the
+declaration ledger in its before-placement view (armed rows are `pending`), and
+`--json` writes its rows. It needs no placed board and exits 4 on an ERROR.
 
 **Every ERROR is sound**: no arrangement of the movable parts satisfies the
 plan. The WARN is the same quantity with a margin.
@@ -848,7 +848,7 @@ plan. The WARN is the same quantity with a margin.
 |---|---|---|
 | `plan_zone_exclusive_unsatisfiable` / `intent_zone_overlap` | a member has no pose in its own zone that stays out of a stranger's exclusive zone | any overlap is a WARN |
 | `intent_zone_in_keepout` | as `grade` raises it | |
-| `block_glob_literal` | a real reference is used as a glob and over-matches into a conflicting claim | an intended over-match is a WARN |
+| `block_glob_literal` | a real reference used as a glob over-matches a block into a second, disjoint zone | a stray over-match with no such conflict is a WARN; one the same list also names (an intended over-match) is no finding |
 | `plan_fixed_outside_zone` | a FILE-locked member is already outside its zone | |
 | `plan_zone_overfull` / `_crowded` | per face, the members' areas exceed the zone by more than the declared `legality_budget.overlap_area`. Fitting area A into zone Z forces at least A - Z of courtyard overlap | the WARN applies without a budget, or past a crowding margin |
 | `plan_edge_overfull` / `_crowded` | one edge-claimed part's pad extent, at its best 90-degree turn, is longer than its edge | summed extents are a WARN, because flanges overhang corners |
@@ -870,7 +870,8 @@ Nothing bounds its overlap, so no area bound is sound.
 - `compare_seeds` stops at the first exit 5, since the plan is the same for
   every seed.
 - `place_pose --intent` refuses, at exit 4, a single pose that leaves a moved
-  part further outside its block's zone than it was.
+  part further outside its block's zone than it was, when that
+  `zone_containment` finding is an ERROR.
 
 ## `mechanical.json`: recorded facts, reconciled and anchored (#959)
 
@@ -889,30 +890,33 @@ it, never what the value calls itself:
 | authority | the value |
 |---|---|
 | `declared` | matches the compiled design brief. Under an unaided regime, where the run writes the brief, it counts as declared only when the manifest recorded the brief's sha at staging; otherwise the brief is the run's own reading, a `hypothesis` |
-| `recorded_fact` | existed before the run: the outline, an existing `.kicad_pro`, and under a regime manifest the staged locks and a `mechanical.json` whose sha the manifest recorded. Without a manifest it is `recorded_fact (unverified provenance)` |
+| `recorded_fact` | existed before the run: the outline, an existing `.kicad_pro`, and a `mechanical.json` -- under a regime manifest, the staged locks and a file whose sha matches the one the manifest recorded (a mismatch makes the file a `hypothesis`). Without a manifest the file is still `recorded_fact`, and its provenance is reported `unverified` |
 | `hypothesis` | anything the run wrote: zone plans, `--intent` files, locks added during the run |
 | `inferred` | re-derived from the board |
 | `assumption` | a staging default (a floor `stage_unaided` fixed) or a code default dimension |
 
 The winner is declared, then recorded_fact, then hypothesis, then inferred.
-Every disagreement is reported in `context.reconciliation` with both values and
-their sources.
+Every disagreement is reported with both values and their sources: in the
+emitted intent's `context.reconciliation`, and in the grade's `--json` as a
+top-level `reconciliation`.
 
 - **Two declared or recorded values that disagree** are a CONTRADICTION, and P1
   refuses until it is answered in `dispositions.contradictions`, because the
   loser may be the right one.
 - **A plan that disagrees with the brief** is DRIFT, and the declared value wins.
-  No disposition clears it: P1 refuses it with the brief-clause wording.
+  No `dispositions` entry clears it. P1 refuses it with the brief-clause
+  wording, and only `--waive brief-clause:<id>:<why>` answers it there.
 
 **Anchors.** Each mechanical ref that wins is compiled at GRADE time, from the
 file itself, into a grade-only anchor block `mech:<ref>`. The anchor is the
 grader's own rect at the declared pose, rounded outward, and is graded by
 `zone_containment` at a fixed ERROR. The `mech:` prefix is reserved in plans.
 
-- P1 requires each such ref to be FILE-locked at its pose. The seeder treats a
-  locked part as placed, so an anchor is graded and never seated.
-- `mechanical_drift` reports a locked ref that moved or turned away from its
-  declaration. It is an ERROR for a turn, which no anchor sees, and for any
+- The anchor itself does not check a lock. P1 requires each such ref that
+  carries pads to be FILE-locked at its pose; the seeder treats a locked part
+  as placed, so an anchor is graded and never seated.
+- `mechanical_drift` reports any mechanical ref, locked or not, that moved or
+  turned away from its declaration. It is an ERROR for a turn, which no anchor sees, and for any
   drift of a pad-less ref, which has no anchor. It is a WARN for a move the
   anchor already reports.
 - Under an unaided regime, the recorded file cannot be dropped: `--no-mechanical`,
@@ -1206,17 +1210,19 @@ never fire on an auto-emitted intent. With `--declare-decaps` it derives
   `unplaced` and `partially_unplaced`. Run 29's pile read
   `partially_unplaced` with a duplicate fraction of 0.833, and strict wrote a
   limit of 0.0 there. When auto withholds, it records why in
-  `context.decap_census.auto_withheld`, never in `budget_withheld`, so a
-  default emit moves no exit code.
+  `context.decap_census.auto_withheld`, never in `budget_withheld`, so an
+  auto emit moves no exit code.
 - **The number is labelled** `observed_baseline` in `context.basis`, alongside
   every other number the emitter chose (the legality budget, the observed edges
   and overhangs, block sides). The `decap_distance` message says "an observed
   regression baseline read off a board, not an electrical requirement". A
   brief merged over the intent re-labels whatever it declares.
 - **A declared relation supersedes the inferred tether.** A `proximity` claim
-  the BRIEF makes that names the cap's pads on the cap's rail takes that cap
-  out of the decap rules at grade time. A row only a plan carries supersedes
-  nothing. `decaps.exempt` is never written, because exempting the cap would
+  the BRIEF makes that names the cap's pads on the cap's rail, and that the
+  graded intent carries unchanged (same partner, limit, basis and pads), takes
+  that cap out of the decap rules at grade time. A row only a plan carries
+  supersedes nothing, and neither does a brief row the plan dropped or
+  changed. `decaps.exempt` is never written, because exempting the cap would
   turn a declared `max_pin_distance_mm` on its rail into `decap_pin_uncovered`.
   When every cap is superseded, an armed decap rule abstains, and a dark one is
   not applicable.

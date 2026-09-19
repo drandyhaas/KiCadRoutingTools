@@ -328,6 +328,12 @@ def test_two_locked_parts_that_overlap():
         found, _ = _check(_raw(legality_budget={'overlap_area': 0.2}), b)
         err = [v for v in found if v.rule == 'plan_fixed_overlap_budget']
         assert err and err[0].severity == 'error', found
+        # As strong as `legality`: demoted, the grade passes this overlap,
+        # so the plan finding is a WARN (Phase-7 fact-check).
+        found, _ = _check(_raw(legality_budget={'overlap_area': 0.2},
+                               severity={'legality': 'warn'}), b)
+        err = [v for v in found if v.rule == 'plan_fixed_overlap_budget']
+        assert err and err[0].severity == 'warn', found
         found, _ = _check(_raw(legality_budget={'overlap_area': 0.3}), b)
         assert not [v for v in found
                     if v.rule == 'plan_fixed_overlap_budget'], found

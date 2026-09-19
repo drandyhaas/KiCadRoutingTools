@@ -179,10 +179,16 @@ _MOUNT_MODES = ('edge_mount', 'top_mount', 'bottom_mount', 'through_edge',
 _CABLE_ENTRY = ('in_plane', 'perpendicular_top', 'perpendicular_bottom',
                 'none', UNKNOWN)
 
-#: #959 (#1000): what an `edge_mount` part's drawn body must sit within of its
-#: edge. Measured, not mapped: the literal mapping would reuse the receptacle
-#: seat tolerance (0.5 mm), and tigard's J7 -- an edge-mount header on a
-#: shipping board -- sits 0.60 mm in (Phase-0 P3, five as-built boards).
+#: #959 (#1000): what an edge- or through-mounted part may sit in from its
+#: edge (the seat reads the drawn body for an `edge_mount` or receptacle
+#: entry, else the courtyard). Measured, not mapped: the literal mapping would
+#: reuse the receptacle seat tolerance (0.5 mm), and two shipping edge-mount
+#: bodies sit past it -- tigard J7 0.60 mm, rp2350 J3 0.614 mm. As built,
+#: the seat binds on neither (each courtyard reaches the edge, and the seat
+#: is asked only of a part whose courtyard sits a margin inside), so no
+#: as-built grade tells 0.75 from 0.5; this is the margin that admits those
+#: bodies wherever the seat does bind. `test_959_connector_clauses` checks
+#: that it still admits the widest measured one.
 EDGE_MOUNT_SETBACK_MM = 0.75
 
 #: The tier-0 questions. Named so a report can say which were answered, which
@@ -1054,7 +1060,8 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
     therefore NOT the issue's literal mapping:
 
       * `mount_mode: edge_mount` -> `max_setback_mm` 0.75 on the drawn body
-        (`derived_default`; tigard J7 sits 0.60 in);
+        (`derived_default`; two shipping edge-mount bodies sit 0.60 and
+        0.614 in);
       * `mount_mode: through_edge` -> the same setback: the body reaches
         the edge (how far PAST it is `overhang_mm`, declared or emitted,
         never derived);
@@ -1118,9 +1125,8 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
                 basis['max_setback_mm'] = 'derived_default'
             src['max_setback_mm'] = 'mount_mode'
             _row(ref, 'mount_mode', 'compiled',
-                 'the drawn body must sit within this of its edge (tigard '
-                 'J7, an edge-mount header on a shipping board, sits 0.60 '
-                 'mm in)',
+                 'the drawn body must sit within this of its edge (two '
+                 'shipping edge-mount bodies sit 0.60 and 0.614 mm in)',
                  compiled_to=f"edge_connectors[{ref}].max_setback_mm",
                  grader='edge_connector',
                  basis=basis.get('max_setback_mm', 'declared'),
@@ -1236,15 +1242,18 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
                 continue
             name = f"cable:{ref}"
             if name in declared_ko:
-                # The brief states this keep-out ITSELF: declared wins, and
-                # the envelope is graded through it rather than replacing it
-                # (Phase-5 verifier S4: replacing it dropped 3 hits to 0).
-                _row(ref, 'cable_envelope_mm', 'compiled',
-                     f"the brief declares keepouts[{name}] itself, and a "
-                     f"declared keep-out wins over the one this envelope "
-                     f"would derive" + tail,
-                     compiled_to=f"keepouts[{name}]", grader='keepout',
-                     basis='declared',
+                # The brief states this keep-out ITSELF: declared wins, so
+                # the envelope derives nothing (Phase-5 verifier S4:
+                # replacing it dropped 3 hits to 0). CARRIED, not compiled:
+                # the keep-out is its own clause, and the envelope's
+                # dimension grades nothing -- counting it too would count one
+                # keep-out as two clauses (round-2 verifier).
+                _row(ref, 'cable_envelope_mm', 'carried',
+                     f"the brief declares keepouts[{name}] itself, which is "
+                     f"graded as its own clause and wins over the one this "
+                     f"envelope would derive; the envelope's dimension "
+                     f"grades nothing" + tail,
+                     compiled_to=f"keepouts[{name}]", basis='declared',
                      value=next(k.get('rect') or k.get('circle')
                                 for k in keeps if k.get('name') == name))
                 continue
@@ -1439,6 +1448,9 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
     bmap = dict(ctx.get('basis') or {})
     for c in (fragment.get('edge_connectors') or []):
         cb = (c.get('context') or {}).get('basis') or {}
+        if (c.get('context') or {}).get('edge_declared_unknown'):
+            # The merge dropped the observed edge; its label goes with it.
+            bmap.pop(f"edge_connectors[{c['ref']}].edge", None)
         for key in ('edge', 'overhang_mm', 'center_on_edge',
                     'along_edge_band', 'max_setback_mm', 'side'):
             if key in c:
@@ -1535,7 +1547,10 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
         # vertical mount the two read differently, is drift too -- the
         # intent would grade a declaration the brief stopped making.
         csrc = ((cur.get('context') or {}).get('compiled_from') or {})
-        for key in ('max_setback_mm', 'side'):
+        # `overhang_mm` too: an intent written before through_edge stopped
+        # deriving an overhang floor carries `{min: 0}` with no `max`, which
+        # costs the part its off-outline exemption (round-2 verifier).
+        for key in ('max_setback_mm', 'side', 'overhang_mm'):
             if key in cur and key not in c and key in csrc:
                 out.append((f"interfaces[{ref}].{csrc[key]}",
                             f"{ref}.{key}: the intent carries "
@@ -1898,12 +1913,17 @@ def clause_coverage(report: Dict, intent_doc: Dict, *,
             # reported by `brief_unknown_keys` already; it is not a clause and
             # must not be counted as one.
             continue
+        # Drift still counts on an "unknown" clause: an intent that carries a
+        # consequence the author has since said they do not know (an envelope
+        # set "unknown" under a derived keep-out) drifts from the brief.
         clauses.append({'id': cid, 'kind': rec['kind'], 'ref': rec['ref'],
                         'rule': _CLAUSE_RULE.get(rec['kind']),
                         'state': 'not_claimed',
                         'why': 'the brief declares this "unknown"',
-                        'drifted': False})
+                        'drifted': cid in drift_set})
         counts['not_claimed'] += 1
+        if cid in drift_set:
+            counts['drifted'] += 1
     for cid in list(report.get('not_graded') or ()):
         rec = parse_clause_id(cid)
         if rec is None or any(c['id'] == cid for c in clauses):
@@ -1911,8 +1931,27 @@ def clause_coverage(report: Dict, intent_doc: Dict, *,
         clauses.append({'id': cid, 'kind': rec['kind'], 'ref': rec['ref'],
                         'rule': None, 'state': 'carried',
                         'why': 'carried into context; nothing grades it',
-                        'drifted': False})
+                        'drifted': cid in drift_set})
         counts['carried'] += 1
+        if cid in drift_set:
+            counts['drifted'] += 1
+    # A drift id no row above names: the intent carries a consequence of a
+    # clause the brief no longer states at all -- a derived keep-out whose
+    # envelope was removed, a setback whose mount_mode was. Without a row it
+    # reached neither P1's refusal nor P-close's, which both read these rows,
+    # while the seat search and the quench kept enforcing it (round-2
+    # verifier, S5).
+    have = {c['id'] for c in clauses}
+    for cid in sorted(drift_set - have):
+        rec = parse_clause_id(cid) or {}
+        clauses.append({'id': cid, 'kind': rec.get('kind'),
+                        'ref': rec.get('ref'), 'rule': None,
+                        'state': 'carried',
+                        'why': ('the intent carries a consequence of this '
+                                'clause, which the brief no longer states'),
+                        'drifted': True})
+        counts['carried'] += 1
+        counts['drifted'] += 1
     clauses.sort(key=lambda c: c['id'])
     out = {'schema': 1, 'brief': os.path.basename(report.get('path') or '')
            or None, 'clauses': clauses}

@@ -189,7 +189,8 @@ ROWS = [
      "                _withheld['decaps.max_distance_mm'] = _why",
      (T_DECAPS,), 'KILLED'),
     ('emitted-numbers-unlabelled', 'fp',
-     "            'basis': _emitted_basis(_decaps, _budget, conns, blocks),",
+     "            'basis': _emitted_basis(_decaps, _budget, conns, blocks,\n"
+     "                                    _assembly),",
      "            'basis': {},",
      (T_DECAPS,), 'KILLED'),
     ('declared-relation-supersedes-nothing', 'fp',

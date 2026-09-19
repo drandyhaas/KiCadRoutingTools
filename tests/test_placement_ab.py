@@ -521,6 +521,11 @@ ROWS = [
 # tethers), place_seed re-seeds from that intent, and stage 2.5 pulls the
 # tethered caps. Both arms are graded against the SAME auto intent, so the
 # signal is how many intent errors each SEED leaves under one ruler.
+#
+# A future re-trial is judged on the ZONED boards: the flat ones cannot move
+# (below), so with them on trial the N-1 rule could never be met.
+_FLAT = ('esp_prog.kicad_pcb', 'splitflap_driver.kicad_pcb',
+         'tigard.kicad_pcb')
 ROWS += [
     {
         'name': f'decaps-auto-{b[:-len(".kicad_pcb")]}',
@@ -538,13 +543,17 @@ ROWS += [
         # change detector with its measured mark; the numbers are in the
         # baseline, not here.
         'rejected': True,
-        'expect': ('neutral' if b in ('esp_prog.kicad_pcb',
-                                      'splitflap_driver.kicad_pcb',
-                                      'tigard.kicad_pcb') else 'regress'),
-        'why': ('MECHANISM: the ON arm seeds from an intent carrying the '
-                'observed decap limit, so seeder stage 2.5 seats each '
-                'tethered cap at its supply pin; the OFF arm packs them '
-                'with their zone. Graded under ONE auto intent.'),
+        'expect': 'neutral' if b in _FLAT else 'regress',
+        'why': (('MECHANISM: the ON arm seeds from an intent carrying the '
+                 'observed decap limit, so seeder stage 2.5 seats each '
+                 'tethered cap at its supply pin; the OFF arm packs them '
+                 'with their zone. Graded under ONE auto intent.')
+                if b not in _FLAT else
+                ('MECHANISM: STRUCTURALLY neutral. With no zoned block, '
+                 'stage 2.5 has no IC placed before it to seat a cap at '
+                 '(seeder.py says so), so the limit moves nothing and both '
+                 'arms seed alike. A change detector for that, not a trial '
+                 'the term could pass.')),
     }
     # The first three emit NO zoned block (flat schematics); the last three
     # do, which is where the doc says a decap limit moves caps: out of zone

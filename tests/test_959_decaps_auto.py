@@ -90,22 +90,65 @@ def test_auto_withholds_on_a_pile_without_an_exit_change():
         assert a['context']['decap_census'].get('auto_withheld'), board
         assert 'decaps.max_distance_mm' not in a['context'][
             'budget_withheld'], board
-    print("  PASS: auto withholds on run 29's pile and on the two boards the "
-          "derivation refuses, into the census rather than budget_withheld")
+    # A FULLY unplaced board (`unplaced`, not `partially_unplaced`): every
+    # part at one coordinate, where strict would read a limit off a heap.
+    with tempfile.TemporaryDirectory() as tmp:
+        from kicad_parser import iter_footprint_blocks
+        text = open(ESP, encoding='utf-8').read()
+        out, last = [], 0
+        for start, end, _t, _r, _key in iter_footprint_blocks(text):
+            block = text[start:end]
+            i = block.index('(at ')
+            j = block.index(')', i)
+            out.append(text[last:start] + block[:i] + '(at 120 95'
+                       + block[j:])
+            last = end
+        heap = os.path.join(tmp, 'heap.kicad_pcb')
+        with open(heap, 'w', encoding='utf-8') as fh:
+            fh.write(''.join(out) + text[last:])
+        from placement.placement_state import assess_placement
+        st = assess_placement(parse_kicad_pcb(heap), heap)
+        assert st.unplaced and not st.partially_unplaced, st.signals
+        h = _emit(heap, 'auto')
+        assert 'max_distance_mm' not in h['decaps'], h['decaps']
+        assert 'not placed' in h['context']['decap_census']['auto_withheld']
+    print("  PASS: auto withholds on run 29's pile, on a fully unplaced heap "
+          "and on the two boards the derivation refuses, into the census "
+          "rather than budget_withheld")
+
+
+def _labelled(doc):
+    basis = doc['context']['basis']
+    for k in doc.get('legality_budget') or {}:
+        assert basis.get(f'legality_budget.{k}') == 'observed_baseline', k
+    for c in doc['edge_connectors']:
+        for k in ('edge', 'overhang_mm'):
+            if k in c:
+                assert basis[f"edge_connectors[{c['ref']}].{k}"] == \
+                    'observed_baseline', (k, c)
+    for b in doc['blocks']:
+        for k in ('side', 'zone'):
+            if k in b:
+                assert basis[f"blocks[{b['name']}].{k}"] == \
+                    'observed_baseline', (k, b['name'])
+    assert basis['envelope.tolerance_mm'] == 'derived_default', basis
+    assert basis['defaults.zone_tolerance_mm'] == 'derived_default', basis
+    if (doc.get('assembly') or {}).get('sides'):
+        assert basis['assembly.sides'] == 'observed_baseline', basis
+    return basis
 
 
 def test_every_emitted_number_is_labelled():
     doc = _emit(SPLIT, 'auto')
-    basis = doc['context']['basis']
+    basis = _labelled(doc)
     assert basis.get('decaps.max_distance_mm') == 'observed_baseline', basis
     assert doc['context']['decap_census']['decaps_basis'] == \
         'observed_baseline'
-    for k in doc.get('legality_budget') or {}:
-        assert basis.get(f'legality_budget.{k}') == 'observed_baseline', k
-    for c in doc['edge_connectors']:
-        if 'edge' in c:
-            assert basis[f"edge_connectors[{c['ref']}].edge"] == \
-                'observed_baseline', c
+    # A board with zoned, sided blocks, so the block labels are reached.
+    ulx = os.path.join(REPO, 'kicad_files', 'ulx3s.kicad_pcb')
+    ub = _labelled(_emit(ulx, 'off'))
+    assert any(k.endswith('.zone') for k in ub) and any(
+        k.endswith('.side') for k in ub), sorted(ub)
     # A brief merged over it re-labels what it declares.
     pcb = parse_kicad_pcb(ESP)
     frag, rep = db.compile_with_consequences(
@@ -115,16 +158,41 @@ def test_every_emitted_number_is_labelled():
     mb = merged['context']['basis']
     assert mb['edge_connectors[USB1].edge'] == 'declared', mb
     assert mb['edge_connectors[USB1].max_setback_mm'] == 'derived_default'
-    # And the finding says what the number is.
-    raw = dict(doc)
-    raw['decaps'] = dict(doc['decaps'], max_distance_mm=0.01)
-    res = fp.grade(fp.intent_from_dict(raw, ''), parse_kicad_pcb(SPLIT),
-                   SPLIT)
-    d = [v for v in res.violations if v.rule == 'decap_distance']
-    assert d and 'observed regression baseline' in d[0].message, d[:1]
-    print("  PASS: the decap limit, the legality budget and the observed "
-          "edges carry observed_baseline; a brief re-labels what it states; "
-          "the finding says so")
+    # A brief that declares an edge "unknown" drops the observed edge, and
+    # its label goes with it.
+    with open(os.path.join(REPO, 'tests', 'fixtures', '711',
+                           'esp_prog.design-brief.json'),
+              encoding='utf-8') as fh:
+        rb = json.load(fh)
+    rb['interfaces'][0]['edge'] = 'unknown'
+    for k in ('along_edge', 'along_edge_tolerance_mm'):
+        rb['interfaces'][0].pop(k, None)
+    f2, r2 = db.compile_with_consequences(db.brief_from_dict(rb, ''), pcb,
+                                          ESP)
+    m2 = db.merge_into_intent(fp.emit_intent(pcb, ESP), f2, r2)
+    usb = [c for c in m2['edge_connectors'] if c['ref'] == 'USB1'][0]
+    assert 'edge' not in usb, usb
+    assert 'edge_connectors[USB1].edge' not in m2['context']['basis']
+    # The finding says what the number is -- while it still IS the
+    # observation. The census repeats the emitted limit so a hand edit is
+    # detectable: an edited limit is somebody's choice, and is not called an
+    # observed baseline.
+    splitflap = parse_kicad_pcb(SPLIT)
+    for census_limit, observed in ((0.01, True), (None, False)):
+        raw = json.loads(json.dumps(doc))
+        raw['decaps']['max_distance_mm'] = 0.01
+        if census_limit is not None:
+            raw['context']['decap_census']['emitted_max_distance_mm'] = \
+                census_limit
+        res = fp.grade(fp.intent_from_dict(raw, ''), splitflap, SPLIT)
+        d = [v for v in res.violations if v.rule == 'decap_distance']
+        assert d and (('observed regression baseline' in d[0].message)
+                      == observed), (census_limit, d[:1])
+    print("  PASS: the decap limit, the legality budget, the observed edges, "
+          "overhangs, sides and zones carry observed_baseline and the module "
+          "tolerances derived_default; a brief re-labels what it states and "
+          "drops what it unknows; the finding calls the limit observed only "
+          "while it is the emitted one")
 
 
 def _intent_with(pcb, board, frag, **extra):
@@ -172,10 +240,59 @@ def test_a_declared_relation_supersedes_the_inferred_tether():
           "supersedes nothing")
 
 
-def test_every_cap_superseded_abstains_the_decap_rules():
+def test_supersession_cannot_be_laundered():
+    """The guards the commit claims, each on its own row (the Phase-6
+    verifier found all of them untested). esp_prog: C3's pad 1 is /+3.3V,
+    pad 2 GND; U2 carries both, Y1 carries neither /+3.3V pin."""
+    pcb = parse_kicad_pcb(ESP)
+
+    def sup(brief_row, plan_row=None):
+        return set(fp.superseded_caps(pcb, [plan_row or brief_row],
+                                      {'proximity': [brief_row]}))
+
+    base = {'ref': 'C3', 'near': 'U2', 'max_mm': 2.0, 'basis': 'pad_edge',
+            'pads': {'C3': ['1'], 'U2': ['3']}}
+    assert sup(base) == {'C3'}
+    # Named pad on GROUND, which the partner also carries: not a rail.
+    assert sup(dict(base, pads={'C3': ['2'], 'U2': ['1']})) == set()
+    # Named pad on the rail, but the PARTNER does not carry it.
+    assert sup(dict(base, near='Y1', pads={'C3': ['1']})) == set()
+    # The plan's row drifted from the brief's: a hypothesis, not a claim.
+    assert sup(base, dict(base, max_mm=5.0)) == set()
+    assert sup(base, dict(base, pads={'C3': ['1']})) == set()
+    # Swapped rows name the same relation.
+    swapped = {'ref': 'U2', 'near': 'C3', 'max_mm': 2.0,
+               'pads': {'C3': ['1'], 'U2': ['3']}}
+    assert sup(swapped) == {'C3'}
+    # The default basis spelled out is the same claim as it left implicit.
+    implicit = {k: v for k, v in base.items() if k != 'basis'}
+    assert sup(implicit, base) == {'C3'}
+    # The emitted limit is NOT tightened by leaving superseded caps out: the
+    # placement engines grade without the brief, and must pass the board it
+    # was emitted from. The census discloses the supersession instead.
+    frag, _rep = db.compile_brief(db.load_brief(BRIEF_902),
+                                  board_refs=sorted(pcb.footprints))
+    plain = fp.emit_intent(pcb, ESP, derive_decaps='strict')
+    with_b = fp.emit_intent(pcb, ESP, derive_decaps='strict',
+                            brief_fragment=frag)
+    assert plain['decaps'] == with_b['decaps'], (plain['decaps'],
+                                                 with_b['decaps'])
+    assert with_b['context']['decap_census']['superseded'] == {
+        'C1': 'proximity C1 near U2', 'C3': 'proximity C3 near U2'}, \
+        with_b['context']['decap_census']
+    assert 'superseded' not in plain['context']['decap_census']
+    print("  PASS: a ground pad, a partner off the rail and a drifted plan "
+          "row supersede nothing; swapped rows and a spelled-out default "
+          "do; the emitted limit ignores supersession and the census "
+          "discloses it")
+
+
+def test_every_cap_superseded_owes_nothing_and_stays_complete():
     """When a declared relation covers every cap with an IC on its rail, the
-    decap rules have nothing of their own to grade: armed, they abstain
-    (not a silent pass); dark, they are not applicable (nothing owed)."""
+    decap rules have nothing of their own to grade. Dark, they are not
+    applicable (nothing owed). Armed, they RUN and skip every cap -- not an
+    abstention, which made the grade incomplete: declaring more turned exit
+    0 into exit 4 (Phase-6 verifier)."""
     pcb = parse_kicad_pcb(ESP)
     frag, _rep = db.compile_brief(db.load_brief(BRIEF_902),
                                   board_refs=sorted(pcb.footprints))
@@ -189,8 +306,13 @@ def test_every_cap_superseded_abstains_the_decap_rules():
     armed = _intent_with(pcb, ESP, frag, decaps={'max_distance_mm': 0.5})
     rows = {r['rule']: r for r in fp.rule_roster(armed, pcb, ESP,
                                                  brief_fragment=frag)}
-    assert rows['decap_distance']['state'] == 'abstained', rows[
-        'decap_distance']
+    assert rows['decap_distance']['state'] == 'armed', rows['decap_distance']
+    res = fp.grade(armed, pcb, ESP, brief_fragment=frag)
+    assert not [v for v in res.violations
+                if v.rule in ('decap_distance', 'decap_ungraded')], [
+        v for v in res.violations if v.rule.startswith('decap')]
+    assert 'decap_distance' in res.rules_run, res.rules_skipped
+    assert res.complete, (res.budget_abstained, res.rules_skipped)
     dark = _intent_with(pcb, ESP, frag)
     rows = {r['rule']: r for r in fp.rule_roster(dark, pcb, ESP,
                                                  brief_fragment=frag)}
@@ -198,25 +320,43 @@ def test_every_cap_superseded_abstains_the_decap_rules():
         'decap_distance']
     assert 'declared proximity' in rows['decap_distance'][
         'applicability_reason'], rows['decap_distance']
-    print("  PASS: all caps superseded -> armed decap rules abstain, dark "
-          "ones owe nothing")
+    print("  PASS: all caps superseded -> armed decap rules run, skip every "
+          "cap and leave the grade complete; dark ones owe nothing")
 
 
 def test_the_cli_flags():
     with tempfile.TemporaryDirectory() as tmp:
         out = {}
         for flag in ('--no-declare-decaps', '--declare-decaps',
-                     '--auto-declare-decaps'):
-            p = os.path.join(tmp, flag.strip('-') + '.json')
+                     '--auto-declare-decaps', None):
+            p = os.path.join(tmp, (flag or 'none').strip('-') + '.json')
             run_utils.check([sys.executable, '-X', 'utf8',
                              run_utils.tool('check_floorplan.py'), SPLIT,
-                             '--emit-intent', p, flag], accept=True)
+                             '--emit-intent', p] + ([flag] if flag else []),
+                            accept=True)
             out[flag] = json.load(open(p, encoding='utf-8'))['decaps']
         assert 'max_distance_mm' not in out['--no-declare-decaps']
         assert out['--declare-decaps'].get('max_distance_mm') == \
             out['--auto-declare-decaps'].get('max_distance_mm') is not None
+        # No flag is the DEFAULT, which stays off (the A/B rejected auto).
+        assert out[None] == out['--no-declare-decaps'], out
+    # ...and the default is the constant, not whatever the first of three
+    # shared-dest flags declared: argparse takes a shared dest's default from
+    # the FIRST action, so a `default=` on the third was dead (Phase-6
+    # verifier -- the constant set to 'auto' still parsed as None).
+    sys.path.insert(0, os.path.join(REPO, 'py_tools'))
+    import check_floorplan as cf
+    saved = cf.DECLARE_DECAPS_DEFAULT
+    try:
+        for want in ('auto', 'strict', 'off'):
+            cf.DECLARE_DECAPS_DEFAULT = want
+            got = cf.build_parser().parse_args([SPLIT]).declare_decaps
+            assert got == want, (want, got)
+    finally:
+        cf.DECLARE_DECAPS_DEFAULT = saved
     print("  PASS: --no-declare-decaps / --declare-decaps / "
-          "--auto-declare-decaps select the three states")
+          "--auto-declare-decaps select the three states; no flag is the "
+          "DECLARE_DECAPS_DEFAULT constant, which is off")
 
 
 TESTS = [
@@ -224,7 +364,8 @@ TESTS = [
     test_auto_withholds_on_a_pile_without_an_exit_change,
     test_every_emitted_number_is_labelled,
     test_a_declared_relation_supersedes_the_inferred_tether,
-    test_every_cap_superseded_abstains_the_decap_rules,
+    test_supersession_cannot_be_laundered,
+    test_every_cap_superseded_owes_nothing_and_stays_complete,
     test_the_cli_flags,
 ]
 

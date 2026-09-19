@@ -66,8 +66,11 @@ from placement.groups import GroupError, parse_sources
 #: #1002): 'off' | 'strict' | 'auto'. 'auto' was put to the A/B gate in
 #: tests/test_placement_ab.py (rows `decaps-auto-*`, improve on N-1 boards,
 #: regress on none) and REJECTED: it improved no board and regressed all
-#: three with zones. The rows stay as change detectors; flip this only when
-#: they say otherwise.
+#: three with zones. The three flat boards are structurally neutral (with no
+#: zoned block the seeder's pin stage seats nothing), so a re-trial is
+#: judged on zoned boards; flip this only when those rows say otherwise.
+#: Set through `set_defaults` in `build_parser` -- a `default=` on one of
+#: the three shared-dest flags would be dead.
 DECLARE_DECAPS_DEFAULT = 'off'
 from placement.floorplan import IntentError
 
@@ -110,7 +113,6 @@ def build_parser():
                         'rather than a limit of 0.0 (#959)')
     p.add_argument('--declare-decaps', dest='declare_decaps',
                    action='store_const', const='strict',
-                   default=DECLARE_DECAPS_DEFAULT,
                    help='with --emit-intent: ALSO derive decaps.'
                         'max_distance_mm from the board\'s own measured '
                         'tethers (#704), so rule_decap_distance can fire on '
@@ -193,6 +195,11 @@ def build_parser():
     p.add_argument('-q', '--quiet', action='store_true',
                    help='suppress the text report; keep JSON_SUMMARY')
     add_board_state_args(p)
+    # The three decap flags share one dest, and argparse takes a shared
+    # dest's default from the FIRST action that declares it -- so a
+    # `default=` on any one of them is dead (the Phase-6 verifier set
+    # the constant to 'auto' and still parsed None). Set it here.
+    p.set_defaults(declare_decaps=DECLARE_DECAPS_DEFAULT)
     return p
 
 
@@ -469,6 +476,11 @@ def main(argv=None):
                       f"instead of zone-packing them")
             elif held:
                 print(f"  decaps: max_distance_mm WITHHELD -- {held}")
+            elif cen.get('auto_withheld'):
+                # #959: auto's withholding is kept out of budget_withheld
+                # (no exit change), and printed here so it is not silent.
+                print(f"  decaps: max_distance_mm not derived (auto) -- "
+                      f"{cen['auto_withheld']}")
             # The two causes are printed SEPARATELY (#792). One number
             # used to carry both, and the doc explained it with a third
             # cause -- a predicate mismatch -- that measurement says does

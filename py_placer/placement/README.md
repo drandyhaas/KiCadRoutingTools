@@ -248,8 +248,9 @@ reports only -- it never withholds the board or moves the exit code.
 section I.
 
 Before anything is written, the PLAN is checked against itself and the board
-(`floorplan.plan_check`, #959). An area bound no arrangement can meet, a part
-longer than its edge, or a real reference used as a glob refuses at **exit 5**
+(`floorplan.plan_check`, #959). An area bound no arrangement can meet within
+a declared overlap budget, a part longer than its edge, or a real reference
+used as a glob that lands a part in two disjoint zones refuses at **exit 5**
 with nothing written and `JSON_SUMMARY.refused: 'plan_check'`
 (`floorplan.PLAN_SEED_REFUSES`). Every other plan finding is printed as
 `PLAN [...]` and the seed proceeds, so the seeder can name the member it could

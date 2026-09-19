@@ -87,8 +87,8 @@ def add_mechanical_arg(parser) -> None:
         help="mechanical.json: poses (and, in the declaration form, edges) a "
              "run did not choose. Auto-discovered in the board's directory "
              "when omitted. Reconciled against the brief and the board, "
-             "compiled into grade-only anchor blocks on --emit-intent, and "
-             "graded as mechanical_drift (#959)")
+             "compiled at GRADE time into grade-only anchor blocks (never "
+             "written into a plan), and graded as mechanical_drift (#959)")
     parser.add_argument(
         "--no-mechanical", action="store_true",
         help="Do not read mechanical.json, even if one sits beside the board. "

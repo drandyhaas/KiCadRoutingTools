@@ -198,8 +198,9 @@ staged board before anything is promoted.
 
 With `--intent PATH` (#959) each MOVED part is also graded against that
 floorplan intent's zones, by the grade's own `zone_containment` rule. A pose
-that leaves a part further outside its block's zone than it was refuses at
-exit 4, and nothing is written. `JSON_SUMMARY.zone_check` names the block, the
+that leaves a part further outside its block's zone than it was, as an ERROR
+finding, refuses at exit 4, and nothing is written; with the rule demoted to
+warn the pose is written and the row reported. `JSON_SUMMARY.zone_check` names the block, the
 zone and the overrun before and after. The check is relative, like the legality
 verdict: a move from the pile toward its zone is never refused for not
 arriving. `--force` writes anyway and says so. A call that only locks or

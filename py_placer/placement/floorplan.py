@@ -773,6 +773,25 @@ def load_intent(path: str) -> Intent:
     return intent_from_dict(raw, source_path=path)
 
 
+def _checked_basis(context: Dict, decaps: Dict) -> Dict[str, str]:
+    """`context.basis`, with the decap label dropped once the number no
+    longer IS the observation. The census repeats the emitted limit
+    (`emitted_max_distance_mm`) precisely so a hand edit is detectable; a
+    limit edited away from it is somebody's choice, and a message calling it
+    "an observed regression baseline read off a board" would be false
+    (Phase-6 verifier)."""
+    out = {str(k): str(v) for k, v in
+           _obj(context.get('basis'), 'context.basis').items()}
+    key = 'decaps.max_distance_mm'
+    if out.get(key) == 'observed_baseline':
+        emitted = (context.get('decap_census') or {}).get(
+            'emitted_max_distance_mm') if isinstance(
+                context.get('decap_census'), dict) else None
+        if emitted is None or (decaps or {}).get('max_distance_mm') != emitted:
+            out.pop(key)
+    return out
+
+
 def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     # FIRST, ahead of the unknown-key and schema checks. A build that declares
     # a new field almost always declares a new TOP-LEVEL one, so checking the
@@ -1089,8 +1108,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         assembly=dict(assembly),
         proximity=tuple(proximity),
         dispositions=dispositions,
-        basis={str(k): str(v) for k, v in
-               _obj(context.get('basis'), 'context.basis').items()},
+        basis=_checked_basis(context, decaps),
     )
     # A disposition for a rule the intent ARMS says "this is not graded" about
     # a rule that is -- the two statements cannot both be true, and a reader
@@ -3449,7 +3467,11 @@ def superseded_caps(pcb_data, proximity, brief_fragment) -> Dict[str, str]:
         b = brief_rows.get(key)
         if b is None:
             continue
-        if any(b.get(k) != p.get(k) for k in ('max_mm', 'basis', 'pads')):
+        # Compared at the EFFECTIVE basis: a plan row spelling out the
+        # default `pad_edge` the brief left implicit is the same claim.
+        if b.get('max_mm') != p.get('max_mm') or b.get('pads') != p.get(
+                'pads') or (b.get('basis') or _PROXIMITY_DEFAULT_BASIS) != (
+                p.get('basis') or _PROXIMITY_DEFAULT_BASIS):
             continue            # drifted from the brief: not a declaration
         pads = p.get('pads') or {}
         for cap, partner in (key, key[::-1]):
@@ -4508,8 +4530,13 @@ _WITHHELD_RULE = {
 #: `budget_abstained_keys` mean two things.
 def _arm_decap_superseded(ctx) -> Optional[str]:
     """The decap distance rules have nothing of their own to grade when a
-    declared relation supersedes EVERY cap with an IC on its rail (#959):
-    armed, they would run and measure nothing, so they abstain and say why."""
+    declared relation supersedes EVERY cap with an IC on its rail (#959).
+    Read by the roster's APPLICABILITY only: a dark decap rule then owes
+    nothing. It is deliberately not in `_ARM` -- an armed rule that abstains
+    makes the grade incomplete, and declaring MORE (a relation for every
+    cap) turned exit 0 into exit 4 (Phase-6 verifier). Armed, the rules run
+    and skip each superseded cap, which is the truth: every cap IS graded,
+    by its relation."""
     spec = ctx.intent.decaps or {}
     r = float(spec.get('search_radius_mm', groups_mod.DECAP_RADIUS_MM))
     near, beyond, _orph = ctx.decap_populations(r)
@@ -4522,9 +4549,7 @@ def _arm_decap_superseded(ctx) -> Optional[str]:
     return None
 
 
-_ARM = {'decap_pin_distance': _arm_decap_pins,
-        'decap_distance': _arm_decap_superseded,
-        'decap_ungraded': _arm_decap_superseded}
+_ARM = {'decap_pin_distance': _arm_decap_pins}
 
 
 #: The marker `grade()` appends to a `_SKIP_REASON` when a WITHHELD key
@@ -5714,7 +5739,11 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     if budget is not None and fixed_total > float(budget) + legality.EPS:
         out.append(Violation(
             rule='plan_fixed_overlap_budget',
-            severity=intent.severity_of('plan_fixed_overlap_budget'),
+            # As strong as the rule it stands for: with `legality` demoted
+            # the grade passes this overlap, so P1 must not refuse it (the
+            # Phase-7 fact-check found it still an ERROR).
+            severity=_plan_severity(intent, 'plan_fixed_overlap_budget',
+                                    ('legality',)),
             message=(f"the LOCKED parts alone overlap by {fixed_total:.3f}"
                      f"mm2, over the declared legality_budget.overlap_area "
                      f"{float(budget):g} -- no arrangement of the other parts "
@@ -6156,8 +6185,7 @@ DECAP_MIN_SAMPLE = 3
 DECAP_MAX_CENSORED = 0.25
 
 
-def decap_census(pcb_data, radius: float = None,
-                 exclude: Sequence[str] = ()) -> Dict:
+def decap_census(pcb_data, radius: float = None) -> Dict:
     """What the board's decoupling tethers look like, and what they HIDE.
 
     Two passes over `groups.decap_tethers`: one at the ordinary radius, which
@@ -6186,17 +6214,6 @@ def decap_census(pcb_data, radius: float = None,
     # code shape rather than a fact about a corpus -- pinned by
     # `tests/test_792_decap_predicate.py`.
     near, beyond, orphans = groups_mod.decap_populations(pcb_data, radius=r)
-    # #959: caps a DECLARED proximity relation supersedes are graded by that
-    # relation, so a limit derived for the rest must not be set by them.
-    skip = set(exclude or ())
-    n_sup = 0
-    if skip:
-        before = sum(len(cs) for cs in near.values()) + len(beyond)
-        near = {ic: [(c, d) for c, d in caps if c not in skip]
-                for ic, caps in near.items()}
-        near = {ic: caps for ic, caps in near.items() if caps}
-        beyond = [row for row in beyond if row[0] not in skip]
-        n_sup = before - sum(len(cs) for cs in near.values()) - len(beyond)
     dists = sorted(d for caps in near.values() for _c, d in caps)
     n = len(dists)
     # `beyond_radius_refs` is cap-sorted for determinism (#457);
@@ -6244,12 +6261,8 @@ def decap_census(pcb_data, radius: float = None,
         # turns "the three arms are the whole scope" from a claim into a
         # number a reader can check, so a future divergence shows up in
         # every emitted document instead of as a silent set difference.
-        'unaccounted': scope - n - len(beyond) - len(orphans) - n_sup,
+        'unaccounted': scope - n - len(beyond) - len(orphans),
     }
-    if n_sup:
-        # Left out because a declared relation grades them (#959); counted,
-        # so `unaccounted` stays the closure check it is.
-        out['superseded_excluded'] = n_sup
     if n:
         # NOT rounded, unlike every other number here. This one is
         # LOAD-BEARING: `_decap_derivation` ceils it, and `round(v, 4)` can
@@ -6354,8 +6367,16 @@ def _decap_mode(v) -> str:
                      f"'auto'")
 
 
-def _emitted_basis(decaps, budget, conns, blocks) -> Dict[str, str]:
-    out: Dict[str, str] = {}
+def _emitted_basis(decaps, budget, conns, blocks,
+                   assembly=None) -> Dict[str, str]:
+    """`{intent path: basis}` for every number the emitter chose: what it
+    READ off this board is `observed_baseline`; a constant of this module is
+    `derived_default`. The envelope RECT is not here -- it is the outline,
+    a recorded fact, not a choice."""
+    out: Dict[str, str] = {
+        'envelope.tolerance_mm': 'derived_default',
+        'defaults.zone_tolerance_mm': 'derived_default',
+    }
     if 'max_distance_mm' in (decaps or {}):
         out['decaps.max_distance_mm'] = 'observed_baseline'
     for k in sorted(budget or {}):
@@ -6365,8 +6386,11 @@ def _emitted_basis(decaps, budget, conns, blocks) -> Dict[str, str]:
             if k in c:
                 out[f"edge_connectors[{c['ref']}].{k}"] = 'observed_baseline'
     for b in blocks or ():
-        if 'side' in b:
-            out[f"blocks[{b['name']}].side"] = 'observed_baseline'
+        for k in ('side', 'zone'):
+            if k in b:
+                out[f"blocks[{b['name']}].{k}"] = 'observed_baseline'
+    if (assembly or {}).get('sides'):
+        out['assembly.sides'] = 'observed_baseline'
     return out
 
 
@@ -6746,10 +6770,14 @@ def emit_intent(pcb_data, pcb_file: str, *,
     # `decaps: {}` alone says only the second. The LIMIT is opt-in, because
     # declaring it is not a grading-only change -- see the seeder note below.
     # #959: caps the BRIEF's own proximity relations supersede are graded by
-    # those relations, so a derived limit is read off the rest.
+    # those relations where the brief is read -- and DISCLOSED here. The
+    # limit is still read off every cap: the placement engines (place_seed,
+    # portfolio, the seeder's repair) grade without the brief, and a limit
+    # tightened by leaving the superseded caps out failed them there on the
+    # board it was emitted from (Phase-6 verifier).
     _sup = (superseded_caps(pcb_data, (brief_fragment or {}).get('proximity'),
                             brief_fragment) if brief_fragment else {})
-    _census = decap_census(pcb_data, exclude=sorted(_sup))
+    _census = decap_census(pcb_data)
     if _sup:
         _census['superseded'] = dict(sorted(_sup.items()))
     _decaps: Dict[str, object] = {}
@@ -6773,8 +6801,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
         _limit, _why = _decap_derivation(_census)
         if _limit is None:
             if _mode == 'auto':
-                # Recorded where the roster reads it, NOT in budget_withheld:
-                # `auto` promises the default emit changes no exit code.
+                # Recorded in the census, which the emit prints, NOT in
+                # budget_withheld: `auto` promises an emit that changes no
+                # exit code. P1 still owes the dark decap rule; the census is
+                # the reason, not the answer.
                 _census['auto_withheld'] = _why
             else:
                 _withheld['decaps.max_distance_mm'] = _why
@@ -6900,7 +6930,8 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # what it is -- a baseline OBSERVED on this board, not a
             # requirement anyone declared. Keyed by intent path; a brief
             # merged over it re-labels what it declares.
-            'basis': _emitted_basis(_decaps, _budget, conns, blocks),
+            'basis': _emitted_basis(_decaps, _budget, conns, blocks,
+                                    _assembly),
         },
     }
 
@@ -7192,6 +7223,7 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
     # (Phase-5 verifier S1).
     ko_err: set = set()
     side_warn: set = set()
+    absent: set = set()
     if result is not None:
         for v in result.violations:
             if v.severity == ERROR:
@@ -7200,10 +7232,18 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
                     ko_err.add(str((v.measured or {}).get('keepout') or ''))
             if v.rule == 'edge_connector_side':
                 side_warn.add(v.ref or '')
+            if v.rule == 'edge_connector' and (v.measured or {}).get(
+                    'found') is False:
+                absent.add(v.ref or '')
 
     def _verdict(grader, ref, keepout=None):
         if result is None:
             return 'pending'
+        if ref and ref in absent:
+            # A connector not on the board fails every clause about it --
+            # the side finding, which only WARNs, would otherwise read a
+            # missing part as a pass (round-2 verifier).
+            return 'graded_fail'
         if grader == 'keepout':
             return 'graded_fail' if keepout in ko_err else 'graded_pass'
         if grader == 'edge_connector_side':
