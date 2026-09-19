@@ -596,7 +596,17 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'decap_pin_uncovered',
                                         'proximity_unresolved',
                                         # #959 (#1001)
-                                        'mechanical_drift'}
+                                        'mechanical_drift',
+                                        # #959 (#998): plan_check
+                                        'plan_zone_exclusive_unsatisfiable',
+                                        'block_glob_literal',
+                                        'plan_fixed_outside_zone',
+                                        'plan_zone_overfull',
+                                        'plan_zone_crowded',
+                                        'plan_edge_overfull',
+                                        'plan_edge_crowded',
+                                        'plan_board_overfull',
+                                        'plan_board_crowded'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         i = intent_from_dict(_base(severity={name: WARN}))

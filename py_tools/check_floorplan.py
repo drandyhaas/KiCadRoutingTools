@@ -128,6 +128,14 @@ def build_parser():
                         'nobody had declared anything for. This counts '
                         'CLAUSES. A clause the author wrote "unknown", and one '
                         'this toolchain carries by design, never block (#902)')
+    p.add_argument('--plan-only', action='store_true',
+                   help='with --intent: check the zone PLAN against itself '
+                        'and the board, before any pose exists (#959) -- '
+                        'overlaps and exclusive-zone infeasibility, glob '
+                        'literals, locked members outside their zone, '
+                        'per-zone / per-edge / board area budgets, and the '
+                        'rule roster. Needs no placed board; exits 4 on an '
+                        'ERROR, which is a plan no arrangement can satisfy')
     p.add_argument('--json', metavar='PATH',
                    help='write the full findings (every measurement) as JSON')
     p.add_argument('--group-by', default='auto', metavar='SOURCES',
@@ -193,6 +201,70 @@ def intent_doc_for_drift(path):
         return {}
 
 
+def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path):
+    """`--plan-only` (#959, #998): the plan, checked before any pose.
+
+    `plan_check` plus the rule roster, with the declaration ledger in its
+    before-placement view (`pending` rows). Exits 4 on an ERROR -- every one
+    is a plan no arrangement can satisfy -- and 0 otherwise, WARNs included.
+    """
+    from list_nets import board_floor_knobs
+    from placement.floorplan import plan_check
+    clearance, edge_clearance, knobs = board_floor_knobs(
+        args.board, args.clearance, args.board_edge_clearance)
+    try:
+        found, measured = plan_check(intent, pcb, args.board,
+                                     group_sources=sources or (),
+                                     clearance=clearance,
+                                     board_edge_clearance=edge_clearance)
+        rows = rule_roster(intent, pcb, args.board,
+                           group_sources=sources or (), clearance=clearance,
+                           board_edge_clearance=edge_clearance,
+                           brief_fragment=brief_fragment or None)
+    except UntrustworthyOutline as exc:
+        print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
+        return UNPLACED_EXIT
+    errors = [v for v in found if v.severity == 'error']
+    stale = stale_dispositions(intent, rows, pcb)
+    ledger = declaration_ledger(intent, rows)
+    if not args.quiet:
+        print(f"PLAN {args.intent} on {args.board}: {len(errors)} error(s), "
+              f"{len(found) - len(errors)} warning(s) -- checked before any "
+              f"pose exists")
+        for v in found:
+            print(f"    [{'ERROR' if v.severity == 'error' else 'warn '}] "
+                  f"{v.rule}: {v.message}")
+        for line in format_roster(rows, stale):
+            print(line)
+    by_rule = {}
+    for v in found:
+        by_rule[v.rule] = by_rule.get(v.rule, 0) + 1
+    if args.json:
+        with open(args.json, 'w', encoding='utf-8') as fh:
+            json.dump({'intent': args.intent, 'board': args.board,
+                       'plan_findings': [v.to_dict() for v in found],
+                       'measured': measured, 'rule_roster': rows,
+                       'stale_dispositions': stale,
+                       'declaration_ledger': ledger}, fh, indent=1,
+                      sort_keys=True, default=str)
+            fh.write('\n')
+    s = {'intent': os.path.basename(args.intent),
+         'board': os.path.basename(args.board), 'plan_only': True,
+         'plan_errors': len(errors),
+         'plan_warnings': len(found) - len(errors),
+         'plan_findings_by_rule': by_rule,
+         'rules_dark_undispositioned': [r['rule'] for r in rows
+                                        if r['needs_disposition']],
+         'stale_dispositions': stale,
+         'clearance_used': knobs['clearance'],
+         'edge_clearance_used': knobs['board_edge_clearance']}
+    s.update(ledger_summary(ledger))
+    print("JSON_SUMMARY: " + json.dumps(s, sort_keys=True))
+    if errors and not args.exit_zero:
+        return VIOLATIONS_EXIT
+    return 0
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     parser_error = build_parser().error
@@ -211,8 +283,12 @@ def main(argv=None):
 
     # The unplaced gate first: grading a pile of parts at the origin fires every
     # rule at once, which is noise rather than a verdict.
+    if args.plan_only and not args.intent:
+        parser_error('--plan-only checks a plan: pass it with --intent')
     gate_or_exit(pcb, args.board, 'check_floorplan',
-                 allow_unplaced=args.allow_unplaced,
+                 # A plan is checked BEFORE a placement exists, so the pile
+                 # is exactly the board --plan-only is for (#959).
+                 allow_unplaced=args.allow_unplaced or args.plan_only,
                  allow_routed=True)          # copper is irrelevant to a floorplan
 
     # #711. Discovery is HERE, in the CLI, never inside `emit_intent`: that
@@ -390,6 +466,10 @@ def main(argv=None):
         intent = load_intent(args.intent)
     except IntentError as exc:
         parser_error(str(exc))
+
+    if args.plan_only:
+        return _plan_only(args, intent, pcb, sources, brief_fragment,
+                          brief_path)
 
     # #711. On the --intent path the brief REPORTS DRIFT; it does not merge.
     # Merging would make the graded document differ from the file on disk, so

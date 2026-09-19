@@ -148,7 +148,7 @@ source, suspect, suspect_reason
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 23 rule names below |
+| `severity` | any of the 32 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `dispositions` | `rules`, `withheld`, `refs`, `contradictions` -- each `{key: why}`, a non-empty written reason (#959; see "The rule roster" below) |
 | `must_lock` | a list of reference globs (no nested keys) |
@@ -160,6 +160,10 @@ source, suspect, suspect_reason
 the rule loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
 `block_unresolved`, `intent_zone_in_keepout`, `keepout_allow_unresolved`,
 `mechanical_drift` (#959, raised only when a `mechanical.json` is read),
+the nine `plan_check` findings (#959: `plan_zone_exclusive_unsatisfiable`,
+`block_glob_literal`, `plan_fixed_outside_zone`, `plan_zone_overfull`,
+`plan_zone_crowded`, `plan_edge_overfull`, `plan_edge_crowded`,
+`plan_board_overfull`, `plan_board_crowded`),
 plus three more raised BESIDE a rule's own name —
 `decap_pin_distance_inferred` and `decap_pin_uncovered` (#705), and
 `proximity_unresolved` (#902). One measurement can support several claims, and
@@ -556,7 +560,9 @@ for it, and the reason is printed:
 | `block_unresolved` | a block matched no footprint | — |
 | `intent_zone_in_keepout` | a declared zone is contradicted by a keep-out that binds its members: covered entirely (reported per block), or left with no pose for a member at any rotation (per member) | `zone_covered_by_keepout`, then `zone_pose_feasibility` |
 | `keepout_allow_unresolved` | a keep-out's `allow` pattern matches no footprint (**warn** by default) | `allow_pattern_matches`, the resolver's own matcher |
-| `intent_zone_overlap`, `intent_zone_outside_envelope` | the intent contradicts itself (no board needed) | — |
+| `intent_zone_outside_envelope` | the intent contradicts itself (no board needed) | — |
+| `intent_zone_overlap` | two zones overlap on one face -- a **warn** since #959: a member of either may sit in the shared area, and run 29's own board satisfied two such pairs | — |
+| `plan_zone_exclusive_unsatisfiable` | a member has no pose in its own zone that stays out of a stranger's EXCLUSIVE zone -- the one overlap no placement can satisfy (#959) | `zone_pose_feasibility` with the exclusive zone as a keep-out |
 
 Every one of them measures with the geometry the **optimizer itself gates on**.
 A grader with its own idea of what "legal" means grades the reimplementation

@@ -28,6 +28,7 @@ Traps written against, from this repo's own history:
 """
 import json
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -295,8 +296,62 @@ def test_a_stale_disposition_is_named():
         'overlap_area': 'nothing is withheld here'}}), '')
     rows = fp.rule_roster(it, pcb, ESP)
     assert fp.stale_dispositions(it, rows) == [
-        'dispositions.withheld.overlap_area'], fp.stale_dispositions(it, rows)
+        'dispositions.withheld.overlap_area: nothing is withheld under that '
+        'key'], fp.stale_dispositions(it, rows)
     print("  PASS: a disposition answering nothing is named")
+
+
+def test_a_stale_ref_disposition_says_why():
+    """Each of the three ways a `refs` answer can be stale gets its OWN
+    reason: the round-2 verifier found check_floorplan telling a locked
+    block's author that "nothing is withheld", which is about a different
+    key entirely."""
+    pcb = parse_kicad_pcb(ESP)
+    logo = sorted(k for k, f in pcb.footprints.items() if not f.pads)[0]
+    pcb.footprints[logo].locked = True
+    it = fp.intent_from_dict(_raw(dispositions={'refs': {
+        'NOPE': 'x', 'U1': 'x', logo: 'x'}}), '')
+    rows = fp.rule_roster(it, pcb, ESP)
+    got = fp.stale_dispositions(it, rows, pcb)
+    want = sorted([
+        'dispositions.refs.NOPE: no such block on this board (keys are '
+        'exact)',
+        'dispositions.refs.U1: the block carries pads -- the seeder places '
+        'it, and `refs` answers pad-less blocks only',
+        f'dispositions.refs.{logo}: the block is already locked; the lock '
+        'is the answer'])
+    assert got == want, got
+    # Without the board the refs cannot be judged, so none are named.
+    assert fp.stale_dispositions(it, rows) == [], fp.stale_dispositions(it,
+                                                                     rows)
+    # And an unlocked pad-less block is exactly what `refs` is for.
+    pcb.footprints[logo].locked = False
+    assert not [s for s in fp.stale_dispositions(it, rows, pcb)
+                if logo in s]
+    lines = fp.format_roster(rows, got)
+    assert sum('STALE: dispositions.refs.' in ln for ln in lines) == 3, lines
+    assert not [ln for ln in lines if 'refs.' in ln and 'withheld' in ln]
+    # The CLI carries the same reason, in its text and its summary.
+    with tempfile.TemporaryDirectory() as tmp:
+        plan = os.path.join(tmp, 'p.json')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            json.dump(_raw(dispositions={'refs': {'U1': 'x'}}), fh)
+        r = subprocess.run([sys.executable, '-X', 'utf8',
+                            run_utils.tool('check_floorplan.py'), ESP,
+                            '--intent', plan, '--plan-only',
+                            '--no-mechanical'],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', cwd=REPO, timeout=900)
+        assert 'Traceback' not in r.stdout + r.stderr, r.stderr[-1500:]
+        why = ('dispositions.refs.U1: the block carries pads -- the seeder '
+               'places it, and `refs` answers pad-less blocks only')
+        assert 'STALE: ' + why in r.stdout, r.stdout[-2000:]
+        line = [x for x in r.stdout.splitlines()
+                if x.startswith('JSON_SUMMARY:')]
+        s = json.loads(line[-1].split('JSON_SUMMARY: ', 1)[1])
+        assert s['stale_dispositions'] == [why], s['stale_dispositions']
+    print("  PASS: an unknown, a pad-bearing and a locked `refs` answer each "
+          "name their own reason, in the API and the CLI")
 
 
 def test_the_run29_pile_owes_decaps_and_the_withheld_overlap():
@@ -412,6 +467,7 @@ TESTS = [
     test_a_severity_promotion_makes_an_advisory_rule_owed,
     test_a_withheld_budget_is_owed_until_answered,
     test_a_stale_disposition_is_named,
+    test_a_stale_ref_disposition_says_why,
     test_the_run29_pile_owes_decaps_and_the_withheld_overlap,
     test_a_board_with_only_orphan_caps_is_not_applicable,
     test_the_cli_prints_the_roster_and_the_carried_facts,

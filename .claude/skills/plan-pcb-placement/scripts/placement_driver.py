@@ -1213,6 +1213,11 @@ def _guard_zone_plan(a):
     ok_, why_ = _mechanical_owed(a, intent, plan, pcb, _bf, _bp)
     if not ok_:
         return False, why_
+    # #959 (#998): the plan checked against itself and the board, before
+    # the first pose write.
+    ok_, why_ = _plan_owed(a, intent, pcb, _fp)
+    if not ok_:
+        return False, why_
     # LAST, so every refusal above keeps its wording and its precedence: a plan
     # that leaves parts unzoned is told that first, not that a rule is dark.
     ok_, why_ = _roster_owed(a, intent, pcb, _fp)
@@ -1276,7 +1281,38 @@ def _padless_owed(a, intent, pcb, padless, covered):
             f'{"is" if len(stale) == 1 else "are"} already locked in the '
             'board: the lock is the answer, and a second one reads as though '
             'the block were still undecided. Remove the disposition.')
+    # Which zoned block, by which pattern, reaches each pad-less block --
+    # matched as `resolve_blocks` matches (`fnmatch`), so this reads the
+    # members the grader will. Two questions, two populations:
+    #   * a block that draws a courtyard IS graded wherever a zoned block's
+    #     pattern reaches it, glob or not, so any match makes it zoned;
+    #   * a block that draws none is graded by nothing, so the zone is only a
+    #     claim when the author NAMED it (the key, its escaped form, or a
+    #     pattern with no wildcard). A class glob sweeping one in -- `R*`
+    #     catching glasgow's `REF**` logos, `D*` catching ulx3s's `D&M` --
+    #     asks nothing of it (round-2 verification: a normal glob plan on
+    #     glasgow was refused with advice place_pose then refused).
+    import fnmatch as _fnm
+    import glob as _glob
+    cover = {}
+    for _z in intent.blocks:
+        if _z.rect is None:
+            continue
+        for _pat in _z.refs:
+            for _r in padless:
+                if _fnm.fnmatch(_r, _pat):
+                    cover.setdefault(_r, []).append(
+                        (_z.name, _pat,
+                         _pat == _glob.escape(_r)
+                         or not any(ch in _pat for ch in '*?[')))
+    answered = file_locked | set(ref_disp)
     zoned = padless & covered
+    named = {r for r, hits in cover.items() if any(e for _b, _p, e in hits)}
+
+    def _where(r, explicit=False):
+        hits = [(b, p) for b, p, e in cover.get(r, ()) if e or not explicit]
+        return (', '.join(f"{r} (block {b!r}, refs {p!r})" for b, p in hits)
+                or r)
     courted = set()
     if zoned:
         try:
@@ -1286,26 +1322,33 @@ def _padless_owed(a, intent, pcb, padless, covered):
                        if getattr(_b.get(r), 'source', '') == SOURCE_COURTYARD}
         except Exception:                                   # noqa: BLE001
             courted = set()
-    ungradable = sorted(zoned - courted)
+    ungradable = sorted(named - courted)
     if ungradable:
+        done = [r for r in ungradable if r in answered]
         return False, (
-            f'{len(ungradable)} pad-less block(s) sit in a zoned block and '
-            f'draw no courtyard: {", ".join(ungradable)}. No rule can grade '
+            f'{len(ungradable)} pad-less block(s) are named in a zoned '
+            f'block and draw no courtyard: '
+            f'{"; ".join(_where(r, True) for r in ungradable)}. No rule can grade '
             'where such a block is -- `zone_containment` grades only parts '
             'the placement state carries, and a block with no pads and no '
-            'courtyard is not one -- so its zone is a claim nothing checks, '
-            'locked or not. Take it out of the block, then place it yourself '
-            'and lock it; the lock is what holds it:\n'
-            f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
-            "set '<KEY>' <X> <Y> --rot <DEG> lock '<KEY>'")
+            'courtyard is not one -- so the zone is a claim nothing checks. '
+            'Remove it from the block\'s `refs`'
+            + (f' ({", ".join(done)} '
+               f'{"is" if len(done) == 1 else "are"} already answered by a '
+               'lock or a disposition, so that is all that is left to do)'
+               if done else '')
+            + '. An unanswered one is then answered like any pad-less '
+              'block: place it yourself and lock it, or write why it may '
+              'stay where it is (`dispositions.refs`).')
     unlocked_zoned = sorted(courted - file_locked)
     if unlocked_zoned:
         return False, (
-            f'{len(unlocked_zoned)} pad-less block(s) sit in a zoned block: '
-            f'{", ".join(unlocked_zoned)}. The seeder never places a block '
-            'with no pads, so the zone does not move it -- but it draws a '
-            'courtyard, so the zone DOES grade it once it is placed. Place '
-            'it yourself and lock it:\n'
+            f'{len(unlocked_zoned)} pad-less block(s) are named in a zoned '
+            f'block: {"; ".join(_where(r) for r in unlocked_zoned)}. The '
+            'seeder never places a block with no pads, so the zone does not '
+            'move it -- but it draws a courtyard, so the zone DOES grade it '
+            'once it is placed (a disposition does not place it). Place it '
+            'yourself and lock it:\n'
             f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
             "set '<KEY>' <X> <Y> --rot <DEG> lock '<KEY>'")
     open_ = sorted(padless - file_locked - set(ref_disp))
@@ -1502,6 +1545,42 @@ def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path):
     return True, None
 
 
+def _plan_owed(a, intent, pcb, _fp):
+    """#959 (#998): the zone plan checked against itself and the board BEFORE
+    the first pose write. `(True, None)` or `(False, why)`.
+
+    Run 29 found its zone plan's ERRORs at lap 5: the only caller of the
+    self-consistency check was the grade, which runs after the seed is
+    written. `floorplan.plan_check` refuses only what no arrangement can
+    satisfy, so every finding here is a plan to fix, not a placement to
+    try. An outline that cannot be graded is left to the roster check,
+    which says so in its own words.
+    """
+    try:
+        from list_nets import board_floor_knobs
+        clr, edge_clr, _k = board_floor_knobs(a.board, None, None)
+        # The SAME group sources the guard resolved the plan's blocks with
+        # above: without them a sheet-group block resolves to nothing and
+        # reads as `block_unresolved` -- a false refusal of every emitted
+        # plan on a hierarchical board (caught by the corpus control).
+        found, _meas = _fp.plan_check(intent, pcb, a.board, clearance=clr,
+                                      board_edge_clearance=edge_clr,
+                                      group_sources=('kicad', 'sheet'))
+    except _fp.UntrustworthyOutline:
+        return True, None
+    errs = [v for v in found if v.severity == _fp.ERROR]
+    if not errs:
+        return True, None
+    return False, (
+        f'{len(errs)} finding(s) in the zone plan that no arrangement can '
+        'satisfy -- checked against the plan itself and the board, before '
+        'any pose exists (run 29 found its plan errors at lap 5):\n'
+        + ''.join(f'  - {v.rule}: {v.message}\n' for v in errs)
+        + '\nFix the plan, then re-check it without seeding:\n'
+        f'  python3 -X utf8 py_tools/check_floorplan.py {a.board} '
+        f'--intent {a.zone_plan} --plan-only')
+
+
 def _roster_owed(a, intent, pcb, _fp):
     """#959 (#997): the rules this plan leaves DARK, answered in writing.
 
@@ -1530,19 +1609,22 @@ def _roster_owed(a, intent, pcb, _fp):
                 'say which rules this plan leaves dark. Fix the outline '
                 'before planning against it.')
     owed = _fp.roster_refusal_lines(rows)
-    stale = _fp.stale_dispositions(intent, rows)
+    stale = [s_ for s_ in _fp.stale_dispositions(intent, rows)
+             if s_.startswith('dispositions.withheld.')]
     if not owed and not stale:
         return True, None
     return False, (
-        f'{len(owed)} rule(s) this plan leaves dark apply to this board and '
-        'would fail the grade when they fire, and nothing answers for them. '
-        'A rule nobody armed and nobody excused is a question the plan '
-        'never asked, and `check_floorplan` will print its skip reason on '
-        'every lap without anyone acting on it (run 29: 6 of 14 rules, 22 '
-        'invocations):\n'
+        (f'{len(owed)} rule(s) this plan leaves dark apply to this board and '
+         'would fail the grade when they fire, and nothing answers for them. '
+         'A rule nobody armed and nobody excused is a question the plan '
+         'never asked, and `check_floorplan` will print its skip reason on '
+         'every lap without anyone acting on it (run 29: 6 of 14 rules, 22 '
+         'invocations):\n' if owed else
+         'This plan answers something that is not asked: a disposition for '
+         'a key nothing withholds reads as though a budget were excused '
+         'that the grade in fact enforces:\n')
         + ''.join(f'  - {line}\n' for line in owed)
-        + ''.join(f'  - {s_} answers nothing (nothing is withheld under '
-                  'that key); remove it\n' for s_ in stale)
+        + ''.join(f'  - STALE {s_}; remove it\n' for s_ in stale)
         + '\nAnswer each IN THE ZONE PLAN -- arm the rule with its key, or '
         'write why it does not apply to this design:\n'
         '  "dispositions": {"rules": {"<rule>": "<why>"}, '
@@ -2819,6 +2901,14 @@ def _refusal_scenarios(tmp):
                  [{'name': 'all', 'refs': ['U*', 'LOGO1'],
                    'zone': [0, 0, 10, 10], 'note': 'ICs and the logo'}]))]
          + damaged),
+        # The same zone around a logo already LOCKED: the advice changes to
+        # "remove it from the block", since the lock is already there.
+        ('a locked pad-less block named in a zoned block',
+         ['--board', locked_logo_board, '--zone-plan', wrote(
+             'zp_logo_zoned_locked.json', _zone_plan_doc(
+                 [{'name': 'all', 'refs': ['U*', 'LOGO1'],
+                   'zone': [0, 0, 10, 10], 'note': 'ICs and the logo'}]))]
+         + damaged),
         ('a pad-less disposition naming a block the board lacks',
          ['--board', logo_board, '--zone-plan', wrote(
              'zp_logo_unknown.json', _zone_plan_doc(
@@ -2888,6 +2978,14 @@ def _refusal_scenarios(tmp):
           '--waive', 'seed-connectors:the fixture hands U2 over',
           '--waive', 'brief-clause:interfaces[U2].edge:']
          + damaged),
+        # #959 (#998): a plan no arrangement can satisfy -- two 0.6 x 0.8 mm
+        # parts need 0.96 mm2 and their zone (tolerance 0) holds 0.81.
+        ('a zone plan whose zone cannot hold its members',
+         ['--board', tiny, '--zone-plan', wrote('zp_overfull.json',
+                                                 _zone_plan_doc(
+             [{'name': 'all', 'refs': ['U*'], 'zone': [1.5, 1.5, 2.4, 2.4],
+               'tolerance_mm': 0, 'note': 'both parts, one tiny zone'}]))]
+         + damaged),
         # #959 (#997): the roster, LAST in P1. One row carries both arms -- a
         # gating rule nothing answers for (the tiny board declares no
         # envelope and no legality budget) and a disposition that answers a
@@ -2897,6 +2995,18 @@ def _refusal_scenarios(tmp):
              [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
                'note': 'both parts, one zone'}],
              dispositions={'withheld': {'overlap_area': 'stale on purpose'}}))]
+         + damaged),
+        # ...and a plan whose ONLY debt is the stale one, so the header that
+        # says so renders too.
+        ('a zone plan whose only debt is a stale disposition',
+         ['--board', tiny, '--zone-plan', wrote(
+             'zp_stale_only.json', _zone_plan_doc(
+                 [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                   'note': 'both parts, one zone'}],
+                 dispositions={
+                     'rules': {'envelope': 'the fixture is its own envelope',
+                               'legality': 'the fixture grades placement'},
+                     'withheld': {'overlap_area': 'stale on purpose'}}))]
          + damaged),
         ('a zone plan over a board with no outline',
          ['--board', _no_outline_board(os.path.join(tmp, 'noedge.kicad_pcb')),

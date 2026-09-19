@@ -121,9 +121,12 @@ def test_a_zoned_padless_block_is_refused_as_inert():
                             'zone': [120, 95, 125, 100],
                             'note': 'the recycle logo, back side'}]
         plan = _plan(tmp, 'inert.json', blocks=blocks)
-        run_utils.check(_p1(ESP, plan),
-                        refuse='sit in a zoned block and draw no courtyard',
-                        code=4)
+        r = run_utils.check(_p1(ESP, plan),
+                            refuse='are named in a zoned block and draw no '
+                                   'courtyard', code=4)
+        # It names the block AND the pattern that claims the logo.
+        assert f"(block 'logos', refs '{LOGOS[0]}')" in r.stdout, \
+            r.stdout[-1500:]
         # LOCKED does not rescue it: no rule grades a block with no pads and
         # no courtyard, so the zone would be a claim nothing checks (the
         # Phase-2 verifier measured a locked logo 13 mm outside its zone
@@ -133,11 +136,44 @@ def test_a_zoned_padless_block_is_refused_as_inert():
         run_utils.check([sys.executable, '-X', 'utf8',
                          run_utils.tool('place_pose.py'), board, board,
                          'lock', LOGOS[0]], accept=True)
-        run_utils.check(_p1(board, plan),
-                        refuse='sit in a zoned block and draw no courtyard',
-                        code=4)
+        r = run_utils.check(_p1(board, plan),
+                            refuse='are named in a zoned block and draw no '
+                                   'courtyard', code=4)
+        # Locked, the only thing left to do is take it out of the block --
+        # the advice must not tell it to place and lock again.
+        assert 'already answered by a lock or a disposition' in r.stdout, \
+            r.stdout[-1500:]
     print("  PASS: a zone around a courtyard-less pad-less block is refused, "
-          "locked or not")
+          "locked or not, naming the block and pattern")
+
+
+def test_a_glob_that_sweeps_in_an_answered_logo_asks_nothing():
+    """Round-2 verification: `R*` in an ordinary plan sweeps glasgow's
+    `REF**` logos into the resistor zone. A courtyard-less block is graded
+    by nothing, so the sweep is not a claim about it -- once the logo is
+    answered (locked, here) the plan passes. Named EXACTLY, it is refused."""
+    drv = _driver()
+    with tempfile.TemporaryDirectory() as tmp:
+        board = drv._tiny_board(os.path.join(tmp, 'b.kicad_pcb'),
+                                ('U1', 'U2', 'LOGO1'), padless=('LOGO1',),
+                                locked=('LOGO1',))
+        argv = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+                '--board', board, '--zone-plan']
+        swept = os.path.join(tmp, 'swept.json')
+        with open(swept, 'w', encoding='utf-8') as fh:
+            json.dump(drv._zone_plan_doc(
+                [{'name': 'all', 'refs': ['U*', 'L*'], 'zone': [0, 0, 10, 10],
+                  'note': 'a class glob, not a claim about the logo'}]), fh)
+        run_utils.check(argv + [swept], accept=True)
+        named = os.path.join(tmp, 'named.json')
+        with open(named, 'w', encoding='utf-8') as fh:
+            json.dump(drv._zone_plan_doc(
+                [{'name': 'all', 'refs': ['U*', 'LOGO1'],
+                  'zone': [0, 0, 10, 10], 'note': 'names the logo'}]), fh)
+        run_utils.check(argv + [named],
+                        refuse="LOGO1 (block 'all', refs 'LOGO1')", code=4)
+    print("  PASS: a glob sweeping in an answered courtyard-less logo passes; "
+          "naming it is refused")
 
 
 def test_a_padless_block_with_a_courtyard_is_graded_once_locked():
@@ -297,6 +333,8 @@ def test_place_pose_snap_on_a_padless_block_is_a_refusal():
         summ = json.loads(line.split('JSON_SUMMARY: ', 1)[1])
         assert summ['exit_code'] == 4 and summ.get('knobs'), summ
         assert summ['ops'], summ
+        # Nothing was written, so the summary names no output (round 2).
+        assert summ['output'] is None, summ['output']
     print("  PASS: place_pose's snap path refuses a pad-less block at exit "
           "4 and writes nothing")
 
@@ -307,6 +345,7 @@ TESTS = [
     test_the_padless_check_keeps_the_older_refusals_first,
     test_must_lock_does_not_answer_a_padless_block,
     test_a_zoned_padless_block_is_refused_as_inert,
+    test_a_glob_that_sweeps_in_an_answered_logo_asks_nothing,
     test_a_padless_block_with_a_courtyard_is_graded_once_locked,
     test_a_disposition_or_a_file_lock_answers_it,
     test_disposition_keys_are_exact_and_padless_only,
