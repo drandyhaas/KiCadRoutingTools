@@ -515,6 +515,31 @@ ROWS = [
     },
 ]
 
+# #959 (#1002): `check_floorplan --emit-intent`'s decap derivation, OFF vs
+# AUTO. The product path the default would change: a PLACED board is
+# emitted (auto derives `decaps.max_distance_mm` = ceil(max) of its own
+# tethers), place_seed re-seeds from that intent, and stage 2.5 pulls the
+# tethered caps. Both arms are graded against the SAME auto intent, so the
+# signal is how many intent errors each SEED leaves under one ruler.
+ROWS += [
+    {
+        'name': f'decaps-auto-{b[:-len(".kicad_pcb")]}',
+        'board': b,
+        'corridors': [],
+        'engine': 'seed',
+        'seed_intents': {'off': 'off', 'on': 'auto', 'grade': 'auto'},
+        'ignore_nets': ['GND'],
+        'signal': 'intent_errors',
+        'guard': ('crossings', 'hpwl', 'inversions', 'body_blocking'),
+        'why': ('MECHANISM: the ON arm seeds from an intent carrying the '
+                'observed decap limit, so seeder stage 2.5 seats each '
+                'tethered cap at its supply pin; the OFF arm packs them '
+                'with their zone. Graded under ONE auto intent. On trial.'),
+    }
+    for b in ('esp_prog.kicad_pcb', 'splitflap_driver.kicad_pcb',
+              'tigard.kicad_pcb')
+]
+
 QUENCH_BASE = dict(
     max_displacement=3.0, step=1.0, grid_step=0.1, clearance=0.2,
     board_edge_clearance=0.55, crossing_penalty=30.0, length_weight=0.3,
@@ -522,7 +547,8 @@ QUENCH_BASE = dict(
     edge_weight=2.0, max_passes=4, verbose=False)
 
 
-def _intent_for(board_path, corridors, workdir, zone_flags=None):
+def _intent_for(board_path, corridors, workdir, zone_flags=None,
+                derive_decaps='off', name='intent.json'):
     """An intent for `board_path` with `corridors` declared.
 
     Emitted from the board itself rather than hand-written, so the blocks the
@@ -543,8 +569,9 @@ def _intent_for(board_path, corridors, workdir, zone_flags=None):
     """
     from kicad_parser import parse_kicad_pcb
     from placement import floorplan
-    path = os.path.join(workdir, 'intent.json')
-    doc = floorplan.emit_intent(parse_kicad_pcb(board_path), board_path)
+    path = os.path.join(workdir, name)
+    doc = floorplan.emit_intent(parse_kicad_pcb(board_path), board_path,
+                                derive_decaps=derive_decaps)
     if corridors:
         # Guarded: an unconditional assignment plants an empty `bus_corridors`
         # on a row that declares none, which makes
@@ -643,7 +670,7 @@ def _ignore_ids(pcb, patterns):
 
 
 def _run_seed(board_path, out_path, intent, seed_kw,
-              group_sources=GROUP_SOURCES, ignore_nets=()):
+              group_sources=GROUP_SOURCES, ignore_nets=(), grade_intent=None):
     """One SEED (from the intent, every part re-seated) + write + the same
     independent grade `_run` applies. The engine switch for a row that
     measures the seeder rather than the quench: `place_seed`'s path, minus
@@ -676,8 +703,11 @@ def _run_seed(board_path, out_path, intent, seed_kw,
         if os.path.exists(src):
             shutil.copy2(src, os.path.splitext(out_path)[0] + ext)
     graded = parse_kicad_pcb(out_path)
-    result = floorplan.grade(intent, graded, out_path, with_health=True,
-                             group_sources=group_sources)
+    # #959 (#1002): the arms may SEED from different intents, and are then
+    # graded against ONE -- otherwise each arm grades itself against the
+    # claim it seeded to, and the comparison measures two rulers.
+    result = floorplan.grade(grade_intent or intent, graded, out_path,
+                             with_health=True, group_sources=group_sources)
     summary = floorplan.summary(result)
     cost = pose_score.make_state(
         graded, out_path,
@@ -875,15 +905,26 @@ def run_row(row, workdir):
         # The SEED engine: both arms re-seat every part from the intent; the
         # ON arm carries `seed_on` (a `seed_from_intent` kwarg set). Same
         # verdict rule, same independent grade, same print.
-        if not row.get('seed_on'):
-            raise AssertionError(f"{row['name']}: a seed row states no "
-                                 f"seed_on -- it would measure the same seed "
-                                 f"twice")
+        si = row.get('seed_intents')
+        if not row.get('seed_on') and not si:
+            raise AssertionError(f"{row['name']}: a seed row states neither "
+                                 f"seed_on nor seed_intents -- it would "
+                                 f"measure the same seed twice")
         _ign = list(row.get('ignore_nets') or ())
-        off = _run_seed(board, os.path.join(d, 'off.kicad_pcb'), intent, {},
-                        ignore_nets=_ign)
-        on = _run_seed(board, os.path.join(d, 'on.kicad_pcb'), intent,
-                       dict(row['seed_on']), ignore_nets=_ign)
+        i_off = i_on = i_grade = intent
+        if si:
+            # Per-arm SEEDING intents and one fixed GRADING intent (#959).
+            def _mk(mode, tag):
+                return _intent_for(board, row['corridors'], d,
+                                   row.get('zone_flags'), derive_decaps=mode,
+                                   name=f'intent_{tag}.json')
+            i_off, i_on = _mk(si['off'], 'off'), _mk(si['on'], 'on')
+            i_grade = _mk(si['grade'], 'grade')
+        off = _run_seed(board, os.path.join(d, 'off.kicad_pcb'), i_off, {},
+                        ignore_nets=_ign, grade_intent=i_grade)
+        on = _run_seed(board, os.path.join(d, 'on.kicad_pcb'), i_on,
+                       dict(row.get('seed_on') or {}), ignore_nets=_ign,
+                       grade_intent=i_grade)
         mark, notes = _verdict(off, on, row)
         expected = row.get('expect')
         tag = mark.upper()
@@ -1478,8 +1519,11 @@ def main(argv=None):
 
     if args.list:
         for r in ROWS:
+            # A seed row has no `quench_on` (the KeyError this printed on).
+            arm = (r.get('quench_on') or r.get('seed_on')
+                   or r.get('seed_intents'))
             print(f"{r['name']:<24} {r['board']:<28} "
-                  f"{r['quench_on']} -> {r['signal']}")
+                  f"{arm} -> {r['signal']}")
         return 0
 
     names = [r['name'] for r in ROWS]

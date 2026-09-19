@@ -1382,6 +1382,21 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
                      'counts', 'fixed', 'product')}
     if report.get('consequences') is not None:
         ctx['brief']['consequences'] = report['consequences']
+    # #959 comment 3.2: a key the brief states is no longer an observation.
+    # The emitter labelled every number it chose `observed_baseline`; each
+    # one the brief overwrote is re-labelled with the brief's own basis --
+    # `declared`, or `derived_default` for a consequence's default.
+    bmap = dict(ctx.get('basis') or {})
+    for c in (fragment.get('edge_connectors') or []):
+        cb = (c.get('context') or {}).get('basis') or {}
+        for key in ('edge', 'overhang_mm', 'center_on_edge',
+                    'along_edge_band', 'max_setback_mm', 'side'):
+            if key in c:
+                own = cb.get(key) or (cb.get('overhang_mm.min')
+                                      if key == 'overhang_mm' else None)
+                bmap[f"edge_connectors[{c['ref']}].{key}"] = own or 'declared'
+    if bmap:
+        ctx['basis'] = bmap
     if fragment.get('keepouts'):
         ctx['keepouts_note'] = (
             f"{len(fragment['keepouts'])} keep-out(s) DECLARED by the design "

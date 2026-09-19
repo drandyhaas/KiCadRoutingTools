@@ -388,6 +388,11 @@ class Intent:
     #: `rule_roster` and the driver, never by a rule -- a disposition is not a
     #: verdict. Defaulted, so every existing construction site is untouched.
     dispositions: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    #: #959 (#1002). `context.basis`: `{intent path: basis}` -- what each
+    #: number IS (`declared`, `observed_baseline`, `derived_default`,
+    #: `mechanical`). Carried like `budget_withheld` so a finding can say an
+    #: observed baseline is not a requirement. Read for messages only.
+    basis: Dict[str, str] = field(default_factory=dict)
 
     def assembly_sides(self) -> str:
         """The declared policy, or 'both' -- which constrains nothing.
@@ -1084,6 +1089,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         assembly=dict(assembly),
         proximity=tuple(proximity),
         dispositions=dispositions,
+        basis={str(k): str(v) for k, v in
+               _obj(context.get('basis'), 'context.basis').items()},
     )
     # A disposition for a rule the intent ARMS says "this is not graded" about
     # a rule that is -- the two statements cannot both be true, and a reader
@@ -2101,6 +2108,17 @@ class _Ctx:
         if hit is None:
             hit = groups_mod.decap_populations(self.pcb, radius=radius)
             self._decap_pops[key] = hit
+        return hit
+
+    def superseded(self) -> Dict[str, str]:
+        """`{cap: claim}` -- the caps a DECLARED proximity relation
+        supersedes (#959), read against the brief the grade was handed.
+        Empty with no brief."""
+        hit = getattr(self, '_superseded', None)
+        if hit is None:
+            hit = superseded_caps(self.pcb, self.intent.proximity,
+                                  getattr(self, 'brief_fragment', None))
+            self._superseded = hit
         return hit
 
 
@@ -3408,6 +3426,46 @@ def _grade_along_edge(ctx, c, ref, part, sev) -> Iterator[Violation]:
                       'edge_span_mm': round(span, 4)})
 
 
+def superseded_caps(pcb_data, proximity, brief_fragment) -> Dict[str, str]:
+    """`{cap: claim}` -- decoupling caps whose INFERRED tether a DECLARED
+    proximity relation replaces (#959 comment 3.2).
+
+    A relation supersedes only when it is the BRIEF's own -- present in the
+    compiled brief with the same partner, limit, basis and pads, so a row a
+    zone plan wrote (a hypothesis) cannot launder a cap out of the decap
+    rules -- and when it names the cap's pads on the cap's RAIL: a pad whose
+    net the partner also carries and that is not ground. Computed at grade
+    time, never written into `decaps.exempt`: exempting a cap would turn a
+    declared `max_pin_distance_mm` on its rail into `decap_pin_uncovered`,
+    weakening a declared value to excuse an inferred one."""
+    if not brief_fragment:
+        return {}
+    brief_rows = {(str(p.get('ref')), str(p.get('near'))): p
+                  for p in brief_fragment.get('proximity') or ()}
+    fps = pcb_data.footprints or {}
+    out: Dict[str, str] = {}
+    for p in proximity or ():
+        key = (str(p.get('ref')), str(p.get('near')))
+        b = brief_rows.get(key)
+        if b is None:
+            continue
+        if any(b.get(k) != p.get(k) for k in ('max_mm', 'basis', 'pads')):
+            continue            # drifted from the brief: not a declaration
+        pads = p.get('pads') or {}
+        for cap, partner in (key, key[::-1]):
+            fp_c, fp_p = fps.get(cap), fps.get(partner)
+            if fp_c is None or fp_p is None \
+                    or not groups_mod.is_decoupling_cap(fp_c, cap):
+                continue
+            named = set(pads.get(cap) or ())
+            partner_nets = {q.net_id for q in fp_p.pads if q.net_id > 0}
+            if any(q.pad_number in named and q.net_id in partner_nets
+                   and _gradeable_supply_net(pcb_data, q.net_id) is not None
+                   for q in fp_c.pads):
+                out[cap] = f"proximity {key[0]} near {key[1]}"
+    return out
+
+
 def rule_decap_distance(ctx) -> Iterator[Violation]:
     """Decoupling caps within reach of the IC they decouple.
 
@@ -3426,16 +3484,25 @@ def rule_decap_distance(ctx) -> Iterator[Violation]:
     # election. `near` is byte-identical to `decap_tethers(radius)` and
     # `tests/test_792_decap_predicate.py` asserts that on every tracked board.
     tethers, _beyond, _orphans = ctx.decap_populations(radius)
+    sup = ctx.superseded()
+    observed = (ctx.intent.basis or {}).get(
+        'decaps.max_distance_mm') == 'observed_baseline'
     for ic in sorted(tethers):
         for cap, dist in tethers[ic]:
             if any(fnmatch.fnmatch(cap, pat) for pat in exempt):
                 continue
+            if cap in sup:
+                continue        # graded by the declared relation instead
             if dist > limit + legality.EPS:
                 yield Violation(
                     rule='decap_distance', severity=ctx.sev('decap_distance'),
                     ref=cap, block=ctx.owner.get(cap),
                     message=(f"{cap} is {dist:.2f}mm from {ic}, the IC it "
-                             f"decouples (limit {limit:.2f}mm)"),
+                             f"decouples (limit {limit:.2f}mm"
+                             + (" -- an observed regression baseline read "
+                                "off a board, not an electrical "
+                                "requirement" if observed else '')
+                             + ")"),
                     measured={'distance_mm': round(dist, 4), 'ic': ic},
                     expected={'max_distance_mm': limit})
 
@@ -3617,11 +3684,13 @@ def rule_decap_ungraded(ctx) -> Iterator[Violation]:
     radius = float(spec.get('search_radius_mm', groups_mod.DECAP_RADIUS_MM))
     _near, beyond, _orphans = ctx.decap_populations(radius)
     sev = ctx.intent.severity_of('decap_ungraded', default=WARN)
+    sup = ctx.superseded()
     for cap, ic, dist in beyond:
         # An author who waived a cap from the distance claim has already
         # decided about it; telling them it is also ungraded is noise about
-        # their own decision.
-        if any(fnmatch.fnmatch(cap, pat) for pat in exempt):
+        # their own decision. A cap a declared relation supersedes IS
+        # graded -- by that relation.
+        if any(fnmatch.fnmatch(cap, pat) for pat in exempt) or cap in sup:
             continue
         yield Violation(
             rule='decap_ungraded', severity=sev,
@@ -4437,7 +4506,25 @@ _WITHHELD_RULE = {
 #: could not derive this key" -- a property of the intent, computed with no
 #: board. This is the opposite, and overloading that key would make
 #: `budget_abstained_keys` mean two things.
-_ARM = {'decap_pin_distance': _arm_decap_pins}
+def _arm_decap_superseded(ctx) -> Optional[str]:
+    """The decap distance rules have nothing of their own to grade when a
+    declared relation supersedes EVERY cap with an IC on its rail (#959):
+    armed, they would run and measure nothing, so they abstain and say why."""
+    spec = ctx.intent.decaps or {}
+    r = float(spec.get('search_radius_mm', groups_mod.DECAP_RADIUS_MM))
+    near, beyond, _orph = ctx.decap_populations(r)
+    caps = ({c for cs in near.values() for c, _d in cs}
+            | {c for c, _ic, _d in beyond})
+    sup = ctx.superseded()
+    if caps and caps <= set(sup):
+        return (f"every cap with an IC on its rail ({len(caps)}) is graded "
+                f"by a declared proximity relation instead")
+    return None
+
+
+_ARM = {'decap_pin_distance': _arm_decap_pins,
+        'decap_distance': _arm_decap_superseded,
+        'decap_ungraded': _arm_decap_superseded}
 
 
 #: The marker `grade()` appends to a `_SKIP_REASON` when a WITHHELD key
@@ -4663,6 +4750,8 @@ def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
         if not scope:
             return False, ("no decoupling cap shares a rail with any IC, so "
                            "no cap has anything to be near")
+        if ctx is not None and _arm_decap_superseded(ctx) is not None:
+            return False, _arm_decap_superseded(ctx)
         return True, (f"{scope} decoupling cap(s) share a rail with an IC")
     if rule == 'decap_pin_distance':
         why = _arm_decap_pins(ctx) if ctx is not None else None
@@ -4888,6 +4977,7 @@ def rule_roster(intent: Intent, pcb_data, pcb_file: str, *,
     ctx = _grade_ctx(intent, pcb_data, pcb_file, group_sources=group_sources,
                      clearance=clearance,
                      board_edge_clearance=board_edge_clearance)[0]
+    ctx.brief_fragment = brief_fragment
     return _roster(intent, pcb_data, ctx, brief_fragment=brief_fragment)
 
 
@@ -5929,6 +6019,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     ctx, outline, state, blocks, block_problems = _grade_ctx(
         intent, pcb_data, pcb_file, group_sources=group_sources,
         clearance=clearance, board_edge_clearance=board_edge_clearance)
+    ctx.brief_fragment = brief_fragment
 
     violations = (list(validate_intent(intent)) + list(block_problems)
                   + list(unresolved_keepout_allows(intent, pcb_data))
@@ -6063,7 +6154,8 @@ DECAP_MIN_SAMPLE = 3
 DECAP_MAX_CENSORED = 0.25
 
 
-def decap_census(pcb_data, radius: float = None) -> Dict:
+def decap_census(pcb_data, radius: float = None,
+                 exclude: Sequence[str] = ()) -> Dict:
     """What the board's decoupling tethers look like, and what they HIDE.
 
     Two passes over `groups.decap_tethers`: one at the ordinary radius, which
@@ -6092,6 +6184,17 @@ def decap_census(pcb_data, radius: float = None) -> Dict:
     # code shape rather than a fact about a corpus -- pinned by
     # `tests/test_792_decap_predicate.py`.
     near, beyond, orphans = groups_mod.decap_populations(pcb_data, radius=r)
+    # #959: caps a DECLARED proximity relation supersedes are graded by that
+    # relation, so a limit derived for the rest must not be set by them.
+    skip = set(exclude or ())
+    n_sup = 0
+    if skip:
+        before = sum(len(cs) for cs in near.values()) + len(beyond)
+        near = {ic: [(c, d) for c, d in caps if c not in skip]
+                for ic, caps in near.items()}
+        near = {ic: caps for ic, caps in near.items() if caps}
+        beyond = [row for row in beyond if row[0] not in skip]
+        n_sup = before - sum(len(cs) for cs in near.values()) - len(beyond)
     dists = sorted(d for caps in near.values() for _c, d in caps)
     n = len(dists)
     # `beyond_radius_refs` is cap-sorted for determinism (#457);
@@ -6139,8 +6242,12 @@ def decap_census(pcb_data, radius: float = None) -> Dict:
         # turns "the three arms are the whole scope" from a claim into a
         # number a reader can check, so a future divergence shows up in
         # every emitted document instead of as a silent set difference.
-        'unaccounted': scope - n - len(beyond) - len(orphans),
+        'unaccounted': scope - n - len(beyond) - len(orphans) - n_sup,
     }
+    if n_sup:
+        # Left out because a declared relation grades them (#959); counted,
+        # so `unaccounted` stays the closure check it is.
+        out['superseded_excluded'] = n_sup
     if n:
         # NOT rounded, unlike every other number here. This one is
         # LOAD-BEARING: `_decap_derivation` ceils it, and `round(v, 4)` can
@@ -6231,11 +6338,41 @@ def _decap_derivation(census: Dict) -> Tuple[Optional[float], Optional[str]]:
     return _ceil4(float(census['max_mm'])), None
 
 
+def _decap_mode(v) -> str:
+    """`derive_decaps` as one of 'off' | 'strict' | 'auto'. A bool is the
+    old spelling (True was the strict flag). Compared by EQUALITY everywhere:
+    'off' is a truthy string, and a truthiness test would derive under it."""
+    if v is True:
+        return 'strict'
+    if v is False or v is None:
+        return 'off'
+    if v in ('off', 'strict', 'auto'):
+        return v
+    raise ValueError(f"derive_decaps {v!r}: expected 'off', 'strict' or "
+                     f"'auto'")
+
+
+def _emitted_basis(decaps, budget, conns, blocks) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if 'max_distance_mm' in (decaps or {}):
+        out['decaps.max_distance_mm'] = 'observed_baseline'
+    for k in sorted(budget or {}):
+        out[f'legality_budget.{k}'] = 'observed_baseline'
+    for c in conns or ():
+        for k in ('edge', 'overhang_mm'):
+            if k in c:
+                out[f"edge_connectors[{c['ref']}].{k}"] = 'observed_baseline'
+    for b in blocks or ():
+        if 'side' in b:
+            out[f"blocks[{b['name']}].side"] = 'observed_baseline'
+    return out
+
+
 def emit_intent(pcb_data, pcb_file: str, *,
                 group_sources: Sequence[str] = ('kicad', 'sheet'),
                 zone_pad_mm: float = 1.0,
                 declare_classes: bool = False,
-                derive_decaps: bool = False) -> Dict:
+                derive_decaps='off', brief_fragment=None) -> Dict:
     """A starter intent READ OFF the board, for a human or a model to edit.
 
     Everything here describes what the board already is. The envelope is
@@ -6606,12 +6743,39 @@ def emit_intent(pcb_data, pcb_file: str, *,
     # be able to tell "no cap is far from its IC" from "nobody measured", and
     # `decaps: {}` alone says only the second. The LIMIT is opt-in, because
     # declaring it is not a grading-only change -- see the seeder note below.
-    _census = decap_census(pcb_data)
+    # #959: caps the BRIEF's own proximity relations supersede are graded by
+    # those relations, so a derived limit is read off the rest.
+    _sup = (superseded_caps(pcb_data, (brief_fragment or {}).get('proximity'),
+                            brief_fragment) if brief_fragment else {})
+    _census = decap_census(pcb_data, exclude=sorted(_sup))
+    if _sup:
+        _census['superseded'] = dict(sorted(_sup.items()))
     _decaps: Dict[str, object] = {}
-    if derive_decaps:
+    _mode = _decap_mode(derive_decaps)
+    _derive = _mode == 'strict'
+    if _mode == 'auto':
+        # #959 (#1002): derive only off a PLACED board. Run 29's pile read
+        # `unplaced: false` and `partially_unplaced: true` (duplicate
+        # fraction 0.833), and a strict derivation there wrote a limit of 0.0.
+        from .placement_state import assess_placement
+        _st = assess_placement(pcb_data, pcb_file)
+        if _st.unplaced or _st.partially_unplaced:
+            _census['auto_withheld'] = (
+                'the board is not placed ('
+                + '; '.join(_st.reasons[:2])
+                + '): a limit read off it would bless a pile -- run 29\'s '
+                  'read 0.0')
+        else:
+            _derive = True
+    if _derive:
         _limit, _why = _decap_derivation(_census)
         if _limit is None:
-            _withheld['decaps.max_distance_mm'] = _why
+            if _mode == 'auto':
+                # Recorded where the roster reads it, NOT in budget_withheld:
+                # `auto` promises the default emit changes no exit code.
+                _census['auto_withheld'] = _why
+            else:
+                _withheld['decaps.max_distance_mm'] = _why
         else:
             _decaps['max_distance_mm'] = _limit
             # Repeated inside the census DELIBERATELY: a hand edit of
@@ -6619,6 +6783,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # detectable rather than a silent lie about where the number came
             # from.
             _census['emitted_max_distance_mm'] = _limit
+            _census['decaps_basis'] = 'observed_baseline'
     # What declaring this key COSTS, measured, next to the number itself.
     # `seeder.seed_from_intent` uses its presence to pull caps out of radial
     # zone packing into stage 2.5, which seats one cap per supply pin -- a
@@ -6729,6 +6894,11 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # to `must_lock` by hand if you want the lock GRADED as a
             # requirement.
             'file_locked': locked,
+            # #959 comment 3.2: every number this emitter chose, labelled as
+            # what it is -- a baseline OBSERVED on this board, not a
+            # requirement anyone declared. Keyed by intent path; a brief
+            # merged over it re-labels what it declares.
+            'basis': _emitted_basis(_decaps, _budget, conns, blocks),
         },
     }
 

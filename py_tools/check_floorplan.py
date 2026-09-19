@@ -61,6 +61,12 @@ from placement.floorplan import (declaration_ledger, format_roster,
                                  rule_roster, stale_dispositions)
 from placement.placement_state import UNPLACED_EXIT, gate_or_exit
 from placement.groups import GroupError, parse_sources
+
+#: What `--emit-intent` does about a decap limit when no flag says (#959,
+#: #1002): 'off' | 'strict' | 'auto'. Flipped only on the A/B gate in
+#: tests/test_placement_ab.py (rows `decaps-auto-*`): improve on N-1 boards,
+#: regress on none.
+DECLARE_DECAPS_DEFAULT = 'off'
 from placement.floorplan import IntentError
 
 VIOLATIONS_EXIT = 4
@@ -89,7 +95,20 @@ def build_parser():
                         'the proximity rule, which is the detection working. '
                         'Default off to preserve the observation-only round '
                         'trip')
-    p.add_argument('--declare-decaps', action='store_true',
+    p.add_argument('--no-declare-decaps', dest='declare_decaps',
+                   action='store_const', const='off',
+                   help='with --emit-intent: derive NO decaps limit, on any '
+                        'board (#959: the explicit OFF arm of the tri-state)')
+    p.add_argument('--auto-declare-decaps', dest='declare_decaps',
+                   action='store_const', const='auto',
+                   help='with --emit-intent: derive decaps.max_distance_mm '
+                        'only off a PLACED board with a sufficient census, '
+                        'labelled an observed regression baseline; a pile '
+                        'records why in context.decap_census.auto_withheld '
+                        'rather than a limit of 0.0 (#959)')
+    p.add_argument('--declare-decaps', dest='declare_decaps',
+                   action='store_const', const='strict',
+                   default=DECLARE_DECAPS_DEFAULT,
                    help='with --emit-intent: ALSO derive decaps.'
                         'max_distance_mm from the board\'s own measured '
                         'tethers (#704), so rule_decap_distance can fire on '
@@ -364,7 +383,8 @@ def main(argv=None):
         try:
             doc = emit_intent(pcb, args.board, group_sources=sources or (),
                               declare_classes=args.declare_classes,
-                              derive_decaps=args.declare_decaps)
+                              derive_decaps=args.declare_decaps,
+                              brief_fragment=brief_fragment or None)
         except UntrustworthyOutline as exc:
             print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
             return UNPLACED_EXIT

@@ -116,7 +116,7 @@ ROWS = [
     # below -- which breaks the ELECTION so the tripwire has something to
     # catch, and is what proves the key is not decoration.
     ('the-partition-does-not-add-up', 'fp',
-     "        'unaccounted': scope - n - len(beyond) - len(orphans),\n",
+     "        'unaccounted': scope - n - len(beyond) - len(orphans) - n_sup,\n",
      "        'unaccounted': 0,\n",
      (T704,), 'SURVIVED'),
 
@@ -211,7 +211,9 @@ ROWS = [
     # Emptying the table is the real "the rule runs even when the board cannot
     # answer" -- which is the vacuous pass `--require-rules` exists to catch.
     ('the-arm-table-is-empty-so-the-rule-always-runs', 'fp',
-     "_ARM = {'decap_pin_distance': _arm_decap_pins}\n",
+     "_ARM = {'decap_pin_distance': _arm_decap_pins,\n"
+     "        'decap_distance': _arm_decap_superseded,\n"
+     "        'decap_ungraded': _arm_decap_superseded}\n",
      "_ARM = {}\n",
      (T705,), 'KILLED'),
 
