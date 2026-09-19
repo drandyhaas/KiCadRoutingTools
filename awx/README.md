@@ -200,8 +200,8 @@ things were wrong, in the order they surfaced:
 
 | K | 9 | 18 | 26 | 32 | 38 | 42 | 44 |
 |---|---|---|---|---|---|---|---|
-| lanes, mm (best -> trimmed + taut pack) | 185 -> 182 | 393 -> 384 | 662 -> 630 | 801 -> 769 | 954 -> 916 | 1054 -> 999 | 1203 -> 1116 |
-| run copper, mm | 221 -> 218 | 468 -> 459 | 774 -> 736 | 971 -> 940 | 1171 -> 1122 | 1300 -> 1238 | 1477 -> 1373 |
+| lanes, mm (best -> trimmed + taut pack) | 185 -> 181 | 393 -> 383 | 662 -> 630 | 801 -> 769 | 954 -> 915 | 1054 -> 996 | 1203 -> 1104 |
+| run copper, mm | 221 -> 217 | 468 -> 458 | 774 -> 736 | 971 -> 940 | 1171 -> 1121 | 1300 -> 1235 | 1477 -> 1350 |
 
 Vias unchanged on every rung, 0 open, 0 DRC with and without the
 margin, every lane packed.
@@ -214,14 +214,21 @@ margin, every lane packed.
   is kept only when the pair's copper is shorter, no lifted lane gained
   a via, and the scoped DRC over the nets involved names nothing new;
   else every piece goes back. 1.2-1.4 s an attempt. On this article it
-  kept nothing, and the log says why: DQ13's 11 mm backtrack at K44 is
-  walled by A10's own STUB (a second far-face tooth in the same field),
-  which no re-lay lifts; A13's neighbour DQS1_N comes back from the
-  router with four vias where it had two, and is refused. Those two are
-  the planner's -- the away-face ban prevents the tooth at the root.
-  And a lane that wraps the long way round its bundle at the same via
-  count is invisible to the chain's judge, which prices vias and never
-  copper.
+  keeps nothing: A13's neighbour DQS1_N comes back from the router with
+  four vias where it had two, and is refused.
+* **Why the south tooth needed no re-lay.** DQ13's 11 mm backtrack at
+  K44 was walled by A10 -- but by A10's own HAIRPIN, one row over: its
+  far-face stub and its lane straight back, both crossing DQ13's splice
+  line. A10's own trim removes exactly that, and the pre-pass had asked
+  DQ13 first, in ladder order. The pre-pass now runs in ROUNDS, the stub
+  chains walked again on the board as it stands each round (a chain
+  walked once still describes the tail a splice cut, and the next round
+  books the saving twice), until a round splices nothing: DQ13 goes in
+  round two, 22.5 mm, and round three finds nothing. 56 s for the whole
+  K44 pack, the rounds' scoped DRC calls being most of it.
+* What a lane keeps after all that is its wrap: a lane that goes the long
+  way round its bundle at the same via count is invisible to the chain's
+  judge, which prices vias and never copper.
 
 **The source stub trim, the served-under-the-part rule, the away-face
 ban** (2026-09-19, the second pass over the zynq article). Three things

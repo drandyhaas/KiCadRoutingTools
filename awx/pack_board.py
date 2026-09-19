@@ -322,35 +322,33 @@ def pack_whole(a):
     # whole. Vias never change; the scoped DRC decides each splice.
     ctx.src_chain, ctx.src_trims, ctx.tooth_layer, ctx.src_trim_refused = {}, {}, {}, {}
     _k4 = lambda x, y: (round(x, 4), round(y, 4))          # noqa: E731
-    for c in corridors:
-        nm = c.members[0]
-        nid, net = byname[nm]
-        tip0 = ends[nm][0]
-        stubs = [s_ for s_ in pcb.segments if s_.net_id == nid and id(s_) not in {id(x) for x in c.out_segs[nm]}]
-        # the stub's end need not be the lane's first vertex to the micron
-        # (DQ13: 7 um apart, joined by the copper's own width): the nearest
-        # stub end within a track's width is the chain's start
-        best_ = None
-        for s_ in stubs:
-            for ex, ey in ((s_.start_x, s_.start_y), (s_.end_x, s_.end_y)):
-                d_ = math.hypot(ex - tip0[0], ey - tip0[1])
-                if d_ <= 0.15 and (best_ is None or d_ < best_[0]):
-                    best_ = (d_, (ex, ey), s_)
-        if best_ is None:
-            if nm in os.environ.get('PK_WHOLE_DUMP', '').split(','):
-                print(f'  DUMP {nm}: no stub end within 0.15 mm of the tip {tip0}')
-            continue
-        start_ = _k4(*best_[1])
-        lay = best_[2].layer
-        vias_n = [(v.x, v.y, v.size / 2) for v in pcb.vias if v.net_id == nid]
-        pads_n = [(p_.global_x, p_.global_y, max(p_.size_x, p_.size_y) / 2) for p_ in net.pads]
 
-        def _stop(pt, _v=vias_n, _p=pads_n):
-            return any(math.hypot(pt[0] - ax, pt[1] - ay) <= max(0.02, ar) for ax, ay, ar in _v + _p)
-        ctx.src_chain[nm] = br._walk_stub(stubs, start_, lay, _stop, _k4, max_hops=5000)
-        if nm in os.environ.get('PK_WHOLE_DUMP', '').split(','):
-            print(f'  DUMP {nm}: tip {tip0} on {lay}, {len(stubs)} stub segs, stub end {best_[0]*1000:.0f} um off, chain {len(ctx.src_chain[nm])} piece(s) '
-                  f'{sum(math.hypot(x[0].end_x - x[0].start_x, x[0].end_y - x[0].start_y) for x in ctx.src_chain[nm]):.1f} mm; lane {len(c.out_segs[nm])} segs')
+    def walk_chains():
+        """Every lane's stub chain from its tooth tip toward the pad, on
+        the board AS IT STANDS -- walked again each round, so a stub a
+        splice has cut is seen cut (else the next round re-splices the
+        tail that is gone and books the saving twice)."""
+        ctx.src_chain.clear()
+        for c in corridors:
+            nm = c.members[0]
+            nid, net = byname[nm]
+            tip0 = ends[nm][0]
+            lane_ids = {id(x) for x in c.out_segs[nm]}
+            stubs = [s_ for s_ in pcb.segments if s_.net_id == nid and id(s_) not in lane_ids]
+            best_ = None
+            for s_ in stubs:
+                for ex, ey in ((s_.start_x, s_.start_y), (s_.end_x, s_.end_y)):
+                    d_ = math.hypot(ex - tip0[0], ey - tip0[1])
+                    if d_ <= 0.15 and (best_ is None or d_ < best_[0]):
+                        best_ = (d_, (ex, ey), s_)
+            if best_ is None:
+                continue
+            vias_n = [(v.x, v.y, v.size / 2) for v in pcb.vias if v.net_id == nid]
+            pads_n = [(p_.global_x, p_.global_y, max(p_.size_x, p_.size_y) / 2) for p_ in net.pads]
+
+            def _stop(pt, _v=vias_n, _p=pads_n):
+                return any(math.hypot(pt[0] - ax, pt[1] - ay) <= max(0.02, ar) for ax, ay, ar in _v + _p)
+            ctx.src_chain[nm] = br._walk_stub(stubs, _k4(*best_[1]), best_[2].layer, _stop, _k4, max_hops=5000)
     _mm = 0.0
     by_nm0 = {c.members[0]: c for c in corridors}
     rcfg = None
@@ -366,15 +364,28 @@ def pack_whole(a):
             kw['board_edge_clearance'] = float(edge_)
         rcfg = cn.make_config(pcb, br.TRACK, br.CLEAR, br.VIA_SIZE, br.VIA_DRILL, grid_step=0.025, **kw)
     n_relay = 0
-    for c in corridors:
-        nm = c.members[0]
-        ctx.src_trim_refused.pop(nm, None)
-        got = br.note_source_joint(ctx, nm, c.out_segs[nm], c.out_vias[nm], a.board, log)
-        if not got and rcfg is not None and ctx.src_trim_refused.get(nm):
-            got = _relay(ctx, pcb, byname, by_nm0, nm, ctx.src_trim_refused[nm], rcfg, a.board, _sr, log)
+    # ROUNDS: a splice refused because another lane's backtrack stood in
+    # the way (K44 DQ13, walled by A10's own hairpin one row over) is
+    # clear once that lane's own trim has run -- which, in ladder order,
+    # may be later in the same round. Every round re-asks every lane
+    # until a round changes nothing.
+    for _round in range(4):
+        changed = 0
+        walk_chains()
+        for c in corridors:
+            nm = c.members[0]
+            ctx.src_trim_refused.pop(nm, None)
+            got = br.note_source_joint(ctx, nm, c.out_segs[nm], c.out_vias[nm], a.board, log)
+            if not got and rcfg is not None and ctx.src_trim_refused.get(nm):
+                got = _relay(ctx, pcb, byname, by_nm0, nm, ctx.src_trim_refused[nm], rcfg, a.board, _sr, log)
+                if got:
+                    n_relay += 1
             if got:
-                n_relay += 1
-        _mm += got
+                changed += 1
+            _mm += got
+        if not changed:
+            break
+        log(f'  trim round {_round + 1}: {changed} lane(s) spliced')
     if ctx.src_trims:
         log(f'source stub trim (finished board): {len(ctx.src_trims)} lane(s) spliced, -{_mm:.1f} mm '
             f'({", ".join(sorted(ctx.src_trims))}){f", {n_relay} by a coupled re-lay" if n_relay else ""}')
