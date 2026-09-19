@@ -1214,9 +1214,10 @@ never fire on an auto-emitted intent. With `--declare-decaps` it derives
   auto emit moves no exit code.
 - **The number is labelled** `observed_baseline` in `context.basis`, alongside
   every other number the emitter read off the board (the legality budget, the
-  observed edges and overhangs, block sides and zones, `assembly.sides`); the
-  module's own tolerances (`envelope.tolerance_mm`,
-  `defaults.zone_tolerance_mm`) are `derived_default`. The `decap_distance`
+  observed edges and overhang bands, block sides and zones, `assembly.sides`);
+  the module's own constants are `derived_default` (`envelope.tolerance_mm`,
+  `defaults.zone_tolerance_mm`, and an overhang band that is a class default,
+  the sanity cap or the connector-affinity floor rather than a reading). The `decap_distance`
   message says "an observed regression baseline read off a board, not an
   electrical requirement" -- only while the limit is still the one the census
   recorded (`emitted_max_distance_mm`): a hand-edited limit loses the label

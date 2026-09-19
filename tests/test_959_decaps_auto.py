@@ -122,10 +122,19 @@ def _labelled(doc):
     for k in doc.get('legality_budget') or {}:
         assert basis.get(f'legality_budget.{k}') == 'observed_baseline', k
     for c in doc['edge_connectors']:
-        for k in ('edge', 'overhang_mm'):
-            if k in c:
-                assert basis[f"edge_connectors[{c['ref']}].{k}"] == \
-                    'observed_baseline', (k, c)
+        if 'edge' in c:
+            assert basis[f"edge_connectors[{c['ref']}].edge"] == \
+                'observed_baseline', c
+        if 'overhang_mm' in c:
+            # A band this module chose -- the sanity cap, a class default,
+            # the affinity floor -- is a default, not an observation.
+            want = ('derived_default' if c.get('overhang_capped')
+                    or c.get('class') == 'connector_affinity'
+                    or 'edge' not in c else None)
+            got = basis[f"edge_connectors[{c['ref']}].overhang_mm"]
+            assert got in ('observed_baseline', 'derived_default'), (got, c)
+            if want:
+                assert got == want, (got, c)
     for b in doc['blocks']:
         for k in ('side', 'zone'):
             if k in b:
@@ -158,21 +167,28 @@ def test_every_emitted_number_is_labelled():
     mb = merged['context']['basis']
     assert mb['edge_connectors[USB1].edge'] == 'declared', mb
     assert mb['edge_connectors[USB1].max_setback_mm'] == 'derived_default'
-    # A brief that declares an edge "unknown" drops the observed edge, and
-    # its label goes with it.
-    with open(os.path.join(REPO, 'tests', 'fixtures', '711',
-                           'esp_prog.design-brief.json'),
-              encoding='utf-8') as fh:
-        rb = json.load(fh)
-    rb['interfaces'][0]['edge'] = 'unknown'
-    for k in ('along_edge', 'along_edge_tolerance_mm'):
-        rb['interfaces'][0].pop(k, None)
-    f2, r2 = db.compile_with_consequences(db.brief_from_dict(rb, ''), pcb,
-                                          ESP)
-    m2 = db.merge_into_intent(fp.emit_intent(pcb, ESP), f2, r2)
-    usb = [c for c in m2['edge_connectors'] if c['ref'] == 'USB1'][0]
-    assert 'edge' not in usb, usb
-    assert 'edge_connectors[USB1].edge' not in m2['context']['basis']
+    # A band this module chose is a default: esp_prog's class-only entries
+    # (USB1's receptacle band, CON1/CON2's affinity floor).
+    eb = _labelled(fp.emit_intent(pcb, ESP, declare_classes=True))
+    for ref in ('USB1', 'CON1', 'CON2'):
+        assert eb[f'edge_connectors[{ref}].overhang_mm'] == \
+            'derived_default', (ref, eb)
+    # A brief that declares an edge "unknown" drops the OBSERVED edge, and
+    # its label goes with it -- on a part that has one (splitflap J12;
+    # esp_prog's USB1 emits no edge, so it could not show this).
+    spcb = parse_kicad_pcb(SPLIT)
+    sdoc = fp.emit_intent(spcb, SPLIT)
+    assert 'edge' in [c for c in sdoc['edge_connectors']
+                      if c['ref'] == 'J12'][0]
+    assert 'edge_connectors[J12].edge' in sdoc['context']['basis']
+    f2, r2 = db.compile_with_consequences(db.brief_from_dict(
+        {'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+         'board': 'splitflap_driver.kicad_pcb',
+         'interfaces': [{'ref': 'J12', 'edge': 'unknown'}]}, ''), spcb, SPLIT)
+    m2 = db.merge_into_intent(sdoc, f2, r2)
+    j12 = [c for c in m2['edge_connectors'] if c['ref'] == 'J12'][0]
+    assert 'edge' not in j12, j12
+    assert 'edge_connectors[J12].edge' not in m2['context']['basis']
     # The finding says what the number is -- while it still IS the
     # observation. The census repeats the emitted limit so a hand edit is
     # detectable: an edited limit is somebody's choice, and is not called an
@@ -227,6 +243,12 @@ def test_a_declared_relation_supersedes_the_inferred_tether():
     res = fp.grade(it, pcb, ESP)
     assert 'C3' in {v.ref for v in res.violations
                     if v.rule == 'decap_distance'}
+    # PARTIAL supersession leaves the dark rule OWED: C2 and C4 still have
+    # only an inferred tether, so P1 must still ask.
+    dark = _intent_with(pcb, ESP, frag)
+    row = {r['rule']: r for r in fp.rule_roster(
+        dark, pcb, ESP, brief_fragment=frag)}['decap_distance']
+    assert row['needs_disposition'], row
     # A row only the PLAN carries (a hypothesis) supersedes nothing, and
     # neither does a brief row naming no pads on the cap's rail.
     plan_only = fp.superseded_caps(pcb, frag['proximity'], {'proximity': []})
@@ -264,9 +286,11 @@ def test_supersession_cannot_be_laundered():
     swapped = {'ref': 'U2', 'near': 'C3', 'max_mm': 2.0,
                'pads': {'C3': ['1'], 'U2': ['3']}}
     assert sup(swapped) == {'C3'}
-    # The default basis spelled out is the same claim as it left implicit.
+    # The default basis spelled out is the same claim as it left implicit;
+    # a DIFFERENT basis is not.
     implicit = {k: v for k, v in base.items() if k != 'basis'}
     assert sup(implicit, base) == {'C3'}
+    assert sup(base, dict(base, basis='body')) == set()
     # The emitted limit is NOT tightened by leaving superseded caps out: the
     # placement engines grade without the brief, and must pass the board it
     # was emitted from. The census discloses the supersession instead.
@@ -340,6 +364,14 @@ def test_the_cli_flags():
             out['--auto-declare-decaps'].get('max_distance_mm') is not None
         # No flag is the DEFAULT, which stays off (the A/B rejected auto).
         assert out[None] == out['--no-declare-decaps'], out
+        # An auto withholding is PRINTED, not only buried in the census.
+        p = os.path.join(tmp, 'pile_auto.json')
+        r = run_utils.check([sys.executable, '-X', 'utf8',
+                             run_utils.tool('check_floorplan.py'), PILE,
+                             '--emit-intent', p, '--auto-declare-decaps'],
+                            accept=True)
+        assert 'max_distance_mm not derived (auto)' in r.stdout, \
+            r.stdout[-1500:]
     # ...and the default is the constant, not whatever the first of three
     # shared-dest flags declared: argparse takes a shared dest's default from
     # the FIRST action, so a `default=` on the third was dead (Phase-6

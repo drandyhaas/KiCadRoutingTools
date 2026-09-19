@@ -190,7 +190,7 @@ ROWS = [
      (T_DECAPS,), 'KILLED'),
     ('emitted-numbers-unlabelled', 'fp',
      "            'basis': _emitted_basis(_decaps, _budget, conns, blocks,\n"
-     "                                    _assembly),",
+     "                                    _assembly, band_default),",
      "            'basis': {},",
      (T_DECAPS,), 'KILLED'),
     ('declared-relation-supersedes-nothing', 'fp',

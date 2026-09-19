@@ -4514,6 +4514,29 @@ _WITHHELD_RULE = {
 }
 
 
+def _arm_decap_superseded(ctx) -> Optional[str]:
+    """The decap distance rules have nothing of their own to grade when a
+    declared relation supersedes EVERY cap with an IC on its rail (#959).
+    Read by the roster's APPLICABILITY only: a dark decap rule then owes
+    nothing. It is deliberately not in `_ARM` -- an armed rule that abstains
+    makes the grade incomplete, and declaring MORE (a relation for every
+    cap) turned exit 0 into exit 4 (Phase-6 verifier). Armed, the rules run
+    and skip each superseded cap, which is the truth: every cap IS graded,
+    by its relation. The trade, taken deliberately: they then count in
+    `rules_run` while `proximity` does their measuring (see `_ARM` below).
+    """
+    spec = ctx.intent.decaps or {}
+    r = float(spec.get('search_radius_mm', groups_mod.DECAP_RADIUS_MM))
+    near, beyond, _orph = ctx.decap_populations(r)
+    caps = ({c for cs in near.values() for c, _d in cs}
+            | {c for c, _ic, _d in beyond})
+    sup = ctx.superseded()
+    if caps and caps <= set(sup):
+        return (f"every cap with an IC on its rail ({len(caps)}) is graded "
+                f"by a declared proximity relation instead")
+    return None
+
+
 #: A rule the intent ASKED for that this BOARD cannot answer -> the reason.
 #: `_wants` sees only the intent; this sees the board (#705).
 #:
@@ -4528,27 +4551,6 @@ _WITHHELD_RULE = {
 #: could not derive this key" -- a property of the intent, computed with no
 #: board. This is the opposite, and overloading that key would make
 #: `budget_abstained_keys` mean two things.
-def _arm_decap_superseded(ctx) -> Optional[str]:
-    """The decap distance rules have nothing of their own to grade when a
-    declared relation supersedes EVERY cap with an IC on its rail (#959).
-    Read by the roster's APPLICABILITY only: a dark decap rule then owes
-    nothing. It is deliberately not in `_ARM` -- an armed rule that abstains
-    makes the grade incomplete, and declaring MORE (a relation for every
-    cap) turned exit 0 into exit 4 (Phase-6 verifier). Armed, the rules run
-    and skip each superseded cap, which is the truth: every cap IS graded,
-    by its relation."""
-    spec = ctx.intent.decaps or {}
-    r = float(spec.get('search_radius_mm', groups_mod.DECAP_RADIUS_MM))
-    near, beyond, _orph = ctx.decap_populations(r)
-    caps = ({c for cs in near.values() for c, _d in cs}
-            | {c for c, _ic, _d in beyond})
-    sup = ctx.superseded()
-    if caps and caps <= set(sup):
-        return (f"every cap with an IC on its rail ({len(caps)}) is graded "
-                f"by a declared proximity relation instead")
-    return None
-
-
 _ARM = {'decap_pin_distance': _arm_decap_pins}
 
 
@@ -6368,7 +6370,7 @@ def _decap_mode(v) -> str:
 
 
 def _emitted_basis(decaps, budget, conns, blocks,
-                   assembly=None) -> Dict[str, str]:
+                   assembly=None, band_default=()) -> Dict[str, str]:
     """`{intent path: basis}` for every number the emitter chose: what it
     READ off this board is `observed_baseline`; a constant of this module is
     `derived_default`. The envelope RECT is not here -- it is the outline,
@@ -6384,7 +6386,9 @@ def _emitted_basis(decaps, budget, conns, blocks,
     for c in conns or ():
         for k in ('edge', 'overhang_mm'):
             if k in c:
-                out[f"edge_connectors[{c['ref']}].{k}"] = 'observed_baseline'
+                out[f"edge_connectors[{c['ref']}].{k}"] = (
+                    'derived_default' if k == 'overhang_mm'
+                    and c['ref'] in band_default else 'observed_baseline')
     for b in blocks or ():
         for k in ('side', 'zone'):
             if k in b:
@@ -6562,6 +6566,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
     conns = []
     declared = set()
     body_geometry = None     # #961: built only if an edged entry is emitted
+    #: #959: refs whose `overhang_mm` is a CONSTANT of this module (a class
+    #: default band, the sanity cap, the affinity floor) rather than a band
+    #: read off the part -- labelled `derived_default`, not an observation.
+    band_default = set()
     for ref in sorted(parts):
         amt = state.edge_gate.rect_outside_amount(parts[ref].rect)
         if amt > legality.EPS:
@@ -6598,11 +6606,13 @@ def emit_intent(pcb_data, pcb_file: str, *,
                     entry['class'] = pc.name
                     entry['source'] = 'auto-class'
                     entry['overhang_mm'] = default_band(pc.name, fp)
+                    band_default.add(ref)
                 elif over_cap:
                     entry['overhang_mm'] = {'min': 0.0,
                                             'max': round(_band_cap(ref), 3)}
                     entry['overhang_capped'] = True
                     entry['observed_overhang_mm'] = round(amt, 3)
+                    band_default.add(ref)
                     entry['note'] += (
                         f'; observed overhang {amt:.3f}mm exceeds any '
                         f'plausible band ({_band_cap(ref):.3f}mm) and is '
@@ -6632,6 +6642,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
                                   f'observation entry that blesses this is '
                                   f'how a 160mm displacement became a 160mm '
                                   f'spec allowance (run 10)')}
+                band_default.add(ref)
             else:
                 entry = {'ref': ref, 'edge': _nearest_edge(parts[ref].rect,
                                                            bounds),
@@ -6694,6 +6705,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 # ADVISORY severity only. A human upgrades by adding `edge`
                 # or `max_setback_mm` to the entry.
                 clr = state.edge_gate.edge_clearance(parts[ref].rect)
+                band_default.add(ref)
                 conns.append({
                     'ref': ref, 'class': pc.name, 'source': 'auto-class',
                     'overhang_mm': {'min': 0.0},
@@ -6708,6 +6720,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
             plaus = pose_plausible(pc.name, 0.0, clr)
             entry = {'ref': ref, 'class': pc.name, 'source': 'auto-class',
                      'overhang_mm': default_band(pc.name, fp)}
+            band_default.add(ref)
             if plaus:
                 entry['edge'] = _nearest_edge(parts[ref].rect, bounds)
             else:
@@ -6931,7 +6944,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # requirement anyone declared. Keyed by intent path; a brief
             # merged over it re-labels what it declares.
             'basis': _emitted_basis(_decaps, _budget, conns, blocks,
-                                    _assembly),
+                                    _assembly, band_default),
         },
     }
 

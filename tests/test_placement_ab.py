@@ -549,11 +549,11 @@ ROWS += [
                  'tethered cap at its supply pin; the OFF arm packs them '
                  'with their zone. Graded under ONE auto intent.')
                 if b not in _FLAT else
-                ('MECHANISM: STRUCTURALLY neutral. With no zoned block, '
-                 'stage 2.5 has no IC placed before it to seat a cap at '
-                 '(seeder.py says so), so the limit moves nothing and both '
-                 'arms seed alike. A change detector for that, not a trial '
-                 'the term could pass.')),
+                ('MECHANISM: STRUCTURALLY neutral. Stage 2.5 seats a cap at '
+                 'the rail pads of PLACED ICs (seeder.py), and with no '
+                 'zoned block none is placed before it, so the limit moves '
+                 'nothing and both arms seed alike. A change detector for '
+                 'that, not a trial the term could pass.')),
     }
     # The first three emit NO zoned block (flat schematics); the last three
     # do, which is where the doc says a decap limit moves caps: out of zone
