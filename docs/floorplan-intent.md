@@ -208,7 +208,7 @@ inside it are yours.
 intent file at once — far too blunt for "this build learned a new field".
 
 So field-level compatibility is a second number. `READER_VERSION` (currently
-`3`) is what this build can act on, and an intent sets `min_reader` when a
+`6`) is what this build can act on, and an intent sets `min_reader` when a
 claim must not be silently ignored:
 
 ```jsonc

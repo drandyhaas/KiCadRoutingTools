@@ -45,7 +45,7 @@ already grade and the existing seat search already honours — ordinarily an
 | `keepouts[]` | `keepouts[]`, verbatim; `kind` and `why` move into `context` | `context.source` |
 | `proximity[]` | `proximity[]`, one row per member of a list `ref`; `why` and `requirement` move into `context` | `source: "brief"`, `context.proximity_note` |
 | `fixed[]` | `context.brief.fixed` — carried, never asserted (see below) | — |
-| `mount_mode`, `cable_entry`, `cable_envelope_mm`, `product.user_top_side` | compiled by `connector_consequences` into `max_setback_mm`, `overhang_mm`, `side` and cable `keepouts[]` -- see [below](#connector-declarations-compile-to-clauses-959) | `context.basis`, `context.compiled_from` |
+| `mount_mode`, `cable_entry`, `cable_envelope_mm`, `product.user_top_side` | compiled by `connector_consequences` into `max_setback_mm`, `side` and cable `keepouts[]` -- see [below](#connector-declarations-compile-to-clauses-959) | `context.basis`, `context.compiled_from` |
 | `product`, `unknown[]` | `context` | — |
 
 ### The one key the compiler adds, and why that is the rule rather than an exception
@@ -130,9 +130,8 @@ it.
 not the intent's `assembly.sides` (#837), which is which faces the **fab
 populates**. The two are independent and cannot contradict each other: a
 back-populated board whose front carries the label is `assembly.sides: "B"`
-with `user_top_side: "F"`, and that is coherent. With a user-facing or
-perpendicular-cable connector, `user_top_side` compiles to that connector's
-face, graded as `edge_connector_side` at a fixed WARN that no search reads (see
+with `user_top_side: "F"`, and that is coherent. With a perpendicular-cable
+connector, `user_top_side` compiles to the face that cable plugs into, graded as `edge_connector_side` at a fixed WARN that no search reads (see
 below); on its own it is carried and graded by nothing, and the brief report
 says so under `not_graded`. `assembly.sides` is graded by `rule_assembly_side`
 and charged by
@@ -373,11 +372,16 @@ must gain no ERROR from it:
 | declaration | compiles to | basis |
 |---|---|---|
 | `mount_mode: edge_mount` | `max_setback_mm` 0.75 on the drawn body | `derived_default` -- tigard J7, an edge-mount header on a shipping board, sits 0.60 mm in, which the 0.5 mm receptacle seat fails |
-| `mount_mode: through_edge` | the body reaches the edge: `overhang_mm.min` 0 and `max_setback_mm` 0.75 (the floor alone is vacuous -- a body inside the board reads 0 overhang) | `derived_default` |
-| `mount_mode: top_mount` / `bottom_mount` | NOT held to the edge-receptacle seat; its declared edge and overhang still grade it | declared -- `user_facing` made 8 vertical headers edge receptacles and failed them all on the as-built boards |
-| `cable_entry: perpendicular_top` / `_bottom`, or `user_facing: true`, with `product.user_top_side` | `side`: the face the connector is on, graded as `edge_connector_side` | declared; a fixed **WARN** an intent cannot raise, read by no seat search, quench or repair |
-| `cable_entry: in_plane` | graded on the declared `edge`; with `edge: "unknown"` it is reported unmeasured | declared |
-| `cable_envelope_mm: {depth}` (in-plane) or `{clear}` (perpendicular) | a `cable:<REF>` keep-out -- a band `depth` in from the edge across the body, or the body plus `clear` on the cable's face -- ONLY for a FILE-locked part (off an unlocked one it would move with every seed) | declared |
+| `mount_mode: through_edge` | the same `max_setback_mm` 0.75: the body reaches the edge. How far PAST it is `overhang_mm`, declared or emitted, never derived -- an overhang floor of 0 is vacuous (a body inside the board reads 0 overhang), and writing one replaced the emitted `overhang_mm` and dropped its `max` | `derived_default` |
+| `mount_mode: top_mount` / `bottom_mount` | an exemption, reported `carried`: NOT held to the edge-receptacle seat; its declared edge and overhang still grade it, and nothing measures the mount itself | declared -- `user_facing` made 8 vertical headers edge receptacles and failed them all on the as-built boards |
+| `cable_entry: perpendicular_top` / `_bottom`, with `product.user_top_side` | `side`: the face the cable plugs into, graded as `edge_connector_side` | declared; a fixed **WARN** an intent cannot raise, read by no seat search, quench or repair |
+| `cable_entry: in_plane` | reported `carried`: the declared `edge` is already a clause and in-plane adds none; with `edge: "unknown"` it is reported unmeasured | declared |
+| `cable_envelope_mm: {depth}` (in-plane) or `{clear}` (perpendicular) | a `cable:<REF>` keep-out -- a band `depth` in from the edge across the body, or the body plus `clear` on the cable's face -- ONLY for a FILE-locked part (off an unlocked one it would move with every seed), and for an in-plane band only when the body reaches within `depth` of its declared edge. A `cable:<REF>` keep-out the brief declares itself wins | declared |
+
+`user_facing` compiles no face. That the user reaches a part says nothing
+about which face it sits on, and reading it as the viewing face put three
+B-side connectors on shipping boards (a DSUB-9, a JST-SH, a microSD) on the
+wrong one.
 
 **There is no default cable envelope.** No clearance passed every as-built
 control, and the in-plane band the literal mapping proposed lay inside each
@@ -390,8 +394,16 @@ declaration ledger (`derived:<clause id>`), with its basis. `JSON_SUMMARY`
 lists `derived_default_clauses` apart, so a default is never read as a
 validated claim. A value the brief declares itself always wins over a derived
 one, and drift is attributed to the declaration a key came from: the setback
-to `mount_mode`, the face to `cable_entry` or `user_facing`. A compiled key the
-brief no longer produces also drifts. A `side` needs `min_reader` 6.
+to `mount_mode`, the face to `cable_entry`. A compiled key the brief no
+longer produces also drifts, and so does a derived keep-out whose envelope the
+brief no longer states. A `side` needs `min_reader` 6.
+
+In the ledger, a clause about a keep-out is judged by the keep-out's NAME (a
+keep-out finding names the part that intrudes, never the connector), a fired
+`edge_connector_side` WARN reads `graded_warn`, a withheld envelope reads
+`abstained` and keeps coverage incomplete, and a `derived_default` number
+carries authority `assumption`: the declaration is the author's, the number is
+this code's.
 
 ## Deferred, and named rather than silently absent
 

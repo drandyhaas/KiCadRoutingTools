@@ -7151,7 +7151,8 @@ def format_roster(rows, stale=()) -> List[str]:
 #: is an armed row with no grade yet (the before-placement view); `dark` is
 #: an applicable gating rule nothing answers for; `carried` is a declared
 #: fact no rule measures.
-LEDGER_STATUSES = ('pending', 'graded_pass', 'graded_fail', 'carried',
+LEDGER_STATUSES = ('pending', 'graded_pass', 'graded_fail', 'graded_warn',
+                   'carried',
                    'unmeasured', 'unknown', 'uncovered', 'inapplicable',
                    'abstained', 'dispositioned', 'dark', 'policy',
                    'advisory')
@@ -7182,10 +7183,32 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
     """
     src = intent.source_path or None
     by_rule_err: Dict[str, set] = {}
+    # A keep-out finding names the INTRUDER, never the keep-out's owner, so
+    # a clause about a keep-out is judged by the keep-out's NAME; and the
+    # side finding is a fixed WARN, so it has its own set -- read as an
+    # ERROR it would never fire, and ignored it reads a WARN as a pass
+    # (Phase-5 verifier S1).
+    ko_err: set = set()
+    side_warn: set = set()
     if result is not None:
         for v in result.violations:
             if v.severity == ERROR:
                 by_rule_err.setdefault(v.rule, set()).add(v.ref or '')
+                if v.rule == 'keepout':
+                    ko_err.add(str((v.measured or {}).get('keepout') or ''))
+            if v.rule == 'edge_connector_side':
+                side_warn.add(v.ref or '')
+
+    def _verdict(grader, ref, keepout=None):
+        if result is None:
+            return 'pending'
+        if grader == 'keepout':
+            return 'graded_fail' if keepout in ko_err else 'graded_pass'
+        if grader == 'edge_connector_side':
+            hit = side_warn if ref is None else side_warn & {ref}
+            return 'graded_warn' if hit else 'graded_pass'
+        return ('graded_fail' if (ref or '') in by_rule_err.get(grader, set())
+                else 'graded_pass')
     out: List[Dict[str, object]] = []
     for r in rows or ():
         name = r['rule']
@@ -7239,12 +7262,11 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
     for c in (coverage or {}).get('clauses') or ():
         st = c.get('state')
         if st == 'graded':
-            if result is None:
-                status = 'pending'
-            else:
-                refs = by_rule_err.get(c.get('rule') or '', set())
-                status = ('graded_fail'
-                          if (c.get('ref') or '') in refs else 'graded_pass')
+            grader = c.get('grader') or c.get('rule') or ''
+            status = _verdict(
+                grader, c.get('ref'),
+                keepout=(c.get('keepout') or (
+                    c.get('ref') if c.get('kind') == 'keepouts' else None)))
         elif c.get('unmeasured'):
             status = 'unmeasured'
         else:
@@ -7264,22 +7286,28 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
     # from a declared value so it is never read as a validated claim.
     for r in consequences or ():
         grader = r.get('grader')
-        refs_err = by_rule_err.get(
-            'edge_connector' if grader == 'edge_connector_side' else grader,
-            set())
-        if r.get('status') == 'unmeasured':
+        cstat = r.get('status')
+        if cstat == 'unmeasured':
             status = 'unmeasured'
-        elif r.get('status') != 'compiled':
+        elif cstat == 'carried':
+            status = 'carried'
+        elif cstat != 'compiled':
             status = 'abstained'
         else:
-            status = ('pending' if result is None
-                      else 'graded_fail' if (
-                          grader != 'edge_connector_side'
-                          and (r.get('ref') or '') in refs_err)
-                      else 'graded_pass')
+            to = str(r.get('compiled_to') or '')
+            status = _verdict(grader, r.get('ref'),
+                              keepout=(to[len('keepouts['):-1]
+                                       if to.startswith('keepouts[')
+                                       else None))
         out.append({
             'id': f"derived:{r['id']}", 'kind': 'derived_clause',
-            'source': brief_source, 'authority': 'declared',
+            'source': brief_source,
+            # A default dimension is nobody's declaration: the DECLARATION
+            # (`mount_mode`) is the brief's, the number is this code's
+            # (verifier N5) -- the same authority a staging default has.
+            'authority': ('assumption'
+                          if r.get('basis') == 'derived_default'
+                          else 'declared'),
             'consequence': r.get('compiled_to'), 'grader': grader,
             'status': status, 'basis': r.get('basis') or 'declared',
             'attribution': 'rule+ref', 'why': r.get('why') or '',
@@ -7337,8 +7365,12 @@ def ledger_summary(ledger) -> Dict[str, object]:
         counts[row['status']] = counts.get(row['status'], 0) + 1
     return {
         'ledger_status': {k: v for k, v in counts.items() if v},
+        # A `derived:` row that is carried (an exemption, a restatement)
+        # always stands beside the DECLARED clause it came from, which is
+        # listed already -- the fact is counted once, by its own id.
         'carried_facts': sorted(r['id'] for r in ledger
-                                if r['status'] == 'carried'),
+                                if r['status'] == 'carried'
+                                and r.get('kind') != 'derived_clause'),
         'unmeasured_facts': sorted(r['id'] for r in ledger
                                    if r['status'] == 'unmeasured'),
         'derived_default_clauses': sorted(

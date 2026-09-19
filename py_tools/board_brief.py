@@ -625,7 +625,7 @@ def fit_section(pcb, pcb_file, extents, step, clearance, edge, skipped):
 # tell which half of a brief for an unplaced board to believe -- and every
 # section here used to read alike.
 SOURCES_NOTE = {
-    'design_brief': 'placement.design_brief.load_brief + compile_brief '
+    'design_brief': 'placement.design_brief.load_brief + compile_with_consequences '
                     '[requires: a sibling <board>.design-brief.json, or '
                     '--brief. This is the only DECLARED section: every other '
                     'one is measured or inferred from the board]',

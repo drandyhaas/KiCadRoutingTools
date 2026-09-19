@@ -69,29 +69,91 @@ def _grade(board, frag, rep, pcb=None):
     return fp.grade(fp.intent_from_dict(doc, ''), pcb, board), doc
 
 
+def _ledger(board, frag, rep, pcb=None):
+    """Grade, then build coverage and the ledger the way check_floorplan
+    does. `(coverage, {ledger id: row}, doc)`."""
+    res, doc = _grade(board, frag, rep, pcb=pcb)
+    cov = db.clause_coverage(rep, doc, rules_run=res.rules_run,
+                             abstained=res.budget_abstained,
+                             drifted_ids=db.drifted_clause_ids(doc, frag))
+    led = fp.declaration_ledger(res.intent, res.roster, result=res,
+                                coverage=cov, brief_source='b.json',
+                                consequences=rep.get('consequences'))
+    return cov, {r['id']: r for r in led}, doc
+
+
 def test_each_declaration_compiles_or_says_why_not():
     """Acceptance 4: every connector declaration either compiles to a clause
     with a grader and a basis, or is reported unmeasured / withheld with the
     missing dimension named."""
     pcb = parse_kicad_pcb(ESP)
-    rows = _rows(db.compile_with_consequences(_brief(BRIEF_711), pcb, ESP))
+    frag, rep = db.compile_with_consequences(_brief(BRIEF_711), pcb, ESP)
+    rows = _rows((frag, rep))
     usb = rows['interfaces[USB1].mount_mode']
     assert usb['status'] == 'compiled' and usb['basis'] == 'derived_default'
     assert usb['compiled_to'] == 'edge_connectors[USB1].max_setback_mm'
     assert usb['value'] == db.EDGE_MOUNT_SETBACK_MM == 0.75, usb
     con2 = rows['interfaces[CON2].mount_mode']
-    assert con2['status'] == 'compiled' and con2['value'][
-        'max_setback_mm'] == 0.75, con2
+    assert con2['status'] == 'compiled' and con2['value'] == 0.75, con2
     side = rows['interfaces[CON2].cable_entry']
     assert side['grader'] == 'edge_connector_side' and side['value'] == 'F'
-    assert rows['interfaces[USB1].user_facing']['value'] == 'F', rows
+    # `user_facing` compiles no face (it put B-side connectors on F).
+    assert 'interfaces[USB1].user_facing' not in rows, rows
+    assert 'side' not in [c for c in frag['edge_connectors']
+                          if c['ref'] == 'USB1'][0]
+    # in_plane with a declared edge restates that edge: carried, not a
+    # second clause; without one it is unmeasured.
+    assert rows['interfaces[USB1].cable_entry']['status'] == 'carried'
     for ref in ('USB1', 'CON2'):
         env = rows[f'interfaces[{ref}].cable_envelope_mm']
         assert env['status'] == 'unmeasured', env
         assert 'no default' in env['why'] and 'z-height' in env['why'], env
+    # What compiled leaves `not_graded`; the viewing face is used by CON2's
+    # perpendicular cable, so it leaves too. What did not compile stays.
+    ng = set(rep['not_graded'])
+    assert not {'interfaces[USB1].mount_mode', 'interfaces[CON2].mount_mode',
+                'interfaces[CON2].cable_entry',
+                'product.user_top_side'} & ng, ng
+    assert 'interfaces[USB1].cable_entry' in ng, ng
+    with open(BRIEF_711, encoding='utf-8') as fh:
+        raw = json.load(fh)
+    raw['interfaces'][0]['edge'] = 'unknown'
+    raw['interfaces'][0].pop('along_edge', None)
+    raw['interfaces'][0].pop('along_edge_tolerance_mm', None)
+    r2 = _rows(db.compile_with_consequences(db.brief_from_dict(raw, ''),
+                                            pcb, ESP))
+    assert r2['interfaces[USB1].cable_entry']['status'] == 'unmeasured', r2
     print(f"  PASS: {len(rows)} consequence rows on fixture 711; edge_mount "
-          f"and through_edge compile, the face compiles, the envelope is "
-          f"unmeasured and says why")
+          f"and through_edge compile, a perpendicular cable compiles the "
+          f"face and user_facing does not, in_plane is carried, the envelope "
+          f"is unmeasured and says why")
+
+
+def test_through_edge_keeps_the_emitted_overhang_cap():
+    """Phase-5 verifier B1: through_edge wrote `overhang_mm {min: 0}`, the
+    merge replaced the emitted `{min 0, max 2.0}` wholesale, and a part with
+    no `max` loses its off-outline exemption -- a through-edge connector
+    hanging correctly past the edge graded as an off-board part."""
+    pile = os.path.join(REPO, 'tests', 'fixtures', '959',
+                        'run29_pile.kicad_pcb')
+    ppcb = parse_kicad_pcb(pile)
+    rawb = {'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+            'board': 'esp_prog.kicad_pcb', 'product': {'user_top_side': 'F'},
+            'interfaces': [{'ref': 'USB1', 'edge': 'west',
+                            'user_facing': True,
+                            'mount_mode': 'through_edge'}]}
+    frag, rep = db.compile_with_consequences(_brief(rawb), ppcb, pile)
+    emitted = fp.emit_intent(ppcb, pile, declare_classes=True)
+    em = [c for c in emitted['edge_connectors'] if c['ref'] == 'USB1'][0]
+    assert (em.get('overhang_mm') or {}).get('max') is not None, em
+    merged = db.merge_into_intent(emitted, frag, rep)
+    mu = [c for c in merged['edge_connectors'] if c['ref'] == 'USB1'][0]
+    assert mu['overhang_mm'] == em['overhang_mm'], (em, mu)
+    assert mu['max_setback_mm'] == 0.75, mu
+    fu = [c for c in frag['edge_connectors'] if c['ref'] == 'USB1'][0]
+    assert 'overhang_mm' not in fu, fu
+    print(f"  PASS: through_edge compiles the setback and leaves the emitted "
+          f"overhang {em['overhang_mm']} -- and its exemption -- intact")
 
 
 def test_the_as_built_briefs_gain_no_error():
@@ -116,9 +178,19 @@ def test_the_as_built_briefs_gain_no_error():
         assert not new, (name, new)
         assert any('max_setback_mm' in c or 'side' in c
                    for c in doc.get('edge_connectors') or ()), name
+        # ABSOLUTE, not only a delta (verifier S7): the plain arm already
+        # holds a user-facing part to the 0.5 mm seat, so a delta cannot see
+        # the setback shrink. Every part declared edge- or through-mounted
+        # must SEAT on its shipping board.
+        mounted = {i['ref'] for i in brief.interfaces
+                   if i.get('mount_mode') in ('edge_mount', 'through_edge')}
+        unseated = sorted({v.ref for v in after.errors
+                           if v.rule == 'edge_connector' and v.ref in mounted
+                           and 'seated' in v.message})
+        assert not unseated, (name, unseated)
         checked += 1
     print(f"  PASS: {checked} as-built boards gain no ERROR from the compiled "
-          f"connector clauses")
+          f"connector clauses, and every edge/through-mounted part seats")
 
 
 def test_a_vertical_mount_is_not_held_to_the_seat():
@@ -132,7 +204,7 @@ def test_a_vertical_mount_is_not_held_to_the_seat():
             'interfaces': [{'ref': 'CON2', 'edge': 'east',
                             'user_facing': True}]}
     seat = []
-    for mm in (None, 'top_mount'):
+    for mm in (None, 'top_mount', 'bottom_mount'):
         iface = dict(rawb['interfaces'][0])
         if mm:
             iface['mount_mode'] = mm
@@ -141,8 +213,25 @@ def test_a_vertical_mount_is_not_held_to_the_seat():
         res, _doc = _grade(ESP, frag, rep, pcb=pcb)
         seat.append([v for v in res.errors if v.rule == 'edge_connector'
                      and v.ref == 'CON2' and 'seated' in v.message])
-    assert seat[0] and not seat[1], seat
-    print("  PASS: user_facing alone fails CON2's seat; top_mount does not")
+        if mm:
+            # An exemption is REPORTED, as carried: it grades nothing of its
+            # own, so it is neither a pass nor a fail.
+            row = _rows((frag, rep))['interfaces[CON2].mount_mode']
+            assert row['status'] == 'carried' and \
+                'does not apply' in row['why'], row
+            cov, led, _d = _ledger(ESP, frag, rep, pcb=pcb)
+            st = {c['id']: c['state'] for c in cov['clauses']}
+            assert st['interfaces[CON2].mount_mode'] == 'carried', st
+            # What grades `user_facing` is the seat it is exempt from.
+            assert st['interfaces[CON2].user_facing'] == 'carried', st
+            assert led['derived:interfaces[CON2].mount_mode'][
+                'status'] == 'carried', led
+            # And no face: user_facing names none (verifier S3).
+            assert 'side' not in [c for c in frag['edge_connectors']
+                                  if c['ref'] == 'CON2'][0]
+    assert seat[0] and not seat[1] and not seat[2], seat
+    print("  PASS: user_facing alone fails CON2's seat; top_mount and "
+          "bottom_mount do not, are reported carried, and compile no face")
 
 
 def test_the_face_is_advisory_and_steers_nothing():
@@ -220,6 +309,7 @@ def test_a_cable_keepout_needs_a_declared_envelope_and_a_lock():
                             'cable_envelope_mm': {'clear': 1.5}}]}
     pcb = parse_kicad_pcb(ESP)
     frag, rep = db.compile_with_consequences(_brief(rawb), pcb, ESP)
+    frag_u, rep_u = frag, rep
     env = _rows((frag, rep))['interfaces[CON2].cable_envelope_mm']
     assert env['status'] == 'withheld' and 'lock CON2' in env['why'], env
     assert not frag.get('keepouts'), frag.get('keepouts')
@@ -234,10 +324,54 @@ def test_a_cable_keepout_needs_a_declared_envelope_and_a_lock():
         # A stranger sitting in the envelope is a keepout finding.
         res, _doc = _grade(lb, frag, rep, pcb=lpcb)
         hits = {v.ref for v in res.violations if v.rule == 'keepout'
-                and v.block == 'cable:CON2' or (v.rule == 'keepout'
-                                                and 'cable:CON2'
-                                                in v.message)}
+                and (v.measured or {}).get('keepout') == 'cable:CON2'}
         assert 'CON2' not in hits, hits
+        # The ledger judges the clause by the keep-out's NAME -- the finding
+        # names the intruder, never CON2 (verifier S1). A clear wide enough
+        # to take in a neighbour fails it; a tiny one passes.
+        for clear, want in ((6.0, 'graded_fail'), (0.05, 'graded_pass')):
+            iface = dict(rawb['interfaces'][0],
+                         cable_envelope_mm={'clear': clear})
+            f2, r2 = db.compile_with_consequences(
+                _brief(rawb, interfaces=[iface]), lpcb, lb)
+            cov, led, _d = _ledger(lb, f2, r2, pcb=lpcb)
+            got = (led['derived:interfaces[CON2].cable_envelope_mm'][
+                'status'],
+                led['interfaces[CON2].cable_envelope_mm']['status'])
+            assert got == (want, want), (clear, got)
+        # A keep-out the brief declares under the same name WINS: the
+        # envelope is graded through it, never replaces it (verifier S4).
+        mine = {'name': 'cable:CON2', 'rect': [100.0, 100.0, 101.0, 101.0],
+                'sides': ['F', 'B']}
+        f3, r3 = db.compile_with_consequences(
+            _brief(rawb, keepouts=[mine]), lpcb, lb)
+        k = [x for x in f3['keepouts'] if x['name'] == 'cable:CON2']
+        assert len(k) == 1 and k[0]['rect'] == mine['rect'], k
+        row = _rows((f3, r3))['interfaces[CON2].cable_envelope_mm']
+        assert row['status'] == 'compiled' and 'declares' in row['why'], row
+        # A derived keep-out the brief stops deriving drifts, and so does
+        # one whose envelope changed shape (verifier S5, M15).
+        base_doc = db.merge_into_intent(
+            fp.emit_intent(lpcb, lb, declare_classes=True), frag, rep)
+        for env2 in (None, 'unknown', {'clear': 2.5}):
+            iface = dict(rawb['interfaces'][0])
+            if env2 is None:
+                iface.pop('cable_envelope_mm')
+            else:
+                iface['cable_envelope_mm'] = env2
+            f4, _r4 = db.compile_with_consequences(
+                _brief(rawb, interfaces=[iface]), lpcb, lb)
+            ids = db.drifted_clause_ids(base_doc, f4)
+            assert 'interfaces[CON2].cable_envelope_mm' in ids, (env2, ids)
+    # Unlocked, the envelope is WITHHELD: an abstention, so coverage is not
+    # complete and the ledger agrees on both rows (verifier S6).
+    cov, led, _d = _ledger(ESP, frag_u, rep_u, pcb=pcb)
+    st = {c['id']: c['state'] for c in cov['clauses']}
+    assert st['interfaces[CON2].cable_envelope_mm'] == 'abstained', st
+    assert not cov['complete'], cov
+    assert led['interfaces[CON2].cable_envelope_mm']['status'] == \
+        led['derived:interfaces[CON2].cable_envelope_mm']['status'] == \
+        'abstained', led
     for env_v, want in (('unknown', 'declared "unknown"'),
                         (None, 'no default is used')):
         iface = dict(rawb['interfaces'][0])
@@ -279,19 +413,38 @@ def test_changing_a_carried_field_now_drifts():
             db.brief_from_dict(r2, ''), pcb, ESP)
         return set(db.drifted_clause_ids(doc, frag))
     assert not drifted(lambda r: None), drifted(lambda r: None)
+    # The viewing face reaches the one part whose cable is perpendicular.
     top = drifted(lambda r: r['product'].__setitem__('user_top_side', 'B'))
-    assert {'interfaces[USB1].user_facing',
-            'interfaces[CON2].cable_entry'} <= top, top
+    assert top == {'interfaces[CON2].cable_entry'}, top
 
-    def mm(r):
-        r['interfaces'][0]['mount_mode'] = 'top_mount'
-    assert 'interfaces[USB1].mount_mode' in drifted(mm), drifted(mm)
+    # A compiled key the brief no longer produces (edge_mount -> nothing):
+    # USB1's setback is stale. Neither side is a vertical mount, so this is
+    # the stale-key check alone (M13).
+    def mm_gone(r):
+        r['interfaces'][0].pop('mount_mode')
+    assert 'interfaces[USB1].mount_mode' in drifted(mm_gone), drifted(mm_gone)
 
     def ce(r):
         r['interfaces'][1]['cable_entry'] = 'perpendicular_bottom'
     assert 'interfaces[CON2].cable_entry' in drifted(ce), drifted(ce)
-    print("  PASS: user_top_side, mount_mode and cable_entry each drift on "
-          "their own clause id")
+
+    # A vertical mount compiles NO key, so only the mount comparison can see
+    # it change (M14): an intent built with CON2 top_mount, graded against a
+    # brief that no longer says so.
+    r_v = json.loads(json.dumps(raw))
+    r_v['interfaces'][1]['mount_mode'] = 'top_mount'
+    base_v = db.compile_with_consequences(db.brief_from_dict(r_v, ''),
+                                          pcb, ESP)
+    doc_v = db.merge_into_intent(
+        fp.emit_intent(pcb, ESP, declare_classes=True), *base_v)
+    r_n = json.loads(json.dumps(r_v))
+    r_n['interfaces'][1].pop('mount_mode')
+    frag_n, _ = db.compile_with_consequences(db.brief_from_dict(r_n, ''),
+                                             pcb, ESP)
+    ids = set(db.drifted_clause_ids(doc_v, frag_n))
+    assert ids == {'interfaces[CON2].mount_mode'}, ids
+    print("  PASS: user_top_side, a dropped mount_mode, a vertical mount and "
+          "cable_entry each drift on their own clause id")
 
 
 def test_the_grade_path_derives_what_the_emit_path_did():
@@ -309,7 +462,9 @@ def test_the_grade_path_derives_what_the_emit_path_did():
                          '--no-mechanical'], accept=True)
         doc = json.load(open(out, encoding='utf-8'))
         usb = [c for c in doc['edge_connectors'] if c['ref'] == 'USB1'][0]
-        assert usb['max_setback_mm'] == 0.75 and usb['side'] == 'F', usb
+        con2 = [c for c in doc['edge_connectors'] if c['ref'] == 'CON2'][0]
+        assert usb['max_setback_mm'] == 0.75 and con2['side'] == 'F', (
+            usb, con2)
         assert doc['min_reader'] >= 6, doc.get('min_reader')
         js = os.path.join(tmp, 'g.json')
         r = subprocess.run([sys.executable, '-X', 'utf8',
@@ -332,8 +487,116 @@ def test_the_grade_path_derives_what_the_emit_path_did():
           "ledger lists derived_default clauses and the unmeasured envelope")
 
 
+def test_the_ledger_reads_the_face_and_the_viewing_side_honestly():
+    """A fired side WARN is not a pass (verifier S1); the viewing face is
+    GRADED once a perpendicular cable turns it into a side, and leaves the
+    carried list (S8); an unrelated edge error does not fail a clause whose
+    grader is the side finding."""
+    pcb = parse_kicad_pcb(ESP)
+    rawb = {'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+            'board': 'esp_prog.kicad_pcb', 'product': {'user_top_side': 'F'},
+            'interfaces': [{'ref': 'CON2', 'edge': 'west',
+                            'cable_entry': 'perpendicular_bottom'}]}
+    frag, rep = db.compile_with_consequences(_brief(rawb), pcb, ESP)
+    cov, led, _doc = _ledger(ESP, frag, rep, pcb=pcb)
+    # CON2 is on F; the bottom cable puts it on B -> the WARN fires. CON2 is
+    # also off its declared west edge -> an edge_connector ERROR on CON2,
+    # which must not decide the side clause's verdict.
+    assert led['derived:interfaces[CON2].cable_entry']['status'] == \
+        'graded_warn', led['derived:interfaces[CON2].cable_entry']
+    assert led['interfaces[CON2].cable_entry']['status'] == 'graded_warn'
+    st = {c['id']: c['state'] for c in cov['clauses']}
+    assert st['product.user_top_side'] == 'graded', st
+    assert led['product.user_top_side']['status'] == 'graded_warn', led[
+        'product.user_top_side']
+    assert 'product.user_top_side' not in fp.ledger_summary(
+        list(led.values()))['carried_facts']
+    rawb['interfaces'][0]['cable_entry'] = 'perpendicular_top'
+    frag, rep = db.compile_with_consequences(_brief(rawb), pcb, ESP)
+    cov, led, _doc = _ledger(ESP, frag, rep, pcb=pcb)
+    assert led['derived:interfaces[CON2].cable_entry']['status'] == \
+        'graded_pass', led['derived:interfaces[CON2].cable_entry']
+    # A default dimension is this code's number, not the author's.
+    rawb['interfaces'][0]['mount_mode'] = 'edge_mount'
+    frag, rep = db.compile_with_consequences(_brief(rawb), pcb, ESP)
+    _cov, led, _doc = _ledger(ESP, frag, rep, pcb=pcb)
+    assert led['derived:interfaces[CON2].mount_mode']['authority'] == \
+        'assumption', led['derived:interfaces[CON2].mount_mode']
+    print("  PASS: a fired side WARN reads graded_warn on both rows, the "
+          "viewing face is graded and not carried, a default is an "
+          "assumption")
+
+
+def test_an_in_plane_band_sits_on_the_declared_edge_or_not_at_all():
+    """The band runs in from the DECLARED edge (M21), and only when the
+    locked part reaches it: fixture 711 declares USB1 east while it ships
+    flush west, where an east band would flag only bystanders (N8)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        lb = _locked_copy(tmp, 'USB1')
+        lpcb = parse_kicad_pcb(lb)
+        bounds = lpcb.board_info.board_bounds
+        rawb = {'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                'board': 'esp_prog.kicad_pcb',
+                'interfaces': [{'ref': 'USB1', 'edge': 'west',
+                                'cable_entry': 'in_plane',
+                                'cable_envelope_mm': {'depth': 2.0}}]}
+        frag, rep = db.compile_with_consequences(_brief(rawb), lpcb, lb)
+        k = [x for x in frag['keepouts'] if x['name'] == 'cable:USB1'][0]
+        assert abs(k['rect'][0] - bounds[0]) < 1e-3 and abs(
+            k['rect'][2] - (bounds[0] + 2.0)) < 1e-3, (k, bounds)
+        rawb['interfaces'][0]['edge'] = 'east'
+        frag, rep = db.compile_with_consequences(_brief(rawb), lpcb, lb)
+        row = _rows((frag, rep))['interfaces[USB1].cable_envelope_mm']
+        assert row['status'] == 'withheld' and 'declared east edge' in row[
+            'why'], row
+        assert not any(x['name'] == 'cable:USB1'
+                       for x in frag.get('keepouts') or ()), frag
+    print("  PASS: the in-plane band runs in from the declared west edge, and "
+          "is withheld when the part does not reach its declared east edge")
+
+
+def test_an_envelope_needs_a_cable():
+    """M33: an envelope on an interface that declares no cable is refused."""
+    for ce in (None, 'none', 'unknown'):
+        iface = {'ref': 'USB1', 'edge': 'east',
+                 'cable_envelope_mm': {'depth': 2.0}}
+        if ce is not None:
+            iface['cable_entry'] = ce
+        try:
+            _brief({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                    'board': 'x', 'interfaces': [iface]})
+        except Exception as exc:                            # noqa: BLE001
+            assert 'no cable_entry' in str(exc), exc
+        else:
+            raise AssertionError(f'accepted an envelope with cable {ce!r}')
+    print("  PASS: an envelope with no cable to apply to is refused")
+
+
+def test_coverage_is_graded_only_when_the_intent_carries_the_clause():
+    """M16/M17: a compiled consequence is `graded` when the intent carries
+    what it compiled to, and `uncovered` when a hand edit dropped it."""
+    pcb = parse_kicad_pcb(ESP)
+    frag, rep = db.compile_with_consequences(_brief(BRIEF_711), pcb, ESP)
+    cov, _led, doc = _ledger(ESP, frag, rep, pcb=pcb)
+    st = {c['id']: c['state'] for c in cov['clauses']}
+    assert st['interfaces[USB1].mount_mode'] == 'graded', st
+    doc2 = json.loads(json.dumps(doc))
+    for c in doc2['edge_connectors']:
+        if c['ref'] == 'USB1':
+            c.pop('max_setback_mm')
+    cov2 = db.clause_coverage(rep, doc2, rules_run=('edge_connector',))
+    st2 = {c['id']: c['state'] for c in cov2['clauses']}
+    assert st2['interfaces[USB1].mount_mode'] == 'uncovered', st2
+    print("  PASS: graded when carried, uncovered when the intent drops it")
+
+
 TESTS = [
     test_each_declaration_compiles_or_says_why_not,
+    test_through_edge_keeps_the_emitted_overhang_cap,
+    test_the_ledger_reads_the_face_and_the_viewing_side_honestly,
+    test_an_in_plane_band_sits_on_the_declared_edge_or_not_at_all,
+    test_an_envelope_needs_a_cable,
+    test_coverage_is_graded_only_when_the_intent_carries_the_clause,
     test_the_as_built_briefs_gain_no_error,
     test_a_vertical_mount_is_not_held_to_the_seat,
     test_the_face_is_advisory_and_steers_nothing,

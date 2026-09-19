@@ -1055,24 +1055,32 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
 
       * `mount_mode: edge_mount` -> `max_setback_mm` 0.75 on the drawn body
         (`derived_default`; tigard J7 sits 0.60 in);
-      * `mount_mode: through_edge` -> the body reaches the edge
-        (`overhang_mm.min` 0, no maximum);
-      * `mount_mode: top_mount` / `bottom_mount` -> the part stands off a
-        face, so the edge-receptacle seat does not apply to it
-        (`floorplan.VERTICAL_MOUNTS`; the default seat false-failed 8
+      * `mount_mode: through_edge` -> the same setback: the body reaches
+        the edge (how far PAST it is `overhang_mm`, declared or emitted,
+        never derived);
+      * `mount_mode: top_mount` / `bottom_mount` -> an EXEMPTION, carried:
+        the edge-receptacle seat does not apply to a part standing off a
+        face (`floorplan.VERTICAL_MOUNTS`; the default seat false-failed 8
         vertical headers on the as-built boards);
-      * `cable_entry: perpendicular_*` or `user_facing` with a declared
+      * `cable_entry: perpendicular_*` with a declared
         `product.user_top_side` -> the face the part is on, graded as
-        `edge_connector_side` at a fixed WARN that steers no search;
-      * `cable_entry: in_plane` -> graded on the declared edge, and
-        unmeasured without one;
+        `edge_connector_side` at a fixed WARN that steers no search.
+        `user_facing` compiles NO face: reaching a part says nothing about
+        which face it sits on;
+      * `cable_entry: in_plane` -> carried: the declared edge is already a
+        clause, and unmeasured without one;
       * a cable keep-out ONLY from a declared `cable_envelope_mm`, and only
         for a FILE-locked part (a keep-out off an unlocked part moves with
-        every seed). No default dimension: none passed the controls.
+        every seed) that reaches its declared edge when the band is
+        in-plane. No default dimension: none passed the controls.
 
-    A value the brief declares itself always wins over a derived one. z-height
-    and insertion travel are never measured -- a keep-out is a 2D projection
-    -- and the rows say so.
+    Row statuses: `compiled` (a rule grades it), `carried` (an exemption or
+    a restatement -- nothing of its own is graded), `unmeasured` (a
+    dimension nobody declared), `withheld` (declared, but not derivable on
+    this board). A value the brief declares itself always wins over a
+    derived one, a declared `cable:<ref>` keep-out included. z-height and
+    insertion travel are never measured -- a keep-out is a 2D projection --
+    and the rows say so.
     """
     import copy
     frag = copy.deepcopy(fragment or {})
@@ -1081,11 +1089,14 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
     uts = (rep.get('product') or {}).get('user_top_side')
     uts = uts if uts in ('F', 'B') else None
     other = {'F': 'B', 'B': 'F'}
-    declared = set(rep.get('declared') or ())
     locked = ({k for k, f in (pcb.footprints or {}).items()
                if getattr(f, 'locked', False)} if pcb is not None else set())
     keeps = list(frag.get('keepouts') or [])
+    #: Keep-out names the BRIEF declares itself. A declared value wins over
+    #: a derived one, so an envelope never replaces one of these.
+    declared_ko = {k.get('name') for k in keeps}
     need_side = False
+    used_uts = False
     geo = None
 
     def _row(ref, key, status, why, *, compiled_to=None, grader=None,
@@ -1115,73 +1126,81 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
                  basis=basis.get('max_setback_mm', 'declared'),
                  value=e['max_setback_mm'])
         elif mm == 'through_edge':
-            # "Reaches the edge": past it (an overhang floor of 0, no cap)
-            # or within the edge-mount setback of it. The floor ALONE is
-            # vacuous -- a body well inside the board reads 0 overhang and
-            # passes it -- so the setback is what makes the claim bite.
-            oh = dict(e.get('overhang_mm') or {})
-            if 'min' not in oh:
-                oh['min'] = 0.0
-                e['overhang_mm'] = oh
-                basis['overhang_mm.min'] = 'derived_default'
-                src['overhang_mm'] = 'mount_mode'
+            # "Reaches the edge": past it, or within the edge-mount setback
+            # of it -- the same clause `edge_mount` compiles to. An overhang
+            # floor of 0 would add nothing (a body inside the board reads 0
+            # overhang and passes it), and writing one REPLACED the emitted
+            # `overhang_mm` wholesale on merge, dropping its `max` -- and
+            # with it the part's off-outline exemption, so a through-edge
+            # connector hanging correctly past the edge graded as an
+            # off-board part (Phase-5 verifier B1). What would tell the two
+            # apart -- how FAR past the edge -- is a dimension nobody
+            # declared, so the row says so rather than inventing one.
             if 'max_setback_mm' not in e:
                 e['max_setback_mm'] = EDGE_MOUNT_SETBACK_MM
                 basis['max_setback_mm'] = 'derived_default'
             src['max_setback_mm'] = 'mount_mode'
             _row(ref, 'mount_mode', 'compiled',
                  'the body reaches the edge: past it, or within the '
-                 'edge-mount setback of it',
+                 'edge-mount setback of it -- graded exactly as edge_mount; '
+                 'how far past the edge it may reach is declared by '
+                 'overhang_mm, never derived',
                  compiled_to=f"edge_connectors[{ref}].max_setback_mm",
                  grader='edge_connector',
                  basis=basis.get('max_setback_mm', 'declared'),
-                 value={'max_setback_mm': e['max_setback_mm'],
-                        'overhang_mm.min': oh['min']})
+                 value=e['max_setback_mm'])
         elif mm in fp.VERTICAL_MOUNTS:
-            _row(ref, 'mount_mode', 'compiled',
+            # An EXEMPTION, not a clause: nothing measures that a part
+            # stands off its face, so the row is `carried` -- it relaxes
+            # the receptacle seat and grades nothing of its own.
+            _row(ref, 'mount_mode', 'carried',
                  'the part stands off a face, so the edge-receptacle seat '
-                 '(the mating face reaching the edge) does not apply; its '
-                 'declared edge and overhang still do',
+                 '(the mating face reaching the edge) does not apply to '
+                 'it; nothing measures the mount itself, and its declared '
+                 'edge and overhang are graded as before',
                  compiled_to=f"edge_connectors[{ref}].context.mount_mode",
-                 grader='edge_connector', basis='declared', value=mm)
+                 basis='declared', value=mm)
 
-        # The face. From the cable when it is perpendicular (the cable
-        # leaves the face it is plugged into), else from `user_facing`.
+        # The face, from a PERPENDICULAR cable only: the cable leaves the
+        # face it plugs into. `user_facing` says the user reaches the part,
+        # not which face it sits on -- it compiled a face once and put three
+        # shipping B-side connectors (a DSUB, a JST-SH, a microSD) on the
+        # wrong one (Phase-5 verifier S3).
         perp = ce in ('perpendicular_top', 'perpendicular_bottom')
-        facing = f"interfaces[{ref}].user_facing" in declared
-        side_key = 'cable_entry' if perp else 'user_facing'
-        if perp or facing:
+        if perp:
             if uts is None:
-                _row(ref, side_key, 'unmeasured',
+                _row(ref, 'cable_entry', 'unmeasured',
                      'which face is the top is not declared '
                      '(product.user_top_side), so no face follows from it')
             else:
-                side = (uts if (not perp or ce == 'perpendicular_top')
-                        else other[uts])
+                side = uts if ce == 'perpendicular_top' else other[uts]
                 if 'side' not in e:
                     e['side'] = side
                     basis['side'] = 'declared'
                     need_side = True
-                src['side'] = side_key
-                _row(ref, side_key, 'compiled',
-                     f"product.user_top_side {uts} is the face the user "
-                     f"sees; the finding is advisory (WARN) and steers no "
-                     f"search",
+                src['side'] = 'cable_entry'
+                used_uts = True
+                _row(ref, 'cable_entry', 'compiled',
+                     f"a {ce} cable leaves by the face it plugs into, and "
+                     f"product.user_top_side {uts} is the top; the finding "
+                     f"is advisory (WARN) and steers no search",
                      compiled_to=f"edge_connectors[{ref}].side",
                      grader='edge_connector_side', basis='declared',
                      value=e['side'])
-        if ce == 'in_plane' and not perp:
+        if ce == 'in_plane':
             if not e.get('edge'):
                 _row(ref, 'cable_entry', 'unmeasured',
                      'an in-plane cable leaves by an edge, and this '
                      'interface declares none (edge "unknown")')
             else:
-                _row(ref, 'cable_entry', 'compiled',
-                     'the cable leaves in the board plane, so the part is '
-                     'graded on its declared edge',
+                # The declared edge is ALREADY a clause; in_plane restates
+                # it and adds none, so it is not counted as a second one.
+                _row(ref, 'cable_entry', 'carried',
+                     f"the cable leaves in the board plane, by the declared "
+                     f"edge -- graded only through interfaces[{ref}].edge, "
+                     f"which in_plane adds nothing to",
                      compiled_to=f"edge_connectors[{ref}].edge",
-                     grader='edge_connector', basis='declared',
-                     value=e['edge'])
+                     basis='declared', value=e['edge'])
 
         # The cable keep-out, only from a declared envelope.
         if ce in ('in_plane', 'perpendicular_top', 'perpendicular_bottom'):
@@ -1215,6 +1234,20 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
                      'an in-plane band runs in from a declared edge, and '
                      'none is declared' + tail)
                 continue
+            name = f"cable:{ref}"
+            if name in declared_ko:
+                # The brief states this keep-out ITSELF: declared wins, and
+                # the envelope is graded through it rather than replacing it
+                # (Phase-5 verifier S4: replacing it dropped 3 hits to 0).
+                _row(ref, 'cable_envelope_mm', 'compiled',
+                     f"the brief declares keepouts[{name}] itself, and a "
+                     f"declared keep-out wins over the one this envelope "
+                     f"would derive" + tail,
+                     compiled_to=f"keepouts[{name}]", grader='keepout',
+                     basis='declared',
+                     value=next(k.get('rect') or k.get('circle')
+                                for k in keeps if k.get('name') == name))
+                continue
             if pcb is None or ref not in (pcb.footprints or {}):
                 _row(ref, 'cable_envelope_mm', 'withheld',
                      'no board to place the keep-out against' + tail)
@@ -1238,6 +1271,22 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
             d = float(env[dim])
             if ce == 'in_plane':
                 edge = e['edge']
+                # The band guards the path a cable takes OUT of the board
+                # from the part. A locked part that does not reach its
+                # declared edge (the edge clause fails it) has no such path
+                # there, and a band on that edge would only flag bystanders
+                # (fixture 711's east band hit Q1, Q2, R3, R4; verifier N8).
+                gap = {'west': body[0] - bounds[0],
+                       'east': bounds[2] - body[2],
+                       'north': body[1] - bounds[1],
+                       'south': bounds[3] - body[3]}[edge]
+                if gap > d:
+                    _row(ref, 'cable_envelope_mm', 'withheld',
+                         f"{ref}'s body sits {gap:.2f} mm from its declared "
+                         f"{edge} edge, beyond the {d:g} mm band, so the "
+                         f"band would guard no path of its cable; the edge "
+                         f"clause reports the part" + tail)
+                    continue
                 rect = {'west': [bounds[0], body[1], bounds[0] + d, body[3]],
                         'east': [bounds[2] - d, body[1], bounds[2], body[3]],
                         'north': [body[0], bounds[1], body[2], bounds[1] + d],
@@ -1248,8 +1297,6 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
                 rect = [body[0] - d, body[1] - d, body[2] + d, body[3] + d]
                 sides = [face]
             rect = [round(v, 4) for v in rect]
-            name = f"cable:{ref}"
-            keeps = [k for k in keeps if k.get('name') != name]
             keeps.append({'name': name, 'rect': rect, 'sides': sides,
                           'allow': [glob.escape(ref)],
                           'context': {'source': 'brief',
@@ -1267,6 +1314,9 @@ def connector_consequences(fragment: Dict, report: Dict, pcb=None,
     if need_side:
         frag['min_reader'] = max(int(frag.get('min_reader') or 0), 6)
     compiled = {r['id'] for r in rows if r['status'] == 'compiled'}
+    if used_uts:
+        # The viewing face now decides a graded `side` (verifier S8).
+        compiled.add('product.user_top_side')
     rep['not_graded'] = [x for x in (rep.get('not_graded') or ())
                          if x not in compiled]
     rep['consequences'] = rows
@@ -1516,6 +1566,17 @@ def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
                 out.append((kid, f"keepout {k.get('name')!r}.{field_name}: "
                                  f"brief says {k[field_name]!r}, the intent "
                                  f"{cur.get(field_name)!r}"))
+    # A keep-out the intent carries because an envelope DERIVED it, which the
+    # brief no longer derives (envelope removed, set "unknown", or its cable
+    # changed): the seat search and the quench still enforce it, so it is a
+    # stale consequence and drifts (Phase-5 verifier S5).
+    frag_k = {k.get('name') for k in (fragment.get('keepouts') or [])}
+    for name, cur in sorted(have_k.items(), key=lambda kv: str(kv[0])):
+        src = (cur.get('context') or {}).get('derived_from')
+        if src and name not in frag_k:
+            out.append((src, f"keepout {name!r}: the intent carries it, "
+                             f"derived from {src}, which the brief no "
+                             f"longer derives it from"))
     # #902. Keyed on the ORDERED (ref, near) pair, which is the row's identity
     # in the brief too, so the two halves cannot disagree about what "the same
     # claim" means. The list `ref` was expanded by `compile_brief`, so both
@@ -1672,6 +1733,12 @@ def _clause_state(rec, intent_doc, rules_run, abstained, cons=None):
         row = (cons or {}).get(f"interfaces[{ref}].{key}")
         if row is None:
             return 'carried', '', rule
+        if row['status'] == 'withheld':
+            # Declared, and derivable once the board allows it (a lock, an
+            # outline): an ABSTENTION, which keeps coverage incomplete --
+            # not a fact carried by design (Phase-5 verifier S6).
+            return ('abstained', f"withheld: {row['why']}",
+                    row.get('grader') or 'keepout')
         if row['status'] != 'compiled':
             return 'carried', f"{row['status']}: {row['why']}", None
         if not _intent_has(intent_doc, row['compiled_to']):
@@ -1684,8 +1751,26 @@ def _clause_state(rec, intent_doc, rules_run, abstained, cons=None):
             return ('uncovered', f"`{rule}`, which grades what {key} "
                                  f"compiles to, did not run", rule)
         return 'graded', '', rule
+    if kind == 'product' and key == 'user_top_side':
+        # Graded once a perpendicular cable turns it into a `side` (S8).
+        sides = [r for r in (cons or {}).values()
+                 if r.get('status') == 'compiled'
+                 and r.get('grader') == 'edge_connector_side'
+                 and _intent_has(intent_doc, r.get('compiled_to'))]
+        if sides and 'edge_connector' in rules_run:
+            return 'graded', '', 'edge_connector'
     if rule is None:
         return 'carried', '', rule
+    if kind == 'interfaces' and key == 'user_facing':
+        entry = next((c for c in (intent_doc.get('edge_connectors') or [])
+                      if c.get('ref') == ref), None)
+        mm = ((entry or {}).get('context') or {}).get('mount_mode')
+        if mm in fp.VERTICAL_MOUNTS:
+            # What grades `user_facing` is the receptacle seat, and a
+            # vertical mount is exempt from it (Phase-5 verifier S2).
+            return ('carried', f"a {mm} part is exempt from the "
+                               f"edge-receptacle seat, which is what grades "
+                               f"user_facing", None)
     if kind == 'interfaces':
         entry = next((c for c in (intent_doc.get('edge_connectors') or [])
                       if c.get('ref') == ref), None)
@@ -1785,8 +1870,22 @@ def clause_coverage(report: Dict, intent_doc: Dict, *,
         row = {'id': cid, 'kind': rec['kind'], 'ref': rec['ref'],
                'rule': rule, 'state': state, 'why': why,
                'drifted': cid in drift_set}
-        if why.startswith(('unmeasured: ', 'withheld: ')):
+        # The FINDING that grades it, where it differs from the rule that
+        # runs it (the side finding runs inside `edge_connector`), and the
+        # keep-out a cable envelope compiled to -- so the ledger attributes
+        # a verdict to this clause, not to whatever else the rule flagged.
+        crow = cons.get(cid) or {}
+        if state == 'graded' and crow.get('grader'):
+            row['grader'] = crow['grader']
+            if crow['grader'] == 'keepout':
+                row['keepout'] = str(crow.get('compiled_to') or '')[
+                    len('keepouts['):-1]
+        if rec['kind'] == 'product' and state == 'graded':
+            row['grader'] = 'edge_connector_side'
+        if why.startswith('unmeasured: '):
             row['unmeasured'] = why.split(': ', 1)[1]
+        elif why.startswith('withheld: '):
+            row['withheld'] = why.split(': ', 1)[1]
         clauses.append(row)
         counts[state] += 1
         if row['drifted']:

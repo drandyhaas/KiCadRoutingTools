@@ -428,14 +428,15 @@ def test_the_cli_prints_the_roster_and_the_carried_facts():
         # In RULES order, which is the order the roster reports in.
         assert s['rules_dark_undispositioned'] == ['zone_containment',
                                                    'decap_distance'], s
-        # 8 before #1000; the four connector clauses (USB1 and CON2's
-        # mount_mode and cable_entry) now COMPILE, and the product facts are
-        # what is left carried.
+        # 8 before #1000. Three connector clauses now COMPILE (both
+        # mount_modes, CON2's perpendicular cable_entry) and the viewing face
+        # is graded through CON2's side. USB1's in-plane cable_entry only
+        # restates its declared edge, so it stays carried -- once in the
+        # facts, though its `derived:` twin is a second carried ROW.
         assert s['carried_facts'] == [
-            'product.form_factor', 'product.held_by',
-            'product.primary_axis', 'product.user_top_side'], s[
-                'carried_facts']
-        assert s['ledger_status']['carried'] == 4, s['ledger_status']
+            'interfaces[USB1].cable_entry', 'product.form_factor',
+            'product.held_by', 'product.primary_axis'], s['carried_facts']
+        assert s['ledger_status']['carried'] == 5, s['ledger_status']
     print("  PASS: the CLI prints the roster, names the 4 carried facts, and "
           "writes the ledger")
 
