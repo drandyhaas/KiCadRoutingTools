@@ -7957,6 +7957,23 @@ def net_walks(pcb, nid, net):
     return len(roots) <= 1
 
 
+def drc_line_nets(ln):
+    """The net names a check_drc violation line names: either side of
+    '<->' is 'Seg:NET', 'Via:NET', 'Pad:NET (REF.PIN)' or a bare 'NET'
+    (a track-to-track pair), the net possibly '/'-pathed."""
+    out = set()
+    if '<->' not in ln or ln.lstrip().startswith('Checking'):   # the checker's own header carries a '<->'
+        return out
+    for side in ln.split('<->'):
+        tok = side.strip().split()[0] if side.strip() else ''
+        if ':' in tok:
+            tok = tok.split(':', 1)[1]
+        tok = tok.split('/')[-1].strip('(),')
+        if tok:
+            out.add(tok)
+    return out
+
+
 def _walk_stub(segs_n, start, lay, _stop, _k, max_hops=24):
     """The stub polyline from `start` on `lay` toward the pad, as
     (segment, near point, far point) triples; stops at a junction, a
@@ -8145,10 +8162,23 @@ def _apply_source_splice(ctx, nm, lane, chain, verts, path, j, pr, run, saving, 
         return 0.0
     if n1 > n0:
         pcb.segments = before
+        # the nets the new violations name, other than this one: what a
+        # coupled re-lay (pack_board) would have to lift for this splice
+        _blk = set()
+        for _ln in v1:
+            if _ln in v0:
+                continue
+            _blk |= {t_ for t_ in drc_line_nets(_ln) if t_ != nm}
+        if hasattr(ctx, 'src_trim_refused'):
+            ctx.src_trim_refused.setdefault(nm, []).append((saving, d, s_at, frozenset(_blk)))
         log(f'  source stub trim {nm}: splice {d:.2f} mm at stub depth {s_at:.1f} would add DRC ({n0} -> {n1}): '
             + '; '.join(x[:110] for x in v1 if x not in v0)[:330] + ' -- not this one')
         return 0.0
     lane[:] = [x for x in lane if id(x) not in drop] + ([splice] if splice else [])
+    # the lane's tooth end is the splice point now: whoever chains the
+    # lane from its tip after this (the pack) must start there
+    if hasattr(ctx, 'ends') and nm in ctx.ends:
+        ctx.ends[nm] = ((float(proj[0]), float(proj[1])), ctx.ends[nm][1])
     ctx.src_trims[nm] = (saving, len(gone), j, d)
     log(f'  source stub trim {nm}: lane rode its stub {s_at:.1f} mm back toward '
         f'the pad; {len(gone)} stub + {j} lane segment(s) dropped, splice {d:.2f} mm, '
@@ -8477,6 +8507,7 @@ def setup(board, names, dest, log, plan=None):
     ctx.dest_alts = {}
     ctx.src_chain = {}
     ctx.src_trims = {}
+    ctx.src_trim_refused = {}
     ctx.trim_spans = {}
     ctx.refusal_info = {}
     ctx.landed = set()            # nets whose lane is on the board

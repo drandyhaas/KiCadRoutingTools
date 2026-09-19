@@ -37,6 +37,103 @@ def _h2h_of(board):
     return float(v) if v and float(v) > d else d
 
 
+def _relay(ctx, pcb, byname, by_nm, nm, refused, cfg, board, _sr, log):
+    """THE COUPLED RE-LAY (2026-09-19, Andy: "try the relay at the end,
+    before packing, fast and only improving"): a splice the trim refused
+    because another lane of the run stands between the stub and the
+    backtrack (K44 DQ13: A10 inside its hairpin) is tried again with that
+    lane LIFTED, then the lifted lane is routed anew between its own two
+    tips by the production router on the board as it now stands. Kept
+    only when the pair's copper is shorter, no lifted lane gained a via,
+    and the scoped DRC over the nets involved names nothing it did not
+    name before; else every piece goes back. Returns the mm saved."""
+    import math
+    import time as _t
+    import connect as cn
+
+    def k3(x, y):
+        return (round(x, 3), round(y, 3))
+
+    def L_of(segs):
+        return sum(math.hypot(s_.end_x - s_.start_x, s_.end_y - s_.start_y) for s_ in segs)
+    log(f'  relay {nm}: {len(refused)} refused splice(s): '
+        + ', '.join(f'depth {r[2]:.1f}/{r[1]:.2f} mm blocked by {sorted(r[3])}' for r in sorted(refused, key=lambda r: -r[0])[:4]))
+    for saving, d, s_at, blockers in sorted(refused, key=lambda r: -r[0]):
+        if not blockers or len(blockers) > 2 or any(b not in by_nm or b == nm for b in blockers):
+            continue
+        t0 = _t.time()
+        nets = [nm] + sorted(blockers)
+        seg0, via0 = list(pcb.segments), list(pcb.vias)
+        snap = {b: (list(by_nm[b].out_segs[b]), list(by_nm[b].out_vias[b])) for b in blockers}
+        lane0 = (list(by_nm[nm].out_segs[nm]), list(by_nm[nm].out_vias[nm]))
+        trims0 = dict(ctx.src_trims)
+        v_before = set(_sr.drc_pairs(board, nets=nets, pcb_data=pcb))
+        L_before = L_of(lane0[0]) + sum(L_of(snap[b][0]) for b in blockers)
+
+        def restore():
+            pcb.segments[:] = seg0
+            pcb.vias[:] = via0
+            by_nm[nm].out_segs[nm][:] = lane0[0]
+            by_nm[nm].out_vias[nm][:] = lane0[1]
+            for b in blockers:
+                by_nm[b].out_segs[b][:] = snap[b][0]
+                by_nm[b].out_vias[b][:] = snap[b][1]
+            ctx.src_trims.clear()
+            ctx.src_trims.update(trims0)
+        drop = {id(x) for b in blockers for x in snap[b][0]} | {id(x) for b in blockers for x in snap[b][1]}
+        pcb.segments[:] = [x for x in pcb.segments if id(x) not in drop]
+        pcb.vias[:] = [x for x in pcb.vias if id(x) not in drop]
+        ctx.src_trim_refused.pop(nm, None)
+        got = br.note_source_joint(ctx, nm, by_nm[nm].out_segs[nm], by_nm[nm].out_vias[nm], board, log)
+        if not got:
+            restore()
+            continue
+        ok, why = True, ''
+        for b in blockers:
+            nid_b = byname[b][0]
+            ta, tb = ctx.ends[b]
+            def layer_at(pt):
+                for s_ in snap[b][0]:
+                    if k3(s_.start_x, s_.start_y) == k3(*pt) or k3(s_.end_x, s_.end_y) == k3(*pt):
+                        return s_.layer
+                return None
+            la, lb = layer_at(ta), layer_at(tb)
+            if la is None or lb is None:
+                ok, why = False, f'{b}: tip layer unknown'
+                break
+            wpts = [(s_.start_x, s_.start_y) for s_ in snap[b][0]] + [(s_.end_x, s_.end_y) for s_ in snap[b][0]]
+            res = cn.connect(pcb, nid_b, tuple(ta), la, tuple(tb), lb, cfg, margin=1.5, window_pts=wpts)
+            if res is None:
+                ok, why = False, f'{b}: no route between its tips'
+                break
+            segs_b, vias_b = res
+            if len(vias_b) > len(snap[b][1]):
+                ok, why = False, f'{b}: {len(vias_b)} vias, had {len(snap[b][1])}'
+                break
+            pcb.segments.extend(segs_b)
+            pcb.vias.extend(vias_b)
+            by_nm[b].out_segs[b][:] = segs_b
+            by_nm[b].out_vias[b][:] = vias_b
+        if ok:
+            L_after = L_of(by_nm[nm].out_segs[nm]) + sum(L_of(by_nm[b].out_segs[b]) for b in blockers)
+            v_after = set(_sr.drc_pairs(board, nets=nets, pcb_data=pcb))
+            new_v = v_after - v_before
+            if new_v:
+                ok, why = False, f'{len(new_v)} new violation(s): {sorted(new_v)[0][:80]}'
+            elif L_after >= L_before - 0.2:
+                ok, why = False, f'pair {L_before:.1f} -> {L_after:.1f} mm, no gain'
+        if not ok:
+            restore()
+            log(f'  relay {nm} with {sorted(blockers)} lifted: not kept ({why}; {_t.time() - t0:.1f} s)')
+            continue
+        log(f'  relay {nm}: {sorted(blockers)} lifted, spliced -{got:.1f} mm, re-laid '
+            + ', '.join(f'{b} {L_of(snap[b][0]):.1f} -> {L_of(by_nm[b].out_segs[b]):.1f} mm '
+                        f'({len(snap[b][1])} -> {len(by_nm[b].out_vias[b])} vias)' for b in blockers)
+            + f'; pair {L_before:.1f} -> {L_after:.1f} mm, DRC clean -- KEPT ({_t.time() - t0:.1f} s)')
+        return L_before - L_after
+    return 0.0
+
+
 def pack_whole(a):
     """Every lane of the run packed against the board as it stands, twice.
     Lanes come from the routed/fanout pair (the fanout's copper stays);
@@ -223,7 +320,7 @@ def pack_whole(a):
     # every lane with its stub chain walked from the tip -- a board the
     # evolution assembled from probes may carry a backtrack no braid saw
     # whole. Vias never change; the scoped DRC decides each splice.
-    ctx.src_chain, ctx.src_trims, ctx.tooth_layer = {}, {}, {}
+    ctx.src_chain, ctx.src_trims, ctx.tooth_layer, ctx.src_trim_refused = {}, {}, {}, {}
     _k4 = lambda x, y: (round(x, 4), round(y, 4))          # noqa: E731
     for c in corridors:
         nm = c.members[0]
@@ -255,13 +352,32 @@ def pack_whole(a):
             print(f'  DUMP {nm}: tip {tip0} on {lay}, {len(stubs)} stub segs, stub end {best_[0]*1000:.0f} um off, chain {len(ctx.src_chain[nm])} piece(s) '
                   f'{sum(math.hypot(x[0].end_x - x[0].start_x, x[0].end_y - x[0].start_y) for x in ctx.src_chain[nm]):.1f} mm; lane {len(c.out_segs[nm])} segs')
     _mm = 0.0
+    by_nm0 = {c.members[0]: c for c in corridors}
+    rcfg = None
+    if a.relay:
+        import connect as cn
+        from list_nets import board_constraint
+        kw = {}
+        h2h_ = _h2h_of(a.board)
+        if h2h_:
+            kw['hole_to_hole_clearance'] = h2h_
+        edge_ = board_constraint(a.board, 'min_copper_edge_clearance')
+        if edge_ and float(edge_) > br.CLEAR:
+            kw['board_edge_clearance'] = float(edge_)
+        rcfg = cn.make_config(pcb, br.TRACK, br.CLEAR, br.VIA_SIZE, br.VIA_DRILL, grid_step=0.025, **kw)
+    n_relay = 0
     for c in corridors:
         nm = c.members[0]
+        ctx.src_trim_refused.pop(nm, None)
         got = br.note_source_joint(ctx, nm, c.out_segs[nm], c.out_vias[nm], a.board, log)
+        if not got and rcfg is not None and ctx.src_trim_refused.get(nm):
+            got = _relay(ctx, pcb, byname, by_nm0, nm, ctx.src_trim_refused[nm], rcfg, a.board, _sr, log)
+            if got:
+                n_relay += 1
         _mm += got
     if ctx.src_trims:
         log(f'source stub trim (finished board): {len(ctx.src_trims)} lane(s) spliced, -{_mm:.1f} mm '
-            f'({", ".join(sorted(ctx.src_trims))})')
+            f'({", ".join(sorted(ctx.src_trims))}){f", {n_relay} by a coupled re-lay" if n_relay else ""}')
     L0 = sum(pk.seg_len(c.out_segs[nm]) for c in corridors for nm in c.members)
     log(f'pack_board (whole board): {len(corridors)} lane(s) of {len(names)} from the pair, {n_skip} kept as laid, '
         f'{L0:.1f} mm  (read {time.time() - t0:.1f} s)')
@@ -284,8 +400,7 @@ def pack_whole(a):
             break
         culprits = set()
         for ln in new:
-            for tok in _re.findall(r'(?:Seg|Via|Pad):(\S+)', ln):
-                tok = tok.split('/')[-1]
+            for tok in br.drc_line_nets(ln):
                 if tok in by_nm and tok in orig:
                     culprits.add(tok)
         if not culprits:
@@ -346,6 +461,11 @@ def main():
                          'evolved world: the K44 record\'s sidecar named ONE lane of 44)')
     ap.add_argument('--nets', default='', help='whole-board mode: the run\'s nets, comma-separated')
     ap.add_argument('--src', default='U1', help='whole-board mode: the source array (the tooth end of each lane)')
+    ap.add_argument('--relay', type=int, default=1,
+                    help='whole-board mode: 1 (default) = a splice the trim refused because another lane of the '
+                         'run stands in its way is tried again with that lane lifted and routed anew between its '
+                         'own tips; kept only when the pair is shorter, no via is added and the scoped DRC adds '
+                         'nothing. 0 = off')
     ap.add_argument('--passes', type=int, default=2,
                     help='whole-board mode: how many times every lane is packed (each pass sees the room the last left)')
     a = ap.parse_args()

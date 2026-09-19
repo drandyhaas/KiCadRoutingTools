@@ -204,15 +204,24 @@ things were wrong, in the order they surfaced:
 | run copper, mm | 221 -> 218 | 468 -> 459 | 774 -> 736 | 971 -> 940 | 1171 -> 1122 | 1300 -> 1238 | 1477 -> 1373 |
 
 Vias unchanged on every rung, 0 open, 0 DRC with and without the
-margin, every lane packed. What remains is walled, not slack: DQ13's
-far-face tooth at K44 keeps its 11 mm backtrack because A10 runs INSIDE
-the hairpin (the trim finds the 2.5 mm splice worth 22 mm and the
-scoped DRC refuses it across A10), A13's likewise across DQS1_N --
-removing those means ripping the threaded neighbour, splicing, and
-re-laying it in the freed room, a coupled re-lay the trim does not
-attempt; the away-face ban prevents the tooth at the root. And a lane
-that wraps the long way round its bundle at the same via count is
-invisible to the chain's judge, which prices vias and never copper.
+margin, every lane packed.
+
+* **The coupled re-lay** (`--relay`, on; before the pack): a splice the
+  trim refused because another lane of the run stands between the stub
+  and the backtrack is tried again with that lane LIFTED, and the lifted
+  lane is then routed anew between its own two tips by the production
+  router (`connect`, the chain's config) on the board as it stands. It
+  is kept only when the pair's copper is shorter, no lifted lane gained
+  a via, and the scoped DRC over the nets involved names nothing new;
+  else every piece goes back. 1.2-1.4 s an attempt. On this article it
+  kept nothing, and the log says why: DQ13's 11 mm backtrack at K44 is
+  walled by A10's own STUB (a second far-face tooth in the same field),
+  which no re-lay lifts; A13's neighbour DQS1_N comes back from the
+  router with four vias where it had two, and is refused. Those two are
+  the planner's -- the away-face ban prevents the tooth at the root.
+  And a lane that wraps the long way round its bundle at the same via
+  count is invisible to the chain's judge, which prices vias and never
+  copper.
 
 **The source stub trim, the served-under-the-part rule, the away-face
 ban** (2026-09-19, the second pass over the zynq article). Three things
