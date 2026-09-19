@@ -4047,7 +4047,8 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                        for r in rects), default=0.0)
             if amt > EPS:
                 oob_copper_refs.append([ref, round(amt, 4)])
-    graphic = _graphic_copper_channel(pcb_data, resolved_edge)
+    # the resolved per-pad edge requirement (#986 moved it onto the context)
+    graphic = _graphic_copper_channel(pcb_data, edge_ctx.required)
     worst.sort(key=lambda t: -t[2])
     return {'pad_conflicts': pad_conflicts,
             'pad_edge_conflicts': len(edge_grade['findings']),
