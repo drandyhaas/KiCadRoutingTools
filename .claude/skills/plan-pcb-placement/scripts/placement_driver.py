@@ -307,11 +307,11 @@ print('no outline:', p.board_info.board_bounds is None)
 print('stacked at defaults:', len({{(round(f.x,3), round(f.y,3))
       for f in p.footprints.values()}}) < len(p.footprints) / 2)"
 
-ZONE PLAN {a.zone_plan}: all {plan['blocks']} footprint block(s) accounted for.
-{plan['zoned']} zoned block(s) cover the {plan['movable']} the seeder places; {plan['locked']} claimed
+ZONE PLAN {a.zone_plan}: all {plan['blocks']} footprint(s) accounted for.
+{plan['zoned']} zoned block(s) cover the other {plan['movable']} movable footprint(s); {plan['locked']} claimed
 by must_lock or pinned in the file ({plan['pinned']} pinned, the only kind the seeder
 cannot move); {plan['edge']} declared edge connector(s), {plan['seeded_edge']} of them the seeder's to
-choose; {plan['padless']} pad-less, placed by hand ({plan['padless_locked']} locked, {plan['padless_disposed']} dispositioned).
+choose; {plan['padless']} pad-less, the seeder never moves them ({plan['padless_locked']} locked, {plan['padless_disposed']} dispositioned).
 
 THE SEEDER PLACES THE RESIDUE. It is a greedy first-fit that packs declared
 zones and drops everything else at its connectivity centroid, at the first
@@ -1148,15 +1148,12 @@ def _guard_zone_plan(a):
     left = sorted(movable - locked - edge - covered)
     if left:
         return False, (
-            f'{len(left)} movable block(s) sit in no zoned block: '
+            f'{len(left)} movable footprint(s) sit in no zoned block: '
             f'{", ".join(left)}. A part the plan does not place is a part '
             'the seeder puts at its connectivity centroid, at the first '
             'rotation that fits -- the pose nobody decided. Add each to a '
             'block with a zone, or declare it must_lock / an edge connector '
             'if that is what it is.')
-    padless_msg = _padless_owed(a, intent, pcb, padless, covered)
-    if padless_msg:
-        return False, padless_msg
     # THE SEEDER PLACES THE RESIDUE, NOT THE DECISIONS (run 27).
     #
     # A declared edge connector states its EDGE and nothing else that matters:
@@ -1205,17 +1202,22 @@ def _guard_zone_plan(a):
             'band.)\n\n'
             'Or hand them to the seeder on the record: '
             '--waive seed-connectors:<why the seeder may choose these poses>')
+    # #959 (#999): pad-less blocks, AFTER every pre-existing refusal so each
+    # keeps its precedence (a plan with a free connector is told that first).
+    ok_, why_ = _padless_owed(a, intent, pcb, padless, covered)
+    if not ok_:
+        return False, why_
     # #959 (#1001): the declared channels, reconciled -- contradictions,
     # unlocked mechanical refs, and drift from the brief.
     _bf, _bp = _p1_brief(a, pcb)
-    mech_owed = _mechanical_owed(a, intent, plan, pcb, _bf, _bp)
-    if mech_owed:
-        return False, mech_owed
+    ok_, why_ = _mechanical_owed(a, intent, plan, pcb, _bf, _bp)
+    if not ok_:
+        return False, why_
     # LAST, so every refusal above keeps its wording and its precedence: a plan
     # that leaves parts unzoned is told that first, not that a rule is dark.
-    owed = _roster_owed(a, intent, pcb, _fp)
-    if owed:
-        return False, owed
+    ok_, why_ = _roster_owed(a, intent, pcb, _fp)
+    if not ok_:
+        return False, why_
     padless_locked = {r for r in padless
                       if getattr(pcb.footprints[r], 'locked', False)}
     return True, {'blocks': len(pcb.footprints),
@@ -1228,7 +1230,8 @@ def _guard_zone_plan(a):
 
 
 def _padless_owed(a, intent, pcb, padless, covered):
-    """#959 (#999): every PAD-LESS block answered for, or the refusal text.
+    """#959 (#999): every PAD-LESS block answered for. `(True, None)` or
+    `(False, why)` -- the guard shape, so `--dump-refusals` gates the texts.
 
     The seeder never places a block with no pads -- it is not in the
     placement state at all -- so on a pile it stays where the input left it.
@@ -1236,6 +1239,13 @@ def _padless_owed(a, intent, pcb, padless, covered):
     has no pad requirement) and lock it, or write why it may stay where it
     is. `must_lock` is NOT an answer: it stamps a lock the seeder writes after
     seating, and the seeder never seats this block.
+
+    A ZONE is an answer for none of them, and a lock does not make it one
+    unless the block draws a courtyard: `rule_zone_containment` grades only
+    parts the placement state carries, and a block with no pads and no
+    courtyard is not one -- measured, a locked courtyard-less logo 13 mm
+    outside its zone graded PASS. 0 of the 30 pad-less blocks on the 22
+    corpus boards draw a courtyard.
 
     `dispositions.refs` keys are EXACT block keys, never globs: `Ref*` as a
     pattern also matches `Ref*~2`, and a disposition that silently covered a
@@ -1245,35 +1255,62 @@ def _padless_owed(a, intent, pcb, padless, covered):
     ref_disp = (intent.dispositions or {}).get('refs', {})
     unknown = sorted(k for k in ref_disp if k not in pcb.footprints)
     if unknown:
-        return (
+        return False, (
             f'dispositions.refs names {len(unknown)} block(s) this board does '
             f'not have: {", ".join(unknown)}. Keys are EXACT block keys as the '
             'board parses them -- `#<uuid>` for a reference-less block, '
             '`Ref*~2` for a second block sharing a reference -- never globs.')
     padded = sorted(k for k in ref_disp if k not in padless)
     if padded:
-        return (
+        return False, (
             f'dispositions.refs answers PAD-LESS blocks only, and '
             f'{", ".join(padded)} carr{"ies" if len(padded) == 1 else "y"} '
             'pads. A block with pads is the seeder\'s to place: zone it, '
             'must_lock it, or declare it an edge connector.')
     file_locked = {r for r in padless
                    if getattr(pcb.footprints[r], 'locked', False)}
-    inert = sorted((padless & covered) - file_locked)
-    if inert:
-        return (
-            f'{len(inert)} pad-less block(s) sit in a zoned block: '
-            f'{", ".join(inert)}. The seeder never places a block with no '
-            'pads, so the zone is inert and the block stays wherever the '
-            'input left it -- on a pile, the pile origin. Place it yourself '
-            'and lock it; the zone then grades the pose you chose:\n'
+    stale = sorted(k for k in ref_disp if k in file_locked)
+    if stale:
+        return False, (
+            f'dispositions.refs answers {", ".join(stale)}, which '
+            f'{"is" if len(stale) == 1 else "are"} already locked in the '
+            'board: the lock is the answer, and a second one reads as though '
+            'the block were still undecided. Remove the disposition.')
+    zoned = padless & covered
+    courted = set()
+    if zoned:
+        try:
+            from placement.body import board_bodies, SOURCE_COURTYARD
+            _b = board_bodies(pcb, board)
+            courted = {r for r in zoned
+                       if getattr(_b.get(r), 'source', '') == SOURCE_COURTYARD}
+        except Exception:                                   # noqa: BLE001
+            courted = set()
+    ungradable = sorted(zoned - courted)
+    if ungradable:
+        return False, (
+            f'{len(ungradable)} pad-less block(s) sit in a zoned block and '
+            f'draw no courtyard: {", ".join(ungradable)}. No rule can grade '
+            'where such a block is -- `zone_containment` grades only parts '
+            'the placement state carries, and a block with no pads and no '
+            'courtyard is not one -- so its zone is a claim nothing checks, '
+            'locked or not. Take it out of the block, then place it yourself '
+            'and lock it; the lock is what holds it:\n'
             f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
-            "set '<KEY>' <X> <Y> --rot <DEG>\n"
+            "set '<KEY>' <X> <Y> --rot <DEG> lock '<KEY>'")
+    unlocked_zoned = sorted(courted - file_locked)
+    if unlocked_zoned:
+        return False, (
+            f'{len(unlocked_zoned)} pad-less block(s) sit in a zoned block: '
+            f'{", ".join(unlocked_zoned)}. The seeder never places a block '
+            'with no pads, so the zone does not move it -- but it draws a '
+            'courtyard, so the zone DOES grade it once it is placed. Place '
+            'it yourself and lock it:\n'
             f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
-            "lock '<KEY>'")
+            "set '<KEY>' <X> <Y> --rot <DEG> lock '<KEY>'")
     open_ = sorted(padless - file_locked - set(ref_disp))
     if open_:
-        return (
+        return False, (
             f'{len(open_)} pad-less block(s) are answered for by nothing: '
             f'{", ".join(open_)}. A logo or a graphic has no pads, so the '
             'seeder never moves it: on a pile it stays at the pile origin, '
@@ -1281,13 +1318,11 @@ def _padless_owed(a, intent, pcb, padless, covered):
             'apertures for 12 laps (10 pairs, max 0.986 mm). Place each one '
             'yourself and lock it:\n'
             f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
-            "set '<KEY>' <X> <Y> --rot <DEG>\n"
-            f"  python3 -X utf8 py_placer/place_pose.py {board} {board} "
-            "lock '<KEY>'\n"
+            "set '<KEY>' <X> <Y> --rot <DEG> lock '<KEY>'\n"
             'or write why it may stay where it is, in the zone plan: '
             '"dispositions": {"refs": {"<KEY>": "<why>"}}. `must_lock` does '
             'not place a block the seeder never seats.')
-    return ''
+    return True, None
 
 
 def _clause_waivers(a, known):
@@ -1347,7 +1382,7 @@ def _p1_brief(a, pcb):
 
 
 def _p1_mechanical(a):
-    """`(mechanical, path, error_text)` -- the same discovery and refusal
+    """`(mechanical, path, error_or_None)` -- the same discovery and refusal
     `check_floorplan` uses (`cli_gates.load_mechanical_or_exit`)."""
     import io
     import contextlib
@@ -1355,14 +1390,7 @@ def _p1_mechanical(a):
     buf = io.StringIO()
     with contextlib.redirect_stderr(buf):
         mech, path, rc = load_mechanical_or_exit(a, a.board)
-    if rc:
-        return None, path, (
-            f'The mechanical declaration {path} cannot be read '
-            f'({buf.getvalue().strip()}). A file by that name that reads as '
-            '"no mechanical facts" would be the silent absence #959 is '
-            'about; fix it, or pass --no-mechanical to say it is not an '
-            'input.')
-    return mech, path, ''
+    return mech, path, (buf.getvalue().strip() or 'unreadable') if rc else None
 
 
 def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path):
@@ -1382,13 +1410,17 @@ def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path):
     3. The plan must not drift from the brief. Before this only P-close
        refused brief drift, so `place_seed` seeded whatever the zone plan
        said, and the drift surfaced laps later.
-    Returns '' when nothing is owed, else the refusal text.
+    Returns `(True, None)` or `(False, why)` -- the guard shape.
     """
     from placement import reconcile as _rc
     from placement import design_brief as _db
     mech, mech_path, mech_err = _p1_mechanical(a)
     if mech_err:
-        return mech_err
+        return False, (
+            f'The mechanical declaration {mech_path} cannot be read '
+            f'({mech_err}). A file by that name that reads as "no '
+            'mechanical facts" would be the silent absence #959 is about; '
+            'fix it, or pass --no-mechanical to say it is not an input.')
     try:
         from list_nets import board_floor_knobs
         _kn = board_floor_knobs(a.board)[2]
@@ -1418,7 +1450,7 @@ def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path):
                 'The zone plan answers contradictions this board does not '
                 'have -- a stale answer reads as though something were '
                 'decided when nothing is')
-        return (
+        return False, (
             head + ':\n' + body
             + '\nEach names both values and where they came from. The '
             'strongest source wins by default, but the author decides -- in '
@@ -1440,7 +1472,7 @@ def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path):
             + (f" --rot {mech['poses'][r]['rot']}"
                if mech['poses'][r]['rot'] is not None else '')
             + f" lock '{r}'\n" for r in unlocked)
-        return (
+        return False, (
             f'{len(unlocked)} mechanical ref(s) in {mech_path} are not '
             f'locked in the board: {", ".join(unlocked)}. Their poses are '
             'recorded facts, and the plan grades them against an anchor at '
@@ -1454,11 +1486,11 @@ def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path):
         waived, phantom, noreason = _clause_waivers(a, set(drifted))
         open_d = [i for i in drifted if i not in waived]
         if noreason:
-            return (f'--waive brief-clause:{noreason[0]}: needs a REASON '
+            return False, (f'--waive brief-clause:{noreason[0]}: needs a REASON '
                     'after the colon -- why this plan may drift from what '
                     'the brief declares.')
         if open_d:
-            return (
+            return False, (
                 f'The zone plan drifts from the design brief on '
                 f'{len(open_d)} clause(s): {", ".join(open_d)}. The brief is '
                 'the declaration; a plan that says something else is a '
@@ -1467,7 +1499,7 @@ def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path):
                 '--emit-intent`, then edit), or waive a clause BY NAME with '
                 'the reason this board cannot hold it:\n'
                 '  --waive brief-clause:<id>:<why>')
-    return ''
+    return True, None
 
 
 def _roster_owed(a, intent, pcb, _fp):
@@ -1483,8 +1515,8 @@ def _roster_owed(a, intent, pcb, _fp):
     (`floorplan._roster`): policy rules (`proximity`, `zone_exclusive`) and
     advisory ones are reported, never refused, because measured before this
     was built they were dark on 22 of 22 corpus boards and a refusal every
-    plan answers the same way carries no signal. Returns '' when nothing is
-    owed, else the refusal text.
+    plan answers the same way carries no signal. Returns `(True, None)` or
+    `(False, why)` -- the guard shape, so `--dump-refusals` gates the text.
     """
     brief_fragment, _bp = _p1_brief(a, pcb)
     try:
@@ -1494,14 +1526,14 @@ def _roster_owed(a, intent, pcb, _fp):
                                board_edge_clearance=edge_clr,
                                brief_fragment=brief_fragment)
     except _fp.UntrustworthyOutline as exc:
-        return (f'The board outline cannot be graded ({exc}), so nothing can '
+        return False, (f'The board outline cannot be graded ({exc}), so nothing can '
                 'say which rules this plan leaves dark. Fix the outline '
                 'before planning against it.')
     owed = _fp.roster_refusal_lines(rows)
     stale = _fp.stale_dispositions(intent, rows)
     if not owed and not stale:
-        return ''
-    return (
+        return True, None
+    return False, (
         f'{len(owed)} rule(s) this plan leaves dark apply to this board and '
         'would fail the grade when they fire, and nothing answers for them. '
         'A rule nobody armed and nobody excused is a question the plan '
@@ -2280,18 +2312,21 @@ def _fake_render(board, halo=100.0, crossings=100.0, hpwl=1000.0, moved=3):
     }
 
 
-def _tiny_board(path, refs, unconnected=(), locked=(), padless=()):
+def _tiny_board(path, refs, unconnected=(), locked=(), padless=(),
+                courtyard=()):
     """A board `parse_kicad_pcb` reads: an outline and one part per ref, each
     with one pad -- connected, except for the refs in `unconnected` (a
     mounting hole, a fiducial), which the seeder moves all the same. Refs in
     `locked` carry `(locked yes)`, which is what `place_pose lock` writes and
     what the zone-plan guard reads as "the author decided this one". Refs in
     `padless` carry NO pad at all -- a logo or a graphic, which the seeder
-    never moves (#959). On disk, because the guard reads the file the flag
-    names."""
+    never moves (#959); those in `courtyard` also draw an F.CrtYd rectangle,
+    which is what lets `zone_containment` grade a pad-less block at all. On
+    disk, because the guard reads the file the flag names."""
     def _pad(r):
         if r in padless:
-            return ''
+            return ('    (fp_rect (start -1 -1) (end 1 1) (layer "F.CrtYd") '
+                    '(width 0.05))\n' if r in courtyard else '')
         return (f'    (pad "1" smd rect (at 0 0) (size 0.6 0.8) (layers "F.Cu") '
                 f'(net {0 if r in unconnected else 1} '
                 f'"{"" if r in unconnected else "/A"}") (uuid "p1-{r}"))\n')
@@ -2668,6 +2703,12 @@ def _refusal_scenarios(tmp):
     tiny = _tiny_board(os.path.join(tmp, 'tiny.kicad_pcb'), ('U1', 'U2'))
     logo_board = _tiny_board(os.path.join(tmp, 'logo.kicad_pcb'),
                              ('U1', 'U2', 'LOGO1'), padless=('LOGO1',))
+    courted_board = _tiny_board(os.path.join(tmp, 'logo_cy.kicad_pcb'),
+                                ('U1', 'U2', 'LOGO1'), padless=('LOGO1',),
+                                courtyard=('LOGO1',))
+    locked_logo_board = _tiny_board(
+        os.path.join(tmp, 'logo_lk.kicad_pcb'), ('U1', 'U2', 'LOGO1'),
+        padless=('LOGO1',), locked=('LOGO1',))
 
     def mech_board(name, brief_edge=None, mech=None):
         """A tiny board in its OWN directory, optionally with a sibling
@@ -2784,6 +2825,19 @@ def _refusal_scenarios(tmp):
                  [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
                    'note': 'both ICs'}],
                  dispositions={'refs': {'LOGO9': 'no such block'}}))]
+         + damaged),
+        ('a pad-less block with a courtyard, zoned but not locked',
+         ['--board', courted_board, '--zone-plan', wrote(
+             'zp_logo_courted.json', _zone_plan_doc(
+                 [{'name': 'all', 'refs': ['U*', 'LOGO1'],
+                   'zone': [0, 0, 10, 10], 'note': 'ICs and the logo'}]))]
+         + damaged),
+        ('a pad-less disposition for a block already locked',
+         ['--board', locked_logo_board, '--zone-plan', wrote(
+             'zp_logo_locked.json', _zone_plan_doc(
+                 [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                   'note': 'both ICs'}],
+                 dispositions={'refs': {'LOGO1': 'already answered'}}))]
          + damaged),
         ('a pad-less disposition naming a block with pads',
          ['--board', logo_board, '--zone-plan', wrote(
@@ -3278,9 +3332,9 @@ def _self_test():
         out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
             'half.json', [{'name': 'a', 'refs': ['U1'], 'zone': [0, 0, 5, 5],
                            'note': 'U1 only'}])]))
-        want(out.startswith('<error>') and '3 movable block(s)' in out
+        want(out.startswith('<error>') and '3 movable footprint(s)' in out
              and 'H1, J1, U2' in out,
-             'P1 names every movable block the plan leaves out')
+             'P1 names every movable footprint the plan leaves out')
         # A declared edge connector is exempt from ZONING only when it CLAIMS
         # an edge (`edge_claims()`, what the seeder's edge stage seats); a
         # connector_affinity entry is seeded at its centroid like any part.
@@ -3302,9 +3356,9 @@ def _self_test():
                                   '--waive',
                                   'seed-connectors:the west edge is clear']))
         want(out.startswith('<stage_instructions')
-             and '1 zoned block(s) cover the 2 the seeder places' in out
+             and '1 zoned block(s) cover the other 2 movable' in out
              and '1 of them the seeder' in out
-             and 'all 4 footprint block(s) accounted for' in out,
+             and 'all 4 footprint(s) accounted for' in out,
              'P1 proceeds once the hand-over is on the record, and says how '
              'many connectors the seeder is choosing')
         # `must_lock` DOES NOT SATISFY THIS, and the review is why the arm
@@ -3340,7 +3394,7 @@ def _self_test():
                           'note': 'the two ICs'}],
             must_lock=['H*'],
             edge_connectors=[{'ref': 'J1', 'class': 'connector_affinity'}])]))
-        want(out.startswith('<error>') and '1 movable block(s)' in out
+        want(out.startswith('<error>') and '1 movable footprint(s)' in out
              and ': J1.' in out,
              'P1 does not exempt a connector_affinity entry -- it claims no '
              'edge and the seeder seats it at its centroid')
@@ -3364,7 +3418,7 @@ def _self_test():
         out = STAGES['P1'](_args(['--board', _tb2, '--zone-plan', _zp(
             'fid.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
                           'note': 'the two ICs'}])]))
-        want(out.startswith('<error>') and '1 movable block(s)' in out
+        want(out.startswith('<error>') and '1 movable footprint(s)' in out
              and ': FID1.' in out,
              'P1 demands a part with no connected pin too -- the seeder moves it')
         out = STAGES['P1'](_args(['--board', _tb2, '--zone-plan', _zp(
@@ -3379,7 +3433,7 @@ def _self_test():
             'group.json', [{'name': 'a', 'group': 'nosuch',
                             'zone': [0, 0, 5, 5], 'note': 'by group'}],
             must_lock=['H*'], edge_connectors=[{'ref': 'J1', 'edge': 'west'}])]))
-        want(out.startswith('<error>') and '2 movable block(s)' in out
+        want(out.startswith('<error>') and '2 movable footprint(s)' in out
              and 'U1, U2' in out,
              'P1 resolves a group block the way the seeder does, and an '
              'unknown group covers nobody')

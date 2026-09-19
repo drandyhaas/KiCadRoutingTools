@@ -52,11 +52,11 @@ def _driver():
     return importlib.import_module('placement_driver')
 
 
-def _p1(board, plan, *extra):
-    return [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
-            '--board', board, '--zone-plan', plan,
-            '--waive', 'seed-connectors:the probe hands them over'] + list(
-                extra)
+def _p1(board, plan, *extra, waive=True):
+    return ([sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+             '--board', board, '--zone-plan', plan]
+            + (['--waive', 'seed-connectors:the probe hands them over']
+               if waive else []) + list(extra))
 
 
 def _plan(tmp, name, **edits):
@@ -89,6 +89,20 @@ def test_p1_names_the_three_logos():
     print("  PASS: P1 refuses naming all three #uuid logo blocks")
 
 
+def test_the_padless_check_keeps_the_older_refusals_first():
+    """Precedence: every refusal P1 had before #959 still comes first. On
+    esp_prog with run 27's plan and NO seed-connectors waiver the reader is
+    told about the free connectors -- the run-27 refusal -- not the logos;
+    with the waiver, the logos."""
+    r = run_utils.check(_p1(ESP, PLAN_975, waive=False),
+                        refuse='carry no `(locked yes)` in the board', code=4)
+    assert 'pad-less' not in r.stdout, r.stdout[-800:]
+    run_utils.check(_p1(ESP, PLAN_975),
+                    refuse='pad-less block(s) are answered for by nothing',
+                    code=4)
+    print("  PASS: the seed-connectors refusal precedes the pad-less one")
+
+
 def test_must_lock_does_not_answer_a_padless_block():
     with tempfile.TemporaryDirectory() as tmp:
         plan = _plan(tmp, 'ml.json',
@@ -108,18 +122,68 @@ def test_a_zoned_padless_block_is_refused_as_inert():
                             'note': 'the recycle logo, back side'}]
         plan = _plan(tmp, 'inert.json', blocks=blocks)
         run_utils.check(_p1(ESP, plan),
-                        refuse='sit in a zoned block', code=4)
-    print("  PASS: a zone around a pad-less block is refused as inert")
+                        refuse='sit in a zoned block and draw no courtyard',
+                        code=4)
+        # LOCKED does not rescue it: no rule grades a block with no pads and
+        # no courtyard, so the zone would be a claim nothing checks (the
+        # Phase-2 verifier measured a locked logo 13 mm outside its zone
+        # grading PASS). 0 of 30 corpus pad-less blocks draw a courtyard.
+        board = os.path.join(tmp, 'esp.kicad_pcb')
+        shutil.copy(ESP, board)
+        run_utils.check([sys.executable, '-X', 'utf8',
+                         run_utils.tool('place_pose.py'), board, board,
+                         'lock', LOGOS[0]], accept=True)
+        run_utils.check(_p1(board, plan),
+                        refuse='sit in a zoned block and draw no courtyard',
+                        code=4)
+    print("  PASS: a zone around a courtyard-less pad-less block is refused, "
+          "locked or not")
+
+
+def test_a_padless_block_with_a_courtyard_is_graded_once_locked():
+    drv = _driver()
+    with tempfile.TemporaryDirectory() as tmp:
+        blocks = [{'name': 'all', 'refs': ['U*', 'LOGO1'],
+                   'zone': [0, 0, 10, 10], 'note': 'ICs and the logo'}]
+        plan = os.path.join(tmp, 'p.json')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            json.dump(drv._zone_plan_doc(blocks), fh)
+        unlocked = drv._tiny_board(os.path.join(tmp, 'a.kicad_pcb'),
+                                   ('U1', 'U2', 'LOGO1'), padless=('LOGO1',),
+                                   courtyard=('LOGO1',))
+        argv = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+                '--zone-plan', plan, '--board']
+        run_utils.check(argv + [unlocked],
+                        refuse='the zone DOES grade it once it is placed',
+                        code=4)
+        locked = drv._tiny_board(os.path.join(tmp, 'b.kicad_pcb'),
+                                 ('U1', 'U2', 'LOGO1'), padless=('LOGO1',),
+                                 courtyard=('LOGO1',), locked=('LOGO1',))
+        run_utils.check(argv + [locked], accept=True)
+        # ...and the grade really does see it: move the locked logo outside
+        # the zone and zone_containment names it.
+        from placement import floorplan as fp_
+        it = fp_.load_intent(plan)
+        far = os.path.join(tmp, 'c.kicad_pcb')
+        text = open(locked, encoding='utf-8').read().replace(
+            '(uuid "fp-LOGO1") (at 8 2)', '(uuid "fp-LOGO1") (at 18 8)')
+        open(far, 'w', encoding='utf-8').write(text)
+        res = fp_.grade(it, parse_kicad_pcb(far), far)
+        assert any(v.rule == 'zone_containment' and v.ref == 'LOGO1'
+                   for v in res.violations), res.violations
+    print("  PASS: a courtyard pad-less block in a zone must be locked, and "
+          "is then graded")
 
 
 def test_a_disposition_or_a_file_lock_answers_it():
     with tempfile.TemporaryDirectory() as tmp:
         plan = _plan(tmp, 'disp.json', dispositions={'refs': {
             k: 'a back-side logo; its position is cosmetic' for k in LOGOS}})
-        r = run_utils.check(_p1(ESP, plan), code=4)
-        # Answered: P1 moves on to its NEXT question (the rule roster), and
-        # the pad-less refusal is gone.
-        assert 'pad-less block' not in r.stdout, r.stdout[-1200:]
+        # Answered: P1 moves on to its NEXT question -- the rule roster --
+        # which is asserted BY ITS OWN TEXT: "the pad-less text is absent" is
+        # also true of a refusal that rejected the disposition itself.
+        run_utils.check(_p1(ESP, plan),
+                        refuse='rule(s) this plan leaves dark', code=4)
         # The file lock answers it too, and is what the refusal tells the
         # reader to write.
         board = os.path.join(tmp, 'esp.kicad_pcb')
@@ -127,9 +191,15 @@ def test_a_disposition_or_a_file_lock_answers_it():
         run_utils.check([sys.executable, '-X', 'utf8',
                          run_utils.tool('place_pose.py'), board, board,
                          'lock'] + LOGOS, accept=True)
-        r = run_utils.check(_p1(board, PLAN_975), code=4)
-        assert 'pad-less block' not in r.stdout, r.stdout[-1200:]
-    print("  PASS: dispositions.refs and a file lock both answer it")
+        run_utils.check(_p1(board, PLAN_975),
+                        refuse='rule(s) this plan leaves dark', code=4)
+        # A disposition for a block already locked answers nothing.
+        plan = _plan(tmp, 'twice.json', dispositions={'refs': {
+            LOGOS[0]: 'answered twice'}})
+        run_utils.check(_p1(board, plan),
+                        refuse='already locked in the board', code=4)
+    print("  PASS: dispositions.refs and a file lock both answer it; both "
+          "at once is refused as stale")
 
 
 def test_disposition_keys_are_exact_and_padless_only():
@@ -166,9 +236,9 @@ def test_the_pass_message_counts_blocks():
                              'P1', '--board', board, '--zone-plan', plan],
                             accept=True)
         out = r.stdout
-        assert 'all 4 footprint block(s) accounted for' in out, out[:900]
-        assert '2 pad-less, placed by hand (1 locked, 1 dispositioned)' in \
-            ' '.join(out.split()), out[:900]
+        assert 'all 4 footprint(s) accounted for' in out, out[:900]
+        assert ('2 pad-less, the seeder never moves them (1 locked, '
+                '1 dispositioned)') in ' '.join(out.split()), out[:900]
     print("  PASS: the census counts 4 blocks, 2 of them pad-less")
 
 
@@ -196,6 +266,7 @@ def test_converge_poses_exits_4_with_json_and_no_traceback():
         start = r.stdout.index('{')
         doc = json.loads(r.stdout[start:r.stdout.rindex('}') + 1])
         assert doc['refused_kind'] == kind and doc['poses'] == [], doc
+        assert key in doc['refused'] and 'knobs' in doc, doc
     print("  PASS: converge poses refuses at exit 4 with a reason, both kinds")
 
 
@@ -216,9 +287,16 @@ def test_place_pose_snap_on_a_padless_block_is_a_refusal():
                              run_utils.tool('place_pose.py'), board, board,
                              'set', LOGOS[1], '--near', '120', '95',
                              '--strict-legal'],
-                            refuse='cannot be ranked', code=4)
+                            refuse='cannot be snapped', code=4)
         assert 'Traceback' not in (r.stdout + r.stderr)
+        assert 'give it an exact pose instead' in r.stdout, r.stdout[-800:]
         assert open(board, 'rb').read() == before, 'the board was written'
+        # The refusal rides in the full summary: the op it refused is named.
+        line = [x for x in r.stdout.splitlines()
+                if x.startswith('JSON_SUMMARY:')][-1]
+        summ = json.loads(line.split('JSON_SUMMARY: ', 1)[1])
+        assert summ['exit_code'] == 4 and summ.get('knobs'), summ
+        assert summ['ops'], summ
     print("  PASS: place_pose's snap path refuses a pad-less block at exit "
           "4 and writes nothing")
 
@@ -226,8 +304,10 @@ def test_place_pose_snap_on_a_padless_block_is_a_refusal():
 TESTS = [
     test_esp_prog_has_21_blocks_and_three_are_padless,
     test_p1_names_the_three_logos,
+    test_the_padless_check_keeps_the_older_refusals_first,
     test_must_lock_does_not_answer_a_padless_block,
     test_a_zoned_padless_block_is_refused_as_inert,
+    test_a_padless_block_with_a_courtyard_is_graded_once_locked,
     test_a_disposition_or_a_file_lock_answers_it,
     test_disposition_keys_are_exact_and_padless_only,
     test_the_pass_message_counts_blocks,

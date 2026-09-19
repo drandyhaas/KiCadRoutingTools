@@ -470,8 +470,14 @@ def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
                                        rotations=(rot,), diagnostics=diag)
     except pose_score.PoseUnrankable as exc:
         # #959 (#999): `place_pose` catches PoseRefusal only, so a pad-less
-        # block reached a traceback here. The code carries over unchanged.
-        raise PoseRefusal(exc.reason, code=exc.code, ref=ref) from exc
+        # block reached a traceback here. The code carries over unchanged;
+        # the advice does not -- this caller IS `place_pose set`, so it is
+        # told what to do instead of the snap, not to run itself.
+        raise PoseRefusal(
+            f"{ref} cannot be snapped: {exc.why}. A snap searches the poses "
+            f"the ranking can score, and there are none for this block -- "
+            f"give it an exact pose instead (drop --near / --snap / "
+            f"--strict-legal) and lock it", code=exc.code, ref=ref) from exc
     # The Euclidean bound, because `_offsets` walks SQUARE rings: a corner of
     # the r=4 ring sits 5.66 mm out, and a caller who typed `--radius 4` read
     # it as a distance (measured: a snap moved a part 5.0 mm under 4).
@@ -694,10 +700,18 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             # cheapest pose the other instrument liked".
             ref = placements[0]['reference']
             want_rot = placements[0]['new_rotation']
-            poses, census = snap_candidates(
-                cand, ref, rot=want_rot, clearance=clearance,
-                board_edge_clearance=board_edge_clearance,
-                radius=snap_radius, step=snap_step, pcb_data=cand_pcb)
+            try:
+                poses, census = snap_candidates(
+                    cand, ref, rot=want_rot, clearance=clearance,
+                    board_edge_clearance=board_edge_clearance,
+                    radius=snap_radius, step=snap_step, pcb_data=cand_pcb)
+            except PoseRefusal as exc:
+                # The refusal rides in the SAME summary every other refusal
+                # here carries -- ops, knobs and lock intent included -- so a
+                # snap that cannot rank does not print an empty document.
+                summary['refused'] = exc.reason
+                raise PoseRefusal(exc.reason, code=exc.code,
+                                  summary=summary) from exc
             summary['nearest_legal'] = next(
                 (p for p in poses if p['rung'] == 'ranked'), None)
             summary['nearest_legal_basis'] = (

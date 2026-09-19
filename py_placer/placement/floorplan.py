@@ -1060,8 +1060,10 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     # A disposition for a rule the intent ARMS says "this is not graded" about
     # a rule that is -- the two statements cannot both be true, and a reader
     # trusting the disposition would skip a live finding. Checked here, where
-    # only the intent is needed; refs and contradiction ids need the board and
-    # the brief, so `rule_roster` checks those.
+    # only the intent is needed. Refs need the board: `stale_dispositions`
+    # reports them when handed it (grade and rule_roster do), and the P1
+    # driver refuses on them. Contradiction ids need the brief and
+    # mechanical.json, so the P1 driver and check_floorplan check those.
     armed = sorted(r for r in dispositions.get('rules', {})
                    if _wants(intent, r))
     if armed:
@@ -4612,17 +4614,32 @@ def _roster(intent: Intent, pcb_data, ctx, *, census=None,
     return rows
 
 
-def stale_dispositions(intent: Intent, rows) -> List[str]:
-    """Written answers to questions this plan does not ask: a withheld-key
-    disposition for a key the emitter did not withhold. Reported by name so
-    the author removes it -- a stale disposition reads as though something
-    were excused when nothing is."""
+def stale_dispositions(intent: Intent, rows, pcb_data=None) -> List[str]:
+    """Written answers to questions this plan does not ask, by name, so the
+    author removes them -- a stale disposition reads as though something were
+    excused when nothing is.
+
+    A withheld-key disposition for a key the emitter did not withhold; and,
+    with the board in hand, a `refs` disposition for a block the board does
+    not have, one that carries pads (the seeder's to place), or one already
+    FILE-locked (the lock is the answer). The P1 driver refuses on the refs
+    cases with its own wording; this is the same judgement for
+    `check_floorplan`, so the two never disagree about one file.
+    """
     held = set()
     for r in rows:
         held.update(r['withheld'])
-    return sorted(f"dispositions.withheld.{k}"
-                  for k in (intent.dispositions or {}).get('withheld', {})
-                  if k not in held)
+    out = [f"dispositions.withheld.{k}"
+           for k in (intent.dispositions or {}).get('withheld', {})
+           if k not in held]
+    if pcb_data is not None:
+        fps = pcb_data.footprints or {}
+        for k in (intent.dispositions or {}).get('refs', {}):
+            fp_ = fps.get(k)
+            if (fp_ is None or fp_.pads
+                    or getattr(fp_, 'locked', False)):
+                out.append(f"dispositions.refs.{k}")
+    return sorted(out)
 
 
 def roster_refusal_lines(rows) -> List[str]:
@@ -5211,7 +5228,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     roster = stale = None
     if with_roster:
         roster = _roster(intent, pcb_data, ctx, brief_fragment=brief_fragment)
-        stale = stale_dispositions(intent, roster)
+        stale = stale_dispositions(intent, roster, pcb_data)
 
     st = placement_state.assess_placement(pcb_data, pcb_file)
     return GradeResult(

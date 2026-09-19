@@ -2290,7 +2290,12 @@ def build_parser():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='verb', required=True)
 
-    q = sub.add_parser('poses', help='rank a part\'s candidate poses')
+    q = sub.add_parser('poses', help='rank a part\'s candidate poses. '
+                       'Exit 0 ranked; 1 no legal pose, including staying '
+                       'put; 2 the sweep stopped early; 4 refused -- the ref '
+                       'is not on the board, or is a block the placement '
+                       'state cannot move (a pad-less logo), with the reason '
+                       'in `refused` (#959)')
     q.add_argument('board')
     q.add_argument('--ref', required=True)
     q.add_argument('--radius', type=float, default=2.0)
