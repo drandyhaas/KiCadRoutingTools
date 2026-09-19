@@ -23,6 +23,7 @@ Traps written against:
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -37,7 +38,7 @@ from kicad_parser import parse_kicad_pcb                    # noqa: E402
 from placement import floorplan as fp                       # noqa: E402
 from placement import reconcile as R                        # noqa: E402
 
-RUN_ALL_TIMEOUT = 1200
+RUN_ALL_TIMEOUT = 2400
 
 ESP = os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb')
 BRIEF_711 = os.path.join(REPO, 'tests', 'fixtures', '711',
@@ -191,20 +192,19 @@ def test_run29_anchors_and_the_lost_usb1():
         mech = doc['context']['mechanical']
         assert mech['anchored'] == ['Ref*', 'Ref*~2'], mech
         assert 'USB1' in mech['skipped'], mech
-        anchors = {x['name']: x for x in doc['blocks']
-                   if (x.get('context') or {}).get('basis') == 'mechanical'}
-        assert anchors['mech:Ref*']['refs'] == ['Ref[*]']
-        it = fp.intent_from_dict(doc, '')
         pcb = parse_kicad_pcb(b)
-        blocks, _ = fp.resolve_blocks(it, pcb, ())
-        assert blocks['mech:Ref*'] == ['Ref*'], blocks['mech:Ref*']
-        assert blocks['mech:Ref*~2'] == ['Ref*~2'], blocks['mech:Ref*~2']
+        m = R.load_mechanical(os.path.join(os.path.dirname(b),
+                                           'mechanical.json'))
+        anchors = {x['name']: x for x in R.anchor_blocks(
+            pcb, b, m, lost=['USB1'])[0]}
+        assert anchors['mech:Ref*']['refs'] == ['Ref[*]']
+        assert anchors['mech:Ref*~2']['refs'] == ['Ref[*]~2']
         # At its declared pose, an anchored part grades clean.
-        res = fp.grade(it, pcb, b)
+        res = fp.grade(fp.intent_from_dict(doc, ''), pcb, b, mechanical=m,
+                       mechanical_skip=['USB1'])
         bad = [v for v in res.violations
-               if v.rule in ('zone_containment', 'intent_zone_overlap',
-                             'intent_zone_outside_envelope')
-               and (v.block or '').startswith('mech:')]
+               if (v.block or '').startswith('mech:')
+               or v.rule == 'mechanical_drift']
         assert not bad, bad
     print("  PASS: USB1 not anchored (lost to the brief); Ref[*] resolves "
           "to Ref* alone; anchored parts at their pose grade clean")
@@ -331,11 +331,13 @@ def test_an_overhanging_mechanical_part_raises_no_envelope_error():
         doc = _emit(b, os.path.join(tmp, 'i.json'))
         assert 'H1' in doc['context']['mechanical']['anchored'], doc[
             'context']['mechanical']
-        it = fp.intent_from_dict(doc, '')
-        env = [v for v in fp.validate_intent(it)
-               if v.rule == 'intent_zone_outside_envelope'
-               and (v.block or '').startswith('mech:')]
-        assert not env, env
+        m = R.load_mechanical(os.path.join(wd, 'mechanical.json'))
+        res = fp.grade(fp.intent_from_dict(doc, ''), parse_kicad_pcb(b), b,
+                       mechanical=m)
+        bad = [v for v in res.violations
+               if (v.block or '').startswith('mech:')
+               or v.rule == 'intent_zone_outside_envelope']
+        assert not bad, bad
     print("  PASS: tigard's overhanging anchors raise no envelope error")
 
 
@@ -363,7 +365,8 @@ def test_p1_refuses_a_contradiction_until_dispositioned():
         def plan(name, **extra):
             p = os.path.join(tmp, name)
             doc = drv._zone_plan_doc(
-                blocks, edge_connectors=[{'ref': 'U2', 'edge': 'east'}],
+                blocks, edge_connectors=[{'ref': 'U2', 'edge': 'east',
+                                          'class': 'edge_receptacle'}],
                 **extra)
             with open(p, 'w', encoding='utf-8') as fh:
                 json.dump(doc, fh)
@@ -375,6 +378,9 @@ def test_p1_refuses_a_contradiction_until_dispositioned():
                             code=4)
         assert "brief 'east' [declared" in r.stdout, r.stdout
         assert "mechanical 'west' [recorded_fact" in r.stdout, r.stdout
+        # The row names its winner, and acknowledging it accepts that.
+        assert '-> brief wins' in r.stdout, r.stdout
+        assert 'ACCEPTS that winner' in r.stdout, r.stdout
         disp = {'rules': {'envelope': 'fixture', 'legality': 'fixture'},
                 'contradictions': {
                     'U2:edge': 'the brief holds: the enclosure moved'}}
@@ -406,8 +412,8 @@ def test_p1_refuses_an_unlocked_mechanical_ref():
                   'note': 'both'}]), fh)
         argv = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
                 '--board', board, '--zone-plan', p]
-        r = run_utils.check(argv, refuse='are not locked in the board: U1',
-                            code=4)
+        r = run_utils.check(argv, refuse='U1 is not locked', code=4)
+        assert 'not held at their declared pose' in r.stdout, r.stdout
         assert "lock 'U1'" in r.stdout
         run_utils.check([sys.executable, '-X', 'utf8',
                          run_utils.tool('place_pose.py'), board, board,
@@ -416,8 +422,503 @@ def test_p1_refuses_an_unlocked_mechanical_ref():
     print("  PASS: P1 refuses an unlocked mechanical ref, passes once locked")
 
 
+
+
+def test_the_loader_refuses_every_stranger():
+    """Round 1 of the Phase-3 verifier: `reasons` as a list crashed the CLI
+    at exit 1, and a `refs`-shape file with a bad `interfaces` row loaded
+    with the row silently dropped."""
+    base = {'refs': {'U1': [1, 2, 0]}}
+    strangers = [
+        dict(base, reasons=['not', 'a', 'map']),
+        dict(base, interfaces=[{'ref': 'J1', 'edge': 'up'}]),
+        dict(base, bogus=1),
+        {'fixed': []},
+        {'interfaces': [], 'fixed': []},
+        {'fixed': [{'ref': 'U1', 'x': 1, 'y': 2}],
+         'refs': {'U1': [1, 2, 0]}},
+        {'interfaces': [{'ref': 'J1', 'edge': 'east'},
+                        {'ref': 'J1', 'edge': 'west'}]},
+        {'kind': 'something-else', 'refs': {'U1': [1, 2, 0]}},
+        {'fixed': [{'ref': 'U1', 'x': 1, 'y': 2}], 'reasons': {}},
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, 'm.json')
+        for bad in strangers:
+            with open(p, 'w', encoding='utf-8') as fh:
+                json.dump(bad, fh)
+            try:
+                R.load_mechanical(p)
+            except R.MechanicalError:
+                pass
+            else:
+                raise AssertionError(f'accepted {bad!r}')
+        # A refs-shape file MAY carry interfaces; they are read, not dropped.
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump(dict(base, interfaces=[{'ref': 'J1', 'edge': 'east'}]),
+                      fh)
+        assert R.load_mechanical(p)['edges'] == {'J1': 'east'}
+        # The CLI refuses the list-shaped `reasons` at exit 2, no traceback.
+        b = _stage(tmp, mech=strangers[0], name='bad')
+        r = run_utils.check([sys.executable, '-X', 'utf8', _check(), b,
+                             '--emit-intent', os.path.join(tmp, 'x.json')],
+                            refuse='`reasons` must map ref -> text', code=2)
+        assert 'Traceback' not in r.stdout + r.stderr
+    print(f"  PASS: {len(strangers)} strangers refused; a refs-shape file's "
+          "interfaces are read; the CLI exits 2 without a traceback")
+
+
+def test_a_plan_cannot_carry_or_claim_an_anchor():
+    """B3: `context.basis: mechanical` on a plan block exempted it from the
+    envelope and overlap checks. Anchors now come from the file at grade
+    time, and a plan may neither declare one nor borrow the exemption."""
+    raw = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+           'envelope': {'rect': [0, 0, 20, 10]},
+           'blocks': [{'name': 'mech:U1', 'refs': ['U1'],
+                       'zone': [0, 0, 2, 2]}]}
+    try:
+        fp.intent_from_dict(raw, '')
+    except fp.IntentError as exc:
+        assert 'reserved' in str(exc), exc
+    else:
+        raise AssertionError('a plan declared a mech: anchor')
+    raw['blocks'] = [{'name': 'xtal', 'refs': ['Y1'],
+                      'zone': [100, 80, 200, 200],
+                      'context': {'basis': 'mechanical'}}]
+    env = [v for v in fp.validate_intent(fp.intent_from_dict(raw, ''))
+           if v.rule == 'intent_zone_outside_envelope']
+    assert env, 'a self-labelled block escaped the envelope check'
+    with tempfile.TemporaryDirectory() as tmp:
+        doc = _emit(_stage(tmp, board=PILE, mech=MECH_29),
+                    os.path.join(tmp, 'i.json'))
+        assert not [b for b in doc.get('blocks') or []
+                    if b['name'].startswith('mech:')], doc['blocks']
+        assert doc['context']['mechanical']['anchored'] == ['Ref*',
+                                                            'Ref*~2']
+    print("  PASS: `mech:` is refused in a plan, a basis label exempts "
+          "nothing, and emit writes no anchor into the plan")
+
+
+def _grade_run29(b, plan_doc, mech):
+    it = fp.intent_from_dict(plan_doc, '')
+    return fp.grade(it, parse_kicad_pcb(b), b, mechanical=mech,
+                    mechanical_skip=['USB1'])
+
+
+def _mech_findings(res, ref):
+    return ([v for v in res.violations if v.rule == 'zone_containment'
+             and v.block == f'mech:{ref}'],
+            [v for v in res.violations if v.rule == 'mechanical_drift'
+             and v.ref == ref])
+
+
+def test_the_grade_anchors_from_the_file_whatever_the_plan_says():
+    """B1: run 29's own plan carries no anchor, so its moved fiducial graded
+    a WARN. The grade now compiles the anchor itself. Boundaries: 0.1 mm off
+    is an anchor ERROR (tolerance 0.05); 0.03 mm is not, but IS drift (0.01);
+    1 degree is drift; the lost USB1 is never graded, however far it moves."""
+    with open(os.path.join(FIX, 'zone_plan_r1.json'), encoding='utf-8') as fh:
+        r1 = json.load(fh)
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _stage(tmp, board=PILE, mech=MECH_29)
+        m = R.load_mechanical(MECH_29)
+        zc, md = _mech_findings(_grade_run29(b, r1, m), 'Ref*')
+        assert not zc and not md, (zc, md)
+        _move(b, 'Ref*', dx=-17.55, dy=-2.7)
+        zc, md = _mech_findings(_grade_run29(b, r1, m), 'Ref*')
+        assert zc and zc[0].severity == 'error', zc
+        assert md and abs(md[0].measured['distance_mm'] - 17.756) < 0.01
+        # A plan cannot demote it.
+        demoted = dict(r1, severity={'zone_containment': 'warn'})
+        zc, _ = _mech_findings(_grade_run29(b, demoted, m), 'Ref*')
+        assert zc and zc[0].severity == 'error', zc
+        _move(b, 'Ref*', dx=17.55 + 0.1, dy=2.7)
+        zc, md = _mech_findings(_grade_run29(b, r1, m), 'Ref*')
+        assert zc, 'a 0.1 mm move escaped a 0.05 mm anchor'
+        _move(b, 'Ref*', dx=-0.07)
+        zc, md = _mech_findings(_grade_run29(b, r1, m), 'Ref*')
+        assert not zc, zc
+        assert md and 0.025 < md[0].measured['distance_mm'] < 0.035, md
+        _move(b, 'Ref*', dx=-0.03, drot=1)
+        zc, md = _mech_findings(_grade_run29(b, r1, m), 'Ref*')
+        assert md and md[0].measured['rotation_off_deg'] == 1.0, md
+        _move(b, 'USB1', dx=5.0)
+        res = _grade_run29(b, r1, m)
+        zc, md = _mech_findings(res, 'USB1')
+        assert not zc and not md, (zc, md)
+    print("  PASS: anchored from the file with r1 (no anchors): 17.8 mm and "
+          "0.1 mm ERROR, 0.03 mm drift only, 1 deg drift, lost USB1 ungraded")
+
+
+def test_an_off_lattice_or_unrotated_declaration_grades_clean():
+    """The anchor is the exact rotated rect unioned with the grader's own,
+    so a part at 30 degrees sits in its anchor; and a declaration with no
+    `rot` pins no rotation (the verifier's CON2 turned in place got a 7.62 mm
+    ERROR)."""
+    pcb0 = parse_kicad_pcb(ESP)
+    u1 = pcb0.footprints['U1']
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _stage(tmp, brief=None)
+        _move(b, 'U1', drot=30)
+        rot = ((u1.rotation or 0.0) + 30) % 360
+        mp = os.path.join(tmp, 'm.json')
+        with open(mp, 'w', encoding='utf-8') as fh:
+            json.dump({'fixed': [{'ref': 'U1', 'x': u1.x, 'y': u1.y,
+                                  'rot': rot},
+                                 {'ref': 'CON2', 'x': pcb0.footprints[
+                                     'CON2'].x, 'y': pcb0.footprints[
+                                     'CON2'].y}]}, fh)
+        m = R.load_mechanical(mp)
+        _move(b, 'CON2', drot=90)
+        res = fp.grade(fp.intent_from_dict(_raw_intent(), ''),
+                       parse_kicad_pcb(b), b, mechanical=m)
+        for ref in ('U1', 'CON2'):
+            zc, md = _mech_findings(res, ref)
+            assert not zc and not md, (ref, zc, md)
+    print("  PASS: U1 at 30 deg and a rot-less CON2 turned 90 deg both grade "
+          "clean in their anchors")
+
+
+def _raw_intent(**extra):
+    d = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm'}
+    d.update(extra)
+    return d
+
+
+def _stage_regime(tmp, name='wd'):
+    wd = os.path.join(tmp, name)
+    run_utils.check([sys.executable, '-X', 'utf8',
+                     os.path.join(REPO, 'tests', 'stress', 'stage_unaided.py'),
+                     ESP, wd], accept=True)
+    return wd, os.path.join(wd, 'board.kicad_pcb'), os.path.join(
+        wd, 'mechanical.json')
+
+
+def test_the_regime_owns_its_mechanical_file():
+    """SF1: under a regime that recorded a mechanical.json, the run cannot
+    make it disappear -- the flag, another path, a rewrite and a deletion
+    are all exit 2 -- and a lap board copied elsewhere still reads it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        wd, b, mp = _stage_regime(tmp)
+        out = os.path.join(tmp, 'x.json')
+        emit = [sys.executable, '-X', 'utf8', _check(), b, '--emit-intent',
+                out, '--allow-unplaced']
+        run_utils.check(emit + ['--no-mechanical'],
+                        refuse='a recorded input cannot be switched off',
+                        code=2)
+        other = os.path.join(tmp, 'other.json')
+        with open(other, 'w', encoding='utf-8') as fh:
+            json.dump({'interfaces': [{'ref': 'USB1', 'edge': 'east'}]}, fh)
+        run_utils.check(emit + ['--mechanical', other],
+                        refuse='another file is not it', code=2)
+        lap = os.path.join(wd, 'laps', 'lap1')
+        os.makedirs(lap)
+        run_utils.check([sys.executable, '-X', 'utf8',
+                         os.path.join(REPO, 'py_router', 'copy_board.py'), b,
+                         os.path.join(lap, 'board.kicad_pcb')], accept=True)
+        r = run_utils.check([sys.executable, '-X', 'utf8', _check(),
+                             os.path.join(lap, 'board.kicad_pcb'),
+                             '--emit-intent', out, '--allow-unplaced'],
+                            accept=True)
+        assert os.path.abspath(mp) in r.stdout, r.stdout[:1500]
+        with open(mp, 'a', encoding='utf-8') as fh:
+            fh.write(' ')
+        run_utils.check(emit, refuse='changed after staging', code=2)
+        os.remove(mp)
+        run_utils.check(emit, refuse='is gone -- restore it', code=2)
+    print("  PASS: under a regime --no-mechanical, another file, a rewrite "
+          "and a deletion are exit 2; a copied lap board keeps the file")
+
+
+def test_a_run_written_lock_is_not_a_recorded_fact():
+    """B2: the staged board is edited in place, so its CURRENT locks said
+    nothing about what existed before the run. Now: `staged_lock_poses` in
+    the manifest, and a board pose is a recorded fact only while the part is
+    locked WHERE it was locked at staging."""
+    with tempfile.TemporaryDirectory() as tmp:
+        wd, b, mp = _stage_regime(tmp)
+        from placement import provenance as PV
+        man_p = os.path.join(wd, PV.REGIME_NAME)
+        with open(man_p, encoding='utf-8') as fh:
+            man = json.load(fh)
+        assert isinstance(man.get('staged_lock_poses'), dict), sorted(man)
+        m = R.load_mechanical(mp)
+        x, y, rot = (m['poses']['Ref*'][k] for k in ('x', 'y', 'rot'))
+
+        def auth():
+            rows = {r['id']: r for r in R.reconcile(parse_kicad_pcb(b), b,
+                                                    mechanical=m)}
+            row = rows['Ref*:pose']
+            return row['values']['board']['authority'], row['kind']
+        pose = [sys.executable, '-X', 'utf8', run_utils.tool('place_pose.py'),
+                b, b]
+        # The run's own lock, even AT the declared pose, is its writing.
+        run_utils.check(pose + ['lock', 'Ref*'], accept=True)
+        assert auth() == ('hypothesis', 'agree'), auth()
+        # A lock the manifest recorded at staging, still there: a fact.
+        man['staged_lock_poses'] = {'Ref*': [x, y, rot]}
+        with open(man_p, 'w', encoding='utf-8') as fh:
+            json.dump(man, fh)
+        assert auth() == ('recorded_fact', 'agree'), auth()
+        # ...moved by the run and locked again: the run's writing -- drift
+        # the declaration wins, never a contradiction to disposition away.
+        run_utils.check(pose + ['unlock', 'Ref*', 'set', 'Ref*', '115.6',
+                                '92.2'], accept=True)
+        run_utils.check(pose + ['lock', 'Ref*'], accept=True)
+        assert auth() == ('hypothesis', 'drift'), auth()
+    print("  PASS: a run lock is a hypothesis; a staged lock in place is a "
+          "recorded fact; a staged lock moved is drift, not a contradiction")
+
+
+def test_p1_refuses_the_run29_move_the_plan_never_anchored():
+    """B1 end to end, the verifier's own scenario: run 29's pile, brief,
+    mechanical.json and r1 plan (with its other debts answered); `Ref*`
+    moved 25.9 mm and locked. P1 passed. It must refuse, print the command
+    that puts it back, and never demand the LOST USB1 be locked west."""
+    with open(os.path.join(FIX, 'zone_plan_r1.json'), encoding='utf-8') as fh:
+        plan = json.load(fh)
+    plan['dispositions'] = {
+        'refs': {k: 'a logo; test' for k in (
+            '#00000000-0000-0000-0000-00005a3b5201',
+            '#00000000-0000-0000-0000-00005d8c51dd',
+            '#00000000-0000-0000-0000-00005e7dd057')},
+        'contradictions': {'USB1:edge': 'the brief holds'},
+        'rules': {'decap_distance': 'test'},
+        'withheld': {'overlap_area': 'test'}}
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _stage(tmp, board=PILE, mech=MECH_29)
+        pp = os.path.join(tmp, 'plan.json')
+        with open(pp, 'w', encoding='utf-8') as fh:
+            json.dump(plan, fh)
+        run_utils.check([sys.executable, '-X', 'utf8',
+                         run_utils.tool('place_pose.py'), b, b, 'set', 'Ref*',
+                         '115.6', '92.2', 'lock', 'Ref*', 'lock', 'Ref*~2'],
+                        accept=True)
+        argv = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+                '--board', b, '--zone-plan', pp,
+                '--waive', 'seed-connectors:the probe hands them over']
+        r = run_utils.check(argv, refuse='not held at their declared pose',
+                            code=4)
+        assert "Ref* is 25.866mm from its declared" in r.stdout, r.stdout
+        assert "unlock 'Ref*' set 'Ref*' 141.2 95.9 --rot 0.0\n" in \
+            r.stdout, r.stdout
+        assert "'USB1'" not in r.stdout.split('not held')[1], r.stdout
+        # The printed remedy, run as printed: two calls.
+        pose = [sys.executable, '-X', 'utf8',
+                run_utils.tool('place_pose.py'), b, b]
+        run_utils.check(pose + ['unlock', 'Ref*', 'set', 'Ref*', '141.2',
+                                '95.9', '--rot', '0.0'], accept=True)
+        run_utils.check(pose + ['lock', 'Ref*'], accept=True)
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           encoding='utf-8', errors='replace', cwd=REPO,
+                           timeout=900)
+        assert 'not held at their declared pose' not in r.stdout, r.stdout
+    print("  PASS: run 29's moved-and-locked Ref* is refused at P1 with the "
+          "command that restores it; USB1 (lost) is not demanded")
+
+
+def test_p1_drift_command_carries_unlock_and_allow_routed():
+    sys.path.insert(0, os.path.dirname(DRIVER))
+    import importlib
+    drv = importlib.import_module('placement_driver')
+    with tempfile.TemporaryDirectory() as tmp:
+        board = drv._tiny_board(os.path.join(tmp, 'board.kicad_pcb'),
+                                ('U1', 'U2'))
+        with open(os.path.join(tmp, 'mechanical.json'), 'w',
+                  encoding='utf-8') as fh:
+            json.dump({'fixed': [{'ref': 'U1', 'x': 2.0, 'y': 2.0, 'rot': 0,
+                                  'reason': 'the datum'}]}, fh)
+        p = os.path.join(tmp, 'p.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump(drv._zone_plan_doc(
+                [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                  'note': 'both'}]), fh)
+        argv = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+                '--board', board, '--zone-plan', p]
+        pose = [sys.executable, '-X', 'utf8', run_utils.tool('place_pose.py'),
+                board, board]
+        run_utils.check(pose + ['set', 'U1', '3', '2', 'lock', 'U1'],
+                        accept=True)
+        r = run_utils.check(argv, refuse='U1 is 1.000mm from its declared',
+                            code=4)
+        assert "unlock 'U1' set 'U1' 2.0 2.0 --rot 0.0\n" in r.stdout, \
+            r.stdout
+        assert r.stdout.count(f"{board} lock 'U1'") == 1, r.stdout
+        # Run exactly what it printed, and P1 has nothing left to say
+        # about U1.
+        cmds = [ln.strip() for ln in r.stdout.splitlines()
+                if ln.strip().startswith('python3 -X utf8 py_placer/'
+                                         'place_pose.py')]
+        assert len(cmds) == 2, cmds
+        import shlex
+        for c in cmds:
+            # The board path (backslashes on Windows) is taken out before
+            # the POSIX split, which would read them as escapes.
+            rest = c.split('place_pose.py ', 1)[1].replace(board, '', 2)
+            run_utils.check(pose + shlex.split(rest), accept=True)
+        r2 = subprocess.run(argv, capture_output=True, text=True,
+                            encoding='utf-8', errors='replace', cwd=REPO,
+                            timeout=900)
+        assert 'not held at their declared pose' not in r2.stdout, r2.stdout
+        run_utils.check(pose + ['unlock', 'U1', 'set', 'U1', '3', '2'],
+                        accept=True)
+        run_utils.check(pose + ['lock', 'U1'], accept=True)
+        assert '--allow-routed' not in r.stdout
+        text = open(board, encoding='utf-8').read().rstrip()
+        assert text.endswith(')')
+        with open(board, 'w', encoding='utf-8') as fh:
+            fh.write(text[:-1] + '  (segment (start 1 8) (end 4 8) (width '
+                     '0.2) (layer "F.Cu") (net 1) (uuid "s1"))\n)\n')
+        r = run_utils.check(argv, refuse='U1 is 1.000mm from its declared',
+                            code=4)
+        assert '--allow-routed unlock' in r.stdout, r.stdout
+        assert '--allow-routed lock' in r.stdout, r.stdout
+    print("  PASS: P1's drift refusal prints unlock, and --allow-routed on "
+          "a board that carries copper")
+
+
+def test_stale_contradiction_answers_agree_between_grader_and_p1():
+    """SF5: check_floorplan reported `stale_dispositions: []` for a
+    contradiction id P1 refused as stale."""
+    sys.path.insert(0, os.path.dirname(DRIVER))
+    import importlib
+    drv = importlib.import_module('placement_driver')
+    with tempfile.TemporaryDirectory() as tmp:
+        board = drv._tiny_board(os.path.join(tmp, 'board.kicad_pcb'),
+                                ('U1', 'U2'))
+        p = os.path.join(tmp, 'p.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump(drv._zone_plan_doc(
+                [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                  'note': 'both'}], dispositions={
+                    'rules': {'envelope': 'fixture', 'legality': 'fixture'},
+                    'contradictions': {'BOGUS:edge': 'x'}}), fh)
+        r = subprocess.run([sys.executable, '-X', 'utf8', _check(), board,
+                            '--intent', p, '--plan-only'],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', cwd=REPO, timeout=900)
+        line = [x for x in r.stdout.splitlines()
+                if x.startswith('JSON_SUMMARY:')][-1]
+        s = json.loads(line.split('JSON_SUMMARY: ', 1)[1])
+        assert s['stale_dispositions'] == [
+            'dispositions.contradictions.BOGUS:edge: no such contradiction '
+            'on this board and these inputs'], s['stale_dispositions']
+        run_utils.check([sys.executable, '-X', 'utf8', DRIVER, '--stage',
+                         'P1', '--board', board, '--zone-plan', p],
+                        refuse='dispositions.contradictions.BOGUS:edge '
+                               'answers no contradiction', code=4)
+    print("  PASS: a stale contradiction answer is named by the grader and "
+          "refused by P1 alike")
+
+
+def test_rows_read_edges_the_way_the_grader_does():
+    """SF2: reading every part's edge off its drawn body disagreed with the
+    grader, which reads the courtyard for a part that is not an edge
+    receptacle. rp2350's SW1 (declared south, top_mount) graded PASS and
+    reconciled as a contradiction. And N3: a ref whose mechanical value lost
+    one row does not win its others."""
+    rp = os.path.join(REPO, 'kicad_files',
+                      'rp2350_fpga_eensy_prePlane.kicad_pcb')
+    pcb = parse_kicad_pcb(rp)
+    sw = pcb.footprints['SW1']
+    from placement import design_brief as db
+    with tempfile.TemporaryDirectory() as tmp:
+        bp = os.path.join(tmp, 'b.design-brief.json')
+        with open(bp, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                       'interfaces': [{'ref': 'SW1', 'edge': 'south',
+                                       'user_facing': False,
+                                       'mount_mode': 'top_mount'}]}, fh)
+        frag, _ = db.compile_brief(db.load_brief(bp),
+                                   board_refs=sorted(pcb.footprints))
+    mech = {'path': rp, 'sha256': 'x', 'shape': 'stage_unaided',
+            'poses': {'SW1': {'x': sw.x, 'y': sw.y,
+                              'rot': (sw.rotation or 0.0) % 360,
+                              'reason': 'test'}},
+            'edges': {}, 'floors': {'knobs': {}, 'unavailable': None}}
+    rows = {r['id']: r for r in R.reconcile(pcb, rp, brief_fragment=frag,
+                                            mechanical=mech)}
+    assert rows['SW1:edge']['kind'] != 'contradiction', rows['SW1:edge']
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _emit(_stage(tmp, mech=PROBE, name='contra'),
+                  os.path.join(tmp, 'c.json'))
+        rows = {r['id']: r for r in c['context']['reconciliation']}
+        assert rows['C1:on_board']['winner'] == 'outline'
+        assert rows['C1:pose']['winner'] != 'mechanical', rows['C1:pose']
+    print("  PASS: SW1 reconciles as the grader reads it; C1's pose row no "
+          "longer names the losing mechanical value its winner")
+
+
+def test_floors_unavailable_is_reported():
+    pcb = parse_kicad_pcb(ESP)
+    mech = {'path': MECH_29, 'sha256': 'x', 'shape': 'stage_unaided',
+            'poses': {}, 'edges': {},
+            'floors': {'knobs': {},
+                       'unavailable': 'unavailable: no project file'}}
+    rows = {r['id']: r for r in R.reconcile(
+        pcb, ESP, mechanical=mech,
+        floors_used={'clearance': {'value': 0.25,
+                                   'source': 'fixed default'}})}
+    row = rows['floors:clearance']
+    assert row['kind'] == 'report', row
+    assert row['values']['mechanical']['value'] is None
+    assert 'no project file' in row['values']['mechanical']['source']
+    assert row['values']['graded']['value'] == 0.25
+    print("  PASS: an 'unavailable' floor is a report naming why")
+
+
+def test_p1_refuses_plan_drift_and_honours_a_named_waiver():
+    sys.path.insert(0, os.path.dirname(DRIVER))
+    import importlib
+    drv = importlib.import_module('placement_driver')
+    with tempfile.TemporaryDirectory() as tmp:
+        d = os.path.join(tmp, 'b')
+        os.makedirs(d)
+        board = drv._tiny_board(os.path.join(d, 'board.kicad_pcb'),
+                                ('U1', 'U2'), locked=('U2',))
+        with open(os.path.join(d, 'board.design-brief.json'), 'w',
+                  encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                       'board': 'board.kicad_pcb',
+                       'interfaces': [{'ref': 'U2', 'edge': 'east',
+                                       'user_facing': True}]}, fh)
+        p = os.path.join(tmp, 'p.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump(drv._zone_plan_doc(
+                [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                  'note': 'both'}],
+                edge_connectors=[{'ref': 'U2', 'edge': 'west',
+                                  'class': 'edge_receptacle'}]), fh)
+        argv = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+                '--board', board, '--zone-plan', p]
+        r = run_utils.check(argv, refuse='drops or contradicts 1 clause(s)',
+                            code=4)
+        cid = r.stdout.split('of the design brief:\n  - ', 1)[1].split(
+            ': ', 1)[0]
+        assert 'U2' in cid, cid
+        run_utils.check(argv + ['--waive', f'brief-clause:{cid}:'],
+                        refuse='needs a REASON', code=4)
+        run_utils.check(argv + ['--waive',
+                                f'brief-clause:{cid}:the enclosure moved'],
+                        accept=True)
+    print(f"  PASS: P1 refuses a plan that drifts from the brief ({cid}) and "
+          "passes it once waived by name with a reason")
+
+
 TESTS = [
     test_both_shapes_load_and_a_stranger_is_refused,
+    test_the_loader_refuses_every_stranger,
+    test_a_plan_cannot_carry_or_claim_an_anchor,
+    test_the_grade_anchors_from_the_file_whatever_the_plan_says,
+    test_an_off_lattice_or_unrotated_declaration_grades_clean,
+    test_the_regime_owns_its_mechanical_file,
+    test_a_run_written_lock_is_not_a_recorded_fact,
+    test_p1_refuses_the_run29_move_the_plan_never_anchored,
+    test_p1_drift_command_carries_unlock_and_allow_routed,
+    test_stale_contradiction_answers_agree_between_grader_and_p1,
+    test_rows_read_edges_the_way_the_grader_does,
+    test_floors_unavailable_is_reported,
+    test_p1_refuses_plan_drift_and_honours_a_named_waiver,
     test_the_comments_probe_is_no_longer_byte_identical,
     test_no_mechanical_is_the_off_arm,
     test_run29_anchors_and_the_lost_usb1,

@@ -360,9 +360,14 @@ try:
                            "stage_blind's regime manifest")
         mb = json.load(open(mb_path, encoding='utf-8'))
         ck('stage_blind arms the regime too', True, mb_path)
+        # `staged_lock_poses` (#959) is the staged board's OWN locks and
+        # their poses -- facts the run can read off the board it is handed,
+        # recorded so a later lock cannot pass for a pre-run one. It carries
+        # nothing about the draw.
         ck('its manifest carries EXACTLY the schema keys, no draw extras',
            set(mb) == {'schema', 'kind', 'staged_board', 'staged_sha256',
-                       'lever_registry'}, str(sorted(mb)))
+                       'staged_lock_poses', 'lever_registry'},
+           str(sorted(mb)))
         import placement.perturb as _P
         blob = json.dumps(mb)
         ck('no perturbation kind appears in it',

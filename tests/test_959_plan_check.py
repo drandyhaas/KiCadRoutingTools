@@ -200,6 +200,33 @@ def _tight_zone_around(pcb, board, ref, margin=1.0):
     return zone, [ref] + under
 
 
+def test_two_locked_parts_that_overlap():
+    """Row 8. Locked parts do not move, so their overlap is in every
+    placement. A WARN per pair -- the grade counts courtyard overlap only
+    against a declared budget, and run 29's shipped board carried a 1.0 mm2
+    fiducial-in-connector overlap -- and an ERROR only when the locked pairs
+    ALONE exceed a declared `overlap_area`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _board(tmp, 'f.kicad_pcb', [('U1', 3, 3, PAD, True),
+                                        ('U2', 3.3, 3, PAD, True),
+                                        ('U3', 3.1, 3, PAD)])
+        found, meas = _check(_raw(), b)
+        pairs = [v for v in found if v.rule == 'plan_fixed_overlap']
+        assert len(pairs) == 1 and pairs[0].severity == 'warn', found
+        assert pairs[0].measured['pair'] == ['U1', 'U2'], pairs[0]
+        # 0.3 mm x 0.8 mm of shared pad bbox, and U3 (unlocked) is not in it.
+        assert abs(meas['fixed_overlap']['total_mm2'] - 0.24) < 1e-6, meas
+        assert not [v for v in found if v.rule == 'plan_fixed_overlap_budget']
+        found, _ = _check(_raw(legality_budget={'overlap_area': 0.2}), b)
+        err = [v for v in found if v.rule == 'plan_fixed_overlap_budget']
+        assert err and err[0].severity == 'error', found
+        found, _ = _check(_raw(legality_budget={'overlap_area': 0.3}), b)
+        assert not [v for v in found
+                    if v.rule == 'plan_fixed_overlap_budget'], found
+    print("  PASS: locked U1/U2 overlap 0.24 mm2 -> a WARN; over a declared "
+          "0.2 budget -> an ERROR; under 0.3 -> none; unlocked U3 ignored")
+
+
 def test_the_area_bound_is_per_face_and_passes_shipped_boards():
     for name, ref in (('ulx3s', 'U9'), ('ulx3s', 'U2'),
                       ('orangecrab_ext_pll', 'J4')):
@@ -397,6 +424,7 @@ TESTS = [
     test_exclusive_infeasibility_is_the_one_error,
     test_a_literal_glob_is_an_error_only_when_it_double_zones,
     test_a_locked_member_outside_its_zone,
+    test_two_locked_parts_that_overlap,
     test_the_area_bound_is_per_face_and_passes_shipped_boards,
     test_the_edge_bound_reads_pads_not_courtyards,
     test_the_board_area_bound_is_per_face,

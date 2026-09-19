@@ -99,10 +99,52 @@ def load_mechanical_or_exit(args, board_path: str):
     """(mechanical, path, exit_code). `exit_code` is 2 when an explicit
     `--mechanical` names nothing, or the file found is not a mechanical
     declaration this build reads -- a file by that name that reads as "no
-    mechanical facts" would be the silent absence #959 is about."""
+    mechanical facts" would be the silent absence #959 is about.
+
+    UNDER AN UNAIDED REGIME whose manifest recorded a `mechanical.json`, that
+    file is an input the run was handed, and the run cannot make it
+    disappear: `--no-mechanical`, another `--mechanical`, a deleted file and
+    a rewritten one (its sha no longer the recorded one) all exit 2. The
+    Phase-3 verifier cleared two undispositioned contradictions each way --
+    the flag, deleting the file, a lap board copied to a directory without
+    it, and a rewrite -- and the recorded path is read wherever the board
+    now lives, so a copied board keeps it."""
     import os
     import sys
     from placement import reconcile
+    man = reconcile.regime_manifest(board_path)
+    recorded = man.get('mechanical') if isinstance(man, dict) else None
+    if recorded:
+        asked = getattr(args, 'mechanical', None)
+        why = None
+        if getattr(args, 'no_mechanical', False):
+            why = ("--no-mechanical: the unaided regime governing this board "
+                   f"recorded {recorded} as an input at staging, and a "
+                   "recorded input cannot be switched off")
+        elif asked and os.path.abspath(asked) != os.path.abspath(recorded):
+            why = (f"--mechanical {asked}: the unaided regime recorded "
+                   f"{recorded} at staging; another file is not it")
+        elif not os.path.isfile(recorded):
+            why = (f"the mechanical declaration the unaided regime recorded "
+                   f"at staging, {recorded}, is gone -- restore it")
+        if why:
+            print(f"cannot use the mechanical declaration: {why}",
+                  file=sys.stderr)
+            return None, recorded, 2
+        try:
+            mech = reconcile.load_mechanical(recorded)
+        except reconcile.MechanicalError as exc:
+            print(f"{exc}", file=sys.stderr)
+            return None, recorded, 2
+        msha = man.get('mechanical_sha256')
+        if msha and mech['sha256'] != msha:
+            print(f"cannot use the mechanical declaration: {recorded} "
+                  f"changed after staging (sha {mech['sha256'][:12]}, "
+                  f"recorded {msha[:12]}). It is an input the run was "
+                  f"handed, not the run's to rewrite -- restore it",
+                  file=sys.stderr)
+            return None, recorded, 2
+        return mech, recorded, 0
     if getattr(args, 'no_mechanical', False):
         return None, '', 0
     path = getattr(args, 'mechanical', None)

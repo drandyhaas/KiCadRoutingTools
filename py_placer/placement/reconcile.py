@@ -25,11 +25,18 @@ came from, and says which one wins by default:
                  run chooses its own floors, so this is never a contradiction
 
 A disagreement between two `declared` / `recorded_fact` values is a
-CONTRADICTION: P1 refuses until the plan writes why in
-`dispositions.contradictions`, because the author decides and the losing
-channel may well be the physically right one (it was, in the issue's own
-example). A disagreement with anything weaker is DRIFT: the stronger value
-wins without anyone having to say so.
+CONTRADICTION: P1 refuses until the plan acknowledges it in
+`dispositions.contradictions`. A disposition ACCEPTS the winner the row names
+-- it does not flip it. A plan is not a declaration and cannot overrule one;
+to make the other value hold, correct the source that is wrong (the brief,
+`mechanical.json`, or the board). A disagreement with anything weaker is
+DRIFT: the stronger value wins without anyone having to say so.
+
+Mechanical ANCHORS are compiled at GRADE time from the file itself
+(`floorplan.mechanical_anchor_violations`), never read out of a plan: a plan
+that must carry them can leave them out (run 29's plans did), and a plan block
+that could label itself an anchor could exempt itself from the envelope and
+overlap checks.
 
 Self-labels are never trusted. A zone plan carrying `"source": "brief"` is
 still a zone plan.
@@ -46,6 +53,11 @@ from typing import Dict, List, Optional, Sequence
 
 MECHANICAL_NAME = 'mechanical.json'
 _EDGES = ('north', 'south', 'east', 'west')
+#: Every top-level key either shape carries. stage_unaided writes schema,
+#: kind, refs, reasons, project and note; the declaration form interfaces,
+#: fixed and project.
+_MECH_KEYS = frozenset({'schema', 'kind', 'refs', 'reasons', 'interfaces',
+                        'fixed', 'project', 'note', 'context'})
 
 #: Strongest first. `winner` is the first channel in this order; a tie keeps
 #: the channel that was listed first.
@@ -131,7 +143,9 @@ def load_mechanical(path: str) -> Dict[str, object]:
 
     Anything else raises MechanicalError -- a file named `mechanical.json`
     that says nothing this module can read must not grade as "no mechanical
-    facts".
+    facts". That includes a file whose sections are all empty, a key neither
+    shape has, and a malformed entry in ANY section: an `interfaces` row with
+    `edge: "up"` is refused whichever shape carries it, never skipped.
     """
     try:
         with open(path, encoding='utf-8') as fh:
@@ -140,14 +154,30 @@ def load_mechanical(path: str) -> Dict[str, object]:
         raise MechanicalError(f"{path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise MechanicalError(f"{path}: expected a JSON object")
+    if not ({'refs', 'interfaces', 'fixed'} & set(raw)):
+        raise MechanicalError(
+            f"{path}: not a mechanical declaration this build reads -- "
+            f"expected stage_unaided's `refs` map or `interfaces` / `fixed` "
+            f"lists (got keys {sorted(raw)})")
+    unknown = sorted(set(raw) - _MECH_KEYS)
+    if unknown:
+        raise MechanicalError(
+            f"{path}: unknown key(s) {unknown}; a mechanical declaration "
+            f"carries only {sorted(_MECH_KEYS)}")
+    if 'kind' in raw and raw['kind'] != 'mechanical-declaration':
+        raise MechanicalError(f"{path}: kind {raw['kind']!r}, expected "
+                              f"'mechanical-declaration'")
     poses: Dict[str, Dict[str, object]] = {}
     edges: Dict[str, str] = {}
-    if raw.get('kind') == 'mechanical-declaration' or 'refs' in raw:
-        shape = 'stage_unaided'
-        refs = raw.get('refs')
+    shape = 'stage_unaided' if 'refs' in raw else 'declaration'
+    if 'refs' in raw:
+        refs = raw['refs']
         if not isinstance(refs, dict):
             raise MechanicalError(f"{path}: `refs` must map ref -> [x, y, rot]")
         reasons = raw.get('reasons') or {}
+        if not isinstance(reasons, dict):
+            raise MechanicalError(f"{path}: `reasons` must map ref -> text, "
+                                  f"got {type(reasons).__name__}")
         for ref, v in sorted(refs.items()):
             if not isinstance(v, (list, tuple)) or len(v) != 3:
                 raise MechanicalError(
@@ -157,41 +187,92 @@ def load_mechanical(path: str) -> Dict[str, object]:
                 'y': _num(v[1], f'refs.{ref}[1]'),
                 'rot': _num(v[2], f'refs.{ref}[2]') % 360.0,
                 'reason': str(reasons.get(ref) or '')}
-    elif ('interfaces' in raw or 'fixed' in raw) and set(raw) <= {
-            'interfaces', 'fixed', 'project', 'note', 'context', 'schema'}:
-        shape = 'declaration'
-        for i, row in enumerate(raw.get('interfaces') or []):
-            if not isinstance(row, dict) or not row.get('ref'):
-                raise MechanicalError(
-                    f"{path}: interfaces[{i}]: expected {{ref, edge}}")
-            edge = row.get('edge')
-            if edge not in _EDGES:
-                raise MechanicalError(
-                    f"{path}: interfaces[{i}] ({row['ref']}): edge {edge!r}, "
-                    f"expected one of {', '.join(_EDGES)}")
-            edges[str(row['ref'])] = edge
-        for i, row in enumerate(raw.get('fixed') or []):
-            if not isinstance(row, dict) or not row.get('ref'):
-                raise MechanicalError(
-                    f"{path}: fixed[{i}]: expected {{ref, x, y, rot?}}")
-            rot = row.get('rot')
-            poses[str(row['ref'])] = {
-                'x': _num(row.get('x'), f'fixed[{i}].x'),
-                'y': _num(row.get('y'), f'fixed[{i}].y'),
-                # No `rot` leaves the rotation unconstrained, not 0.
-                'rot': None if rot is None else _num(
-                    rot, f'fixed[{i}].rot') % 360.0,
-                'reason': str(row.get('reason') or '')}
-    else:
+    elif 'reasons' in raw:
+        raise MechanicalError(f"{path}: `reasons` annotates `refs`, and this "
+                              f"file has none")
+    for key in ('interfaces', 'fixed'):
+        if key in raw and not isinstance(raw[key], list):
+            raise MechanicalError(f"{path}: `{key}` must be a list")
+    for i, row in enumerate(raw.get('interfaces') or []):
+        if not isinstance(row, dict) or not row.get('ref'):
+            raise MechanicalError(
+                f"{path}: interfaces[{i}]: expected {{ref, edge}}")
+        edge = row.get('edge')
+        if edge not in _EDGES:
+            raise MechanicalError(
+                f"{path}: interfaces[{i}] ({row['ref']}): edge {edge!r}, "
+                f"expected one of {', '.join(_EDGES)}")
+        if str(row['ref']) in edges:
+            raise MechanicalError(
+                f"{path}: interfaces[{i}]: {row['ref']} is declared twice")
+        edges[str(row['ref'])] = edge
+    for i, row in enumerate(raw.get('fixed') or []):
+        if not isinstance(row, dict) or not row.get('ref'):
+            raise MechanicalError(
+                f"{path}: fixed[{i}]: expected {{ref, x, y, rot?}}")
+        if str(row['ref']) in poses:
+            raise MechanicalError(
+                f"{path}: fixed[{i}]: {row['ref']} already has a declared "
+                f"pose -- one ref, one pose")
+        rot = row.get('rot')
+        poses[str(row['ref'])] = {
+            'x': _num(row.get('x'), f'fixed[{i}].x'),
+            'y': _num(row.get('y'), f'fixed[{i}].y'),
+            # No `rot` leaves the rotation unconstrained, not 0.
+            'rot': None if rot is None else _num(
+                rot, f'fixed[{i}].rot') % 360.0,
+            'reason': str(row.get('reason') or '')}
+    if not poses and not edges:
         raise MechanicalError(
-            f"{path}: not a mechanical declaration this build reads -- "
-            f"expected stage_unaided's `refs` map or `interfaces` / `fixed` "
-            f"lists (got keys {sorted(raw)})")
+            f"{path}: declares no pose and no edge -- a mechanical "
+            f"declaration that says nothing would grade as 'no mechanical "
+            f"facts'. Delete it, or pass --no-mechanical")
     floors = _floors((raw.get('project') or {}).get('floors')
                      if isinstance(raw.get('project'), dict) else None)
     return {'path': os.path.abspath(path), 'sha256': _sha256(path),
             'shape': shape, 'poses': poses, 'edges': edges,
             'floors': floors}
+
+
+def regime_manifest(board_path: str):
+    """The unaided-regime manifest governing `board_path` as a dict, None
+    when no regime governs it, or a string saying why it could not be read."""
+    from . import provenance as PV
+    wd = PV.regime_for(board_path)
+    if wd is None:
+        return None
+    try:
+        with open(os.path.join(wd, PV.REGIME_NAME), encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as exc:
+        return f'the regime manifest is unreadable ({exc})'
+
+
+def staged_lock_poses(man: Dict):
+    """`{ref: (x, y, rot)}` for every part the staged board carried
+    `(locked yes)` for AT STAGING, or None when nothing vouches for them.
+
+    The manifest's own `staged_lock_poses` when `start_regime` recorded it
+    (#959). Otherwise the staged board's CURRENT locks, only while its sha
+    still matches `staged_sha256`: the skill's own commands edit that file in
+    place (`place_pose BOARD BOARD ... lock`), so reading it later would
+    promote the run's lock to a pre-run fact -- which the Phase-3 verifier
+    measured turning the run's own move into a "contradiction between
+    declared sources" that the run could then disposition away."""
+    rec = man.get('staged_lock_poses')
+    if isinstance(rec, dict):
+        return {str(r): tuple(float(v) for v in xyz)
+                for r, xyz in rec.items()}
+    sb = man.get('staged_board')
+    if not sb or not os.path.isfile(sb):
+        return None
+    if not man.get('staged_sha256') or _sha256(sb) != man['staged_sha256']:
+        return None
+    try:
+        from .provenance import locked_poses
+        return {r: tuple(xyz) for r, xyz in locked_poses(sb).items()}
+    except (OSError, ValueError):
+        return None
 
 
 def mechanical_provenance(mech: Dict, board_path: str):
@@ -201,28 +282,17 @@ def mechanical_provenance(mech: Dict, board_path: str):
     sha), `unverified` (no manifest, or one staged before the sha was
     recorded), or `mismatch` (the manifest recorded different bytes -- the
     file changed after staging, so it is the run's own writing and reads as a
-    hypothesis). `staged_locks` is the lock set of the staged board the
-    manifest names, the only locks that existed before the run, or None."""
-    from . import provenance as PV
-    wd = PV.regime_for(board_path)
-    if wd is None:
+    hypothesis). `staged_locks` is `{ref: pose}` for the locks the staged
+    board carried WHEN IT WAS STAGED -- the only locks that existed before
+    the run -- or None when nothing can vouch for it (`staged_lock_poses`)."""
+    man = regime_manifest(board_path)
+    if man is None:
         return ('unverified', 'no unaided-regime manifest governs this '
                 'board, so nothing vouches for when this file was written',
                 None)
-    try:
-        with open(os.path.join(wd, PV.REGIME_NAME), encoding='utf-8') as fh:
-            man = json.load(fh)
-    except (OSError, ValueError) as exc:
-        return ('unverified', f'the regime manifest is unreadable ({exc})',
-                None)
-    staged_locks = None
-    sb = man.get('staged_board')
-    if sb and os.path.isfile(sb):
-        try:
-            from .parser import extract_locked_refs
-            staged_locks = set(extract_locked_refs(sb))
-        except (OSError, ValueError):
-            staged_locks = None
+    if isinstance(man, str):
+        return ('unverified', man, None)
+    staged_locks = staged_lock_poses(man)
     mp = man.get('mechanical')
     if not mp or os.path.abspath(mp) != os.path.abspath(mech['path']):
         return ('unverified', 'the regime manifest names a different '
@@ -266,16 +336,64 @@ def _winner(values: Dict[str, Dict[str, object]]) -> Optional[str]:
     return ranked[0] if ranked else None
 
 
-def _body_rect_at(pcb, bodies, ref, x=None, y=None, rot=None):
-    from .floorplan import drawn_body_rect
-    fp = pcb.footprints.get(ref)
-    if fp is None:
-        return None
-    proxy = SimpleNamespace(x=fp.x if x is None else x,
-                            y=fp.y if y is None else y,
-                            rotation=fp.rotation if rot is None else rot)
-    rect, _src = drawn_body_rect(bodies.get(ref), proxy)
-    return rect
+class _Geometry:
+    """The board's bodies and placement state, built on first use: a
+    reconciliation with nothing to compare must not pay for either (the
+    Phase-3 verifier measured 0.55 s on ulx3s for an empty one)."""
+
+    def __init__(self, pcb, board_path):
+        self.pcb, self.board_path = pcb, board_path
+        self._bodies = self._state = None
+
+    @property
+    def bodies(self):
+        if self._bodies is None:
+            from .body import board_bodies
+            try:
+                self._bodies = board_bodies(self.pcb, self.board_path)
+            except Exception:                               # noqa: BLE001
+                self._bodies = {}
+        return self._bodies
+
+    @property
+    def state(self):
+        if self._state is None:
+            import pose_score
+            self._state = pose_score.make_state(self.pcb, self.board_path)
+        return self._state
+
+    def _proxy(self, ref, x, y, rot):
+        fp = self.pcb.footprints.get(ref)
+        if fp is None:
+            return None
+        return SimpleNamespace(x=fp.x if x is None else x,
+                               y=fp.y if y is None else y,
+                               rotation=((fp.rotation or 0.0) if rot is None
+                                         else rot))
+
+    def body_rect(self, ref, x=None, y=None, rot=None):
+        """The DRAWN body (fab/silk, else courtyard) at a pose."""
+        from .floorplan import drawn_body_rect
+        proxy = self._proxy(ref, x, y, rot)
+        if proxy is None:
+            return None
+        return drawn_body_rect(self.bodies.get(ref), proxy)[0]
+
+    def seat_rect(self, ref, entry, x=None, y=None, rot=None):
+        """The rect `rule_edge_connector` reads a part's edge off, at a pose:
+        `edge_seat_rect` itself -- the drawn body for an edge receptacle or an
+        `edge_mount` entry, the courtyard otherwise. Reading the drawn body
+        for every part disagreed with the grader on three corpus refs, and
+        manufactured a contradiction on rp2350's SW1 that the grade passed."""
+        from .floorplan import drawn_body_rect, edge_seat_rect
+        proxy = self._proxy(ref, x, y, rot)
+        part = self.state.parts.get(ref)
+        if proxy is None or part is None:
+            return None
+        rect, _basis = edge_seat_rect(
+            entry or {}, part.rect(proxy.x, proxy.y, proxy.rotation),
+            lambda: drawn_body_rect(self.bodies.get(ref), proxy))
+        return rect
 
 
 def _edge_of(rect, bounds) -> Optional[str]:
@@ -294,31 +412,33 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
     """One row per (ref, field) that TWO OR MORE channels speak to.
 
     Fields: `edge` (for every ref some channel declares an edge for; the
-    mechanical and board values are read off the DRAWN BODY at the declared
-    and current pose -- a courtyard or pad bbox reads esp_prog's USB1 as
-    south, its body as west), `pose` (mechanical vs board), `on_board` (a
-    declared pose whose body is DISJOINT from the outline contradicts the
-    outline), and `floors` (mechanical vs the floors the grade used; a
-    report, never a contradiction).
+    mechanical and board values are read off `edge_seat_rect` at the declared
+    and current pose -- the rect the grader itself reads, so reconciliation
+    and the grade cannot disagree about which edge a part is on), `pose`
+    (mechanical vs board), `on_board` (a declared pose whose drawn body is
+    DISJOINT from the outline's bounding box contradicts the outline), and
+    `floors` (mechanical vs the floors the grade used; a report, never a
+    contradiction). A row whose mechanical value lost ANOTHER row's
+    contradiction does not name mechanical its winner.
     """
-    from .body import board_bodies
-    try:
-        bodies = board_bodies(pcb, board_path)
-    except Exception:                                       # noqa: BLE001
-        bodies = {}
+    geo = _Geometry(pcb, board_path)
     bounds = pcb.board_info.board_bounds if pcb.board_info else None
-    brief_edges = {str(c.get('ref')): c.get('edge')
-                   for c in (brief_fragment or {}).get('edge_connectors') or []
-                   if c.get('ref') and c.get('edge')}
-    intent_edges = {str(c.get('ref')): c.get('edge')
-                    for c in (intent_doc or {}).get('edge_connectors') or []
-                    if c.get('ref') and c.get('edge')}
+    brief_entries = {str(c.get('ref')): c
+                     for c in (brief_fragment or {}).get('edge_connectors')
+                     or [] if c.get('ref') and c.get('edge')}
+    brief_edges = {r: c.get('edge') for r, c in brief_entries.items()}
+    intent_entries = {str(c.get('ref')): c
+                      for c in (intent_doc or {}).get('edge_connectors')
+                      or [] if c.get('ref') and c.get('edge')}
+    intent_edges = {r: c.get('edge') for r, c in intent_entries.items()}
+    if brief_source and os.path.isfile(brief_source):
+        brief_source = f"{brief_source} (sha256 {_sha256(brief_source)})"
     mech = mechanical or {}
     prov, prov_why, staged_locks = ((None, None, None) if not mech else
                                     mechanical_provenance(mech, board_path))
     mech_auth = ('hypothesis' if prov == 'mismatch' else 'recorded_fact')
-    mech_src = (f"{mech.get('path')} ({prov}: {prov_why})"
-                if mech else None)
+    mech_src = (f"{mech.get('path')} (sha256 {mech.get('sha256')}; "
+                f"{prov}: {prov_why})" if mech else None)
     rows: List[Dict[str, object]] = []
 
     def _row(ref, field, values, same, why=''):
@@ -335,6 +455,9 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
         if ref not in pcb.footprints:
             continue
         values: Dict[str, Dict[str, object]] = {}
+        # The entry the GRADER would read this ref's edge by: the brief's
+        # when it declares one, else the plan's, else none (courtyard).
+        entry = brief_entries.get(ref) or intent_entries.get(ref)
         if ref in brief_edges:
             values['brief'] = {'value': brief_edges[ref],
                                'authority': 'declared',
@@ -346,8 +469,8 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
         elif ref in (mech.get('poses') or {}):
             p = mech['poses'][ref]
             values['mechanical'] = {
-                'value': _edge_of(_body_rect_at(pcb, bodies, ref, p['x'],
-                                                p['y'], p['rot']), bounds),
+                'value': _edge_of(geo.seat_rect(ref, entry, p['x'], p['y'],
+                                                p['rot']), bounds),
                 'authority': mech_auth, 'source': mech_src}
         if ref in intent_edges:
             ie = intent_edges[ref]
@@ -358,12 +481,12 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
                 'authority': ('declared' if brief_edges.get(ref) == ie
                               else 'hypothesis'),
                 'source': intent_source}
-        values['board'] = {'value': _edge_of(_body_rect_at(pcb, bodies, ref),
+        values['board'] = {'value': _edge_of(geo.seat_rect(ref, entry),
                                              bounds),
                            'authority': 'inferred', 'source': board_path}
         _row(ref, 'edge', values, lambda a, b: a == b,
-             'the edge each channel puts this part on, read off the drawn '
-             'body')
+             'the edge each channel puts this part on, read off the rect the '
+             'edge-connector rule reads (`edge_seat_rect`)')
 
     def _same_pose(a, b):
         return (abs(a[0] - b[0]) <= POSE_TOL_MM
@@ -376,17 +499,23 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
         fp = pcb.footprints.get(ref)
         if fp is None:
             continue
-        board_auth = ('recorded_fact' if staged_locks and ref in staged_locks
-                      else 'hypothesis' if getattr(fp, 'locked', False)
-                      else 'inferred')
+        # A board pose is a pre-run fact only while the part is LOCKED where
+        # it was locked at staging. The run's own lock, or a staged lock the
+        # run has since moved, is the run's writing.
+        cur = (fp.x, fp.y, (fp.rotation or 0.0) % 360.0)
+        locked = getattr(fp, 'locked', False)
+        sp = (staged_locks or {}).get(ref)
+        board_auth = ('recorded_fact' if locked and sp is not None
+                      and _same_pose(sp, cur)
+                      else 'hypothesis' if locked else 'inferred')
         values = {
             'mechanical': {'value': (p['x'], p['y'], p['rot']),
                            'authority': mech_auth, 'source': mech_src},
-            'board': {'value': (fp.x, fp.y, (fp.rotation or 0.0) % 360.0),
-                      'authority': board_auth, 'source': board_path}}
+            'board': {'value': cur, 'authority': board_auth,
+                      'source': board_path}}
         _row(ref, 'pose', values, _same_pose,
              p.get('reason') or 'a declared mechanical pose')
-        rect = _body_rect_at(pcb, bodies, ref, p['x'], p['y'], p['rot'])
+        rect = geo.body_rect(ref, p['x'], p['y'], p['rot'])
         if rect is not None and bounds is not None and (
                 rect[2] < bounds[0] or rect[0] > bounds[2]
                 or rect[3] < bounds[1] or rect[1] > bounds[3]):
@@ -402,8 +531,8 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
                 'kind': ('contradiction' if mech_auth == 'recorded_fact'
                          else 'drift'),
                 'winner': 'outline',
-                'why': 'the declared pose puts the body entirely off the '
-                       'board outline'})
+                'why': 'the declared pose puts the drawn body entirely '
+                       'outside the board outline\'s bounding box'})
 
     knobs = ((mech.get('floors') or {}).get('knobs') or {})
     unavailable = (mech.get('floors') or {}).get('unavailable')
@@ -440,6 +569,19 @@ def reconcile(pcb, board_path: str, *, brief_fragment: Optional[Dict] = None,
                 'winner': 'graded' if u is not None else None,
                 'why': ('staging recorded this floor as an assumption; the '
                         'grade used the value named `graded`')})
+    # A mechanical value that LOST one row's contradiction is not the winner
+    # of that ref's other rows either: run 29's USB1 lost `USB1:edge` to the
+    # brief, and `USB1:pose` still printed "mechanical wins".
+    lost = set(lost_mechanical_refs(rows))
+    for r in rows:
+        if (r.get('ref') in lost and r['winner'] == 'mechanical'
+                and r['kind'] != 'contradiction'):
+            rest = {ch: v for ch, v in r['values'].items()
+                    if ch != 'mechanical'}
+            r['winner'] = _winner(rest)
+            r['why'] = (f"{r['why']} -- the mechanical value lost "
+                        f"{r['ref']}'s contradiction elsewhere, so it wins "
+                        f"nothing here")
     return rows
 
 
@@ -475,10 +617,16 @@ def anchor_blocks(pcb, board_path: str, mechanical: Dict, *,
                   tolerance_mm: float = ANCHOR_TOL_MM):
     """`(blocks, skipped)`: one grade-only anchor block per mechanical ref.
 
+    Compiled by the GRADE from the file (`floorplan.mechanical_anchor_
+    violations`), and never written into a plan: `block` names starting
+    `mech:` are refused in an intent, so no plan can leave an anchor out or
+    label a zone of its own as one.
+
     The zone is the GRADER's own rect for the part at its declared pose --
     `_Part.rect`, which is what `rule_zone_containment` tests -- unioned with
     the exactly rotated rect (the grader falls back to its 0-degree bounds
-    off the 90-degree lattice), rounded outward. So a part sitting at its
+    off the 90-degree lattice), rounded outward; over every rotation the part
+    may take when the declaration gives none. So a part sitting at its
     declared pose grades clean and one that moved does not.
 
     Grade-only: P1 requires each anchored ref to be FILE-locked, so the
@@ -519,15 +667,26 @@ def anchor_blocks(pcb, board_path: str, mechanical: Dict, *,
         if part is None:
             skipped[ref] = 'the placement state carries no geometry for it'
             continue
-        rot = p['rot'] if p['rot'] is not None else (fp.rotation or 0.0)
-        g = part.rect(p['x'], p['y'], rot)
+        # A declaration with no `rot` constrains the POSITION only, so the
+        # zone must hold the part at every rotation it may take there -- the
+        # four lattice rotations and the board's own. Building it at the
+        # current rotation pinned a rotation the file never declared (the
+        # Phase-3 verifier turned CON2 90 degrees in place and got a 7.62 mm
+        # zone_containment ERROR while mechanical_drift correctly said nothing).
+        rots = ([p['rot']] if p['rot'] is not None else
+                sorted({0.0, 90.0, 180.0, 270.0,
+                        (fp.rotation or 0.0) % 360.0}))
         b0 = part.bounds_by_rot[0.0]
-        e = rotate_local_bounds(*b0, rot)
-        exact = (p['x'] + e[0], p['y'] + e[1], p['x'] + e[2], p['y'] + e[3])
-        zone = [math.floor(min(g[0], exact[0]) * 1e4) / 1e4,
-                math.floor(min(g[1], exact[1]) * 1e4) / 1e4,
-                math.ceil(max(g[2], exact[2]) * 1e4) / 1e4,
-                math.ceil(max(g[3], exact[3]) * 1e4) / 1e4]
+        rects = []
+        for rot in rots:
+            rects.append(part.rect(p['x'], p['y'], rot))
+            e = rotate_local_bounds(*b0, rot)
+            rects.append((p['x'] + e[0], p['y'] + e[1],
+                          p['x'] + e[2], p['y'] + e[3]))
+        zone = [math.floor(min(r[0] for r in rects) * 1e4) / 1e4,
+                math.floor(min(r[1] for r in rects) * 1e4) / 1e4,
+                math.ceil(max(r[2] for r in rects) * 1e4) / 1e4,
+                math.ceil(max(r[3] for r in rects) * 1e4) / 1e4]
         blocks.append({
             'name': f'mech:{ref}', 'refs': [glob.escape(ref)], 'zone': zone,
             'tolerance_mm': tolerance_mm,

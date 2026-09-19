@@ -148,7 +148,7 @@ source, suspect, suspect_reason
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 32 rule names below |
+| `severity` | any of the 34 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `dispositions` | `rules`, `withheld`, `refs`, `contradictions` -- each `{key: why}`, a non-empty written reason (#959; see "The rule roster" below) |
 | `must_lock` | a list of reference globs (no nested keys) |
@@ -160,10 +160,11 @@ source, suspect, suspect_reason
 the rule loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
 `block_unresolved`, `intent_zone_in_keepout`, `keepout_allow_unresolved`,
 `mechanical_drift` (#959, raised only when a `mechanical.json` is read),
-the nine `plan_check` findings (#959: `plan_zone_exclusive_unsatisfiable`,
+the eleven `plan_check` findings (#959: `plan_zone_exclusive_unsatisfiable`,
 `block_glob_literal`, `plan_fixed_outside_zone`, `plan_zone_overfull`,
 `plan_zone_crowded`, `plan_edge_overfull`, `plan_edge_crowded`,
-`plan_board_overfull`, `plan_board_crowded`),
+`plan_board_overfull`, `plan_board_crowded`, `plan_fixed_overlap`,
+`plan_fixed_overlap_budget`),
 plus three more raised BESIDE a rule's own name —
 `decap_pin_distance_inferred` and `decap_pin_uncovered` (#705), and
 `proximity_unresolved` (#902). One measurement can support several claims, and
@@ -536,6 +537,55 @@ for it, and the reason is printed:
     - decap_distance: the intent declares no decaps.max_distance_mm
     - keepout: the intent declares no keepouts
 ```
+
+### The rule roster
+
+A skip reason nobody has to act on was printed on every lap of run 29. There were
+22 grades, and 6 of the 14 rules never ran. The roster (#959) turns each dark rule
+into a question the plan answers. It is printed by the grade, by `--emit-intent`
+and by `--plan-only`. `--json` carries it as `rule_roster`, and `JSON_SUMMARY`
+carries `rules_dark_undispositioned`.
+
+The placement skill's P1 gate refuses a plan when a rule meets all five of these
+conditions:
+
+1. The rule is dark, meaning the plan does not arm it.
+2. It is not a **policy** rule. `proximity` and `zone_exclusive` are policy
+   rules: nothing on the board says which parts belong together or which area is
+   reserved.
+3. A **board fact** says the rule applies. The plan's own claims never count
+   here.
+4. It is **gating**: its table-default severity is ERROR. An intent can promote
+   a rule to ERROR, but never demote one out of the refusal.
+5. Nothing answers for it in `dispositions.rules`.
+
+Budget keys work the same way. `legality_budget` without `overlap_area` or
+`oob_count` owes that key a `dispositions.withheld.<key>`. The debt is read off
+the budget the plan actually declares, not off the plan's
+`context.budget_withheld` note.
+
+A rule the **design brief** declares is answered in one place only, P1's
+brief-clause check. That check refuses a plan that drops or contradicts a brief
+clause, by clause id, and `--waive brief-clause:<id>:<why>` answers it. The roster
+reports such a rule as `uncovered` and asks nothing more.
+
+`check_floorplan --json` also writes a `declaration_ledger`. It has one row per
+requirement: each rule, each brief clause, and each reconciled channel value.
+Every row carries its source, its authority, the rule that grades it, and one
+status from this list:
+
+| status | meaning |
+|---|---|
+| `pending` | no grade yet |
+| `graded_pass` / `graded_fail` | the grade has run and passed or failed |
+| `dark` | owed, nothing answers it |
+| `dispositioned` | answered in writing |
+| `uncovered` | declared, but not carried by the plan |
+| `policy` | a policy rule |
+| `advisory` | the rule's findings are WARN only |
+| `inapplicable` | the rule does not apply to this board |
+| `abstained` | the rule is armed but cannot measure this board |
+| `carried` / `unmeasured` / `unknown` | the brief fact is reported, but not physically checked |
 
 ## The rules
 

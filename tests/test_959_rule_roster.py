@@ -42,7 +42,7 @@ import run_utils                                            # noqa: E402
 from kicad_parser import parse_kicad_pcb                    # noqa: E402
 from placement import floorplan as fp                       # noqa: E402
 
-RUN_ALL_TIMEOUT = 900
+RUN_ALL_TIMEOUT = 1800
 
 ESP = os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb')
 BRIEF_711 = os.path.join(REPO, 'tests', 'fixtures', '711',
@@ -111,6 +111,18 @@ def test_the_arming_key_is_what_arms_the_rule():
         top = next(iter(frag))
         assert fp._ARMING_KEY[name].split('.')[0].split('[')[0] == top, (
             name, fp._ARMING_KEY[name], top)
+        # The WHOLE path, not only its first segment: every segment the table
+        # names must be present in the fragment that arms the rule (the
+        # Phase-1 verifier renamed `envelope.rect` to
+        # `envelope.tolerance_mm` and this test still passed).
+        node = frag
+        for seg in fp._ARMING_KEY[name].split(' ')[0].split('.'):
+            key = seg.split('[')[0]
+            assert isinstance(node, dict) and key in node, (
+                name, fp._ARMING_KEY[name], seg, node)
+            node = node[key]
+            if isinstance(node, list):
+                node = node[0]
     print(f"  PASS: {len(ARM_WITH)} arming keys each arm their rule")
 
 
@@ -144,6 +156,7 @@ def test_the_default_severity_table_is_what_the_rules_emit():
         edge_connectors=[{'ref': 'USB1', 'edge': 'north'}],
         decaps={'max_distance_mm': 0.01},
         proximity=[{'ref': 'Y1', 'near': 'U1', 'max_mm': 0.01}],
+        must_lock=['C1'],
     )
     it = fp.intent_from_dict(raw, '')
     res = fp.grade(it, pcb, ESP)
@@ -163,7 +176,7 @@ def test_the_default_severity_table_is_what_the_rules_emit():
     for must in ('envelope', 'zone_containment', 'zone_side',
                  'assembly_side', 'zone_exclusive', 'keepout',
                  'edge_connector', 'decap_distance', 'decap_ungraded',
-                 'proximity', 'pins_to_edge'):
+                 'proximity', 'pins_to_edge', 'must_lock'):
         assert must in checked, (must, sorted(got))
     print(f"  PASS: {len(checked)} rules fired, each at its table severity: "
           f"{', '.join(sorted(checked))}")
@@ -405,7 +418,7 @@ def test_the_cli_prints_the_roster_and_the_carried_facts():
             doc = json.load(fh)
         ledger = doc['declaration_ledger']
         kinds = {row['kind'] for row in ledger}
-        assert kinds == {'rule', 'brief_clause'}, kinds
+        assert kinds == {'rule', 'brief_clause', 'reconciliation'}, kinds
         statuses = {row['status'] for row in ledger}
         for s in ('graded_pass', 'carried', 'unknown', 'dark', 'inapplicable'):
             assert s in statuses, (s, statuses)
@@ -456,7 +469,279 @@ def test_p1_refuses_by_name_and_passes_once_answered():
           "answered")
 
 
+
+
+def _driver():
+    sys.path.insert(0, os.path.dirname(DRIVER))
+    import importlib
+    return importlib.import_module('placement_driver')
+
+
+def _tiny_with_brief(tmp, brief, name='b', **board_kw):
+    drv = _driver()
+    d = os.path.join(tmp, name)
+    os.makedirs(d, exist_ok=True)
+    board = drv._tiny_board(os.path.join(d, 'board.kicad_pcb'),
+                            ('U1', 'U2'), **board_kw)
+    if brief is not None:
+        with open(os.path.join(d, 'board.design-brief.json'), 'w',
+                  encoding='utf-8') as fh:
+            json.dump(dict({'schema': 1, 'kind': 'design-brief',
+                            'units': 'mm', 'board': 'board.kicad_pcb'},
+                           **brief), fh)
+    return drv, board
+
+
+def _p1(board, plan_doc, tmp, *extra, name='p.json'):
+    p = os.path.join(tmp, name)
+    with open(p, 'w', encoding='utf-8') as fh:
+        json.dump(plan_doc, fh)
+    return [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+            '--board', board, '--zone-plan', p] + list(extra)
+
+
+BLOCKS = [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+           'note': 'both parts, one zone'}]
+
+
+def test_a_plan_that_drops_brief_declarations_is_refused_at_p1():
+    """Phase-1 verifier B1: a plan with `proximity: []` passed P1 against a
+    brief declaring proximity claims, and one with no edge entries passed
+    against a brief claiming edges -- the roster called both "only a
+    declaration can arm it" / "nothing has an edge to claim". Now P1's
+    brief-clause check refuses each dropped clause by id (the coverage
+    P-close grades), and the roster names the brief instead of asking for a
+    second answer to the same question."""
+    with tempfile.TemporaryDirectory() as tmp:
+        drv, board = _tiny_with_brief(tmp, {
+            'interfaces': [{'ref': 'U2', 'edge': 'east',
+                            'user_facing': True}],
+            'proximity': [{'ref': 'U1', 'near': 'U2', 'max_mm': 5.0,
+                           'requirement': 'R1', 'why': 'test'}]},
+            locked=('U2',))
+        r = run_utils.check(_p1(board, drv._zone_plan_doc(BLOCKS), tmp),
+                            refuse='drops or contradicts', code=4)
+        assert 'interfaces[U2]' in r.stdout, r.stdout
+        assert 'proximity[' in r.stdout, r.stdout
+        # Carrying both clauses answers it.
+        full = drv._zone_plan_doc(
+            BLOCKS, edge_connectors=[{'ref': 'U2', 'edge': 'east',
+                                      'class': 'edge_receptacle'}],
+            proximity=[{'ref': 'U1', 'near': 'U2', 'max_mm': 5.0}])
+        r = subprocess.run(_p1(board, full, tmp, name='full.json'),
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', cwd=REPO, timeout=900)
+        assert 'drops or contradicts' not in r.stdout, r.stdout
+        # The roster: named, applicable, answered at the clause gate.
+        from placement import design_brief as db
+        pcb = parse_kicad_pcb(board)
+        bp = os.path.join(os.path.dirname(board), 'board.design-brief.json')
+        frag, _ = db.compile_brief(db.load_brief(bp),
+                                   board_refs=sorted(pcb.footprints))
+        rows = {r_['rule']: r_ for r_ in fp.rule_roster(
+            fp.intent_from_dict(drv._zone_plan_doc(BLOCKS), ''), pcb,
+            board, brief_fragment=frag)}
+        for name in ('proximity', 'edge_connector'):
+            row = rows[name]
+            assert row['brief_claims'] and row['applicable'], row
+            assert not row['policy'] and not row['needs_disposition'], row
+            assert 'design brief declares' in row['applicability_reason']
+        led = {x['id']: x for x in fp.declaration_ledger(
+            fp.intent_from_dict(drv._zone_plan_doc(BLOCKS), ''),
+            list(rows.values()))}
+        assert led['rule:proximity']['status'] == 'uncovered', led
+    print("  PASS: dropped brief proximity and edge clauses are refused at "
+          "P1 by id; carried, they pass; the roster names the brief")
+
+
+def test_a_malformed_brief_refuses_p1():
+    with tempfile.TemporaryDirectory() as tmp:
+        drv, board = _tiny_with_brief(tmp, {'bogus_key': 1})
+        run_utils.check(_p1(board, drv._zone_plan_doc(BLOCKS), tmp),
+                        refuse='cannot be read', code=4)
+    print("  PASS: a brief check_floorplan refuses is refused at P1 too")
+
+
+def test_the_withheld_debt_is_read_off_the_budget():
+    """Phase-1 verifier B2: deleting the plan's own `context.budget_withheld`
+    note deleted the debt. A legality budget armed without `overlap_area` or
+    `oob_count` now owes the missing key, whatever the notes say."""
+    pcb = parse_kicad_pcb(PILE)
+    with open(os.path.join(FIX, 'zone_plan_r1.json'), encoding='utf-8') as fh:
+        r1 = json.load(fh)
+    stripped = json.loads(json.dumps(r1))
+    stripped.get('context', {}).pop('budget_withheld', None)
+    for doc in (r1, stripped,
+                _raw(legality_budget={'oob_count': 0})):
+        rows = {r['rule']: r for r in fp.rule_roster(
+            fp.intent_from_dict(doc, ''), pcb, PILE)}
+        leg = rows['legality']
+        assert leg['state'] == 'armed' and leg['needs_disposition'], leg
+        assert 'overlap_area' in leg['withheld'], leg['withheld']
+        led = {x['id']: x for x in fp.declaration_ledger(
+            fp.intent_from_dict(doc, ''), list(rows.values()))}
+        assert led['rule:legality']['status'] == 'dark', led['rule:legality']
+        assert 'overlap_area' in led['rule:legality']['why']
+    answered = _raw(legality_budget={'oob_count': 0},
+                    dispositions={'withheld': {
+                        'overlap_area': 'graded by check_assembly'}})
+    rows = {r['rule']: r for r in fp.rule_roster(
+        fp.intent_from_dict(answered, ''), pcb, PILE)}
+    assert not rows['legality']['needs_disposition'], rows['legality']
+    print("  PASS: overlap_area is owed with the note, without it, and on a "
+          "hand-written budget; a disposition answers it")
+
+
+def test_ledger_statuses_say_what_the_roster_says():
+    """Phase-1 verifier S1: armed-with-an-open-key read `graded_pass`, and
+    policy / advisory rows read `inapplicable`. Also pins `pending` before a
+    grade and `graded_fail` after one."""
+    pcb = parse_kicad_pcb(ESP)
+    side = pcb.footprints['R1']
+    from placement import legality as _leg
+    raw = _raw(blocks=[{'name': 'far', 'refs': ['U1'], 'zone': [0, 0, 1, 1],
+                        'note': 'U1 is nowhere near here'},
+                       {'name': 'r1', 'refs': ['R1'],
+                        'side': _leg.footprint_side(side),
+                        'note': 'R1 on its own face'}],
+               legality_budget={'oob_count': 0})
+    it = fp.intent_from_dict(raw, '')
+    rows = fp.rule_roster(it, pcb, ESP)
+    before = {x['id']: x for x in fp.declaration_ledger(it, rows)}
+    assert before['rule:zone_containment']['status'] == 'pending', before
+    assert before['rule:legality']['status'] == 'dark', before
+    assert before['rule:proximity']['status'] == 'policy', before
+    assert before['rule:zone_exclusive']['status'] == 'policy', before
+    assert before['rule:decap_pin_distance']['status'] == 'advisory', before
+    assert before['rule:must_lock']['status'] == 'inapplicable', before
+    by = {r['rule']: r for r in rows}
+    assert by['zone_containment']['applicable'] is True
+    assert 'armed by' in by['zone_containment']['applicability_reason']
+    res = fp.grade(it, pcb, ESP, with_roster=True)
+    after = {x['id']: x for x in fp.declaration_ledger(
+        it, res.roster, result=res)}
+    assert after['rule:zone_containment']['status'] == 'graded_fail', after
+    assert after['rule:zone_side']['status'] == 'graded_pass', after
+    print("  PASS: pending / graded_fail / graded_pass / dark / policy / "
+          "advisory / inapplicable each where the roster says")
+
+
+def test_a_stale_only_plan_opens_with_the_true_sentence():
+    """Phase-1 verifier S4: a plan whose only debt is a stale disposition
+    opened "0 rule(s) this plan leaves dark ... nothing answers for them"."""
+    with tempfile.TemporaryDirectory() as tmp:
+        drv, board = _tiny_with_brief(tmp, None)
+        doc = drv._zone_plan_doc(BLOCKS, dispositions={
+            'rules': {'envelope': 'fixture', 'legality': 'fixture'},
+            'withheld': {'overlap_area': 'nothing withholds this'}})
+        r = run_utils.check(_p1(board, doc, tmp),
+                            refuse='answers something that is not asked',
+                            code=4)
+        assert '0 rule(s)' not in r.stdout, r.stdout
+        assert 'STALE dispositions.withheld.overlap_area' in r.stdout
+    print("  PASS: a stale-only plan is refused with the stale header")
+
+
+def test_the_roster_runs_last_at_p1():
+    """Phase-1 verifier S6/D02: the older P1 refusals keep precedence. A plan
+    with an unzoned movable part AND a dark gating rule is refused for the
+    unzoned part."""
+    with tempfile.TemporaryDirectory() as tmp:
+        drv = _driver()
+        board = drv._tiny_board(os.path.join(tmp, 'b.kicad_pcb'),
+                                ('U1', 'U2'))
+        doc = drv._zone_plan_doc(
+            [{'name': 'one', 'refs': ['U1'], 'zone': [0, 0, 10, 10],
+              'note': 'U1 only'}], dispositions={})
+        r = run_utils.check(_p1(board, doc, tmp),
+                            refuse='sit in no zoned block', code=4)
+        assert 'dispositions.rules.envelope' not in r.stdout, r.stdout
+    print("  PASS: the unzoned-part refusal comes before the roster's")
+
+
+def test_gating_and_applicability_predicates():
+    """Phase-1 verifier S5: the pin-distance gating arms, the edge-claim
+    classes, a two-faced board's zone_side, and `_arm_decap_pins`."""
+    def roster(path, **raw):
+        pcb = parse_kicad_pcb(path)
+        return {r['rule']: r for r in fp.rule_roster(
+            fp.intent_from_dict(_raw(**raw), ''), pcb, path)}
+    sf = os.path.join(REPO, 'kicad_files', 'splitflap_driver.kicad_pcb')
+    fh_ = os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pcb')
+    ul = os.path.join(REPO, 'kicad_files', 'ulx3s.kicad_pcb')
+    assert roster(sf)['decap_pin_distance']['gating'] is False
+    assert roster(sf, severity={'decap_pin_distance_inferred': 'error'})[
+        'decap_pin_distance']['gating'] is True
+    assert roster(fh_)['decap_pin_distance']['gating'] is True
+    assert roster(fh_, severity={'decap_pin_distance': 'warn'})[
+        'decap_pin_distance']['gating'] is True
+    # ...and on a pintype board the rule's OWN findings carry its table
+    # severity (F17: a table entry moved to WARN survived every test).
+    res = fp.grade(fp.intent_from_dict(
+        _raw(decaps={'max_pin_distance_mm': 0.01}), ''),
+        parse_kicad_pcb(fh_), fh_)
+    sev = {v.severity for v in res.violations
+           if v.rule == 'decap_pin_distance'}
+    assert sev == {fp._RULE_DEFAULT_SEVERITY['decap_pin_distance']}, sev
+    assert roster(ESP)['edge_connector']['applicable'] is True
+    assert roster(ul)['zone_side']['applicable'] is True
+    assert roster(ESP)['zone_side']['applicable'] is False
+    with tempfile.TemporaryDirectory() as tmp:
+        tiny = _driver()._tiny_board(os.path.join(tmp, 't.kicad_pcb'),
+                                     ('U1', 'U2'))
+        t = roster(tiny)
+        assert t['edge_connector']['applicable'] is False, t['edge_connector']
+        assert t['decap_pin_distance']['applicable'] is False, t[
+            'decap_pin_distance']
+        ab = roster(tiny, decaps={'max_pin_distance_mm': 1.0})
+        assert ab['decap_pin_distance']['state'] == 'abstained', ab[
+            'decap_pin_distance']
+    print("  PASS: pin gating by channel and promotion; edge classes both "
+          "ways; zone_side on one and two faces; an abstained pin rule")
+
+
+def test_the_cli_carries_the_roster_everywhere_it_says():
+    """C01 / C05 / F77: the emit path prints the roster, JSON_SUMMARY carries
+    `stale_dispositions`, and `to_json` carries `rule_roster`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, 'e.json')
+        r = run_utils.check([sys.executable, '-X', 'utf8',
+                             run_utils.tool('check_floorplan.py'), ESP,
+                             '--emit-intent', out], accept=True)
+        assert 'rule roster:' in r.stdout, r.stdout[-1500:]
+        plan = os.path.join(tmp, 'p.json')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            json.dump(_raw(dispositions={'withheld': {'oob_amount': 'x'}}),
+                      fh)
+        js = os.path.join(tmp, 'g.json')
+        r = subprocess.run([sys.executable, '-X', 'utf8',
+                            run_utils.tool('check_floorplan.py'), ESP,
+                            '--intent', plan, '--json', js],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', cwd=REPO, timeout=900)
+        line = [x for x in r.stdout.splitlines()
+                if x.startswith('JSON_SUMMARY:')][-1]
+        s = json.loads(line.split('JSON_SUMMARY: ', 1)[1])
+        assert s['stale_dispositions'] == [
+            'dispositions.withheld.oob_amount: nothing is withheld under '
+            'that key'], s['stale_dispositions']
+        with open(js, encoding='utf-8') as fh:
+            doc = json.load(fh)
+        assert isinstance(doc.get('rule_roster'), list) and doc[
+            'rule_roster'], doc.get('rule_roster')
+    print("  PASS: emit prints the roster; the summary names the stale key; "
+          "the JSON carries the roster")
+
+
 TESTS = [
+    test_a_plan_that_drops_brief_declarations_is_refused_at_p1,
+    test_a_malformed_brief_refuses_p1,
+    test_the_withheld_debt_is_read_off_the_budget,
+    test_ledger_statuses_say_what_the_roster_says,
+    test_a_stale_only_plan_opens_with_the_true_sentence,
+    test_the_roster_runs_last_at_p1,
+    test_gating_and_applicability_predicates,
+    test_the_cli_carries_the_roster_everywhere_it_says,
     test_every_rule_has_its_table_entries,
     test_the_arming_key_is_what_arms_the_rule,
     test_the_default_severity_table_is_what_the_rules_emit,

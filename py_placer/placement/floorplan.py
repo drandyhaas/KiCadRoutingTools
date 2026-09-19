@@ -44,6 +44,7 @@ import fnmatch
 import json
 import math
 import os
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
@@ -809,6 +810,12 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         _reject_unknown(b, _BLOCK_KEYS, f"blocks[{i}]")
         _entry_context(b, f"blocks[{i}]")
         name = b.get('name') or f"block{i}"
+        if str(name).startswith(MECHANICAL_ANCHOR_PREFIX):
+            raise IntentError(
+                f"blocks[{i}]: the name {name!r} is reserved -- "
+                f"`{MECHANICAL_ANCHOR_PREFIX}` blocks are compiled from "
+                f"mechanical.json by the grade itself (#959). Remove it; the "
+                f"grade reads the declaration directly")
         if name in seen_names:
             raise IntentError(f"blocks[{i}]: duplicate block name {name!r}")
         seen_names.add(name)
@@ -1062,8 +1069,10 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     # trusting the disposition would skip a live finding. Checked here, where
     # only the intent is needed. Refs need the board: `stale_dispositions`
     # reports them when handed it (`grade` and `check_floorplan --plan-only`
-    # do), and the P1 driver refuses on them in its own words. Contradiction ids need the brief and
-    # mechanical.json, so the P1 driver and check_floorplan check those.
+    # do), and the P1 driver refuses on them in its own words. Contradiction
+    # ids need the brief and mechanical.json: `stale_dispositions` names them
+    # when handed the reconciliation (both of those callers do), and P1
+    # refuses them.
     armed = sorted(r for r in dispositions.get('rules', {})
                    if _wants(intent, r))
     if armed:
@@ -1163,12 +1172,56 @@ def mechanical_drift(intent: Intent, pcb_data, mechanical: Dict, *,
     return out
 
 
-def is_mechanical_anchor(z: Zone) -> bool:
-    """A block `check_floorplan --emit-intent` compiled from `mechanical.json`
-    (#959, #1001): the grader's own rect for a FILE-locked part at its
-    declared pose. Grade-only -- it answers "is the part still where the
-    mechanical declaration put it", never "where may parts go"."""
-    return (z.context or {}).get('basis') == 'mechanical'
+#: Block names the grade compiles from `mechanical.json` (#959, #1001) and
+#: a plan may therefore not use. An anchor taken from the PLAN could be left
+#: out (run 29's plans had none, so its moved fiducial graded a WARN), and a
+#: plan block that could call itself an anchor could exempt itself from the
+#: envelope and overlap checks (the Phase-3 verifier did exactly that with
+#: `context.basis: mechanical`). So the grade builds them from the file, and
+#: this prefix is refused in an intent.
+MECHANICAL_ANCHOR_PREFIX = 'mech:'
+
+
+def mechanical_anchor_violations(pcb_data, pcb_file: str, mechanical: Dict,
+                                 *, skip: Sequence[str] = (), state=None,
+                                 locked=(), outline=None) -> List['Violation']:
+    """`zone_containment` for every anchored mechanical ref, against an
+    anchor compiled from the FILE at grade time (#959, #1001).
+
+    The anchor is the grader's own rect at the declared pose
+    (`reconcile.anchor_blocks`); `skip` holds refs whose mechanical value lost
+    a contradiction. ERROR, fixed: the pose is a recorded fact, and a plan's
+    `severity` map cannot demote it."""
+    from . import reconcile as _rc
+    anchors, _skipped = _rc.anchor_blocks(pcb_data, pcb_file, mechanical,
+                                          lost=skip, state=state)
+    if not anchors:
+        return []
+    it = intent_from_dict({'schema': 1, 'kind': 'floorplan-intent',
+                           'units': 'mm', 'severity': {
+                               'zone_containment': 'error'}}, '')
+    it = dataclasses.replace(it, blocks=[_anchor_zone(b) for b in anchors])
+    blocks = {z.name: [z.name[len(MECHANICAL_ANCHOR_PREFIX):]]
+              for z in it.blocks}
+    if state is None:
+        import pose_score
+        state = pose_score.make_state(pcb_data, pcb_file)
+    ctx = _Ctx(it, pcb_data, pcb_file, state, blocks, set(locked), outline)
+    return [dataclasses.replace(
+        v, message=(f"{v.message} -- the anchor is {v.ref}'s declared pose "
+                    f"in {mechanical.get('path')}"))
+        for v in rule_zone_containment(ctx)]
+
+
+def _anchor_zone(b: Dict) -> 'Zone':
+    """One compiled anchor dict as a `Zone`, bypassing the reserved-name
+    refusal that keeps plans from declaring one."""
+    doc = dict(b)
+    name = doc.pop('name')
+    z = intent_from_dict({'schema': 1, 'kind': 'floorplan-intent',
+                          'units': 'mm',
+                          'blocks': [dict(doc, name='anchor')]}, '').blocks[0]
+    return dataclasses.replace(z, name=name)
 
 
 def validate_intent(intent: Intent) -> List[Violation]:
@@ -1183,14 +1236,6 @@ def validate_intent(intent: Intent) -> List[Violation]:
 
     for z in intent.blocks:
         if z.rect is None:
-            continue
-        # #959 (#1001): a mechanical ANCHOR is the grader's own rect for a
-        # part at its declared pose, and a mechanical part is often a
-        # connector or a mounting hole that overhangs the outline by design
-        # (measured: 33 of 97 mechanical refs on 11 of 22 corpus boards). Its
-        # zone is where the part IS, not a region the plan reserves, so the
-        # envelope says nothing about it.
-        if is_mechanical_anchor(z):
             continue
         if env is not None and not _rect_contains(env, z.rect):
             out.append(Violation(
@@ -1215,10 +1260,6 @@ def validate_intent(intent: Intent) -> List[Violation]:
             if a.rect is None or b.rect is None:
                 continue
             if a.side and b.side and a.side != b.side:
-                continue
-            # An anchor claims no area (see above): a locked part sitting
-            # inside a plan block's zone is not two zones fighting over it.
-            if is_mechanical_anchor(a) or is_mechanical_anchor(b):
                 continue
             area = legality.rect_overlap_area(a.rect, b.rect)
             if area > legality.EPS:
@@ -4258,7 +4299,10 @@ _NON_RULE_SEVERITIES = frozenset({
     'plan_zone_exclusive_unsatisfiable', 'block_glob_literal',
     'plan_fixed_outside_zone', 'plan_zone_overfull', 'plan_zone_crowded',
     'plan_edge_overfull', 'plan_edge_crowded', 'plan_board_overfull',
-    'plan_board_crowded'})
+    'plan_board_crowded',
+    # Row 8: two FILE-locked parts overlapping. A WARN per pair; an ERROR
+    # only when their overlap alone exceeds a DECLARED overlap budget.
+    'plan_fixed_overlap', 'plan_fixed_overlap_budget'})
 
 #: Every rule name an intent may set a severity for. Derived from `RULES`, so a
 #: new rule is settable the moment it is registered -- a hand-listed set would
@@ -4479,11 +4523,34 @@ _FORCED_SEVERITY = {'pins_to_edge': WARN}
 #: everybody answers the same way carries no signal.
 _POLICY_RULES = {
     'proximity': ('a design relation between two named parts; nothing on the '
-                  'board says which parts must be near which, so only a '
-                  'declaration can arm it'),
+                  'board, and nothing in a design brief, says which parts '
+                  'must be near which'),
     'zone_exclusive': ('a policy about who may enter a zone; nothing on the '
                        'board says that a zone is reserved'),
 }
+
+
+def _brief_claims(rule: str, brief_fragment) -> List[str]:
+    """What the design BRIEF declares that `rule` grades, by name (#959).
+
+    A brief-declared requirement is not the roster's to excuse: a plan that
+    leaves it out has DROPPED a declaration, and P1's brief-clause check
+    refuses that by clause id -- answered by carrying the clause, or by
+    `--waive brief-clause:<id>:<why>`, the same spelling P-close takes. So
+    the roster reports such a rule `uncovered` rather than asking for a
+    second, rule-level answer to the same question. (The Phase-1 verifier
+    measured the gap this closes: a plan dropping all four of fixture 902's
+    brief proximity claims, or splitflap's 17 brief edge claims, passed P1.)"""
+    frag = brief_fragment or {}
+    if rule == 'proximity':
+        return [f"{p.get('ref')}~{p.get('near')}"
+                for p in frag.get('proximity') or ()]
+    if rule == 'keepout':
+        return [str(k.get('name')) for k in frag.get('keepouts') or ()]
+    if rule in ('edge_connector', 'pins_to_edge'):
+        return [str(c.get('ref')) for c in frag.get('edge_connectors') or ()
+                if c.get('edge')]
+    return []
 
 #: Part classes whose presence makes the edge rules applicable. Strict on
 #: purpose: `connector_affinity` (a header, a JST) makes no edge claim, and
@@ -4512,8 +4579,6 @@ def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
                            f"can be on the wrong one")
         return True, "the board carries parts on both faces"
     if rule == 'keepout':
-        if (brief_fragment or {}).get('keepouts'):
-            return True, "the design brief declares keep-outs"
         return False, ("nothing declares a keep-out: the brief (if any) names "
                        "none, and the board file has none this intent can "
                        "grade")
@@ -4544,9 +4609,11 @@ def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
             return False, why
         return True, "the board has supply pins and caps on their rails"
     if rule == 'must_lock':
-        return False, ("must_lock is refused by design: filling it made "
-                       "place_seed --repair lift the user's own locks "
-                       "(docs/design-brief.md)")
+        return False, ("must_lock is a plan's choice, not a requirement no "
+                       "board fact can excuse: the design brief never "
+                       "compiles one (filling it made place_seed --repair "
+                       "lift the user's own locks, docs/design-brief.md), so "
+                       "leaving it dark owes nothing")
     if rule == 'envelope':
         return True, "the board has an outline, and it bounds every placement"
     if rule == 'zone_containment':
@@ -4606,6 +4673,17 @@ def _roster(intent: Intent, pcb_data, ctx, *, census=None,
     abstained = {str(k): str(v)
                  for k, v in (intent.budget_withheld or {}).items()
                  if not _declared_by_hand(intent, str(k))}
+    # Read off the BUDGET the plan declares, not only its own note about what
+    # was withheld: `context.budget_withheld` is prose the plan carries, and
+    # deleting it used to delete the debt (Phase-1 verifier, run 29's r1).
+    # The two keys the emitter grades by default are owed whenever the budget
+    # arms legality without them.
+    if _wants(intent, 'legality'):
+        for k in ('overlap_area', 'oob_count'):
+            if k not in (intent.legality_budget or {}):
+                abstained.setdefault(
+                    k, f"legality_budget declares no `{k}`, so it is not "
+                       f"graded -- whatever the plan's notes say")
     rows: List[Dict[str, object]] = []
     for name, _fn in RULES:
         wants = _wants(intent, name)
@@ -4616,8 +4694,19 @@ def _roster(intent: Intent, pcb_data, ctx, *, census=None,
                  else 'abstained' if wants else 'dark')
         withheld = {k: v for k, v in sorted(abstained.items())
                     if name in (_WITHHELD_RULE.get(k) or ((),))[0]}
-        policy = name in _POLICY_RULES
-        if policy:
+        brief = _brief_claims(name, brief_fragment)
+        policy = name in _POLICY_RULES and not brief
+        if state == 'armed':
+            applicable, why_app = True, (
+                f"armed by the plan's `{_ARMING_KEY.get(name, name)}`")
+        elif brief:
+            applicable, why_app = True, (
+                f"the design brief declares {len(brief)} "
+                f"({', '.join(brief[:6])}{', ...' if len(brief) > 6 else ''}"
+                f"); a plan that drops one is refused by P1's brief-clause "
+                f"check, answered by carrying it or by `--waive "
+                f"brief-clause:<id>:<why>`")
+        elif policy:
             applicable, why_app = True, _POLICY_RULES[name]
         else:
             applicable, why_app = _applicability(
@@ -4629,7 +4718,10 @@ def _roster(intent: Intent, pcb_data, ctx, *, census=None,
         needs = False
         if not policy and applicable and gating:
             if state != 'armed':
-                needs = not disposition and not (withheld and not open_held)
+                # A brief-declared rule is answered at the clause gate, not
+                # here: one question, one answer.
+                needs = (not brief and not disposition
+                         and not (withheld and not open_held))
             else:
                 needs = bool(open_held)
         skip = ('' if state == 'armed'
@@ -4645,11 +4737,13 @@ def _roster(intent: Intent, pcb_data, ctx, *, census=None,
             'disposition': disposition,
             'withheld_dispositions': held_answered,
             'needs_disposition': needs,
+            'brief_claims': brief,
         })
     return rows
 
 
-def stale_dispositions(intent: Intent, rows, pcb_data=None) -> List[str]:
+def stale_dispositions(intent: Intent, rows, pcb_data=None,
+                       reconciliation=None) -> List[str]:
     """Written answers to questions this plan does not ask, by name, so the
     author removes them -- a stale disposition reads as though something were
     excused when nothing is.
@@ -4661,6 +4755,15 @@ def stale_dispositions(intent: Intent, rows, pcb_data=None) -> List[str]:
     cases with its own wording; this is the same judgement for
     `check_floorplan`, so the two never disagree about one file.
     """
+    if reconciliation is not None:
+        ids = {r['id'] for r in reconciliation
+               if r.get('kind') == 'contradiction'}
+        stale_c = [f"dispositions.contradictions.{k}: no such contradiction "
+                   f"on this board and these inputs"
+                   for k in (intent.dispositions or {}).get(
+                       'contradictions', {}) if k not in ids]
+    else:
+        stale_c = []
     held = set()
     for r in rows:
         held.update(r['withheld'])
@@ -4681,7 +4784,7 @@ def stale_dispositions(intent: Intent, rows, pcb_data=None) -> List[str]:
             else:
                 continue
             out.append(f"dispositions.refs.{k}: {why}")
-    return sorted(out)
+    return sorted(out + stale_c)
 
 
 def roster_refusal_lines(rows) -> List[str]:
@@ -5163,13 +5266,12 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
     Anything else about two overlapping zones is satisfiable.
     """
     out: List[Violation] = []
-    excl = [z for z in intent.blocks if z.exclusive and z.rect is not None
-            and not is_mechanical_anchor(z)]
+    excl = [z for z in intent.blocks if z.exclusive and z.rect is not None]
     if not excl:
         return out
     locals_ = legality.part_local_bounds(pcb_data, pcb_file or None)
     for zb in intent.blocks:
-        if zb.rect is None or is_mechanical_anchor(zb):
+        if zb.rect is None:
             continue
         tol = intent.zone_tolerance(zb)
         for za in excl:
@@ -5316,6 +5418,13 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
       4. `plan_fixed_outside_zone`: a FILE-locked member already outside its
          zone. A lock is the only thing the seeder does not move (edge claims
          and must_lock are seated), so this is a fact about the plan.
+      8. `plan_fixed_overlap` (WARN, per pair) / `plan_fixed_overlap_budget`
+         (ERROR): two FILE-locked parts whose courtyards overlap on a shared
+         face overlap in every placement. The grade counts courtyard overlap
+         only against a declared `legality_budget.overlap_area` -- run 29's
+         shipped board carried a 1.0 mm2 fiducial-in-connector overlap -- so
+         the ERROR fires only when the locked pairs ALONE exceed that budget,
+         which no arrangement of the other parts can undo.
       5. `plan_zone_overfull` / `_crowded`: per FACE, the members' areas
          (courtyard, else pad bbox; a through-hole member's drilled footprint
          charged to the far face) exceed the zone's area. Sound relative to
@@ -5358,13 +5467,55 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                          f"does will move it -- fix the zone or the pose"),
                 measured=v.measured, expected=v.expected))
 
+    # 8. two FILE-locked parts overlapping -- in every placement there is.
+    fixed_gp = {p.ref: p for p in state.graded_parts() if p.ref in ctx.locked}
+    fixed_refs = sorted(fixed_gp)
+    fixed_pairs = []
+    for i_, a_ in enumerate(fixed_refs):
+        for b_ in fixed_refs[i_ + 1:]:
+            area = legality.placement_overlap_area([fixed_gp[a_],
+                                                    fixed_gp[b_]])
+            if area > legality.EPS:
+                fixed_pairs.append((a_, b_, area))
+                out.append(Violation(
+                    rule='plan_fixed_overlap',
+                    severity=intent.severity_of('plan_fixed_overlap', WARN),
+                    ref=a_,
+                    message=(f"{a_} and {b_} are both LOCKED in the board and "
+                             f"their courtyards overlap by {area:.3f}mm2 -- "
+                             f"in every placement, since the seeder moves "
+                             f"neither"),
+                    measured={'pair': [a_, b_],
+                              'overlap_area_mm2': round(area, 4)},
+                    expected={'overlap_area_mm2': 0.0}))
+    budget = (intent.legality_budget or {}).get('overlap_area')
+    fixed_total = sum(x[2] for x in fixed_pairs)
+    if budget is not None and fixed_total > float(budget) + legality.EPS:
+        out.append(Violation(
+            rule='plan_fixed_overlap_budget',
+            severity=intent.severity_of('plan_fixed_overlap_budget'),
+            message=(f"the LOCKED parts alone overlap by {fixed_total:.3f}"
+                     f"mm2, over the declared legality_budget.overlap_area "
+                     f"{float(budget):g} -- no arrangement of the other parts "
+                     f"can bring the total under it. Unlock one of each "
+                     f"pair, move it, or raise the budget: "
+                     + ', '.join(f"{a_}/{b_} {ar:.3f}"
+                                 for a_, b_, ar in fixed_pairs)),
+            measured={'fixed_overlap_area_mm2': round(fixed_total, 4),
+                      'pairs': [[a_, b_, round(ar, 4)]
+                                for a_, b_, ar in fixed_pairs]},
+            expected={'overlap_area': float(budget)}))
+    measured['fixed_overlap'] = {
+        'pairs': [[a_, b_, round(ar, 4)] for a_, b_, ar in fixed_pairs],
+        'total_mm2': round(fixed_total, 4)}
+
     # 5. per-zone area, per face
     import routing_defaults as _rd
     clr_used = float(clearance if clearance is not None else _rd.CLEARANCE)
     waived = {frozenset(p_) for p_ in intent.waiver_pairs()}
     zone_rows = []
     for z in intent.blocks:
-        if z.rect is None or is_mechanical_anchor(z):
+        if z.rect is None:
             continue
         members = [r for r in blocks.get(z.name, ()) if r in state.parts]
         if any(frozenset((a_, b_)) in waived
@@ -5560,7 +5711,8 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
           board_edge_clearance: Optional[float] = None,
           with_health: bool = False, with_roster: bool = False,
           brief_fragment=None, mechanical=None,
-          mechanical_skip: Sequence[str] = ()) -> GradeResult:
+          mechanical_skip: Sequence[str] = (),
+          reconciliation=None) -> GradeResult:
     """Measure a board against its declared floorplan intent.
 
     `with_roster` (#959) also builds the rule roster -- which rules the intent
@@ -5590,6 +5742,9 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     if mechanical:
         violations.extend(mechanical_drift(intent, pcb_data, mechanical,
                                            skip=mechanical_skip))
+        violations.extend(mechanical_anchor_violations(
+            pcb_data, pcb_file, mechanical, skip=mechanical_skip,
+            state=state, locked=ctx.locked, outline=outline))
     # #712: a DECLARED along-edge claim this outline cannot support a verdict
     # on joins the same not-derivable channel the withheld budgets use. It is
     # neither a violation nor a pass, and `pass: true` beside a non-zero
@@ -5642,7 +5797,8 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     roster = stale = None
     if with_roster:
         roster = _roster(intent, pcb_data, ctx, brief_fragment=brief_fragment)
-        stale = stale_dispositions(intent, roster, pcb_data)
+        stale = stale_dispositions(intent, roster, pcb_data,
+                                   reconciliation=reconciliation)
 
     st = placement_state.assess_placement(pcb_data, pcb_file)
     return GradeResult(
@@ -6235,6 +6391,11 @@ def emit_intent(pcb_data, pcb_file: str, *,
         _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
     if not _suspects:
         _budget['oob_count'] = int(leg['oob_count'])
+    else:
+        _withheld['oob_count'] = (
+            'an edge connector on the emitting board sits in a SUSPECT pose '
+            '(see its edge_connectors note), so its overhang is not a '
+            'baseline to bless')
 
     # #704. The census runs on EVERY emission: a reader of the document must
     # be able to tell "no cap is far from its IC" from "nobody measured", and
@@ -6576,8 +6737,9 @@ def format_roster(rows, stale=()) -> List[str]:
     so both print the same thing."""
     armed = [r['rule'] for r in rows if r['state'] == 'armed']
     owed = roster_refusal_lines(rows)
+    n_owed = sum(1 for r in rows if r['needs_disposition'])
     lines = [f"  rule roster: {len(armed)} armed, {len(rows) - len(armed)} "
-             f"not; {len(owed)} dark rule(s) with no written disposition"]
+             f"not; {n_owed} rule(s) owe a written answer"]
     for r in rows:
         if r['state'] == 'armed' and not r['withheld']:
             continue
@@ -6585,6 +6747,8 @@ def format_roster(rows, stale=()) -> List[str]:
             tag = 'OWED'
         elif r['disposition'] or r['withheld_dispositions']:
             tag = 'dispositioned'
+        elif r.get('brief_claims') and r['state'] != 'armed':
+            tag = 'brief: not carried'
         elif r['policy']:
             tag = 'policy'
         elif not r['applicable']:
@@ -6595,9 +6759,11 @@ def format_roster(rows, stale=()) -> List[str]:
             tag = 'armed'
         why = (r['disposition']
                or '; '.join(r['withheld_dispositions'].values())
-               or (r['applicability_reason'] if tag in ('policy',
-                                                        'not applicable')
-                   else r['skip_reason']))
+               or (r['applicability_reason'] if tag in (
+                   'policy', 'not applicable', 'brief: not carried')
+                   else r['skip_reason'])
+               or '; '.join(f"`{k}` withheld: {v}"
+                            for k, v in r['withheld'].items()))
         lines.append(f"    [{tag}] {r['rule']}: {why}")
     for line in owed:
         lines.append(f"    OWED: {line}")
@@ -6612,12 +6778,13 @@ def format_roster(rows, stale=()) -> List[str]:
 #: fact no rule measures.
 LEDGER_STATUSES = ('pending', 'graded_pass', 'graded_fail', 'carried',
                    'unmeasured', 'unknown', 'uncovered', 'inapplicable',
-                   'abstained', 'dispositioned', 'dark')
+                   'abstained', 'dispositioned', 'dark', 'policy',
+                   'advisory')
 
 
 def declaration_ledger(intent: Intent, rows, *, result=None,
-                       coverage=None,
-                       brief_source=None) -> List[Dict[str, object]]:
+                       coverage=None, brief_source=None,
+                       reconciliation=None) -> List[Dict[str, object]]:
     """One row per REQUIREMENT, whoever declared it (#959 comment §3.1).
 
     Joins the rule roster (what the intent arms and leaves dark) with the
@@ -6646,7 +6813,12 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
     out: List[Dict[str, object]] = []
     for r in rows or ():
         name = r['rule']
-        if r['state'] == 'armed':
+        # OWED first, armed or not: a rule armed with a budget key nobody
+        # answers is not a pass on that key (Phase-1 verifier: legality read
+        # `graded_pass` while the roster printed it OWED).
+        if r['needs_disposition']:
+            status = 'dark'
+        elif r['state'] == 'armed':
             if result is None:
                 status = 'pending'
             elif name in by_rule_err:
@@ -6657,10 +6829,16 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
                 k for k in r['withheld']
                 if k not in r['withheld_dispositions']]):
             status = 'dispositioned'
-        elif r['needs_disposition']:
-            status = 'dark'
+        elif r.get('brief_claims'):
+            status = 'uncovered'
         elif r['state'] == 'abstained':
             status = 'abstained'
+        elif r['policy']:
+            status = 'policy'
+        elif not r['applicable']:
+            status = 'inapplicable'
+        elif not r['gating']:
+            status = 'advisory'
         else:
             status = 'inapplicable'
         out.append({
@@ -6671,8 +6849,13 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
                 r['arming_key'] if r['state'] == 'armed' else None),
             'grader': name, 'status': status,
             'basis': 'declared',
-            'why': (r['disposition'] or r['skip_reason']
-                    or r['applicability_reason']),
+            'why': (r['disposition']
+                    or ('; '.join(f"`{k}` withheld: {v}"
+                                  for k, v in r['withheld'].items()
+                                  if k not in r['withheld_dispositions'])
+                        if status == 'dark' and r['state'] == 'armed'
+                        else '')
+                    or r['skip_reason'] or r['applicability_reason']),
             'disposition': r['disposition'] or None,
         })
     state_map = {'carried': 'carried', 'not_claimed': 'unknown',
@@ -6697,6 +6880,42 @@ def declaration_ledger(intent: Intent, rows, *, result=None,
             'attribution': 'rule+ref',
             'why': c.get('why') or '', 'drifted': bool(c.get('drifted')),
             'disposition': None,
+        })
+    # #959 (#1001): every ref two channels speak to. A contradiction is
+    # failed until the plan acknowledges it; drift the BOARD alone loses is
+    # pending before a grade (a pile is expected to disagree with where a
+    # part will go) and failed after one; drift a plan loses is failed --
+    # P1 refuses it; a floors row is reported, not graded.
+    answered = (intent.dispositions or {}).get('contradictions', {})
+    for r in reconciliation or ():
+        kind = r.get('kind')
+        winner = r.get('winner')
+        wv = (r.get('values') or {}).get(winner) or {}
+        losers = {v.get('authority') for ch, v in (r.get('values')
+                                                   or {}).items()
+                  if ch != winner and v.get('value') is not None}
+        if kind == 'contradiction':
+            status = ('dispositioned' if r['id'] in answered
+                      else 'graded_fail')
+        elif kind == 'drift':
+            status = ('pending' if result is None and losers <= {'inferred'}
+                      else 'graded_fail')
+        elif kind == 'agree':
+            status = 'graded_pass'
+        else:
+            status = 'carried'
+        out.append({
+            'id': f"reconcile:{r['id']}", 'kind': 'reconciliation',
+            'source': wv.get('source'),
+            'authority': wv.get('authority'),
+            'consequence': None, 'grader': 'reconciliation',
+            'status': status,
+            'basis': 'mechanical' if winner == 'mechanical' else 'declared',
+            'why': r.get('why') or '',
+            'disposition': answered.get(r['id']),
+            'values': {ch: v.get('value') for ch, v in (r.get('values')
+                                                        or {}).items()},
+            'winner': winner,
         })
     return out
 

@@ -201,7 +201,8 @@ def intent_doc_for_drift(path):
         return {}
 
 
-def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path):
+def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path,
+               mech=None):
     """`--plan-only` (#959, #998): the plan, checked before any pose.
 
     `plan_check` plus the rule roster, with the declaration ledger in its
@@ -209,6 +210,7 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path):
     is a plan no arrangement can satisfy -- and 0 otherwise, WARNs included.
     """
     from list_nets import board_floor_knobs
+    from placement import reconcile as _rc
     from placement.floorplan import plan_check
     clearance, edge_clearance, knobs = board_floor_knobs(
         args.board, args.clearance, args.board_edge_clearance)
@@ -225,8 +227,17 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path):
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
         return UNPLACED_EXIT
     errors = [v for v in found if v.severity == 'error']
-    stale = stale_dispositions(intent, rows, pcb)
-    ledger = declaration_ledger(intent, rows)
+    # The channels reconciled here too, so the before-placement ledger names
+    # every contradiction P1 will refuse on.
+    recon = _rc.reconcile(pcb, args.board, brief_fragment=brief_fragment,
+                          brief_source=brief_path or None, mechanical=mech,
+                          intent_doc=intent_doc_for_drift(args.intent),
+                          intent_source=args.intent, floors_used=knobs)
+    stale = stale_dispositions(intent, rows, pcb, reconciliation=recon)
+    ledger = declaration_ledger(intent, rows, reconciliation=recon)
+    answered_c = (intent.dispositions or {}).get('contradictions', {})
+    open_c = [r['id'] for r in _rc.contradictions(recon)
+              if r['id'] not in answered_c]
     if not args.quiet:
         print(f"PLAN {args.intent} on {args.board}: {len(errors)} error(s), "
               f"{len(found) - len(errors)} warning(s) -- checked before any "
@@ -235,6 +246,8 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path):
             print(f"    [{'ERROR' if v.severity == 'error' else 'warn '}] "
                   f"{v.rule}: {v.message}")
         for line in format_roster(rows, stale):
+            print(line)
+        for line in _rc.format_rows(recon):
             print(line)
     by_rule = {}
     for v in found:
@@ -256,6 +269,9 @@ def _plan_only(args, intent, pcb, sources, brief_fragment, brief_path):
          'rules_dark_undispositioned': [r['rule'] for r in rows
                                         if r['needs_disposition']],
          'stale_dispositions': stale,
+         'contradictions': len(_rc.contradictions(recon)),
+         'contradictions_undispositioned': open_c,
+         'mechanical': (mech or {}).get('path'),
          'clearance_used': knobs['clearance'],
          'edge_clearance_used': knobs['board_edge_clearance']}
     s.update(ledger_summary(ledger))
@@ -350,9 +366,10 @@ def main(argv=None):
                       f"from a part's current pose")
                 for line in brief_report['contradictions']:
                     print(f"  CONTRADICTION {line}")
-        # #959 (#1001): every ref two channels speak to, and the mechanical
-        # facts compiled into grade-only anchors (never for a ref whose
-        # mechanical value lost a contradiction).
+        # #959 (#1001): every ref two channels speak to, and which mechanical
+        # refs the grade will anchor. The anchors themselves are NOT written
+        # into the plan: the grade compiles them from the file, so no plan
+        # can drop one or claim one.
         _rows = _rc.reconcile(pcb, args.board, brief_fragment=brief_fragment,
                               brief_source=brief_path or None,
                               mechanical=mech, floors_used=_floors_used)
@@ -366,9 +383,6 @@ def main(argv=None):
             _anchors, _skipped = _rc.anchor_blocks(
                 pcb, args.board, mech,
                 lost=_rc.lost_mechanical_refs(_rows))
-            _names = {b.get('name') for b in doc.get('blocks') or []}
-            doc.setdefault('blocks', []).extend(
-                b for b in _anchors if b['name'] not in _names)
             _prov = _rc.mechanical_provenance(mech, args.board)
             _ctx['mechanical'] = {
                 'path': mech['path'], 'sha256': mech['sha256'],
@@ -384,9 +398,10 @@ def main(argv=None):
                 _m = _ctx['mechanical']
                 _sk = ', '.join(f"{k} ({v})"
                                 for k, v in sorted(_m['skipped'].items()))
-                print(f"  {len(_m['anchored'])} mechanical anchor block(s) "
-                      f"compiled (grade-only; P1 requires each anchored ref "
-                      f"to be locked)"
+                print(f"  {len(_m['anchored'])} mechanical ref(s) the "
+                      f"grade anchors at their declared pose (compiled from "
+                      f"the file at grade time; P1 requires each locked "
+                      f"there)"
                       + (f"; skipped: {_sk}" if _sk else ''))
         if args.require_brief and not brief_fragment:
             print(f"  FAIL: --require-brief, but " + _brief_absence_reason(
@@ -469,7 +484,7 @@ def main(argv=None):
 
     if args.plan_only:
         return _plan_only(args, intent, pcb, sources, brief_fragment,
-                          brief_path)
+                          brief_path, mech)
 
     # #711. On the --intent path the brief REPORTS DRIFT; it does not merge.
     # Merging would make the graded document differ from the file on disk, so
@@ -506,7 +521,8 @@ def main(argv=None):
                        board_edge_clearance=edge_clearance,
                        with_health=args.health, with_roster=True,
                        brief_fragment=brief_fragment or None,
-                       mechanical=mech, mechanical_skip=_lost)
+                       mechanical=mech, mechanical_skip=_lost,
+                       reconciliation=_rows)
     except UntrustworthyOutline as exc:
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
         print("  Refused rather than graded: with no usable outline every "
@@ -564,7 +580,8 @@ def main(argv=None):
     # brief's clauses together, so a carried fact cannot hide behind
     # `complete`.
     ledger = declaration_ledger(result.intent, result.roster, result=result,
-                                coverage=coverage, brief_source=brief_path)
+                                coverage=coverage, brief_source=brief_path,
+                                reconciliation=_rows)
     ledger_s = ledger_summary(ledger)
     if not args.quiet and ledger_s['carried_facts']:
         print(f"  {len(ledger_s['carried_facts'])} declared fact(s) are "
