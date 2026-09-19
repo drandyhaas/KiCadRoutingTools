@@ -4339,6 +4339,20 @@ def generate_bga_fanout(footprint: Footprint,
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
+    # #962: via-in-pad needs IPC-4761 Type VII, DECLARED on each via rather
+    # than only printed: (capping yes) (filling yes). Once, here, over EVERY
+    # via this fanout returns -- the channel escape's in-pad vias (manage_vias
+    # centres inner-layer escapes on the ball), the under-pad escape's and the
+    # plane drops. The dicts carry it to the CLI writer and to the GUI fanout
+    # tab, which both honour `tenting_attrs`. The input snapshot is empty
+    # because every via in `vias_to_add` is this call's own: the engine appends
+    # them to pcb_data.vias as it goes, so a snapshot taken now would call them
+    # pre-existing.
+    from fab_notes import (via_protection_stamps, apply_stamps_in_memory,
+                           print_via_protection_record)
+    _st962, _rec962 = via_protection_stamps(vias_to_add, [], pcb_data)
+    apply_stamps_in_memory(_st962)
+    print_via_protection_record(_rec962, "BGA fanout")
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
@@ -4627,6 +4641,10 @@ def main():
                 # concern and would change this 'total's meaning.
                 _viols = _run_drc(out_path, clearance=args.clearance,
                                   quiet=True, max_print=0, check_sizes=False)
+            # #962: via-in-paste rows (and their accepted protected/inherited
+            # twins) are a fab-protection finding, not a clearance graze; a
+            # fanout's own stamped via-in-pad would otherwise inflate `total`.
+            _viols = [_v for _v in _viols if _v.get('type') != 'via-in-paste']
             _by = {}
             for _v in _viols:
                 _by[_v['type']] = _by.get(_v['type'], 0) + 1

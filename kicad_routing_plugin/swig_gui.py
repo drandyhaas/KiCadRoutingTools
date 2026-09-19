@@ -1249,7 +1249,7 @@ class RoutingDialog(wx.Dialog):
         self.same_net_pad_clearance.SetDigits(_snpc_r['digits'])
         self.same_net_pad_clearance.SetToolTip(
             "Edge-to-edge clearance between placed vias and same-net SMD "
-            "pads. Active only while 'Allow via-in-pad' is unchecked.")
+            "pads and the net's solder-paste openings (#962). Active only while 'Allow via-in-pad' is unchecked.")
         self.same_net_pad_clearance.Enable(False)  # sync with default-checked box
         self.via_in_pad_check.Bind(
             wx.EVT_CHECKBOX,

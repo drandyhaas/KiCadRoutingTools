@@ -343,6 +343,20 @@ def main():
                   "bounding box against an outline inflated by the grading "
                   "clearance -- an edge-mounted part reports a breach its "
                   "copper does not make.")
+    # #962: the second off-outline channel, footprint GRAPHIC copper (a drawn
+    # SOT-89 tab, an antenna). Pads can all be inside while the tab hangs off
+    # the board: esp_prog U2 at 115.34 reported blocking 0 with its tab
+    # 1.11 mm past the outline. Printed, and in JSON; it is not a
+    # `not_buildable` conjunct (the same decision as the pad channel above,
+    # #937), and check_drc grades it as graphic-off-board.
+    _g_refs = leg.get('oob_graphic_copper_refs') or []
+    if _g_refs:
+        print("    footprint GRAPHIC copper past the outline (margin 0): "
+              + ', '.join(f'{r} ({a}mm)' for r, a in _g_refs))
+    _g_un = leg.get('oob_graphic_copper_unmeasured') or []
+    if _g_un:
+        print("    footprint copper NOT measured against the outline: "
+              + ', '.join(f'{u[0]} ({u[1]})' for u in _g_un[:6]))
     # ONE predicate, used verbatim at all three sites (verdict, JSON
     # `buildable`, exit code). Three re-derivations of `blocking or
     # locked_contact` is how the coincident-origin channel would have reached
@@ -629,6 +643,15 @@ def main():
             'oob_pad_copper_count': leg.get('oob_pad_copper_count', 0),
             'oob_pad_copper_refs': leg.get('oob_pad_copper_refs') or [],
             'oob_pad_copper_basis': leg.get('oob_pad_copper_basis'),
+            # #962: footprint GRAPHIC copper against the outline -- the second
+            # off-outline channel, same non-gating contract as the pad one.
+            'oob_graphic_copper_count': leg.get('oob_graphic_copper_count', 0),
+            'oob_graphic_copper_amount': leg.get('oob_graphic_copper_amount', 0.0),
+            'oob_graphic_copper_refs': leg.get('oob_graphic_copper_refs') or [],
+            'oob_graphic_copper_waived': leg.get('oob_graphic_copper_waived') or [],
+            'oob_graphic_copper_unmeasured': leg.get('oob_graphic_copper_unmeasured') or [],
+            'oob_graphic_copper_basis': leg.get('oob_graphic_copper_basis'),
+            'graphic_edge_shortfall_refs': leg.get('graphic_edge_shortfall_refs') or [],
             'locked_contact_pairs': [q._asdict() for q in locked_contact],
             # run-19: parts stacked at one origin, marker classes exonerated.
             # Groups, not fake N*(N-1)/2 pair entries -- a stack is one

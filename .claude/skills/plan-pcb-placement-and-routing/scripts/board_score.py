@@ -79,6 +79,18 @@ SIZE_TYPES = frozenset({'track-width', 'via-size', 'via-drill-size'})
 # pairs drowned a blocking of ~17 physical defects into an unusable 627.
 RULE_PAIR_TYPES = frozenset({'segment-segment-track-rule'})
 
+# #962: a via in a solder-paste opening that is not filled+capped. ADVISORY,
+# beside `drc_rule_pairs`, never in `blocking`. On a KiCad 10-format board
+# the tool stamps IPC-4761 Type VII onto every via it puts under solder at ship
+# time, so what fires on a board this chain routed is almost always a via the
+# input already had -- 136 on one corpus board alone (a pre-KiCad-10 file
+# cannot carry the tokens; check_drc accepts those as undeclarable). No
+# placement or routing lap can change a fab spec it did not write, so
+# counting them in `blocking` would make 0 unreachable there.
+# Pass --baseline <input board> and check_drc accepts those as
+# `inherited-via-in-paste`; what is left is disclosed here.
+VIA_PASTE_TYPES = frozenset({'via-in-paste'})
+
 _DRC_TOTAL = re.compile(r'^FOUND (\d+) DRC VIOLATIONS', re.M)
 # The per-type header carries an OPTIONAL suffix between the count and the
 # colon -- `PAD-PAD violations (40) -- 32 in CONTACT:` (check_drc.py's `_ct`,
@@ -543,7 +555,8 @@ def score_assembly(root: str, board: str, intent: str, tmp: str,
     return assembly_component(doc, rc)
 
 
-def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
+def score_drc(root: str, board: str, clearance=None, sizes=None,
+              baseline=None) -> tuple:
     """(drc, undersized, rule_pairs) -- physical clearance violations,
     sub-floor copper, and .kicad_dru track-rule-governed pairs (advisory).
 
@@ -570,9 +583,14 @@ def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
     # --max-print 0 prints every violation of every type, so the per-type header
     # counts are complete rather than capped at the default 20.
     args += ['--max-print', '0']
+    if baseline:
+        args += ['--baseline', baseline]
     rc, out = run_tool(root, 'check_drc.py', *args)
     if 'NO DRC VIOLATIONS FOUND' in out:
-        return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out)},
+        return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out),
+                 'graphic_grazes_unverified': _unverified_grazes(out),
+                 'via_in_paste': {'ran': True, 'count': 0, 'by_type': {},
+                                  'undeclarable': _undeclarable_vias(out)}},
                 {'ran': True, 'count': 0, 'by_type': {}},
                 {'ran': True, 'count': 0, 'by_type': {}})
     if not _DRC_TOTAL.search(out):
@@ -602,12 +620,43 @@ def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
         return r, dict(r), dict(r)
     size = {t: n for t, n in by_type.items() if t in SIZE_TYPES}
     rule = {t: n for t, n in by_type.items() if t in RULE_PAIR_TYPES}
+    vip = {t: n for t, n in by_type.items() if t in VIA_PASTE_TYPES}
     clear = {t: n for t, n in by_type.items()
-             if t not in SIZE_TYPES and t not in RULE_PAIR_TYPES}
+             if t not in SIZE_TYPES and t not in RULE_PAIR_TYPES
+             and t not in VIA_PASTE_TYPES}
     return ({'ran': True, 'count': sum(clear.values()), 'by_type': clear,
-             'graded_at': _graded_at(out)},
+             'graded_at': _graded_at(out),
+             'graphic_grazes_unverified': _unverified_grazes(out),
+             'via_in_paste': {'ran': True, 'count': sum(vip.values()), 'by_type': vip,
+                              'undeclarable': _undeclarable_vias(out)}},
             {'ran': True, 'count': sum(size.values()), 'by_type': size},
             {'ran': True, 'count': sum(rule.values()), 'by_type': rule})
+
+
+def _undeclarable_vias(out: str) -> int:
+    """Vias in a paste opening on a pre-KiCad-10 file, which cannot carry
+    per-via capping/filling at all (#962). check_drc ACCEPTS them (the
+    requirement belongs on the fab drawing) and counts them on its console
+    line; this reads that count so `count` is not mistaken for all of them."""
+    m = re.search(r'(\d+) undeclarable in this file format', out)
+    return int(m.group(1)) if m else 0
+
+
+def _unverified_grazes(out: str) -> int:
+    """Footprint graphic copper grazing the edge that check_drc ACCEPTED
+    without knowing whether a part move made the graze (#962).
+
+    Without --baseline, check_drc cannot tell a library graze (an antenna's
+    own art) from one a placement lap created; both are accepted and count toward
+    nothing. The number is disclosed so a reader knows `count`
+    does not cover them. Copper PAST the outline is `graphic-off-board` and is
+    counted either way.
+    """
+    m = re.search(r'ACCEPTED as immutable-graphic: \d+ row\(s\) \(([^)]*)\)', out)
+    if not m:
+        return 0
+    u = re.search(r'unverified (\d+)', m.group(1))
+    return int(u.group(1)) if u else 0
 
 
 def _graded_at(out: str):
@@ -1034,6 +1083,11 @@ def build_parser():
     p.add_argument('board', help='the .kicad_pcb to score')
     p.add_argument('--intent', help='floorplan intent JSON (check_floorplan '
                                     '--intent). Omitted = floorplan ungraded')
+    p.add_argument('--baseline', metavar='BOARD',
+                   help='the board this one was derived from (the unrouted '
+                        'input). check_drc then accepts the vias it already had '
+                        'in a paste opening as inherited, and grades a graze of '
+                        'footprint graphic copper that a part MOVE created (#962)')
     p.add_argument('--clearance', type=float,
                    help='grade DRC at this clearance. OMIT IT unless you know '
                         'better than the board: check_drc then reads the '
@@ -1109,7 +1163,8 @@ def main():
     # the user's project. `--json` is the copy you keep.
     with tempfile.TemporaryDirectory(prefix='board_score_') as tmp:
         conn = score_connectivity(root, args.board)
-        drc, undersized, rule_pairs = score_drc(root, args.board, args.clearance, sizes)
+        drc, undersized, rule_pairs = score_drc(root, args.board, args.clearance, sizes,
+                                                baseline=args.baseline)
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
         assembly = score_assembly(root, args.board, args.intent, tmp,
                                   args.clearance)
@@ -1152,7 +1207,9 @@ def main():
     # registered-floor checker (check_dru), not this scalar. They live beside
     # `parts`, never in it -- the blocking sum below iterates parts, and 610
     # floor-governed pairs must not drown ~17 physical defects (run 6).
-    advisory = {'drc_rule_pairs': rule_pairs}
+    advisory = {'drc_rule_pairs': rule_pairs,
+                'drc_via_in_paste': drc.get('via_in_paste')
+                or {'ran': drc.get('ran'), 'count': None, 'by_type': {}}}
 
     # A component that was ASKED for and could not run leaves blocking unknown.
     # Reporting 0 there would let the loop stop on a board nothing graded.
