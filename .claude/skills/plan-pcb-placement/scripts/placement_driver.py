@@ -1531,6 +1531,47 @@ def _mechanical_owed(a, intent, plan, pcb, brief_fragment, brief_path,
             'PLAN:\n'
             '  "dispositions": {"contradictions": {"<id>": "<why the '
             'winning value holds>"}}')
+    # A HYPOTHESIS that loses to a RECORDED fact: under an unaided regime the
+    # brief is the run's own reading, so run 29's USB1 -- brief east,
+    # mechanical.json west -- is drift the mechanical value wins, not a
+    # contradiction. Nothing refused it: P1 then demanded USB1 locked WEST
+    # while the brief-clause check demanded the plan carry EAST, and the
+    # grade failed on a locked part the seeder never moves (pre-push
+    # review). The recorded fact cannot be overruled, so the answer is to
+    # correct the losing source; there is no disposition for it.
+    beaten = []
+    for r in rows:
+        if r.get('kind') != 'drift':
+            continue
+        wv = (r.get('values') or {}).get(r.get('winner')) or {}
+        if wv.get('authority') != 'recorded_fact':
+            continue
+        # The brief and the plan only: a POSE the run moved is answered by
+        # the lock-at-pose check below, with the place_pose commands.
+        losers = [(ch, v) for ch, v in (r.get('values') or {}).items()
+                  if ch in ('brief', 'intent') and ch != r.get('winner')
+                  and v.get('value') is not None
+                  and v.get('authority') == 'hypothesis'
+                  and v.get('value') != wv.get('value')]
+        if losers:
+            beaten.append((r, wv, losers))
+    if beaten:
+        return False, (
+            f'{len(beaten)} value(s) this run wrote disagree with a RECORDED '
+            'fact that outranks them:\n'
+            + ''.join(
+                f"  - {r['id']}: {r['winner']} {wv['value']!r} "
+                f"[recorded_fact, {wv.get('source')}] vs "
+                + '; '.join(f"{ch} {v['value']!r} [hypothesis, "
+                            f"{v.get('source')}]" for ch, v in losers)
+                + '\n' for r, wv, losers in beaten)
+            + '\nThe recorded value holds -- it existed before this run, '
+            'and a value the run wrote (its own brief, the zone plan) '
+            'cannot overrule it. Correct the losing source so the two '
+            'agree: the brief this run wrote, and the plan\'s entry, then '
+            're-check. There is no disposition for this -- a plan that '
+            'carried the losing value would be graded against a fact '
+            'nothing in this run may change.')
     lost = set(_rc.lost_mechanical_refs(rows))
     anchored = sorted(
         ref for ref, _p in (mech or {}).get('poses', {}).items()
@@ -3040,6 +3081,15 @@ def _refusal_scenarios(tmp):
               dispositions={'contradictions': {'U9:edge': 'no such row'},
                             'rules': {'envelope': 'fixture',
                                       'legality': 'fixture'}}))]
+         + damaged),
+        ('a plan edge a recorded mechanical edge outranks',
+         ['--board', mech_board('beaten', mech={
+             'interfaces': [{'ref': 'U2', 'edge': 'west'}]}),
+          '--zone-plan', wrote('zp_beaten.json', _zone_plan_doc(
+              [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                'note': 'both parts, one zone'}],
+              edge_connectors=[{'ref': 'U2', 'edge': 'east'}])),
+          '--waive', 'seed-connectors:the fixture hands U2 over']
          + damaged),
         ('a mechanical ref the board does not lock',
          ['--board', mech_board('unlocked', mech={

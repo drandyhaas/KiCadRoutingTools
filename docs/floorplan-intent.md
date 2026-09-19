@@ -202,6 +202,13 @@ place either: it is grepped for the substring `SUSPECT`, so appending prose to
 it can change behaviour. A `context` value must still be an object; the keys
 inside it are yours.
 
+Two exceptions since #959, both on `edge_connectors[]` entries. The
+compiled keys' provenance (`context.compiled_from`, `context.basis`) is read by
+drift attribution. `context.mount_mode` in `top_mount` / `bottom_mount`
+exempts the part from the edge-receptacle seat. The second is the plan choosing
+its own clause, exactly as dropping `class` would be, and with a design brief
+a plan whose `mount_mode` differs from the brief's drifts.
+
 ### Versioning: `schema` is the format, `min_reader` is the vocabulary
 
 `schema` is matched **exactly**, so bumping it invalidates every existing
@@ -856,8 +863,10 @@ plan. The WARN is the same quantity with a margin.
 | `plan_fixed_overlap_budget` / `plan_fixed_overlap` | the FILE-locked pairs alone exceed the overlap budget | each such pair is a WARN |
 
 A plan ERROR is only as strong as the rules it stands for. With
-`zone_containment`, `zone_exclusive` or `legality` demoted to warn, the matching
-plan finding is a WARN. An explicit severity for the finding itself still wins.
+`zone_containment`, `zone_exclusive`, `legality` or `edge_connector` demoted to
+warn, the matching plan finding is a WARN. An explicit severity for the finding
+itself still wins. `block_glob_literal` is about the plan's own spelling, not a
+graded rule, and keeps its own severity.
 A plan that declares no `legality_budget` gets WARNs only from the area rows.
 Nothing bounds its overlap, so no area bound is sound.
 
@@ -917,8 +926,9 @@ grader's own rect at the declared pose, rounded outward, and is graded by
   as placed, so an anchor is graded and never seated.
 - `mechanical_drift` reports any mechanical ref, locked or not, that moved or
   turned away from its declaration. It is an ERROR for a turn, which no anchor sees, and for any
-  drift of a pad-less ref, which has no anchor. It is a WARN for a move the
-  anchor already reports.
+  drift of a pad-less ref, which has no anchor -- and a plan's `severity` map
+  cannot demote that ERROR, only promote the WARN it gives a move the anchor
+  already reports.
 - Under an unaided regime, the recorded file cannot be dropped: `--no-mechanical`,
   another path, a rewrite or a deletion each exit 2. A run directory that was
   moved still finds its sha-matching file beside the manifest.

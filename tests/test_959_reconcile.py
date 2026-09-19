@@ -260,6 +260,17 @@ def test_a_moved_or_turned_mechanical_ref_is_graded():
               and v.ref == 'Ref*']
         assert md and md[0].measured['rotation_off_deg'] == 90.0, md
         assert md[0].measured['distance_mm'] < 0.01, md[0]
+        assert md[0].severity == 'error', md[0]
+        # A plan cannot DEMOTE the turn: the pose is a recorded fact (PR
+        # fact-check: `severity: {mechanical_drift: warn}` read it `warn`).
+        # It may promote the move-only WARN.
+        demoted = fp.intent_from_dict(dict(doc, severity={
+            'mechanical_drift': 'warn'}), '')
+        res = fp.grade(demoted, pcb, b, mechanical=m,
+                       mechanical_skip=['USB1'])
+        md = [v for v in res.violations if v.rule == 'mechanical_drift'
+              and v.ref == 'Ref*']
+        assert md and md[0].severity == 'error', md
         # The skipped ref (lost to the brief) is never graded against the
         # losing value.
         assert not [v for v in res.violations
@@ -1018,6 +1029,111 @@ def test_round2_a_brief_written_in_the_run_cannot_outrank_the_record():
           "one the regime recorded is a declaration")
 
 
+def test_p1_refuses_a_run_written_value_the_record_outranks():
+    """Pre-push review BLOCKING: under an unaided regime the brief is the
+    run's reading, so run 29's own case -- brief USB1 east, mechanical.json
+    west -- is drift the recorded value wins. P1 passed it: it demanded the
+    mechanical refs locked (west) while the brief-clause check demanded the
+    plan carry EAST, and the grade then failed on a locked part. P1 must
+    refuse the losing values and name both; no disposition answers it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        wd, b, _mp = _stage_regime(tmp)
+        bp = os.path.join(wd, 'board.design-brief.json')
+        with open(bp, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                       'board': 'board.kicad_pcb',
+                       'interfaces': [{'ref': 'USB1', 'edge': 'east',
+                                       'user_facing': True}]}, fh)
+        bounds = parse_kicad_pcb(b).board_info.board_bounds
+        plan = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+                'blocks': [{'name': 'all', 'refs': ['*'],
+                            'zone': [round(v, 3) for v in bounds],
+                            'note': 'everything, one zone'}],
+                'edge_connectors': [{'ref': 'USB1', 'edge': 'east'}],
+                'dispositions': {'refs': {k: 'a logo; test' for k in (
+                    '#00000000-0000-0000-0000-00005a3b5201',
+                    '#00000000-0000-0000-0000-00005d8c51dd',
+                    '#00000000-0000-0000-0000-00005e7dd057')}}}
+        pp = os.path.join(tmp, 'plan.json')
+        with open(pp, 'w', encoding='utf-8') as fh:
+            json.dump(plan, fh)
+        r = run_utils.check(
+            [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+             '--board', b, '--zone-plan', pp,
+             '--waive', 'seed-connectors:the probe hands them over'],
+            refuse='disagree with a RECORDED fact', code=4)
+        line = [x for x in r.stdout.splitlines() if 'USB1:edge' in x]
+        assert line and "mechanical 'west'" in line[0] and (
+            "brief 'east' [hypothesis" in line[0]) and (
+            "intent 'east' [hypothesis" in line[0]), r.stdout[-2000:]
+        # A disposition does not answer it: acknowledging it changes nothing.
+        plan['dispositions']['contradictions'] = {'USB1:edge': 'accepted'}
+        with open(pp, 'w', encoding='utf-8') as fh:
+            json.dump(plan, fh)
+        r = subprocess.run(
+            [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P1',
+             '--board', b, '--zone-plan', pp,
+             '--waive', 'seed-connectors:the probe hands them over'],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', cwd=REPO, timeout=900)
+        assert r.returncode == 4 and ('disagree with a RECORDED fact' in
+                                      r.stdout or 'answers contradictions'
+                                      in r.stdout), r.stdout[-1500:]
+    print("  PASS: a run-written brief and plan that the recorded edge "
+          "outranks are refused at P1, both values named")
+
+
+def test_a_board_with_no_outline_still_exits_3_with_a_brief():
+    """Pre-push review: reconciliation ran before the grade's outline check,
+    and on a board with no outline a brief that declares an edge turned the
+    base's exit 3 into a traceback (exit 1)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        text = open(ESP, encoding='utf-8').read()
+        # Every top-level `(gr_...` block on Edge.Cuts, removed by a
+        # paren-balanced scan (the blocks span several lines).
+        out, i = [], 0
+        while True:
+            j = text.find('(gr_', i)
+            if j < 0:
+                out.append(text[i:])
+                break
+            depth, k = 0, j
+            while True:
+                depth += {'(': 1, ')': -1}.get(text[k], 0)
+                k += 1
+                if depth == 0:
+                    break
+            out.append(text[i:j])
+            if '"Edge.Cuts"' not in text[j:k]:
+                out.append(text[j:k])
+            i = k
+        b = os.path.join(tmp, 'noedge.kicad_pcb')
+        with open(b, 'w', encoding='utf-8') as fh:
+            fh.write(''.join(out))
+        from placement.floorplan import outline_state
+        npcb = parse_kicad_pcb(b)
+        assert 'USB1' in npcb.footprints
+        assert not outline_state(npcb, b)['trustworthy']
+        with open(os.path.join(tmp, 'noedge.design-brief.json'), 'w',
+                  encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                       'board': 'noedge.kicad_pcb',
+                       'interfaces': [{'ref': 'USB1', 'edge': 'east'}]}, fh)
+        intent = os.path.join(tmp, 'i.json')
+        with open(intent, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'floorplan-intent',
+                       'units': 'mm'}, fh)
+        r = subprocess.run([sys.executable, '-X', 'utf8',
+                            run_utils.tool('check_floorplan.py'), b,
+                            '--intent', intent],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', cwd=REPO, timeout=600)
+        assert 'Traceback' not in r.stderr + r.stdout, r.stderr[-1500:]
+        assert r.returncode == 3, (r.returncode, r.stdout[-800:],
+                                   r.stderr[-800:])
+    print("  PASS: no outline + a brief -> exit 3, no traceback")
+
+
 def test_round2_a_moved_run_dir_keeps_its_declaration():
     """Round-2 SHOULD-FIX: the regime bound an absolute path, so an archived
     or relocated run dir exited 2 with a sha-matching file beside it."""
@@ -1138,6 +1254,8 @@ TESTS = [
     test_both_shapes_load_and_a_stranger_is_refused,
     test_round2_the_stagers_empty_declaration_is_a_declaration,
     test_round2_a_brief_written_in_the_run_cannot_outrank_the_record,
+    test_p1_refuses_a_run_written_value_the_record_outranks,
+    test_a_board_with_no_outline_still_exits_3_with_a_brief,
     test_round2_a_moved_run_dir_keeps_its_declaration,
     test_round2_turns_and_padless_drift_are_errors_and_the_anchor_is_tight,
     test_round2_old_manifests_and_ledger_statuses,

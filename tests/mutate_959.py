@@ -43,6 +43,17 @@ the battery exits 2 if one fails there. `_uncache` is carried over from
 EXPECTED SURVIVORS: none declared.
 
 THE MEASURED RESULT is recorded below from the run, never predicted.
+
+MEASURED on the tree of `#1002: the Phase-6 round-2 verifier's findings,
+fixed` (dd0892dc3, 2026-09-20, Windows; every killer test run unmutated
+first, and green): **24 rows, 24 KILLED, 0 SURVIVED, 0 broken.** That is the
+run of record.
+
+The earlier run, which changed the tests rather than the table: 24 rows at
+07bd82b25, 23 KILLED. `p1-never-checks-the-plan` SURVIVED -- nothing drove
+the real P1 with a plan-check ERROR, so the driver could stop asking and
+every test still passed. `test_959_plan_check.test_p1_itself_refuses_a_plan_
+error` kills it.
 """
 from __future__ import annotations
 

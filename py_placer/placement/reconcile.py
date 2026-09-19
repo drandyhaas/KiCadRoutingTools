@@ -388,8 +388,17 @@ class _Geometry:
     def state(self):
         if self._state is None:
             import pose_score
-            self._state = pose_score.make_state(self.pcb, self.board_path)
-        return self._state
+            try:
+                self._state = pose_score.make_state(self.pcb,
+                                                    self.board_path)
+            except ValueError:
+                # No outline (or none the placement state trusts): there is
+                # no edge to read a part against. The grade refuses such a
+                # board itself, at exit 3 -- reconciliation, which runs
+                # first, must not turn that into a traceback (pre-push
+                # review: exit 1 where the base exited 3).
+                self._state = False
+        return self._state or None
 
     def _proxy(self, ref, x, y, rot):
         fp = self.pcb.footprints.get(ref)
@@ -416,7 +425,8 @@ class _Geometry:
         manufactured a contradiction on rp2350's SW1 that the grade passed."""
         from .floorplan import drawn_body_rect, edge_seat_rect
         proxy = self._proxy(ref, x, y, rot)
-        part = self.state.parts.get(ref)
+        st = self.state
+        part = st.parts.get(ref) if st is not None else None
         if proxy is None or part is None:
             return None
         rect, _basis = edge_seat_rect(

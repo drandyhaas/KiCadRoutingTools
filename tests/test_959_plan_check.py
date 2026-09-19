@@ -468,7 +468,12 @@ def test_the_edge_bound_reads_pads_not_courtyards():
                                      'class': 'edge_receptacle'}])
         found, _ = _check(raw, b)
         v = [x for x in found if x.rule == 'plan_edge_overfull']
-        assert v and v[0].ref == 'J1', found
+        assert v and v[0].ref == 'J1' and v[0].severity == 'error', found
+        # As strong as `edge_connector`: demoted, the grade passes the
+        # overrun, so the plan finding is a WARN (PR fact-check).
+        found, _ = _check(dict(raw, severity={'edge_connector': 'warn'}), b)
+        v = [x for x in found if x.rule == 'plan_edge_overfull']
+        assert v and v[0].severity == 'warn', found
         # A 9 x 9 array (8.6 mm) turned 45 degrees measures 11.9 mm in the
         # board frame; in its own frame it fits a 10 mm edge.
         nine = [(dx, dy, 0.6, 0.6) for dx in range(9) for dy in range(9)]

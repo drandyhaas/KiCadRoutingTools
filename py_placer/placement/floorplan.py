@@ -546,7 +546,11 @@ def _entry_context(entry, where: str) -> None:
     """An entry's `context` is free-form, but it is still an OBJECT.
 
     Type-checked and otherwise untouched: a list here means the author meant
-    something else, while an unknown key inside means nothing at all.
+    something else, while an unknown key inside means nothing at all. ONE
+    key is read (#959): an `edge_connectors[]` entry's `context.mount_mode`
+    in `VERTICAL_MOUNTS` exempts the part from the receptacle seat. That is
+    the plan choosing its own clause, as dropping `class` would be; with a
+    design brief, a plan whose mount_mode differs from the brief's drifts.
     """
     if 'context' in entry:
         _obj(entry['context'], f"{where}.context")
@@ -1206,9 +1210,16 @@ def mechanical_drift(intent: Intent, pcb_data, mechanical: Dict, *,
         # sits inside its anchor turned 180: 68 of 97 anchored corpus refs)
         # and ANY drift of a pad-less ref, which is never anchored.
         default = ERROR if (turned or not fp.pads) else WARN
+        # The plan may PROMOTE the move-only WARN, never demote the ERROR:
+        # the pose is a recorded fact, and a plan's severity map overruling
+        # it at grade and P-close is exactly what the anchor's fixed ERROR
+        # forbids (PR fact-check: a 90-degree turn read `warn` under
+        # `severity: {mechanical_drift: warn}`).
+        sev = (ERROR if default == ERROR
+               else intent.severity_of('mechanical_drift', default))
         out.append(Violation(
             rule='mechanical_drift',
-            severity=intent.severity_of('mechanical_drift', default),
+            severity=sev,
             ref=ref,
             message=(f"{ref} is {what} its declared mechanical pose "
                      f"({p['x']:.3f}, {p['y']:.3f}"
@@ -5749,8 +5760,10 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             message=(f"the LOCKED parts alone overlap by {fixed_total:.3f}"
                      f"mm2, over the declared legality_budget.overlap_area "
                      f"{float(budget):g} -- no arrangement of the other parts "
-                     f"can bring the total under it. Unlock one of each "
-                     f"pair, move it, or raise the budget: "
+                     f"can bring the total under it. Raise the budget, or "
+                     f"unlock one of each pair and move it -- unless "
+                     f"mechanical.json fixes that part's pose, which a plan "
+                     f"cannot move: "
                      + ', '.join(f"{a_}/{b_} {ar:.3f}"
                                  for a_, b_, ar in fixed_pairs)),
             measured={'fixed_overlap_area_mm2': round(fixed_total, 4),
@@ -5896,7 +5909,12 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             if ext > blen[edge] + legality.EPS:
                 out.append(Violation(
                     rule='plan_edge_overfull',
-                    severity=intent.severity_of('plan_edge_overfull'),
+                    # As strong as the rule it stands for: with
+                    # `edge_connector` demoted, the grade passes a part that
+                    # overruns its edge, so P1 and place_seed must not
+                    # refuse the plan for it (PR fact-check).
+                    severity=_plan_severity(intent, 'plan_edge_overfull',
+                                            ('edge_connector',)),
                     ref=ref,
                     message=(f"{ref}'s pads span {ext:.2f}mm at its best "
                              f"90-degree rotation, and the {edge} edge is "
@@ -6074,6 +6092,15 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         violations.extend(mechanical_anchor_violations(
             pcb_data, pcb_file, mechanical, skip=mechanical_skip,
             state=state, locked=ctx.locked, outline=outline))
+        if 'zone_containment' in skipped and (mechanical.get('poses')
+                                              or {}):
+            # The PLAN's zones are dark, but the anchors are graded under
+            # this rule's name; say so, or one grade reads the rule as both
+            # skipped and failed (pre-push review).
+            skipped['zone_containment'] = (
+                skipped['zone_containment'] + '; the mechanical anchors '
+                '(`mech:<ref>` blocks) are graded under this name all the '
+                'same')
     # #712: a DECLARED along-edge claim this outline cannot support a verdict
     # on joins the same not-derivable channel the withheld budgets use. It is
     # neither a violation nor a pass, and `pass: true` beside a non-zero
