@@ -1762,7 +1762,7 @@ def find_gap_between_components(debug_info: Dict, tolerance: float) -> Optional[
 def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = None,
                            tolerance: float = 0.02, quiet: bool = False,
                            verbose: bool = False, component: Optional[str] = None,
-                           routed_only: bool = False) -> List[Dict]:
+                           routed_only: bool = False, pcb_data=None) -> List[Dict]:
     """Run connectivity checks on the PCB file.
 
     Args:
@@ -1784,7 +1784,8 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     elif not quiet:
         print(f"Loading {pcb_file}...")
 
-    pcb_data = parse_kicad_pcb(pcb_file)
+    if pcb_data is None:
+        pcb_data = parse_kicad_pcb(pcb_file)
 
     if not quiet:
         total_pads = sum(len(pads) for pads in pcb_data.pads_by_net.values())

@@ -200,6 +200,7 @@ octilinear, so a non-orthogonal pose is outside both models today.*
 | `replan.py` | the ROUTE as the judge; re-plans the ends the braid paid for; `--par=N` resident probe workers, `--perturb=N` the near jump |
 | `probe_memo.py` | the probe / screen / closed-world memo (`tmp/memo/k<K>/`), keyed on copper, move, code and knobs |
 | `probe_worker.py` | a resident probe process: holds the round's Board, braids in-process, N of them = the parallel menu |
+| `solve_memo.py` | a CP-SAT solve read back instead of run: the model text is the key, the solution replayed through the caller's solver |
 | **`plan_loop.py`** | **the PLAN-LEVEL LOOP: the routing inside the planning iteration. Solve, fan out, braid both arms, grade; the route's verdict goes back into the next pages-first re-solve as class bans, residual prices and the incumbent plan as hint; the best routed board is kept across rounds (monotone by construction); candidates within a round are independent (`--jobs`). See *The plan-level loop*** |
 | **`evolve.py`** | **the POPULATION: descend (replan probes) / jump (a far re-solve, no holds) / cross (two parents' ends held), elitist on routed grades; K15 16 -> 14 in one generation** |
 | `evolve_movie.py TAG K [--view ...] [--gif]` | the MOVIE of a population run from its ledger alone: one canvas per generation (the population row, each descent under its parent, jump/cross worlds with lineage arrows), per-probe steps from the descent transcripts with the copper that CHANGED lit (added) and ghosted (removed), selection fades, a lineage ribbon; `--verify` reconciles every diff against the raw segment/via counts; `--self-test`. Outputs `tmp/movie/` |
@@ -1267,6 +1268,40 @@ routing (about 2 s: the map and band of each rung, the A*), the
 fanout engine's dry runs (0.3 s each, a pure-Python A* under the pads)
 and a dozen board parses a probe; the round's Board, ranking and
 derived apply are seconds.
+
+**Where a full K41 run's time goes, third pass.** The chain is 147 s
+(two fanout arms 36 + 35 s, two braids 40 + 30 s), the descent 83 s
+with four workers, a two-generation population 1876 s. Profiled, a
+fanout arm is 42 percent CP-SAT and 18 percent pure-Python move
+conflict tests; a full braid is Rust A* 14, Rust obstacle stamps 18,
+Python map build 11, band strips 13 and post-route distance checks 13
+percent; a descent is 55 percent braid, then board parsing (twelve a
+probe), the fanout engine's under-pad A* and the checks, about 9 percent
+each. Four things were then built and measured (`tmp/four_t*`):
+
+* **A CP-SAT solve read back instead of run** (`solve_memo.py`): the
+  plan solver runs one worker under a deterministic-time budget, so the
+  model's text form plus the parameters is an exact key and the recorded
+  solution is replayed through the caller's own solver with every
+  variable fixed to its hint, so every later `Value()` answers as before.
+  A fanout arm **35 s cold, 12 s warm**, the board identical; the chain's
+  second arm shares all four solves with the first, so it is 12 s too.
+* **Lane spans cached on the move** (`select_moves._lane_spans`): the
+  conflict test asked twice per pair, 2.7 million times for 1.3 million
+  tests. Exact; about a second of a 35 s arm in practice (the profile's
+  8 s were mostly profiler overhead on a hot Python row).
+* **Parse once**: realize's second parse of its input (a drift guard that
+  only needs endpoints read before the mutation) and the two checkers
+  now taking a parsed board (`pcb_data=`, additive). Four of a probe's
+  twelve parses; with the spans memo, the K51 null descent 126 -> 120 s
+  in one process and the K41 descent 83 -> 77 s with four workers,
+  verdicts and moves identical.
+* **A whole-board obstacle map cloned per connect** (`connect.py`,
+  `CONNECT_MAP_CACHE`): copper identical, but no gain -- a K41 braid
+  42.7 -> 48.8 s when every connect built one, 44.1 s when only a
+  ladder's second rung did (109 builds for 62 clones). The ladders are
+  too short for a 97 ms whole-board build to repay 20-50 ms window
+  builds. Left in, off.
 
 ## TODO
 

@@ -56,6 +56,7 @@ import source_realize as sr
 from escape_moves import Move, DIRS
 from sched_first import Frame, VIA_W, CHAN_W
 import plan_feedback as pfb  # the route's verdict (PLAN_LOOP_FEEDBACK), plan_loop.py
+import solve_memo as _smemo  # noqa: E402  a solve read back instead of run
 
 Pt = Tuple[float, float]
 
@@ -2207,7 +2208,7 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
         sA.parameters.interleave_search = True
         sA.parameters.max_deterministic_time = PAGES_CERT_DET
         tA = time.time()
-        stA = sA.Solve(mA)
+        stA = _smemo.solve(mA, sA, log=cert_lines.append, label='pages-first cert')
         if stA in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             cap = int(round(sA.ObjectiveValue()))
             if stA == cp_model.OPTIMAL:
@@ -2275,8 +2276,8 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
         rseed = pfb.SEED                                # PLAN_LOOP_FEEDBACK seed: a jump
     if rseed is not None:
         solver.parameters.random_seed = int(rseed)      # PLAN_PAGES_SEEDS: another feasible point
-    status = solver.Solve(m)
     rep = list(cert_lines)
+    status = _smemo.solve(m, solver, log=rep.append, label='pages-first')
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         rep.append(f'  pages-first: NO SOLUTION ({solver.StatusName(status)}) -- the greedy choice stands')
         # ...AND SAY WHAT STOPPED IT (review, 2026-09-16). The CANON report

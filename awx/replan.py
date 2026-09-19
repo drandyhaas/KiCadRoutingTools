@@ -265,7 +265,7 @@ def _grade_scoped(board, nets, scope, ref):
     pats = [f'*/{n}' for n in scope] + list(scope)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        issues = _cc.run_connectivity_check(board, pats, quiet=True)
+        issues = _cc.run_connectivity_check(board, pats, quiet=True, pcb_data=parsed(board))
     if any(i.get('scope_error') for i in issues):
         return None, 'BROKEN: scoped connectivity check selected nothing'
     nets_set = set(nets)
@@ -275,7 +275,8 @@ def _grade_scoped(board, nets, scope, ref):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         try:
-            _cd.run_drc(board, clearance=clr, clearance_margin=0.1, max_print=0, net_patterns=pats)
+            _cd.run_drc(board, clearance=clr, clearance_margin=0.1, max_print=0, net_patterns=pats,
+                        pcb_data=parsed(board))
         except SystemExit:
             pass
     dd = buf.getvalue()
@@ -1536,7 +1537,7 @@ def _probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_
     if not ok:
         # a re-fanned berth that grazes a LANE routed against the old one:
         # that lane is re-laid with the group (its net named by the DRC pair)
-        pairs = sr.drc_pairs(b2, nets=(group if clean else None))
+        pairs = sr.drc_pairs(b2, nets=(group if clean else None), pcb_data=(parsed(b2) if clean else None))
         extra = set()
         for ln in pairs:
             for tok in re.findall(r'/([A-Za-z0-9_]+)', ln):
@@ -1550,7 +1551,8 @@ def _probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_
             write_board(txt2, b2, cur)
             C |= extra
             res['relaid'] = sorted(C)
-            ok = not sr.drc_pairs(b2, nets=(sorted(set(group) | extra) if clean else None))
+            ok = not sr.drc_pairs(b2, nets=(sorted(set(group) | extra) if clean else None),
+                                  pcb_data=(parsed(b2) if clean else None))
         if not ok:
             res['fail'] = 'destination: fanout board not clean/complete (' + '; '.join(pairs[:3]) + ')'
             res['seconds'] = time.time() - t0
