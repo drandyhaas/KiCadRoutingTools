@@ -138,10 +138,19 @@ DST_WALK_OFF = int(os.environ.get('DST_WALK_OFF', '0'))
 from escape_moves import DIRS, LAYERS  # noqa: E402,F401  -- ONE source
 
 
+FAST_PRO = False   # True (a probe's intermediate boards): the sidecar copied, not re-scanned
+
+
 def copy_pro(src_board, dst_board):
     pro = os.path.splitext(src_board)[0] + '.kicad_pro'
     if os.path.exists(pro):
         shutil.copy(pro, os.path.splitext(dst_board)[0] + '.kicad_pro')
+    if FAST_PRO:
+        # a probe's bare / source / destination boards carry the copper of
+        # the board they came from at the same widths: the floor the copy
+        # already holds is the floor the scan would write (2026-09-18: the
+        # scan was 0.25 s of a 6.6 s probe, three boards a probe)
+        return
     # ...and stamp the floor this stage fans out at (0.1 / 0.1 / the braid's
     # via, the numbers fanout_once is called with below), lower-only, as the
     # production CLIs do -- see braid.write_out for why a bare copy was not

@@ -248,8 +248,57 @@ def _grade_inproc(board, nets):
     return [sorted(opens), ndrc, nvias, None], line
 
 
-def grade(board, K, base):
-    """(opens, drc, vias) of the run's nets on `board`, by grade_k."""
+def _grade_scoped(board, nets, scope, ref):
+    """The grade of a board on which only the `scope` nets changed, from
+    a board graded `ref` = (opens, drc, vias, ...) that was DRC-clean:
+    every new violation involves changed copper, so the DRC runs over
+    the scope's nets against everything; the scope's connectivity is
+    checked and the other nets keep the reference's opens; the vias are
+    counted off the board. Same answer as the whole-board grade, at a
+    fraction of the work (measured: 1.8 s of a 6.6 s probe)."""
+    import contextlib
+    import io
+    sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+    import check_drc as _cd
+    import check_connected as _cc
+    scope = sorted(set(scope))
+    pats = [f'*/{n}' for n in scope] + list(scope)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        issues = _cc.run_connectivity_check(board, pats, quiet=True)
+    if any(i.get('scope_error') for i in issues):
+        return None, 'BROKEN: scoped connectivity check selected nothing'
+    nets_set = set(nets)
+    opens = {i['net_name'].split('/')[-1] for i in issues if i.get('net_name')} & nets_set
+    opens |= set(ref[0]) - set(scope)
+    clr = _rules.active().clearance
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        try:
+            _cd.run_drc(board, clearance=clr, clearance_margin=0.1, max_print=0, net_patterns=pats)
+        except SystemExit:
+            pass
+    dd = buf.getvalue()
+    m = re.search(r'FOUND (\d+) DRC VIOLATIONS', dd)
+    if m is None and 'NO DRC VIOLATIONS' not in dd:
+        return None, 'BROKEN: scoped check_drc reported no verdict'
+    ndrc = int(m.group(1)) if m else 0
+    pcb_ = parsed(board)
+    ids = {i for i, n in pcb_.nets.items() if n.name.split('/')[-1] in nets_set}
+    nvias = sum(1 for v in pcb_.vias if v.net_id in ids)
+    line = (f'GRADE {os.path.basename(board)} K={len(nets)} clr={clr} open={len(opens)} drc={ndrc} vias={nvias}'
+            f' [scoped to {len(scope)} net(s)]' + (f'  open: {",".join(sorted(opens))}' if opens else ''))
+    return [sorted(opens), ndrc, nvias, None], line
+
+
+def grade(board, K, base, scope=None, ref=None):
+    """(opens, drc, vias) of the run's nets on `board`, by grade_k -- or,
+    with `scope` (the nets that changed) and `ref` (the DRC-clean grade
+    of the board they changed from), by the scoped checks."""
+    if GRADE_MODE == 'inproc' and scope and ref is not None and ref[1] == 0:
+        g, line = _grade_scoped(board, coherent_nets(K, base), scope, ref)
+        if g is not None:
+            return g, line
     if GRADE_MODE == 'inproc':
         g, line = _grade_inproc(board, coherent_nets(K, base))
         if g is None:
@@ -1051,6 +1100,14 @@ def legs_cross(m, others):
 # --------------------------------------------------------------- probe
 PROBE_ATTEMPTS = os.environ.get('PROBE_ATTEMPTS', '1')   # the probe braid's attempt ladder
 PROBE_BUDGET_X = os.environ.get('PROBE_BUDGET_X', '4')   # its rescue / last-call budget (2 loses nets: measured)
+# PROBE_LADDER=open (default, 2026-09-18): a probe braid's rescue ladder starts
+# at the rung that opens both layers -- measured over 436 probe braids, lanes
+# landed on the two rungs below it in 16 and 16, and every rung costs
+# 0.06-0.33 s whether it lands or not; the K41 67 -> 64 descent stands on the
+# same two moves (104 -> 95 s) and the K51 null descent gives all 31 verdicts
+# identical (63 -> 51 s). PROBE_LADDER=full is the ladder the full braid runs.
+PROBE_LADDER = os.environ.get('PROBE_LADDER', 'open')
+SCREEN = int(OPTS.get('screen', 1))    # 0: no engine dry runs; the probe's own realize is the screen
 
 
 def braid_run(board, out_stem, nets, dref, log_to, probe=False):
@@ -1060,6 +1117,7 @@ def braid_run(board, out_stem, nets, dref, log_to, probe=False):
         env['BRAID_ATTEMPTS'] = PROBE_ATTEMPTS
         env['BRAID_BUDGET_X'] = PROBE_BUDGET_X
         env['BRAID_SMOOTH'] = os.environ.get('PROBE_SMOOTH', '0')   # the smoother never moves a via
+        env['BRAID_LADDER'] = PROBE_LADDER
     r = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'braid.py'),
                         '--board', board, '--dest', dref, '--nets', nets, '--out', out_stem],
                        capture_output=True, text=True, env=env)
@@ -1335,7 +1393,7 @@ class ProbePool:
             w.stop()
 
 
-def probe_many(B, R, nm, items, K, base, nets_csv, log, extra_relay=None):
+def probe_many(B, R, nm, items, K, base, nets_csv, log, extra_relay=None, ref=None):
     """The probes of one net's candidates, `items` = [(end, move(s), tag)],
     each as probe_run gives it: a memo hit read back (probe_memo), the
     rest run -- in the pool side by side when one is up, else here one
@@ -1361,7 +1419,7 @@ def probe_many(B, R, nm, items, K, base, nets_csv, log, extra_relay=None):
         def one(t):
             i, sm, dm, ptag, _key = t
             msg = {'op': 'probe', 'R': R, 'net': nm, 'src': move_to_json(sm), 'dst': move_to_json(dm),
-                   'tag': ptag, 'extra_relay': list(extra_relay or [])}
+                   'tag': ptag, 'extra_relay': list(extra_relay or []), 'ref': ref}
             try:
                 r = POOL.probe(msg)
                 res = _res_live(r['res'], sm, dm)
@@ -1373,24 +1431,35 @@ def probe_many(B, R, nm, items, K, base, nets_csv, log, extra_relay=None):
                 out[i] = res
     else:
         for i, sm, dm, ptag, _key in miss:
-            out[i] = probe_run(B, R, nm, sm, dm, ptag, K, base, nets_csv, log, extra_relay)
+            out[i] = probe_run(B, R, nm, sm, dm, ptag, K, base, nets_csv, log, extra_relay, ref=ref)
     if st is not None:
         for i, sm, dm, ptag, key in miss:
             st.put(key, _res_doc(out[i], ptag))
     return out
 
 
-def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay=None):
+def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay=None, ref=None):
     """One probe through probe_many: the memo, then the pool or here."""
     end = 'both' if (src_move is not None and dst_move is not None) else ('src' if src_move is not None else 'dst')
     m = (src_move, dst_move) if end == 'both' else (src_move if end == 'src' else dst_move)
-    return probe_many(B, R, nm, [(end, m, tag)], K, base, nets_csv, log, extra_relay)[0]
+    return probe_many(B, R, nm, [(end, m, tag)], K, base, nets_csv, log, extra_relay, ref=ref)[0]
 
 
-def probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay=None):
+def probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay=None, ref=None):
     """The real router's answer to ONE move on the routed board R: the
     net stripped to its tooth, the asked end(s) re-fanned against the
-    frozen copper, braided alone, graded whole. Returns a dict."""
+    frozen copper, braided alone, graded whole. Returns a dict. `ref`:
+    R's own grade; when it is DRC-clean the probe's checks are scoped to
+    the nets it changed (same answer, a third of the time)."""
+    clean = ref is not None and ref[1] == 0
+    keep_fast, fp.FAST_PRO = fp.FAST_PRO, True
+    try:
+        return _probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay, ref, clean)
+    finally:
+        fp.FAST_PRO = keep_fast
+
+
+def _probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay, ref, clean):
     t0 = time.time()
     st, byname = B.st, B.byname
     nid, net = byname[nm]
@@ -1414,7 +1483,7 @@ def probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_r
         buf0 = io.StringIO()
         with contextlib.redirect_stdout(buf0), contextlib.redirect_stderr(buf0):
             r = sr.realize(cur, {nm: src_move}, st['src_pad'], byname, st['sref'], b1,
-                           log=lines.append, guard_names=())
+                           log=lines.append, guard_names=(), clean_base=clean)
         with open(tag + '_src.fanout.log', 'w') as f:
             f.write(buf0.getvalue() + '\n'.join(lines))
         a = r['audit'].get(nm, {})
@@ -1467,7 +1536,7 @@ def probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_r
     if not ok:
         # a re-fanned berth that grazes a LANE routed against the old one:
         # that lane is re-laid with the group (its net named by the DRC pair)
-        pairs = sr.drc_pairs(b2)
+        pairs = sr.drc_pairs(b2, nets=(group if clean else None))
         extra = set()
         for ln in pairs:
             for tok in re.findall(r'/([A-Za-z0-9_]+)', ln):
@@ -1481,7 +1550,7 @@ def probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_r
             write_board(txt2, b2, cur)
             C |= extra
             res['relaid'] = sorted(C)
-            ok = not sr.drc_pairs(b2)
+            ok = not sr.drc_pairs(b2, nets=(sorted(set(group) | extra) if clean else None))
         if not ok:
             res['fail'] = 'destination: fanout board not clean/complete (' + '; '.join(pairs[:3]) + ')'
             res['seconds'] = time.time() - t0
@@ -1541,7 +1610,7 @@ def probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_r
         if nm in rf:
             res['refused'] = True
             res['walled_at'] = rf[nm].get('walled_at')
-    g, line = grade(rb, K, base)
+    g, line = grade(rb, K, base, scope=(set([nm]) | C | set(N)) if clean else None, ref=ref)
     res['grade'] = g
     res['board'] = rb
     res['vias_net'] = count_copper(rb, nid)[0]
@@ -1830,7 +1899,7 @@ def main():
                         ranked, n_menu = rank_dest(B, nm, bans_d[nm], buses, cache, SCREEN_MAX)
                     else:
                         ranked, n_menu = rank_src(B, nm, buses, cache, SCREEN_MAX)
-                    ranked = screen(B, nm, ranked, end, PROBES + 1, log)
+                    ranked = screen(B, nm, ranked, end, PROBES + 1, log) if SCREEN else ranked[:PROBES + 1]
                     screened[end] = ranked
                     log(f'  {nm} {end}: {n_menu} move(s) in the menu, current '
                         f'{sr.fmt(B.ends[nm][end])}; candidates: '
@@ -1875,7 +1944,7 @@ def main():
                 for end, m, c in cands:
                     tried[nm] += 1
                     items.append((end, m, f'{stem}_r{rnd}_{nm}_{end}{tried[nm]}'))
-                prs = probe_many(B, R_cur, nm, items, K, base, nets_csv, log)
+                prs = probe_many(B, R_cur, nm, items, K, base, nets_csv, log, ref=list(best_g))
                 for (end, m, c), pr in zip(cands, prs):
                     if 'fail' in pr:
                         log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}; '
@@ -2006,7 +2075,7 @@ def main():
                         ranked, n_menu = rank_dest(B, g, bans_d[g], buses, cache, SCREEN_MAX)
                     else:
                         ranked, n_menu = rank_src(B, g, buses, cache, SCREEN_MAX)
-                    ranked = screen(B, g, ranked, end, PROBES, log)
+                    ranked = screen(B, g, ranked, end, PROBES, log) if SCREEN else ranked[:PROBES]
                     log(f'  gatekeeper {g} {end}: {n_menu} move(s), current {sr.fmt(B.ends[g][end])}, blocks '
                         f'{blocked_by_g}; candidates: '
                         + ('; '.join(f'{fmt_move(m)} judged {c:.1f}' for c, m in ranked) or 'none'))
@@ -2017,7 +2086,8 @@ def main():
                 for end, m, c in cands:
                     tried[g] += 1
                     items.append((end, m, f'{stem}_r{rnd}_{g}_{end}{tried[g]}'))
-                prs = probe_many(B, R_cur, g, items, K, base, nets_csv, log, extra_relay=blocked_by_g)
+                prs = probe_many(B, R_cur, g, items, K, base, nets_csv, log, extra_relay=blocked_by_g,
+                                 ref=list(best_g))
                 for (end, m, c), pr in zip(cands, prs):
                     if 'fail' in pr:
                         log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}) {pr["seconds"]:.0f} s')

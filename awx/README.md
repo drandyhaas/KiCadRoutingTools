@@ -1221,6 +1221,53 @@ speculation: a net's menu rarely stands at the
 frontier, so the next net's probes can start on the assumption that it
 will not, and be discarded when it does.
 
+**The serial probe, second pass (same day, "not with more parallelism").**
+A profile of a whole null descent in one process (220 s, 31 probes) put a
+probe at 6.6 s: the braid 2.6, the WHOLE-BOARD GRADE 1.8 (a pure-Python
+DRC over 1.1 million pad-segment pairs, plus a connectivity check run
+through `runpy`), the destination re-fan 1.3 (0.5 of it a whole-board
+DRC of the fanout board by subprocess), the source realize 0.8, and
+0.25 of `.kicad_pro` sidecars re-scanning the board for their floor --
+three boards a probe. Three changes, each checked for identical verdict
+lines on the K51 record's null descent and the same standing moves on
+the K41 67 -> 64 descent:
+
+* **The scoped grade.** A probe changes only its coupled set's copper, so
+  on a DRC-clean board every new violation involves a changed net: the
+  DRC runs over those nets against everything (`check_drc`'s own net
+  filter skips the other pairs), the connectivity check runs over them
+  and the other nets keep the reference's opens, the vias are counted
+  off the board. The same answer at 0.25 s instead of 0.56 s (three
+  probe boards checked both ways); the fanout board's graze check and
+  the source realize's gate are scoped the same way, in-process. The
+  whole-board grade stays for a reference that is not clean.
+* **The probe ladder starts where it lands.** Over 436 probe braids,
+  lanes landed on the ladder's first two rungs (the band widened, layers
+  as scheduled) in 16 and 16, on the third (both layers open) in 355; a
+  rung costs 0.06-0.33 s whether it lands or not. `PROBE_LADDER=open`
+  (the default for probes; the full braid's ladder is untouched) starts
+  at the third rung: K41 95 s against 104 on the same two moves, the
+  K51 null descent 51 s against 63 with all 31 verdicts identical.
+* **Sidecars copied, not re-scanned** inside a probe (`fanout_from_plan
+  .FAST_PRO`): the probe's intermediate boards carry the copper of the
+  board they came from at the same widths, so the floor the copy holds
+  is the floor the scan would write.
+
+Not taken: running without the engine screen (the probe's own realize
+repeats its dry run) lands the same moves but measured 113 s and 79 s on
+two runs of the K41 descent against 95 -- the screen's 0.18 s dry runs
+are cheaper than the probes they save; `--screen=0` stays an option.
+
+All three together, memo off (`tmp/final_t`): the K51 null descent
+**161 -> 126 s in one process and 63 -> 50 s with four workers**, all
+31 verdicts identical to the morning's; the K41 67 -> 64 descent **440
+-> 205 s in one process and 104 -> 83 s with four workers**, the same
+two moves standing. What remains in a serial probe is the braid's own
+routing (about 2 s: the map and band of each rung, the A*), the
+fanout engine's dry runs (0.3 s each, a pure-Python A* under the pads)
+and a dozen board parses a probe; the round's Board, ranking and
+derived apply are seconds.
+
 ## TODO
 
 Ordered, highest value first. An item leaves this list when it is **done**

@@ -155,6 +155,7 @@ SLOPE_W = 0.02                 # extra band half-width per unit |do/ds|:
 SWIM_PRICE = _pr.PLANNER       # ONE source: prices.py. The planner's price for a lane that cannot
                                # run in-band (a dive and a surface)
 ATTEMPTS = int(os.environ.get('BRAID_ATTEMPTS', '6'))
+LADDER_MODE = os.environ.get('BRAID_LADDER', 'full')   # full | open (connect_ladder)
 BUDGET_X = int(os.environ.get('BRAID_BUDGET_X', '4'))
 SWIM_TUBE = 1.2                # ribbon swimmer's band half-width: it
                                # WEAVES through the page lattice, so
@@ -7555,16 +7556,31 @@ class Corridor:
                  ('slack0.8', lambda: self.band_of(nm, 0.8), 2.0),
                  ('slack1.6+open', lambda: self.band_of(nm, 1.6, True), 3.0),
                  ('free', lambda: None, 4.0), ('free', lambda: None, 6.0)]
+        if LADDER_MODE == 'open':
+            # BRAID_LADDER=open (2026-09-18, probes): start at the rung that
+            # opens both layers. Measured over 436 probe braids, lanes landed
+            # on the first two rungs in 16 and 16 and on the third in 355; a
+            # rung costs 0.06-0.33 s whether it lands or not.
+            rungs = rungs[2:]
         wp = (getattr(self, 'lane_xy', {}) or {}).get(nm) or [a, b]
+        # the ladder's cost per rung, in the log (2026-09-18: of 436 probe
+        # braids, lanes landed on the first two rungs in 16 and 16, on the
+        # third in 355 -- the layer requirement, not the width, is what the
+        # early rungs cannot relax)
+        spent = []
         for label, mk, mg in rungs:
+            _t = _time.perf_counter()
             res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg,
                              band=mk(), margin=mg,
                              virtual=list(virt or []) + reserve(ctx, nm),
                              window_pts=wp, virtual_vias=virt_vias,
                              b_alts=b_alts, report=report)
+            spent.append(f'{label}/{mg:g} {_time.perf_counter() - _t:.2f}s {"ok" if res is not None else "no"}')
             if res is not None:
                 ctx.rungs[(stage, label)] += 1
+                self.log(f'    ladder {nm} ({stage}): ' + ', '.join(spent))
                 return res
+        self.log(f'    ladder {nm} ({stage}): ' + ', '.join(spent) + ' -- refused')
         return None
 
     def rip_for(self, nm, others, rep, max_victims=None, depth=None, protect=frozenset()):
