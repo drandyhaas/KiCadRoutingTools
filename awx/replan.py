@@ -111,6 +111,17 @@ COUPLED = OPTS.get('coupled', 'census')
 PERTURB = int(OPTS.get('perturb', 0) or 0)
 PERTURB_TRIES = int(OPTS.get('perturb-tries', 3))   # candidates probed per perturbed net, at most
 PERTURB_SEED = int(OPTS.get('seed', 1))
+# --cross=STEM_B (2026-09-19): a CROSSOVER through the probes. The run's
+# --from world is parent A; for a random --cross-frac of the nets whose
+# ends differ between A and B, B's end(s) are asked for on A's routed
+# board through the descent's own probes (both ends together when both
+# differ, then each alone), the probe board taken whatever its grade.
+# Measured need: population members differ in 2-10 of 41 nets at K41, and
+# the chain crossover (re-solve, fan out, braid) cost 214 s and landed at
+# 96 from parents at 64 and 66.
+CROSS = OPTS.get('cross')
+CROSS_FRAC = float(OPTS.get('cross-frac', 0.5))
+CROSS_TOL = 0.3     # mm: an end within this of the other parent's, same class, is the same end
 # --widen=N: a local braid that REFUSES a lane is answered with ROOM, not
 # with the full re-braid: the frozen lanes crossing the refused lane's own
 # chord are stripped and re-laid with it, up to N times. The 0918 wide run
@@ -979,6 +990,16 @@ def engine_lays_run(B, nm, move, end, others=None):
 SCREEN_MAX = 8        # dry runs per net and end, at most
 
 
+def _end_same(a, b, tol=None):
+    """Two measured ends are the same end: both absent, or the same face,
+    layer and kind with the tips within `tol` (CROSS_TOL) of each other."""
+    if a is None or b is None:
+        return a is None and b is None
+    if (a['direction'], a['layer'], a['kind']) != (b['direction'], b['layer'], b['kind']):
+        return False
+    return math.hypot(a['tooth'][0] - b['tooth'][0], a['tooth'][1] - b['tooth'][1]) <= (tol or CROSS_TOL)
+
+
 def synth_move(nm, got):
     """A Move the engine can be asked for again, from the end it LAID
     (measure_tooth's dict): face, exit, layer, kind, site -- what
@@ -1698,8 +1719,8 @@ def main():
           f'  [{_r.source}]')
     ROUNDS = int(OPTS.get('rounds', 4))
     WORST = int(OPTS.get('worst', 3))
-    if PERTURB:
-        ROUNDS, WORST = 1, PERTURB
+    if PERTURB or CROSS:
+        ROUNDS, WORST = 1, PERTURB or 10 ** 6
         import random as _random
         prng = _random.Random(PERTURB_SEED)
     PROBES = int(OPTS.get('probes', 1))
@@ -1825,6 +1846,35 @@ def main():
                 worst = prng.sample(names, min(PERTURB, len(names)))
                 log(f'  perturb (seed {PERTURB_SEED}): {worst} moved to another class each, '
                     f'{PERTURB_TRIES} candidate(s) probed per net at most')
+            cross_cands = {}
+            if CROSS:
+                # the crossover: the nets whose ends differ from parent B's, a
+                # random share of them asked for B's end(s) on this board
+                B2 = Board(CROSS + '_fo.kicad_pcb', names, dref)
+                differ = {}
+                for nm in names:
+                    ends_b = {e: (None if _end_same(B.ends[nm][e], B2.ends[nm][e]) else B2.ends[nm][e])
+                              for e in ('src', 'dst')}
+                    if ends_b['src'] or ends_b['dst']:
+                        differ[nm] = ends_b
+                picked = sorted(prng.sample(sorted(differ), max(1, round(CROSS_FRAC * len(differ))))) if differ else []
+                for nm in picked:
+                    ms = synth_move(nm, differ[nm]['src']) if differ[nm]['src'] else None
+                    md = synth_move(nm, differ[nm]['dst']) if differ[nm]['dst'] else None
+                    cl = []
+                    if ms is not None and md is not None:
+                        cl.append(('both', (ms, md), 0.0))
+                    if md is not None:
+                        cl.append(('dst', md, 0.0))
+                    if ms is not None:
+                        cl.append(('src', ms, 0.0))
+                    cross_cands[nm] = cl
+                worst = [nm for nm in picked if cross_cands.get(nm)]
+                prng.shuffle(worst)
+                log(f'  cross (seed {PERTURB_SEED}): {len(differ)} of {len(names)} nets differ from '
+                    f'{os.path.basename(CROSS)}; taking B\'s ends for {worst}'
+                    + (f' (no askable move for {[n for n in picked if n not in worst]})'
+                       if len(worst) < len(picked) else ''))
             bad = set(worst)
             log(f'  worst: ' + '; '.join(fmt_v(nm, V[nm], real[nm]) for nm in worst))
             # THE BLOCKER CENSUS: for each bad net, the lanes the braid found
@@ -1878,6 +1928,12 @@ def main():
                 if len(stand) >= WORST + 2:
                     break
                 screened = {}
+                if CROSS:
+                    cands = list(cross_cands.get(nm, []))
+                    ends_try = []            # B's ends are the candidates; no ranking, no screen
+                    log(f'  {nm}: B\'s end(s) asked: '
+                        + '; '.join((f'{fmt_move(m[0])} + {fmt_move(m[1])}' if end == 'both' else fmt_move(m))
+                                    for end, m, c in cands))
                 for end in ends_try:
                     if PERTURB:
                         # every class the menu offers, shuffled, the current
@@ -2026,7 +2082,11 @@ def main():
                         + f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
                         + (f' (the engine\'s substitute {fmt_move(m)} is the ask)' if substitute is not None else '')
                         + (' [memo]' if pr.get('memo') else f' ({pr["seconds"]:.0f} s)'))
-                    if PERTURB and not pr.get('refused') and (in_cls or substitute is not None):
+                    if (PERTURB and not pr.get('refused') and (in_cls or substitute is not None)) \
+                            or (CROSS and not pr.get('refused') and len(g[0]) <= len(ref_g[0])):
+                        # a crossover takes B's end only where it leaves no net
+                        # open that was routed (measured: 22 ends taken across
+                        # lineages walked the 83 to 110 with two open)
                         routed.append((len(g[0]), g[2], 0, end, m, pr))
                         if not g[0]:
                             break           # a jump lands on the first complete board
@@ -2040,10 +2100,12 @@ def main():
                             bans_s.add((nm, sr.move_sig(m)))
                         else:
                             bans_pair[nm].add((sr.move_sig(m[0]), m[1].direction, m[1].layer))
-                if PERTURB and routed:
+                if (PERTURB or CROSS) and routed:
                     results = routed        # the landing: whatever it grades
-                    log(f'    {nm}: JUMPED (the probe board is the landing, graded '
+                    log(f'    {nm}: {"CROSSED" if CROSS else "JUMPED"} (the probe board is the landing, graded '
                         f'open {min(routed)[0]} vias {min(routed)[1]})')
+                elif CROSS:
+                    log(f'    {nm}: B\'s end NOT taken (no landing without a net left open)')
                 if results:
                     results.sort(key=lambda t: (t[0], t[1], t[2]))
                     _o, _v, _mm, end, m, pr = results[0]
@@ -2066,7 +2128,7 @@ def main():
                             f'(open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]})')
             # PHASE 2: each gatekeeper tried at another class of its own,
             # judged by the local braid with the bad nets it blocks re-laid
-            for g in (gates if not PERTURB else []):
+            for g in (gates if not (PERTURB or CROSS) else []):
                 if g in stand or g in bad:
                     continue
                 blocked_by_g = [nm for nm in worst if g in blockers.get(nm, [])]
@@ -2205,7 +2267,7 @@ def main():
                         # braid trimmed the bypassed tip (the #622 overshoot
                         # trim): the derived board's end is the routed board's
                         trimmed.append(f'{nm}: {sr.fmt(b)} -> {sr.fmt(a)}')
-                keep = (better(g1, g_round0) or bool(PERTURB)) and not miss
+                keep = (better(g1, g_round0) or bool(PERTURB or CROSS)) and not miss
                 log(f'  round {rnd}: {"KEPT" if keep else "rejected"} derived -- open {g1[0]}, drc {g1[1]}, '
                     f'vias {g1[2]}' + (f' mm {g1[3]}' if LENGTH_TIE else '')
                     + f' (round start {g_round0[0]}/{g_round0[2]}); fanout board {os.path.basename(F1)} derived '

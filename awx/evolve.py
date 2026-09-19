@@ -30,7 +30,8 @@ Selection is elitist over exact routed grades (open, drc, vias), worlds
 deduplicated by copper; the population's best is monotone.
 
 usage: evolve.py TAG K --seeds=STEM[,STEM...] [--pop=4] [--gens=3]
-                 [--jumps=2] [--cross=1] [--jobs=2] [--jump=near|chain] [--jump-nets=2] [--jump-bans=4]
+                 [--jumps=2] [--cross=1] [--cross-mode=probe|chain] [--jobs=2]
+                 [--jump=near|chain] [--jump-nets=2] [--jump-bans=4]
                  [--descend="--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --widen=0 --grade=inproc"]
                  [--board=BENCH] [--dest=REF] [--seed=N]
                  [--descend-env="DST_CLIMB=2"] [--jump-env="DST_CLIMB=2 SRC_CLIMB=4"]
@@ -257,6 +258,42 @@ def jump(world, K, out_dir, names, dref, nets_csv, n_bans, rng, dest, env_extra=
     return w, secs
 
 
+def cross_probe(A, Bw, K, out_dir, rng, nets_csv, par, env_extra=None):
+    """A crossover through the probes (replan --cross): B's ends asked for
+    on A's routed board for a random half of the nets whose ends differ,
+    one probe each, the landing taken whatever its grade. Population
+    members differ in a handful of nets (2-10 of 41 at K41, measured), so
+    this is a few probes where the chain crossover was 214 s and landed
+    worse than either parent."""
+    out = os.path.join(out_dir, 'x')
+    seed = rng.randint(1, 10 ** 6)
+    t0 = time.time()
+    args = [sys.executable, '-u', os.path.join(HERE, 'replan.py'), A['stem'], str(K),
+            f'--from={A["stem"]}', f'--out={out}', f'--cross={Bw["stem"]}', f'--seed={seed}',
+            '--mode=incremental', '--apply=strip', '--coupled=census', '--widen=0', '--grade=inproc']
+    if par:
+        args.append(f'--par={par}')
+    with open(out + '.out', 'w', encoding='utf-8') as f:
+        subprocess.run(args, cwd=HERE, env=child_env(env_extra), stdout=f, stderr=subprocess.STDOUT, text=True)
+    stem = f'{out}_rp_k{K}'
+    if not os.path.exists(stem + '.kicad_pcb'):
+        return None, round(time.time() - t0)
+    crossed, n_differ = [], None
+    try:
+        txt = open(out + '.out', encoding='utf-8').read()
+        crossed = re.findall(r'^    (\S+): CROSSED', txt, re.M)
+        m = re.search(r'cross \(seed \d+\): (\d+) of \d+ nets differ', txt)
+        n_differ = int(m.group(1)) if m else None
+    except OSError:
+        pass
+    if not crossed:
+        return None, round(time.time() - t0)     # nothing taken from B: not a new world
+    g, line = pl.grade(stem + '.kicad_pcb', nets_csv)
+    return {'stem': stem, 'grade': g,
+            'origin': f'cross<{A["name"]} x {Bw["name"]}; {len(crossed)} of {n_differ} differing net(s) from B; seed {seed}>'}, \
+        round(time.time() - t0)
+
+
 def cross(A, Bw, K, out_dir, names, dref, nets_csv, rng, dest):
     """A crossover: half the nets held at A's ends, half at B's, on A's
     source view (B's teeth named as moves there)."""
@@ -313,6 +350,11 @@ def main():
     # the plan-level re-solve with class bans (665 s at K51, landed 84..141)
     JUMP = OPTS.get('jump', 'near')
     JNETS = int(OPTS.get('jump-nets', 2))
+    # --cross-mode=probe (default, 2026-09-19): B's ends asked for on A's
+    # board through the probes; --cross-mode=chain: the hold-channel re-solve
+    CROSS_MODE = OPTS.get('cross-mode', 'probe')
+    _mpar = re.search(r'--par=(\d+)', OPTS.get('descend', ''))
+    PAR = int(_mpar.group(1)) if _mpar else 0
     # min-vias 2 (2026-09-18): at the frontier (K41 67, K51 83) no net carries
     # three lane vias any more, and a descent with the threshold at three
     # returns in 7 s having probed nothing. The 2-via one-dive nets are the
@@ -339,7 +381,7 @@ def main():
     dref = Counter(ends0[nm][2] for nm in nets_all if nm in ends0).most_common(1)[0][0]
     names = [nm for nm in nets_all if nm in ends0 and ends0[nm][2] == dref]
     log(f'evolve: K{K} tag {tag}; pop {POP}, {GENS} generation(s), {JUMPS} jump(s) + {CROSS} cross per '
-        f'generation, jobs {JOBS}; descend: {DESC} {DESC_ENV}; jump {JUMP} '
+        f'generation, jobs {JOBS}; descend: {DESC} {DESC_ENV}; cross {CROSS_MODE}; jump {JUMP} '
         f'({f"{JNETS} net(s)" if JUMP == "near" else f"{JBANS} bans"}) env {JUMP_ENV}; '
         f'memo {"on" if pm.ENABLED else "OFF"} ({pm.MEMO_DIR}, code {pm.code_hash()})')
     # ---- the initial population
@@ -396,7 +438,10 @@ def main():
                     else:
                         nw, secs = jump(w, K, d, names, dref, nets_csv, JBANS, rng, dest, JUMP_ENV)
                     return kind, w, nw, '', secs
-                nw, secs = cross(w[0], w[1], K, d, names, dref, nets_csv, rng, dest)
+                if CROSS_MODE == 'probe':
+                    nw, secs = cross_probe(w[0], w[1], K, d, rng, nets_csv, PAR, JUMP_ENV)
+                else:
+                    nw, secs = cross(w[0], w[1], K, d, names, dref, nets_csv, rng, dest)
                 return kind, w, nw, '', secs
             except Exception as e:
                 return kind, w, None, f'{type(e).__name__}: {str(e)[:120]}', 0
