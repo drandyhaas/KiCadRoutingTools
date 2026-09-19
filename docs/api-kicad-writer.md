@@ -294,8 +294,11 @@ on its in-memory vias, which `apply_via_protection` writes. The record is
 published as `via_in_pad` ({count, sites, stamped, restored, protected,
 unstampable, site_created, unprotected, note}, plus `written` when a file
 stamp could not place every token) on the route step's merged `--json-out`
-summary (not the early `JSON_SUMMARY`, which predates the finalize) and on
-`results_data`. `check_drc` reports what still ships unprotected as
+summary and on `results_data`. The early `JSON_SUMMARY` lines predate the
+finalize, so route.py prints the record on its own `VIA_IN_PAD_JSON:` line
+(as route_diff and repair_planes do), and
+`route_summary.merge_route_summaries` folds the last one in: the file and the
+merged stdout stay one document. `check_drc` reports what still ships unprotected as
 `via-in-paste` (on a pre-KiCad-10 file it accepts them as
 `undeclarable-via-in-paste` and counts them, since that file cannot declare
 Type VII at all).

@@ -46,7 +46,7 @@ accepted `undeclarable-via-in-paste` and counted on the same line: Type VII
 belongs on the fab drawing. Report whatever still fires as a fab defect: the
 via needs filled+capped on the fab drawing, or it must move out of the opening.
 Without `--baseline`, every pre-existing one reads as a violation
-(orangecrab_ext_pll carries 136). The same flag grades a graze of footprint graphic copper that a
+(one corpus board carries 136). The same flag grades a graze of footprint graphic copper that a
 part MOVE created (`graphic-board-edge`); `graphic-off-board` (copper past the
 outline) is reported either way.
 

@@ -83,7 +83,7 @@ RULE_PAIR_TYPES = frozenset({'segment-segment-track-rule'})
 # beside `drc_rule_pairs`, never in `blocking`. On a KiCad 10-format board
 # the tool stamps IPC-4761 Type VII onto every via it puts under solder at ship
 # time, so what fires on a board this chain routed is almost always a via the
-# input already had -- 136 on orangecrab_ext_pll alone (a pre-KiCad-10 file
+# input already had -- 136 on one corpus board alone (a pre-KiCad-10 file
 # cannot carry the tokens; check_drc accepts those as undeclarable). No
 # placement or routing lap can change a fab spec it did not write, so
 # counting them in `blocking` would make 0 unreachable there.
@@ -646,8 +646,8 @@ def _unverified_grazes(out: str) -> int:
     """Footprint graphic copper grazing the edge that check_drc ACCEPTED
     without knowing whether a part move made the graze (#962).
 
-    Without --baseline, check_drc cannot tell a library graze (watchy AE1)
-    from one a placement lap created; both are accepted and count toward
+    Without --baseline, check_drc cannot tell a library graze (an antenna's
+    own art) from one a placement lap created; both are accepted and count toward
     nothing. The number is disclosed so a reader knows `count`
     does not cover them. Copper PAST the outline is `graphic-off-board` and is
     counted either way.

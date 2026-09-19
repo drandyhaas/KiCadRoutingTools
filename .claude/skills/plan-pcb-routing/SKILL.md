@@ -45,8 +45,8 @@ The tools are of two kinds, and the difference decides how you use one:
 
 `tests/stress/kicad_drc_compare.py` grades the board with KiCad's own DRC beside
 `check_drc` and names the copper findings only one of them makes. It was never run
-in run 29, where KiCad's DRC was the only channel that saw copper against
-esp_prog U2's net-0 tab (#962, #994). It needs `kicad-cli`,
+in run 29, where KiCad's DRC was the only channel that saw copper against a
+part's own net-0 tab (#962, #994). It needs `kicad-cli`,
 and `krt_registry` does not list it because it lives under `tests/`. Without
 `kicad-cli` it prints SKIP, compares 0 boards and exits 0: record that as NOT
 RUN, never as agreement.

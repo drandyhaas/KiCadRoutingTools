@@ -393,8 +393,13 @@ def _ship_via_protection962(pcb_data, output_file, return_results, results_data,
       and publishes the record as `results_data['via_in_pad']`.
     - CLI: every pass wrote through to the file, so it stamps the file.
 
+    The record is also printed as a `VIA_IN_PAD_JSON:` line, which
+    `route_summary.merge_route_summaries` folds into the merged tally, so the
+    `--json-out` file and the merged stdout stay one document (#830).
+
     Returns the record, or None.
     """
+    record = None
     try:
         import fab_notes
         if return_results:
@@ -406,12 +411,14 @@ def _ship_via_protection962(pcb_data, output_file, return_results, results_data,
             fab_notes.print_via_protection_record(record, 'route')
             if results_data is not None:
                 results_data['via_in_pad'] = record
-            return record
-        if output_file and os.path.exists(output_file):
-            return fab_notes.ship_via_protection_file(output_file, input_snapshot, 'route')
+        elif output_file and os.path.exists(output_file):
+            record = fab_notes.ship_via_protection_file(output_file, input_snapshot, 'route')
     except Exception as e:                                       # noqa: BLE001
         print(f"  (via protection stamp skipped: {type(e).__name__}: {e})")
-    return None
+        record = None
+    if record is not None:
+        print('VIA_IN_PAD_JSON: ' + json.dumps(record))
+    return record
 
 
 def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,

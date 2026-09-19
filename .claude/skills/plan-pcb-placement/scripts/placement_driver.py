@@ -556,21 +556,14 @@ MEASURE (all four, every lap, on the copper-free board):
   python3 -X utf8 py_tools/check_channels.py {a.board} --baseline <the board this RUN started from> --gate
   python3 -X utf8 check_rigid_consistency.py {a.before} {a.board}
 
-check_drc's --baseline is what tells a graze of footprint graphic copper
-(a drawn tab or antenna) against the board edge apart: a part that has not
-moved since the baseline keeps its library graze as accepted `inherited`, and
-a part this run MOVED into one is a `graphic-board-edge` violation. Without
-it every such graze reads `unverified` and is accepted, so a lap can create
-one and grade clean. Copper past the outline is a `graphic-off-board`
-violation either way.
-
 check_assembly and check_channels now READ THE BOARD's own clearance (and
 check_channels its track width too) and print each value with its source, so
 do NOT pass <floor> to them -- omitting it is what gets the board's floor.
 They used to default to a flat 0.25 / 0.3 regardless: on a 0.2 board that
 track width invented a "U2 N short 1 lane" deficit that does not exist
 (supply 14, demand 12), and it was handed forward as floorplan-shaped residue.
-check_drc still wants it spelled out.
+check_drc still wants it spelled out; its --baseline grades a graphic-copper graze
+a lap's MOVE created (without it, accepted `unverified`, so a lap grades clean).
 
 READ THE PRINTED SOURCE. `[board netclass]` / `[board constraint]` means the
 board answered; `[fixed default]` means it declared nothing and the number is
@@ -1523,8 +1516,9 @@ def _implicated_refs(paths):
                     refs.add(v.split('.', 1)[0])
             # #962: check_drc names footprint GRAPHIC copper by its owner
             # (graphic-off-board / graphic-board-edge). Only from counted
-            # rows: an ACCEPTED immutable-graphic row is inherited art (watchy
-            # AE1), and reading it would implicate that part on every run.
+            # rows: an ACCEPTED immutable-graphic row is inherited art (a
+            # library antenna), and reading it would implicate that part on
+            # every run.
             # Graphic rows only: a via-in-paste row also carries an owner_ref
             # (the opening's part), but it complains about a VIA, not a pose.
             if (item.get('owner_ref') and not item.get('accepted')
