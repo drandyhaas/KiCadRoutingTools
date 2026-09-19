@@ -144,8 +144,17 @@ _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
     'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
-    'assembly', 'proximity',
+    'assembly', 'proximity', 'dispositions',
 }
+#: #959 (#997). WRITTEN answers to "why is this not graded", one map per kind
+#: of question: a rule the plan leaves dark, a budget key the emitter withheld,
+#: a pad-less block the seeder cannot place, a contradiction between two
+#: declared sources. Every value is a non-empty `why`. No READER_VERSION bump:
+#: the rule above says not to bump for a field nothing grades, and a
+#: disposition changes no verdict -- it answers P1's refusal, which reads it.
+#: An older build still refuses the file (unknown top-level key), which is the
+#: safe direction.
+_DISPOSITION_KEYS = {'rules', 'withheld', 'refs', 'contradictions'}
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                'tolerance_mm', 'note', 'context',
                # #893. `rotation` is a DECISION (honoured exactly, and the
@@ -362,6 +371,11 @@ class Intent:
     # Defaulted, so every existing `Intent(...)` construction site is
     # untouched and an intent declaring none behaves exactly as before.
     proximity: Tuple[Dict[str, object], ...] = ()
+    #: #959 (#997). `{kind: {key: why}}` for kind in `_DISPOSITION_KEYS`: the
+    #: plan's written answers to the questions P1 refuses on. Read by
+    #: `rule_roster` and the driver, never by a rule -- a disposition is not a
+    #: verdict. Defaulted, so every existing construction site is untouched.
+    dispositions: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     def assembly_sides(self) -> str:
         """The declared policy, or 'both' -- which constrains nothing.
@@ -1020,7 +1034,9 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         _reject_unknown(w, _WAIVER_KEYS, f"overlap_waivers[{i}]")
         _entry_context(w, f"overlap_waivers[{i}]")
 
-    return Intent(
+    dispositions = _dispositions(raw.get('dispositions'))
+
+    intent = Intent(
         schema=schema, kind=kind, board=raw.get('board', '') or '',
         units=units, envelope=envelope,
         defaults=defaults,
@@ -1039,7 +1055,61 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                  'context.budget_withheld').items()},
         assembly=dict(assembly),
         proximity=tuple(proximity),
+        dispositions=dispositions,
     )
+    # A disposition for a rule the intent ARMS says "this is not graded" about
+    # a rule that is -- the two statements cannot both be true, and a reader
+    # trusting the disposition would skip a live finding. Checked here, where
+    # only the intent is needed; refs and contradiction ids need the board and
+    # the brief, so `rule_roster` checks those.
+    armed = sorted(r for r in dispositions.get('rules', {})
+                   if _wants(intent, r))
+    if armed:
+        raise IntentError(
+            f"dispositions.rules: {', '.join(armed)} "
+            f"{'is' if len(armed) == 1 else 'are'} ARMED by this intent, so a "
+            f"disposition saying why it is not graded contradicts the intent "
+            f"itself. Drop the disposition, or drop the key that arms the rule")
+    return intent
+
+
+def _dispositions(raw) -> Dict[str, Dict[str, str]]:
+    """Parse `dispositions` (#959, #997): `{kind: {key: why}}`.
+
+    Refused, not ignored, on anything that would make a disposition answer a
+    question nobody can see: an unknown kind, a non-string or empty `why`, a
+    rule name `RULES` does not have, a withheld key the emitter cannot
+    withhold. An empty `why` is the one that matters most -- a disposition
+    with no reason is a flag that makes the refusal go away rather than an
+    answer to it, which is exactly what the driver's `--waive x:` refuses.
+    """
+    if raw is None:
+        return {}
+    d = _obj(raw, 'dispositions')
+    _reject_unknown(d, _DISPOSITION_KEYS, 'dispositions')
+    known = {
+        'rules': {name for name, _ in RULES},
+        'withheld': set(_WITHHELD_RULE),
+    }
+    out: Dict[str, Dict[str, str]] = {}
+    for kind in sorted(d):
+        m = _obj(d[kind], f'dispositions.{kind}')
+        entries: Dict[str, str] = {}
+        for key, why in sorted(m.items()):
+            if not isinstance(why, str) or not why.strip():
+                raise IntentError(
+                    f"dispositions.{kind}.{key}: needs a non-empty `why`. A "
+                    f"disposition is a written reason, and one with no reason "
+                    f"makes a refusal go away rather than answering it")
+            if kind in known and key not in known[kind]:
+                raise IntentError(
+                    f"dispositions.{kind}.{key}: not a "
+                    f"{'rule' if kind == 'rules' else 'withholdable key'}"
+                    f" -- expected one of {', '.join(sorted(known[kind]))}")
+            entries[str(key)] = why.strip()
+        if entries:
+            out[kind] = entries
+    return out
 
 
 def validate_intent(intent: Intent) -> List[Violation]:
@@ -4251,6 +4321,279 @@ def _wants(intent: Intent, rule: str) -> bool:
 
 
 # --------------------------------------------------------------------------
+# the rule roster (#959, #997): which rules a plan leaves dark, and whether
+# anything answers for that
+# --------------------------------------------------------------------------
+
+#: The key an author declares to ARM each rule -- the thing a refusal names.
+#: Pinned against `_wants` rule by rule (tests/test_959_rule_roster.py), so a
+#: change to what arms a rule cannot leave this table naming the old key.
+_ARMING_KEY = {
+    'envelope': 'envelope.rect',
+    'zone_containment': 'blocks[].zone',
+    'zone_side': 'blocks[].side',
+    'assembly_side': 'assembly.sides',
+    'zone_exclusive': 'blocks[].exclusive (on a zoned block)',
+    'keepout': 'keepouts[]',
+    'edge_connector': 'edge_connectors[]',
+    'decap_distance': 'decaps.max_distance_mm',
+    'decap_ungraded': 'decaps.max_distance_mm',
+    'decap_pin_distance': 'decaps.max_pin_distance_mm',
+    'proximity': 'proximity[]',
+    'must_lock': 'must_lock[]',
+    'legality': 'legality_budget',
+    'pins_to_edge': 'edge_connectors[]',
+}
+
+#: What each rule reports at when the intent's `severity` map says nothing.
+#: One table, because "is this rule advisory" is what the roster refuses on
+#: and the answer lived in three places: `severity_of`'s ERROR default, two
+#: rules passing `default=WARN`, and one hard-wired WARN. Pinned against the
+#: severity each rule actually EMITS by a test that fires every rule, so the
+#: table cannot drift from the rules without failing.
+_RULE_DEFAULT_SEVERITY = dict({name: ERROR for name, _ in RULES},
+                              assembly_side=WARN, decap_ungraded=WARN,
+                              pins_to_edge=WARN)
+
+#: A rule whose severity the intent's map cannot change, because the rule
+#: ignores the map (`rule_pins_to_edge` always yields WARN).
+_FORCED_SEVERITY = {'pins_to_edge': WARN}
+
+#: Rules no board fact can arm or excuse, so they are REPORTED dark and never
+#: refused. Measured before this was built (#959 Phase 0, P4): `emit_intent`
+#: writes neither `exclusive` nor `proximity`, so both were dark on 22 of 22
+#: corpus boards and on both of run 29's zone plans. Refusing them would have
+#: opened every plan with the same two boilerplate dispositions, and a refusal
+#: everybody answers the same way carries no signal.
+_POLICY_RULES = {
+    'proximity': ('a design relation between two named parts; nothing on the '
+                  'board says which parts must be near which, so only a '
+                  'declaration can arm it'),
+    'zone_exclusive': ('a policy about who may enter a zone; nothing on the '
+                       'board says that a zone is reserved'),
+}
+
+#: Part classes whose presence makes the edge rules applicable. Strict on
+#: purpose: `connector_affinity` (a header, a JST) makes no edge claim, and
+#: counting it would make the edge rules applicable on nearly every board.
+_EDGE_CLAIM_CLASSES = ('edge_receptacle', 'edge_actuator')
+
+
+def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
+                   brief_fragment) -> Tuple[bool, str]:
+    """Could this rule apply to THIS board? `(applicable, reason)`.
+
+    Conservative: applicable unless a board fact proves otherwise, because the
+    direction a wrong answer errs in matters -- a false "not applicable"
+    excuses a rule silently, a false "applicable" costs one written sentence.
+    Reads board facts, never the intent's own claims about the board: an
+    intent that says `assembly.sides: "F"` is a claim, and letting it exempt
+    `zone_side` would let the plan excuse itself.
+    """
+    if rule == 'zone_side':
+        faces = sorted({legality.footprint_side(fp)
+                        for fp in (pcb_data.footprints or {}).values()
+                        if fp.pads})
+        if len(faces) < 2:
+            return False, (f"every part with pads is on "
+                           f"{faces[0] if faces else 'no'} face, so no block "
+                           f"can be on the wrong one")
+        return True, "the board carries parts on both faces"
+    if rule == 'keepout':
+        if (brief_fragment or {}).get('keepouts'):
+            return True, "the design brief declares keep-outs"
+        return False, ("nothing declares a keep-out: the brief (if any) names "
+                       "none, and the board file has none this intent can "
+                       "grade")
+    if rule in ('edge_connector', 'pins_to_edge'):
+        from .part_class import classify_part
+        refs = sorted(r for r, fp in (pcb_data.footprints or {}).items()
+                      if classify_part(fp, r).name in _EDGE_CLAIM_CLASSES)
+        if not refs:
+            return False, ("no part classifies as an edge receptacle or "
+                           "actuator, so nothing has an edge to claim")
+        return True, (f"{len(refs)} part(s) classify as edge receptacles or "
+                      f"actuators ({', '.join(refs[:6])}"
+                      + (', ...' if len(refs) > 6 else '') + ")")
+    if rule in ('decap_distance', 'decap_ungraded'):
+        # tethered + beyond-radius is every cap with an IC on its rail. The
+        # SPLIT between the two moves with the poses; the SUM does not, so
+        # this reads the same on a pile as on the placed board (measured on
+        # 24 rows in #959 Phase 0).
+        scope = int(census.get('tethers', 0)) + int(
+            census.get('beyond_radius', 0))
+        if not scope:
+            return False, ("no decoupling cap shares a rail with any IC, so "
+                           "no cap has anything to be near")
+        return True, (f"{scope} decoupling cap(s) share a rail with an IC")
+    if rule == 'decap_pin_distance':
+        why = _arm_decap_pins(ctx) if ctx is not None else None
+        if why is not None:
+            return False, why
+        return True, "the board has supply pins and caps on their rails"
+    if rule == 'must_lock':
+        return False, ("must_lock is refused by design: filling it made "
+                       "place_seed --repair lift the user's own locks "
+                       "(docs/design-brief.md)")
+    if rule == 'envelope':
+        return True, "the board has an outline, and it bounds every placement"
+    if rule == 'zone_containment':
+        return True, "every movable block can be given a zone"
+    if rule == 'assembly_side':
+        return True, "every board has faces for the fab to populate"
+    if rule == 'legality':
+        return True, "every placement has a legality to measure"
+    return True, "no board fact excuses it"
+
+
+def _gating(rule: str, intent: Intent, ctx) -> bool:
+    """Does a violation of this rule fail the grade on THIS board?
+
+    The table default decides, plus one direction of the intent's map: a
+    PROMOTION to error makes a rule gating, a demotion never makes it
+    advisory. A dark rule never runs, so demoting it would change nothing but
+    this answer -- a way to make P1's refusal go away by editing a severity
+    no finding will ever carry (#959 plan review, round 3).
+    """
+    if rule in _FORCED_SEVERITY:
+        return _FORCED_SEVERITY[rule] == ERROR
+    if rule == 'decap_pin_distance':
+        # Per board. A pin found only through the rail-net channel is filed
+        # under `decap_pin_distance_inferred`, WARN by default, so on a board
+        # whose every supply pin came that way the rule cannot fail the grade
+        # (esp_prog, splitflap_driver, tigard, ulx3s -- measured, #959 P4).
+        recs = ctx.supply_pins() if ctx is not None else {}
+        chans = {r['channel'] for r in recs.values() if r['pins']}
+        if chans & {'pintype', 'pinfunction'}:
+            return True
+        if 'rail_net' in chans:
+            return intent.severity.get('decap_pin_distance_inferred') == ERROR
+        return False
+    if intent.severity.get(rule) == ERROR:
+        return True
+    return _RULE_DEFAULT_SEVERITY.get(rule, ERROR) == ERROR
+
+
+def _roster(intent: Intent, pcb_data, ctx, *, census=None,
+            brief_fragment=None) -> List[Dict[str, object]]:
+    """One row per rule in `RULES`: is it armed, and if not, does anything
+    answer for that? The `needs_disposition` rows are what P1 refuses on.
+
+    A rule is REFUSED only when all of these hold: it is dark (or abstained,
+    or armed with a withheld key), it is not a policy rule, a board fact says
+    it applies, it is gating, and no written disposition answers for it.
+    Withheld budgets are refused like dark rules, for decaps and legality
+    alike: in both cases the emitter declined to derive a number, and in both
+    cases the honest answers are "declare it from a requirement" or "say why
+    not" (#959 Phase 0 checkpoint).
+    """
+    census = census if census is not None else decap_census(pcb_data)
+    disp = intent.dispositions or {}
+    rule_disp = disp.get('rules', {})
+    held_disp = disp.get('withheld', {})
+    abstained = {str(k): str(v)
+                 for k, v in (intent.budget_withheld or {}).items()
+                 if not _declared_by_hand(intent, str(k))}
+    rows: List[Dict[str, object]] = []
+    for name, _fn in RULES:
+        wants = _wants(intent, name)
+        arm_why = None
+        if wants and ctx is not None and name in _ARM:
+            arm_why = _ARM[name](ctx)
+        state = ('armed' if wants and arm_why is None
+                 else 'abstained' if wants else 'dark')
+        withheld = {k: v for k, v in sorted(abstained.items())
+                    if name in (_WITHHELD_RULE.get(k) or ((),))[0]}
+        policy = name in _POLICY_RULES
+        if policy:
+            applicable, why_app = True, _POLICY_RULES[name]
+        else:
+            applicable, why_app = _applicability(
+                name, intent, pcb_data, ctx, census, brief_fragment)
+        gating = _gating(name, intent, ctx)
+        disposition = rule_disp.get(name, '')
+        held_answered = {k: held_disp[k] for k in withheld if k in held_disp}
+        open_held = [k for k in withheld if k not in held_disp]
+        needs = False
+        if not policy and applicable and gating:
+            if state != 'armed':
+                needs = not disposition and not (withheld and not open_held)
+            else:
+                needs = bool(open_held)
+        skip = ('' if state == 'armed'
+                else arm_why if state == 'abstained'
+                else _SKIP_REASON.get(name, 'not requested'))
+        rows.append({
+            'rule': name, 'state': state,
+            'arming_key': _ARMING_KEY.get(name, ''),
+            'policy': policy, 'applicable': applicable,
+            'applicability_reason': why_app, 'gating': gating,
+            'default_severity': _RULE_DEFAULT_SEVERITY.get(name, ERROR),
+            'skip_reason': skip, 'withheld': withheld,
+            'disposition': disposition,
+            'withheld_dispositions': held_answered,
+            'needs_disposition': needs,
+        })
+    return rows
+
+
+def stale_dispositions(intent: Intent, rows) -> List[str]:
+    """Written answers to questions this plan does not ask: a withheld-key
+    disposition for a key the emitter did not withhold. Reported by name so
+    the author removes it -- a stale disposition reads as though something
+    were excused when nothing is."""
+    held = set()
+    for r in rows:
+        held.update(r['withheld'])
+    return sorted(f"dispositions.withheld.{k}"
+                  for k in (intent.dispositions or {}).get('withheld', {})
+                  if k not in held)
+
+
+def roster_refusal_lines(rows) -> List[str]:
+    """One line per row P1 refuses on, naming the key that arms the rule and
+    the disposition spelling that answers it. Never steers toward inventing a
+    limit: "declare it from a requirement" and "write why it does not apply"
+    are offered side by side."""
+    out = []
+    for r in rows:
+        if not r['needs_disposition']:
+            continue
+        name = r['rule']
+        if r['state'] == 'armed':
+            for k in r['withheld']:
+                if k in r['withheld_dispositions']:
+                    continue
+                out.append(
+                    f"{name}: armed, but the emitter WITHHELD `{k}` "
+                    f"({r['withheld'][k]}), so that half is never graded. "
+                    f"Declare `{k}` from a requirement, or write why it "
+                    f"stays ungraded: dispositions.withheld.{k}")
+            continue
+        out.append(
+            f"{name}: {r['state']} -- {r['skip_reason']}. It applies here "
+            f"({r['applicability_reason']}). Arm it with `{r['arming_key']}` "
+            f"if the design has that requirement, or write why it does not: "
+            f"dispositions.rules.{name}")
+    return out
+
+
+def rule_roster(intent: Intent, pcb_data, pcb_file: str, *,
+                group_sources: Sequence[str] = (),
+                clearance: Optional[float] = None,
+                board_edge_clearance: Optional[float] = None,
+                brief_fragment=None) -> List[Dict[str, object]]:
+    """The roster for a PLAN, before anything is graded (P1's question).
+
+    Builds the same `_Ctx` `grade` builds, so the board facts the roster reads
+    (supply pins, the decap census) are the ones the grade would read."""
+    ctx = _grade_ctx(intent, pcb_data, pcb_file, group_sources=group_sources,
+                     clearance=clearance,
+                     board_edge_clearance=board_edge_clearance)[0]
+    return _roster(intent, pcb_data, ctx, brief_fragment=brief_fragment)
+
+
+# --------------------------------------------------------------------------
 # grade
 # --------------------------------------------------------------------------
 
@@ -4299,6 +4642,20 @@ class GradeResult:
     #: reason the inferred findings carry their own name. Empty when the
     #: rule did not run.
     decap_pin_evidence: Dict[str, object] = field(default_factory=dict)
+    #: #959 (#997): the rule roster, when `grade(with_roster=True)` built it;
+    #: None when nobody asked, which a consumer must not read as "no rule is
+    #: dark".
+    roster: Optional[List[Dict[str, object]]] = None
+    #: #959: dispositions this plan writes that answer nothing (see
+    #: `stale_dispositions`). Empty unless the roster was built.
+    stale_dispositions: List[str] = field(default_factory=list)
+
+    @property
+    def dark_undispositioned(self) -> List[str]:
+        """Rules P1 would refuse on, by name. Empty when no roster was built,
+        so read it together with `roster is not None`."""
+        return [r['rule'] for r in (self.roster or ())
+                if r['needs_disposition']]
 
     @property
     def errors(self) -> List[Violation]:
@@ -4658,13 +5015,14 @@ def grade_delta(before: Sequence[Violation],
     return out
 
 
-def grade(intent: Intent, pcb_data, pcb_file: str, *,
-          group_sources: Sequence[str] = (), clearance: Optional[float] = None,
-          board_edge_clearance: Optional[float] = None,
-          with_health: bool = False) -> GradeResult:
-    """Measure a board against its declared floorplan intent."""
+def _grade_ctx(intent: Intent, pcb_data, pcb_file: str, *,
+               group_sources: Sequence[str] = (),
+               clearance: Optional[float] = None,
+               board_edge_clearance: Optional[float] = None):
+    """`(ctx, outline, state, blocks, block_problems)`: the one setup `grade`
+    and `rule_roster` share, so a plan's roster reads the board facts its
+    grade will read."""
     from .quench import QuenchState
-    from . import placement_state
     import routing_defaults as defaults
 
     outline = outline_state(pcb_data, pcb_file)
@@ -4690,6 +5048,25 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     blocks, block_problems = resolve_blocks(intent, pcb_data, group_sources)
     ctx = _Ctx(intent, pcb_data, pcb_file, state, blocks, locked, outline)
     ctx.requested_floors = (clearance, board_edge_clearance)
+    return ctx, outline, state, blocks, block_problems
+
+
+def grade(intent: Intent, pcb_data, pcb_file: str, *,
+          group_sources: Sequence[str] = (), clearance: Optional[float] = None,
+          board_edge_clearance: Optional[float] = None,
+          with_health: bool = False, with_roster: bool = False,
+          brief_fragment=None) -> GradeResult:
+    """Measure a board against its declared floorplan intent.
+
+    `with_roster` (#959) also builds the rule roster -- which rules the intent
+    leaves dark and whether a disposition answers for each. Opt-in, because
+    it costs a decap census and most callers (the seeder's self-grade, the
+    A/B harness) never read it."""
+    from . import placement_state
+
+    ctx, outline, state, blocks, block_problems = _grade_ctx(
+        intent, pcb_data, pcb_file, group_sources=group_sources,
+        clearance=clearance, board_edge_clearance=board_edge_clearance)
 
     violations = (list(validate_intent(intent)) + list(block_problems)
                   + list(unresolved_keepout_allows(intent, pcb_data))
@@ -4752,8 +5129,14 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                 and matches_net_filter(n.name, list(exempt))]
         health_out = routability.health(state, pcb_data, blocks, spec)
 
+    roster = stale = None
+    if with_roster:
+        roster = _roster(intent, pcb_data, ctx, brief_fragment=brief_fragment)
+        stale = stale_dispositions(intent, roster)
+
     st = placement_state.assess_placement(pcb_data, pcb_file)
     return GradeResult(
+        roster=roster, stale_dispositions=list(stale or ()),
         intent=intent, board=pcb_file, violations=violations, blocks=blocks,
         legality={k: (round(float(v), 4) if isinstance(v, float) else v)
                   for k, v in ctx.legality.items()},
@@ -5582,6 +5965,8 @@ def format_text(r: GradeResult) -> str:
         lines.append(f"  {len(r.rules_skipped)} rule(s) did not run:")
         for name in sorted(r.rules_skipped):
             lines.append(f"    - {name}: {r.rules_skipped[name]}")
+    if r.roster is not None:
+        lines.extend(format_roster(r.roster, r.stale_dispositions))
     if r.health:
         lines.append("  routability (advisory -- this says the floorplan will "
                      "fight the router, not that it breaks the intent):")
@@ -5675,8 +6060,157 @@ def format_text(r: GradeResult) -> str:
     return '\n'.join(lines)
 
 
+def format_roster(rows, stale=()) -> List[str]:
+    """The roster as report lines: armed / dark-with-reason / dispositioned,
+    and what a plan still owes. Shared by the grade report and the emit path,
+    so both print the same thing."""
+    armed = [r['rule'] for r in rows if r['state'] == 'armed']
+    owed = roster_refusal_lines(rows)
+    lines = [f"  rule roster: {len(armed)} armed, {len(rows) - len(armed)} "
+             f"not; {len(owed)} dark rule(s) with no written disposition"]
+    for r in rows:
+        if r['state'] == 'armed' and not r['withheld']:
+            continue
+        if r['needs_disposition']:
+            tag = 'OWED'
+        elif r['disposition'] or r['withheld_dispositions']:
+            tag = 'dispositioned'
+        elif r['policy']:
+            tag = 'policy'
+        elif not r['applicable']:
+            tag = 'not applicable'
+        elif not r['gating']:
+            tag = 'advisory'
+        else:
+            tag = 'armed'
+        why = (r['disposition']
+               or '; '.join(r['withheld_dispositions'].values())
+               or (r['applicability_reason'] if tag in ('policy',
+                                                        'not applicable')
+                   else r['skip_reason']))
+        lines.append(f"    [{tag}] {r['rule']}: {why}")
+    for line in owed:
+        lines.append(f"    OWED: {line}")
+    for s in stale:
+        lines.append(f"    STALE: {s} answers nothing -- nothing is withheld "
+                     f"under that key; remove it")
+    return lines
+
+
+#: #959 (#997): every status a declaration-ledger row can carry. `pending`
+#: is an armed row with no grade yet (the before-placement view); `dark` is
+#: an applicable gating rule nothing answers for; `carried` is a declared
+#: fact no rule measures.
+LEDGER_STATUSES = ('pending', 'graded_pass', 'graded_fail', 'carried',
+                   'unmeasured', 'unknown', 'uncovered', 'inapplicable',
+                   'abstained', 'dispositioned', 'dark')
+
+
+def declaration_ledger(intent: Intent, rows, *, result=None,
+                       coverage=None,
+                       brief_source=None) -> List[Dict[str, object]]:
+    """One row per REQUIREMENT, whoever declared it (#959 comment §3.1).
+
+    Joins the rule roster (what the intent arms and leaves dark) with the
+    brief's clause coverage (what the brief declares and which rule, if any,
+    measures it). Each row says who declared it, what it compiled to, which
+    rule grades it and with what outcome -- so "complete" can never again
+    mean "every graded clause passed" while eight carried facts sit unread
+    beside it.
+
+    `result` is the grade, when there is one; without it an armed row is
+    `pending`, which is the plan's view before any pose exists.
+
+    `graded_fail` on a brief clause is attributed per (rule, ref): the rule
+    that grades the clause reported an ERROR for that ref. A connector whose
+    EDGE is wrong therefore marks its along-edge clause failed too -- the
+    grader's findings name a rule and a ref, not a clause key, and inventing
+    a finer attribution than the grader reports would be a claim nothing
+    measured. `attribution` says so on every such row.
+    """
+    src = intent.source_path or None
+    by_rule_err: Dict[str, set] = {}
+    if result is not None:
+        for v in result.violations:
+            if v.severity == ERROR:
+                by_rule_err.setdefault(v.rule, set()).add(v.ref or '')
+    out: List[Dict[str, object]] = []
+    for r in rows or ():
+        name = r['rule']
+        if r['state'] == 'armed':
+            if result is None:
+                status = 'pending'
+            elif name in by_rule_err:
+                status = 'graded_fail'
+            else:
+                status = 'graded_pass'
+        elif r['disposition'] or (r['withheld'] and not [
+                k for k in r['withheld']
+                if k not in r['withheld_dispositions']]):
+            status = 'dispositioned'
+        elif r['needs_disposition']:
+            status = 'dark'
+        elif r['state'] == 'abstained':
+            status = 'abstained'
+        else:
+            status = 'inapplicable'
+        out.append({
+            'id': f"rule:{name}", 'kind': 'rule', 'source': src,
+            'source_reason': (None if src else
+                              'an in-memory intent has no file'),
+            'authority': 'hypothesis', 'consequence': (
+                r['arming_key'] if r['state'] == 'armed' else None),
+            'grader': name, 'status': status,
+            'basis': 'declared',
+            'why': (r['disposition'] or r['skip_reason']
+                    or r['applicability_reason']),
+            'disposition': r['disposition'] or None,
+        })
+    state_map = {'carried': 'carried', 'not_claimed': 'unknown',
+                 'uncovered': 'uncovered', 'abstained': 'abstained'}
+    for c in (coverage or {}).get('clauses') or ():
+        st = c.get('state')
+        if st == 'graded':
+            if result is None:
+                status = 'pending'
+            else:
+                refs = by_rule_err.get(c.get('rule') or '', set())
+                status = ('graded_fail'
+                          if (c.get('ref') or '') in refs else 'graded_pass')
+        else:
+            status = state_map.get(st, st)
+        out.append({
+            'id': c['id'], 'kind': 'brief_clause',
+            'source': brief_source,
+            'authority': 'declared',
+            'consequence': c.get('rule') if st == 'graded' else None,
+            'grader': c.get('rule'), 'status': status, 'basis': 'declared',
+            'attribution': 'rule+ref',
+            'why': c.get('why') or '', 'drifted': bool(c.get('drifted')),
+            'disposition': None,
+        })
+    return out
+
+
+def ledger_summary(ledger) -> Dict[str, object]:
+    """The JSON_SUMMARY view of the ledger: counts by status, and the facts a
+    reader must not mistake for checked ones, by id."""
+    counts = {s: 0 for s in LEDGER_STATUSES}
+    for row in ledger:
+        counts[row['status']] = counts.get(row['status'], 0) + 1
+    return {
+        'ledger_status': {k: v for k, v in counts.items() if v},
+        'carried_facts': sorted(r['id'] for r in ledger
+                                if r['status'] == 'carried'),
+        'unmeasured_facts': sorted(r['id'] for r in ledger
+                                   if r['status'] == 'unmeasured'),
+    }
+
+
 def to_json(r: GradeResult) -> Dict:
     return {
+        'rule_roster': r.roster,
+        'stale_dispositions': list(r.stale_dispositions),
         'schema': SCHEMA_VERSION,
         'board': r.board,
         'intent': r.intent.source_path,
@@ -5721,6 +6255,10 @@ def summary(r: GradeResult) -> Dict:
         'violations_by_rule': by_rule,
         'rules_run': len(r.rules_run),
         'rules_skipped': len(r.rules_skipped),
+        # #959: None (not []) when no roster was built, so "nothing owed" and
+        # "nobody asked" never read the same.
+        'rules_dark_undispositioned': (None if r.roster is None
+                                       else r.dark_undispositioned),
         # Not a violation count and not a pass: channels nothing graded.
         'budget_abstained': len(r.budget_abstained),
         'edge_seating_rows': len(r.edge_seating),

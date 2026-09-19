@@ -55,6 +55,9 @@ from placement.cli_gates import (add_board_state_args, add_brief_arg,
                                  load_brief_or_exit)
 from placement.floorplan import (UntrustworthyOutline, emit_intent, format_text,
                                  grade, load_intent, summary, to_json)
+from placement.floorplan import (declaration_ledger, format_roster,
+                                 intent_from_dict, ledger_summary,
+                                 rule_roster, stale_dispositions)
 from placement.placement_state import UNPLACED_EXIT, gate_or_exit
 from placement.groups import GroupError, parse_sources
 from placement.floorplan import IntentError
@@ -306,6 +309,23 @@ def main(argv=None):
                       f"({', '.join(cen.get('no_rail_chip_refs') or [])}) "
                       f"-- bulk or filter caps with no IC to be near; "
                       f"graded by nothing, and correctly so")
+            # #959 (#997): what the emitted intent leaves dark, and what a
+            # plan built from it will owe at P1 -- said at the moment of
+            # emission, not discovered laps later.
+            try:
+                from list_nets import board_floor_knobs
+                _c, _e, _k = board_floor_knobs(args.board, args.clearance,
+                                               args.board_edge_clearance)
+                _it = intent_from_dict(doc, args.emit_intent)
+                _rows = rule_roster(
+                    _it, pcb, args.board, group_sources=sources or (),
+                    clearance=_c, board_edge_clearance=_e,
+                    brief_fragment=brief_fragment or None)
+                for line in format_roster(_rows,
+                                          stale_dispositions(_it, _rows)):
+                    print(line)
+            except (IntentError, UntrustworthyOutline) as exc:
+                print(f"  rule roster not computed: {exc}")
         # AFTER the document is written, not instead of it (see above).
         if _require_brief_failed and not args.exit_zero:
             return VIOLATIONS_EXIT
@@ -344,7 +364,8 @@ def main(argv=None):
         result = grade(intent, pcb, args.board, group_sources=sources or (),
                        clearance=clearance,
                        board_edge_clearance=edge_clearance,
-                       with_health=args.health)
+                       with_health=args.health, with_roster=True,
+                       brief_fragment=brief_fragment or None)
     except UntrustworthyOutline as exc:
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
         print("  Refused rather than graded: with no usable outline every "
@@ -394,9 +415,22 @@ def main(argv=None):
                          ' -- graded, but not against what the brief declares')
                       )
 
+    # #959 (#997): one row per requirement, from the intent's rules and the
+    # brief's clauses together, so a carried fact cannot hide behind
+    # `complete`.
+    ledger = declaration_ledger(result.intent, result.roster, result=result,
+                                coverage=coverage, brief_source=brief_path)
+    ledger_s = ledger_summary(ledger)
+    if not args.quiet and ledger_s['carried_facts']:
+        print(f"  {len(ledger_s['carried_facts'])} declared fact(s) are "
+              f"CARRIED, NOT physically checked -- no rule measures them, "
+              f"whatever `complete` says: "
+              f"{', '.join(ledger_s['carried_facts'])}")
+
     if args.json:
         doc = to_json(result)
         doc['brief_coverage'] = coverage
+        doc['declaration_ledger'] = ledger
         with open(args.json, 'w', encoding='utf-8') as fh:
             json.dump(doc, fh, indent=1, sort_keys=True)
             fh.write('\n')
@@ -416,6 +450,8 @@ def main(argv=None):
                    'carried', 'drifted'):
             s[f'brief_clauses_{_k}'] = coverage[_k]
         s['brief_coverage_complete'] = coverage['complete']
+    s.update(ledger_s)
+    s['stale_dispositions'] = list(result.stale_dispositions)
     s['clearance_used'] = knobs['clearance']
     s['edge_clearance_used'] = knobs['board_edge_clearance']
     print("JSON_SUMMARY: " + json.dumps(s, sort_keys=True))

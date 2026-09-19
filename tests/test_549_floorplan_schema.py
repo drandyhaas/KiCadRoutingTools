@@ -126,7 +126,9 @@ KEY_SETS = {
         'schema', 'kind', 'board', 'units', 'min_reader', 'envelope',
         'defaults', 'blocks', 'keepouts', 'edge_connectors', 'decaps',
         'must_lock', 'legality_budget', 'health', 'severity', 'context',
-        'overlap_waivers', 'assembly', 'proximity'},
+        'overlap_waivers', 'assembly', 'proximity',
+        # #959 (#997): written answers to P1's refusals, never a verdict.
+        'dispositions'},
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
@@ -163,6 +165,8 @@ KEY_SETS = {
     # sugar that `compile_brief` expands before it reaches this schema.
     '_PROXIMITY_KEYS': {'ref', 'near', 'max_mm', 'basis', 'pads', 'note',
                         'source', 'context'},
+    # #959 (#997): one map per kind of question P1 refuses on.
+    '_DISPOSITION_KEYS': {'rules', 'withheld', 'refs', 'contradictions'},
 }
 
 
@@ -213,6 +217,7 @@ def test_the_key_sets_are_exactly_what_is_documented():
         '_EDGE_CONNECTOR_KEYS': 'edge_connectors[]',
         '_ASSEMBLY_KEYS': 'assembly',
         '_PROXIMITY_KEYS': 'proximity[]',
+        '_DISPOSITION_KEYS': 'dispositions',
     }
     checked = 0
     for name, row in sorted(TABLE_ROWS.items()):
@@ -289,6 +294,12 @@ def test_an_intent_using_every_known_key_loads():
                              'context': {'why': 'w'}}],
         'assembly': {'sides': 'F', 'why': 'one reflow pass',
                      'context': {'quoted': 'the fab'}},
+        # #959. `rules` is EMPTY here on purpose: this intent arms every
+        # rule, and a disposition for an armed rule is refused at load.
+        'dispositions': {'rules': {},
+                         'withheld': {'overlap_area': 'w'},
+                         'refs': {'MH1': 'w'},
+                         'contradictions': {'J1:edge': 'w'}},
         # #902. `source` is compiler-written, `note` and `context` are the
         # prose slots, and `pads` names only refs this claim mentions.
         'proximity': [{'ref': 'Y1', 'near': 'U1', 'max_mm': 2.0,
@@ -316,6 +327,7 @@ def test_an_intent_using_every_known_key_loads():
     seen |= set(raw['overlap_waivers'][0])
     seen |= set(raw['assembly'])
     seen |= set(raw['proximity'][0])
+    seen |= set(raw['dispositions'])
     for k in raw['keepouts']:
         seen |= set(k)
     missing = sorted({k for keys in KEY_SETS.values() for k in keys} - seen)

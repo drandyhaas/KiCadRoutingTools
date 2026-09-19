@@ -1217,9 +1217,74 @@ def _guard_zone_plan(a):
             'band.)\n\n'
             'Or hand them to the seeder on the record: '
             '--waive seed-connectors:<why the seeder may choose these poses>')
+    # LAST, so every refusal above keeps its wording and its precedence: a plan
+    # that leaves parts unzoned is told that first, not that a rule is dark.
+    owed = _roster_owed(a, intent, pcb, _fp)
+    if owed:
+        return False, owed
     return True, {'zoned': len(zoned), 'movable': len(movable - locked - edge),
                   'locked': len(locked), 'pinned': len(file_locked),
                   'edge': len(edge), 'seeded_edge': len(free_edge)}
+
+
+def _roster_owed(a, intent, pcb, _fp):
+    """#959 (#997): the rules this plan leaves DARK, answered in writing.
+
+    Run 29 graded 22 times with 6 of 14 rules never running, and every run
+    printed each one's reason -- "the intent declares no ..." -- to a reader who
+    had no reason to act on it. A plan is where that becomes a decision: a
+    rule that applies to this board, fails the grade when it fires, and that
+    the plan neither arms nor excuses is a question the plan never asked.
+
+    Refused only when a board fact says the rule applies and it is gating
+    (`floorplan._roster`): policy rules (`proximity`, `zone_exclusive`) and
+    advisory ones are reported, never refused, because measured before this
+    was built they were dark on 22 of 22 corpus boards and a refusal every
+    plan answers the same way carries no signal. Returns '' when nothing is
+    owed, else the refusal text.
+    """
+    brief_fragment = None
+    try:
+        from placement import design_brief as _db
+        bp = _db.discover_brief(a.board)
+        if bp:
+            brief_fragment, _rep = _db.compile_brief(
+                _db.load_brief(bp), board_refs=sorted(pcb.footprints or {}))
+    except Exception:                                       # noqa: BLE001
+        # An unreadable brief is P-brief's refusal, not this one's.
+        brief_fragment = None
+    try:
+        from list_nets import board_floor_knobs
+        clr, edge_clr, _k = board_floor_knobs(a.board, None, None)
+        rows = _fp.rule_roster(intent, pcb, a.board, clearance=clr,
+                               board_edge_clearance=edge_clr,
+                               brief_fragment=brief_fragment)
+    except _fp.UntrustworthyOutline as exc:
+        return (f'The board outline cannot be graded ({exc}), so nothing can '
+                'say which rules this plan leaves dark. Fix the outline '
+                'before planning against it.')
+    owed = _fp.roster_refusal_lines(rows)
+    stale = _fp.stale_dispositions(intent, rows)
+    if not owed and not stale:
+        return ''
+    return (
+        f'{len(owed)} rule(s) this plan leaves dark apply to this board and '
+        'would fail the grade when they fire, and nothing answers for them. '
+        'A rule nobody armed and nobody excused is a question the plan '
+        'never asked, and `check_floorplan` will print its skip reason on '
+        'every lap without anyone acting on it (run 29: 6 of 14 rules, 22 '
+        'invocations):\n'
+        + ''.join(f'  - {line}\n' for line in owed)
+        + ''.join(f'  - {s_} answers nothing (nothing is withheld under '
+                  'that key); remove it\n' for s_ in stale)
+        + '\nAnswer each IN THE ZONE PLAN -- arm the rule with its key, or '
+        'write why it does not apply to this design:\n'
+        '  "dispositions": {"rules": {"<rule>": "<why>"}, '
+        '"withheld": {"<key>": "<why>"}}\n'
+        'Arming a rule with an invented number is the wrong answer: a '
+        'limit read off the board you are about to move grades clean by '
+        'construction. Declare it from a requirement, or say there is '
+        'none.')
 
 
 def _guard_damage(a):
@@ -1994,12 +2059,33 @@ def _tiny_board(path, refs, unconnected=(), locked=()):
     return path
 
 
+def _no_outline_board(path):
+    """`_tiny_board` with its Edge.Cuts rectangle removed: parts the guard can
+    resolve, and no outline anything can be graded against (#959)."""
+    _tiny_board(path, ('U1', 'U2'))
+    with open(path, encoding='utf-8') as fh:
+        text = fh.read()
+    text = '\n'.join(line for line in text.split('\n')
+                     if 'Edge.Cuts' not in line)
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+    return path
+
+
 def _zone_plan_doc(blocks, **extra):
     """A floorplan intent carrying `blocks` and nothing else the guard
-    does not ask for."""
+    does not ask for -- plus the two written dispositions the tiny board's
+    roster owes (#959): it declares no envelope and no legality budget, both
+    apply to any board with an outline, and both are gating. A scenario that
+    means to exercise the roster refusal passes `dispositions={}`."""
     doc = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
-           'blocks': blocks}
+           'blocks': blocks,
+           'dispositions': {'rules': {
+               'envelope': 'the fixture board is its own envelope',
+               'legality': 'the fixture grades placement, not legality'}}}
     doc.update(extra)
+    if not doc['dispositions']:
+        del doc['dispositions']
     return doc
 
 
@@ -2411,6 +2497,19 @@ def _refusal_scenarios(tmp):
                  edge_connectors=[{'ref': 'U2', 'edge': 'west'}])),
             '--waive', 'seed-connectors:']
          + damaged),
+        # #959 (#997): the roster, LAST in P1. One row carries both arms -- a
+        # gating rule nothing answers for (the tiny board declares no
+        # envelope and no legality budget) and a disposition that answers a
+        # withheld key nothing withheld -- so every literal renders.
+        ('a zone plan that leaves gating rules dark',
+         ['--board', tiny, '--zone-plan', wrote('zp_dark.json', _zone_plan_doc(
+             [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+               'note': 'both parts, one zone'}],
+             dispositions={'withheld': {'overlap_area': 'stale on purpose'}}))]
+         + damaged),
+        ('a zone plan over a board with no outline',
+         ['--board', _no_outline_board(os.path.join(tmp, 'noedge.kicad_pcb')),
+          '--zone-plan', zp_ok] + damaged),
         # P3's lock advice
         ('no lock advice', base + damaged),
         ('unlocked_high with nothing waived', base + damaged
