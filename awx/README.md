@@ -39,6 +39,8 @@ with its fanout board and sidecars.
 | evolution time, this laptop | 2 min | 2 min (the chain) | 7 min | 12 min | 35 min |
 
 **K15, K28, K35 and K41 beat the human; K51 is two vias short of it.**
+The chain-alone row reproduces exactly after the rebase onto main
+(2026-09-19; "What this adds to `py_router`" below has the run).
 The 83 carries two grazes of 7 and 8 um under 0.1 on B.Cu -- the
 grid-quantisation class the chain's `--clearance-margin 0.1` filters, as
 `check_drc` documents -- and the 85 (`tmp/records/k51_85_climbs`) is the
@@ -660,6 +662,16 @@ is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 
 ## What this adds to `py_router`
 
+**The branch is rebased onto main `ad243b74` (2026-09-19).** The delta
+against main is 13 `py_router` files, +1895/-265 (`git diff main --
+py_router/` is the exact list). Two of the branch's `py_router` changes
+were already on main as twins and dropped out of it: the smoother's
+trusted foreign-segment cache with its bounding boxes built once
+(`d4c8bd0f`), and the zero-is-UNSET floor in `fix_kicad_drc_settings`.
+Nothing in `awx/` is touched by main, so the chain is the same code
+before and after; what the merge changed is main's routing under it,
+measured below. What the delta holds:
+
 **`KICAD_SEG_DIST_EXACT=1`** (default OFF since 2026-09-19; changes every
 board when on): the segment-to-segment distance in `single_ended_routing`
 is exact -- four point-to-segment distances -- instead of a 0.02 mm
@@ -667,7 +679,9 @@ sampled sweep whose minimum was always at or above the truth. Only ever
 more conservative. It ran ON by default while the ladder records up to
 2026-09-19 were measured, so a replay of those needs `=1`; it is off now
 so that merging this branch does not change main's behaviour, and it
-owes the corpus A/B before it becomes the default anywhere.
+owes the corpus A/B before it becomes the default anywhere. On the bench
+at K28 it is inert: knob on and off route the same 935 segments and 42
+vias.
 
 **`generate_bga_fanout(..., escape_dir_hints=...)`**: a per-pad planned
 escape, a bare face or a full move; the under-pad engine follows a full
@@ -675,9 +689,42 @@ move in its plan-follow phase, negotiates a blocked ball against the same
 call's escapes, degrades along the least damaging dimension, and reports
 every ball per dimension in `pcb_data._fanout_plan_report`.
 
+**`flip_frame.py`, and `rotate_frame` extended**: a BGA on the back fans
+out as the mirror of the same BGA on the front (`to_front_frame`,
+`flip_hints`, `flip_results`; 18 of 51 escapes differed before), and the
+plan-follow hints, the frame's quarter turn (`KICAD_FANOUT_FRAME_QUARTER`)
+and the back-side plane drops all go through the rotation frame.
+
+**Translation invariance**: every last-bit tie the fanout engine, its
+rescues, the plane drop's cell choice (`plane_fill_model`) and the main
+router's pad keep-out (`routing_utils`) decide is decided by a key rounded
+to a nanometre, so the same board shifted in memory routes the same.
+`_SWEEP_CHUNK` runs the clearance sweeps in row chunks of 512 KB --
+bit-identical; what changes is what macOS malloc keeps of a freed matrix.
+
+**`KICAD_FANOUT_SKIP_UNDER=1`** (opt-in): a ball whose net's every
+off-footprint pad lies inside the ball field gets no escape stub.
+
 **`check_drc.run_drc(..., pcb_data=)`, `check_connected.run_connectivity_check(..., pcb_data=)`**:
 a caller with the board parsed hands it over (additive; the default
 parses as ever).
+
+**What the merge changed under the chain, measured (2026-09-19).** The
+chain alone (`chain_k.sh` under the documented environment, knob off),
+re-run on the rebased tree, reproduces the recorded row at every rung:
+
+| chain alone | K15 | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|---|
+| recorded before the merge (the table above) | 16 | 34 | 60 | 74 | 98 |
+| after the rebase onto main `ad243b74` | 16 | 34 | 60 | 74 | 98 |
+
+Every rung 0 open, 0 DRC at 0.1 mm; the five rungs took 14 min on this
+laptop. In a bare environment at K28 the pre-rebase tip and the rebased
+tree route the same 42 vias and 725.6 mm of copper, and main's `#958`
+equal-length collapse halves the segment count (1832 -> 935) at the same
+length. The evolution's records were not re-run. Main's suite is not
+untouched by the delta, though: item 13 of the TODO names the two boards
+whose copper it moves.
 
 ## The synthetic harness
 
@@ -778,21 +825,32 @@ abandoned with a measurement.
 
 9. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
 
-10. **Merge main and re-baseline.** The branch diverged before `#958`,
-    `#441` and `#521`/`#906`; the suite is local-only until the merge.
-
-11. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
+10. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
     `pages-first:` line and reads like "never ran".
 
-12. **Built, default off, never finished**: `DST_ASK_BAN`, `BRAID_PACK=1`,
+11. **Built, default off, never finished**: `DST_ASK_BAN`, `BRAID_PACK=1`,
     `SRC_EXCHANGE=1`, `CONNECT_MAP_CACHE=1`, `--screen=0`.
 
-13. **Unverified review findings**: `dedupe_boards` fingerprints copper
+12. **Unverified review findings**: `dedupe_boards` fingerprints copper
     but not the sidecar; `braid_tier`'s budget exhaustion is silent;
     `_realize_group_first` bans nothing on a pure DRC rejection;
     `blockers_of` double-counts half a track; `collapse_dives` calls
     `os.chdir` at import; `flip_frame` does not mirror `pad.polygons`.
 
-14. **Three pre-existing suite failures**: `test_703_predictor_regen`,
-    `test_782_nondefault_netclass_clamp`, `test_fanout_cancel`, plus
-    `test_459_group_routing` at its own 1200 s budget.
+13. **Two suite failures the `py_router` delta causes, and one artifact**
+    (measured 2026-09-19 after the rebase; all three pass on main
+    `ad243b74`). `test_703_predictor_regen`: splitflap_driver's authored
+    row regenerates one segment and 0.06 mm differently (1155 segments
+    vs 1154 recorded) -- attributed by single-file revert to the
+    nanometre rounding of the pad keep-out's sub-cell offset in
+    `routing_utils`, so the translation-invariance change is NOT
+    copper-neutral on main's corpus: a cell sitting exactly on a keep-out
+    boundary is decided the other way. `test_fanout_cancel`: interf_u's
+    U9 fanout requests and escapes 77 balls where main's requests 75
+    (0 failed either way) -- the `bga_fanout` delta, not bisected
+    further. Both are the corpus A/B's business (item 7), and the
+    recorded baselines move with its verdict. `test_782_nondefault_
+    netclass_clamp` fails only in a checkout carrying a `venv/`: its
+    walker skips `.git`, `node_modules` and `.claude` but not `venv`, so
+    a numpy file joins the hit list -- a test fix for main, not a branch
+    defect. `test_459_group_routing` at its own 1200 s budget is unrun.
