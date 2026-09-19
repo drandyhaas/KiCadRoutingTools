@@ -1,3 +1,51 @@
+82522c1e 2026-09-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 96912901..82522c1e: upstream's 66 commits since the last audit plus the
+#962 branch (fix/962-paste-aperture). THREE GAPS FOUND AND FIXED on the branch;
+the gates below run green at 82522c1e.
+
+UPSTREAM'S SHARE is one GUI change: 32dc92769 makes the routing dialog's
+dependency probe CALL startup_checks.dependency_problems instead of a
+hand-mirrored list -- a parity closer, not a gap. No CLI routing front
+(route.py, route_diff.py, route_planes.py, repair_planes.py, the fanouts)
+changed in that range; the rest is placement (#985/#986/#990) and tests.
+
+#962'S SHARE adds ship-time IPC-4761 Type VII stamping and a paste-opening
+keep-out, both inside shared engines except where a CLI main writes the file.
+Every CLI stamp site was checked for a GUI twin; the verifiers found three
+that had none, all fixed and now covered:
+  - planes_gui's GND return vias were not stamped where
+    `route_planes --add-gnd-vias` stamps them (a CALL check in
+    test_962_type_vii_stamp, and a battery row, guard it);
+  - place_fanout_clearance.main stamps a via its cap moves put under a pad
+    (`site_created`); the GUI twin is fanout_gui._optimize_decoupling_caps;
+  - the GUI fallback oracle (gui_utils.run_kicad_oracle_on_live_board)
+    stamps orc['new_vias'] before building its PCB_VIAs.
+The keep-out lives in obstacle_map / plane_obstacle_builder /
+pcb_modification / routing_diagnostics, which both fronts call. The format
+gate (no per-via capping/filling on a pre-KiCad-10 file) reads the parsed
+file version on the CLI and asks the running pcbnew for the setters on a live
+board. apply_via_protection falls back to the bool setters because the
+shipping 10.0.0 SWIG exports no *_MODE_* constants (#751).
+
+GATES RUN AT 82522c1e (KiCad 10.0.0 python): test_settings_roundtrip,
+test_726_parse_path_parity, test_751_via_protection_readback,
+test_962_paste_parity (corpus + synthetic witnesses, both paths agree on the
+paste model, graphic_filled and the unmeasured list), test_962_native_graphic_
+overrun, test_manifest_plan_parity, test_cli_postpass_coverage,
+test_engine_kwarg_parity, test_cli_defaults_parity, test_733 / 746 / 768 /
+772 cap gates, test_plane_all_layers_parity, test_gui_engine_parity (copper
+sets IDENTICAL, 1078 segments / 128 vias) -- all green.
+test_gui_livechain_rp2350: green (create 0/0, route 0/0) ONLY with its grader
+subprocess given an environment without PYTHON* variables. Run under KiCad's
+python on this machine, KiCad exports PYTHONUSERBASE, so `_grade`'s bare
+`python3` child cannot import numpy and every stage reads -1 on BOTH fronts.
+The cause is independent of the branch (the base's `_grade` spawns the same
+bare `python3`); the base run itself was not repeated.
+NOT green here, and failing identically on 32dc92769 (the branch's original
+base, run as the control): test_fanout_rotated_gui (the GUI leg captures 0
+tracks) and test_fanout_threaded_gui (5 pump checks), when run directly under
+KiCad's python; their own interpreter probes skip on this box.
+
 96912901 2026-09-17 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit a633f898..96912901 on main (16 commits: PR #981's #974 work, and the fanout
 clearance-ceiling fix). NO GAP FOUND. Eight gates green, run live on this
