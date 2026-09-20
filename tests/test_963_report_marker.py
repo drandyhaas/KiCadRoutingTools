@@ -76,11 +76,23 @@ def test_cheats_does_not_exit_at_done_when_a_report_marker_is_expected():
     td = _wd(DONE='done\n', REPORT_DONE='done\n',
              REPORT__md='FENCE VERDICT: CLEAN (exit 0)\n'
                         'PROVENANCE VERDICT: UNAIDED (exit 0)\n')
-    t, box = _cheats(td, report_done=os.path.join(td, 'REPORT_DONE'),
-                     report_wait=5)
-    t.join(timeout=60)
+    # THE OUTPUT, not just the exit code. Exiting at DONE -- the pre-#963
+    # contract, and the defect -- also returns 0 and also ends the thread, so
+    # a test asserting only those two passes on the mutant. A mutation row
+    # measured exactly that.
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        t, box = _cheats(td, report_done=os.path.join(td, 'REPORT_DONE'),
+                         report_wait=5)
+        t.join(timeout=60)
+    out = buf.getvalue()
     assert not t.is_alive(), 'the watcher never returned'
     assert box.get('rc') == 0, box
+    assert 'DONE declared' in out, out[:400]
+    assert 'REPORT audited' in out, (
+        'it stopped at DONE: the report audit never ran, which is the whole '
+        'of this item:\n' + out[:600])
     print("  PASS: it runs the board audits and carries on to the report")
 
 
@@ -230,6 +242,11 @@ def test_arm_report_writes_the_marker():
     assert "'REPORT_DONE'" in src, (
         'arm_report writes no marker, so the cheat watcher waits for a file '
         'only an agent ever writes')
+    # THE WRITE, not just the name. A mutation that kept `'REPORT_DONE'` in
+    # the source and wrote `_marker + '.disabled'` instead survived a test
+    # that only looked for the name.
+    assert "with open(_marker, 'w'" in src, (
+        'the marker name is in the source but nothing writes THAT path')
     i = src.index("'REPORT_DONE'")
     tail = src[i:i + 700]
     assert 'os.path.dirname' in src[i - 200:i + 200], (

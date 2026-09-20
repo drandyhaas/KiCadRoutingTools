@@ -273,10 +273,14 @@ RENDER_ROWS = [
 
 # --- run_watch: the second marker -----------------------------------------
 WATCHER_ROWS = [
+    # `return 0 or _await_report(...)` was a BAD MUTATION, not a missing test:
+    # `0 or X` evaluates X, so the mutant behaved identically and reported
+    # SURVIVED about a row that had changed nothing. This one restores the
+    # pre-#963 contract -- exit at DONE, and never audit the report.
     ('report-marker-never-waited',
      "            return _await_report(workdir, done_path, _done_sha, truthdir,",
-     "            return 0 or _await_report(\n"
-     "                workdir, done_path, _done_sha, truthdir,",
+     "            return 0\n"
+     "            return _await_report(workdir, done_path, _done_sha, truthdir,",
      None),
     ('report-audit-is-a-noop',
      "    out = []\n    if not os.path.isfile(report_path):",
