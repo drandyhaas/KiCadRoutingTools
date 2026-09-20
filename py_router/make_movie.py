@@ -155,7 +155,7 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
                camera=None, camera_budget=60.0, tween=10,
                panels=None, iso_opts=None, timing=None, theme=None,
-               layout=None, aspect=None):
+               layout=None, aspect=None, attempts=None):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -282,6 +282,39 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         if not quiet:
             print("make_movie: no frames (nothing routed?)", file=sys.stderr)
         return None
+    # #1021. THE ATTEMPTS BAND, before the clock and before the iso panel:
+    # composition order is board -> attempts -> clock -> iso, so the band sits
+    # adjacent to the board it annotates and the iso panel still stacks last.
+    #
+    # Imported HERE, like movie_panels below, so the GUI recorder and the
+    # in-process callers do not pay for a feature they did not ask for.
+    try:
+        import movie_attempts
+        # `False` is the OFF arm (`--no-attempts`); `None` means "look", which
+        # is the default because the sidecars sit next to the boards and the
+        # feature has no GUI control of its own -- same posture as the camera
+        # and panels knobs.
+        if attempts is False:
+            _track = None
+        elif attempts is not None:
+            _track = attempts
+        else:
+            _track = movie_attempts.discover(
+                os.path.dirname(os.path.abspath(final)))
+        frames, _arep = movie_attempts.attach(frames, _track, theme=theme,
+                                              marks=marks)
+        # PRINTED EVEN WHEN QUIET, for the reason iso_status_line is: this is
+        # the only channel that says whether the band ran, and the front end
+        # the discovery exists for (place_route_loop's film, the GUI recorder)
+        # calls make_movie with quiet=True. It only ever says "not drawn" on a
+        # chain that HAS attempts on disk -- a plain chain says so in one line
+        # and that is the honest OFF state.
+        if _arep.get('drawn') or _arep.get('attempts'):
+            print(movie_attempts.status_line(_arep), file=sys.stderr)
+    except Exception as exc:                                    # noqa: BLE001
+        if not quiet:
+            print('make_movie: no attempts band (%s)' % exc, file=sys.stderr)
+
     frame_meta = None
     if ledger:
         try:
@@ -393,6 +426,11 @@ def main():
                     help="target frame aspect, or $KICAD_MOVIE_ASPECT. "
                          "'board' (default) keeps today's behaviour: "
                          "the frame IS the board's bounding box")
+    ap.add_argument('--no-attempts', action='store_true',
+                    help="drop the attempts band (#1021). The band is drawn "
+                         "when loop_round*.json sidecars or a converge ledger "
+                         "sit next to the boards; a chain with no search "
+                         "behind it has none and says so.")
     ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--camera', default=None,
@@ -516,6 +554,7 @@ def main():
                        camera_budget=args.camera_budget,
                        tween=args.tween,
                        panels=args.panels, iso_opts=iso_opts,
+                       attempts=(False if args.no_attempts else None),
                        timing=args.timing)
     except FileNotFoundError as e:
         print(f"make_movie: no such board: {e}", file=sys.stderr)

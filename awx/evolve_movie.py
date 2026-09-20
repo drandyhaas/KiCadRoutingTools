@@ -1212,16 +1212,22 @@ class Ribbon:
         # born -- not once per chapter.  A descent that walks 98 -> 96 -> 95 set
         # two records inside one chapter, and a per-chapter sample keeps only
         # the last of them.
-        times = sorted({w.born for w in reg.worlds.values() if w.grade})
-        self.record = []
-        best = None
-        for t in times:
-            for w in reg.worlds.values():
-                if w.born <= t and w.grade and not w.grade[0]:
-                    if best is None or w.grade[2] < best:
-                        best = w.grade[2]
-            if best is not None:
-                self.record.append((t, best))
+        #
+        # #1021: that sampling rule is now ONE function, shared with the
+        # routing movie's attempts band, because it is one algorithm and was
+        # about to be written twice.  The POLICY stays each film's own and is
+        # passed in: here a world need not have been KEPT to set a record, and
+        # it must be admissible (open nets are not bought off by a via count).
+        # On the routing side both are the other way round, and both are right
+        # -- see `movie_attempts.best_so_far`.
+        from movie_attempts import Attempt, best_so_far
+        rows = sorted((w for w in reg.worlds.values() if w.grade),
+                      key=lambda w: (w.born, w.gid))
+        self.record = best_so_far(
+            [Attempt(index=w.born, label=w.gid, kind=w.kind, parent=None,
+                     accepted=True, screened=False, score=w.grade[2],
+                     admissible=not w.grade[0], board=None) for w in rows],
+            require_accepted=False, require_admissible=True)
 
     def _x(self, chapter):
         px0, _, px1, _ = self.plot
