@@ -494,14 +494,28 @@ def volume_manifest_sizes(run_dir_names: list):
     try:
         import modal
         vol = modal.Volume.from_name(CORPUS_VOLUME)
-        entries = []
-        for rd in run_dir_names:
-            entries.extend((e.path, e.size)
-                           for e in vol.listdir(f"/{rd}", recursive=True))
-    except Exception as ex:                      # network, auth, a missing dir
-        print(f"  corpus freshness UNVERIFIED: could not list {CORPUS_VOLUME} "
+    except Exception as ex:                      # no client, no auth
+        print(f"  corpus freshness UNVERIFIED: could not open {CORPUS_VOLUME} "
               f"({type(ex).__name__}: {str(ex)[:120]})")
         return None
+    entries = []
+    for rd in run_dir_names:
+        # One listing per run dir, retried with a backoff: a flapping link
+        # drops a stream mid-way, and VolumeListFiles is rate-limited (a
+        # monitor polling the results volume beside this check tripped it,
+        # 2026-09-19). Either way the answer is "unverified", never "fresh".
+        for attempt in range(4):
+            try:
+                entries.extend((e.path, e.size)
+                               for e in vol.listdir(f"/{rd}", recursive=True))
+                break
+            except Exception as ex:
+                if attempt == 3:
+                    print(f"  corpus freshness UNVERIFIED: could not list "
+                          f"{CORPUS_VOLUME}/{rd} ({type(ex).__name__}: "
+                          f"{str(ex)[:120]})")
+                    return None
+                time.sleep(20 * (attempt + 1))
     return manifest_sizes_from_entries(entries)
 
 
