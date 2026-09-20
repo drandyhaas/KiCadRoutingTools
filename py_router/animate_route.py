@@ -101,6 +101,18 @@ class Movie:
         # whole film, and that is the honest reading: at frame 40 the key says
         # what has happened by frame 40, never what is coming.
         self.seen_events = []
+        #: #1019. One record per frame: what the RAIL says (stable), what the
+        #: EVENT line says (per frame), what the TOTALS block says. Kept beside
+        #: the frames rather than baked into them, so the composer can size
+        #: each region for its own content. One strip doing four jobs is why
+        #: the caption overflowed and dropped `hole-conflict 0.60mm` and
+        #: `oob 7` off a strip that still looked complete.
+        self.chrome = []
+        self.rail_left = ''
+        self.rail_right = ''
+        self.totals = ''
+        #: Set by `build_boards` when the layout reserved a rail.
+        self.split_caption = False
         self.layers = layers
         self.rip_hold = rip_hold
         self.live_s: Dict[Tuple, _Seg] = {}
@@ -138,8 +150,19 @@ class Movie:
                      theme=self.theme, corner='bl', pad_scale=ss)
         return _draw
 
+    def _note_chrome(self, label):
+        self.chrome.append({'rail': self.rail_left,
+                            'rail_right': self.rail_right,
+                            'event': label or '', 'totals': self.totals})
+
     def _frame(self, hl_s, hl_v, color, label, mark='solid'):
         ov = self._key_overlay()
+        self._note_chrome(label)
+        # #1019: when a rail is going to carry this, the over-board strip is a
+        # DUPLICATE, and a duplicate that sits on the copper is worse than no
+        # strip at all. `_label` stays for the legacy frame, which has no rail.
+        if self.split_caption:
+            label = None
         self.frames.append(self.r.frame(
             segments=list(self.live_s.values()), vias=list(self.live_v.values()),
             highlight_segments=hl_s, highlight_vias=hl_v,
@@ -149,6 +172,9 @@ class Movie:
 
     def snapshot(self, label):
         """A plain frame of the current state (no highlight)."""
+        self._note_chrome(label)
+        if self.split_caption:
+            label = None
         self.frames.append(self.r.frame(
             segments=list(self.live_s.values()), vias=list(self.live_v.values()),
             label=label, zone_net_ids=self.revealed_zones))
@@ -340,6 +366,17 @@ def build_run(run_dir, size, ss, alpha, rip_hold, chunks):
     return build_boards(steps, final, size, ss, alpha, rip_hold, chunks)
 
 
+def render_chrome_lap(n, laps, label):
+    """`lap 3 of 5 - route` for a loop chain, the step label otherwise."""
+    from render_chrome import lap_text
+    try:
+        lap = laps.index(n) + 1
+    except ValueError:
+        return label
+    phase = 'route' if 'routed' in label else 'place'
+    return lap_text(label, lap=lap, laps=len(laps), phase=phase)
+
+
 def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                  marks=None, theme=None, layout=None, aspect=None,
                  geom_out=None):
@@ -404,10 +441,27 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         if geom_out is not None:
             geom_out.append(_g)
     m = Movie(r, layers, rip_hold=rip_hold)
+    # #1019. THE RAIL COUNTS LAPS, NOT STEPS. A loop revisits the same step, so
+    # `step 2 - route` cannot say whether this is the first attempt or the
+    # fourth. `placement_chain` labels its steps `round N` / `round N routed`,
+    # and those rounds ARE the laps -- so when the chain is a loop the rail can
+    # count them, and when it is not there are no laps to count and the step
+    # label is the honest thing to show.
+    _laps = sorted({int(mm.group(1)) for mm in
+                    (re.match(r'round (\d+)', str(st[0])) for st in steps)
+                    if mm})
+    m.rail_left = os.path.splitext(os.path.basename(final))[0]
+    m.split_caption = bool(geom_out and geom_out[0].rail.h > 0)
     if stage is not None:
         stage.attach(m, r, layers)
     m.snapshot("input")
     for _step in steps:
+        _lbl = str(_step[0])
+        _mm = re.match(r'round (\d+)', _lbl)
+        if _mm and _laps:
+            m.rail_right = render_chrome_lap(int(_mm.group(1)), _laps, _lbl)
+        else:
+            m.rail_right = _lbl
         # 4th element (optional, back-compatible): 'revert' undoes a beat with
         # the SILENT trueup instead of reveal_delta -- which would flash the
         # copper red and label it "(rip)". Nothing was ripped; an attempt was
@@ -475,7 +529,7 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # In place, so peak memory stays about two frames rather than twice the
     # movie: the same reason `movie_panels.compose_two_panel` does it that way.
     if geom_out:
-        _compose_into_frame(m.frames, geom_out[0], r)
+        _compose_into_frame(m.frames, geom_out[0], r, m.chrome)
     return m.frames
 
 
@@ -522,7 +576,7 @@ def _png_info(meta):
     return info
 
 
-def _compose_into_frame(frames, geom, r):
+def _compose_into_frame(frames, geom, r, chrome=None):
     """Fit each board-box frame into its planned frame, IN PLACE.
 
     Two cases, and the first is the common one:
@@ -549,6 +603,44 @@ def _compose_into_frame(frames, geom, r):
         canvas = Image.new('RGB', (W, H), bg)
         canvas.paste(f, (geom.board.x, geom.board.y))
         frames[i] = canvas
+    if chrome and geom.rail.h > 0:
+        _draw_chrome(frames, geom, r, chrome)
+
+
+def _draw_chrome(frames, geom, r, chrome):
+    """Fill the reserved rail and foot (#1019).
+
+    Each region is sized for ITS OWN content and ellipsises inside itself, so a
+    long event line can no longer push the totals off the edge of a strip that
+    still looks complete.
+    """
+    from PIL import ImageDraw
+    import render_chrome
+    th = getattr(r, 'theme', None)
+    n = max(1, len(frames) - 1)
+    ticks = tuple(sorted({c.get('lap_at') for c in chrome
+                          if c.get('lap_at') is not None}))
+    for i, f in enumerate(frames):
+        c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
+        d = ImageDraw.Draw(f)
+        render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
+                                c.get('rail_right', ''), theme=th,
+                                progress=i / float(n), ticks=ticks)
+        if geom.foot.h > 0:
+            d.rectangle([geom.foot.x, geom.foot.y,
+                         geom.foot.x + geom.foot.w - 1,
+                         geom.foot.y + geom.foot.h - 1],
+                        fill=th.rgb('chrome_panel') if th else (14, 14, 18))
+            render_chrome.draw_totals(d, geom.foot, c.get('totals', ''),
+                                      theme=th)
+            ev = c.get('event', '')
+            if ev:
+                from route_render import load_font
+                font = load_font(max(9, int(geom.foot.h * 0.34)))
+                d.text((geom.foot.x + 6, geom.foot.y + 3),
+                       render_chrome._fit(d, ev, font, geom.foot.w * 0.55),
+                       font=font,
+                       fill=th.rgb('chrome_text') if th else (240, 240, 240))
 
 
 def _uniform_or_pad(frames):

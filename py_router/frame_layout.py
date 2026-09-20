@@ -52,6 +52,11 @@ from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 RAIL_FRAC = 0.045
 FOOT_FRAC = 0.045
 
+#: Floors, because a fraction of a small frame is smaller than the text the
+#: region has to hold. Measured: at 236 px tall, 4.5% is 10 px.
+RAIL_MIN_PX = 22
+FOOT_MIN_PX = 26
+
 #: Above this board aspect (w/h) the sidebar beats the stack. Measured: B wins
 #: on wide and 4:3 boards, A on square and tall, by 13-24%.
 ADAPTIVE_ASPECT_CUT = 1.25
@@ -236,8 +241,12 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     # being the bit-for-bit reproduction it exists to be.
     if key == 'legacy':
         rail_frac = foot_frac = 0.0
-    rail_h = even(H * rail_frac) if rail_frac else 0
-    foot_h = even(H * foot_frac) if foot_frac else 0
+    # FLOORED at a legible height. 4.5% of a 236 px frame is 10 px, which is
+    # smaller than the text it has to hold -- a reserved region too small for
+    # its content is the same defect as a strip too narrow for its fields,
+    # only quieter.
+    rail_h = max(RAIL_MIN_PX, even(H * rail_frac)) if rail_frac else 0
+    foot_h = max(FOOT_MIN_PX, even(H * foot_frac)) if foot_frac else 0
     band_h = even(foot_px) if foot_px else 0
     track_h = even(track_px) if track_px else 0
     inner_y = rail_h
