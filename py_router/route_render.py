@@ -398,7 +398,27 @@ class BoardRenderer:
         return out
 
     def _draw_segments(self, d: ImageDraw.ImageDraw, segments: Iterable,
-                       color=None) -> None:
+                       color=None, mark: str = 'solid') -> None:
+        """Draw copper. ``mark`` is the SECOND CHANNEL (#946, #1013).
+
+        ``'dashed'`` is what makes ripped copper legible when the colour does
+        not survive -- a greyscale print, a projector, a compressed GIF, or a
+        deuteranope viewer. `render_placement.py:802` already hatches locked
+        parts for the same reason; this is that instinct applied to the routing
+        side, where the two most opposed events were separated by hue alone.
+
+        Two details that are easy to get wrong:
+
+        * the dash PERIOD is floored against stroke width, because at 1-2 px on
+          a dense board a fixed period degrades into dots and reads as noise;
+        * the dash PHASE is derived from each segment's own start point, never
+          from a running accumulator. ``Movie.remove`` holds a rip for
+          ``rip_hold`` frames, and a phase that advanced between frames would
+          shimmer -- which reads as motion, not as a rip.
+
+        A dashed rip has a second virtue nobody asked for: the layer colour
+        shows through the gaps, so you can still see WHICH layer was torn out.
+        """
         for s in segments:
             if s.layer not in self._layer_set:
                 continue
@@ -406,11 +426,38 @@ class BoardRenderer:
             x0, y0 = self.tf.pt(s.start_x, s.start_y)
             x1, y1 = self.tf.pt(s.end_x, s.end_y)
             w = max(1, int(round(self.tf.length(s.width))))
+            if mark == 'dashed':
+                self._dashed_line(d, x0, y0, x1, y1, c, w)
+                continue
             d.line([x0, y0, x1, y1], fill=c, width=w, joint='curve')
             if w >= 3:  # round caps so corners of a polyline look continuous
                 r = w / 2
                 d.ellipse([x0 - r, y0 - r, x0 + r, y0 + r], fill=c)
                 d.ellipse([x1 - r, y1 - r, x1 + r, y1 + r], fill=c)
+
+    def _dashed_line(self, d, x0, y0, x1, y1, c, w) -> None:
+        """One segment as a dash run. Phase starts at (x0, y0) -- see above."""
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            d.line([x0, y0, x1, y1], fill=c, width=w, joint='curve')
+            return
+        on = max(4.0, 3.0 * w)
+        off = max(3.0, 2.0 * w)
+        period = on + off
+        # A segment shorter than one full dash would render as a single stub
+        # whose length depends on where it happened to start -- draw it solid,
+        # so a short trace does not read as a different KIND of copper.
+        if length <= period:
+            d.line([x0, y0, x1, y1], fill=c, width=w, joint='curve')
+            return
+        ux, uy = dx / length, dy / length
+        t = 0.0
+        while t < length:
+            t2 = min(t + on, length)
+            d.line([x0 + ux * t, y0 + uy * t, x0 + ux * t2, y0 + uy * t2],
+                   fill=c, width=w, joint='curve')
+            t += period
 
     def _draw_vias(self, d: ImageDraw.ImageDraw, vias: Iterable,
                    color: Optional[Tuple[int, int, int]] = None) -> None:
@@ -430,6 +477,7 @@ class BoardRenderer:
               highlight_segments: Optional[Iterable] = None,
               highlight_vias: Optional[Iterable] = None,
               highlight_color: Optional[Tuple[int, int, int]] = None,
+              highlight_mark: str = 'solid',
               label: Optional[str] = None, zone_net_ids=None,
               overlays: Optional[Sequence] = None) -> Image.Image:
         """Composite the given copper onto the static substrate and return an
@@ -481,7 +529,8 @@ class BoardRenderer:
             highlight_color = self.theme.rgb('hilite')
         self._draw_vias(d, vs)
         if highlight_segments:
-            self._draw_segments(d, highlight_segments, color=highlight_color)
+            self._draw_segments(d, highlight_segments,
+                                color=highlight_color, mark=highlight_mark)
         if highlight_vias:
             self._draw_vias(d, highlight_vias, color=highlight_color)
         # Caller-supplied drawing, BEFORE the downsample so it antialiases like

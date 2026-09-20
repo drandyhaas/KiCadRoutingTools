@@ -104,11 +104,12 @@ class Movie:
         if net_id in self.zone_avail:
             self.revealed_zones.add(net_id)
 
-    def _frame(self, hl_s, hl_v, color, label):
+    def _frame(self, hl_s, hl_v, color, label, mark='solid'):
         self.frames.append(self.r.frame(
             segments=list(self.live_s.values()), vias=list(self.live_v.values()),
             highlight_segments=hl_s, highlight_vias=hl_v,
-            highlight_color=color, label=label, zone_net_ids=self.revealed_zones))
+            highlight_color=color, highlight_mark=mark, label=label,
+            zone_net_ids=self.revealed_zones))
 
     def snapshot(self, label):
         """A plain frame of the current state (no highlight)."""
@@ -142,7 +143,8 @@ class Movie:
             return
         rlabel = label + (f"  (rip by {by})" if by else '  (rip)')
         for _ in range(max(1, self.rip_hold)):
-            self._frame(hl_s, hl_v, self.theme.rgb('event_ripped'), rlabel)
+            self._frame(hl_s, hl_v, self.theme.rgb('event_ripped'), rlabel,
+                        mark=self.theme.mark('event_ripped'))
         for k in seg_keys:
             self.live_s.pop(k, None)
         for k in via_keys:

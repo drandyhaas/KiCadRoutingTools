@@ -65,7 +65,7 @@ DARK_AT_1012 = {
     'via_hole': (10, 10, 10),
     'hilite': (255, 60, 60),
     'event_new': (250, 250, 250),
-    'event_restored': (86, 224, 96),
+    'event_restored': (80, 215, 230),
     'event_ripped': (255, 66, 66),
     'defect_conflict': (255, 140, 0),
     'defect_hole': (255, 160, 64),

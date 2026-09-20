@@ -196,7 +196,15 @@ _DARK = {
     'hilite':             (255, 60, 60),     # _HILITE
     # animate_route
     'event_new':          (250, 250, 250),   # _NEW
-    'event_restored':     (86, 224, 96),     # _RESTORE  -- #1013 moves to cyan
+    # #1013: was (86,224,96). Green and the rip were 233 apart in RGB and
+    # **76** under a Vienot deuteranope transform -- two thirds of the
+    # separation gone, and what remained was lightness, a weak channel for a
+    # 1-2 px trace that flashes for two frames. Cyan takes that to 187 at an
+    # unchanged 2.00x luminance ratio, and stays clear of both event_new and
+    # B.Cu (70,130,210). Sky (90,190,255) scores 205 but drops the luminance
+    # ratio to 1.68x; ice (200,240,255) scores 229 and lands 51.2 from
+    # event_new, trading one collision for another.
+    'event_restored':     (80, 215, 230),
     'event_ripped':       (255, 66, 66),     # _RIP
     # render_placement
     'defect_conflict':    (255, 140, 0),     # #1012: was (255,64,64),
@@ -267,6 +275,12 @@ _DARK = {
 #: precedent (`render_placement.py:802`, "hatch so 'locked' reads without a
 #: legend"), and it is what #1013 extends to the rip.
 _DARK_MARKS = {
+    # #1013. The rip is the one event whose colour must not be its only
+    # channel: it is the thing the movie exists to explain, and it is half of
+    # the pair #946 opened on. Dashed survives greyscale, a projector, a
+    # compressed GIF and a deuteranope viewer -- and it lets the layer colour
+    # show through the gaps, so you can still see WHICH layer was torn out.
+    'event_ripped': 'dashed',
     'place_locked': 'hatch',
     'place_ghost': 'dashed',
     'place_arrow': 'arrow',

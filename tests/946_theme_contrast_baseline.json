@@ -231,26 +231,26 @@
     "contrast_min": 4.7382,
     "contrast_vs_board": {
      "event_new": 15.6025,
-     "event_restored": 9.4818,
+     "event_restored": 9.464,
      "event_ripped": 4.7382
     },
-    "pair_deuteranope_min": 76.1643,
+    "pair_deuteranope_min": 89.5098,
     "pairs": {
      "event_new|event_restored": {
-      "deuteranope": 166.5413,
-      "normal": 226.4685
+      "deuteranope": 89.5098,
+      "normal": 174.7141
      },
      "event_new|event_ripped": {
       "deuteranope": 239.3178,
       "normal": 260.2633
      },
      "event_restored|event_ripped": {
-      "deuteranope": 76.1643,
-      "normal": 233.2917
+      "deuteranope": 186.5717,
+      "normal": 282.3508
      }
     },
-    "rip_restore_deuteranope": 76.1643,
-    "rip_restore_luminance_ratio": 2.0011
+    "rip_restore_deuteranope": 186.5717,
+    "rip_restore_luminance_ratio": 1.9974
    },
    "kind": "palette-audit",
    "layers": {
