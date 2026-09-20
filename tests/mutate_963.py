@@ -151,6 +151,38 @@ CONVERGE_ROWS = [
      "    if _HALF.get(str(row.get('kind') or '')) != half:",
      "    if _HALF.get(row.get('kind')) != half:",
      None),
+    # ROUND 2. The hardened `_is_lap` is UNREACHABLE from the stop-4 gate --
+    # this walk runs first, so a bare string on any ledger line tracebacked
+    # out before a lap was counted. A traceback is not a refusal.
+    ('is_lap-assumes-objects',
+     "    if not isinstance(row, dict):\n        return False\n"
+     "    if _HALF.get(str(row.get('kind') or '')) != half:",
+     "    if _HALF.get(str(row.get('kind') or '')) != half:",
+     None),
+    ('classification-walk-assumes-objects',
+     "        if not isinstance(r, dict):\n            continue\n"
+     "        # ACCEPTED ONLY.",
+     "        # ACCEPTED ONLY.",
+     None),
+    # "Nobody classified" and "every classification was thrown away" are
+    # different sentences about the reader's own file, and only one of them
+    # was ever printed.
+    ('rejected-only-reads-as-never-written',
+     "        _rej = _classification_rejected(_prior)",
+     "        _rej = 0",
+     None),
+    # The null lever with a word typed in it.
+    ('lever-may-name-the-shape-again',
+     "    if (a.kind == 'classification'\n"
+     "            and (a.lever or '').strip().strip('.:;,-').lower() in SHAPES):",
+     "    if False and (a.lever or '').strip().lower() in SHAPES:",
+     None),
+    # A write site with no read site: "nobody could look" then reads to the
+    # operator exactly like "it was checked and it matched".
+    ('unbindable-declaration-goes-silent',
+     "        if st[h].get('declared_board_unknown'):",
+     "        if False and st[h].get('declared_board_unknown'):",
+     [T_EXH]),
 ]
 
 # --- the loop driver: the gates the stages apply --------------------------
@@ -202,9 +234,13 @@ DRIVER_ROWS = [
      "              if (r.get('kind') or '') in ('completion', 'routing')]",
      None),
     # One unimportable module must not switch five gates off in silence.
+    # `None and (...)` and not `None or (...)`: the first draft was the second,
+    # which leaves the implicit concatenation truthy and only renames the
+    # sentence -- a mutant that is not the defect, reported SURVIVED because
+    # nothing was broken. The whole row is whether the note still FIRES.
     ('binding-import-failure-goes-silent',
      "            _BINDING_BLIND = ('the board could not be hashed from here -- '",
-     "            _BINDING_BLIND = None or ('unused -- '",
+     "            _BINDING_BLIND = None and ('unused -- '",
      None),
     # Guarding the import and not the attribute turns an older converge into
     # a traceback on a path whose contract is that it degrades to a refusal.
@@ -242,17 +278,56 @@ DRIVER_ROWS = [
      [T_ORDER]),
     # The hand-off renders' own text sends the reader to a stdout block that
     # is in neither the JSON nor the sheet.
-    ('handoff-render-quieted-again',
-     "      --review-sheet {_hos} --json-out {_hoj} -o {_hop}\n\n"
-     "Its WHAT THIS PANEL SHOWS block is what routing is being given.",
+    # ...AND THE OTHER WAY ROUND, which is the polarity this row had first.
+    # A first cut of #963 quieted the two L2 hand-offs; a round-2 verifier
+    # measured that at 7,178 characters over 34 lines at a boundary SKILL.md
+    # prescribes --quiet for, and the fix was to keep --quiet and REPOINT the
+    # sentence at the sheet and the document. So the mutation is dropping the
+    # flag again -- and the gate that kills it is the same one, because the
+    # prose no longer buys the command its stdout back.
+    ('handoff-render-loud-again',
      "      --review-sheet {_hos} --json-out {_hoj} -o {_hop} --quiet\n\n"
-     "Its WHAT THIS PANEL SHOWS block is what routing is being given.",
+     "That sheet is what routing is being given.",
+     "      --review-sheet {_hos} --json-out {_hoj} -o {_hop}\n\n"
+     "That sheet is what routing is being given.",
+     [T_431]),
+    # The prose arm of the same gate: an exemption is now a PROHIBITION, so a
+    # sentence sending the reader to a stdout block beside a quieted command
+    # must fail rather than excuse it.
+    ('handoff-prose-points-at-stdout-again',
+     "That sheet is what routing is being given. LOOK at it and write what you see",
+     "Its WHAT THIS PANEL SHOWS block is what routing is being given. LOOK at it",
      [T_431]),
     # The boundary whose text says FIRST, LOOK wrote its PNG beside the board.
     ('close-sheet-loses-its-o',
      "      -o wk/close_sheet_panels.png --quiet",
      "      --quiet",
      [T_431]),
+    # ROUND 2. Ten guards in the previous commit survived a verifier's own
+    # battery; these are the loop_driver half of them.
+    #
+    # `_cv_is_lap` asks for the module once per ROW, so the dedup is what
+    # keeps a 439-row ledger from leaving 441 copies of ROOT on sys.path.
+    ('lazy-import-reinserts-per-row',
+     "        if ROOT not in sys.path:\n"
+     "            sys.path.insert(0, ROOT)",
+     "        sys.path.insert(0, ROOT)",
+     [T_BIND]),
+    # The report the measured run would actually have seen.
+    ('report-terminal-only-again',
+     "        _creport = _verdict_report(a, _paths(a)[0], terminal=False)",
+     "        _creport = ''",
+     [T_ORDER]),
+    # A header with no notes is a report that found nothing to say.
+    ('vreport-drops-the-notes',
+     "        + (''.join(f'  NOTE {n}\\n' for n in _notes) if _notes else ''))",
+     "        + '')",
+     [T_ORDER]),
+    # `expected` was stored by discovery and read by nobody until #963.
+    ('expected-lens-unread',
+     "        if _d.get('expected') and _dln != _d['expected']:",
+     "        if False and _d.get('expected') and _dln != _d['expected']:",
+     [T_ORDER]),
 ]
 
 # --- render_placement: the document must survive a sheet failure ----------

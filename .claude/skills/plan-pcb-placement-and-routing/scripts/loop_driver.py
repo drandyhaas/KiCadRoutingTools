@@ -309,6 +309,45 @@ def _binding_note():
             f'on it.\n')
 
 
+def _verdict_report(a, cycle, terminal):
+    """What `_discover_verdicts` found this call, as stage text.
+
+    ON BOTH BRANCHES, and that is the correction (#963 round 2). The first cut
+    printed it on the terminal branch alone, to keep prose off the hot path --
+    but run 29, the run this item exists for, took CONTINUE on every one of its
+    seven L5 calls and never reached a terminal arm at all. A report only the
+    close-out prints is a report that run would not have seen, which is the
+    same defect one level up: the finding was computed and thrown away.
+
+    CONTINUE gets the one-line form; the close-out keeps the sentence saying
+    the flag stays optional, because that is where a reader decides whether to
+    name the files in a `--final` row. The NOTES ride on both -- they exist
+    only when something actually disagrees, so they cost nothing on a quiet
+    lap and are the whole point on a loud one.
+
+    The CYCLE is named because `_paths` takes the highest of the ledger's own
+    cycle index and any `_c<n>` already on disk, so a verifier that misnames
+    its output moves the whole map -- invisible unless the number is printed.
+    """
+    _found = list(getattr(a, '_discovered_verdicts', None) or [])
+    _gone = list(getattr(a, '_absent_verdicts', None) or [])
+    _notes = list(getattr(a, '_discovered_notes', None) or [])
+    return (
+        f'\nVERDICT FILES, cycle {cycle}: FOUND '
+        + (', '.join(f'{os.path.basename(d["path"])} '
+                     f'{(d.get("line") or "unreadable").split(";")[0]}'
+                     for d in _found) or 'none')
+        + (f'. ABSENT: {", ".join(l for l, _p in _gone)}.' if _gone
+           else '. ABSENT: none.')
+        + ('\nFound by the cycle map, not named -- the flag stays optional.\n'
+           if terminal else '\n')
+        # What the comparison SAW but did not refuse. These are the arms a
+        # first cut of #963 made refusals, which turned the honest
+        # fix-and-re-dispatch path into two refusals with no remedy printed.
+        # A report can be read; a refusal on the honest path gets waived.
+        + (''.join(f'  NOTE {n}\n' for n in _notes) if _notes else ''))
+
+
 # The hpwl gain below which the congestion READ is worth pointing at. It decides
 # whether to print a warning beside the numbers -- it does NOT decide anything.
 # It used to gate, and the calibration withdrew that
@@ -1673,12 +1712,14 @@ afterwards every panel is placement plus whatever the router did:
 
   python3 -X utf8 py_tools/render_placement.py {_frozen} \\
       --clearance <the board's own floor> --ignore-nets <the poured nets> \\
-      --review-sheet {_hos} --json-out {_hoj} -o {_hop}
+      --review-sheet {_hos} --json-out {_hoj} -o {_hop} --quiet
 
-Anything its WHAT THIS PANEL SHOWS block names as off the outline, stacked or
-hole-conflicting will still be there after the route, and no router setting
-removes it. Keep that board: it is the baseline `check_channels --baseline`
-needs, and you return its path below.
+LOOK at {_hos} and write what you see BEFORE opening {_hoj} -- the hand-off is
+one of the four boundaries the combined SKILL puts eyes on, and `--quiet` keeps
+it blind-first. Then read the document: anything its `checklist.a_off_outline`,
+stacked-pad or hole-conflict rows name is still there after the route, and no
+router setting removes it. Keep that board: it is the baseline
+`check_channels --baseline` needs, and you return its path below.
 
 No step has a wall-clock budget -- `--deadline` was removed everywhere (#621:
 no result may depend on timing, so the same board with the same arguments has
@@ -1828,12 +1869,13 @@ become hard to separate by eye:
 
   python3 -X utf8 py_tools/render_placement.py {_frozen} \\
       --clearance <the board's own floor> --ignore-nets <the poured nets> \\
-      --review-sheet {_hos} --json-out {_hoj} -o {_hop}
+      --review-sheet {_hos} --json-out {_hoj} -o {_hop} --quiet
 
-Its WHAT THIS PANEL SHOWS block is what routing is being given. Anything it
-names as off the outline, stacked, or hole-conflicting will still be there after
-the route, and no router setting removes it -- so if that list is not empty,
-read this stage's refusals again before spending a routing pass on it.
+That sheet is what routing is being given. LOOK at it and write what you see
+before opening {_hoj} -- `--quiet` keeps this boundary blind-first. Then read
+the document: anything its `checklist.a_off_outline`, stacked-pad or
+hole-conflict rows name is still there after the route -- so if those lists
+are not empty, read this stage's refusals before spending a routing pass.
 
 Next, on success: --stage L5. On a failure: --stage L3 --score <score json>
          --render-json <a --focus render; L3 will not open without one>
@@ -2275,7 +2317,9 @@ def final_record_command(ledger, board, score, name, verdicts):
 #: just told the run to do.
 #:
 #: MEASURED COST, which the first cut did not measure at all: replayed over
-#: the 28 `wk/**/ledger.jsonl` committed to this repo, the gate at ONE fires
+#: the 28 `wk/**/ledger.jsonl` in this WORKING TREE -- `wk/` is gitignored, so
+#: they are run artifacts rather than fixtures and re-deriving this needs a
+#: tree that has them -- the gate at ONE fires
 #: somewhere in 18 of them, including all four most recent runs, with peak
 #: unclassified streaks of 31, 26, 24 and 16. Only 2 of the 28 contain a
 #: classification row at all. At TWO it still fires on those streaks -- which
@@ -2541,8 +2585,9 @@ def l5(a):
                      f'-- which is not the same as "it is still improving"')
         else:
             _head = 'a half has not answered yet'
+        _creport = _verdict_report(a, _paths(a)[0], terminal=False)
         return f'''<stage_instructions stage="L5" name="not done yet" of="{len(STAGES)}">
-The loop is NOT over: {_head}.{_binding_note()}
+The loop is NOT over: {_head}.{_binding_note()}{_creport}
 
 {why}
 
@@ -2584,28 +2629,9 @@ tell a finished run from a stalled one.
     # still the trap, so it does not exist.
     _cyc, P = _paths(a)
     work = _work(a)
-    # WHAT THIS CALL FOUND, and what it did not (#963). Printed on the terminal
-    # branch only: CONTINUE is the hot branch, and a report there would be
-    # prose on every lap. The CYCLE is named because `_paths` takes the highest
-    # of the ledger's own cycle index and any `_c<n>` already on disk, so a
-    # verifier that misnames its output moves the whole map -- which is
-    # invisible unless the number is on the page.
-    _found = [d for d in (getattr(a, '_discovered_verdicts', None) or [])]
-    _gone = list(getattr(a, '_absent_verdicts', None) or [])
-    _notes = list(getattr(a, '_discovered_notes', None) or [])
-    _vreport = (
-        f'\nVERDICT FILES, cycle {_cyc}: FOUND '
-        + (', '.join(f'{os.path.basename(d["path"])} '
-                     f'{(d.get("line") or "unreadable").split(";")[0]}'
-                     for d in _found) or 'none')
-        + (f'. ABSENT: {", ".join(l for l, _p in _gone)}.' if _gone
-           else '. ABSENT: none.')
-        + '\nFound by the cycle map, not named -- the flag stays optional.\n'
-        # What the comparison SAW but did not refuse. These are the arms a
-        # first cut of #963 made refusals, which turned the honest
-        # fix-and-re-dispatch path into two refusals with no remedy printed.
-        # A report can be read; a refusal on the honest path gets waived.
-        + (''.join(f'  NOTE {n}\n' for n in _notes) if _notes else ''))
+    # WHAT THIS CALL FOUND, and what it did not (#963) -- see `_verdict_report`,
+    # which the CONTINUE branch above prints too.
+    _vreport = _verdict_report(a, _cyc, terminal=True)
     return f'''<stage_instructions stage="L5" name="close out: {name}" of="{len(STAGES)}">
 {headline.get(name, name)}.{_binding_note()}{_vreport}
 

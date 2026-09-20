@@ -1150,15 +1150,30 @@ def cmd_record(a):
     # rather than a demand for a decision. Same `.strip()` test, and the same
     # reason, as `--exhausted-reason` thirty lines above: an unreasoned
     # declaration is just a lower --flat with extra steps.
+    # ...AND IT MAY NOT JUST SAY THE SHAPE BACK. `--shape parameter --lever
+    # parameter` cleared every gate in this item, which is `--lever ""` with a
+    # word typed in it. This catches THAT SPELLING ONLY and nothing cleverer:
+    # no gate reads a sentence and knows whether a measurement is behind it,
+    # and a length or word-count rule would refuse an honest short lever while
+    # still passing `--lever "congestion"`. The limit is disclosed rather than
+    # papered over -- see #963's sub-issue A.
+    if (a.kind == 'classification'
+            and (a.lever or '').strip().strip('.:;,-').lower() in SHAPES):
+        print(f"record: --lever {a.lever!r} only names the shape again. The "
+              f"lever is the MEASUREMENT that made `{a.shape}` the answer -- "
+              f"the congestion read, the escape-face census, the DRC cluster "
+              f"-- so that the next reader can check the decision instead of "
+              f"taking it. Nothing was written.", file=sys.stderr)
+        return 2
     if a.kind == 'classification' and not (a.lever or '').strip():
-        print(f"record: --kind classification needs --lever \"<the shape, and "
-              f"the measurement that names it>\". The row's job is to say WHY "
-              f"the next re-entry changes what it changes; a shape with no "
-              f"measurement behind it is the default answer of a classifier "
-              f"that could not see congestion. The three shapes cost very "
-              f"different things to get wrong -- a mistaken `parameter` "
-              f"spends iterations on a board no parameter can fix, a mistaken "
-              f"`placement` throws away a routed board. Nothing was written.",
+        print("record: --kind classification needs --lever \"<the shape, and "
+              "the measurement that names it>\". The row's job is to say WHY "
+              "the next re-entry changes what it changes; a shape with no "
+              "measurement behind it is the default answer of a classifier "
+              "that could not see congestion. The three shapes cost very "
+              "different things to get wrong -- a mistaken `parameter` "
+              "spends iterations on a board no parameter can fix, a mistaken "
+              "`placement` throws away a routed board. Nothing was written.",
               file=sys.stderr)
         return 2
     if a.final and not a.stop_condition:
@@ -1210,8 +1225,13 @@ def cmd_record(a):
         # untouched. The RETRY gate counts routing only, and for the opposite
         # reason: there, a placement lap is the decision being acted on.
         _since = None if _cls is None else sum(_cls['laps_since'].values())
+        _rej = _classification_rejected(_prior)
         if _cls is None or _since:
-            _what = ('no classification row was ever recorded'
+            _what = ((f'{_rej} classification row(s) were recorded and '
+                      f'every one was --rejected, so none of them is a '
+                      f'decision this close-out can rest on'
+                      if _rej else 'no classification row was ever '
+                                   'recorded')
                      if _cls is None else
                      f'{_since} lap(s) were recorded after the last '
                      f'classification (iteration {_cls["iteration"]}, shape '
@@ -1793,6 +1813,22 @@ def _declaration(rows, half):
     return None if found is None else (found, live, sha)
 
 
+def _classification_rejected(rows):
+    """How many `kind: classification` rows were recorded `--rejected`.
+
+    `_classification_state` counts ACCEPTED rows only, and rightly -- a
+    discarded decision is not one the next lap can act on. But the refusal
+    it feeds then said "no classification row was ever recorded" to a
+    ledger holding three of them, which is a false sentence about the
+    reader's own file and the fastest way to lose their trust in the gate.
+    Published beside it so the text can say which of the two it is.
+    """
+    return sum(1 for r in rows
+               if isinstance(r, dict)
+               and (r.get('kind') or '') == 'classification'
+               and not r.get('accepted'))
+
+
 def _classification_state(rows):
     """The last L3 DECISION on the record, and what has happened since (#963).
 
@@ -1818,6 +1854,12 @@ def _classification_state(rows):
     """
     found, idx = None, -1
     for i, r in enumerate(rows):
+        # A LEDGER LINE NEED NOT BE AN OBJECT. `_is_lap` was hardened for
+        # exactly this and is unreachable from here: the walk below runs
+        # first, so a bare string or list on any line tracebacked out of
+        # `record --final --stop-condition 4` before the laps were counted.
+        if not isinstance(r, dict):
+            continue
         # ACCEPTED ONLY. `--rejected` on a classification says the decision
         # was thrown away, and a discarded decision is not one the next lap
         # can act on -- it satisfied the gate before this line existed.

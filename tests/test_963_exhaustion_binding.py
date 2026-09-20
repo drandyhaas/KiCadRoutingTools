@@ -305,6 +305,41 @@ def test_a_declaration_is_not_retracted_by_the_board_moving_on():
     print("  PASS: the board moving on does not retract the other half")
 
 
+
+def test_a_declaration_with_no_board_of_its_own_says_so():
+    """"Nobody could look" is not "it matched", and the verdict must say which.
+
+    A hand-built or pre-#963 declaration carries no `result_sha`, so the
+    stale-board finding cannot be computed for it. Failing OPEN is right --
+    nothing can be judged -- but failing open in SILENCE gives the reader the
+    same absent key as a declaration that was checked and matched. A verifier
+    mutated the reader away and every test still passed, because the write
+    site had one and the read site had none.
+    """
+    import converge as C
+    rows = [{'iteration': 0, 'kind': 'placement', 'accepted': True,
+             'score': {'blocking': 2, 'quality': {}},
+             'exhausted': {'half': 'placement', 'reason': 'no levers left'}}]
+    st = C._half_state(rows, 'placement', 5, board_sha='a' * 64)
+    assert st.get('why') == 'declared-exhausted', st
+    assert st.get('declared_board_unknown') is True, (
+        'a declaration carrying no result_sha reported nothing at all: '
+        + str(st))
+    assert 'declared_stale_board' not in st, st
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'unk.jsonl')
+        with io.open(led, 'w', encoding='utf-8') as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + '\n')
+        out = _cv(['verdict', '--ledger', led, '--score',
+                   _score(td, 'sc.json', blocking=2), '--board', PLACED])
+        both = out.stdout + out.stderr
+        assert 'carries NO board of its own' in both, (
+            'the verdict never says the binding could not be checked:\n'
+            + both[:900])
+    print("  PASS: an unbindable declaration is disclosed, not silently open")
+
+
 if __name__ == '__main__':
     run_utils.evidence(PLACED)
     run_utils.evidence(DAMAGED)

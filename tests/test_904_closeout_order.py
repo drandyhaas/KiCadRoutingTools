@@ -663,6 +663,91 @@ def test_the_verifier_waiver_covers_discovered_files_too():
                    'apart for')
     print("  PASS: the verifier waiver covers them and the agreement one does not")
 
+
+def test_the_report_reaches_the_CONTINUE_branch_too():
+    """The branch the measured run actually took, on every call it made.
+
+    The first cut printed the verdict-file report on the terminal branch
+    alone, to keep prose off the hot path. Run 29 -- the run this item exists
+    for -- took CONTINUE on all seven of its L5 calls and never reached a
+    terminal arm, so that report is one its own case would not have seen. A
+    round-2 verifier measured it: three discovered files, three notes
+    computed, and `VERDICT FILES` nowhere in the text.
+
+    Asserted through the REAL stage, and on the NOTES as well as the header,
+    because the notes are what carries a disagreement -- a header with no
+    notes is a report that found nothing to say.
+    """
+    import json as _json
+    import tempfile as _tf
+    td = _tf.mkdtemp()
+    board = os.path.join(td, 'b.kicad_pcb')
+    with open(board, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb)\n')
+    sys.path.insert(0, ROOT)
+    from board_store import sha256_file
+    sha = sha256_file(board)
+    led = os.path.join(td, 'l.jsonl')
+    # ONE routing lap, so the unclassified-retry gate does not fire first --
+    # this test is about the report, and a refusal would hide it.
+    rows = [{'kind': 'placement', 'accepted': True, 'result_sha': sha,
+             'score': {'blocking': 2, 'quality': {}}},
+            {'kind': 'completion', 'accepted': True, 'result_sha': sha,
+             'score': {'blocking': 2, 'quality': {}}},
+            {'kind': 'completion', 'accepted': True, 'final': True,
+             'result_sha': sha, 'score': {'blocking': 2, 'quality': {}},
+             'lenses': ['VERDICT=PASS:lens=drc']}]
+    with open(led, 'w', encoding='utf-8') as fh:
+        for i, r in enumerate(rows):
+            fh.write(_json.dumps(dict(r, iteration=i)) + '\n')
+    score = os.path.join(td, 's.json')
+    with open(score, 'w', encoding='utf-8') as fh:
+        _json.dump({'blocking': 2, 'quality': {}, 'ungraded': [],
+                    'board_sha': sha}, fh)
+    # The file on disk says FAIL where iteration 2 recorded PASS: a NOTE, not
+    # a refusal, because "fix it and re-dispatch" is the honest path.
+    with open(os.path.join(td, 'verdict_drc.txt'), 'w', encoding='utf-8') as fh:
+        fh.write('VERDICT=FAIL:lens=drc;finding=x;evidence=y\n')
+    a = L._args(['--stage', 'L5', '--board', board, '--ledger', led,
+                 '--score', score])
+    out = L.STAGES['L5'](a)
+    assert not out.startswith('<error>'), (
+        'the fixture refused, so it proves nothing about the report:\n'
+        + out[:500])
+    assert 'not done yet' in out, out[:200]
+    assert 'VERDICT FILES' in out, (
+        'the CONTINUE branch printed no report -- which is every L5 call run '
+        '29 made:\n' + out[:800])
+    assert 'verdict_drc.txt' in out, out[:800]
+    assert 'NOTE' in out and 'the record is behind the file' in out, (
+        'the header reached CONTINUE and the notes did not, so a real '
+        'disagreement is still invisible on the hot branch:\n' + out[:900])
+    print("  PASS: the CONTINUE branch reports what was found and what it says")
+
+
+def test_a_file_named_for_one_lens_that_speaks_for_another_is_named():
+    """`expected` was stored by discovery and read by nobody.
+
+    `verdict_drc.txt` carrying `VERDICT=PASS:lens=spec` means the cycle map
+    went looking for `drc` and got a file that answers a different question --
+    so `drc` is covered by NOTHING, while a reader counting files sees three
+    of three. A verifier mutated the `expected` comparison away and every test
+    passed.
+    """
+    files = {'verdict_drc.txt': 'VERDICT=PASS:lens=spec'}
+    a, refusal = _discovered([], files, close_verdict='INCOMPLETE',
+                             name='STUCK')
+    notes = '\n'.join(a._discovered_notes)
+    assert 'names lens spec, not drc' in notes, notes or '(no notes at all)'
+    assert 'covered by no file' in notes, notes
+    # ...and the honest case stays quiet.
+    _a2, _ = _discovered([], {'verdict_drc.txt': 'VERDICT=PASS:lens=drc'},
+                         close_verdict='INCOMPLETE', name='STUCK')
+    assert not [n for n in _a2._discovered_notes if 'names lens' in n], \
+        _a2._discovered_notes
+    print("  PASS: a file answering a different lens is named as a gap")
+
+
 if __name__ == '__main__':
     for k, v in sorted(globals().items()):
         if k.startswith('test_'):

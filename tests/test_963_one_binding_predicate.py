@@ -412,6 +412,32 @@ def test_a_driver_that_cannot_answer_says_so():
     print("  PASS: the blind case is armed by the real path and rendered")
 
 
+def test_the_lazy_import_does_not_grow_sys_path_per_ledger_row():
+    """`_converge_module` is called once per ROW, not once per run.
+
+    `_cv_is_lap` asks for it on every ledger line, so an unconditional
+    `sys.path.insert(0, ROOT)` left 441 duplicate entries after ONE L4 call on
+    run 29's 439-row ledger -- and every import in the process after that walks
+    the longer list. A verifier mutated the `if ROOT not in sys.path` guard
+    away and nothing failed, because nothing counted. This counts.
+    """
+    sys.path.insert(0, os.path.dirname(DRIVER))
+    import loop_driver as L
+    # THE DELTA, not an absolute count: other tests in this process insert
+    # ROOT for their own reasons, so `count(ROOT) <= 1` fails for a reason
+    # that is not this guard -- measured, 31 copies by the time this runs.
+    before, before_root = len(sys.path), sys.path.count(L.ROOT)
+    for _ in range(50):
+        L._converge_module('score_board_binding')
+    grew = len(sys.path) - before
+    assert grew <= 1, (
+        f'sys.path grew by {grew} entries over 50 calls -- the guard is gone, '
+        f'and a 439-row ledger would add that many again')
+    assert sys.path.count(L.ROOT) <= before_root + 1, (
+        f'copies of ROOT went {before_root} -> {sys.path.count(L.ROOT)}')
+    print("  PASS: the lazy import inserts ROOT at most once")
+
+
 TESTS = [
     test_one_place_compares_a_board_digest_to_a_payload,
     test_no_other_function_compares_a_stored_digest,
@@ -421,6 +447,7 @@ TESTS = [
     test_a_caller_supplied_digest_is_used_instead_of_rehashing,
     test_the_local_fallback_agrees_with_the_shared_predicate,
     test_a_driver_that_cannot_answer_says_so,
+    test_the_lazy_import_does_not_grow_sys_path_per_ledger_row,
 ]
 
 

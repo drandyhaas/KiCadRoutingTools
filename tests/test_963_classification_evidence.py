@@ -45,7 +45,9 @@ the THIRD. A gate refusing the second put L3 and L4 in contradiction: the loop
 refusing what its own re-entry stage had just told the run to do.
 
 MEASURED COST, which the first cut did not measure at all: replayed over the 28
-`wk/**/ledger.jsonl` committed to this repo, the gate at ONE fires somewhere in
+`wk/**/ledger.jsonl` in this WORKING TREE -- `wk/` is gitignored, so they are
+run artifacts rather than fixtures and re-deriving this needs a tree that has
+them -- the gate at ONE fires somewhere in
 18 of them -- including all four most recent runs -- with peak unclassified
 streaks of 31, 26, 24 and 16, and only 2 of the 28 hold a classification row at
 all. At TWO it still fires on those streaks, which is the point; it stops
@@ -457,6 +459,105 @@ def test_l4_reads_the_shared_lap_predicate():
              '--score', _score(td, 's4b.json')]))
         assert 'NONE RECORDED' in out, out[:400]
     print("  PASS: L4 asks the one predicate, and a bad row is not a traceback")
+
+
+def test_a_ledger_line_that_is_not_an_object_is_not_a_traceback():
+    """Both guards, on the path that actually walks the rows.
+
+    A round-2 verifier mutated `isinstance(row, dict)` out of `_is_lap` AND
+    out of `_classification_state` and neither died: the hardened `_is_lap` is
+    UNREACHABLE from `record --final --stop-condition 4`, because
+    `_classification_state` walks the same rows first and tracebacked before
+    the laps were ever counted. A ledger is append-only text that several
+    tools and a human can write to, so a bare string, a list or a null on one
+    line is the ordinary damaged-file case -- and the gate this feeds is the
+    one that refuses the loop's strongest claim. A traceback there is not a
+    refusal, it is an argparse accident wearing a refusal's exit code.
+    """
+    bad = [{'kind': 'classification', 'accepted': True, 'shape': 'parameter',
+            'lever': 'the escape faces are saturated'},
+           'not an object at all', ['neither', 'is', 'this'], None,
+           {'kind': 'completion', 'accepted': True,
+            'score': {'blocking': 2, 'quality': {}}}]
+    st = C._classification_state(bad)
+    assert st is not None and st['laps_since']['routing'] == 1, (
+        'the walk did not survive three non-object rows: ' + str(st))
+    assert C._classification_rejected(bad) == 0, 'a string is not a row'
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'bad.jsonl')
+        with io.open(led, 'w', encoding='utf-8') as fh:
+            for r in bad:
+                fh.write(json.dumps(r) + '\n')
+        lenses = []
+        for name in ('connectivity', 'drc', 'spec'):
+            p = os.path.join(td, f'verdict_{name}.txt')
+            io.open(p, 'w', encoding='utf-8').write(
+                f'VERDICT=PASS:lens={name}\n')
+            lenses += ['--lens-file', p]
+        # It must REFUSE -- one routing lap after the decision -- and the
+        # reason must be the lap count, not a NoneType/str attribute error.
+        run_utils.check(
+            _argv(['record', '--ledger', led, '--board', BOARD, '--final',
+                   '--kind', 'completion', '--stop-condition', '4'] + lenses),
+            refuse='0 placement, 1 routing', code=2)
+    print("  PASS: a damaged ledger line refuses for the right reason")
+
+
+def test_a_ledger_of_only_rejected_classifications_says_so():
+    """The refusal must not tell the reader a false thing about their file.
+
+    With three `--rejected` classification rows on file it said "no
+    classification row was ever recorded", which is untrue of the ledger the
+    reader is looking at -- and the two cases need different actions: nobody
+    classified (go classify) against every classification was thrown away
+    (accept one, or say why none of them holds).
+    """
+    rows = _rows(classification(accepted=False),
+                 classification(accepted=False, shape='placement'))
+    assert C._classification_state(rows) is None
+    assert C._classification_rejected(rows) == 2
+    with tempfile.TemporaryDirectory() as td:
+        led = _ledger(td, 'rej.jsonl', rows)
+        lenses = []
+        for name in ('connectivity', 'drc', 'spec'):
+            p = os.path.join(td, f'verdict_{name}.txt')
+            io.open(p, 'w', encoding='utf-8').write(
+                f'VERDICT=PASS:lens={name}\n')
+            lenses += ['--lens-file', p]
+        run_utils.check(
+            _argv(['record', '--ledger', led, '--board', BOARD, '--final',
+                   '--kind', 'completion', '--stop-condition', '4'] + lenses),
+            refuse='every one was --rejected', code=2)
+    print("  PASS: rejected-only reads as rejected, not as never-written")
+
+
+def test_the_lever_may_not_be_the_shape_word_again():
+    """The null lever, in the one spelling the gate can actually detect.
+
+    A verifier's F7: `--shape parameter --lever parameter` clears everything.
+    It cannot be detected in general -- no gate reads a sentence and knows
+    whether a measurement is behind it, and the sub-issue says exactly that --
+    but the degenerate case, where the "measurement" is the shape word itself,
+    is the same row as `--lever ""` with a word typed in it. Refusing more
+    than that would refuse honest short levers, so this is deliberately the
+    only spelling it catches, and the PR says so.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        for word in ('parameter', ' Parameter.', 'placement'):
+            r = _cv(['record', '--ledger', led, '--board', BOARD,
+                     '--kind', 'classification', '--shape', 'parameter',
+                     '--lever', word])
+            assert r.returncode == 2, (
+                f'--lever {word!r} was accepted as a measurement:\n'
+                + (r.stdout + r.stderr)[-400:])
+            assert 'names the shape again' in r.stderr, r.stderr[-400:]
+        assert _cv(['record', '--ledger', led, '--board', BOARD,
+                    '--kind', 'classification', '--shape', 'parameter',
+                    '--lever', 'parameter: the escape faces are saturated']
+                   ).returncode == 0, 'an honest lever must still record'
+    print("  PASS: a lever that only repeats the shape is not a measurement")
+
 
 if __name__ == '__main__':
     run_utils.evidence(BOARD)

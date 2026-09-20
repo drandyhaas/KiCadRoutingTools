@@ -1300,15 +1300,16 @@ def test_routed_board_lenses_exist_and_reenter_the_loop():
 #: opposite of what a line list does as it rots.
 _RENDER_LOUD = ('--pair', '--focus')
 
-#: ...and the same exemption derived from the PROSE rather than from a flag:
-#: a render whose own stage text sends the reader to a stdout narrative keeps
-#: its stdout. `--quiet` removes these blocks from stdout, they are NOT in the
-#: `--json-out` document (`doc['describe']` carries only `worst`) and NOT in
-#: the review sheet's facts strip, so quieting such a command deletes the thing
-#: its text is about. Measured on the two L2 hand-off renders, which a first
-#: cut of #963 quieted and which read "Anything its WHAT THIS PANEL SHOWS block
-#: names as off the outline, stacked or hole-conflicting will still be there
-#: after the route".
+#: The stdout-only blocks -- used as a PROHIBITION, not as a second
+#: exemption, and that inversion is the correction. A round-2 verifier
+#: measured the exempting version letting the two L2 hand-off renders print
+#: 7,178 characters over 34 lines (one `JSON_SUMMARY:` line of 4,119) at a
+#: boundary `SKILL.md:205-213` names by name and prescribes `--quiet` for.
+#: So the rule is the other way round: a render may not be quieted while its
+#: own stage text sends the reader to a block `--quiet` removes -- REWRITE
+#: THE SENTENCE to name the sheet and the document, which is what the two
+#: hand-offs now do. `--pair`/`--focus` remain the only exemption, because
+#: they are what makes the narrative the deliverable.
 _RENDER_NARRATIVE = ('WHAT THIS PANEL SHOWS', 'WHAT THE MOVE DID',
                      'THE WORST N')
 
@@ -1323,6 +1324,11 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
     ordering is the whole mechanism of the boundary review, and the commands
     the review gates prescribe were the ones defeating it.
 
+    The exemption is `--pair`/`--focus` ALONE. A prose-derived exemption was
+    tried and withdrawn: it let a boundary render re-open the very defect
+    this gate exists for, since any stage text naming a stdout block then
+    bought that command its stdout back.
+
     `--quiet` is `store_true`, so
     `test_driver_commands_supply_required_options_and_values` cannot see it:
     that arm checks argparse-`required` options and whether a value-taking flag
@@ -1335,8 +1341,8 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
     """
     import collections
     tool = 'py_tools/render_placement.py'
-    seen = exempt = 0
-    loud, missing = [], []
+    seen = exempt = narrated = 0
+    loud, missing, quieted, sheetless = [], [], [], []
     sheets = collections.Counter()
     # EVERY render span, then branch -- not `if '--json-out' not in span:
     # continue`, which is what this did and which made the bare-`--quiet`
@@ -1347,15 +1353,49 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
     # that could never fire.
     for src in DRIVERS + tuple(s for s in SOURCES if s.endswith('.md')):
         text = source_text(src)
+        _cursor = 0
         for b in _continued_blocks(text, tool):
-            # The prose this command is embedded in, so the exemption can be
-            # read off what the reader is TOLD to do rather than off a flag.
-            _at = text.find(b.splitlines()[0])
-            _after = text[_at:_at + 1400] if _at >= 0 else ''
+            # The prose this command is embedded in. LOCATED BY A CURSOR over
+            # the WHOLE block, not by `text.find(b.splitlines()[0])`: three
+            # render blocks share a first line, so that resolved all three to
+            # the first one's paragraph. Measured by a verifier -- deleting
+            # the SECOND hand-off's entire narrative left this gate green,
+            # because it was reading the first hand-off's text three times.
+            # `_continued_blocks` yields in file order, so a cursor is exact
+            # even when two blocks are byte-identical.
+            _at = text.find(b, _cursor)
+            if _at >= 0:
+                _cursor = _at + len(b)
+            # ...and bounded by the END OF THE STAGE. A fixed 1400-character
+            # window runs into the next stage's prose, which is a sentence
+            # this command's reader never sees.
+            _stop = text.find('</stage_instructions>', _at) if _at >= 0 else -1
+            _end = _at + 1400 if _at >= 0 else 0
+            if _stop >= 0:
+                _end = min(_end, _stop)
+            _after = text[_at:_end] if _at >= 0 else ''
             _tells = next((n for n in _RENDER_NARRATIVE if n in _after), None)
             for span in _tool_spans(b, tool):
                 _cmd = ' '.join(span)[:110]
-                pass
+                # THE EXEMPTION IS ALSO A REQUIREMENT, and it was not until
+                # `mutate_963.py::handoff-render-quieted-again` SURVIVED: the
+                # arm below only ever reported a MISSING `--quiet`, so putting
+                # it back on a hand-off render -- the exact first cut #963
+                # withdrew -- passed this gate. `_RENDER_NARRATIVE` names the
+                # blocks that exist only on stdout, so a span whose own text
+                # sends the reader to one may not silence it.
+                if _tells and '--quiet' in span:
+                    quieted.append((src, f'silences the {_tells} block its '
+                                         f'own text sends you to: ' + _cmd))
+                # And a DRIVER-emitted sheet command must say where the sheet
+                # goes. Without `-o` render_placement writes
+                # `<board>_placement.png` beside the BOARD -- on a fenced run,
+                # potentially beside the control (references/evidence-map.md).
+                # Drivers only: an `.md` template spells `<PATH>` and leaves
+                # the paths to the reader.
+                if (src in DRIVERS and '--review-sheet' in span
+                        and '-o' not in span):
+                    sheetless.append((src, _cmd))
                 if '--json-out' not in span:
                     # A bare `--quiet` silences `describe` via `_quiet_text`
                     # while `_quiet` stays False and the keys still print --
@@ -1364,8 +1404,9 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
                         missing.append((src, 'bare --quiet: ' + _cmd))
                     continue
                 seen += 1
-                _why = next((f for f in _RENDER_LOUD if f in span), None) \
-                    or (f'its text reads {_tells}' if _tells else None)
+                if _tells:
+                    narrated += 1
+                _why = next((f for f in _RENDER_LOUD if f in span), None)
                 if _why:
                     exempt += 1
                     loud.append((src, _why, _cmd))
@@ -1383,6 +1424,16 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
           'deliverable. `--quiet` with no --json-out is the worst of both: it '
           'silences `describe` and the JSON still prints '
           '(render_placement.py, _quiet vs _quiet_text).')
+    assert not quieted, (
+        'render commands that silence the stdout block their own stage text '
+        'tells the reader to read:\n'
+        + '\n'.join(f'  {s}: {t}' for s, t in quieted)
+        + '\n\nDrop --quiet, or drop the sentence -- those blocks are NOT in '
+          'the --json-out document (doc[\'describe\'] carries only `worst`) '
+          'and NOT on the review sheet.')
+    assert not sheetless, (
+        'driver-emitted review-sheet commands with no -o, so the sheet lands '
+        'beside the BOARD:\n' + '\n'.join(f'  {s}: {t}' for s, t in sheetless))
     # Measured floors, not round ones. A gate that stops finding its
     # population reads exactly like a gate that finds nothing wrong.
     assert seen >= 34, (
@@ -1391,11 +1442,20 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
     # BOUNDED ON BOTH SIDES. A floor alone is satisfied by widening the
     # exemption: `_RENDER_LOUD = ('--json-out',)` exempts all 38 and passes,
     # which is a gate that has been switched off from inside.
-    assert 8 <= exempt <= 14, (
-        f'{exempt} exempt span(s), measured 11: the --pair/--focus arm is what '
+    assert 7 <= exempt <= 12, (
+        f'{exempt} exempt span(s), measured 9: the --pair/--focus arm is what '
         f'keeps this from being a blanket rule. Too few and it has stopped '
         f'being exercised; too many and the predicate has been widened until '
         f'it exempts the population it guards.')
+    # ...and the PROHIBITION has a population too. It fires on nothing today,
+    # which is what a green gate looks like and also what a dead one looks
+    # like: 8 spans carry a stdout block in their own stage text, and the
+    # check is that none of them is quieted. If that number goes to zero the
+    # arm is guarding nothing and the `quieted` assertion above is theatre.
+    assert narrated >= 6, (
+        f'only {narrated} render span(s) sit in prose naming a stdout-only '
+        f'block, measured 8: the --quiet-vs-narrative check has lost the '
+        f'population it guards, so it can no longer fire on anything.')
     # And the drivers must keep ASKING for a sheet. Without `--review-sheet`
     # the render writes no `review_sheet` key, and
     # `placement_driver._guard_render`'s fifth check reads an absent key as
@@ -1417,7 +1477,8 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
              '--dump-refusals', 1, 'the _guard_render recipe'),
             ('.claude/skills/plan-pcb-placement-and-routing/scripts/'
              'loop_driver.py', '--dump-all', 6,
-             'both hand-offs (two arms each) and the close-out')):
+             'the hand-off render in three arms, and the close sheet in the '
+             'three terminal arms -- 3 + 3, not 4 + 1')):
         _dump, _rc = driver_dump(_src, _dumpflag)
         _n = sum(1 for b in _continued_blocks(_dump, tool)
                  for sp in _tool_spans(b, tool) if '--review-sheet' in sp)

@@ -159,6 +159,42 @@ def test_the_self_test_no_longer_claims_the_arm_is_unreachable():
     print("  PASS: the self-test says what is true of the guard now")
 
 
+
+def test_an_unwritable_sheet_still_leaves_the_document_and_still_exits_2():
+    """The headline of this item's render half, on the path with no --gate.
+
+    Deferring the sheet failure until after `json.dump` is the whole change:
+    one unwritable sheet path used to cost the caller the render DOCUMENT --
+    `--json-out` never reached its dump, so a run had a PNG, an exit 2 and
+    nothing for any downstream gate to read. A verifier mutated
+    `return _sheet_exit or 0` to `return 0` and nothing failed, because every
+    test here read the document and none read the EXIT on that branch: the
+    #898 pin covers the `--gate` branch (`_sheet_exit or 4`) and this one was
+    uncovered. Both halves are asserted here -- the document exists AND the
+    exit is still 2 -- because either alone passes for the wrong reason.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        doc = os.path.join(td, 'view.json')
+        png = os.path.join(td, 'view.png')
+        # A directory that does not exist: render_placement cannot write the
+        # sheet there and says so.
+        sheet = os.path.join(td, 'no', 'such', 'dir', 'sheet.png')
+        r = _run([RENDER, BOARD, '--review-sheet', sheet, '--json-out', doc,
+                  '-o', png, '--quiet'])
+        assert r.returncode == 2, (
+            f'an unwritable --review-sheet exited {r.returncode}, not 2 -- '
+            f'the caller asked for an artifact and did not get one\n'
+            + (r.stdout + r.stderr)[-500:])
+        assert 'review-sheet' in r.stderr, r.stderr[-400:]
+        assert os.path.isfile(doc), (
+            'the render document was not written: the sheet failure is back '
+            'in front of the json.dump, which is the defect this fixed')
+        d = json.load(io.open(doc, encoding='utf-8'))
+        assert 'checklist' in d, sorted(d)
+    print("  PASS: the document survives an unwritable sheet, and 2 still "
+          "reaches the caller")
+
+
 if __name__ == '__main__':
     run_utils.evidence(BOARD)
     for k, v in sorted(globals().items()):
