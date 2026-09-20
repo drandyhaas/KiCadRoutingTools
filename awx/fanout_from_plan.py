@@ -468,6 +468,27 @@ def plan_state(pcb, names, banned=frozenset()):
             moves += [m for m in menu(pad, em.block_of(pad, dblocks), nid)
                       if sr.move_sig(m) not in seen]
         dmenu[nm] = [m for m in moves if (nm, sr.move_sig(m)) not in banned]
+        # a pad of this net on the other layer UNDER the ball (a back-side
+        # termination resistor under a DDR clock ball) is served by a TIE
+        # VIA at the ball (tie_vias_under, after the berths are laid), so
+        # the menu stays the plan's. It used to keep via-in-pad moves only:
+        # every one of them was "infeasible even alone" under the DDR (the
+        # B.Cu escape from the barrel runs into the resistor's other pad
+        # and the neighbours' dogbones), three destination passes banned
+        # and re-planned the berths, and the plan ended on a surface
+        # escape with the pad unreached (K36, 2026-09-20).
+        import pairs as _pairs
+        if any(_pairs.under_pad(pad, q, te.VIA_SIZE) for q in net.pads):
+            # ...and it takes NO via-in-pad escape: the barrel's other-layer
+            # run leaves through the pad's own footprint and the partner pad
+            # beside it (measured infeasible in every direction at K36), and
+            # a banned pair leg with 33 berths held has no joint move left
+            keep = [m for m in dmenu[nm] if m.kind != 'via_in_pad']
+            print(f'  {nm}: a pad of its own lies under the ball on the other layer -- '
+                  f'tied by a via at the ball once its berth is laid; no via-in-pad escape '
+                  f'({len(keep)} of {len(dmenu[nm])} moves kept)')
+            if keep:
+                dmenu[nm] = keep
         dmenu[nm] = _force(FORCE_DST, nm, dmenu[nm], 'destination')
         # PLAN_LOOP_FEEDBACK: the classes the route's verdict banned at this end
         dmenu[nm] = pfb.filter_menu(nm, 'dst', dmenu[nm])
@@ -761,6 +782,79 @@ def accept_key(k1, k0, lis1=None, lis0=None):
     return k1[1] < k0[1] - ACCEPT_MARGIN
 
 
+PAIR_BAD_W = float(os.environ.get('PLAN_PAIR_BAD_W', '50') or 0)
+
+
+def pair_penalty(st, choice, log=None):
+    """THE JUDGE'S VIEW OF A PAIR (2026-09-20): a differential pair whose
+    two ends are not NEIGHBOURS -- one face, one layer, within 1.3 pitches,
+    nothing of any other net between them -- cannot be launched or landed
+    coupled, so a plan with such an end is not a plan for that pair. The
+    price is PAIR_BAD_W per bad end (vias-equivalent, above any count the
+    residue rounds trade: a source round that moved the pair's teeth
+    together was judged 204 -> 233 and REVERTED, the moves banned, K36
+    pf9). Berths from `choice`, teeth as they stand (st['launch'] / tooth0).
+    Returns (penalty, [reasons])."""
+    import pairs as _pairs
+    if not int(os.environ.get('PLAN_PAIRS', os.environ.get('BRAID_PAIRS', '0')) or 0) or PAIR_BAD_W <= 0:
+        return 0.0, []
+    bad = []
+    dg, sg = st['dgrid'], st['sgrid']
+    reach_d = 1.3 * max(dg.pitch_x, dg.pitch_y)
+    reach_s = 1.3 * max(sg.pitch_x, sg.pitch_y)
+    for base, (pn, nn) in _pairs.pair_names(list(choice)).items():
+        if pn not in choice or nn not in choice:
+            continue
+        a, b = choice[pn], choice[nn]
+        ea, eb = getattr(a, 'exit_pt', None), getattr(b, 'exit_pt', None)
+        if ea is not None and eb is not None:
+            d = math.hypot(ea[0] - eb[0], ea[1] - eb[1])
+            if (a.direction, a.layer) != (b.direction, b.layer) or not (0.05 < d <= reach_d):
+                bad.append(f'{base} berths apart ({a.direction}/{a.layer} vs {b.direction}/{b.layer}, {d:.2f} mm)')
+            else:
+                ax = 0 if a.direction in ('up', 'down') else 1
+                lo_, hi_ = sorted((ea[ax], eb[ax]))
+                between = [o for o, m in choice.items() if o not in (pn, nn)
+                           and getattr(m, 'exit_pt', None) is not None
+                           and (m.direction, m.layer) == (a.direction, a.layer)
+                           and lo_ + 0.02 < m.exit_pt[ax] < hi_ - 0.02]
+                if between:
+                    bad.append(f'{base} berths with {between} between')
+        la, lb = st['launch'].get(pn), st['launch'].get(nn)
+        if la is not None and lb is not None:
+            L_a, L_b = st['tooth0'].get(pn), st['tooth0'].get(nn)
+            d = math.hypot(la[0] - lb[0], la[1] - lb[1])
+            if L_a != L_b or not (0.05 < d <= reach_s):
+                bad.append(f'{base} teeth apart ({L_a} vs {L_b}, {d:.2f} mm)')
+            else:
+                if abs(la[0] - lb[0]) <= 0.05:
+                    fx, ax = 0, 1
+                elif abs(la[1] - lb[1]) <= 0.05:
+                    fx, ax = 1, 0
+                else:
+                    fx, ax = None, None
+                if ax is not None:
+                    lo_, hi_ = sorted((la[ax], lb[ax]))
+                    between = [o for o, p in st['launch'].items() if o not in (pn, nn)
+                               and st['tooth0'].get(o) == L_a and abs(p[fx] - la[fx]) <= 0.05
+                               and lo_ + 0.02 < p[ax] < hi_ - 0.02]
+                    if between:
+                        bad.append(f'{base} teeth with {between} between')
+        # ...and one handedness at both ends (pairs.hand)
+        if ea is not None and eb is not None and la is not None and lb is not None:
+            try:
+                ga = sr.measure_tooth(st['pcb'], pn, st['src_pad'][pn], st['byname'])
+                hs = _pairs.hand(ga['direction'], la, lb) if ga and ga.get('direction') else 0
+            except Exception:
+                hs = 0
+            hd = _pairs.hand(a.direction, ea, eb, arriving=True)
+            if hs and hd and hs != hd:
+                bad.append(f'{base} handedness: teeth {hs:+d}, berths {hd:+d}')
+    if bad and log:
+        log('  pairs: ' + '; '.join(bad))
+    return PAIR_BAD_W * len(bad), bad
+
+
 def judge_by_braid(st, choice, board, achieved=None, bp=None):
     """THE judgment of a candidate plan: the braid's own planner
     (braid.plan_braid) on the plan's ends -- corridors as the braid forms
@@ -798,15 +892,16 @@ def judge_by_braid(st, choice, board, achieved=None, bp=None):
                 length += pe.sm.ride_mm({nm: m}, st['launch'], st['dboxes'], st['sgrid'].bbox)
             length += pe.sm._length(m)
         ride = length / pe.sm.VIA_MM
+    pp, _bad = pair_penalty(st, choice)
     if PLAN_JUDGE:
         # THE PLAN item 1: the braid's plan-implied COUNT is the cost -- plus
         # the ride round both arrays at VIA_MM (Andy, 2026-09-15: length at
         # 7.5 mm per via EVERYWHERE), the one term that sees a far-face tooth
         # (K35 SDQ13: 13 mm out and 13 mm back for a ball on U1's east
         # column). PLAN_JUDGE_RIDE=0 = the count alone (the jc arm).
-        return sum(pred.values()) + (ride if PLAN_JUDGE_RIDE else 0.0), pred, bp, plan
+        return sum(pred.values()) + (ride if PLAN_JUDGE_RIDE else 0.0) + pp, pred, bp, plan
     if SF_ESC_W == 1.0:
-        return sum(pred.values()) + ride, pred, bp, plan
+        return sum(pred.values()) + ride + pp, pred, bp, plan
     # split pred back into its two halves. Per net vias_from_pages emits
     # tooth_vias + cross + (changes | SWIM) + m.vias, so the escape half is
     # exactly the tooth and berth vias and everything else is corridor --
@@ -814,7 +909,7 @@ def judge_by_braid(st, choice, board, achieved=None, bp=None):
     esc = (sum(st['tooth_vias'].get(n, 0) for n in choice)
            + sum(m.vias for m in choice.values()))
     cor = sum(pred.values()) - esc
-    return cor + SF_ESC_W * (esc + ride), pred, bp, plan
+    return cor + SF_ESC_W * (esc + ride) + pp, pred, bp, plan
 
 
 def pf_key(choice, bp, cost, model_vias=None):
@@ -3455,6 +3550,85 @@ def main():
     return lay(out_path, names, choice, dst_pad, dref, byname, board, realized, banned)
 
 
+def tie_vias_under(pcb, nms, byname, dst_pad, vias_add, log=print):
+    """A TIE VIA for every destination ball with a pad of its OWN net under
+    it on the other layer (a back-side termination under a DDR clock ball,
+    pairs.under_pad): the escape is whatever the plan chose; the pad is
+    served by a via at the ball -- nudged toward the pad's centre within
+    the ball's own slack, so the barrel's far annulus lies in the pad's
+    copper -- unless a via of the net already stands in the ball (a
+    via-in-pad escape ties it by itself). Checked clean of foreign pads
+    on either layer and of every drill (hole to hole) before it is added;
+    a graze leaves the pad open and says so. Returns via dicts for
+    add_tracks_and_vias_to_pcb."""
+    import pairs as _pairs
+    from routing_defaults import HOLE_TO_HOLE_CLEARANCE
+    out = []
+    for nm in nms:
+        nid, net = byname[nm]
+        ball = dst_pad.get(nm)
+        if ball is None:
+            continue
+        under = [q for q in net.pads if _pairs.under_pad(ball, q, te.VIA_SIZE)]
+        if not under:
+            continue
+        r_ball = min(ball.size_x, ball.size_y) / 2
+        bx, by = ball.global_x, ball.global_y
+        if any(v['net_id'] == nid and math.hypot(v['x'] - bx, v['y'] - by) <= r_ball for v in (vias_add or [])) \
+                or any(v.net_id == nid and math.hypot(v.x - bx, v.y - by) <= r_ball for v in pcb.vias):
+            continue
+        q = under[0]
+        slack = max(r_ball - te.VIA_SIZE / 2, 0.0)
+        dx, dy = q.global_x - bx, q.global_y - by
+        d = math.hypot(dx, dy)
+        x, y = bx, by
+        if d > 1e-9:
+            m = min(slack, d)
+            x, y = bx + dx / d * m, by + dy / d * m
+        need = te.VIA_SIZE / 2 + sr.FAN_CLEAR
+        bad = None
+        for fp in pcb.footprints.values():
+            for p in fp.pads:
+                if p.net_id == nid:
+                    continue
+                if p.pad_type == 'np_thru_hole' or p.drill > 0:
+                    if math.hypot(p.global_x - x, p.global_y - y) < (p.drill + te.VIA_DRILL) / 2 + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                        bad = f'the hole of {fp.reference}.{p.pad_number}'
+                        break
+                if p.pad_type == 'np_thru_hole':
+                    continue
+                ex = max(abs(p.global_x - x) - p.size_x / 2, 0.0)
+                ey = max(abs(p.global_y - y) - p.size_y / 2, 0.0)
+                if math.hypot(ex, ey) < need - 1e-6:
+                    bad = f'pad {fp.reference}.{p.pad_number}'
+                    break
+            if bad:
+                break
+        if not bad:
+            for v in list(pcb.vias) + list(vias_add or []):
+                vx, vy = (v.x, v.y) if hasattr(v, 'x') else (v['x'], v['y'])
+                vn = v.net_id if hasattr(v, 'net_id') else v['net_id']
+                vs = v.size if hasattr(v, 'size') else v['size']
+                vd = v.drill if hasattr(v, 'drill') else v['drill']
+                dd = math.hypot(vx - x, vy - y)
+                if dd < 1e-6:
+                    continue
+                if vn != nid and dd < need + vs / 2 - 1e-6:
+                    bad = 'a via'
+                    break
+                if dd < (vd + te.VIA_DRILL) / 2 + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                    bad = 'a drill'
+                    break
+        if bad:
+            log(f'  {nm}: {q.component_ref}.{q.pad_number} lies under the ball, but a tie via there '
+                f'grazes {bad} -- left open')
+            continue
+        out.append({'x': round(x, 4), 'y': round(y, 4), 'size': te.VIA_SIZE, 'drill': te.VIA_DRILL,
+                    'layers': list(LAYERS), 'net_id': nid})
+        log(f'  {nm}: tie via at ({x:.2f},{y:.2f}) serves {q.component_ref}.{q.pad_number} under the ball')
+    return out
+
+
 def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
                        realized, banned):
     """Fan out DU1 to the plan, audit, and FEED BACK: a berth the engine
@@ -3462,10 +3636,24 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
     re-selected against the same teeth, and the fanout runs again --
     until every berth is exactly the plan's, or nothing changes. The
     plan's own via model is printed for the plan that ships."""
-    st = plan_state(parse_kicad_pcb(board), names, banned)
+    _pcb0 = parse_kicad_pcb(board)
+    st = plan_state(_pcb0, names, banned)
     laid_pass = None       # the LAST pass fanned out: (choice, st, achieved, ok)
     learned = set()        # SF_LEARN: pairs of moves the engine would not lay together
+    # PAIR BERTHS (pairs.harmonise, PLAN_PAIRS): a differential pair's two
+    # berths are made one move -- same face, layer and kind, neighbouring
+    # exits -- before the engine lays them, every pass. Off unless the
+    # braid routes pairs as members (BRAID_PAIRS), so the chain is
+    # byte-identical without it; inert on a run with no pairs.
+    _harm = int(os.environ.get('PLAN_PAIRS', os.environ.get('BRAID_PAIRS', '0')) or 0)
+    _pitch = 0.0
+    if _harm:
+        import pairs as _pairs
+        _g = em.grid_of(_pcb0.footprints[dref])
+        _pitch = max(_g.pitch_x, _g.pitch_y)
     for it in range(DST_ITERS):
+        if _harm:
+            _pairs.harmonise(choice, st['dmenu'], names, _pitch, pe.sm._conflict, print)
         faces = [m.direction for m in choice.values()]
         print(f'\nplan (destination pass {it}): {len(choice)} berth escape directions '
               + ', '.join(f'{d}:{faces.count(d)}' for d in sorted(set(faces)))
@@ -3560,6 +3748,21 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
     # same copper the braid will read, so its taut paths are the memo's.
     choice_l, st_l, achieved_l, ok_l = laid_pass
     explain_plan(choice_l, st_l, names, out_path, out_path, achieved=achieved_l)
+    # TIE VIAS for the pads under balls, on the SHIPPED board and only
+    # there: inside the loop a barrel in the ball reads to the audit as a
+    # via-in-pad berth that was never asked, and the pass bans and
+    # re-plans the berth every time (K36 pf5: eight passes, the SCK pair's
+    # berths driven 7 mm apart)
+    try:
+        pcb_f = parse_kicad_pcb(out_path)
+        ties = tie_vias_under(pcb_f, list(names), byname, st_l['dst_pad'] if isinstance(st_l, dict) and 'dst_pad' in st_l else dst_pad, [])
+        if ties:
+            tmp = out_path[:-len('.kicad_pcb')] + '_tie.kicad_pcb'
+            add_tracks_and_vias_to_pcb(out_path, tmp, [], ties, [],
+                                       net_id_to_name={i: n.name for i, n in pcb_f.nets.items()})
+            os.replace(tmp, out_path)
+    except Exception as e:      # a tie must not lose the board
+        print(f'  tie vias NOT added: {e}')
     return 0 if ok_l else 1
 
 

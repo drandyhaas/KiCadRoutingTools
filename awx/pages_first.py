@@ -155,6 +155,7 @@ PAGES_SWIM = float(os.environ.get('PLAN_PAGES_SWIM', '100'))  # vias: the price 
 # 0.44 / 0.8); the flat 100 with a non-zero XING would just be the flat
 # price again.
 PAGES_SWIM_XING = float(os.environ.get('PLAN_PAGES_SWIM_XING', '0'))
+PAIR_SWIM = float(os.environ.get('PLAN_PAIR_SWIM', '3') or 3)   # a pair leg's swim price, times PAGES_SWIM (2026-09-20: SDQS1 planned as a swimmer weaved 6 page crossings)
 PAGES_ISLAND = float(os.environ.get('PLAN_PAGES_ISLAND', '0') or 0)   # vias per corridor part a page lane's chord crosses on its page (learned from verify; 0 = off)
 PAGES_SRC = int(os.environ.get('PLAN_PAGES_SRC', '1'))        # 0 = the source frozen (destination only)
 PAGES_LOG = int(os.environ.get('PLAN_PAGES_LOG', '0'))        # 1 = per-net choice printed
@@ -1691,6 +1692,57 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
             D[b] = ms
         if boxed:
             log(f'  pages-first: unblock: {len(boxed)} boxed-in swimmer(s) {boxed}; {len(unheld)} held berth(s) freed')
+    # PAIRS UNHOLD (2026-09-20): a pair's two berths must be neighbours with
+    # nothing between them. When every neighbouring combination in the two
+    # legs' menus has a HELD berth (a one-move menu) between it, the holders
+    # of the cheapest combination get their full menus back, so the solve
+    # can move them and the pair constraint binds them by its clause.
+    # Without this the re-solve is INFEASIBLE and the greedy choice, which
+    # knows no pairs, stands (K36 pf8: SODT0 held between SCK's dogbones,
+    # SDQ11/SDQ8 standing between SDQS1's teeth).
+    if fixed and int(os.environ.get('PLAN_PAIRS', os.environ.get('BRAID_PAIRS', '0')) or 0):
+        import pairs as _pairs
+        _dg = st['dgrid']
+        _reach_b = 1.3 * max(_dg.pitch_x, _dg.pitch_y)
+        hard = set(hard_fixed or {})
+        freed_p = []
+        for _base, (_pn, _nn) in _pairs.pair_names(names).items():
+            if _pn not in D or _nn not in D:
+                continue
+            best = None
+            for a in D[_pn]:
+                for b in D[_nn]:
+                    ea, eb = getattr(a, 'exit_pt', None), getattr(b, 'exit_pt', None)
+                    if ea is None or eb is None or (a.direction, a.layer) != (b.direction, b.layer):
+                        continue
+                    d = math.hypot(ea[0] - eb[0], ea[1] - eb[1])
+                    if not (0.05 < d <= _reach_b):
+                        continue
+                    ax = 0 if a.direction in ('up', 'down') else 1
+                    lo_, hi_ = sorted((ea[ax], eb[ax]))
+                    held_between = set()
+                    for o in names:
+                        if o in (_pn, _nn) or len(D.get(o, [])) != 1:
+                            continue
+                        mo = D[o][0]
+                        eo = getattr(mo, 'exit_pt', None)
+                        if eo is not None and (mo.direction, mo.layer) == (a.direction, a.layer) \
+                                and lo_ + 0.02 < eo[ax] < hi_ - 0.02:
+                            held_between.add(o)
+                    key = (len(held_between), a.vias + b.vias, d)
+                    if best is None or key < best[0]:
+                        best = (key, held_between)
+            if best is None or not best[1]:
+                continue            # a free combination exists, or none at all (the constraint says so)
+            if best[1] & hard:
+                continue            # the berth between is laid copper: nothing to free
+            for o in sorted(best[1]):
+                D[o] = list(st['dmenu'][o])
+                if no_climb:
+                    D[o] = [m for m in D[o] if not getattr(m, 'climb', 0)]
+                freed_p.append(o)
+        if freed_p:
+            log(f'  pages-first: pairs: {len(freed_p)} held berth(s) between a pair freed {sorted(set(freed_p))}')
     S: Dict[str, List[Move]] = {}
     cur: Dict[str, Optional[Move]] = {}
     for n in names:
@@ -1939,6 +1991,114 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
             lits = [moved[(n, kind)] for (n, kind, _sig) in ng if (n, kind) in moved]
             if lits and len(lits) == len(ng):
                 m.AddBoolOr([v.Not() for v in lits])
+    # THE PAIRS AS ONE MOVE (pairs.py, 2026-09-20): a differential pair's two
+    # nets take moves of ONE face and ONE layer with neighbouring exits, at
+    # BOTH ends -- a constraint of the plan, not a repair after it. The
+    # post-fix (pairs.harmonise) could only move one leg where the other's
+    # class had room: SDQS1's teeth ended 13.7 mm apart, SCK's berths 7.4.
+    # A pair with no compatible combination in its menus at an end is left
+    # unconstrained there and named. Gated with the braid's pair member.
+    import pairs as _pairs
+    n_pair_c = 0
+    _pair_legs = set()        # a pair's legs swim at PAIR_SWIM times the price: a swimming pair weaves both legs
+    if int(os.environ.get('PLAN_PAIRS', os.environ.get('BRAID_PAIRS', '0')) or 0):
+        _pair_legs = {leg for pr in _pairs.pair_names(names).values() for leg in pr}
+        _dg, _sg = st['dgrid'], st['sgrid']
+        _reach = {'berths': 1.3 * max(_dg.pitch_x, _dg.pitch_y),
+                  'teeth': 1.3 * max(_sg.pitch_x, _sg.pitch_y)}
+
+        def _compat(a, b, reach):
+            ea, eb = getattr(a, 'exit_pt', None), getattr(b, 'exit_pt', None)
+            if ea is None or eb is None:
+                return True
+            if (a.direction, a.layer) != (b.direction, b.layer):
+                return False
+            d = math.hypot(ea[0] - eb[0], ea[1] - eb[1])
+            return 0.05 < d <= reach
+        n_hand = 0
+        for _base, (_pn, _nn) in _pairs.pair_names(names).items():
+            if _pn not in names or _nn not in names:
+                continue
+            combos = {'berths': [], 'teeth': []}      # (j, k, hand) per end, variables live
+            fixed_hand = {}                           # an end with no variables: its hand as a constant
+            for X, C, end in ((xd, D, 'berths'), (xs, S, 'teeth')):
+                A, B = C.get(_pn, []), C.get(_nn, [])
+                if len(A) <= 1 and len(B) <= 1:
+                    if len(A) == 1 and len(B) == 1:
+                        fixed_hand[end] = _pairs.hand(A[0].direction, A[0].exit_pt, B[0].exit_pt,
+                                                      arriving=(end == 'berths'))
+                    continue
+                if len(X[_pn]) != len(A) or len(X[_nn]) != len(B):
+                    continue          # an empty source menu's dummy variable
+                okj = {j: [k for k, b in enumerate(B) if _compat(a, b, _reach[end])] for j, a in enumerate(A)}
+                for j, ks in okj.items():
+                    for k in ks:
+                        combos[end].append((j, k, _pairs.hand(A[j].direction, A[j].exit_pt, B[k].exit_pt,
+                                                                 arriving=(end == 'berths'))))
+                if not any(okj.values()):
+                    log(f'  pages-first: pair {_base}: no {end} of one face and layer with '
+                        f'neighbouring exits in its menus -- unconstrained there')
+                    continue
+                for j, ks in okj.items():
+                    if ks:
+                        m.AddBoolOr([X[_nn][k] for k in ks]).OnlyEnforceIf(X[_pn][j])
+                    else:
+                        m.Add(X[_pn][j] == 0)
+                # ...and NOTHING BETWEEN them: a third net's exit of the same
+                # face and layer strictly between the two is barred while
+                # both stand (K36 pf7: SDQS1's teeth 0.96 mm apart passed the
+                # reach, with SDQ11 and SDQ8 between them on a 0.32 mm comb;
+                # the pair could not be launched coupled)
+                n_between = 0
+                for j, ks in okj.items():
+                    a = A[j]
+                    for k in ks:
+                        b = B[k]
+                        ax = 0 if a.direction in ('up', 'down') else 1
+                        lo_, hi_ = sorted((a.exit_pt[ax], b.exit_pt[ax]))
+                        for o in names:
+                            if o in (_pn, _nn) or len(X[o]) != len(C.get(o, [])):
+                                continue
+                            for i, mo in enumerate(C[o]):
+                                eo = getattr(mo, 'exit_pt', None)
+                                if eo is None or (mo.direction, mo.layer) != (a.direction, a.layer):
+                                    continue
+                                if lo_ + 0.02 < eo[ax] < hi_ - 0.02:
+                                    m.AddBoolOr([X[_pn][j].Not(), X[_nn][k].Not(), X[o][i].Not()])
+                                    n_between += 1
+                if n_between:
+                    log(f'  pages-first: pair {_base} {end}: {n_between} third-exit-between clause(s)')
+                okk = {k: [j for j, a in enumerate(A) if _compat(a, b, _reach[end])] for k, b in enumerate(B)}
+                for k, js in okk.items():
+                    if js:
+                        m.AddBoolOr([X[_pn][j] for j in js]).OnlyEnforceIf(X[_nn][k])
+                    else:
+                        m.Add(X[_nn][k] == 0)
+                n_pair_c += 1
+            # ...and ONE HANDEDNESS at both ends (pairs.hand): a teeth
+            # combination and a berth combination that disagree cannot both
+            # stand; an end without variables contributes its hand as a fact
+            hb = combos['berths']
+            ht = combos['teeth']
+            if hb and ht:
+                for (jb, kb, sb) in hb:
+                    for (jt, kt, st_) in ht:
+                        if sb and st_ and sb != st_:
+                            m.AddBoolOr([xd[_pn][jb].Not(), xd[_nn][kb].Not(), xs[_pn][jt].Not(), xs[_nn][kt].Not()])
+                            n_hand += 1
+            elif hb and fixed_hand.get('teeth'):
+                for (jb, kb, sb) in hb:
+                    if sb and sb != fixed_hand['teeth']:
+                        m.AddBoolOr([xd[_pn][jb].Not(), xd[_nn][kb].Not()])
+                        n_hand += 1
+            elif ht and fixed_hand.get('berths'):
+                for (jt, kt, st_) in ht:
+                    if st_ and st_ != fixed_hand['berths']:
+                        m.AddBoolOr([xs[_pn][jt].Not(), xs[_nn][kt].Not()])
+                        n_hand += 1
+        if n_pair_c:
+            log(f'  pages-first: {n_pair_c} pair constraint(s): each pair one face, one layer, neighbouring exits, at each end'
+                + (f'; {n_hand} handedness clause(s)' if n_hand else ''))
     T = {n: m.NewIntVar(min(tkey[n] + jkey.get(n, [])), max(tkey[n] + jkey.get(n, [])), f'T_{n}') for n in names}
     L = {n: m.NewIntVar(min(lkey[n]), max(lkey[n]), f'L_{n}') for n in names}
     cost_terms = []
@@ -2041,7 +2201,7 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
             cost_terms.append(int(round(VIA_W * st['tooth_vias'].get(n, 0) * SCALE)))
         cost_terms.append(int(round(VIA_W * PAGES_MISMATCH * SCALE)) * mt)
         cost_terms.append(int(round(VIA_W * PAGES_MISMATCH * SCALE)) * md)
-        cost_terms.append(int(round(PAGES_SWIM * VIA_W * SCALE)) * sw[n])
+        cost_terms.append(int(round(PAGES_SWIM * VIA_W * SCALE * (PAIR_SWIM if n in _pair_legs else 1.0))) * sw[n])
     # ---- the side strips' capacity (PLAN_PAGES_STRIP)
     strip_load = {}
     if PAGES_STRIP:
