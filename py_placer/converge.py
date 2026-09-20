@@ -1079,6 +1079,30 @@ def cmd_record(a):
               f"is just a lower --flat with extra steps. Nothing was written.",
               file=sys.stderr)
         return 2
+    # A DECLARATION IS A CLAIM ABOUT --board, SO IT IS REFUSED, NOT WARNED
+    # (#963). An ordinary row keeps the warning below and must: a baseline row
+    # legitimately attaches a parent score to a rejected candidate, which is
+    # what tests/test_converge.py::test_record_warns_on_unbound_or_mismatched_
+    # score pins. A declaration has no such case -- its whole content is "this
+    # board's half has nothing left", so numbers taken on a different board are
+    # not weak evidence for it, they are evidence about something else.
+    # Checked HERE, before `store.put`, so the message can honestly say nothing
+    # was written; the shared predicate hashes the board itself, which costs
+    # one extra read on the rare `--exhausted` + `--score` path.
+    if a.exhausted and isinstance(_score_doc, dict):
+        _eb, _eps = score_board_binding(a.board, _score_doc)
+        if _eb == 'other':
+            print(f"record: --exhausted {a.exhausted} was given a score that "
+                  f"grades a DIFFERENT board (score board_sha "
+                  f"{str(_eps)[:12]}... is not --board "
+                  f"{os.path.abspath(a.board)}).\n\nA declaration is a claim "
+                  f"about the board it names, and it outlives the run: run 29 "
+                  f"declared placement exhausted against a board that existed "
+                  f"for eight minutes, and the claim survived three close-out "
+                  f"calls. Score the board you are declaring about, or drop "
+                  f"the score -- an unscored declaration is still a "
+                  f"declaration. Nothing was written.", file=sys.stderr)
+            return 2
     if a.final and not a.stop_condition:
         print("record: --final requires --stop-condition (which of the run's "
               "stop conditions ended it). Nothing was written.",
@@ -1224,6 +1248,7 @@ def cmd_record(a):
     # different board than the one being recorded. A warning rather than a
     # refusal: baseline rows legitimately attach a parent score to a
     # rejected candidate -- but never silently.
+    _binding, _payload_sha = 'unbound', None
     if a.score:
         # Through the SHARED predicate, and with the digest `store.put` just
         # computed handed in: this used to re-parse `a.score` behind a bare
@@ -1438,6 +1463,18 @@ def cmd_record(a):
     if a.exhausted:
         entry['exhausted'] = {'half': a.exhausted,
                               'reason': a.exhausted_reason.strip()}
+    if _binding in ('other', 'unbound') and a.score:
+        # THE WARNING, ON THE ROW (#963). It has always gone to stderr and
+        # vanished, while the row kept a score `_score_key` will happily rank
+        # -- so no later reader could tell a warned row from a clean one, which
+        # is the contributor's "stale scores may be stored only as explicitly
+        # labelled attachments". NOTHING READS THIS YET, deliberately: making
+        # `_score_key` or `_half_state` skip such a row would move plateau
+        # windows on every historical ledger, which is a large behaviour change
+        # to hide inside a "just record it" line.
+        entry['score_stale'] = {'binding': _binding,
+                                'payload_sha': _payload_sha,
+                                'board_sha': sha}
     if a.accept_incommensurable:
         # The disposition belongs in the row, not only in the console the
         # refusal was cleared from. Same shape as --exhausted: what is recorded
@@ -1606,19 +1643,34 @@ def _score_key(score):
 
 
 def _declaration(rows, half):
-    """(reason, live) for the last `--exhausted <half>` row, else None.
+    """(reason, live, board_sha) for the last `--exhausted <half>` row, else None.
 
     `live` is False when a lap of that half was recorded AFTER the declaration:
     the half went back to work, so the claim "there is nothing further" is
     stale. Superseding it needs no flag and no deletion -- running the half
     again is the retraction.
+
+    `board_sha` is the declaration row's OWN `result_sha` -- the board the claim
+    was made about (#963). It is not a new field and deliberately not one:
+    `cmd_record` already writes `result_sha` on every row from
+    `store.put(a.board)`, `--board` is required, and `BoardStore.put` COPIES the
+    file, so the binding is on disk on every ledger ever written -- including
+    run 29's row 29, whose board `frozen.kicad_pcb` was overwritten nine seconds
+    later. A second key for one fact would be absent on every historical row,
+    would need this same fallback anyway, and both paths would then live
+    forever; two numbers for one fact is #941's defect in miniature.
+
+    The sha is captured on the row that RE-ARMS the walk, not on an earlier
+    declaration's: a self-declaring row restarts `found`, and the claim being
+    judged is the last one made.
     """
-    found, live = None, False
+    found, live, sha = None, False, None
     for r in rows:
         dec = r.get('exhausted')
         if isinstance(dec, dict) and dec.get('half') == half:
             found, live = (str(dec.get('reason') or '').strip()
                            or 'no reason recorded'), True
+            sha = r.get('result_sha')
         elif found is not None and _is_lap(r, half):
             # _is_lap, not a bare _HALF match, and this is the sharper half of
             # the fix: "the half went back to work" must mean a LAP was run.
@@ -1626,7 +1678,7 @@ def _declaration(rows, half):
             # `kind completion` and neither turns the loop, so either one
             # silently retracted a declaration a person had written down.
             live = False
-    return None if found is None else (found, live)
+    return None if found is None else (found, live, sha)
 
 
 def placement_terms(score):
@@ -1703,12 +1755,26 @@ def parent_score(rows, row):
     return hits[0].get('score')
 
 
-def _half_state(rows, half, flat):
+def _half_state(rows, half, flat, board_sha=None):
     """Can this half still improve? -- with the evidence it was decided from.
 
     Returns a dict: flat, laps, accepted, rejected, why, and (when they apply)
-    declared / declared_superseded / incommensurable / compared. `why` is one of
+    declared / declared_board / declared_stale_board / declared_superseded /
+    incommensurable / compared. `why` is one of
     declared-exhausted, too-few-laps, no-comparison, plateau, improving.
+
+    `board_sha` is the board being JUDGED, and it is keyword-with-a-default
+    because this function is called positionally at some thirty-five sites
+    across the test suite. It only ever adds `declared_stale_board`: `flat` and
+    `why` do not change, on purpose (#963). "Any digest change invalidates a
+    declaration" sounds safe and is inert-making -- every accepted lap of
+    EITHER half writes a new sha, so a placement exhaustion would die on the
+    next routing lap although routing copper says nothing about placement's
+    remaining levers; and the L2 freeze row changes the sha BY CONSTRUCTION
+    while `test_904_not_a_lap` pins that a freeze must not retract. A sha
+    cannot tell "rewrote the file, same poses" from "replaced the placement".
+    So this reports, and `_close_out` -- where the claim actually ships --
+    refuses.
 
     THE COUNTER COUNTS REJECTED LAPS TOO, and that is the fix for a gate that
     could not be satisfied. It used to count accepted rows only, while L5's own
@@ -1754,6 +1820,15 @@ def _half_state(rows, half, flat):
            'flat': False, 'why': 'too-few-laps'}
     if dec and dec[1]:
         out.update(flat=True, why='declared-exhausted', declared=dec[0])
+        # LAP SUPERSESSION FIRST, ALWAYS -- and it already has, because this
+        # branch is the live one. The ledger test is total and always
+        # answerable; the board test depends on a sha the caller may not have
+        # supplied, so reporting both about one declaration would be two
+        # findings for one fact.
+        if dec[2]:
+            out['declared_board'] = dec[2]
+            if board_sha and board_sha != dec[2]:
+                out['declared_stale_board'] = dec[2]
         return out
     if dec and not dec[1]:
         out['declared_superseded'] = dec[0]
@@ -2030,7 +2105,34 @@ def cmd_verdict(a):
                    'not zero. Re-score, then ask for a verdict.')
         return _no_score(why)
     blocking = key[0]
-    st = {h: _half_state(rows, h, a.flat) for h in ('placement', 'routing')}
+    # THE BOARD BEING CLOSED, for the exhaustion binding (#963). The score's
+    # own `board_sha` is primary -- board_score writes it, and L5 has already
+    # proven it equals `--board` before it shells out to here, so reading it
+    # costs nothing. `--board` is the second channel, for a pre-B4 or
+    # hand-built score that carries no sha. Absent on BOTH is unanswerable and
+    # invalidates nothing: every hand-built score in tests/test_converge.py
+    # lacks the key, and a question that cannot be answered must not decide.
+    board_sha = score.get('board_sha') if isinstance(score, dict) else None
+    board_sha_source = 'score' if board_sha else None
+    if getattr(a, 'board', None):
+        _bind, _psha = score_board_binding(
+            a.board, score if isinstance(score, dict) else None)
+        if _bind == 'other':
+            print(f"verdict: --board and --score disagree about which board "
+                  f"is being judged (score board_sha {str(_psha)[:12]}... is "
+                  f"not {os.path.abspath(a.board)}). A stop verdict read off "
+                  f"one board's ledger and another board's numbers is the "
+                  f"defect this binding exists to catch. Re-score the board "
+                  f"you are closing out. Nothing was judged.", file=sys.stderr)
+            return 2
+        if not board_sha:
+            try:
+                from board_store import sha256_file
+                board_sha, board_sha_source = sha256_file(a.board), '--board'
+            except Exception:                               # noqa: BLE001
+                pass
+    st = {h: _half_state(rows, h, a.flat, board_sha=board_sha)
+          for h in ('placement', 'routing')}
     flat_p, flat_r = st['placement']['flat'], st['routing']['flat']
     laps_p, laps_r = st['placement']['laps'], st['routing']['laps']
     why_p, why_r = st['placement']['why'], st['routing']['why']
@@ -2041,6 +2143,11 @@ def cmd_verdict(a):
            'quality': score.get('quality'),
            'ungraded': sorted(score.get('ungraded') or []),
            'unknown': sorted(score.get('unknown') or []),
+           # WHICH INPUT the board binding came from, published beside it: an
+           # aggregate verdict cannot say which of its inputs moved (#694), and
+           # `null` here is the honest answer for a score with no board_sha and
+           # no --board -- not a passing one.
+           'board_sha': board_sha, 'board_sha_source': board_sha_source,
            # `accepted_laps` is kept and still means accepted laps only; `laps`
            # is what the plateau test counts, and it counts REJECTED laps too
            # -- see _half_state. They differ, so both are published rather than
@@ -2156,6 +2263,26 @@ def cmd_verdict(a):
             f'is legitimate; calling the board finished is not. Itemise every '
             f'remaining blocker with the measurement that proves it.'))
         code = STUCK
+
+    # A DECLARATION MADE ABOUT ANOTHER BOARD, named on every verdict (#963).
+    # Run 29 declared placement exhausted against a board that existed for
+    # eight minutes -- `os-promote-placed` overwrote `frozen.kicad_pcb` nine
+    # seconds after the row was written -- and the claim then outlived its
+    # board and survived three L5 calls, because nothing here read the sha the
+    # row had carried all along. This REPORTS; `_close_out` is where shipping
+    # behind such a claim is refused, because that is where the claim is made
+    # to a reader.
+    for h in ('placement', 'routing'):
+        _sb = st[h].get('declared_stale_board')
+        if _sb:
+            doc['reason'] += (
+                f' DECLARED ABOUT ANOTHER BOARD: the live {h} exhaustion was '
+                f'recorded against board {str(_sb)[:12]}..., and the board '
+                f'being judged is {str(board_sha)[:12]}... (from '
+                f'{board_sha_source}). The claim has outlived the board it was '
+                f'made about. Recover that board and see what changed:'
+                f' converge.py step-back --ledger <this ledger> --to {_sb} '
+                f'--out wk/declared.kicad_pcb')
 
     # LOUD, on every verdict, never only on the one it happened to change.
     # A plateau or an improvement read off two totals that graded different
@@ -2527,6 +2654,13 @@ def build_parser():
     v.add_argument('--ledger', required=True)
     v.add_argument('--score', required=True,
                    help="the current board's score JSON (board_score --json)")
+    v.add_argument('--board',
+                   help='the board being closed out. Optional: the score '
+                        "already carries board_sha and that is read first. "
+                        'Pass it when the score is pre-B4 or hand-built, so an '
+                        'exhaustion declared about a board that no longer '
+                        'exists can still be named. Given BOTH and they '
+                        'disagree, nothing is judged (exit 2).')
     v.add_argument('--budget', type=int, default=100,
                    help='ledger entries this run may write (default 100, the '
                         'figure convergence.md already states)')

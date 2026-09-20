@@ -56,15 +56,19 @@ ALLOWED_COMPARE_SITES = {
     ('loop_driver.py', '_score_board_mismatch'),
 }
 
-#: The driver's own FIXTURE builders hash a board and write its digest into a
-#: payload they then hand to a stage -- that is building the evidence, not
-#: answering the question, and the weaker scan below cannot tell the two apart
-#: from syntax alone. Exempt by name, PRINTED rather than silently skipped, and
-#: deliberately short: a new name here should have to be argued for.
-FIXTURE_BUILDERS = {
-    ('loop_driver.py', '_self_test'),
-    ('loop_driver.py', '_refusal_scenarios'),
-    ('loop_driver.py', '_dump_all'),
+#: Sites that compare a digest they hashed themselves and are NOT this
+#: predicate, each with the question it actually answers. A list like this is
+#: where a guard usually fails, so two things hold it honest: every entry is
+#: PRINTED with its reason on every run, and a new name fails the test until
+#: somebody writes that reason down. "Does this board appear in the ledger" and
+#: "do two ledgers describe the same work" are different questions from "does
+#: this score grade this board", and folding them together would be the
+#: opposite of what #963 is about.
+NOT_THE_PREDICATE = {
+    ('loop_driver.py', '_recorded'):
+        'is this board IN the ledger -- compares to rows\' result_sha',
+    ('loop_driver.py', '_ledger_collision'):
+        'do two ledger files describe the same work -- compares file content',
 }
 
 
@@ -119,40 +123,72 @@ def test_one_place_compares_a_board_digest_to_a_payload():
     print(f"  PASS: {len(found)} digest comparison(s), both expected")
 
 
-def test_no_other_function_reads_board_sha_and_hashes_a_board():
-    """The weaker half of the same fingerprint, for a copy spelled differently.
+def _names_from_sha(fn):
+    """Names bound DIRECTLY to a `sha256_file(...)` result inside `fn`."""
+    out = set()
+    for n in ast.walk(fn):
+        if not isinstance(n, ast.Assign):
+            continue
+        pairs = []
+        if isinstance(n.value, ast.Tuple):
+            for tgt in n.targets:
+                if isinstance(tgt, ast.Tuple) and \
+                        len(tgt.elts) == len(n.value.elts):
+                    pairs += list(zip(tgt.elts, n.value.elts))
+        else:
+            pairs = [(t, n.value) for t in n.targets]
+        for tgt, val in pairs:
+            if isinstance(tgt, ast.Name) and _is_sha_call(val):
+                out.add(tgt.id)
+    return out
 
-    A copy that assigns the digest first (`sha = sha256_file(b)` then
-    `if sha != psha`) has no Call inside its Compare and slips past the test
-    above. Holding "hashes a board AND reads a payload's board_sha" to the same
-    two functions catches that spelling too.
+
+def test_no_other_function_compares_a_stored_digest():
+    """The other spelling of the same copy, caught by dataflow not by keywords.
+
+    A copy that assigns the digest first -- `sha = sha256_file(b)` then
+    `if sha != psha:` -- has no Call inside its Compare and walks straight past
+    the test above.
+
+    The obvious cheaper scan, "this function hashes a board AND mentions
+    `board_sha`", is what an earlier draft of this file did, and it was wrong
+    in both directions on the real tree: `cmd_record` hashes a LENS FILE for
+    `lens_source` and mentions `board_sha` in a dict it writes, and
+    `cmd_verdict` hashes `--board` and reads the score's key without ever
+    comparing the two. Neither is a copy of the predicate. Requiring the
+    COMPARISON is what separates deciding from mentioning.
     """
     hits = set()
     for rel, path in (('py_placer/converge.py', CONVERGE),
                       ('loop_driver.py', DRIVER)):
-        tree = _tree(path)
-        for fn in ast.walk(tree):
+        for fn in ast.walk(_tree(path)):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            body = ast.walk(fn)
-            hashes = reads = False
-            for n in body:
-                if _is_sha_call(n):
-                    hashes = True
-                elif isinstance(n, ast.Constant) and n.value == 'board_sha':
-                    reads = True
-            if hashes and reads:
-                hits.add((rel, fn.name))
-    assert hits, "scan matched nothing"
-    exempt = sorted(hits & FIXTURE_BUILDERS)
+            held = _names_from_sha(fn)
+            if not held:
+                continue
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Compare) and any(
+                        isinstance(p, ast.Name) and p.id in held
+                        for p in [n.left] + list(n.comparators)):
+                    hits.add((rel, fn.name))
+    assert hits, ("the dataflow scan matched nothing at all -- it is supposed "
+                  "to reach the ledger comparisons below, and a silently "
+                  "empty walk reads exactly like a pass")
+    exempt = sorted(hits & set(NOT_THE_PREDICATE))
     for site in exempt:
-        print(f"    exempt (builds fixtures, does not decide): {site[1]}")
-    extra = hits - ALLOWED_COMPARE_SITES - FIXTURE_BUILDERS
+        print(f"    not the predicate -- {site[1]}: {NOT_THE_PREDICATE[site]}")
+    extra = hits - ALLOWED_COMPARE_SITES - set(NOT_THE_PREDICATE)
     assert not extra, (
-        f"{sorted(extra)} both hash a board and read a payload's board_sha -- "
-        f"that is the predicate, and it lives in score_board_binding")
-    print(f"  PASS: {len(hits) - len(exempt)} deciding function(s), "
-          f"{len(exempt)} exempt")
+        f"{sorted(extra)} compare a digest they hashed themselves. If that is "
+        f"'does this score grade this board', call score_board_binding; if it "
+        f"is a different question, say which in NOT_THE_PREDICATE.")
+    missing = set(NOT_THE_PREDICATE) - hits
+    assert not missing, (
+        f"{sorted(missing)} no longer compare a digest -- an exemption for a "
+        f"site that does not exist is a note nobody will ever re-read")
+    print(f"  PASS: {len(hits) - len(exempt)} assign-then-compare site(s) in "
+          f"scope, {len(exempt)} answering another question")
 
 
 def test_the_driver_asks_the_one_function_everywhere_it_used_to_inline():
@@ -288,7 +324,7 @@ def test_a_driver_that_cannot_answer_says_so():
 
 TESTS = [
     test_one_place_compares_a_board_digest_to_a_payload,
-    test_no_other_function_reads_board_sha_and_hashes_a_board,
+    test_no_other_function_compares_a_stored_digest,
     test_the_driver_asks_the_one_function_everywhere_it_used_to_inline,
     test_the_binding_is_four_valued,
     test_unknown_never_reads_as_a_mismatch,

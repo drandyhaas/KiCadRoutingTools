@@ -2099,11 +2099,19 @@ def _verdict(a):
     # another (a missing ledger reads as empty history, which is a confident
     # CONTINUE derived from nothing). Same fix shape as check_complete's
     # relative-path repair; run-17 audit, D4.
+    # `--board` (#963): the score's own board_sha is what converge reads first,
+    # and the SCORE-MISMATCH check above has already proven it equals this
+    # board -- so this is for the pre-B4 or hand-built score that carries no
+    # sha at all, where it is the only way an exhaustion declared about a board
+    # that no longer exists can be named. Absent on both is unanswerable and
+    # invalidates nothing.
+    _bd = (['--board', os.path.abspath(a.board)]
+           if a.board and os.path.isfile(a.board) else [])
     p = subprocess.run(
         [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_placer', 'converge.py'),
          'verdict', '--ledger', os.path.abspath(a.ledger),
          '--score', os.path.abspath(a.score),
-         '--budget', str(a.budget), '--flat', str(a.flat)],
+         '--budget', str(a.budget), '--flat', str(a.flat)] + _bd,
         capture_output=True, text=True, encoding='utf-8', errors='replace',
         cwd=ROOT)
     try:
@@ -2329,6 +2337,56 @@ tell a finished run from a stalled one.
     # again branch, and gating it would put the most expensive instrument in
     # the repo into the loop that runs most often, to say nothing the score has
     # not already said.
+    # A DECLARATION MADE ABOUT ANOTHER BOARD DOES NOT SHIP (#963). converge
+    # REPORTS the staleness on every verdict and changes no `why` -- a sha
+    # cannot tell "rewrote the file, same poses" from "replaced the placement",
+    # and every freeze row changes it by construction. But this branch is where
+    # the claim is made TO A READER, and "this half has nothing left" about a
+    # board that no longer exists is the claim run 29 shipped: its row 29
+    # declared placement exhausted against a board `os-promote-placed`
+    # overwrote nine seconds later, and it then survived three visits here.
+    #
+    # NOT waivable, and not by omission: CLOSE_CHECKS' own comment says `shape`
+    # and `binding` are absent because "a malformed or mis-bound document is
+    # the wrong document, and there is nothing to accept". A declaration bound
+    # to another board is the same kind of thing, and the escape is cheaper
+    # than a waiver -- re-record it against the board being shipped.
+    for _h in ('placement', 'routing'):
+        _stale = (doc.get(_h) or {}).get('declared_stale_board')
+        if _stale:
+            # Read out HERE rather than inside the f-string: `--dump-refusals`
+            # holds every 12-character literal a refusal can print to appearing
+            # in the rendered text, and a dict KEY spelled inside the call is a
+            # literal that is never printed.
+            _ship = str(doc.get('board_sha'))
+            _src = doc.get('board_sha_source')
+            _said = (doc.get(_h) or {}).get('declared', '')
+            return err(
+                f'The {_h} half is DECLARED EXHAUSTED about a different '
+                f'board.\n\n'
+                f'  declared about : {str(_stale)[:16]}...\n'
+                f'  shipping       : {_ship[:16]}... (from {_src})\n'
+                f'  reason on the record: {_said}\n\n'
+                f'"There is nothing further for this half" is a claim about a '
+                f'BOARD, and this one has outlived the board it was made '
+                f'about. Measured (run 29): a placement exhaustion was '
+                f'recorded against a board that existed for eight minutes, '
+                f'the file was overwritten nine seconds later, and the claim '
+                f'survived three close-out calls into the run\'s terminal '
+                f'record.\n\nSee what changed, then say it again about the '
+                f'board you are shipping:\n\n'
+                f'  python3 -X utf8 py_placer/converge.py step-back --ledger '
+                f'{a.ledger} \\\n'
+                f'      --to {_stale} --out wk/declared.kicad_pcb\n'
+                f'  python3 -X utf8 py_placer/converge.py record --ledger '
+                f'{a.ledger} \\\n'
+                f'      --board {a.board} --kind systemic --exhausted {_h} \\\n'
+                f'      --exhausted-reason "<what is still spent, on THIS '
+                f'board>"\n\n'
+                f'There is deliberately no --accept-unclosed token for this: a '
+                f'claim bound to the wrong board is the wrong claim, not a '
+                f'residue to accept, and re-recording it costs one command.')
+
     _refusal = _close_out(a, name)
     if _refusal:
         return _refusal
@@ -3419,6 +3477,15 @@ def _refusal_scenarios(tmp):
     led = ledger('ledger.jsonl', [row])
     flat = ledger('flat.jsonl',
                   [dict(row, kind='placement')] * 6 + [row] * 6)
+    # #963: both halves declared exhausted about a board that is not the one
+    # being shipped. A declaration alone makes its half flat, so this reaches
+    # a TERMINAL branch -- which is the only branch that refuses on it.
+    stale_decl = ledger('stale_decl.jsonl', [
+        {'kind': 'systemic', 'accepted': True, 'result_sha': 'f' * 64,
+         'exhausted': {'half': 'placement', 'reason': 'every lever spent'}},
+        {'kind': 'systemic', 'accepted': True, 'result_sha': 'f' * 64,
+         'exhausted': {'half': 'routing', 'reason': 'the pair is parity-fixed'}},
+    ])
     _REPORT = {'blocking': 0, 'oob_pad_count': 0, 'buildable': True,
                'verdict': 'buildable (blocking 0)', 'locked_contacts': 0,
                'pad_conflicts': 0, 'hole_conflicts': 0, 'clearance': 0.2,
@@ -3690,6 +3757,13 @@ def _refusal_scenarios(tmp):
          ['--board', board, '--ledger', missing, '--score', score,
           '--routing-close', close],
          lambda a: _close_out(a, 'DONE-EXHAUSTED') or ''),
+        # #963. Reached through the STAGE, not through a gate lambda: the
+        # refusal is in l5's terminal branch ahead of `_close_out`, and the
+        # point is that a run which satisfies every close-out check still does
+        # not ship behind a claim about another board.
+        ('a ship behind an exhaustion declared about another board',
+         ['--board', board, '--ledger', stale_decl, '--score', score,
+          '--routing-close', close]),
     ]
 
 
