@@ -480,11 +480,18 @@ def score_board_binding(board, payload, board_sha=None):
     are a policy each caller may legitimately choose; the PREDICATE is not, and
     it is the predicate that had drifted into five copies.
 
-    THREE-VALUED RATHER THAN A BOOL, because `unbound` is a different operator
+    FOUR-VALUED RATHER THAN A BOOL, because `unbound` is a different operator
     action from `other`: a payload with no `board_sha` at all is a pre-B4
     board_score or a hand-built JSON, and `record` discloses that in its own
     sentence. Collapsing it into False deletes that disclosure silently, which
     is why `_grades_another_board` below is a WRAPPER and not the interface.
+
+    WHAT THIS DOES NOT COVER, said here rather than implied: it is the only
+    implementation in `converge.py` and `loop_driver.py`, and those are the two
+    files `tests/test_963_one_binding_predicate.py` scans. There is a sibling
+    of the same shape in `py_tools/render_placement.py` (~:570, ~:641-651),
+    hand-rolled on `hashlib` and degrading the same way, which #963 does not
+    touch and no gate here can see.
 
     `unknown` is "I could not tell" -- no board, unreadable, board_store
     unimportable -- and it must NEVER read as a mismatch. A check that switched
@@ -492,8 +499,8 @@ def score_board_binding(board, payload, board_sha=None):
     exists to catch.
 
     `board_sha` lets a caller that has ALREADY hashed the board hand the digest
-    in (`cmd_record` has it from `store.put`), so the file is not read twice and
-    there is no window between the two reads in which it could change.
+    in (`cmd_record` has it from `store.put`), so the board is not read twice
+    for one answer.
     """
     psha = payload.get('board_sha') if isinstance(payload, dict) else None
     if not psha:
@@ -519,9 +526,9 @@ def _grades_another_board(board, score):
     verdict about board A against board B's numbers would be the same class of
     mistake it exists to catch.
 
-    Kept as a one-line wrapper over `score_board_binding` rather than deleted:
-    `tests/mutate_904.py` anchors on its call site, and the bool is the shape
-    the lens-vs-score skip at cmd_record actually wants.
+    Kept as a one-line wrapper over `score_board_binding` rather than deleted
+    because the bool is the shape its one caller wants -- the lens-vs-score
+    skip in `cmd_record`, which needs "is this foreign" and nothing finer.
     """
     return score_board_binding(board, score)[0] == 'other'
 
@@ -1254,8 +1261,8 @@ def cmd_record(a):
         # computed handed in: this used to re-parse `a.score` behind a bare
         # `except Exception` even though `_score_doc` was already parsed and
         # validated above, so the mismatch was judged on a second, weaker read
-        # of the same bytes. Passing `board_sha=sha` also closes the window in
-        # which the file could change between the two hashes.
+        # of the same string. Passing `board_sha=sha` also spares the board a
+        # second hash -- `store.put` computed exactly this digest one line up.
         _binding, _payload_sha = score_board_binding(a.board, _score_doc,
                                                      board_sha=sha)
         if _binding == 'unbound':

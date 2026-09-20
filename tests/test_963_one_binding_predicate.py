@@ -29,8 +29,19 @@ lists.py`, which refuses a tenth sibling list for the same reason.
 
 The scan asserts it FOUND the expected sites before it asserts it found nothing
 else: a silently-empty walk reads exactly like a pass.
+
+WHAT THIS GATE CANNOT SEE, named rather than implied:
+
+  * It scans TWO FILES. `py_tools/render_placement.py` (~:570, ~:641-651)
+    holds a sixth site of the same shape -- hand-rolled on `hashlib`, matching
+    / mismatch-skips / no-sha-notes -- and degrades the same way. #963 does not
+    touch it, and widening the scan to the whole tree would make every
+    legitimate content hash in the repo a finding.
+  * It is syntax, not semantics. A copy that routes the compare through a
+    helper of its own, or through a dict lookup, is invisible.
 """
 import ast
+import contextlib
 import io
 import os
 import sys
@@ -87,9 +98,23 @@ def _enclosing_functions(tree):
 
 
 def _is_sha_call(node):
-    """A direct call to board_store.sha256_file, under any import alias."""
-    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id.lstrip('_').startswith('sha256_file'))
+    """A call that produces a board digest, in any spelling used in this repo.
+
+    Three, and the third was a measured blind spot in the first draft of this
+    file: `sha256_file(p)` under any import alias, `hashlib.sha256(...)`, and
+    `....hexdigest()`. The hashlib pair is not hypothetical -- it is exactly
+    how `py_tools/render_placement.py` and
+    `.claude/skills/.../scripts/board_score.py` already spell it, so a copy
+    pasted from either would have walked straight past a scan that only knew
+    `sha256_file`.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id.lstrip('_').startswith('sha256_file')
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr in ('sha256_file', 'sha256', 'hexdigest')
+    return False
 
 
 def test_one_place_compares_a_board_digest_to_a_payload():
@@ -305,21 +330,80 @@ def test_the_local_fallback_agrees_with_the_shared_predicate():
 
 
 def test_a_driver_that_cannot_answer_says_so():
-    """The disclosure exists and reaches a stage's text."""
+    """The disclosure is ARMED by the real path, not only assertable.
+
+    The first draft of this asserted `_binding_note()` with the global set by
+    hand, which proves the formatter works and says nothing about whether
+    anything ever sets it. A verifier then measured that nothing did: converge
+    answering `unknown` -- board_store missing, or the read raising -- was
+    discarded silently, and with board_store blocked L5 emitted a terminal
+    DONE-EXHAUSTED close-out at exit 0 on a score whose board_sha was
+    `deadbeef...`. So this drives the predicate and reads the global after.
+    """
     sys.path.insert(0, os.path.dirname(DRIVER))
     import loop_driver as L
-    real_blind, L._BINDING_BLIND = L._BINDING_BLIND, 'a simulated import error'
+    with tempfile.TemporaryDirectory() as tmp:
+        b = os.path.join(tmp, 'b.kicad_pcb')
+        io.open(b, 'w', encoding='utf-8').write('(kicad_pcb)\n')
+        payload = {'board_sha': 'deadbeef' * 8}
+
+        class _Blind:                       # converge that cannot hash
+            @staticmethod
+            def score_board_binding(board, doc, board_sha=None):
+                return ('unknown', (doc or {}).get('board_sha'))
+
+        real_mod, real_blind = L._converge_module, L._BINDING_BLIND
+        L._BINDING_BLIND = None
+        L._converge_module = lambda: _Blind
+        try:
+            assert L._score_board_mismatch(b, payload) is None, \
+                'an unanswerable question must still refuse nothing'
+            assert L._BINDING_BLIND, (
+                'converge answered `unknown` and the driver said nothing -- '
+                'that is the gate switching itself off in silence')
+            note = L._binding_note()
+            assert 'could NOT check' in note, note
+            assert L._BINDING_BLIND in note, note
+        finally:
+            L._converge_module, L._BINDING_BLIND = real_mod, real_blind
+
+        # And a converge WITHOUT the predicate is a fallback, not a traceback.
+        class _Old:
+            pass
+        real_mod = L._converge_module
+        try:
+            sys.modules['converge_stub_old'] = _Old
+            L._converge_module = (
+                lambda: None if not hasattr(_Old, 'score_board_binding')
+                else _Old)
+            assert L._score_board_mismatch(b, payload) == payload['board_sha']
+        finally:
+            L._converge_module = real_mod
+            sys.modules.pop('converge_stub_old', None)
+    # AND IT REACHES REAL STAGE TEXT. Counting `{_binding_note()}` in the
+    # source would prove the call sites exist and nothing about whether a
+    # reader ever sees the sentence; `--dump-all` renders every arm with its
+    # guards satisfied, which is the text a stage actually hands over.
+    real_blind = L._BINDING_BLIND
+    L._BINDING_BLIND = 'a simulated blindness'
     try:
-        note = L._binding_note()
-        assert 'could NOT check' in note, note
-        assert 'a simulated import error' in note, note
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = L.main(['--dump-all'])
+        out = buf.getvalue()
     finally:
         L._BINDING_BLIND = real_blind
+    assert rc == 0, 'the disclosure must not push an arm past its ceiling'
+    assert out.count('could NOT check') >= 3, (
+        'the note is defined but barely rendered -- an instrument with no '
+        f'production caller reports nothing (seen {out.count("could NOT check")})')
+    assert 'a simulated blindness' in out, out[:400]
+
     src = io.open(DRIVER, encoding='utf-8').read()
-    assert src.count('{_binding_note()}') >= 3, (
-        "the disclosure is defined but barely called -- an instrument with no "
-        "production caller reports nothing")
-    print("  PASS: the blind case is disclosed, and the note has callers")
+    assert 'hasattr(converge' in src, (
+        'the lazy import must check the ATTRIBUTE, not only the import: an '
+        'older converge otherwise turns a refusal into a traceback')
+    print("  PASS: the blind case is armed by the real path and rendered")
 
 
 TESTS = [

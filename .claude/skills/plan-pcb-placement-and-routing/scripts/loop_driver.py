@@ -180,27 +180,34 @@ def _guard_route_render(a):
 
 
 #: Why the score-to-board binding could not be checked from here, when it could
-#: not be. Set only on an IMPORT failure -- never on a merely absent board_sha,
-#: which is answerable and means "unbound". Read by `_binding_note` so that a
-#: gate switching itself off is DISCLOSED rather than silent: converge's own
-#: rule for the twin case is that "an unannounced skip is a door".
+#: not be -- an import that failed, or a hash that raised. NEVER set for a
+#: merely absent `board_sha`, which is answerable and means "unbound". Read by
+#: `_binding_note` so that a gate switching itself off is DISCLOSED rather than
+#: silent: converge's own rule for the twin case is that "an unannounced skip
+#: is a door".
 _BINDING_BLIND = None
 
 
 def _converge_module():
-    """The converge module, or None. Imported LAZILY and never at module scope.
+    """converge, or None -- and only when it has the predicate we want.
 
-    `_refusal_sites` and `_passthrough_count` parse this file with `ast`, and
-    `--list` / `--dump-all` / `--dump-refusals` all run before any stage, so a
+    Imported LAZILY and never at module scope: `_refusal_sites` and
+    `_passthrough_count` parse this file with `ast`, and `--list` /
+    `--dump-all` / `--dump-refusals` all run before any stage, so a
     module-scope import failure would take the whole driver down rather than
     one check.
+
+    THE ATTRIBUTE IS CHECKED, NOT ONLY THE IMPORT. Guarding the import alone
+    turns an older or shadowed converge into an AttributeError traceback at
+    exit 1, on a path whose whole contract is that it degrades to a refusal --
+    which is worse than the duplication it replaced.
     """
     try:
         sys.path.insert(0, ROOT)
         import converge                                         # noqa: PLC0415
-        return converge
     except Exception:                                           # noqa: BLE001
         return None
+    return converge if hasattr(converge, 'score_board_binding') else None
 
 
 def _score_board_mismatch(board, payload):
@@ -233,13 +240,25 @@ def _score_board_mismatch(board, payload):
     _cv = _converge_module()
     if _cv is not None:
         _st, _psha = _cv.score_board_binding(board, payload)
+        if _st == 'unknown':
+            # THE BLIND CASE, and the first draft of this threw it away. By
+            # here `board` is a real file and `psha` is truthy, so converge can
+            # answer `unknown` ONLY because board_store could not be imported
+            # or the hash itself raised. Returning None is right -- an
+            # unanswerable question refuses nothing -- but saying nothing is
+            # not: with board_store blocked, a verifier measured L5 emitting a
+            # terminal DONE-EXHAUSTED close-out at exit 0 on a score whose
+            # board_sha was `deadbeef...`, and the driver mentioned it nowhere.
+            _BINDING_BLIND = ('the board could not be hashed from here -- '
+                              'board_store is missing, or reading the board '
+                              'raised')
         return _psha if _st == 'other' else None
     try:
         from board_store import sha256_file
         return None if sha256_file(board) == psha else psha
-    except Exception:                                           # noqa: BLE001
-        _BINDING_BLIND = ('neither converge nor board_store could be imported '
-                          'from this driver')
+    except Exception as exc:                                    # noqa: BLE001
+        _BINDING_BLIND = (f'neither converge nor board_store could answer '
+                          f'from this driver ({type(exc).__name__})')
         return None
 
 
