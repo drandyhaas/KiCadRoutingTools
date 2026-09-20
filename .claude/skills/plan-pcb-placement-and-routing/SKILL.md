@@ -224,9 +224,19 @@ by their process: write each one's brief to `<workdir>/watch/<name>_prompt.md`
 before the first tool runs — the mtime is the evidence that the brief was not
 tailored to the outcome — then spawn ONE agent with one section per brief at the
 end, on a smaller model, fed `REPORT.md`, `cmd_timing.jsonl` and `ledger.jsonl`
-first and the raw logs only when a section names one. `tests/stress/RUNBOOK.md`
-has the mechanics; `tests/stress/run_watch.py` is the part that costs nothing to
-leave running and should be started at the beginning.
+first and the raw logs only when a section names one, into ONE file with a
+section per brief — not one file per brief, and never over a `watch/<name>.md`
+that already exists. `tests/stress/RUNBOOK.md` has the mechanics;
+`tests/stress/run_watch.py` is the part that costs nothing to leave running and
+should be started at the beginning.
+
+**This is the only specification of the watcher mechanism, and a run prompt
+defers to it.** A run prompt names the briefs, the work dir and the subject; a
+run prompt that re-specifies the spawn count, the trigger or the model is a
+second specification, and the two have already disagreed on all three. Measured
+(run 29): four watchers were dispatched twice over, `watch/cheats.md` was
+written twice with the second overwriting the first, and `tool_usage.md` — the
+brief whose findings changed the shipped board — never landed at all.
 
 ### The seven criteria, MEASURED and written down
 
@@ -348,9 +358,13 @@ written out of turn.
    started.
 6. **The report** — `REPORT.md`, written AFTER `DONE` so it can carry the two
    verdicts that only exist by then: the fence audit's and the provenance
-   audit's, each quoted with its exit code. That makes the report the one
-   artifact the cheat watcher cannot audit, which is exactly why it quotes
-   those two verbatim instead of summarising them. And it compares on TWO axes
+   audit's, each quoted with its exit code. Then `echo done > <workdir>/
+   REPORT_DONE`: the cheat watcher used to exit at `DONE`, which made the
+   report the one artifact it could not audit; it waits for this second marker
+   now, re-runs the board audits if `DONE` changed in between, and checks that
+   the sha the report names as shipped is the sha those audits examined. Run 29
+   fails that check — its "What ships" table names a board superseded 29
+   minutes before the report was written. And the report compares on TWO axes
    or it is not a report:
    - **against the human**, when a human-routed reference exists:
      `compare_to_original.py --ours <final> --orig <reference> --json` (vias,

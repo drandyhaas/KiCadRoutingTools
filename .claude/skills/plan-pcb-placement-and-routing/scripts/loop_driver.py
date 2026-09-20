@@ -2699,17 +2699,24 @@ Then, and only then, write the DONE marker:
   echo done > {work}/DONE
 
 DONE means THE COPPER IS FROZEN, not that the run is over. `run_watch.py cheats`
-blocks on this file, runs the fence and provenance audits when it appears, and
-then exits -- so a marker written early declares a run finished while its own
-auditors have not started, and one written before the row above claims a
-close-out that is not in the ledger. Cite nothing in it that is not already on
-disk.
+blocks on this file and runs the fence and provenance audits when it appears --
+so a marker written early declares a run finished while its own auditors have
+not started, and one written before the row above claims a close-out that is
+not in the ledger. Cite nothing in it that is not already on disk, and do not
+rewrite it: run 29 did, 29 minutes after the audits had read the board it then
+superseded, and both verdicts in its log are about the wrong board.
 
 Report LAST, so the report can carry the two verdicts that only exist after
 DONE: the fence audit's and the provenance audit's, each quoted with its exit
-code. That makes the report the one artifact the cheat watcher cannot audit --
-it has exited by then -- which is exactly why it quotes those two verbatim
-instead of summarising them.
+code. Then write the SECOND marker:
+
+  echo done > {work}/REPORT_DONE
+
+That is what lets the cheat watcher audit the one artifact it was documented as
+unable to audit -- it used to exit at DONE, so the report was written after its
+last reader left. It waits for this file now, re-runs the board audits if DONE
+changed in between, and checks that the sha the report names as shipped is the
+sha those audits actually examined.
 
 Report, per half, the number and the instrument beside it; say how many times
 the loop turned and why each turn happened; and name anything UNEXAMINED rather
@@ -3296,7 +3303,10 @@ _ARM_CEILING = {
     'L1': 105, 'L1 (delegated)': 105, 'L1 (inline)': 25,
     'L2': 225, 'L2 (delegated)': 225, 'L2 (inline)': 95,
     'L3': 84, 'L4': 51, 'L5': 40,
-    'L5 (DONE-EXHAUSTED)': 170, 'L5 (STUCK)': 170, 'L5 (BUDGET)': 170,
+    # 170 -> 174 (#963 item E): the REPORT_DONE marker and the sentence
+    # saying what it is for, plus room for the 2-line blind note.
+    # Measured 171 clear, 173 blind.
+    'L5 (DONE-EXHAUSTED)': 174, 'L5 (STUCK)': 174, 'L5 (BUDGET)': 174,
 }
 
 STAGES = {'L1': l1, 'L2': l2, 'L3': l3, 'L4': l4, 'L5': l5}

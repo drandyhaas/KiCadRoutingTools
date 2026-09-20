@@ -78,9 +78,15 @@ def test_the_verifier_is_dispatched_before_the_row_it_decides():
         'record': text.index('--final --stop-condition'),
         'done': text.index('DONE marker'),
         'report': text.index('Report LAST'),
+        # #963: the SECOND marker, and it is last for the same reason the
+        # report is -- it is what says the report has stopped moving. Run 29's
+        # cheat watcher recorded REPORT.md growing 287 -> 393 lines while it
+        # read it, and the finished file is 686.
+        'report_done': text.index('REPORT_DONE'),
     }
     order = [k for k, _ in sorted(marks.items(), key=lambda kv: kv[1])]
-    assert order == ['verifier', 'record', 'done', 'report'], (order, marks)
+    assert order == ['verifier', 'record', 'done', 'report',
+                     'report_done'], (order, marks)
     # tee_cmd wraps the record, so the wrapper must come first on that line.
     assert text.index('tee_cmd.py') < text.index('py_placer/converge.py record')
     # ...and the old instruction must be gone: it told the executor to paste a
