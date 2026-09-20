@@ -113,10 +113,25 @@ class Movie:
         self.totals = ''
         #: Set by `build_boards` when the layout reserved a rail.
         self.split_caption = False
+        #: Set by `build_boards` when the layout reserved a LOWER BOX. It
+        #: gates the per-frame copper snapshot below: retaining
+        #: `tuple(self.live_s.values())` on every frame costs
+        #: O(frames x segments) references (measured: 5961 refs / 48 KB on a
+        #: 7-frame 1701-segment reveal, and it grows with both), and 'legacy'
+        #: -- the default -- never draws a panel at all.
+        self.want_panel = False
+        #: True when the board's parts are still stacked in a pile, from
+        #: `assess_placement`. It picks the box's SEEDING content, and it is
+        #: the only thing that can: a label cannot say whether the parts have
+        #: been seated yet.
+        self.unplaced = False
         #: The layer the current event is on, so the strip can light it.
         self.active_layer = None
         self.layers = layers
         self.rip_hold = rip_hold
+        #: `{class: (seated, total)}` for the box's inventory content,
+        #: computed ONCE over the board rather than per frame.
+        self.inventory = {}
         self.live_s: Dict[Tuple, _Seg] = {}
         self.live_v: Dict[Tuple, _Via] = {}
         self.frames: List = []
@@ -159,7 +174,14 @@ class Movie:
                             # #1020: the copper as it stands on THIS frame, so
                             # the per-layer strip grows with the film instead
                             # of showing the finished board from frame one.
-                            'live': tuple(self.live_s.values()),
+                            # ONLY when a box exists to draw it in -- see
+                            # `want_panel`.
+                            'live': (tuple(self.live_s.values())
+                                     if self.want_panel else ()),
+                            'live_v': (tuple(self.live_v.values())
+                                       if self.want_panel else ()),
+                            'unplaced': self.unplaced,
+                            'inventory': self.inventory,
                             'active': self.active_layer})
 
     def _frame(self, hl_s, hl_v, color, label, mark='solid'):
@@ -457,6 +479,28 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         if geom_out is not None:
             geom_out.append(_g)
     m = Movie(r, layers, rip_hold=rip_hold)
+    # #1020: the lower box's non-routing contents, decided ONCE. `want_panel`
+    # also gates the per-frame copper snapshot, so a legacy film -- which has
+    # no box -- retains nothing.
+    m.want_panel = bool(geom_out and geom_out[0].panel is not None
+                        and geom_out[0].panel.h > 0)
+    if m.want_panel:
+        import render_panels as _rp
+        _unseated = ()
+        try:
+            # py_placer, which py_router does not put on sys.path; a movie is
+            # not worth failing over a placement import, and without it the
+            # inventory simply counts every part as seated.
+            from placement.placement_state import assess_placement
+            _st = assess_placement(r.pcb, final)
+            m.unplaced = bool(_st.unplaced)
+            _unseated = _st.stacked_suspect_refs
+        except Exception:                                      # noqa: BLE001
+            pass
+        try:
+            m.inventory = _rp.inventory_counts(r.pcb, _unseated)
+        except Exception:                                      # noqa: BLE001
+            pass
     # #1019. THE RAIL COUNTS LAPS, NOT STEPS. A loop revisits the same step, so
     # `step 2 - route` cannot say whether this is the first attempt or the
     # fourth. `placement_chain` labels its steps `round N` / `round N routed`,
@@ -623,14 +667,22 @@ def _compose_into_frame(frames, geom, r, chrome=None):
         _draw_chrome(frames, geom, r, chrome)
 
 
-def _draw_panel(f, d, geom, r, c):
-    """The lower box, whichever of its four contents this phase asks for."""
-    if geom.panel is None or geom.panel.h <= 0:
+def _draw_panel(d, geom, r, c):
+    """The lower box, whichever of its four contents this phase asks for.
+
+    Four REAL contents, not one content and three captions: the phase-1
+    verifier measured that `draw_inventory` had no caller anywhere in the repo
+    and that `phase_for(unplaced=...)` was never called from production, so
+    'seeding' could not occur in a film at all and the other two branches drew
+    a literal string. Each branch now draws data the film already holds.
+    """
+    if geom.panel is None or geom.panel.h <= 0 or geom.panel.w <= 0:
         return
     try:
         import render_panels
         th = getattr(r, 'theme', None)
-        phase = render_panels.phase_for(c.get('event', ''))
+        phase = render_panels.phase_for(c.get('event', ''),
+                                        unplaced=bool(c.get('unplaced')))
         box = geom.panel
         d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
                     fill=th.rgb('chrome_panel') if th else (14, 14, 18))
@@ -639,14 +691,17 @@ def _draw_panel(f, d, geom, r, c):
                 d, box, bounds=r.bounds, segments=c.get('live', ()),
                 layers=list(r.copper_layers), palette=r.palette, theme=th,
                 active=c.get('active'))
+        elif phase == 'bookend':
+            render_panels.draw_summary(
+                d, box, theme=th,
+                lines=render_panels.board_summary(
+                    r.pcb, c.get('live', ()), c.get('live_v', ())))
         else:
-            from route_render import load_font
-            font = load_font(max(9, int(box.h * 0.12)))
-            d.text((box.x + 8, box.y + 6),
-                   {'bookend': 'the board', 'placement': 'what moved',
-                    'seeding': 'still in the pile'}.get(phase, phase),
-                   font=font,
-                   fill=th.rgb('chrome_text_dim') if th else (150, 150, 150))
+            inv = c.get('inventory') or {}
+            done = sum(a for a, _b in inv.values())
+            tot = sum(b for _a, b in inv.values())
+            render_panels.draw_inventory(d, box, counts=inv, placed=done,
+                                         total=tot, theme=th)
     except Exception:                                          # noqa: BLE001
         pass
 
@@ -667,7 +722,7 @@ def _draw_chrome(frames, geom, r, chrome):
     for i, f in enumerate(frames):
         c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
         d = ImageDraw.Draw(f)
-        _draw_panel(f, d, geom, r, c)
+        _draw_panel(d, geom, r, c)
         render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
                                 c.get('rail_right', ''), theme=th,
                                 progress=i / float(n), ticks=ticks)

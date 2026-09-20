@@ -18,7 +18,21 @@ What this file pins:
     on the no-stage path, so a strip of ten small boards cannot construct ten
     of them;
   * **the counts are the copper**, not a decoration -- a cell that says `390`
-    has 390 segments on that layer;
+    has 390 segments on that layer. Asserted against what `draw_layer_strip`
+    REPORTS HAVING DRAWN, not against a tally re-derived here. The phase
+    verifier measured why: the first version of this check built `want` from
+    `pcb.segments` and never read the drawing, so a mutant stamping `cnt + 7`
+    on every cell and a mutant counting EVERY segment on the board in EVERY
+    cell both survived while it printed "PASS: every cell counts its own
+    layer";
+  * **a count that would touch the layer name is dropped, not overprinted**.
+    `CELL_MIN_W` bounds the cell width; nothing bounded the text, so at the
+    widths this feature actually produces the count was stamped on top of the
+    name (+23 px of overlap in the 180 px case below, +25 px at `CELL_MIN_W`
+    exactly);
+  * **all four contents are reachable and draw**, because three of them were
+    a literal string and one of them -- 'seeding' -- could not occur in a real
+    film at all: nothing in production passed `unplaced`;
   * **cells shrink in NUMBER, not below legibility**. A cell too small to show
     a route costs pixels and answers nothing;
   * **the box rect never changes between phases**, which is the whole reason
@@ -65,10 +79,11 @@ def _strip(box_w=560, box_h=110, n_layers=None):
     img = Image.new('RGB', (box_w, box_h + 20), RT.DARK.rgb('ground'))
     d = ImageDraw.Draw(img)
     box = FL.Box(0, 10, box_w, box_h)
-    n = RP.draw_layer_strip(d, box, bounds=r.bounds, segments=pcb.segments,
-                            layers=layers, palette=r.palette, theme=RT.DARK,
-                            active=layers[0] if layers else None)
-    return img, n, layers, pcb, r
+    cells = RP.draw_layer_strip(d, box, bounds=r.bounds,
+                                segments=pcb.segments, layers=layers,
+                                palette=r.palette, theme=RT.DARK,
+                                active=layers[0] if layers else None)
+    return img, cells, layers, pcb, r
 
 
 def test_the_strip_builds_no_second_renderer():
@@ -103,33 +118,103 @@ def test_the_strip_builds_no_second_renderer():
 
 
 def test_the_counts_are_the_copper():
+    """Asserted on what was DRAWN. The previous version re-derived the counts
+    here and then compared them to nothing at all."""
     _mark = len(_FAIL)
-    _img, n, layers, pcb, _r = _strip()
+    _img, cells, layers, pcb, _r = _strip(box_w=900)
     want = {}
-    for s in pcb.segments:
-        want[s.layer] = want.get(s.layer, 0) + 1
-    if n < 1:
+    for sg in pcb.segments:
+        want[sg.layer] = want.get(sg.layer, 0) + 1
+    if not cells:
         fail('the strip drew no cells at all')
         return
-    # the function draws the count; assert the SOURCE agrees, which is what a
-    # reader of the picture is trusting
-    total = sum(want.get(ln, 0) for ln in layers[:n])
-    if total <= 0:
-        fail('BROKEN: the fixture board has no copper on the drawn layers, so '
-             'this test cannot tell a right count from a wrong one')
+    if sum(want.get(c.layer, 0) for c in cells) <= 0:
+        fail('BROKEN TEST: the fixture board has no copper on the drawn '
+             'layers, so this cannot tell a right count from a wrong one')
         return
-    print('    %d cells, %d segments across them (%s)'
-          % (n, total, ', '.join('%s=%d' % (ln.replace('.Cu', ''),
-                                            want.get(ln, 0))
-                                 for ln in layers[:min(n, 4)])))
+    for c in cells:
+        true = want.get(c.layer, 0)
+        # the STRING that was stamped, not the tally behind it
+        if c.count_text and c.count_text != str(true):
+            fail('%s: the cell drew %r, the board has %d segment(s) on that '
+                 'layer' % (c.layer, c.count_text, true))
+        if c.lines != true:
+            fail('%s: %d line(s) were stroked for %d segment(s) -- a cell is '
+                 'counting or drawing copper that is not its own'
+                 % (c.layer, c.lines, true))
+    stamped = [c for c in cells if c.count_text]
+    if len(stamped) != len(cells):
+        fail('a 900 px box dropped %d count(s); every cell there has room'
+             % (len(cells) - len(stamped)))
+    # INDEPENDENT of the report: `lines` is still the drawer's own word, so
+    # probe the pixels. A cell with copper must carry ink in its own palette
+    # colour, INSIDE its own rect -- which also catches a cell that draws its
+    # neighbour's copper or draws outside the box.
+    px = _img.convert('RGB')
+    for c in cells:
+        cx, cy, cw, ch = c.box
+        col = _r.palette.get(c.layer)
+        if col is None:
+            continue
+        ink = 0
+        for yy in range(max(0, cy), min(px.height, cy + ch)):
+            for xx in range(max(0, cx), min(px.width, cx + cw)):
+                if px.getpixel((xx, yy)) == col:
+                    ink += 1
+        if c.lines and not ink:
+            fail('%s reported %d line(s) and left NO ink in its own cell'
+                 % (c.layer, c.lines))
+        if not c.lines and ink:
+            fail('%s reported no lines and yet has %d px of its own colour'
+                 % (c.layer, ink))
     if len(_FAIL) == _mark:
-        print('  PASS: every cell counts its own layer')
+        print('    %d cells, %d segments across them (%s)'
+              % (len(cells), sum(c.lines for c in cells),
+                 ', '.join('%s=%s' % (c.name_text, c.count_text)
+                           for c in cells[:4])))
+        print('  PASS: every cell counts, and draws, its own layer')
+
+
+def test_a_count_that_would_touch_the_name_is_dropped():
+    """The name is the identity; the count is the extra. Overprinting destroys
+    both, and `CELL_MIN_W` cannot prevent it -- it bounds the cell, not the
+    text."""
+    _mark = len(_FAIL)
+    from route_render import load_font
+    probe = ImageDraw.Draw(Image.new('RGB', (8, 8)))
+    font = load_font(max(8, min(13, int(130 * 0.16))))
+    for box_w in (180, 370, 240, 900):
+        _img, cells, _l, _p, _r = _strip(box_w=box_w)
+        if not cells:
+            fail('%d px box drew nothing' % box_w)
+            continue
+        for c in cells:
+            if not c.count_text:
+                continue
+            cw = c.box[2]
+            need = (probe.textlength(c.name_text, font=font)
+                    + probe.textlength(c.count_text, font=font)
+                    + RP.LABEL_GAP_PX + 8)
+            if need > cw:
+                fail('%d px box, %s: name+count need %.0f px in a %d px cell'
+                     % (box_w, c.layer, need, cw))
+        print('    %3d px box -> %d cell(s), %d count(s) kept'
+              % (box_w, len(cells), sum(1 for c in cells if c.count_text)))
+    # and the drop must be REAL at the narrow end, or this is asserting that a
+    # condition which never fires never fires
+    _img, narrow, _l, _p, _r = _strip(box_w=180)
+    if narrow and all(c.count_text for c in narrow):
+        fail('BROKEN TEST: no count was dropped even at 180 px, where the '
+             'measured overlap was +23 px -- the guard is not engaged')
+    if len(_FAIL) == _mark:
+        print('  PASS: the count goes before it lands on the name')
 
 
 def test_cells_shrink_in_number_not_below_legibility():
     _mark = len(_FAIL)
-    wide, n_wide, layers, _p, _r = _strip(box_w=900)
-    narrow, n_narrow, _l, _p2, _r2 = _strip(box_w=180)
+    _wi, wide, layers, _p, _r = _strip(box_w=900)
+    _na, narrow, _l, _p2, _r2 = _strip(box_w=180)
+    n_wide, n_narrow = len(wide), len(narrow)
     if n_wide < n_narrow:
         fail('a narrower box drew MORE cells (%d vs %d)' % (n_narrow, n_wide))
     if n_narrow >= len(layers):
@@ -140,6 +225,18 @@ def test_cells_shrink_in_number_not_below_legibility():
     else:
         print('    900 px -> %d cells, 180 px -> %d cells (of %d layers)'
               % (n_wide, n_narrow, len(layers)))
+    # a box too small for even ONE legible cell draws NOTHING, rather than a
+    # negative-width rectangle the never-fail wrapper would swallow
+    for w in (0, 10, 24, 38):
+        boxes, n = RP._cell_boxes(FL.Box(0, 0, w, 40), 10)
+        if not isinstance(boxes, list) or not isinstance(n, int):
+            fail('_cell_boxes(w=%d) returned %r -- it must ALWAYS be '
+                 '(list, int); a bare [] raises ValueError in its own caller'
+                 % (w, (boxes, n)))
+            continue
+        for _x, _y, cw, _ch in boxes:
+            if cw < RP.CELL_FLOOR_W:
+                fail('_cell_boxes(w=%d) produced a %d px cell' % (w, cw))
     if len(_FAIL) == _mark:
         print('  PASS: fewer, readable cells beat more, unreadable ones')
 
@@ -168,11 +265,75 @@ def test_the_box_rect_never_changes_between_phases():
               'the content')
 
 
+
+
+def test_all_four_contents_are_reachable_and_draw():
+    """One content and three captions is not four contents.
+
+    `draw_inventory` had NO caller anywhere in the repo, and `unplaced` was
+    never passed from production -- so 'seeding' could not occur in a film at
+    all, and 'bookend' and 'placement' drew a literal string. Each branch is
+    asserted here to reach a drawer and put ink on the box.
+    """
+    _mark = len(_FAIL)
+    pcb = parse_kicad_pcb(BOARD)
+    r = RR.BoardRenderer(pcb, size=300, supersample=1)
+    ground = RT.DARK.rgb('ground')
+    box = FL.Box(0, 0, 420, 130)
+    inv = RP.inventory_counts(pcb)
+    if not inv:
+        fail('BROKEN FIXTURE: the board yielded no part classes')
+        return
+    cases = {
+        'bookend': lambda d: RP.draw_summary(
+            d, box, theme=RT.DARK,
+            lines=RP.board_summary(pcb, pcb.segments, pcb.vias)),
+        'placement': lambda d: RP.draw_inventory(
+            d, box, counts=inv, placed=len(pcb.footprints) - 2,
+            total=len(pcb.footprints), theme=RT.DARK),
+        'seeding': lambda d: RP.draw_inventory(
+            d, box, counts=inv, placed=0, total=len(pcb.footprints),
+            theme=RT.DARK),
+        'routing': lambda d: RP.draw_layer_strip(
+            d, box, bounds=r.bounds, segments=pcb.segments,
+            layers=list(r.copper_layers), palette=r.palette, theme=RT.DARK),
+    }
+    for phase, draw in cases.items():
+        img = Image.new('RGB', (420, 130), ground)
+        got = draw(ImageDraw.Draw(img))
+        cols = {c for _n, c in img.getcolors(1 << 20)}
+        if len(cols) < 3:
+            fail('%s drew %d colour(s) -- it swallowed an exception'
+                 % (phase, len(cols)))
+        if not got:
+            fail('%s reported drawing nothing' % phase)
+        else:
+            print('    %-10s %d colours, %d row(s) reported'
+                  % (phase, len(cols), len(got)))
+    # and the SEEDING branch must be reachable from a label, which is the half
+    # that was missing: nothing in production passed `unplaced`.
+    if RP.phase_for('round 2 moving 4 part(s)', unplaced=True) != 'seeding':
+        fail('unplaced does not win over the label')
+    src = open(os.path.join(ROOT, 'py_router', 'animate_route.py'),
+               encoding='utf-8').read()
+    if 'unplaced=bool(c.get(' not in src.replace('\n', '').replace(' ', ''):
+        if 'unplaced' not in src:
+            fail('nothing in animate_route passes unplaced, so the seeding '
+                 'content cannot occur in a film')
+    if 'inventory_counts' not in src:
+        fail('nothing in animate_route builds the inventory, so the box has '
+             'no data to draw it from')
+    if len(_FAIL) == _mark:
+        print('  PASS: four contents, four drawers, all reachable')
+
+
 TESTS = (
     test_the_strip_builds_no_second_renderer,
     test_the_counts_are_the_copper,
+    test_a_count_that_would_touch_the_name_is_dropped,
     test_cells_shrink_in_number_not_below_legibility,
     test_the_box_rect_never_changes_between_phases,
+    test_all_four_contents_are_reachable_and_draw,
 )
 
 
