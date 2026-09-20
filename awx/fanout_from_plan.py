@@ -411,6 +411,7 @@ def plan_state(pcb, names, banned=frozenset()):
     holds (net, move signature) pairs the fanout has REFUSED to lay as
     asked: the plan's model said they were possible, the engine said no,
     and the engine is the authority -- they leave the menus."""
+    plan_state._pair_legs = None
     byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
     ends = te.endpoints(pcb, names, byname)
     kids = {byname[n][0] for n in names}
@@ -489,6 +490,21 @@ def plan_state(pcb, names, banned=frozenset()):
                   f'({len(keep)} of {len(dmenu[nm])} moves kept)')
             if keep:
                 dmenu[nm] = keep
+        # a PAIR leg keeps only the moves with room for the pair at the exit
+        _plegs = getattr(plan_state, '_pair_legs', None)
+        if _plegs is None:
+            _plegs = {}
+            if int(os.environ.get('PLAN_PAIRS', os.environ.get('BRAID_PAIRS', '0')) or 0):
+                for _b, (_pn, _nn) in _pairs.pair_names(names).items():
+                    _plegs[_pn], _plegs[_nn] = _nn, _pn
+            plan_state._pair_legs = _plegs
+        if nm in _plegs and _plegs[nm] in byname:
+            keep = [m for m in dmenu[nm] if pair_exit_clear(pcb, nid, byname[_plegs[nm]][0], m)]
+            if len(keep) < len(dmenu[nm]):
+                print(f'  {nm}: {len(dmenu[nm]) - len(keep)} of {len(dmenu[nm])} berth moves have no room '
+                      f'for the pair at the exit -- dropped')
+            if keep:
+                dmenu[nm] = keep
         dmenu[nm] = _force(FORCE_DST, nm, dmenu[nm], 'destination')
         # PLAN_LOOP_FEEDBACK: the classes the route's verdict banned at this end
         dmenu[nm] = pfb.filter_menu(nm, 'dst', dmenu[nm])
@@ -513,6 +529,13 @@ def plan_state(pcb, names, banned=frozenset()):
             continue
         smenu[nm] = [m for m in dedupe_climbs(menu(p, sgrid, byname[nm][0], own_only=True, climb=SRC_CLIMB))
                      if (nm, sr.move_sig(m)) not in banned and m.direction not in away]
+        _plegs = getattr(plan_state, '_pair_legs', None) or {}
+        if nm in _plegs and _plegs[nm] in byname:
+            keep = [m for m in smenu[nm] if pair_exit_clear(pcb, byname[nm][0], byname[_plegs[nm]][0], m)]
+            if len(keep) < len(smenu[nm]):
+                print(f'  {nm}: {len(smenu[nm]) - len(keep)} of {len(smenu[nm])} tooth moves have no room '
+                      f'for the pair at the exit -- dropped')
+            smenu[nm] = keep
     if SRC_CLIMB_END:
         for line in end_climbs(smenu, names, src_pad, sref, sgrid, ends, menu, byname, banned):
             print(line)
@@ -3548,6 +3571,55 @@ def main():
     choice, dst_pad, dref, byname, board, realized, banned = plan(base, names, work)
     lay = fanout_equivalent if SF_EQUIV else fanout_destination
     return lay(out_path, names, choice, dst_pad, dref, byname, board, realized, banned)
+
+
+PAIR_EXIT_REACH = float(os.environ.get('PLAN_PAIR_EXIT_REACH', '1.2') or 0)
+
+
+def pair_exit_clear(pcb, nid, other, m, reach=None):
+    """A pair leg's move has ROOM FOR THE PAIR at its exit (2026-09-20):
+    the ray from its exit point along its escape direction, `reach` mm
+    (the pose router's setback ladder reaches 1.09), is clear of static
+    foreign copper on the move's layer at the leg's own line and a pair
+    pitch either side of it -- where the partner leg may run
+    (braid.build_obstacles: every foreign pad, segment and via, inflated
+    by clearance and half a track; the partner is not foreign). A single
+    lane's exit is checked by the engine only to the tooth's tip, and a
+    pair's pose needs a millimetre more: on the zynq bench C105, a
+    back-side capacitor 0.6 mm in front of DQS0's tooth, refused every
+    pose at every setback."""
+    import pairs as _pairs
+    if reach is None:
+        reach = PAIR_EXIT_REACH
+    if reach <= 0 or getattr(m, 'exit_pt', None) is None:
+        return True
+    mp = te.build_obstacles(pcb, nid, {nid, other}, m.layer)
+    d = DIRS.get(m.direction)
+    if d is None:
+        return True
+    n = (-d[1], d[0])
+    pitch = _pairs.pitch(te.TRACK)
+    # the leg's own line must be clear, and the partner's line on ONE side
+    # of it (either): a leg running along the array's edge has the balls
+    # on one side and room on the other, which is where the partner goes
+    side_ok = {1: True, -1: True}
+    k = 1
+    while k * 0.1 <= reach + 1e-9:
+        x = m.exit_pt[0] + d[0] * 0.1 * k
+        y = m.exit_pt[1] + d[1] * 0.1 * k
+        if mp.point_violation((x, y)):
+            if os.environ.get('PLAN_PAIR_EXIT_DEBUG'):
+                print(f'    exit blocked: {m.net} {m.kind}/{m.direction}/{m.layer[0]} at {0.1 * k:.1f} mm on its own line')
+            return False
+        for sg in (1, -1):
+            if side_ok[sg] and mp.point_violation((x + n[0] * pitch * sg, y + n[1] * pitch * sg)):
+                side_ok[sg] = False
+        if not (side_ok[1] or side_ok[-1]):
+            if os.environ.get('PLAN_PAIR_EXIT_DEBUG'):
+                print(f'    exit blocked: {m.net} {m.kind}/{m.direction}/{m.layer[0]} at {0.1 * k:.1f} mm on both sides')
+            return False
+        k += 1
+    return True
 
 
 def tie_vias_under(pcb, nms, byname, dst_pad, vias_add, log=print):

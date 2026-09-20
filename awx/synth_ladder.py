@@ -84,7 +84,7 @@ def case(k, pattern, **kw):
              cols=4, rows=None, depth=1, gap=12.0, dst_rot=0.0, caps=0,
              pad=0.4, pad_inner=None, margin_y=6.0, fanout_layers='F.Cu',
              obstacle_w=0.0, obstacle_h=0.0, obstacle_x=0.5, obstacle_y=0.0,
-             row_offset=0)
+             row_offset=0, pairs=0)
     c.update(kw)
     bits = [pattern, f'k{k}']
     for key, dflt in (('seed', 0), ('blocks', 2), ('gap', 12.0), ('depth', 1),
@@ -103,6 +103,8 @@ def case(k, pattern, **kw):
                     + (f'x{c["obstacle_x"]:g}' if c['obstacle_x'] != 0.5 else ''))
     if c['fanout_layers'] != 'F.Cu':
         bits.append('fb')
+    if c['pairs']:
+        bits.append(f'pr{c["pairs"]}')
     c['tag'] = '_'.join(bits)
     return c
 
@@ -110,6 +112,11 @@ def case(k, pattern, **kw):
 BATCHES = {
     # the proof: three planted optima at one K, every one exact
     'first': [case(8, 'sorted'), case(8, 'blocks'), case(8, 'interleave')],
+    # DIFFERENTIAL PAIRS (2026-09-20): two pairs among sixteen, balls
+    # neighbouring at both ends; the chain runs with BRAID_PAIRS=1
+    # PLAN_PAIRS=1 (override in the environment for the pairs-off arm)
+    'pairs': [case(16, 'sorted', pairs=2), case(16, 'blocks', pairs=2),
+              case(16, 'interleave', pairs=2)],
 
     # the first real batch: the patterns crossed with K, plus the axes
     # that are geometry rather than pattern (gap, rotation, foreign
@@ -615,6 +622,8 @@ def gen_and_bench(c, outdir, log=print):
         argv += ['--row-offset', str(c['row_offset'])]
     if c['inversions'] is not None:
         argv += ['--inversions', str(c['inversions'])]
+    if c.get('pairs'):
+        argv += ['--pairs', str(c['pairs'])]
     r = subprocess.run(argv, capture_output=True, text=True)
     if r.returncode:
         log(f'  {c["tag"]}: GENERATOR FAILED\n' + (r.stdout + r.stderr)[-600:])
@@ -644,6 +653,9 @@ def coherent(bench, K):
 
 def run_chain(c, bench, tag, env_extra=None, log=print):
     env = dict(os.environ, BASE=bench, DEST=DST, PLAN_PAGES='1')
+    if c.get('pairs'):
+        env.setdefault('BRAID_PAIRS', '1')
+        env.setdefault('PLAN_PAIRS', '1')
     env.update(env_extra or {})
     t0 = time.time()
     r = subprocess.run(['bash', 'chain_k.sh', tag, str(c['k'])],

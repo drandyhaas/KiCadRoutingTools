@@ -1460,6 +1460,28 @@ def build(a):
     src_slots = face_slots(K, cols, east=True)
     dst_slots = face_slots(K, cols, east=False)
     names = [f'SYN{i:02d}' for i in range(K)]
+    # --pairs N: N DIFFERENTIAL PAIRS among the bus (2026-09-20), each two
+    # nets whose balls are NEIGHBOURS at both arrays -- adjacent in the
+    # source order and in the planted destination order -- named
+    # SYPj_P / SYPj_N so pairs.pair_names finds them; spread along the bus.
+    # The truth is unchanged (a pair is two nets of the pattern); what the
+    # chain must add is COUPLING, which grade_k's PAIR lines report.
+    if getattr(a, 'pairs', 0):
+        cands = [i for i in range(K - 1) if abs(pi[i] - pi[i + 1]) == 1]
+        chosen, used = [], set()
+        step = max(1, len(cands) // max(1, a.pairs))
+        for i in cands[::step] + cands:
+            if i in used or i + 1 in used:
+                continue
+            chosen.append(i)
+            used |= {i, i + 1}
+            if len(chosen) == a.pairs:
+                break
+        if len(chosen) < a.pairs:
+            print(f'WARNING: only {len(chosen)} of {a.pairs} pair(s) have neighbouring balls at '
+                  f'both ends on this pattern', file=sys.stderr)
+        for j, i in enumerate(sorted(chosen)):
+            names[i], names[i + 1] = f'SYP{j}_P', f'SYP{j}_N'
     # lane i: source rank i -> destination rank pi[i]
     src_assign = {src_slots[i]: (i + 1, names[i]) for i in range(K)}
     dst_assign = {dst_slots[pi[i]]: (i + 1, names[i]) for i in range(K)}
@@ -1598,6 +1620,9 @@ def main(argv=None):
                          'so a lane cannot ride around an array')
     ap.add_argument('--dst-rot', type=float, default=0.0)
     ap.add_argument('--caps', type=int, default=0)
+    ap.add_argument('--pairs', type=int, default=0,
+                    help='differential pairs among the bus: two neighbouring nets each, '
+                         'named SYPj_P / SYPj_N')
     ap.add_argument('--src', default='SU1')
     ap.add_argument('--dst', default='SD1')
     ap.add_argument('--obstacle-w', type=float, default=0.0,

@@ -772,6 +772,15 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     connectors = []
     conn_vias = []
     connected = set()        # the ends whose routed connector stands
+    # the validation window: the same copper the pose router sees (the
+    # connectors and the approach are checked against it)
+    vw = None
+    if half is not None:
+        pts0 = [a_p, a_n, b_p, b_n] + list(window_pts or [])
+        vw = make_local_window(pcb, (min(p[0] for p in pts0) + max(p[0] for p in pts0)) / 2,
+                               (min(p[1] for p in pts0) + max(p[1] for p in pts0)) / 2,
+                               max(max(p[0] for p in pts0) - min(p[0] for p in pts0),
+                                   max(p[1] for p in pts0) - min(p[1] for p in pts0)) / 2 + margin)
     if a_dir is not None and b_dir is not None and half is not None and (a_conn or b_conn):
         # BETTER CONNECTORS (Andy, 2026-09-20): the fan-in in front of the
         # teeth is where every neighbour's lane crosses, and a straight
@@ -787,12 +796,6 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
         via_half = max((cfg.via_size + cfg.clearance) / 2.0,
                        (via_r + cfg.clearance + cfg.track_width / 2.0 - half) / 0.7071 + 0.005)
         dbg = os.environ.get('BRAID_PAIR_DEBUG')
-        # the validation window: the same copper the pose router sees
-        pts0 = [a_p, a_n, b_p, b_n] + list(window_pts or [])
-        vw = make_local_window(pcb, (min(p[0] for p in pts0) + max(p[0] for p in pts0)) / 2,
-                               (min(p[1] for p in pts0) + max(p[1] for p in pts0)) / 2,
-                               max(max(p[0] for p in pts0) - min(p[0] for p in pts0),
-                                   max(p[1] for p in pts0) - min(p[1] for p in pts0)) / 2 + margin)
         for end, tip_p, tip_n, d, layer, far in (('a', a_p, a_n, a_dir, a_layer, a_conn),
                                                    ('b', b_p, b_n, b_dir, b_layer, b_conn)):
             if far is None:
@@ -854,6 +857,38 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
             mid = _pairs.mid(tip_p, tip_n)
             n = _pairs._left(d)
             sgn = 1.0 if _pairs._cross(d, (tip_p[0] - mid[0], tip_p[1] - mid[1])) >= 0 else -1.0
+            sep = abs((tip_p[0] - tip_n[0]) * n[0] + (tip_p[1] - tip_n[1]) * n[1])
+            why = None
+            if sep > 2 * half + 2 * cfg.track_width and vw is not None:
+                # TIPS FAR APART across the escape (a comb of teeth between
+                # them, or two columns' balls): each leg runs on along its
+                # escape until the two can converge at 30 degrees without
+                # touching anything, then they converge to the pair pitch
+                # -- the human's DQS0 at the zynq's U1: two surface teeth
+                # 1.5 mm apart on a 0.32 mm comb, coupled after it
+                conv = (sep - 2 * half) / 2 / math.tan(math.radians(30))
+                run = 0.0
+                while run <= 3.0 + 1e-9:
+                    kp = (tip_p[0] + d[0] * run, tip_p[1] + d[1] * run)
+                    kn = (tip_n[0] + d[0] * run, tip_n[1] + d[1] * run)
+                    e = run + conv
+                    ep = (mid[0] + d[0] * e + sgn * n[0] * half, mid[1] + d[1] * e + sgn * n[1] * half)
+                    en = (mid[0] + d[0] * e - sgn * n[0] * half, mid[1] + d[1] * e - sgn * n[1] * half)
+                    legs = []
+                    if run > 1e-6:
+                        legs += [Segment(tip_p[0], tip_p[1], kp[0], kp[1], cfg.track_width, layer, p_id),
+                                 Segment(tip_n[0], tip_n[1], kn[0], kn[1], cfg.track_width, layer, n_id)]
+                    legs += [Segment(kp[0], kp[1], ep[0], ep[1], cfg.track_width, layer, p_id),
+                             Segment(kn[0], kn[1], en[0], en[1], cfg.track_width, layer, n_id)]
+                    why = _legs_clear(vw, legs, [p_id, n_id], cfg, virtual, layer_map)
+                    if why is None:
+                        if os.environ.get('BRAID_PAIR_DEBUG'):
+                            print(f"    approach: tips {sep:.2f} mm apart -- legs run {run:.1f} mm along the escape, "
+                                  f"then converge over {conv:.2f} mm")
+                        return legs, ep, en
+                    run += 0.1
+                if os.environ.get('BRAID_PAIR_DEBUG'):
+                    print(f"    approach: tips {sep:.2f} mm apart -- no clean convergence within 3 mm ({why}); straight approach")
             end_p = (mid[0] + d[0] * appr + sgn * n[0] * half, mid[1] + d[1] * appr + sgn * n[1] * half)
             end_n = (mid[0] + d[0] * appr - sgn * n[0] * half, mid[1] + d[1] * appr - sgn * n[1] * half)
             return [Segment(tip_p[0], tip_p[1], end_p[0], end_p[1], cfg.track_width, layer, p_id),

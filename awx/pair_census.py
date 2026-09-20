@@ -95,9 +95,12 @@ def census(pcb, nets=None, track=0.127, gap=0.1, tol=0.06, step=0.05):
                      if near else None)
                 samples.append((L / k, d))
         total = sum(w for w, _ in samples)
+        # the pitch: the mode of the P->N distance among PAIR-LIKE distances
+        # (up to 1.6 x track + gap); two legs a ball pitch apart are not
+        # coupled, whatever fraction of their length runs parallel
         hist = {}
         for w, d in samples:
-            if d is not None and 0.12 <= d <= 1.2:
+            if d is not None and 0.12 <= d <= 1.6 * pitch:
                 hist[round(d / 0.02)] = hist.get(round(d / 0.02), 0.0) + w
         mode = (max(hist.items(), key=lambda kv: kv[1])[0] * 0.02) if hist else pitch
         coupled = sum(w for w, d in samples if d is not None and abs(d - mode) <= tol)

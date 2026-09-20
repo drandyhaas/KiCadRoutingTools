@@ -549,6 +549,27 @@ unasked via-in-pad berth and re-planned eight passes).
 leg escaped as a single net, 1-7 mm); the routed part is coupled. The
 human's pairs: 0.90/0.83/0.92.
 
+**Two more benches (2026-09-20 evening).** The ZYNQ article (`BASE=tmp/zynq/
+zynqF.kicad_pcb DEST=U2`, K44 carries both DQS pairs as legs; CK stays out,
+its R20 is 4 mm from the balls): pairs off 105 vias / 0 open, uncoupled;
+pairs first 116 vias / 0 open, DQS0 coupled 0.84 and DQS1 0.88 against the
+human's 0.84 / 0.87. Two rules came from it: a PAIR leg's move must have
+ROOM for the pair at its exit (`pair_exit_clear`: the ray past the exit for
+1.2 mm clear on the leg's own line and on ONE side, where the partner
+runs -- C105, a back-side cap 0.6 mm behind DQS0's tooth, refused every
+pose), and when a pair has NO neighbouring combination at an end, one
+face and one layer is accepted and the router's approach converges the
+legs after the comb (`connect._appr`: each leg runs on along its escape
+until the two can converge at 30 degrees without touching anything --
+DQS0's P ball is an outer-column ball with two tooth moves, both boxed).
+The SYNTHETIC bench (`synth_bus.py --pairs N`, `synth_ladder.py --batch
+pairs`: two pairs among sixteen, balls neighbouring at both ends; the
+interleave pattern has none and runs as the control): sorted 0 vias
+either way, the pairs coupled 0.80 at the pair pitch against 0.00 as
+singles; blocks 22 vias against 16, coupled 0.88 / 0.85 against 0.56 /
+0.29 (the census's pitch is now the mode among PAIR-LIKE distances, so
+two legs a ball pitch apart read as 0.00, not 0.92).
+
 **Instruments:** `grade_k.py` prints one PAIR line per pair (routed or
 not, coupled fraction at the inferred pitch, skew, barrels);
 `pair_census.py` is the same on any board; `BRAID_PAIR_DEBUG=1` prints each

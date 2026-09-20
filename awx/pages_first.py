@@ -2031,14 +2031,26 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                 if len(X[_pn]) != len(A) or len(X[_nn]) != len(B):
                     continue          # an empty source menu's dummy variable
                 okj = {j: [k for k, b in enumerate(B) if _compat(a, b, _reach[end])] for j, a in enumerate(A)}
+                relaxed = False
+                if not any(okj.values()):
+                    # no neighbouring combination: ONE FACE AND ONE LAYER will
+                    # do (the pair's legs leave through the comb one by one
+                    # and are converged by the router's approach after it --
+                    # zynq DQS0's P ball, an outer-column ball with a cap
+                    # behind it, has no neighbouring tooth at all)
+                    okj = {j: [k for k, b in enumerate(B) if _compat(a, b, 4.0 * _reach[end])]
+                           for j, a in enumerate(A)}
+                    relaxed = True
+                    if not any(okj.values()):
+                        log(f'  pages-first: pair {_base}: no {end} of one face and layer '
+                            f'in its menus -- unconstrained there')
+                        continue
+                    log(f'  pages-first: pair {_base}: no neighbouring {end} in its menus -- '
+                        f'one face and layer accepted, the approach converges the legs')
                 for j, ks in okj.items():
                     for k in ks:
                         combos[end].append((j, k, _pairs.hand(A[j].direction, A[j].exit_pt, B[k].exit_pt,
                                                                  arriving=(end == 'berths'))))
-                if not any(okj.values()):
-                    log(f'  pages-first: pair {_base}: no {end} of one face and layer with '
-                        f'neighbouring exits in its menus -- unconstrained there')
-                    continue
                 for j, ks in okj.items():
                     if ks:
                         m.AddBoolOr([X[_nn][k] for k in ks]).OnlyEnforceIf(X[_pn][j])
@@ -2050,7 +2062,7 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                 # reach, with SDQ11 and SDQ8 between them on a 0.32 mm comb;
                 # the pair could not be launched coupled)
                 n_between = 0
-                for j, ks in okj.items():
+                for j, ks in ([] if relaxed else okj.items()):
                     a = A[j]
                     for k in ks:
                         b = B[k]
@@ -2068,7 +2080,8 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                                     n_between += 1
                 if n_between:
                     log(f'  pages-first: pair {_base} {end}: {n_between} third-exit-between clause(s)')
-                okk = {k: [j for j, a in enumerate(A) if _compat(a, b, _reach[end])] for k, b in enumerate(B)}
+                okk = {k: [j for j, a in enumerate(A) if _compat(a, b, (4.0 if relaxed else 1.0) * _reach[end])]
+                       for k, b in enumerate(B)}
                 for k, js in okk.items():
                     if js:
                         m.AddBoolOr([X[_pn][j] for j in js]).OnlyEnforceIf(X[_nn][k])
