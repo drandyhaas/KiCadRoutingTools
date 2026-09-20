@@ -6,7 +6,7 @@ planning document. Every consumer then quoted it in prose -- `frame_layout`'s
 module docstring, `render_panels.CELL_MIN_W`'s comment, `docs/route-animation`
 and the PR body -- and a quoted number is a claim, not a measurement. The PR's
 own fact-checker reconstructed the table and found **`inset`'s px-per-layer-cell
-was 32k in every copy and 28.5k in fact**, which is the figure `CELL_MIN_W`'s
+was 32k in every copy and **28 490** in fact, which is the figure `CELL_MIN_W`'s
 comment leans on.
 
 So the table has a producer now. It re-derives from `frame_layout.plan_frame`,
@@ -35,9 +35,12 @@ same budget, so the columns compare.
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing', 'placement'], 'kind': 'instrument'}
+
 import argparse
 import json
-import math
 import os
 import sys
 
@@ -113,8 +116,8 @@ def measure(aspect=REFERENCE_ASPECT, budget=BUDGET_PX, cells=CELLS):
 def swing(aspects=(0.5, 0.8, 1.0, 1.25, 1.6, 1.85, 2.5), budget=BUDGET_PX):
     """By how much `stacked` and `sidebar` swap across board shapes.
 
-    This is the "13-24%" claim, and it is the ONLY reason `auto` exists: if the
-    two never swapped, one of them would simply be better.
+    This is the "8.8-23.8%" claim, and it is the ONLY reason `auto` exists: if
+    the two never swapped, one of them would simply be better.
     """
     rows = []
     for a in aspects:
