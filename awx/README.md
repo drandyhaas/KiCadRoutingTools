@@ -817,7 +817,24 @@ abandoned with a measurement.
 
 7. **The corpus A/B for the `py_router` changes, then the PR to main.**
    `KICAD_SEG_DIST_EXACT` ships OFF (2026-09-19) so the merge leaves
-   main's copper alone; the A/B decides whether it turns on.
+   main's copper alone; the A/B decides whether it turns on. **Measured
+   2026-09-19**, sets 1-10 on Modal, the branch at `587980fe` against the
+   v0.22.1 validation arm (`heads110-kc_96912901`; main's routing code
+   moved by one non-routing commit since), 149 boards with the same
+   completed chain in both, paired by `tests/stress/pair_arms.py`:
+   real DRC 40 -> 42, incomplete nets 175 -> 174, KiCad's own DRC
+   57 -> 51, direction 7 better / 11 worse / 131 tied, CPU +14%. A wash
+   on the headline, leaning worse by count; the moves are cparti_fpga
+   nets 6 -> 11, scalenode_cm4 and ulx5m_gatemate +3 each, smartknob_base
+   DRC 2 -> 4 against orbiter_kb 12 -> 8, ulx3s 9 -> 6, zynq_ad9364
+   23 -> 19 (at +39% CPU) and orangecrab 14 -> 8 (inside its own noise).
+   Nothing here clears the two-board bar in either direction, so the
+   knob stays off and the first-bucket changes owe a per-board
+   attribution (cparti_fpga is a BGA board: the fanout tie-breaks are the
+   suspect). Two caveats on the arm itself: the volume's sets 6-10
+   replayed manifests from before the 09-03 `--clearance-ceiling` rewrite
+   (both arms alike), and butterstick ran for the first time on its
+   repaired manifest (11 DRC, 1 of 317 nets open; no baseline).
 
 8. **The `.kicad_dru` is read with real layer names inside the turned
    frame**; a per-layer rule lands on the opposite face for a back-side
