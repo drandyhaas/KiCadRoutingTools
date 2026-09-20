@@ -278,6 +278,67 @@ def test_marks_still_bracket_each_step():
         print('  PASS: the beats still bracket their own frames')
 
 
+def test_a_growth_stage_is_not_drawn_over_its_finished_self():
+    """`_frame(base_s=...)` exists for exactly one reason, and it is invisible
+    to every count-based check.
+
+    A growth stage draws the partial copper as a HIGHLIGHT over a base. If the
+    base is the live state -- which already holds the whole restored net,
+    because `add` inserts before it draws -- then the finished copper sits
+    under every stage and the growth is not visible at all. The frame count,
+    the frame size and the reported stages are identical either way, so this is
+    asserted on INK: each growth frame must carry strictly more than the one
+    before it.
+    """
+    _mark = len(_FAIL)
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(BOARD)
+    layers = list(pcb.board_info.copper_layers)
+    rows_s, _rv = A._board_rows(pcb, layers)
+    # ONE layer, so the ink being counted is unambiguous.
+    one = [r for r in rows_s if int(r[5]) == 0][:300]
+    if len(one) < 40:
+        fail('BROKEN FIXTURE: only %d segment(s) on the first layer'
+             % len(one))
+        return
+    r, ls = A._renderer(BOARD, None, 260, 1, 150)
+    m = A.Movie(r, ls, rip_hold=2)
+    m.add(one, [], 'reroute', 'restored')
+    if len(m.frames) < 3:
+        fail('a restore drew %d frame(s); there is nothing to compare'
+             % len(m.frames))
+        return
+    col = m.theme.rgb('event_restored')
+    ink = []
+    for f in m.frames:
+        px = f.convert('RGB')
+        ink.append(sum(n for n, c in px.getcolors(1 << 20) if c == col))
+    if any(b <= a for a, b in zip(ink, ink[1:])):
+        fail('the growth stages do not gain ink: %s -- the finished copper is '
+             'drawn UNDER every stage, so the growth is invisible' % ink)
+    else:
+        print('    restore ink per frame: %s' % ink)
+    if ink[0] * 2 > ink[-1]:
+        fail('the first stage already carries %d of the final %d -- it is not '
+             'growing from an anchor' % (ink[0], ink[-1]))
+    # AND THE BASE. The highlight ink above grows either way; what `base_s`
+    # decides is whether the FINISHED copper is already drawn underneath in
+    # its LAYER colour. With the base excluded it appears only in the final
+    # frame; without it, it is there from stage one and the growth is a
+    # highlight crawling over a net that is visibly already complete.
+    lay = r.palette.get(ls[0])
+    base_ink = [sum(n for n, c in f.convert('RGB').getcolors(1 << 20)
+                    if c == lay) for f in m.frames]
+    if base_ink[0] * 2 > max(base_ink):
+        fail('the restored net is already drawn in its layer colour at stage '
+             '0 (%s) -- the growth stages have their finished self underneath '
+             'them' % base_ink)
+    else:
+        print('    layer-colour ink per frame: %s' % base_ink)
+    if len(_FAIL) == _mark:
+        print('  PASS: each stage is drawn on what existed, not on what will')
+
+
 TESTS = (
     test_it_retracts_from_the_far_end,
     test_growth_is_the_mirror_image,
@@ -286,6 +347,7 @@ TESTS = (
     test_rip_hold_zero_still_cuts,
     test_only_restores_grow,
     test_marks_still_bracket_each_step,
+    test_a_growth_stage_is_not_drawn_over_its_finished_self,
 )
 
 

@@ -290,19 +290,15 @@ ROWS = [
     ('a-growth-stage-has-its-finished-self-underneath-it', 'anim',
      "                                    col, label, base_s=base)",
      "                                    col, label)",
-     (T_MOT,), 'SURVIVED'),
+     (T_MOT,), 'KILLED'),
 
 ]
 
-# The two rows above that are NOT 'KILLED' are deliberate and are explained
-# here rather than in a name:
-#
-#   a-growth-stage-has-its-finished-self-underneath-it -- EXPECTED SURVIVOR.
-#     `base_s` changes what a growth stage LOOKS like (the finished copper is
-#     drawn under it, so the growth is invisible) and nothing in the suite
-#     probes those pixels. It is recorded rather than deleted because it is a
-#     real hole: a reader who wants to close it needs a pixel probe of a
-#     growth stage, not another count.
+# `a-growth-stage-has-its-finished-self-underneath-it` shipped for one commit
+# as an EXPECTED SURVIVOR, with the note that closing it needed a pixel probe
+# of a growth stage rather than another count. It has one now
+# (`test_a_growth_stage_is_not_drawn_over_its_finished_self`, asserting the
+# restore ink grows stage by stage), so the row is an ordinary KILLED.
 #
 # #946 SECTION 4 has NO row here on purpose. Its refusal lives in
 # `make_movie.DEFAULT_SIZE` / `DEFAULT_FPS`, which this battery does not own,
