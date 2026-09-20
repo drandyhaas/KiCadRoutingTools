@@ -188,8 +188,30 @@ def _guard_route_render(a):
 _BINDING_BLIND = None
 
 
-def _converge_module():
-    """converge, or None -- and only when it has the predicate we want.
+def _cv_is_lap(row, half):
+    """converge's `_is_lap`, or a narrower fallback that cannot over-count.
+
+    #904 made "is this row a lap" ONE predicate for a measured reason -- three
+    readers disagreed, and a freeze row silently retracted three recorded
+    declarations. So this asks converge rather than restating it.
+
+    When converge cannot be imported the fallback is the single kind `record
+    --kind` can actually write for this half, which is NARROWER than the
+    predicate (it drops nothing a lap would have included, and keeps out the
+    close-out and declaration rows a bare kind match would let in). Its one
+    caller is a DISPLAY list, so being conservative there costs a line of
+    output, not a gate.
+    """
+    _cv = _converge_module('_is_lap')
+    if _cv is not None:
+        return _cv._is_lap(row, half)
+    _kind = {'placement': 'placement', 'routing': 'completion'}.get(half)
+    return ((row.get('kind') or '') == _kind and not row.get('final')
+            and not isinstance(row.get('exhausted'), dict))
+
+
+def _converge_module(*attrs):
+    """converge, or None -- and only when it has the attributes asked for.
 
     Imported LAZILY and never at module scope: `_refusal_sites` and
     `_passthrough_count` parse this file with `ast`, and `--list` /
@@ -197,17 +219,19 @@ def _converge_module():
     module-scope import failure would take the whole driver down rather than
     one check.
 
-    THE ATTRIBUTE IS CHECKED, NOT ONLY THE IMPORT. Guarding the import alone
+    THE ATTRIBUTES ARE CHECKED, NOT ONLY THE IMPORT. Guarding the import alone
     turns an older or shadowed converge into an AttributeError traceback at
     exit 1, on a path whose whole contract is that it degrades to a refusal --
-    which is worse than the duplication it replaced.
+    which is worse than the duplication it replaced. Each caller names what it
+    needs, so a converge that has one of them and not the other degrades per
+    call rather than all at once.
     """
     try:
         sys.path.insert(0, ROOT)
         import converge                                         # noqa: PLC0415
     except Exception:                                           # noqa: BLE001
         return None
-    return converge if hasattr(converge, 'score_board_binding') else None
+    return converge if all(hasattr(converge, n) for n in attrs) else None
 
 
 def _score_board_mismatch(board, payload):
@@ -237,7 +261,7 @@ def _score_board_mismatch(board, payload):
     psha = payload.get('board_sha')
     if not psha:
         return None
-    _cv = _converge_module()
+    _cv = _converge_module('score_board_binding')
     if _cv is not None:
         _st, _psha = _cv.score_board_binding(board, payload)
         if _st == 'unknown':
@@ -1960,8 +1984,20 @@ check_reachability answers about ONE pad per run -- give it a pad on a failing
 net (or --net <id> --at <x,y>). A single genuine CAGED (exit 1) on the
 copper-free board is enough to make the shape placement.
 
-Then re-run this stage with the shape you measured:
-  --stage L4 --shape <parameter|placement|floorplan> --board {a.board} \\
+WRITE THE SHAPE DOWN BEFORE YOU ACT ON IT. This stage is where the decision is
+made and the ledger is where the next lap reads it; a shape that exists only in
+this conversation is a decision the next pass will re-derive, differently. The
+row changes no board and enters neither half's plateau window, so it cannot
+move a verdict -- and after two routing laps with no row behind them, L5
+refuses to go round again:
+
+  python3 -X utf8 py_placer/converge.py record --ledger {a.ledger} \\
+      --board {a.board} --kind classification \\
+      --shape <{"|".join(SHAPES)}> \\
+      --lever "<the shape, and the measurement that names it>"
+
+Then re-run this stage with the SAME shape you just recorded:
+  --stage L4 --shape <{"|".join(SHAPES)}> --board {a.board} \\
       --score {a.score} --ledger {a.ledger} \\
       [--congestion-json wk/cong_now.json --congestion-baseline wk/cong_base.json]
 </stage_instructions>'''
@@ -2027,7 +2063,12 @@ Next: --stage L1 --board <the adopted arrangement> --ledger {a.ledger}
 </stage_instructions>'''
     # placement-shaped: the expensive one
     rows = _ledger_rows(a.ledger)
-    routed = [r for r in rows if (r.get('kind') or '') in ('completion', 'routing')]
+    # `_is_lap`, not a kind tuple. This filtered `kind in ('completion',
+    # 'routing')`, and `routing` is not a kind `record --kind` can write --
+    # a second vocabulary for the half that `converge._HALF` does not contain,
+    # so the arm was dead. Asking the predicate instead also drops the rows
+    # that turned no loop: a freeze, a close-out, a declaration.
+    routed = [r for r in rows if _cv_is_lap(r, 'routing')]
     if routed:
         stale = '\n'.join(f'    - iteration {r.get("iteration")}: '
                           f'{(r.get("result_sha") or "")[:12]}'
@@ -2059,7 +2100,12 @@ Routed boards this ledger recorded, which must not be reused:
 
 1. Record the classification in the ledger BEFORE moving, with the measurement
    that produced it -- otherwise the next pass cannot tell why the placement
-   changed and will re-derive it wrongly.
+   changed and will re-derive it wrongly. This stood here as prose with no
+   command for long enough that run 29 recorded none at all:
+
+   python3 -X utf8 py_placer/converge.py record --ledger {a.ledger} \\
+       --board {a.board} --kind classification --shape {a.shape} \\
+       --lever "<the measurement that named this shape>"
 2. Re-enter the placement half at the rung the damage calls for:
        P2  a part whose position is a mechanical fact is wrong
        P3  the structure is wrong (a swap, a drag, a bad import)
@@ -2194,6 +2240,121 @@ def final_record_command(ledger, board, score, name, verdicts):
         f'      --score-file {score} --argv <the command that produced this board>')
 
 
+#: Routing laps one classification authorises. L4's parameter arm says
+#: "Re-enter the FAILING ROUTING STEP ... Record it, then go back to L3 with
+#: the new score" -- exactly one. The first lap after a decision is the lap
+#: that decision bought; the SECOND is the first lap no decision authorised.
+#: DELIBERATELY NOT `--flat`, which is 5 and means something else: two numbers
+#: with two meanings do not become one number by sharing a value.
+_LAPS_PER_CLASSIFICATION = 1
+
+
+def _unclassified_retry(a, doc):
+    """Refuse a routing re-entry no recorded decision authorises, else None.
+
+    #963's headline. Run 29 never invoked L3 or L4 -- zero times in 439
+    commands -- while this stage PRINTED the `--stage L3` command in three of
+    its six emissions, because CONTINUE returns `<stage_instructions>` and
+    therefore exit 0. Fifty-seven inline routing calls then ran against an
+    unclassified blocker, and the run recorded a "geometrically unsatisfiable"
+    stop an outside reader refuted in one pass (BLOCKING 2 -> 0).
+
+    THIS GATES ON THE RECORD, NOT ON WHO MADE IT. The evidence is a ledger row
+    -- `--kind classification --shape <...>` -- which an inline diagnosis can
+    write as easily as a delegated one. Requiring a stage invocation or a fresh
+    prompt file would refuse a model that diagnosed correctly by another route,
+    which is the objection #963's follow-up raises and it is right.
+
+    Three conjuncts, each load-bearing:
+
+    * `blocking` must be non-zero. L3 at `blocking == 0` returns "nothing to
+      classify" and tells the reader not to bounce back, so a quality-
+      polishing run CANNOT produce a classification row -- gating it would
+      refuse such a run forever.
+    * ROUTING laps only. A placement lap after `shape=placement` is the
+      classification being ACTED ON, not invalidated.
+    * No classification row ANYWHERE is its own arm. "Laps since the last
+      classification" is vacuously false when there has never been one, which
+      is exactly run 29, so a predicate without this arm cannot catch the case
+      it was written for.
+
+    The classified board's sha is PRINTED and never compared: a classification
+    is made on the failed routed board and L5 runs on a later one, so their
+    shas differ on every honest run and an equality test would refuse all of
+    them.
+    """
+    if getattr(a, 'accept_unclassified', None):
+        return None
+    if doc.get('blocking') in (0, None):
+        return None
+    _cls = doc.get('classification')
+    if _cls is None:
+        since, _where = (doc.get('routing') or {}).get('laps') or 0, None
+    else:
+        since = ((_cls.get('laps_since') or {}).get('routing')) or 0
+        _where = _cls
+    if since <= _LAPS_PER_CLASSIFICATION:
+        return None
+    if _where is None:
+        _head = (f'The last {since} routing laps in this ledger were recorded '
+                 f'with no DECISION behind them: no classification row has '
+                 f'ever been written here.')
+        _board = ''
+    else:
+        _head = (f'{since} routing laps have been recorded since the last '
+                 f'decision. Iteration {_where.get("iteration")} '
+                 f'(kind classification, shape {_where.get("shape")}) is the '
+                 f'last one on record, and nothing since says what the laps '
+                 f'after it were aimed at.')
+        _sha = str(_where.get('result_sha') or '')
+        _board = ('' if not _sha else
+                  f'\nThat decision was made about board {_sha[:12]}..., which '
+                  f'is not expected to be the board in hand -- a '
+                  f'classification is made on the board that FAILED. Recover '
+                  f'it if you want to see what changed:\n  python3 -X utf8 '
+                  f'py_placer/converge.py step-back --ledger {a.ledger} --to '
+                  f'{_sha} --out wk/classified.kicad_pcb\n')
+    return err(
+        f'''{_head}
+{_board}
+This is not a demand that a particular stage ran, or that a particular process
+did the thinking. It is a demand for a ROW. Whatever produced the diagnosis --
+this driver's classify stage, a teammate, or your own reading of the focus
+panels and the checker output in front of you -- write the conclusion where the
+next lap can read it:
+
+  python3 -X utf8 py_placer/converge.py record --ledger {a.ledger} \\
+      --board {a.board} --kind classification \\
+      --shape <{"|".join(SHAPES)}> \\
+      --lever "<the shape, and the measurement that names it>"
+
+The row IS the evidence, and it makes three claims: WHICH board was classified
+(--board, stored by content), WHAT the next re-entry changes (--shape, one of
+three), and WHY (--lever). A classification changes no board and enters
+neither half's plateau window, so writing one cannot move any verdict -- it
+only makes one available.
+
+The three shapes are not interchangeable and the cost of guessing is
+asymmetric: a wrong `parameter` spends iterations on a board no parameter can
+fix; a wrong `placement` throws away a routed board for nothing. What separates
+them is a measurement -- lane supply at the escape faces against a baseline, a
+CAGED pad on the COPPER-FREE board, crossings against the pre-placement
+figure. If you have already taken them, this row is one command. If you have
+not, take them first: an unmeasured shape is the default answer of a classifier
+that cannot see congestion.
+
+Measured (run 29): 57 routing-engine calls ran against an unclassified
+blocker across 439 commands, and the run closed with a recorded "geometrically unsatisfiable"
+claim an outside reader refuted in one pass -- the board refuting it was
+already on disk and named in no row. This stage printed that advice three
+times and the advice did not carry. That is why it is now a refusal and not a
+fourth printing.
+
+If the board this decision was about is gone and cannot be re-derived, say so
+on the record instead:
+  --accept-unclassified "<what you decided, and why the evidence is gone>"''')
+
+
 def l5(a):
     """Close out -- but only if the loop is actually finished.
 
@@ -2311,6 +2472,9 @@ def l5(a):
         _x = _cross_check(a, name, _peek_close(a))
         if _x:
             return _x
+        _u = _unclassified_retry(a, doc)
+        if _u:
+            return _u
         # SAY WHICH OF THE TWO IT IS. This line asserted "is still improving"
         # about every half that was not flat, including one whose plateau was
         # NOT ANSWERABLE -- so a half that had recorded `--exhausted placement`
@@ -2356,56 +2520,6 @@ tell a finished run from a stalled one.
     # again branch, and gating it would put the most expensive instrument in
     # the repo into the loop that runs most often, to say nothing the score has
     # not already said.
-    # A DECLARATION MADE ABOUT ANOTHER BOARD DOES NOT SHIP (#963). converge
-    # REPORTS the staleness on every verdict and changes no `why` -- a sha
-    # cannot tell "rewrote the file, same poses" from "replaced the placement",
-    # and every freeze row changes it by construction. But this branch is where
-    # the claim is made TO A READER, and "this half has nothing left" about a
-    # board that no longer exists is the claim run 29 shipped: its row 29
-    # declared placement exhausted against a board `os-promote-placed`
-    # overwrote nine seconds later, and it then survived three visits here.
-    #
-    # NOT waivable, and not by omission: CLOSE_CHECKS' own comment says `shape`
-    # and `binding` are absent because "a malformed or mis-bound document is
-    # the wrong document, and there is nothing to accept". A declaration bound
-    # to another board is the same kind of thing, and the escape is cheaper
-    # than a waiver -- re-record it against the board being shipped.
-    for _h in ('placement', 'routing'):
-        _stale = (doc.get(_h) or {}).get('declared_stale_board')
-        if _stale:
-            # Read out HERE rather than inside the f-string: `--dump-refusals`
-            # holds every 12-character literal a refusal can print to appearing
-            # in the rendered text, and a dict KEY spelled inside the call is a
-            # literal that is never printed.
-            _ship = str(doc.get('board_sha'))
-            _src = doc.get('board_sha_source')
-            _said = (doc.get(_h) or {}).get('declared', '')
-            return err(
-                f'The {_h} half is DECLARED EXHAUSTED about a different '
-                f'board.\n\n'
-                f'  declared about : {str(_stale)[:16]}...\n'
-                f'  shipping       : {_ship[:16]}... (from {_src})\n'
-                f'  reason on the record: {_said}\n\n'
-                f'"There is nothing further for this half" is a claim about a '
-                f'BOARD, and this one has outlived the board it was made '
-                f'about. Measured (run 29): a placement exhaustion was '
-                f'recorded against a board that existed for eight minutes, '
-                f'the file was overwritten nine seconds later, and the claim '
-                f'survived three close-out calls into the run\'s terminal '
-                f'record.\n\nSee what changed, then say it again about the '
-                f'board you are shipping:\n\n'
-                f'  python3 -X utf8 py_placer/converge.py step-back --ledger '
-                f'{a.ledger} \\\n'
-                f'      --to {_stale} --out wk/declared.kicad_pcb\n'
-                f'  python3 -X utf8 py_placer/converge.py record --ledger '
-                f'{a.ledger} \\\n'
-                f'      --board {a.board} --kind systemic --exhausted {_h} \\\n'
-                f'      --exhausted-reason "<what is still spent, on THIS '
-                f'board>"\n\n'
-                f'There is deliberately no --accept-unclosed token for this: a '
-                f'claim bound to the wrong board is the wrong claim, not a '
-                f'residue to accept, and re-recording it costs one command.')
-
     _refusal = _close_out(a, name)
     if _refusal:
         return _refusal
@@ -2998,10 +3112,20 @@ def _close_out(a, name):
 #: heard it -- a waived gate is a gap the routing half inherits, and the freeze
 #: row is the one record both halves read. Five lines, shared by the
 #: delegated and inline arms.
+#: L3 75 -> 82 and L4 45 -> 51 (#963): both stages now PRINT the
+#: `record --kind classification` command instead of naming it in prose. L4's
+#: step 1 has said "Record the classification in the ledger" with no command
+#: since it was written, and run 29 recorded none at all in 439 commands -- so
+#: the lines are the fix, not decoration. L5 stays at 40 deliberately: a fourth
+#: printing on the branch that was measured not to carry is the defect, and
+#: what landed there is a refusal, which has no ceiling.
+#: L3's 82 leaves room for the 2-line `_binding_note()`: measured 79 clear
+#: and 81 with the driver blind, and an arm that fits only while every
+#: instrument is healthy is a ceiling that fails on the bad day.
 _ARM_CEILING = {
     'L1': 105, 'L1 (delegated)': 105, 'L1 (inline)': 25,
     'L2': 225, 'L2 (delegated)': 225, 'L2 (inline)': 95,
-    'L3': 75, 'L4': 45, 'L5': 40,
+    'L3': 82, 'L4': 51, 'L5': 40,
     'L5 (DONE-EXHAUSTED)': 170, 'L5 (STUCK)': 170, 'L5 (BUDGET)': 170,
 }
 
@@ -3043,6 +3167,20 @@ def _args(argv=None):
                          'speaks the L2 placement gate\'s vocabulary, and a '
                          'waiver that covers two gates at once waives the one '
                          'that was working.')
+    ap.add_argument('--accept-unclassified', default=None, metavar='REASON',
+                    help='Go round again although the routing laps since the '
+                         'last decision outnumber what one decision '
+                         'authorises. Needs a REASON, and it is meant to be '
+                         'rare: the ordinary answer is to WRITE the decision, '
+                         'which is one `converge record --kind '
+                         'classification --shape <...>` and moves no verdict. '
+                         'This flag is for the case where the board the '
+                         'decision was about is gone and cannot be '
+                         're-derived. A THIRD waiver vocabulary on purpose, '
+                         'not a token in --accept-unclosed: that one is the '
+                         'terminal branch\'s, and sharing it would let a '
+                         'waiver granted for a close-out disagreement clear an '
+                         'unclassified retry.')
     ap.add_argument('--render-json', default=None, metavar='PATH',
                     help='render_placement --json-out document. L3 requires '
                          'one when there is a failure to classify: "one pocket '
@@ -3496,15 +3634,14 @@ def _refusal_scenarios(tmp):
     led = ledger('ledger.jsonl', [row])
     flat = ledger('flat.jsonl',
                   [dict(row, kind='placement')] * 6 + [row] * 6)
-    # #963: both halves declared exhausted about a board that is not the one
-    # being shipped. A declaration alone makes its half flat, so this reaches
-    # a TERMINAL branch -- which is the only branch that refuses on it.
-    stale_decl = ledger('stale_decl.jsonl', [
-        {'kind': 'systemic', 'accepted': True, 'result_sha': 'f' * 64,
-         'exhausted': {'half': 'placement', 'reason': 'every lever spent'}},
-        {'kind': 'systemic', 'accepted': True, 'result_sha': 'f' * 64,
-         'exhausted': {'half': 'routing', 'reason': 'the pair is parity-fixed'}},
-    ])
+    # #963: two routing laps and no decision behind them. Two ledgers, because
+    # "no classification row has ever been written" and "the laps ran past the
+    # last one" are different arms and the first is the one run 29 was.
+    unclass = ledger('unclassified.jsonl', [row, row])
+    classified = ledger('classified.jsonl', [
+        {'kind': 'classification', 'accepted': True, 'result_sha': sha,
+         'shape': 'parameter', 'lever': 'the escape faces are saturated'},
+        row, row])
     _REPORT = {'blocking': 0, 'oob_pad_count': 0, 'buildable': True,
                'verdict': 'buildable (blocking 0)', 'locked_contacts': 0,
                'pad_conflicts': 0, 'hole_conflicts': 0, 'clearance': 0.2,
@@ -3780,9 +3917,12 @@ def _refusal_scenarios(tmp):
         # refusal is in l5's terminal branch ahead of `_close_out`, and the
         # point is that a run which satisfies every close-out check still does
         # not ship behind a claim about another board.
-        ('a ship behind an exhaustion declared about another board',
-         ['--board', board, '--ledger', stale_decl, '--score', score,
-          '--routing-close', close]),
+        # #963's headline, both arms. These reach the CONTINUE branch, which is
+        # where run 29 sat: it took this branch six times and exited 0 each.
+        ('a retry with no classification ever recorded',
+         ['--board', board, '--ledger', unclass, '--score', score]),
+        ('a retry two laps past the last classification',
+         ['--board', board, '--ledger', classified, '--score', score]),
     ]
 
 
@@ -4541,6 +4681,51 @@ def _self_test():
         # gating it would run the most expensive instrument every lap.
         want('routing close-out' not in out,
              'the CONTINUE branch is not gated on a close-out')
+
+        # #963: the retry gate. Four arms, because three of them are the ways
+        # it must NOT fire -- a gate whose only test is that it refuses is a
+        # gate nobody has measured the cost of.
+        _rlap = {'kind': 'completion', 'accepted': True, 'result_sha': _b5sha,
+                 'score': {'blocking': 2, 'quality': {}}}
+        _cls_row = {'kind': 'classification', 'accepted': True,
+                    'result_sha': _b5sha, 'shape': 'parameter',
+                    'lever': 'the escape faces are saturated'}
+        _s2 = scored({'blocking': 2}, 'two.json')
+        out = STAGES['L5'](_args(base + [
+            '--ledger', ledger_of([_rlap], 'one_lap.jsonl'), '--score', _s2]))
+        want('not done yet' in out,
+             'one unclassified routing lap is the lap the last decision '
+             'bought, and is not refused')
+        out = STAGES['L5'](_args(base + [
+            '--ledger', ledger_of([_rlap, _rlap], 'two_laps.jsonl'),
+            '--score', _s2]))
+        want(out.startswith('<error>') and 'kind classification' in out,
+             'the SECOND unclassified routing lap is refused, naming the row')
+        # The DEMANDS, not the prose. An earlier draft of this pin banned the
+        # word "teammate" and failed on a sentence whose whole point was that a
+        # teammate is ONE acceptable producer among several -- banning the
+        # vocabulary would have pushed the text towards saying less.
+        want('--stage L3' not in out and 'route_prompt' not in out
+             and 'place_prompt' not in out and '--delegate' not in out,
+             'the refusal asks for a ROW, and names no stage to run and no '
+             'prompt file to produce')
+        out = STAGES['L5'](_args(base + [
+            '--ledger', ledger_of([_rlap, _rlap, _cls_row], 'classed.jsonl'),
+            '--score', _s2]))
+        want('not done yet' in out,
+             'recording the classification clears the gate, and that is the '
+             'whole escape -- one command, no waiver')
+        out = STAGES['L5'](_args(base + [
+            '--ledger', ledger_of([_rlap, _rlap], 'two_laps.jsonl'),
+            '--score', _s2, '--accept-unclassified', 'the board is gone']))
+        want('not done yet' in out,
+             '--accept-unclassified is the reason-bearing escape')
+        out = STAGES['L5'](_args(base + [
+            '--ledger', ledger_of([_rlap, _rlap], 'two_laps.jsonl'),
+            '--score', scored({'blocking': 0}, 'zero.json')]))
+        want('not done yet' in out,
+             'blocking == 0 is never refused: L3 refuses to classify it, so '
+             'the row the gate wants cannot be produced')
 
         _fl = ledger_of(flat, 'flat.jsonl')
         _z2 = scored({'blocking': 0}, 'z2.json')

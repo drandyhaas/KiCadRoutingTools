@@ -23,10 +23,15 @@ WHAT IS NOT DONE HERE, and why, because the obvious fix is the wrong one:
     `test_904_not_a_lap::test_a_declaration_survives_a_freeze_and_a_close_out`
     pins that a freeze must not retract. A sha cannot tell "rewrote the file,
     same poses" from "replaced the placement", and `verdict` opens no board.
-  * So converge REPORTS (`declared_stale_board`, named on every verdict) and
-    the driver's terminal branch REFUSES -- the place where the claim is made
-    to a reader. That half is pinned in `loop_driver --dump-refusals` and
-    `--self-test`.
+  * So converge REPORTS: `declared_stale_board` is named on every verdict,
+    with the `step-back` command that recovers the board the claim was about.
+    It does NOT gate the ship. A first cut did, and a verifier measured that
+    refusal firing on the chain's own prescribed ordering -- see
+    `test_the_ship_is_not_gated_on_the_board_having_moved`, which exists so it
+    is not re-added as an obvious improvement.
+  * The REFUSALS are where the claim can be judged: `record` refuses a
+    declaration whose score grades another board, and a later lap of the half
+    retracts it with no flag at all.
   * No new `exhausted.board_sha` field. Every row already carries `result_sha`
     from `store.put(a.board)` and `--board` is required, so the binding is on
     disk on every ledger ever written. A second number for one fact would be
@@ -223,6 +228,49 @@ def test_the_stale_attachment_is_on_the_row_not_only_on_stderr():
         assert 'score_stale' not in json.loads(r.stdout), \
             'a correctly bound row must not be labelled'
     print("  PASS: an unbound or foreign score is labelled on its own row")
+
+
+def test_the_ship_is_not_gated_on_the_board_having_moved():
+    """The refusal this change deliberately does NOT make, and why.
+
+    A first cut refused the terminal close-out whenever a live declaration's
+    board was not the shipping board. An adversarial verifier measured it
+    firing on the chain's OWN prescribed ordering: declare placement, then run
+    the routing laps L2 prescribes, and the ship is refused -- because the L2
+    freeze writes "a new file, new content hash" by construction. It also
+    fired at BUDGET with one half not flat. That is "any digest change
+    invalidates" applied at the ship, which is the rule this very change
+    argues is inert-making everywhere else.
+
+    So the staleness is REPORTED, loudly, on every verdict, and the refusals
+    live where the claim can actually be judged: `record` refuses a declaration
+    whose score grades another board, and a later lap of the half retracts it.
+    This test exists so the refusal is not re-added as an obvious improvement.
+    """
+    scripts = os.path.join(ROOT, '.claude', 'skills',
+                           'plan-pcb-placement-and-routing', 'scripts')
+    sys.path.insert(0, scripts)
+    import loop_driver as L
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        rows = [
+            {'kind': 'systemic', 'accepted': True, 'result_sha': 'f' * 64,
+             'exhausted': {'half': 'placement', 'reason': 'levers spent'}},
+            {'kind': 'systemic', 'accepted': True, 'result_sha': 'f' * 64,
+             'exhausted': {'half': 'routing', 'reason': 'parity-fixed'}},
+        ]
+        with io.open(led, 'w', encoding='utf-8') as fh:
+            for i, r in enumerate(rows):
+                fh.write(json.dumps(dict(r, iteration=i)) + '\n')
+        sp = _score(td, 's.json', board_sha=_sha_of(PLACED))
+        doc = json.loads(_cv(['verdict', '--ledger', led, '--score', sp]).stdout)
+        assert doc['placement']['declared_stale_board'] == 'f' * 64, doc
+        assert 'DECLARED ABOUT ANOTHER BOARD' in doc['reason'], doc['reason']
+        out = L.STAGES['L5'](L._args(
+            ['--board', PLACED, '--ledger', led, '--score', sp]))
+        assert 'DECLARED EXHAUSTED about a different board' not in out, (
+            'the ship was gated on a digest change again:\n' + out[:500])
+    print("  PASS: the staleness is reported; the ship is not gated on it")
 
 
 def test_a_declaration_is_not_retracted_by_the_board_moving_on():

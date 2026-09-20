@@ -382,6 +382,25 @@ FAIL_COMPATIBLE_STOPS = ('2', '4', 'STUCK', 'BUDGET')
 #: interpolates. FAIL_COMPATIBLE_STOPS is the subset legal beside a FAIL lens.
 STOP_TOKENS = ('1', '2', '3', '4', 'DONE-EXHAUSTED', 'STUCK', 'BUDGET')
 
+#: The three re-entry shapes, named once. The same three words loop_driver's L4
+#: demands, and `--shape` records which one a lap acted on. Spelled as a
+#: constant since #963 required one on a classification row: the refusal and
+#: the argparse choices must be the same list, or the message can name a word
+#: the parser refuses.
+SHAPES = ('parameter', 'placement', 'floorplan')
+
+#: The stop token that claims the board is MEASURED-UNFIXABLE rather than
+#: merely not finished -- convergence.md §3's fourth condition. Run 29 recorded
+#: exactly this, falsely, about an impedance clause whose own log's next two
+#: lines read `SE fallback: 2/2 member net(s) routed`, with no classification
+#: row anywhere in its ledger.
+#:
+#: `STUCK` is deliberately NOT here, and the distinction is the point: STUCK is
+#: `verdict`'s own name for "neither half improved in its last N laps", which
+#: is §3's THIRD condition, a plateau. A plateau is a statement about a search;
+#: "unfixable" is a statement about a board.
+UNFIXABLE_STOPS = ('4',)
+
 #: MSYS2's argv-rewrite signature. Git Bash rewrites any argument starting with
 #: `/` into a Windows path unless MSYS2_ARG_CONV_EXCL is set, and EVERY KiCad
 #: net name is `/`-prefixed -- so `/D_P` reaches the tool as
@@ -1110,6 +1129,20 @@ def cmd_record(a):
                   f"the score -- an unscored declaration is still a "
                   f"declaration. Nothing was written.", file=sys.stderr)
             return 2
+    # A CLASSIFICATION WITH NO SHAPE IS A DECISION THAT RECORDED NO DECISION
+    # (#963). `--shape` defaults to None and nothing required it, so the one
+    # row the retry gate reads could be written by a command that names
+    # nothing -- which would make that gate a formality one flagless call
+    # clears. The three words are not interchangeable and the cost of guessing
+    # is asymmetric: a wrong `parameter` spends iterations on a board no
+    # parameter can fix, a wrong `placement` throws away a routed board.
+    if a.kind == 'classification' and not a.shape:
+        print(f"record: --kind classification needs --shape "
+              f"{' | '.join(SHAPES)}. The shape IS the decision -- it is what "
+              f"the next re-entry changes, and a classification row that "
+              f"names none records that a decision was made without recording "
+              f"which. Nothing was written.", file=sys.stderr)
+        return 2
     if a.final and not a.stop_condition:
         print("record: --final requires --stop-condition (which of the run's "
               "stop conditions ended it). Nothing was written.",
@@ -1138,6 +1171,44 @@ def cmd_record(a):
               "written.", file=sys.stderr)
         return 2
     _stop_reason = (a.stop_reason or '').strip() or _stop_reason
+    # A "MEASURED-UNFIXABLE" CLAIM NEEDS THE MEASUREMENT ON THE RECORD (#963).
+    # Run 29 closed with stop condition 4 on an impedance clause whose own log
+    # said, two lines later, `SE fallback: 2/2 member net(s) routed`. Its
+    # ledger held no classification row at all -- L3 and L4 were never invoked
+    # across 439 commands -- so the claim rested on 57 inline routing calls
+    # nothing had classified. An outside verifier refuted it an hour later and
+    # the re-route took BLOCKING 2 -> 0.
+    #
+    # BOUND TO THE ROW THAT MAKES THE CLAIM, not to the stage that prints it:
+    # run 29's close-out was written without L5's advice carrying at all, so a
+    # gate in the driver would have been another thing to walk past.
+    if a.final and _stop_token in UNFIXABLE_STOPS:
+        _prior = Ledger(a.ledger).entries() if os.path.isfile(a.ledger) else []
+        _cls = _classification_state(_prior)
+        _since = None if _cls is None else _cls['laps_since']['routing']
+        if _cls is None or _since:
+            _what = ('no classification row was ever recorded'
+                     if _cls is None else
+                     f'{_since} routing lap(s) were recorded after the last '
+                     f'classification (iteration {_cls["iteration"]}, shape '
+                     f'{_cls["shape"]})')
+            print(f"record: --stop-condition {_stop_token} says the board is "
+                  f"MEASURED-UNFIXABLE, and in this ledger {_what}.\n\n"
+                  f"That is convergence.md's strongest claim and the one run "
+                  f"29 recorded falsely: an impedance clause declared "
+                  f"geometrically unsatisfiable on a log whose next two lines "
+                  f"read `SE fallback: 2/2 member net(s) routed`, over 57 "
+                  f"routing calls nothing had classified. Write the decision "
+                  f"the claim rests on, then record the close-out:\n\n"
+                  f"  python3 -X utf8 py_placer/converge.py record --ledger "
+                  f"{a.ledger} \\\n"
+                  f"      --board {a.board} --kind classification "
+                  f"--shape <{'|'.join(SHAPES)}> \\\n"
+                  f"      --lever \"<the measurement that names the shape>\"\n\n"
+                  f"A plateau is a different claim and needs none of this: "
+                  f"--stop-condition 3, or the STUCK the verdict prints. "
+                  f"Nothing was written.", file=sys.stderr)
+            return 2
     # #901: these two are about --final, NOT about which half it closes.
     # They sat inside the `kind == 'completion'` gate below, so
     # `--kind systemic --final --stop-condition DONE-EXHAUSTED --lens
@@ -1470,7 +1541,7 @@ def cmd_record(a):
     if a.exhausted:
         entry['exhausted'] = {'half': a.exhausted,
                               'reason': a.exhausted_reason.strip()}
-    if _binding in ('other', 'unbound') and a.score:
+    if _binding in ('other', 'unbound') and isinstance(_score_doc, dict):
         # THE WARNING, ON THE ROW (#963). It has always gone to stderr and
         # vanished, while the row kept a score `_score_key` will happily rank
         # -- so no later reader could tell a warned row from a clean one, which
@@ -1479,9 +1550,11 @@ def cmd_record(a):
         # `_score_key` or `_half_state` skip such a row would move plateau
         # windows on every historical ledger, which is a large behaviour change
         # to hide inside a "just record it" line.
+        # No `board_sha` key here: it would be `result_sha` on this same row,
+        # byte for byte, and two numbers for one fact is the defect
+        # `_declaration`'s docstring refuses a field for.
         entry['score_stale'] = {'binding': _binding,
-                                'payload_sha': _payload_sha,
-                                'board_sha': sha}
+                                'payload_sha': _payload_sha}
     if a.accept_incommensurable:
         # The disposition belongs in the row, not only in the console the
         # refusal was cleared from. Same shape as --exhausted: what is recorded
@@ -1688,6 +1761,44 @@ def _declaration(rows, half):
     return None if found is None else (found, live, sha)
 
 
+def _classification_state(rows):
+    """The last L3 DECISION on the record, and what has happened since (#963).
+
+    `None` when the ledger holds no `kind: classification` row AT ALL, which is
+    not the same as "no laps since one" and is the difference that decides
+    whether this catches anything. Run 29 recorded ZERO classification rows
+    across 439 commands while L5 printed the `--stage L3` command three times,
+    so a predicate phrased only as "laps since the last classification" is
+    vacuously satisfied on exactly the run it was written for. A caller must
+    handle `None` explicitly; `verdict` publishes each half's total `laps`
+    beside this, which is the count that applies then.
+
+    `laps_since` is published for BOTH halves, and only ROUTING is gated on --
+    see the refusal in loop_driver's L5. A placement lap recorded after
+    `shape=placement` is the classification being ACTED ON, not invalidated:
+    gating on it would refuse the loop for doing what the decision said. That
+    sentence is the whole reason both numbers are here rather than one, and
+    deleting it is how the next reader adds the wrong conjunct.
+
+    Counted with `_is_lap`, so a `--final` row, a declaration, a freeze and a
+    `systemic` or `classification` row are none of them laps -- one predicate,
+    the same one `_declaration` and `_half_state` use.
+    """
+    found, idx = None, -1
+    for i, r in enumerate(rows):
+        if (r.get('kind') or '') == 'classification':
+            found, idx = r, i
+    if found is None:
+        return None
+    after = rows[idx + 1:]
+    return {'iteration': found.get('iteration'),
+            'shape': found.get('shape'),
+            'result_sha': found.get('result_sha'),
+            'lever': found.get('lever'),
+            'laps_since': {h: sum(1 for r in after if _is_lap(r, h))
+                           for h in ('placement', 'routing')}}
+
+
 def placement_terms(score):
     """The `placement.terms` block of a score, or None. #894."""
     if not isinstance(score, dict):
@@ -1836,6 +1947,12 @@ def _half_state(rows, half, flat, board_sha=None):
             out['declared_board'] = dec[2]
             if board_sha and board_sha != dec[2]:
                 out['declared_stale_board'] = dec[2]
+        else:
+            # A hand-built or pre-#963 row can carry no `result_sha`. FAILING
+            # OPEN is right -- nothing can be judged -- but failing open in
+            # silence is not, because a reader sees the same absent key as a
+            # declaration that matched.
+            out['declared_board_unknown'] = True
         return out
     if dec and not dec[1]:
         out['declared_superseded'] = dec[0]
@@ -2136,8 +2253,16 @@ def cmd_verdict(a):
             try:
                 from board_store import sha256_file
                 board_sha, board_sha_source = sha256_file(a.board), '--board'
-            except Exception:                               # noqa: BLE001
-                pass
+            except Exception as exc:                        # noqa: BLE001
+                # NEVER SILENT. `--board` pointing at a directory or a path
+                # that is not there used to leave `board_sha_source: null` and
+                # say nothing, so a caller who passed the flag precisely to get
+                # the binding checked was told nothing had been checked only by
+                # reading a null they had no reason to look at.
+                print(f"verdict NOTE: --board {os.path.abspath(a.board)} "
+                      f"could not be hashed ({type(exc).__name__}), so the "
+                      f"exhaustion binding was NOT checked from it. The score "
+                      f"carries no board_sha either.", file=sys.stderr)
     st = {h: _half_state(rows, h, a.flat, board_sha=board_sha)
           for h in ('placement', 'routing')}
     flat_p, flat_r = st['placement']['flat'], st['routing']['flat']
@@ -2150,6 +2275,12 @@ def cmd_verdict(a):
            'quality': score.get('quality'),
            'ungraded': sorted(score.get('ungraded') or []),
            'unknown': sorted(score.get('unknown') or []),
+           # The last L3 decision on the record, published on EVERY verdict
+           # rather than only on the branch that reads it -- the posture the
+           # incommensurable block already takes. `null` means no
+           # classification row exists at all, which is run 29's case and the
+           # one a reader most needs told.
+           'classification': _classification_state(rows),
            # WHICH INPUT the board binding came from, published beside it: an
            # aggregate verdict cannot say which of its inputs moved (#694), and
            # `null` here is the honest answer for a score with no board_sha and
@@ -2546,7 +2677,7 @@ def build_parser():
                         'keeps the MEASUREMENT can tell a later reader what '
                         'the lap was for; a ledger that keeps a paragraph '
                         'about it cannot.')
-    r.add_argument('--shape', choices=('parameter', 'placement', 'floorplan'),
+    r.add_argument('--shape', choices=SHAPES,
                    default=None,
                    help='the re-entry shape this lap acted on (the same word '
                         'L4 demands). Stored as entry["shape"].')

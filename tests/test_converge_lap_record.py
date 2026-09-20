@@ -137,7 +137,7 @@ class TestClassificationKind(unittest.TestCase):
     def test_it_is_accepted_and_recorded(self):
         with tempfile.TemporaryDirectory() as td:
             ledger = os.path.join(td, 'ledger.jsonl')
-            r = _record(ledger, kind='classification',
+            r = _record(ledger, kind='classification', shape='floorplan',
                         lever='the residual is a floorplan finding')
             self.assertEqual(r.returncode, 0, r.stderr[-400:])
             self.assertEqual(_rows(ledger)[0]['kind'], 'classification')
@@ -168,7 +168,7 @@ class TestStatusIsStillOneDocument(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             ledger = os.path.join(td, 'ledger.jsonl')
             _record(ledger, score={'blocking': 2, 'quality': {}},
-                    kind='classification', lever='lap')
+                    kind='classification', shape='parameter', lever='lap')
             r = _run(CONVERGE, 'status', '--ledger', ledger)
             self.assertEqual(r.returncode, 0, r.stderr[-300:])
             doc = json.loads(r.stdout.split('\nNOTE:')[0])

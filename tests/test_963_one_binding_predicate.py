@@ -316,7 +316,10 @@ def test_the_local_fallback_agrees_with_the_shared_predicate():
         sha = sha256_file(b)
         cases = [{'board_sha': sha}, {'board_sha': 'd' * 64}, {'blocking': 0}]
         shared = [L._score_board_mismatch(b, p) for p in cases]
-        real, L._converge_module = L._converge_module, lambda: None
+        # `*_a`: the real helper takes the attribute names each caller
+        # needs, so a zero-arg stub would raise TypeError and the test
+        # would be measuring its own stub.
+        real, L._converge_module = L._converge_module, lambda *_a: None
         try:
             fallback = [L._score_board_mismatch(b, p) for p in cases]
         finally:
@@ -354,7 +357,7 @@ def test_a_driver_that_cannot_answer_says_so():
 
         real_mod, real_blind = L._converge_module, L._BINDING_BLIND
         L._BINDING_BLIND = None
-        L._converge_module = lambda: _Blind
+        L._converge_module = lambda *_a: _Blind
         try:
             assert L._score_board_mismatch(b, payload) is None, \
                 'an unanswerable question must still refuse nothing'
@@ -374,8 +377,8 @@ def test_a_driver_that_cannot_answer_says_so():
         try:
             sys.modules['converge_stub_old'] = _Old
             L._converge_module = (
-                lambda: None if not hasattr(_Old, 'score_board_binding')
-                else _Old)
+                lambda *attrs: (_Old if all(hasattr(_Old, n)
+                                            for n in attrs) else None))
             assert L._score_board_mismatch(b, payload) == payload['board_sha']
         finally:
             L._converge_module = real_mod
