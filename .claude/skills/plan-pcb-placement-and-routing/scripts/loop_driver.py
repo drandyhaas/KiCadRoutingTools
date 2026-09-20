@@ -351,10 +351,10 @@ def _guard_congestion(a):
             'placement started from:\n'
             '  python3 -X utf8 py_tools/render_placement.py <the placed board> \\\n'
             '      --clearance <floor> --ignore-nets <poured nets> \\\n'
-            '      --json-out wk/cong_now.json -o wk/cong_now.png\n'
+            '      --json-out wk/cong_now.json -o wk/cong_now.png --quiet\n'
             '  python3 -X utf8 py_tools/render_placement.py <the pre-placement board> \\\n'
             '      --clearance <floor> --ignore-nets <poured nets> \\\n'
-            '      --json-out wk/cong_base.json -o wk/cong_base.png\n'
+            '      --json-out wk/cong_base.json -o wk/cong_base.png --quiet\n'
             '  ... --stage L4 --shape parameter \\\n'
             '      --congestion-json wk/cong_now.json '
             '--congestion-baseline wk/cong_base.json\n\n'
@@ -612,6 +612,15 @@ _ARTIFACTS = ('placed.kicad_pcb', 'assembly_close.json',
               'place_close_render.json', 'freeze_refs.json',
               'frozen.kicad_pcb', 'routed.kicad_pcb', 'score.json',
               'route.log', 'routing_close.json', 'handoff.json', 'handoff.png',
+              # The hand-off's REVIEW SHEET (#963). SKILL.md names the hand-off
+              # as a boundary, and the sheet is what the seven boundary
+              # criteria are measured off -- without it the render carries no
+              # `review_sheet` key and `placement_driver._guard_render`'s fifth
+              # check cannot fire at all. Inserted here rather than appended:
+              # `tests/mutate_904.py`'s `verdict-artifacts-unregistered` row
+              # anchors on this tuple's CLOSING tail, and appending would
+              # report that row stale.
+              'handoff_sheet.png',
               # The end-to-end verifier's verdicts, one file per lens, and one
               # for the close-out boundary verification (#904). These are named
               # HERE rather than in the L5 text for two reasons a fixed
@@ -1161,7 +1170,7 @@ message.
                      --clearance <the board's own floor> \\
                      --json {_asm}
   render       : {_rend}
-                 the render_placement.py --json-out you actually READ
+                 the render document you actually READ
   freeze refs  : {_refs}
                  a JSON list of the refs whose pose is a DECISION -- moved
                  deliberately, or mechanically pinned. WRITE it: a pose diff
@@ -1560,6 +1569,7 @@ def l2(a):
     _refs, _score, _log = P['freeze_refs.json'], P['score.json'], P['route.log']
     _close, _hoj, _hop = (P['routing_close.json'], P['handoff.json'],
                           P['handoff.png'])
+    _hos = P['handoff_sheet.png']
     # The freeze SOURCE is the board handed to this stage, not a name derived
     # from the work dir: on a second cycle the placed board is placed_c2, and
     # `copy_board placed.kicad_pcb frozen.kicad_pcb` would freeze cycle 1's
@@ -1654,7 +1664,7 @@ afterwards every panel is placement plus whatever the router did:
 
   python3 -X utf8 py_tools/render_placement.py {_frozen} \\
       --clearance <the board's own floor> --ignore-nets <the poured nets> \\
-      --json-out {_hoj} -o {_hop}
+      --review-sheet {_hos} --json-out {_hoj} -o {_hop} --quiet
 
 Anything its WHAT THIS PANEL SHOWS block names as off the outline, stacked or
 hole-conflicting will still be there after the route, and no router setting
@@ -1809,7 +1819,7 @@ become hard to separate by eye:
 
   python3 -X utf8 py_tools/render_placement.py {_frozen} \\
       --clearance <the board's own floor> --ignore-nets <the poured nets> \\
-      --json-out {_hoj} -o {_hop}
+      --review-sheet {_hos} --json-out {_hoj} -o {_hop} --quiet
 
 Its WHAT THIS PANEL SHOWS block is what routing is being given. Anything it
 names as off the outline, stacked, or hole-conflicting will still be there after
@@ -1959,8 +1969,10 @@ Measure it, do not infer it from how the failure feels:
   python3 -X utf8 py_tools/check_channels.py {a.board} --baseline <the pre-route board> \\
       --clearance <the board's own floor> --track-width <the board's own floor>
   python3 -X utf8 py_tools/check_reachability.py <the COPPER-FREE board> --pad <REF.PAD> --json
-  python3 -X utf8 py_tools/render_placement.py <the COPPER-FREE board> --json-out wk/cong_now.json
-  python3 -X utf8 py_tools/render_placement.py <the pre-placement board> --json-out wk/cong_base.json
+  python3 -X utf8 py_tools/render_placement.py <the COPPER-FREE board> \\
+      --json-out wk/cong_now.json -o wk/cong_now.png --quiet
+  python3 -X utf8 py_tools/render_placement.py <the pre-placement board> \\
+      --json-out wk/cong_base.json -o wk/cong_base.png --quiet
 
 Three things that have each cost a run:
 
@@ -3112,20 +3124,22 @@ def _close_out(a, name):
 #: heard it -- a waived gate is a gap the routing half inherits, and the freeze
 #: row is the one record both halves read. Five lines, shared by the
 #: delegated and inline arms.
-#: L3 75 -> 82 and L4 45 -> 51 (#963): both stages now PRINT the
+#: L3 75 -> 84 and L4 45 -> 51 (#963): both stages now PRINT the
 #: `record --kind classification` command instead of naming it in prose. L4's
 #: step 1 has said "Record the classification in the ledger" with no command
 #: since it was written, and run 29 recorded none at all in 439 commands -- so
 #: the lines are the fix, not decoration. L5 stays at 40 deliberately: a fourth
 #: printing on the branch that was measured not to carry is the defect, and
 #: what landed there is a refusal, which has no ceiling.
-#: L3's 82 leaves room for the 2-line `_binding_note()`: measured 79 clear
-#: and 81 with the driver blind, and an arm that fits only while every
+#: L3's 84 leaves room for the 2-line `_binding_note()`, and for item D's
+#: repair of the two congestion one-liners (they carried --json-out with no
+#: -o, so render_placement wrote its PNG beside the BOARD): measured 81
+#: clear and 83 with the driver blind. An arm that fits only while every
 #: instrument is healthy is a ceiling that fails on the bad day.
 _ARM_CEILING = {
     'L1': 105, 'L1 (delegated)': 105, 'L1 (inline)': 25,
     'L2': 225, 'L2 (delegated)': 225, 'L2 (inline)': 95,
-    'L3': 82, 'L4': 51, 'L5': 40,
+    'L3': 84, 'L4': 51, 'L5': 40,
     'L5 (DONE-EXHAUSTED)': 170, 'L5 (STUCK)': 170, 'L5 (BUDGET)': 170,
 }
 

@@ -1289,7 +1289,91 @@ def test_routed_board_lenses_exist_and_reenter_the_loop():
     print("  PASS: 3 routed lenses present, FAIL re-enters the loop")
 
 
+#: Render commands whose NARRATIVE is the deliverable, and which therefore
+#: keep their stdout. `--pair` prints `N fixed, M NEW` and the before/after
+#: metrics, which the surrounding text tells the reader to read; `--focus`
+#: prints THE WORST N and the crop commands it hands you, and writes to a
+#: DIRECTORY, so there is no single picture to look at first.
+#:
+#: A PREDICATE, not a list of line numbers (#963): a new diff template lands
+#: exempt automatically and a new close-out template does not, which is the
+#: opposite of what a line list does as it rots.
+_RENDER_LOUD = ('--pair', '--focus')
+
+
+def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
+    """`--json-out` implies `--quiet`, unless the narrative IS the deliverable.
+
+    Measured (#963): ten of the thirteen render commands the two drivers emit
+    omitted `--quiet`, so 10 of a run's 13 review sheets printed every
+    checklist key before the picture could be looked at -- 36 stdout lines and
+    8,513 characters, against 3 lines and 536 with the flag. The blind-first
+    ordering is the whole mechanism of the boundary review, and the commands
+    the review gates prescribe were the ones defeating it.
+
+    `--quiet` is `store_true`, so
+    `test_driver_commands_supply_required_options_and_values` cannot see it:
+    that arm checks argparse-`required` options and whether a value-taking flag
+    was given a value, and a flag that consumes nothing is invisible to both.
+
+    Scoped to spans carrying `--json-out`, which is not a convenience but the
+    exact statement of the rule: a render that writes its keys to a FILE should
+    not also print them. Prose that merely names the tool yields a span with no
+    flags and is invisible here.
+    """
+    import collections
+    tool = 'py_tools/render_placement.py'
+    seen = exempt = 0
+    loud, missing = [], []
+    sheets = collections.Counter()
+    for src in DRIVERS + tuple(s for s in SOURCES if s.endswith('.md')):
+        text = source_text(src)
+        for b in _continued_blocks(text, tool):
+            for span in _tool_spans(b, tool):
+                if '--json-out' not in span:
+                    continue
+                seen += 1
+                if any(f in span for f in _RENDER_LOUD):
+                    exempt += 1
+                    loud.append((src, next(f for f in _RENDER_LOUD
+                                           if f in span)))
+                elif '--quiet' not in span:
+                    missing.append((src, ' '.join(span)[:110]))
+                if '--review-sheet' in span:
+                    sheets[src.rsplit('/', 1)[-1]] += 1
+                if '--quiet' in span and '--json-out' not in span:
+                    missing.append((src, 'bare --quiet: ' + ' '.join(span)[:90]))
+    for src, why in sorted(set(loud)):
+        print(f'    loud on purpose ({why}): {src}')
+    assert not missing, (
+        'render commands that write their keys to a file and print them too:\n'
+        + '\n'.join(f'  {s}: {t}' for s, t in missing)
+        + '\n\nAdd --quiet, or add the flag that makes the narrative the '
+          'deliverable. `--quiet` with no --json-out is the worst of both: it '
+          'silences `describe` and the JSON still prints '
+          '(render_placement.py, _quiet vs _quiet_text).')
+    # Measured floors, not round ones: 38 spans and 9 exempt at the commit that
+    # added this. A gate that stops finding its population reads exactly like a
+    # gate that finds nothing wrong.
+    assert seen >= 34, (
+        f'only {seen} --json-out render span(s) found, measured 38; this gate '
+        f'has stopped looking at the population it guards')
+    assert exempt >= 8, (
+        f'{exempt} exempt span(s), measured 9: the --pair/--focus arm is what '
+        f'keeps this from being a blanket rule, and it must stay exercised')
+    # And the drivers must keep ASKING for a sheet. Without `--review-sheet`
+    # the render writes no `review_sheet` key, and
+    # `placement_driver._guard_render`'s fifth check reads an absent key as
+    # "never asked for" -- which is how that guard sat unable to fire on its
+    # own driver's renders until #963. Measured 18 and 6.
+    assert sheets.get('placement_driver.py', 0) >= 15, sheets
+    assert sheets.get('loop_driver.py', 0) >= 5, sheets
+    print(f'  PASS: {seen} --json-out render span(s), {exempt} loud on '
+          f'purpose, {sum(sheets.values())} asking for a sheet')
+
+
 TESTS = [
+    test_a_render_that_writes_its_keys_to_a_file_does_not_print_them,
     test_every_documented_flag_exists,
     test_driver_commands_supply_required_options_and_values,
     test_the_refusal_branches_are_scanned,

@@ -523,6 +523,7 @@ swap):
   python3 -X utf8 py_tools/render_placement.py r.kicad_pcb --before {a.board} --pair \\
       --clearance <the board's own floor> --ignore-nets <the poured nets> \\
       --expect-moved <the count this stage reported> \\
+      --review-sheet wk/sheet_p3.png \\
       --json-out wk/render_p3.json -o wk/render_p3.png
 
 It prints WHAT THIS PANEL SHOWS (every finding in words), THE WORST N (one crop
@@ -630,6 +631,7 @@ board that lap came from:
   python3 -X utf8 py_tools/render_placement.py <this lap> --before <the lap before it> \\
       --pair --clearance <floor> --ignore-nets <poured nets> \\
       --expect-moved <the COUNT of parts this lap moved> \\
+      --review-sheet wk/sheet_lapN.png \\
       --json-out wk/render_lapN.json -o wk/render_lapN.png
 
 Read WHAT THE MOVE DID: `N fixed, M NEW` is the lap's verdict. A lap that
@@ -1827,7 +1829,9 @@ def _guard_render(a):
                    '      --clearance <the board\'s own floor> '
                    '--ignore-nets <the poured nets> \\\n'
                    '      --expect-moved <how many the stage said it moved> \\\n'
-                   '      --json-out wk/render.json -o wk/render.png\n\n'
+                   '      --review-sheet wk/sheet.png \\\n'
+                   '      --json-out wk/render.json -o wk/render.png '
+                   '--quiet\n\n'
                    'Then READ it -- the JSON is the re-measurement channel, the '
                    'picture is what catches what no metric models.')
     inst = doc.get('instrument') or {}
@@ -2128,7 +2132,8 @@ def _guard_congestion(a):
             f'  python3 -X utf8 py_tools/render_placement.py {a.before} \\\n'
             '      --clearance <the board\'s own floor> '
             '--ignore-nets <the poured nets> \\\n'
-            '      --json-out wk/congestion_before.json -o wk/congestion_before.png\n'
+            '      --json-out wk/congestion_before.json '
+            '-o wk/congestion_before.png --quiet\n'
             f'  ... --stage P-close --congestion-before wk/congestion_before.json\n\n'
             'If this board genuinely has no congestion to compare (a handful of '
             'parts, no buses), put that on the record: '
@@ -4033,8 +4038,17 @@ def _self_test():
 
         # #895's fifth render check. It is BACKWARD-COMPATIBLE by design -- a
         # document with no `review_sheet` key was produced by a run that never
-        # asked for one -- so it can only be seen by feeding the two shapes
-        # that mean something, or it is an arm nothing exercises.
+        # asked for one -- so the two shapes that MEAN something are fed here
+        # by hand.
+        #
+        # Until #963 that was the only way it could be reached AT ALL, and the
+        # sentence that stood here said so: none of this driver's own templates
+        # passed `--review-sheet`, so no render they produce ever carried the
+        # key, so the absent-key arm swallowed every one of them. The guard was
+        # live code that could not fire on its own population. The templates
+        # pass the flag now, and
+        # `tests/test_963_render_templates.py::
+        # test_the_guard_can_fire_on_the_drivers_own_render` holds them to it.
         _sheet_file = _wr('sheet_exists.json', {'x': 1})
         for _val, _want in ((None, 'none was written'),
                             (os.path.join(tmp3, 'no_such_sheet.png'),
