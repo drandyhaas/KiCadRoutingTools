@@ -390,3 +390,304 @@ to be a hand-run watch subagent:
 python3 -X utf8 py_router/cmd_timing.py WORKDIR          # step table, subtotals, totals
 python3 -X utf8 py_router/cmd_timing.py WORKDIR --json
 ```
+
+---
+
+## The render design system (#946)
+
+Two films are rendered from one engine, and before #946 they did not agree with
+each other. The issue opened on the narrowest symptom — ripped copper and
+restored copper told apart by hue alone, on the red–green axis, with no key in
+the frame — and the finding underneath it is that **there was no design system
+at all**: every module re-derived the same intent and landed near it.
+
+Four modules now hold it, and every renderer imports them:
+
+| module | owns |
+|---|---|
+| `py_router/render_theme.py` | *what things look like* — semantic roles, two measured themes, the mark vocabulary. **Imports no PIL**, so `render_placement` can import it at module scope |
+| `py_router/frame_layout.py` | *where things are* — named layouts, aspect presets, every box in final pixels. Pure geometry, no PIL, no board reads |
+| `py_router/render_chrome.py` | the in-frame key, the rail and the totals |
+| `py_router/render_panels.py` | the lower box and its four contents |
+
+plus `py_router/movie_attempts.py` (the attempts band) and
+`py_router/copper_motion.py` (retract and grow).
+
+### Themes
+
+`--theme dark` (the default) or `--theme light`, on `make_movie.py`,
+`make_film.py` and `render_placement.py`, or `$KICAD_RENDER_THEME`.
+
+The dark theme's values **are** the constants the renderers used before, so an
+unthemed render is byte-identical. The light theme is a genuinely second
+measured palette, not a transform of the first, and three measurements say why:
+
+- **on a light board the outline vanishes.** `board_edge` measures 12.33:1
+  against the dark board body and **1.01:1** against a light one — and since
+  the board body sits only 1.11× off the ground, a light frame with no edge has
+  no board in it at all. The hole colour is the mirror image and the one
+  theme-invariant token, improving 1.22× → 15.21× for free.
+- **the layer palette does not carry over.** Alpha compositing preserves the
+  differences *between* layers whatever the ground (closest rendered pair 24.8
+  dark vs 24.3 light), but nothing had measured contrast **against the board**:
+  1.96× minimum dark, **1.19×** light. `_LAYER_PALETTE` is a *light-on-dark*
+  palette, so over a bright board every entry is nearly the board. Scaling the
+  palette toward black by k = 0.74 and raising `layer_alpha` to 205 beats dark
+  on all three measures at once (2.00× minimum, closest pair 25.1, mean 78.9).
+  The light palette is written out as literal triples, never computed at
+  import: a derived palette means the committed baseline describes a
+  *computation*, and a rounding change would silently move frames.
+- **the obvious light event palette fails.** Take the dark events and darken
+  them and the rip/restore pair lands at a deuteranope separation of 88.6 —
+  worse than the neighbourhood of the original collision this whole issue is
+  about.
+
+`py_router/palette_audit.py` is the instrument. It is stdlib-only and never
+imports PIL:
+
+```bash
+python3 -X utf8 py_router/palette_audit.py --self-test   # pins the TRANSFORM
+python3 -X utf8 py_router/palette_audit.py --json out.json
+python3 -X utf8 py_router/palette_card.py --theme light -o card.png
+```
+
+`--self-test` exists because **a broken deuteranope transform reads as a broken
+palette**. It pins six published fixtures (black/white = 21.00; the old dark
+rip↔green pair = 76; rip↔cyan = 187) in milliseconds, on every invocation.
+
+`tests/test_946_palette_measures.py` re-derives every floor from the shipped
+palettes *and* compares them per key against
+`tests/946_theme_contrast_baseline.json`, reporting `DRIFT` / `INVERTED` /
+`ORPHAN` / `MALFORMED`. Both halves are needed: a threshold alone would pass a
+margin that silently collapsed from 12.0× to 4.6×, and a baseline alone cannot
+say whether the new number is acceptable, so regenerating it launders a
+regression.
+
+### Ratios and layouts
+
+`--layout` and `--aspect` on `make_movie.py`, or `$KICAD_MOVIE_LAYOUT` /
+`$KICAD_MOVIE_ASPECT`.
+
+`legacy` is the default and reproduces today's frame exactly. That is deliberate
+and is the same call the camera knob already made (*"'off' (default) keeps every
+existing movie bit-for-bit"*): making `auto` the default would change the shape
+of every existing artifact — the GUI recorder's, `place_route_loop`'s
+`placement.mp4`, `render_run`'s.
+
+| layout | arrangement | frame aspect | px/mm on copper | px per layer cell |
+|---|---|---|---|---|
+| `stacked` | board full width, panel below | 0.62:1 | 10.00 | 113k |
+| `sidebar` | board left, panel a right column | 1.78:1 | 12.39 | 100k |
+| `inset` | board fills frame, panel a corner inset | = board's | **15.75** | 32k |
+| `split` | board on top, lower box split | 1.60:1 | 10.98 | **130k** |
+| `auto` | `sidebar` on a wide board, `stacked` otherwise | — | — | — |
+
+*(measured at one pixel budget — 1.62 Mpx — on a 1.85:1 board.)*
+
+**No layout wins both metrics, on any board shape.** `inset` wins px/mm
+everywhere and loses px-per-layer-cell everywhere (32k against `split`'s 130k);
+`split` is the mirror image. `stacked` and `sidebar` genuinely swap, by 13–24%,
+on board aspect. That asymmetry is the design rule:
+
+> **`stacked`-vs-`sidebar` is INFERRED; `inset`-vs-`split` is DECLARED.**
+> Picking between the first pair from `board_info.board_bounds` costs one
+> comparison and is right across the corpus. Choosing `inset` over `split` is a
+> decision about what the film is *for*, so it is a flag, never an inference.
+
+`FrameGeometry.chosen_by` carries the sentence — `"adaptive: board aspect 1.41 >
+1.25"` — and `frame_layout.frame_status_line` prints it.
+
+| constant | value |
+|---|---|
+| `RAIL_FRAC` (`py_router/frame_layout.py`) | 0.045 |
+| `FOOT_FRAC` (`py_router/frame_layout.py`) | 0.045 |
+| `RAIL_MIN_PX` (`py_router/frame_layout.py`) | 22 |
+| `FOOT_MIN_PX` (`py_router/frame_layout.py`) | 26 |
+| `ADAPTIVE_ASPECT_CUT` (`py_router/frame_layout.py`) | 1.25 |
+
+**Both frame dimensions are forced even.** Only the height ever was, while
+`animate_route._write_mp4` crops `a.shape[0] & ~1` **and** `a.shape[1] & ~1` —
+so a taller-than-wide board silently lost a pixel column in every mp4 this repo
+had written. Planning `legacy` too means the frame is even *before* the encoder.
+
+`frame_layout.assert_frames_uniform` is wired into `animate_route.save_movie`,
+the choke point every front end passes through. **On failure it reports loudly
+and pads; it does not raise** — aborting a routing run for a cosmetic reason is
+something this repo refuses elsewhere (`movie_panels._finite`). The film is
+produced, the defect is audible, and the distortion is a letterbox rather than
+a squash.
+
+### The lower box
+
+One fixed rect, four contents, switched by the phase the frame belongs to:
+
+| phase | content |
+|---|---|
+| bookend | a board summary — parts, nets, copper layers, segments, vias |
+| placement | the inventory: how much of the board is seated, by reference class |
+| routing | the per-layer strip |
+| seeding | the same inventory, emptying as the pile empties |
+
+It is **one box** because a panel that appears and disappears changes frame
+height, and Pillow does not raise on that — it writes a valid file in which
+every later frame has been silently resized to the first.
+
+The strip is the answer to the 19 two-layer crossings that landed within 34 of
+some third layer's solo appearance (worst: `B.Cu` over `F.Cu` renders
+`(96,98,142)` against `In6`'s `(99,102,143)`, **5.1 apart**). **Position carries
+layer identity instead of colour, and position never collides.** Each cell draws
+at full strength on its own ground, so there is no alpha dimming and no blend.
+
+It builds **no second `BoardRenderer`** — `tests/test_431_placement_movie.py:92`
+pins exactly one on the no-stage path — and `draw_layer_strip` returns a `Cell`
+per cell carrying the count string it stamped and the number of lines it
+stroked, so a test can assert the drawing rather than re-deriving the tally and
+comparing it to nothing.
+
+| constant | value |
+|---|---|
+| `CELL_MIN_W` (`py_router/render_panels.py`) | 26 |
+| `CELL_FLOOR_W` (`py_router/render_panels.py`) | 8 |
+| `LABEL_GAP_PX` (`py_router/render_panels.py`) | 5 |
+
+Cells shrink in **number**, not below legibility: below `CELL_MIN_W` the strip
+draws fewer, wider cells and says `+N more`. And a count that would touch the
+layer name is **dropped, not overprinted** — measured overlap was +25 px at
+`CELL_MIN_W` exactly and +23 px at a 180 px box.
+
+### The attempts band
+
+Routing and placement are not one shot. `place_route_loop` tries a round,
+routes it, keeps it or throws it away, and tries again — and the search is on
+disk in full, because `write_round_sidecar` records every round including the
+rejected ones. Nothing drew it.
+
+```bash
+python3 py_tools/make_film.py --from-loop-dir wk/ -o film.gif
+python3 py_tools/make_film.py --from-ledger converge/ledger.jsonl -o film.gif
+python3 py_router/make_movie.py RUNDIR --no-attempts     # the OFF arm
+```
+
+Every round is a point; the record is a step-line. x is when an attempt was
+born, y its accept-rule score with **lower higher on screen**. A node is hollow
+while something is still blocking and filled once it is admissible; a kept
+attempt is ringed; the gold staircase labels each new record once; and the band
+grows with the film behind a visibility horizon.
+
+**The axis is the run's own accept rule, chosen once over the whole list and
+named in the label.**
+
+| producer | axis | why |
+|---|---|---|
+| `place_route_loop` | `failures` | `better()` ranks "failures first, then iterations" |
+| `place_route_loop --accept-cmd` | `accept_score` | that *is* the accept rule |
+| `converge` ledger | `score.blocking` | `_score_key`'s leading term |
+| `awx` evolve ledger | `vias` | the last term of `awx`'s own key |
+
+`vias` is the literal analogue of what `awx/evolve_movie` plots and it is in
+every sidecar — but the loop annotates it report-only, and an axis that is not
+the accept rule draws a staircase pointing one way beside accept/reject rings
+pointing the other. **Never mixed**: a film whose axis changes meaning halfway
+is worse than no film.
+
+`best_so_far` is one algorithm with two policy flags, shared with
+`awx/evolve_movie.Ribbon`: on this side a *rejected* round cannot set a record
+(the loop rejects exactly what `better()` says is not better), and on the `awx`
+side *"a world with open nets is not admissible however few vias it has"*. When
+the axis IS the blocking term the admissibility gate must be off, or the
+staircase collapses to a single point.
+
+**An ungraded attempt is not a zero.** A screened round's sidecar carries
+`metrics: {}` on purpose, and a converge row's `blocking: null` means a
+component that was asked for could not answer. Neither is dropped and neither is
+plotted at the axis floor: they are a tick on the rail, counted in the caption.
+
+**Nothing is synthesised.** No sidecars and no ledger means no band, and the
+status line says so in words. One attempt is also an OFF arm — `attach` then
+returns the frame list completely untouched, the same list object holding the
+same images.
+
+| constant | value |
+|---|---|
+| `BAND_FRAC` (`py_router/movie_attempts.py`) | 0.16 |
+| `BAND_MIN_PX` (`py_router/movie_attempts.py`) | 64 |
+
+### A rip retracts; its replacement grows
+
+The channel a movie has and a still does not is **time**, and direction survives
+every colour deficiency there is. `py_router/copper_motion.py` is pure geometry:
+it takes trace-style rows and returns rows, so the whole animation is assertable
+as data before anything is drawn.
+
+It retracts **from the far end**, not everywhere at once: the segments are
+ordered by distance from an anchor and consumed from the far end, with the
+frontier segment cut rather than dropped. The anchor is the doomed set's
+endpoint nearest the surviving copper — the end a track is actually pulled back
+to.
+
+Only **restores** grow. A plain `new` add happens thousands of times in a film;
+a restore is the thing a rip turns into, so the two motions are opposites on
+screen, which is the claim.
+
+`--rip-hold 0` still cuts: `Movie.motion` is `rip_hold > 0` rather than a knob
+of its own, because "no rip animation, just cut" already has a spelling.
+
+| constant | value |
+|---|---|
+| `MOTION_STAGES` (`py_router/copper_motion.py`) | 4 |
+
+**Disclosed:** `reveal_delta`'s chunked *add* path passes `event='route'`, so a
+coarse step (fanout, planes, repair) rips with motion but does not grow with it.
+That is correct rather than incomplete — those steps are not restoring copper a
+rip took away — but the growth half is visible on trace steps and on an explicit
+restore, not everywhere.
+
+### Per-format defaults — measured, and refused
+
+#946 §4 asks for per-format defaults for `--size` and `--fps`, on the grounds
+that *"6 fps is below the rate at which motion reads as continuous"*. The
+premise is true of continuous motion and false of this movie.
+
+**Raising `fps` adds no frames.** A routing movie's frames are discrete events —
+one per copper event, or per chunk of a coarse reveal — so `fps` only changes
+the per-frame delay. Measured on the two-board `fanout_starting_point →
+fanout_output1` chain, identical 13 frames at every rate:
+
+| format | size | fps | bytes | film |
+|---|---|---|---|---|
+| gif | 1000 | 6 | 59 550 | 3580 ms |
+| gif | 1000 | 12 | 59 550 | 2530 ms |
+| gif | 1000 | 24 | 59 550 | 1990 ms |
+| mp4 | 1000 | 6 | 108 935 | |
+| mp4 | 1000 | 12 | 103 447 | |
+| mp4 | 1000 | 24 | 96 467 | |
+
+The raise is nearly free — the GIF is byte-identical and the mp4 gets *smaller*
+— and it buys nothing, because it does not interpolate: it plays the same
+slideshow faster and ends sooner. What actually makes motion continuous is more
+frames, which is the retract-and-grow above and the camera's `tween`.
+
+| constant | value |
+|---|---|
+| `DEFAULT_SIZE` (`py_router/make_movie.py`) | 1000 |
+| `DEFAULT_FPS` (`py_router/make_movie.py`) | 6.0 |
+| `MOSTLY_BARE_FRACTION` (`py_router/kicad_iso_render.py`) | 0.25 |
+
+`tests/test_946_format_defaults.py` re-measures this on every run, so a later
+raise has to come past the measurement rather than around it.
+
+### No GUI control
+
+None of `--theme`, `--layout`, `--aspect` or `--no-attempts` adds a dialog
+control, which is the second arm of CLAUDE.md's CLI/GUI parity rule taken
+explicitly: the GUI's movie button passes no movie parameters at all
+(`movie_recorder.py:160` is `make_movie(boards, out=out, quiet=True)`), and the
+env knobs are how a feature with no dialog control of its own reaches every
+front end at once — the same rationale `KICAD_MOVIE_CAMERA` and
+`KICAD_MOVIE_PANELS` already carry.
+
+**The env knob and the kwarg parse asymmetrically**, following
+`make_movie._panels_wanted`: an unknown value in the *knob* warns to stderr and
+falls back (a typo in a shell must not abort a routing run that happened to ask
+for a movie), while an unknown value passed as a *kwarg* raises and names the
+accepted set (a typo in code is a bug).
