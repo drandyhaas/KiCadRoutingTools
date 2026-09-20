@@ -489,6 +489,75 @@ build), the descent without the engine screen (`--screen=0`; same moves,
 not faster), a Rust port of the under-pad search (1 percent of a
 descent), batching the post-route distance checks (2 percent of a braid).
 
+## Differential pairs (2026-09-20)
+
+A DDR bus is its pairs as much as its vias: the strobes (SDQS0/1) and the
+clock (SCK) must run COUPLED, and the ladder never carried them. They are
+in now, opt-in: `BRAID_PAIRS=1 PLAN_PAIRS=1`, on the pair bench
+`fb_t2q_pairs` (`fb_t2q_fresh` plus the six pair nets in their rivers,
+checkpoints in `fb_t2q_pairs.ladder.txt`; K34 = the old K28 + the DQS legs,
+K36 = + SCK). A pairs run of the chain needs `BASE=fb_t2q_pairs.kicad_pcb`
+as well: `chain_k.sh` defaults to the fresh bench, and a pairs run on it
+grades against the wrong list. Off, everything is byte-identical (checked
+by copper comparison on the recorded K34 braid and by the ladder: K28 34,
+K41 74).
+
+**Pairs go first, free, and are protected** (`braid.route_pairs_free`,
+`BRAID_PAIRS_FIRST_FREE`, default on). Before any corridor is planned, each
+pair is routed by the production pair router (`connect_pair` ->
+`route_diff_pair_with_obstacles`: one centreline, P and N generated either
+side of it) on the fanout board as it stands, no band, a 6 mm window, with
+only the singles' EXIT STUBS reserved (a millimetre in front of every tooth
+and berth, `BRAID_PAIR_EXIT_RESERVE`; without it a pair laid across a tooth
+row sealed SA4 into its tooth). Its copper joins the base copper, so the
+corridors plan and route the singles around it and no rescue, rip or re-lay
+touches it; the output project records the legs as protected nets (#521).
+Each pair lands in under a second. A pair the free pass refuses stays a
+corridor member and is tried again by the same router inside the corridor
+(`BRAID_PAIR_FREE`: as a free swimmer; `=0`: in its single-lane band, which
+refused every pair at K36 -- leg strips, dive zones and slope pitches sized
+for one track). **A pair is never routed as singles**: one it cannot couple
+is refused, both legs open and named. Measured at K36, braid alone on one
+fanout: legs as singles 66 vias coupled 0.2/0.3/0.1; pairs first 71 vias
+coupled 0.89/0.83/0.85, no refusal.
+
+**The plan knows a pair** (`pairs.py`, `pages_first.py`,
+`fanout_from_plan.py`): one member per pair with midpoint ends and the room
+of two slots (`Corridor.lane_w`, `pair_floor`); in the CP-SAT, both legs take
+moves of ONE face and ONE layer with neighbouring exits at BOTH ends, with
+NOTHING of another net between them (SDQS1's teeth 0.96 mm apart with two
+teeth between, on a 0.32 mm comb, passed the reach alone) and ONE
+HANDEDNESS at both ends (`pairs.hand`: which side of travel P lies on;
+arriving at a berth is against its escape -- SCK's teeth P-west leaving
+south with berths P-west entered from the south was the router's "polarity
+mismatch cannot be resolved"); a held berth standing between a pair is
+freed before a re-solve, or the re-solve is infeasible and the greedy
+choice, which knows no pairs, stands. The braid judge prices a bad pair end
+at `PLAN_PAIR_BAD_W` (50 vias): without it the source residue round judged
+the pair's moved teeth worse by count and reverted them. `pairs.harmonise`
+is the post-fix on a plan chosen one leg at a time. A ball with a pad of
+its OWN net under it on the other layer (a back-side termination the
+placement step moved under a clock ball) takes no via-in-pad escape and is
+served by a TIE VIA at the ball on the shipped fanout board
+(`tie_vias_under`; inside the destination loop the audit read it as an
+unasked via-in-pad berth and re-planned eight passes).
+
+**Measured, the K36 chain on the pair bench:** pairs off 1 open / 0 DRC /
+81 vias, coupled 0.07/0.12/0.01, SDQS1 skewed 35 mm; pairs first 0 open /
+0 DRC / 86 vias, coupled 0.77/0.84/0.66 (SCK / SDQS0 / SDQS1), skews
+0.42/0.45/0.36 mm. The uncoupled length is the fanout's escape stubs (each
+leg escaped as a single net, 1-7 mm); the routed part is coupled. The
+human's pairs: 0.90/0.83/0.92.
+
+**Instruments:** `grade_k.py` prints one PAIR line per pair (routed or
+not, coupled fraction at the inferred pitch, skew, barrels);
+`pair_census.py` is the same on any board; `BRAID_PAIR_DEBUG=1` prints each
+end's connectors and a map probe (centre / P / N cells, via mark, the other
+layer, WHY blocked) and writes `tmp/pairdbg_<pair>_<n>.png` with the band,
+the pieces, the reserved vias and the poses. Knobs: `BRAID_PAIR_GAP`
+(default hug + 0.04), `BRAID_PAIR_SEP`, `BRAID_PAIR_ROUTER` (`prod` |
+`envelope`), `BRAID_PAIR_SLACK`, `PLAN_PAIR_SWIM`.
+
 ## The chain's other pieces
 
 **The pages-first planner** (`pages_first.py`, `PLAN_PAGES=1`). One CP-SAT
