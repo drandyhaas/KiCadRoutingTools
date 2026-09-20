@@ -63,10 +63,15 @@ BOARD = os.path.join(ROOT, 'kicad_files', 'routed_output.kicad_pcb')
 #: the ordering entirely passes. Measured -- `copper-dissolves-instead-of-
 #: retracting` survived the first version of this file. A file order is
 #: whatever the writer emitted, so this is also the realistic case.
-CHAIN = [[30.0, 0.0, 20.0, 0.0, 0.2, 0],
-         [0.0, 0.0, 10.0, 0.0, 0.2, 0],
-         [40.0, 0.0, 30.0, 0.0, 0.2, 0],
-         [10.0, 0.0, 20.0, 0.0, 0.2, 0]]
+#: The lengths are 7 / 11 / 13 / 9, which do NOT divide the total evenly at
+#: n = 4 -- so every keep-length falls INSIDE a segment and the frontier CUT
+#: runs. A 4x10 chain puts every boundary on a joint, so the cut never
+#: executes and a mutant that drops it passes: the phase-12 verifier measured
+#: exactly that, on the two properties this module argues hardest for.
+CHAIN = [[18.0, 0.0, 7.0, 0.0, 0.2, 0],
+         [0.0, 0.0, 7.0, 0.0, 0.2, 0],
+         [40.0, 0.0, 31.0, 0.0, 0.2, 0],
+         [18.0, 0.0, 31.0, 0.0, 0.2, 0]]
 #: Copper that stays, touching the chain's near end.
 LIVE = [[-5.0, 0.0, 0.0, 0.0, 0.2, 0]]
 
@@ -104,6 +109,17 @@ def test_it_retracts_from_the_far_end():
              'that frame IS the event' % lens[-1])
     if abs(lens[0] - total * 0.75) > 1e-6:
         fail('stage 0 holds %.3f mm, expected %.3f' % (lens[0], total * 0.75))
+    # THE FRONTIER IS CUT, not dropped: at least one stage must end inside a
+    # segment rather than on a joint, or the cut is never executed and a
+    # mutant that removes it passes.
+    joints = {0.0, 7.0, 18.0, 31.0, 40.0}
+    cuts = [i for i, st in enumerate(plan) if st
+            and round(max(max(r[0], r[2]) for r in st), 6) not in joints]
+    if not cuts:
+        fail('BROKEN FIXTURE: every stage ends on a segment joint %s, so the '
+             'frontier cut never runs' % sorted(joints))
+    else:
+        print('    stage(s) %s end mid-segment, so the frontier is CUT' % cuts)
     # the FAR end goes first: the anchor is at x=0 (LIVE touches it there), so
     # what survives is the near part
     for i, st in enumerate(plan):
@@ -339,8 +355,92 @@ def test_a_growth_stage_is_not_drawn_over_its_finished_self():
         print('  PASS: each stage is drawn on what existed, not on what will')
 
 
+def test_the_rows_are_oriented_near_end_first():
+    """A fraction of an ORIENTED segment is the part still attached to the
+    anchor; a fraction of an unoriented one is a stub floating wherever the
+    file happened to spell the endpoints.
+
+    Asserted directly, because the fixture used to be spelled near-end-first
+    already and the flip never ran -- a mutant that removed it passed every
+    gate.
+    """
+    _mark = len(_FAIL)
+    a = CM.anchor_for(CHAIN, LIVE)
+    ordered = CM.order_from(CHAIN, a)
+    if len(ordered) != len(CHAIN):
+        fail('order_from lost a row: %d of %d' % (len(ordered), len(CHAIN)))
+    flipped = sum(1 for r in ordered if list(r) not in [list(c) for c in CHAIN])
+    if not flipped:
+        fail('BROKEN FIXTURE: nothing was flipped, so the orientation rule is '
+             'not exercised at all')
+    ax, ay = a
+    for r in ordered:
+        d0 = ((r[0] - ax) ** 2 + (r[1] - ay) ** 2) ** 0.5
+        d1 = ((r[2] - ax) ** 2 + (r[3] - ay) ** 2) ** 0.5
+        if d0 > d1 + 1e-9:
+            fail('a row is spelled far-end-first: %s (anchor %s)' % (r, a))
+    # and nearest-first overall
+    ds = [((r[0] - ax) ** 2 + (r[1] - ay) ** 2) ** 0.5 for r in ordered]
+    if ds != sorted(ds):
+        fail('the rows are not nearest-first from the anchor: %s'
+             % [round(v, 1) for v in ds])
+    else:
+        print('    %d of %d rows flipped; distances %s'
+              % (flipped, len(CHAIN), [round(v, 1) for v in ds]))
+    if len(_FAIL) == _mark:
+        print('  PASS: near end first, nearest first')
+
+
+def test_a_trunk_passing_through_is_not_filtered_away():
+    """`_near_live` bounds the anchor search, and its bound must not change
+    the answer.
+
+    The first version admitted a live segment only when one of its ENDPOINTS
+    fell in the neighbourhood, while the justification is about DISTANCE. A
+    T-junction -- a long trunk with a stub branching mid-span -- then had its
+    trunk dropped, the anchor fell back to the centroid rule and landed on the
+    STUB'S OWN MIDDLE, and the stub retracted from both ends leaving a
+    detached floating piece.
+    """
+    _mark = len(_FAIL)
+    r, layers = A._renderer(BOARD, None, 160, 1, 150)
+    m = A.Movie(r, layers, rip_hold=1)
+    trunk = [-30.0, 0.0, 30.0, 0.0, 0.2, 0]          # both ends far outside
+    stub = [[0.0, 0.0, 0.0, 3.0, 0.2, 0],
+            [0.0, 3.0, 0.0, 6.0, 0.2, 0]]
+    from route_trace import _Seg, seg_key_row
+    for row in [trunk] + stub:
+        m.live_s[seg_key_row(row)] = _Seg(row, layers)
+    doomed = [seg_key_row(row) for row in stub]
+    near = m._near_live([m._row(m.live_s[k]) for k in doomed],
+                        exclude=set(doomed))
+    if not near:
+        fail('the trunk was filtered away -- it passes straight through the '
+             'stub\'s neighbourhood and both its ends are outside the box')
+        return
+    anchor = CM.anchor_for(stub, near)
+    if anchor != (0.0, 0.0):
+        fail('the anchor is %s, not the junction (0.0, 0.0) -- the stub would '
+             'retract to its own middle and leave a floating piece' % (anchor,))
+    else:
+        print('    trunk kept (%d row(s)); anchor at the junction %s'
+              % (len(near), anchor))
+    # and the filter still BOUNDS: copper far away is not admitted
+    far = [900.0, 900.0, 910.0, 900.0, 0.2, 0]
+    m.live_s[seg_key_row(far)] = _Seg(far, layers)
+    near2 = m._near_live([m._row(m.live_s[k]) for k in doomed],
+                         exclude=set(doomed))
+    if any(abs(row[0] - 900.0) < 1e-6 for row in near2):
+        fail('the filter admitted copper 900 mm away -- it bounds nothing')
+    if len(_FAIL) == _mark:
+        print('  PASS: a trunk through the neighbourhood is in, distant '
+              'copper is out')
+
+
 TESTS = (
     test_it_retracts_from_the_far_end,
+    test_the_rows_are_oriented_near_end_first,
+    test_a_trunk_passing_through_is_not_filtered_away,
     test_growth_is_the_mirror_image,
     test_the_degenerate_cases_refuse_rather_than_invent,
     test_frame_count_goes_up_and_frame_size_does_not,

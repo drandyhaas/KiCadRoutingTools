@@ -193,12 +193,17 @@ class Movie:
                             'inventory': self.inventory,
                             'active': self.active_layer})
 
-    def _frame(self, hl_s, hl_v, color, label, mark='solid',
-               base_s=None, base_v=None):
-        """One frame. `base_s`/`base_v` override the live copper drawn under
-        the highlight -- #1022 needs that: a growth stage must NOT have its
-        finished self already drawn underneath it, and a retraction stage must
-        not have the copper it is pulling back from."""
+    def _frame(self, hl_s, hl_v, color, label, mark='solid', base_s=None):
+        """One frame. `base_s` overrides the live copper drawn under the
+        highlight.
+
+        #1022 needs it for ONE case, and the docstring used to claim two: a
+        GROWTH stage must not have its finished self already drawn underneath
+        it, because `add` inserts into `live_s` before it draws. The
+        retraction half was vacuous -- `remove` pops the doomed keys BEFORE it
+        animates, so the live state is already correct there and passing it
+        explicitly is pixel-identical (verified). `base_v` is gone for the same
+        reason: it never had a caller."""
         ov = self._key_overlay()
         self._note_chrome(label)
         # #1019: when a rail is going to carry this, the over-board strip is a
@@ -209,8 +214,7 @@ class Movie:
         self.frames.append(self.r.frame(
             segments=(list(self.live_s.values()) if base_s is None
                       else list(base_s)),
-            vias=(list(self.live_v.values()) if base_v is None
-                  else list(base_v)),
+            vias=list(self.live_v.values()),
             highlight_segments=hl_s, highlight_vias=hl_v,
             highlight_color=color, highlight_mark=mark, label=label,
             zone_net_ids=self.revealed_zones,
@@ -270,8 +274,20 @@ class Movie:
         BOUNDED on purpose: `anchor_for` is O(|moving| x |live|), and a rip of
         20 segments against a 1701-segment board would be 68k distance
         computations per rip. Copper far from the doomed set cannot be the end
-        it is pulled back to, so a bbox filter loses nothing and keeps the cost
+        it is pulled back to, so a neighbourhood filter keeps the cost
         proportional to the neighbourhood.
+
+        **THE TEST IS SEGMENT-OVERLAP, NOT ENDPOINT-CONTAINMENT**, and the
+        phase-12 verifier measured why the first version was wrong. It admitted
+        a live segment only when one of its two ENDPOINTS fell in the box,
+        while the justification is about DISTANCE -- so a long trunk passing
+        THROUGH the neighbourhood with both ends far outside it was dropped.
+        Constructed as a T-junction (a 60 mm trunk, a stub branching mid-span)
+        and driven through `Movie.remove`: the filter returned nothing, the
+        anchor fell back to the centroid rule and landed on the stub's own
+        MIDDLE, and the stub retracted from both ends at once leaving a
+        DETACHED FLOATING piece -- the exact artefact `order_from` exists to
+        prevent. Comparing bounding boxes costs the same and cannot miss it.
         """
         if not rows:
             return []
@@ -285,8 +301,12 @@ class Movie:
         for k, sg in self.live_s.items():
             if k in skip:
                 continue
-            if ((x0 <= sg.start_x <= x1 and y0 <= sg.start_y <= y1)
-                    or (x0 <= sg.end_x <= x1 and y0 <= sg.end_y <= y1)):
+            # the segment's own bbox against the neighbourhood's -- true for a
+            # segment with an end inside, AND for one that merely crosses it.
+            if (min(sg.start_x, sg.end_x) <= x1
+                    and max(sg.start_x, sg.end_x) >= x0
+                    and min(sg.start_y, sg.end_y) <= y1
+                    and max(sg.start_y, sg.end_y) >= y0):
                 out.append(self._row(sg))
         return out
 

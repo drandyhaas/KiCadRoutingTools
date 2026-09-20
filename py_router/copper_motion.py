@@ -135,10 +135,16 @@ def stages(rows: Sequence[Sequence], *, anchor=None, live=(),
     """`n` lists of rows: the copper retracting toward the anchor, or growing
     out of it.
 
-    Retracting, stage `i` holds `(n - 1 - i) / (n - 1)` of the total length, so
-    the LAST stage is empty -- the copper is gone, which is the event. Growing,
+    Retracting, stage `i` holds `1 - (i + 1) / n` of the total length, so the
+    LAST stage is empty -- the copper is gone, which is the event. Growing,
     stage `i` holds `(i + 1) / n`, so the last stage is the whole thing and the
-    caller's live state and the last frame agree.
+    caller's live state and the last frame agree. The two are therefore
+    complementary at every stage, which is what makes them read as opposites.
+
+    (An earlier version of this paragraph said `(n - 1 - i) / (n - 1)`, which
+    is a different sequence -- it would make stage 0 the WHOLE length rather
+    than `1 - 1/n` of it. The code was right and the docstring was not; the
+    phase-12 verifier found it, and the test pins the code.)
 
     Returns `[]` for an empty input and for `n < 2`, which is the documented
     degradation: `--rip-hold 0` asks for the old cut, and a one-stage motion is
