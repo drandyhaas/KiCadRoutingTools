@@ -462,6 +462,53 @@ def score_component(score, key):
     return None
 
 
+#: The answers `score_board_binding` can give, in the order a reader meets
+#: them: the payload grades this board, it grades another one, it names no
+#: board at all, or the question could not be answered here.
+SCORE_BINDINGS = ('this', 'other', 'unbound', 'unknown')
+
+
+def score_board_binding(board, payload, board_sha=None):
+    """(binding, payload_sha) -- does this score payload grade THIS board?
+
+    ONE implementation of a question FIVE sites used to answer separately, and
+    they answered it at different STRENGTHS: `record` warned, L3 and L5
+    refused at exit 4, and the close-out compare refused about a different
+    document. #963's contributor measured that asymmetry from the outside -- a
+    stale score `record` accepted with `accepted: true` was refused by the very
+    next stage -- and named it "different enforcement strengths". The strengths
+    are a policy each caller may legitimately choose; the PREDICATE is not, and
+    it is the predicate that had drifted into five copies.
+
+    THREE-VALUED RATHER THAN A BOOL, because `unbound` is a different operator
+    action from `other`: a payload with no `board_sha` at all is a pre-B4
+    board_score or a hand-built JSON, and `record` discloses that in its own
+    sentence. Collapsing it into False deletes that disclosure silently, which
+    is why `_grades_another_board` below is a WRAPPER and not the interface.
+
+    `unknown` is "I could not tell" -- no board, unreadable, board_store
+    unimportable -- and it must NEVER read as a mismatch. A check that switched
+    itself ON because it could not answer would be the same class of mistake it
+    exists to catch.
+
+    `board_sha` lets a caller that has ALREADY hashed the board hand the digest
+    in (`cmd_record` has it from `store.put`), so the file is not read twice and
+    there is no window between the two reads in which it could change.
+    """
+    psha = payload.get('board_sha') if isinstance(payload, dict) else None
+    if not psha:
+        return ('unbound', None)
+    if board_sha:
+        return ('this' if board_sha == psha else 'other', psha)
+    if not board or not os.path.isfile(board):
+        return ('unknown', psha)
+    try:
+        from board_store import sha256_file
+        return ('this' if sha256_file(board) == psha else 'other', psha)
+    except Exception:                                           # noqa: BLE001
+        return ('unknown', psha)
+
+
 def _grades_another_board(board, score):
     """Does this score payload demonstrably grade a DIFFERENT board?
 
@@ -471,15 +518,12 @@ def _grades_another_board(board, score):
     candidate (record already WARNS about that), and a check that compared a
     verdict about board A against board B's numbers would be the same class of
     mistake it exists to catch.
+
+    Kept as a one-line wrapper over `score_board_binding` rather than deleted:
+    `tests/mutate_904.py` anchors on its call site, and the bool is the shape
+    the lens-vs-score skip at cmd_record actually wants.
     """
-    psha = (score or {}).get('board_sha') if isinstance(score, dict) else None
-    if not psha or not board or not os.path.isfile(board):
-        return False
-    try:
-        from board_store import sha256_file
-        return sha256_file(board) != psha
-    except Exception:                                           # noqa: BLE001
-        return False
+    return score_board_binding(board, score)[0] == 'other'
 
 
 def read_lens_file(path):
@@ -1181,15 +1225,19 @@ def cmd_record(a):
     # refusal: baseline rows legitimately attach a parent score to a
     # rejected candidate -- but never silently.
     if a.score:
-        try:
-            _payload_sha = json.loads(a.score).get('board_sha')
-        except Exception:
-            _payload_sha = None
-        if _payload_sha is None:
+        # Through the SHARED predicate, and with the digest `store.put` just
+        # computed handed in: this used to re-parse `a.score` behind a bare
+        # `except Exception` even though `_score_doc` was already parsed and
+        # validated above, so the mismatch was judged on a second, weaker read
+        # of the same bytes. Passing `board_sha=sha` also closes the window in
+        # which the file could change between the two hashes.
+        _binding, _payload_sha = score_board_binding(a.board, _score_doc,
+                                                     board_sha=sha)
+        if _binding == 'unbound':
             print("record WARNING: score payload carries no board_sha "
                   "(pre-B4 board_score, or hand-built JSON) -- the ledger "
                   "cannot verify it grades THIS board.", file=sys.stderr)
-        elif _payload_sha != sha:
+        elif _binding == 'other':
             print(f"record WARNING: score payload grades a DIFFERENT board "
                   f"(payload board_sha {_payload_sha[:12]}... != recorded "
                   f"board {sha[:12]}...). Run-3 shipped three stale-payload "

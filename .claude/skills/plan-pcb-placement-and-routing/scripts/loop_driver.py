@@ -179,6 +179,30 @@ def _guard_route_render(a):
     return True, None
 
 
+#: Why the score-to-board binding could not be checked from here, when it could
+#: not be. Set only on an IMPORT failure -- never on a merely absent board_sha,
+#: which is answerable and means "unbound". Read by `_binding_note` so that a
+#: gate switching itself off is DISCLOSED rather than silent: converge's own
+#: rule for the twin case is that "an unannounced skip is a door".
+_BINDING_BLIND = None
+
+
+def _converge_module():
+    """The converge module, or None. Imported LAZILY and never at module scope.
+
+    `_refusal_sites` and `_passthrough_count` parse this file with `ast`, and
+    `--list` / `--dump-all` / `--dump-refusals` all run before any stage, so a
+    module-scope import failure would take the whole driver down rather than
+    one check.
+    """
+    try:
+        sys.path.insert(0, ROOT)
+        import converge                                         # noqa: PLC0415
+        return converge
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
 def _score_board_mismatch(board, payload):
     """The score's `board_sha` when it is NOT this board's, else None.
 
@@ -187,18 +211,50 @@ def _score_board_mismatch(board, payload):
     one board from another board's score. Returns None when the question is
     unanswerable (no sha, no board, board_store unimportable) -- an absent
     answer must not read as a mismatch.
+
+    THE PREDICATE IS converge's (#963). Five sites used to answer "does this
+    score grade this board" separately; `converge.score_board_binding` is now
+    the only implementation, and this function is the driver's POLICY over it
+    (return the offending sha, so the caller can refuse and name it).
+
+    The local fallback below is kept deliberately. A shared predicate reached
+    through a bare `except` is strictly WORSE than five honest copies, because
+    one unimportable module then switches off every gate at once -- which is
+    what the neighbouring `lens_contradictions` import does today. So: fall
+    back, and when even the fallback cannot answer, say so through
+    `_BINDING_BLIND`.
     """
+    global _BINDING_BLIND
     if not board or not os.path.isfile(board) or not isinstance(payload, dict):
         return None
     psha = payload.get('board_sha')
     if not psha:
         return None
+    _cv = _converge_module()
+    if _cv is not None:
+        _st, _psha = _cv.score_board_binding(board, payload)
+        return _psha if _st == 'other' else None
     try:
-        sys.path.insert(0, ROOT)
         from board_store import sha256_file
         return None if sha256_file(board) == psha else psha
     except Exception:                                           # noqa: BLE001
+        _BINDING_BLIND = ('neither converge nor board_store could be imported '
+                          'from this driver')
         return None
+
+
+def _binding_note():
+    """One line when the score-to-board binding could not be checked, else ''.
+
+    A body line rather than an `err()`: the run is not wrong, the driver is
+    blind, and a reader who is told so can check by hand. `_refusal_sites`
+    therefore owes it no scenario row.
+    """
+    return ('' if not _BINDING_BLIND else
+            f'\nNOTE: this stage could NOT check that the score grades the '
+            f'board it names -- {_BINDING_BLIND}. Nothing below rests on that '
+            f'binding; compare the score\'s board_sha yourself before you act '
+            f'on it.\n')
 
 
 # The hpwl gain below which the congestion READ is worth pointing at. It decides
@@ -1824,7 +1880,7 @@ Next: --stage L5 --board {a.board} --score {a.score} --ledger {a.ledger}
     if not _rok:
         return err(_rwhy)
     return f'''<stage_instructions stage="L3" name="classify the failure" of="{len(STAGES)}">
-blocking = {blocking}. Name the SHAPE before choosing anything.
+blocking = {blocking}. Name the SHAPE before choosing anything.{_binding_note()}
 
 You have the focus panels ({a.render_json}). Say in one line what they showed --
 one pocket or scattered -- and let that lead the evidence below, rather than
@@ -2029,17 +2085,13 @@ def _verdict(a):
             _payload = json.load(_sf)
     except Exception:                                           # noqa: BLE001
         _payload = None
-    if isinstance(_payload, dict) and a.board and os.path.isfile(a.board):
-        _psha = _payload.get('board_sha')
-        if _psha:
-            try:
-                sys.path.insert(0, ROOT)
-                from board_store import sha256_file
-                if sha256_file(a.board) != _psha:
-                    return ('SCORE-MISMATCH',
-                            {'board': a.board, 'payload_sha': _psha}, 3)
-            except Exception:                                   # noqa: BLE001
-                pass
+    # THROUGH THE SHARED PREDICATE (#963). This was a third inline copy of the
+    # compare `_score_board_mismatch` already owned -- in the same file, two
+    # thousand lines apart -- so the driver could answer one question two ways,
+    # and only one of the two would have been found by a reader fixing it.
+    _psha = _score_board_mismatch(a.board, _payload)
+    if _psha:
+        return ('SCORE-MISMATCH', {'board': a.board, 'payload_sha': _psha}, 3)
     import subprocess
     # ABSPATH BOTH FILES: this subprocess runs with cwd=ROOT while every
     # isfile() check above resolved against the CALLER's cwd -- so from any
@@ -2251,7 +2303,7 @@ def l5(a):
         else:
             _head = 'a half has not answered yet'
         return f'''<stage_instructions stage="L5" name="not done yet" of="{len(STAGES)}">
-The loop is NOT over: {_head}.
+The loop is NOT over: {_head}.{_binding_note()}
 
 {why}
 
@@ -2294,7 +2346,7 @@ tell a finished run from a stalled one.
     _cyc, P = _paths(a)
     work = _work(a)
     return f'''<stage_instructions stage="L5" name="close out: {name}" of="{len(STAGES)}">
-{headline.get(name, name)}.
+{headline.get(name, name)}.{_binding_note()}
 
 {why}
 
@@ -2767,20 +2819,20 @@ def _close_out(a, name):
 
     # Bind by CONTENT. A path comparison accepts a close-out for a board that
     # has since been rewritten, and the close-out is the terminal artifact.
+    # Same predicate as the score binding, about a DIFFERENT document (#963).
+    # Folded onto `_score_board_mismatch` rather than left as a fifth copy: the
+    # question "does this JSON's board_sha name the board in hand" does not
+    # change because the JSON is a close-out instead of a score, and the branch
+    # below still falls through to the path compare when there is no sha.
     _dsha = doc.get('board_sha')
     if _dsha and a.board and os.path.isfile(a.board):
-        try:
-            sys.path.insert(0, ROOT)
-            from board_store import sha256_file
-            if sha256_file(a.board) != _dsha:
-                return err(
-                    f'The close-out grades a DIFFERENT board than the one being '
-                    f'closed out:\n\n  --board          : '
-                    f'{os.path.abspath(a.board)}\n'
-                    f'  close-out board_sha: {str(_dsha)[:16]}...\n\n'
-                    f'Re-run check_complete on the board you are shipping.')
-        except Exception:                                       # noqa: BLE001
-            pass
+        if _score_board_mismatch(a.board, doc):
+            return err(
+                f'The close-out grades a DIFFERENT board than the one being '
+                f'closed out:\n\n  --board          : '
+                f'{os.path.abspath(a.board)}\n'
+                f'  close-out board_sha: {str(_dsha)[:16]}...\n\n'
+                f'Re-run check_complete on the board you are shipping.')
     elif doc.get('board') and a.board:
         if os.path.normcase(os.path.abspath(doc['board'])) != \
                 os.path.normcase(os.path.abspath(a.board)):
