@@ -346,6 +346,37 @@ def test_the_measured_story_of_946_is_reproduced():
               "opened on is fixed")
 
 
+def test_the_rejected_light_arm_is_derived_not_remembered():
+    """#1012 rejected "darken the dark events" on a measurement, and that
+    measurement was recorded as a bare number two comments carried and nothing
+    computed. The PR's fact-checker could not reproduce it under any plausible
+    reading of the rule -- which makes it a claim, and a claim in a comment is
+    exactly what this file exists to refuse."""
+    _mark = len(_FAIL)
+    pr = PA.propose_darkened_events()
+    if pr['binding_event'] != 'event_new':
+        fail('the binding event is %s; it is `event_new` that is near-white '
+             'and needs the most darkening' % pr['binding_event'])
+    got = pr['rip_restore_deuteranope']
+    orig = pr['original_collision_deuteranope']
+    if got > orig:
+        fail('the darkened arm reaches %.1f, ABOVE the %.1f collision -- if '
+             'that is now true the rejection needs re-deriving, not quoting'
+             % (got, orig))
+    if pr['shipped_light_deuteranope'] <= orig:
+        fail('the SHIPPED light palette is at %.1f, no better than the '
+             'collision it replaces' % pr['shipped_light_deuteranope'])
+    if pr['shipped_light_deuteranope'] < got * 1.5:
+        fail('the shipped palette (%.1f) is not clearly better than the arm '
+             'it rejected (%.1f)' % (pr['shipped_light_deuteranope'], got))
+    print('    darkened arm %.1f (k=%.3f, bound by %s) vs shipped %.1f, '
+          'vs the collision %.1f'
+          % (got, pr['factor'], pr['binding_event'],
+             pr['shipped_light_deuteranope'], orig))
+    if len(_FAIL) == _mark:
+        print('  PASS: the rejected arm is executable, and it is worse')
+
+
 TESTS = (
     test_the_instrument_is_pinned_before_the_palette,
     test_every_floor_is_cleared_by_every_shipped_theme,
@@ -353,6 +384,7 @@ TESTS = (
     test_the_baseline_agrees_key_by_key_and_theme_by_theme,
     test_the_audit_is_deterministic_across_hash_seeds,
     test_the_measured_story_of_946_is_reproduced,
+    test_the_rejected_light_arm_is_derived_not_remembered,
 )
 
 

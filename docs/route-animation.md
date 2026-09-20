@@ -408,7 +408,12 @@ Two films are rendered from one engine, and before #946 they did not agree with
 each other. The issue opened on the narrowest symptom — ripped copper and
 restored copper told apart by hue alone, on the red–green axis, with no key in
 the frame — and the finding underneath it is that **there was no design system
-at all**: every module re-derived the same intent and landed near it.
+at all**: every module re-derived the same intent and landed near it. Six distinct
+near-black triples coexisted across the render modules -- `(14,14,18)`,
+`(14,16,18)`, `(28,28,34)`, `(10,11,13)`, `(16,18,21)`, `(20,23,28)` -- one of
+them hand-copied with a comment saying it was copied *"so the film and the
+movie do not drift into two different dark greys"*, which is itself the
+evidence that nothing shared them.
 
 Four modules now hold it, and every renderer imports them:
 
@@ -446,10 +451,19 @@ measured palette, not a transform of the first, and three measurements say why:
   The light palette is written out as literal triples, never computed at
   import: a derived palette means the committed baseline describes a
   *computation*, and a rounding change would silently move frames.
-- **the obvious light event palette fails.** Take the dark events and darken
-  them and the rip/restore pair lands at a deuteranope separation of 88.6 —
-  worse than the neighbourhood of the original collision this whole issue is
-  about.
+- **the obvious light event palette reproduces the defect.** Darken the dark
+  events by one factor until the weakest clears 4.5:1 against the light board
+  and the rip/restore pair lands at **73.3** deuteranope separation — *below*
+  the **76.2** the original red/green collision measured. The binding event is
+  `event_new`, which is near-white and needs the most darkening, and it drags
+  the other two down with it. The shipped light palette measures **153.6**.
+
+  ```bash
+  python3 -X utf8 py_router/palette_audit.py --propose
+  ```
+
+  That flag exists because this paragraph used to carry a bare `88.6` that
+  nothing in the tree computed — a claim, not a measurement.
 
 `py_router/palette_audit.py` is the instrument. It is stdlib-only and never
 imports PIL:
@@ -485,18 +499,30 @@ of every existing artifact — the GUI recorder's, `place_route_loop`'s
 
 | layout | arrangement | frame aspect | px/mm on copper | px per layer cell |
 |---|---|---|---|---|
-| `stacked` | board full width, panel below | 0.62:1 | 10.00 | 113k |
-| `sidebar` | board left, panel a right column | 1.78:1 | 12.39 | 100k |
-| `inset` | board fills frame, panel a corner inset | = board's | **15.75** | 32k |
-| `split` | board on top, lower box split | 1.60:1 | 10.98 | **130k** |
+| `stacked` | board full width, panel below | 0.62:1 | 10.00 | 113 000 |
+| `sidebar` | board left, panel a right column | 1.78:1 | 12.38 | 100 050 |
+| `inset` | board fills frame, panel a corner inset | 1.85:1 | **15.76** | 28 490 |
+| `split` | board on top, lower box split | 1.60:1 | 11.06 | **128 800** |
 | `auto` | `sidebar` on a wide board, `stacked` otherwise | — | — | — |
 
-*(measured at one pixel budget — 1.62 Mpx — on a 1.85:1 board.)*
+*(one pixel budget — 1.62 Mpx — on a 1.85:1 board, four cells across the
+panel.)* **Re-derive it rather than trusting it:**
+
+```bash
+python3 -X utf8 py_router/layout_budget.py --swing
+```
+
+Every figure above is that command's output, and
+`tests/test_946_layout_budget.py` compares the two on every run. It has to:
+`inset`'s px-per-layer-cell was quoted as "32k" in four places — including the
+comment on `CELL_MIN_W`, the constant that leans on it — and is **28 490**. A
+12% error that nothing could catch, because nothing computed it.
 
 **No layout wins both metrics, on any board shape.** `inset` wins px/mm
-everywhere and loses px-per-layer-cell everywhere (32k against `split`'s 130k);
-`split` is the mirror image. `stacked` and `sidebar` genuinely swap, by 13–24%,
-on board aspect. That asymmetry is the design rule:
+everywhere and loses px-per-layer-cell everywhere (28 490 against `split`'s
+128 800, a **4.5× penalty**); `split` is the mirror image. `stacked` and
+`sidebar` genuinely swap, by **8.8–23.8%**, on board aspect — and the crossover
+falls exactly at `ADAPTIVE_ASPECT_CUT`, which is the number `auto` branches on. That asymmetry is the design rule:
 
 > **`stacked`-vs-`sidebar` is INFERRED; `inset`-vs-`split` is DECLARED.**
 > Picking between the first pair from `board_info.board_bounds` costs one

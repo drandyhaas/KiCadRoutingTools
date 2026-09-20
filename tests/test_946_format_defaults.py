@@ -53,7 +53,7 @@ RUN_ALL_TIMEOUT = 600
 
 _TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_TESTS)
-for _p in (ROOT, os.path.join(ROOT, 'py_router')):
+for _p in (ROOT, _TESTS, os.path.join(ROOT, 'py_router')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -63,8 +63,19 @@ except ImportError as exc:
     print('SKIP: needs Pillow (%s)' % exc)
     sys.exit(77)
 
-BOARDS = [os.path.join(ROOT, 'kicad_files', 'fanout_starting_point.kicad_pcb'),
-          os.path.join(ROOT, 'kicad_files', 'fanout_output1.kicad_pcb')]
+#: OBTAINED, not assumed. Both of these are GENERATED and gitignored, so
+#: reading them by path fails on any fresh clone -- and
+#: `tests/test_457_fresh_clone_fixtures.py` is a static git-ls-files check
+#: that catches it on the author's machine too, where the boards happen to
+#: exist. `fixture_boards.ensure` builds them on demand from the TRACKED
+#: roots, which is the whole reason it exists (#457 item 3).
+try:
+    from fixture_boards import ensure_many
+    BOARDS = ensure_many('fanout_starting_point.kicad_pcb',
+                         'fanout_output1.kicad_pcb')
+except Exception as exc:                                       # noqa: BLE001
+    print('SKIP: fixture boards unavailable (%s)' % exc)
+    sys.exit(77)
 
 #: The shipping default, and the raise the issue asks about.
 BASE_FPS = 6.0

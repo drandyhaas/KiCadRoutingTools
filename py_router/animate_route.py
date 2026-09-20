@@ -908,11 +908,26 @@ def _draw_chrome(frames, geom, r, chrome):
                        fill=th.rgb('chrome_text') if th else (240, 240, 240))
 
 
-def _uniform_or_pad(frames):
+def _pad_rgb(theme=None):
+    try:
+        import render_theme
+        return render_theme.theme(theme, strict=False).rgb('ground')
+    except Exception:                                          # noqa: BLE001
+        return (14, 16, 18)
+
+
+def _uniform_or_pad(frames, theme=None):
     """Every frame at the first frame's size, letterboxed rather than squashed.
 
     Returns `frames` unchanged when they already agree, so the common path
     allocates nothing.
+
+    The pad is the THEME's ground, not black: a black letterbox on a light
+    film is the one place the whole theme system would have leaked, and it
+    would look like a defect in the frame rather than in the pad. `theme` is
+    optional because `save_movie` is called with a bare frame list from
+    several places; without one the pad falls back to the dark ground, which
+    is what it always was.
     """
     try:
         import frame_layout
@@ -933,13 +948,14 @@ def _uniform_or_pad(frames):
         if f.size == (W, H):
             out.append(f)
             continue
-        pad = Image.new(f.mode, (W, H), (0, 0, 0))
+        pad = Image.new(f.mode, (W, H), _pad_rgb(theme))
         pad.paste(f, ((W - f.width) // 2, (H - f.height) // 2))
         out.append(pad)
     return out
 
 
-def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None):
+def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
+               theme=None):
     """Write the frames to ``out``. Format follows the extension: `.mp4`
     (imageio-ffmpeg; falls back to a sibling `.gif` if unavailable) or `.gif`
     (native Pillow, no dependency).
@@ -971,7 +987,7 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None):
     # fails loudly and falls back to the GIF that then absorbs it, and nothing
     # anywhere says a word. After this the film is produced, the defect is
     # AUDIBLE, and the distortion is a letterbox rather than a squash.
-    frames = _uniform_or_pad(frames)
+    frames = _uniform_or_pad(frames, theme)
     hold = [frames[-1]] * max(1, int(end_hold * fps))
     seq = frames + hold
     ext = os.path.splitext(out)[1].lower()

@@ -286,6 +286,65 @@ def measure_crossings(pal: Dict, threshold: float = 34.0,
             'worst': hits[0] if hits else None, 'hits': hits}
 
 
+def propose_darkened_events(contrast_floor: float = 4.5) -> Dict:
+    """THE ARM THAT WAS REJECTED, computed rather than remembered.
+
+    "Take the dark events and darken them" is the obvious way to build a light
+    event palette, and #1012 rejected it on a measurement. That measurement
+    was recorded as the bare number **88.6** in two comments and reproduced by
+    nothing -- the PR's own fact-checker could not derive it under any
+    plausible reading of the rule, which makes it a claim rather than a
+    measurement, which is exactly what this module exists to prevent.
+
+    So here is the rule, executable: scale all three dark events by one factor
+    until the WEAKEST of them clears `contrast_floor` against the light board
+    body, then measure the rip/restore deuteranope separation there.
+
+    The binding event is `event_new`, which is near-white -- it needs the most
+    darkening, and it drags the other two down with it. The answer is worse
+    than the figure that was recorded, not better: the pair lands BELOW the
+    76.2 that the original red/green collision measured, so the obvious light
+    palette reproduces the very defect #946 opened on.
+
+    Returns the factor, the resulting triples, their contrasts, the separation
+    it reaches, and the shipped light palette's separation to compare against.
+    """
+    dark = current_palette('dark')
+    light = current_palette('light')
+    body = light['board_body']
+    keys = ('event_ripped', 'event_restored', 'event_new')
+    lo, hi = 0.02, 1.0
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        worst = min(contrast_ratio(tuple(int(round(v * mid))
+                                         for v in dark[k]), body)
+                    for k in keys)
+        if worst < contrast_floor:
+            hi = mid
+        else:
+            lo = mid
+    k = (lo + hi) / 2.0
+    got = {n: tuple(int(round(v * k)) for v in dark[n]) for n in keys}
+    binding = min(keys, key=lambda n: contrast_ratio(got[n], body))
+    return {
+        'rule': 'scale every dark event by one factor until the weakest '
+                'clears %.1f:1 against the light board body' % contrast_floor,
+        'contrast_floor': contrast_floor,
+        'factor': round(k, 4),
+        'binding_event': binding,
+        'events': {n: list(v) for n, v in got.items()},
+        'contrasts': {n: round(contrast_ratio(v, body), 2)
+                      for n, v in got.items()},
+        'rip_restore_deuteranope': round(rgb_distance(
+            deuteranope(got['event_ripped']),
+            deuteranope(got['event_restored'])), 1),
+        'shipped_light_deuteranope': round(rgb_distance(
+            deuteranope(light['event_ripped']),
+            deuteranope(light['event_restored'])), 1),
+        'original_collision_deuteranope': 76.2,
+    }
+
+
 def audit(pal=None) -> Dict:
     """Every measurement, as one JSON-shaped document.
 
@@ -414,6 +473,10 @@ def main(argv=None) -> int:
                     help='pin the TRANSFORMS against published fixtures and '
                          'exit; a broken transform must not read as a broken '
                          'palette')
+    ap.add_argument('--propose', action='store_true',
+                    help="derive the REJECTED light-event arm -- darken the "
+                         "dark events until the weakest clears the contrast "
+                         "floor -- and report what separation it reaches")
     ap.add_argument('--quiet', action='store_true')
     a = ap.parse_args(argv)
 
@@ -423,6 +486,25 @@ def main(argv=None) -> int:
     # The instrument checks itself before it measures anything, always.
     if self_test(quiet=True):
         return 1
+
+    if a.propose:
+        pr = propose_darkened_events()
+        print(pr['rule'])
+        print('  factor %.4f, bound by %s' % (pr['factor'],
+                                              pr['binding_event']))
+        for n in sorted(pr['events']):
+            print('    %-16s %-16s contrast %.2f'
+                  % (n, tuple(pr['events'][n]), pr['contrasts'][n]))
+        print('  rip <-> restored, deuteranope:  %.1f'
+              % pr['rip_restore_deuteranope'])
+        print('  the shipped light palette:      %.1f'
+              % pr['shipped_light_deuteranope'])
+        print('  the collision #946 opened on:   %.1f'
+              % pr['original_collision_deuteranope'])
+        if (pr['rip_restore_deuteranope']
+                <= pr['original_collision_deuteranope']):
+            print('  -> the obvious light palette REPRODUCES the defect.')
+        return 0
 
     docs = [audit(p) for p in shipped_palettes()]
     doc = docs[0]

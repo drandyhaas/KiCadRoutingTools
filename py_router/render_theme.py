@@ -297,11 +297,25 @@ DARK = Theme('dark', _DARK, _DARK_MARKS, _DARK_LAYERS, 150)
 
 # ---------------------------------------------------------------------------
 # LIGHT (#1012). NOT a background swap, and not a transform of DARK -- the
-# obvious light theme (darken the dark events) lands at 88.6 deuteranope
-# separation between ripped and restored, WORSE than the neighbourhood of the
-# red/green collision this whole issue is about. At contrast >= 4.5 over a
-# light body the usable gamut is the dark half of the cube, where dark-red and
-# dark-teal both lose their blue separation.
+# obvious light theme REPRODUCES THE DEFECT #946 OPENED ON. Darken the dark
+# events by one factor until the weakest clears 4.5:1 against the light board
+# body and the rip/restore pair lands at **73.3** deuteranope separation --
+# BELOW the 76.2 the original red/green collision measured. The binding event
+# is `event_new`, which is near-white and so needs the most darkening; it
+# drags the other two down with it. At contrast >= 4.5 over a light body the
+# usable gamut is the dark half of the cube, where dark-red and dark-teal both
+# lose their blue separation. The shipped light palette measures 153.6.
+#
+# DERIVE IT, do not trust this comment:
+#
+#     python3 -X utf8 py_router/palette_audit.py --propose
+#
+# That flag exists BECAUSE this comment used to carry a bare 88.6 that nothing
+# in the tree computed. The PR's fact-checker could not reproduce it under any
+# plausible reading of "darken the dark events", which makes it a claim rather
+# than a measurement -- exactly what `palette_audit` exists to prevent. The
+# rule is executable now, and its answer is worse than the number that was
+# recorded, not better.
 #
 # Three things #946 concluded or never measured, and what measuring found:
 #

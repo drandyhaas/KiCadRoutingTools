@@ -29,8 +29,8 @@ movie this repo has ever written.
 **C VS D IS A STANCE, NOT AN INFERENCE.** Measured at equal total pixel budget,
 the two quality metrics never agree: px/mm on the copper and px per layer cell
 pick different winners on every board shape. C (Inset) wins copper everywhere,
-by +16% to +44%; D (Split) wins panel everywhere, 130k against C's 32k. A and B
-genuinely swap by board shape, by 13-24%, which is the ONLY part worth
+by +16% to +44%; D (Split) wins panel everywhere, 128 800 against C's 28 490.
+A and B genuinely swap by board shape, by 8.8-23.8%, which is the ONLY part worth
 automating -- so `'auto'` picks between A and B from `board_bounds`, and nothing
 picks between C and D. A measure that never changes its mind is not measuring
 the decision.
@@ -58,7 +58,8 @@ RAIL_MIN_PX = 22
 FOOT_MIN_PX = 26
 
 #: Above this board aspect (w/h) the sidebar beats the stack. Measured: B wins
-#: on wide and 4:3 boards, A on square and tall, by 13-24%.
+#: on wide and 4:3 boards, A on square and tall, by 8.8-23.8%. The cut is
+#: where the measurement puts the crossover -- `py_router/layout_budget.py` computes these; `tests/test_946_layout_budget.py` pins them.
 ADAPTIVE_ASPECT_CUT = 1.25
 
 STACKED_PANEL_FRAC = 0.28           # of frame HEIGHT           (A)

@@ -57,8 +57,14 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 #: Below this cell width a layer cell cannot show a route, only that copper
-#: exists. Measured against the layout study's px-per-layer-cell figures: the
-#: inset layout gives 32k px per cell against the split layout's 130k.
+#: exists. Measured against the px-per-layer-cell figures: at one pixel
+#: budget the inset layout gives **28 490** px per cell against the split
+#: layout's 128 800 -- a 4.5x penalty, which is what makes a floor on the
+#: CELL rather than on the count the right guard.
+#:
+#: That 28 490 was quoted as "32k" here and in three other places until the
+#: PR's fact-checker reconstructed it: a 12% error in the number this
+#: constant leans on, uncatchable because nothing computed it. `py_router/layout_budget.py` computes these; `tests/test_946_layout_budget.py` pins them.
 CELL_MIN_W = 26
 
 #: And below THIS a cell cannot be drawn at all -- `d.rectangle` raises when

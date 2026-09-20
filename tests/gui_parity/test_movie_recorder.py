@@ -81,11 +81,23 @@ try:                                       # the engine's own finder, verified
 except Exception:                                              # noqa: BLE001
     pass
 
-#: `fanout_output.kicad_pcb` has no such file in the repo -- the boards
-#: are `fanout_output1` / `fanout_output2` -- so this gate printed
-#: `SKIP: fixture board missing` and exited 0, on top of the
-#: interpreter defect above. TWO self-skips in a row, both silent.
-BOARD = os.path.join(REPO, 'kicad_files', 'fanout_output1.kicad_pcb')
+#: `fanout_output.kicad_pcb` has no such file in the repo -- the boards are
+#: `fanout_output1` / `fanout_output2` -- so this gate printed
+#: `SKIP: fixture board missing` and exited 0, on top of the interpreter
+#: defect above.
+#:
+#: AND `fanout_output1` IS GENERATED AND GITIGNORED, so naming it by path is
+#: the same self-skip one step later: it exists on a machine that has run the
+#: fanout suite and on no fresh clone. `fixture_boards.ensure` builds it from
+#: the tracked roots -- THREE self-skips stacked behind one another, each
+#: reporting every claim this gate guards as checked.
+def _board():
+    sys.path.insert(0, os.path.join(REPO, 'tests'))
+    from fixture_boards import ensure
+    return ensure('fanout_output1.kicad_pcb')
+
+
+BOARD = None            # resolved in main(), after the re-exec
 GREEN = '\033[92m'
 
 failures = []
@@ -150,8 +162,11 @@ def main():
     from kicad_routing_plugin import swig_gui
     from kicad_routing_plugin.movie_recorder import record_movie_step
 
-    if not os.path.exists(BOARD):
-        print(f"SKIP: fixture board missing ({BOARD})")
+    global BOARD
+    try:
+        BOARD = _board()
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"SKIP: fixture board could not be built ({exc})")
         return 0
 
     app = wx.App(False)

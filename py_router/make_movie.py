@@ -375,7 +375,7 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
     out = os.path.abspath(out)
     os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
     if not a.save_movie(frames, out, fps=fps, end_hold=end_hold,
-                        png_dir=png_dir, frame_meta=frame_meta):
+                        png_dir=png_dir, frame_meta=frame_meta, theme=theme):
         return None
     # save_movie falls back .mp4 -> .gif when imageio-ffmpeg is missing; report
     # the file that actually exists so callers (and the GUI) point at it.
