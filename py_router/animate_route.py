@@ -113,6 +113,8 @@ class Movie:
         self.totals = ''
         #: Set by `build_boards` when the layout reserved a rail.
         self.split_caption = False
+        #: The layer the current event is on, so the strip can light it.
+        self.active_layer = None
         self.layers = layers
         self.rip_hold = rip_hold
         self.live_s: Dict[Tuple, _Seg] = {}
@@ -153,7 +155,12 @@ class Movie:
     def _note_chrome(self, label):
         self.chrome.append({'rail': self.rail_left,
                             'rail_right': self.rail_right,
-                            'event': label or '', 'totals': self.totals})
+                            'event': label or '', 'totals': self.totals,
+                            # #1020: the copper as it stands on THIS frame, so
+                            # the per-layer strip grows with the film instead
+                            # of showing the finished board from frame one.
+                            'live': tuple(self.live_s.values()),
+                            'active': self.active_layer})
 
     def _frame(self, hl_s, hl_v, color, label, mark='solid'):
         ov = self._key_overlay()
@@ -199,6 +206,11 @@ class Movie:
                     if _add_color(event, self.theme)
                     == self.theme.rgb('event_restored') else 'event_new')
             self._note_event(role)
+            # `new_s` holds `_Seg` objects, which carry `.layer` already --
+            # the strip lights whichever layer the event touched.
+            self.active_layer = next(
+                (sg.layer for sg in new_s if getattr(sg, 'layer', None)),
+                self.active_layer)
             self._frame(new_s, new_v, _add_color(event, self.theme), label)
 
     def remove(self, seg_keys, via_keys, label, by=None):
@@ -427,7 +439,11 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         _g = frame_layout.plan_frame(
             r.pcb.board_info.board_bounds, layout=layout or 'legacy',
             ratio=frame_layout.parse_ratio(aspect), size=size,
-            panel=False, legacy_size=(r.W, r.H))
+            # A panel is reserved for every layout that declares one, EXCEPT
+            # 'legacy' -- which has no chrome at all, because legacy means
+            # today's frame and today's frame has no lower box.
+            panel=(str(layout or 'legacy').lower() != 'legacy'),
+            legacy_size=(r.W, r.H))
         # Only when the layout genuinely MOVES the board box. On 'legacy' the
         # box is the renderer's own size evened, and the evening is applied by
         # cropping the composed frame instead -- because
@@ -607,6 +623,34 @@ def _compose_into_frame(frames, geom, r, chrome=None):
         _draw_chrome(frames, geom, r, chrome)
 
 
+def _draw_panel(f, d, geom, r, c):
+    """The lower box, whichever of its four contents this phase asks for."""
+    if geom.panel is None or geom.panel.h <= 0:
+        return
+    try:
+        import render_panels
+        th = getattr(r, 'theme', None)
+        phase = render_panels.phase_for(c.get('event', ''))
+        box = geom.panel
+        d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
+                    fill=th.rgb('chrome_panel') if th else (14, 14, 18))
+        if phase == 'routing':
+            render_panels.draw_layer_strip(
+                d, box, bounds=r.bounds, segments=c.get('live', ()),
+                layers=list(r.copper_layers), palette=r.palette, theme=th,
+                active=c.get('active'))
+        else:
+            from route_render import load_font
+            font = load_font(max(9, int(box.h * 0.12)))
+            d.text((box.x + 8, box.y + 6),
+                   {'bookend': 'the board', 'placement': 'what moved',
+                    'seeding': 'still in the pile'}.get(phase, phase),
+                   font=font,
+                   fill=th.rgb('chrome_text_dim') if th else (150, 150, 150))
+    except Exception:                                          # noqa: BLE001
+        pass
+
+
 def _draw_chrome(frames, geom, r, chrome):
     """Fill the reserved rail and foot (#1019).
 
@@ -623,6 +667,7 @@ def _draw_chrome(frames, geom, r, chrome):
     for i, f in enumerate(frames):
         c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
         d = ImageDraw.Draw(f)
+        _draw_panel(f, d, geom, r, c)
         render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
                                 c.get('rail_right', ''), theme=th,
                                 progress=i / float(n), ticks=ticks)
