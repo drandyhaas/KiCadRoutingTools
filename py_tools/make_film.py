@@ -253,7 +253,8 @@ def _card_frame(size_wh, image_path, caption):
     from PIL import Image, ImageDraw
     from route_render import load_font
     W, H = size_wh
-    canvas = Image.new('RGB', (W, H), (14, 14, 18))
+    from render_theme import DARK as _TH
+    canvas = Image.new('RGB', (W, H), _TH.rgb('chrome_panel'))
     strip = max(22, H // 9)
     if image_path and os.path.exists(image_path):
         try:
@@ -266,7 +267,7 @@ def _card_frame(size_wh, image_path, caption):
         except Exception as exc:
             print(f"make_film: could not read {image_path} ({exc})", file=sys.stderr)
     d = ImageDraw.Draw(canvas)
-    d.rectangle([0, H - strip, W, H], fill=(28, 28, 34))
+    d.rectangle([0, H - strip, W, H], fill=_TH.rgb('chrome_strip'))
     font = load_font(max(11, strip // 2))
     txt = caption or ''
     try:
@@ -274,17 +275,22 @@ def _card_frame(size_wh, image_path, caption):
     except Exception:
         tw = len(txt) * strip // 4
     d.text((max(6, (W - tw) // 2), H - strip + strip // 5), txt,
-           fill=(228, 228, 236), font=font)
+           fill=_TH.rgb('chrome_strip_text'), font=font)
     return canvas
 
 
-def _badge(frame, text, rgb=(200, 60, 60)):
+def _badge(frame, text, rgb=None):
     """Mark a frame as an attempt: a border and a tag, drawn in place.
 
     Without it a rejected beat is indistinguishable from a kept one, and a film
     that shows an undone change without saying so is worse than one that omits
     it -- which is exactly why the convergence movie omits it.
     """
+    # `rgb=None` -> the theme's `status_tried`. #1012 moves it off red: a red
+    # badge on a frame whose copper also flashes red is the same collision
+    # #946 is about. #1011 keeps the value.
+    from render_theme import DARK as _TH
+    rgb = _TH.rgb('status_tried') if rgb is None else rgb
     from PIL import ImageDraw
     from route_render import load_font
     W, H = frame.size

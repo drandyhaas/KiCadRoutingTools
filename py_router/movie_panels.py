@@ -56,11 +56,18 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-#: Panel background and caption strip, matching make_film._card_frame so the
-#: film and the movie do not drift into two different dark greys.
-_PANEL_BG = (14, 14, 18)
-_STRIP_BG = (28, 28, 34)
-_STRIP_FG = (228, 228, 236)
+from render_theme import DARK as _THEME_DARK
+
+#: Panel background and caption strip. These used to be hand-copied from
+#: `make_film._card_frame` with a comment saying they were copied "so the film
+#: and the movie do not drift into two different dark greys" -- which was the
+#: evidence that NOTHING SHARED THEM. `render_theme` owns them now; both
+#: modules read the same role, so the drift is structurally impossible rather
+#: than merely discouraged. Kept as names because
+#: `tests/test_887_two_panel_frame.py:323,362` reads `_PANEL_BG` directly.
+_PANEL_BG = _THEME_DARK.rgb('chrome_panel')
+_STRIP_BG = _THEME_DARK.rgb('chrome_strip')
+_STRIP_FG = _THEME_DARK.rgb('chrome_strip_text')
 
 
 def _finite(value, default, name):

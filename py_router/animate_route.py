@@ -36,16 +36,26 @@ from typing import Dict, List, Optional, Tuple
 
 from route_trace import (load_trace, _Seg, _Via, seg_key_row, via_key_row)
 
-_RIP = (255, 66, 66)        # ripped copper
-_NEW = (250, 250, 250)      # freshly routed copper
-_RESTORE = (86, 224, 96)    # rerouted / restored copper
+from render_theme import DARK as _THEME_DARK
+
+#: Aliases onto the dark theme, kept as names for out-of-repo callers. The
+#: EVENT colours are the two #946 opened on: `_RIP` and `_RESTORE` differ
+#: almost entirely in hue, along the one axis red-green colour blindness
+#: removes -- 233 apart in RGB and 76 under a Vienot transform. #1013 moves
+#: `_RESTORE` to cyan and gives the rip a dash; #1011 changes no value.
+_RIP = _THEME_DARK.rgb('event_ripped')
+_NEW = _THEME_DARK.rgb('event_new')
+_RESTORE = _THEME_DARK.rgb('event_restored')
 
 
-def _add_color(event: str) -> Tuple[int, int, int]:
+def _add_color(event: str, theme=None) -> Tuple[int, int, int]:
+    """Which event colour an 'add' carries. Resolves a ROLE, not an RGB, so a
+    themed movie flashes in its own palette."""
+    th = theme or _THEME_DARK
     e = (event or '').lower()
     if 'reroute' in e or 'restore' in e or 'rescue' in e:
-        return _RESTORE
-    return _NEW
+        return th.rgb('event_restored')
+    return th.rgb('event_new')
 
 
 def _board_rows(pcb, layers) -> Tuple[List[List], List[List]]:
@@ -76,8 +86,10 @@ class Movie:
     finalize re-adding prior copper neither duplicates nor, with
     ``only_new``, flashes it)."""
 
-    def __init__(self, renderer, layers, rip_hold: int = 2):
+    def __init__(self, renderer, layers, rip_hold: int = 2, theme=None):
         self.r = renderer
+        # Off the renderer by default, so no call site has to learn about it.
+        self.theme = theme or getattr(renderer, 'theme', _THEME_DARK)
         self.layers = layers
         self.rip_hold = rip_hold
         self.live_s: Dict[Tuple, _Seg] = {}
@@ -120,7 +132,7 @@ class Movie:
             if fresh or not only_new:
                 new_v.append(self.live_v[k])
         if new_s or new_v:
-            self._frame(new_s, new_v, _add_color(event), label)
+            self._frame(new_s, new_v, _add_color(event, self.theme), label)
 
     def remove(self, seg_keys, via_keys, label, by=None):
         """Flash the doomed copper red (still present), then drop it."""
@@ -130,7 +142,7 @@ class Movie:
             return
         rlabel = label + (f"  (rip by {by})" if by else '  (rip)')
         for _ in range(max(1, self.rip_hold)):
-            self._frame(hl_s, hl_v, _RIP, rlabel)
+            self._frame(hl_s, hl_v, self.theme.rgb('event_ripped'), rlabel)
         for k in seg_keys:
             self.live_s.pop(k, None)
         for k in via_keys:

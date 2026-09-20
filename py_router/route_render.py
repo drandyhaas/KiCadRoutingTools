@@ -61,42 +61,38 @@ from PIL import Image, ImageDraw, ImageFont
 # A distinct color per copper layer, assigned in board stack order so any
 # board (2, 4, 6, ... layers) renders sensibly. F.Cu warm/red, B.Cu cool/blue,
 # inners spread across the spectrum -- roughly the KiCad convention.
-_LAYER_PALETTE: List[Tuple[int, int, int]] = [
-    (208, 64, 58),    # 0  F.Cu   red
-    (70, 130, 210),   # 1  B.Cu   blue  (kept as the *last* layer below)
-    (96, 190, 96),    # 2  In1    green
-    (214, 190, 78),   # 3  In2    yellow
-    (196, 110, 206),  # 4  In3    magenta
-    (94, 200, 200),   # 5  In4    cyan
-    (224, 150, 70),   # 6  In5    orange
-    (150, 150, 224),  # 7  In6    periwinkle
-    (170, 210, 90),   # 8  In7    lime
-    (210, 120, 150),  # 9  In8    pink
-]
-_BG = (14, 16, 18)             # frame background (outside the board)
-_BOARD_FILL = (26, 34, 28)     # soldermask-ish dark green board body
-_EDGE = (225, 225, 210)        # Edge.Cuts stroke
-_PAD = (192, 168, 96)          # exposed-pad gold
-_PAD_HOLE = (10, 10, 10)       # drilled hole
-_VIA = (176, 176, 184)         # via annulus
-_VIA_HOLE = (10, 10, 10)
-_HILITE = (255, 60, 60)        # default highlight (e.g. a rip)
+from render_theme import DARK as _THEME_DARK, default_theme
+
+#: Module-level aliases onto the dark theme, kept AS NAMES because callers read
+#: them that way -- `tests/test_431_render_placement.py:293-294` reads
+#: `RP.C_AIR_PICK` by name, and out-of-repo code reads these. An alias survives
+#: a VALUE change and not a rename, which is exactly the compatibility surface
+#: wanted: #1012 may move a value, and nothing here has to move with it.
+#:
+#: These are the MODULE DEFAULTS. The draw sites below read `self.theme`, so a
+#: renderer built with a different theme actually draws differently -- which is
+#: the whole point, and was not true of `bg` alone.
+_LAYER_PALETTE: List[Tuple[int, int, int]] = list(_THEME_DARK.layers)
+_BG = _THEME_DARK.rgb('ground')             # frame background, outside the board
+_BOARD_FILL = _THEME_DARK.rgb('board_body')  # soldermask-ish board body
+_EDGE = _THEME_DARK.rgb('board_edge')       # Edge.Cuts stroke
+_PAD = _THEME_DARK.rgb('pad')               # exposed-pad gold
+_PAD_HOLE = _THEME_DARK.rgb('pad_hole')     # drilled hole
+_VIA = _THEME_DARK.rgb('via')               # via annulus
+_VIA_HOLE = _THEME_DARK.rgb('via_hole')
+_HILITE = _THEME_DARK.rgb('hilite')         # default highlight (e.g. a rip)
 
 
-def layer_palette(copper_layers: Sequence[str]) -> Dict[str, Tuple[int, int, int]]:
-    """Map each copper layer name -> a color. B.Cu always gets the blue slot
-    (index 1) so front/back read consistently; inner layers fill the rest."""
-    pal: Dict[str, Tuple[int, int, int]] = {}
-    inner_idx = 2
-    for name in copper_layers:
-        if name == 'F.Cu':
-            pal[name] = _LAYER_PALETTE[0]
-        elif name == 'B.Cu':
-            pal[name] = _LAYER_PALETTE[1]
-        else:
-            pal[name] = _LAYER_PALETTE[inner_idx % len(_LAYER_PALETTE)]
-            inner_idx += 1
-    return pal
+def layer_palette(copper_layers: Sequence[str],
+                  theme=None) -> Dict[str, Tuple[int, int, int]]:
+    """F.Cu first, B.Cu second, inners in order, wrapping modulo the palette.
+
+    Delegates to `render_theme.layer_palette` so a theme can supply a different
+    set of ten without every caller learning about it. Re-exported here because
+    this is the name the repo imports.
+    """
+    import render_theme
+    return render_theme.layer_palette(copper_layers, theme or _THEME_DARK)
 
 
 # ---------------------------------------------------------------------------
@@ -195,22 +191,34 @@ class BoardRenderer:
     def __init__(self, pcb, size: int = 1600, supersample: int = 2,
                  margin_frac: float = 0.03, show_pads: bool = True,
                  show_zones: bool = True, layers: Optional[Sequence[str]] = None,
-                 bg: Tuple[int, int, int] = _BG, layer_alpha: int = 150,
+                 bg: Optional[Tuple[int, int, int]] = None,
+                 layer_alpha: Optional[int] = None,
                  dynamic_zones: bool = False,
-                 view: Optional[Tuple[float, float, float, float]] = None):
+                 view: Optional[Tuple[float, float, float, float]] = None,
+                 theme=None):
+        # #1011. `theme=None` resolves to DARK, whose values are exactly
+        # the constants this module shipped before, so every existing
+        # construction site renders byte-identically. `bg` and
+        # `layer_alpha` stay and still WIN when passed explicitly: `bg`
+        # had zero callers repo-wide, so this closes the half-open door
+        # rather than removing it.
+        import render_theme
+        self.theme = render_theme.theme(theme) if theme is not None \
+            else _THEME_DARK
         self.pcb = pcb
         # dynamic_zones: keep plane pours OUT of the static base so the animator
         # can reveal each plane's fill per frame (via frame(zone_net_ids=...)).
         self.dynamic_zones = dynamic_zones
         self.ss = max(1, int(supersample))
         self.copper_layers = list(layers) if layers else list(pcb.board_info.copper_layers)
-        self.palette = layer_palette(self.copper_layers)
+        self.palette = layer_palette(self.copper_layers, self.theme)
         self._layer_set = set(self.copper_layers)
-        self.bg = bg
+        self.bg = self.theme.rgb('ground') if bg is None else bg
         # Per-layer copper opacity (0-255). <255 composites each layer as a
         # translucent overlay so overlapping layers blend at crossings ("layers
         # add on each other"); 255 = opaque (fast path, last layer wins).
-        self.layer_alpha = max(1, min(255, int(layer_alpha)))
+        self.layer_alpha = max(1, min(255, int(
+            self.theme.layer_alpha if layer_alpha is None else layer_alpha)))
 
         # The BOARD bounds fix the canvas size; the VIEW only aims the transform
         # inside it. Keeping W/H off the board is what lets a camera change the
@@ -266,7 +274,8 @@ class BoardRenderer:
         if outlines:
             for poly in outlines:
                 if len(poly) >= 3:
-                    d.polygon([self.tf.pt(x, y) for x, y in poly], fill=_BOARD_FILL)
+                    d.polygon([self.tf.pt(x, y) for x, y in poly],
+                              fill=self.theme.rgb('board_body'))
             for poly in cutouts:
                 if len(poly) >= 3:
                     d.polygon([self.tf.pt(x, y) for x, y in poly], fill=self.bg)
@@ -274,11 +283,13 @@ class BoardRenderer:
             for poly in outlines:
                 if len(poly) >= 2:
                     pts = [self.tf.pt(x, y) for x, y in poly]
-                    d.line(pts + [pts[0]], fill=_EDGE, width=ew, joint='curve')
+                    d.line(pts + [pts[0]], fill=self.theme.rgb('board_edge'),
+                           width=ew, joint='curve')
         elif bi.board_bounds:
             (x0, y0, x1, y1) = bi.board_bounds
             d.rectangle([self.tf.pt(x0, y0), self.tf.pt(x1, y1)],
-                        fill=_BOARD_FILL, outline=_EDGE,
+                        fill=self.theme.rgb('board_body'),
+                        outline=self.theme.rgb('board_edge'),
                         width=max(1, int(round(self.tf.length(0.15)))))
 
     def _draw_zones(self, d: ImageDraw.ImageDraw, net_ids=None) -> None:
@@ -291,8 +302,9 @@ class BoardRenderer:
                 continue
             if net_ids is not None and z.net_id not in net_ids:
                 continue
-            base = self.palette.get(z.layer, (120, 120, 120))
-            dim = tuple(int(_BOARD_FILL[i] * 0.55 + base[i] * 0.45) for i in range(3))
+            base = self.palette.get(z.layer, self.theme.rgb('zone_tint'))
+            body = self.theme.rgb('board_body')
+            dim = tuple(int(body[i] * 0.55 + base[i] * 0.45) for i in range(3))
             d.polygon([self.tf.pt(x, y) for x, y in z.polygon], fill=dim)
 
     def zone_net_ids(self):
@@ -320,7 +332,7 @@ class BoardRenderer:
         self.draw_pads(d)
 
     def _draw_pad(self, d: ImageDraw.ImageDraw, p, fill=None) -> None:
-        fill = fill or _PAD
+        fill = fill or self.theme.rgb('pad')
         # Custom copper outline(s) take precedence (comb/finger pads, #188).
         if getattr(p, 'polygons', None):
             for poly in p.polygons:
@@ -345,7 +357,8 @@ class BoardRenderer:
                                 p.hole_y if p.hole_y is not None else p.global_y)
             hr = self.tf.length(p.drill) / 2
             if hr >= 0.5:
-                d.ellipse([hx - hr, hy - hr, hx + hr, hy + hr], fill=_PAD_HOLE)
+                d.ellipse([hx - hr, hy - hr, hx + hr, hy + hr],
+                          fill=self.theme.rgb('pad_hole'))
 
     def _rrect(self, d, cx, cy, sx, sy, rot, rratio, fill) -> None:
         hw, hh = sx / 2, sy / 2
@@ -404,17 +417,19 @@ class BoardRenderer:
         for v in vias:
             cx, cy = self.tf.pt(v.x, v.y)
             r = max(1.0, self.tf.length(v.size) / 2)
-            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color or _VIA)
+            d.ellipse([cx - r, cy - r, cx + r, cy + r],
+                      fill=color or self.theme.rgb('via'))
             hr = self.tf.length(v.drill) / 2
             if hr >= 0.5:
-                d.ellipse([cx - hr, cy - hr, cx + hr, cy + hr], fill=_VIA_HOLE)
+                d.ellipse([cx - hr, cy - hr, cx + hr, cy + hr],
+                          fill=self.theme.rgb('via_hole'))
 
     # -- public ----------------------------------------------------------
     def frame(self, segments: Optional[Iterable] = None,
               vias: Optional[Iterable] = None,
               highlight_segments: Optional[Iterable] = None,
               highlight_vias: Optional[Iterable] = None,
-              highlight_color: Tuple[int, int, int] = _HILITE,
+              highlight_color: Optional[Tuple[int, int, int]] = None,
               label: Optional[str] = None, zone_net_ids=None,
               overlays: Optional[Sequence] = None) -> Image.Image:
         """Composite the given copper onto the static substrate and return an
@@ -460,6 +475,10 @@ class BoardRenderer:
             img = acc.convert('RGB')
         # Vias and highlights are drawn opaque on top so they stay unambiguous.
         d = ImageDraw.Draw(img)
+        # #1011: None means "the theme's highlight", so a themed renderer
+        # highlights in its own palette; an explicit colour still wins.
+        if highlight_color is None:
+            highlight_color = self.theme.rgb('hilite')
         self._draw_vias(d, vs)
         if highlight_segments:
             self._draw_segments(d, highlight_segments, color=highlight_color)
@@ -531,9 +550,11 @@ class BoardRenderer:
             lh = 16
         box_w = max(_w(ln) for ln in lines)
         d.rectangle([pad - 3, pad - 3, pad + box_w + 3,
-                     pad + lh * len(lines) + 5], fill=(0, 0, 0))
+                     pad + lh * len(lines) + 5],
+                    fill=self.theme.rgb('chrome_band'))
         for i, ln in enumerate(lines):
-            d.text((pad, pad + i * lh), ln, fill=(240, 240, 240), font=font)
+            d.text((pad, pad + i * lh), ln,
+                   fill=self.theme.rgb('chrome_text'), font=font)
 
 
 def render_board_file(board_path: str, out_png: Optional[str] = None,

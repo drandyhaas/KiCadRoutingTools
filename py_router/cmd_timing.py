@@ -935,7 +935,8 @@ def add_clock_band(frame, lines, band_h):
     from PIL import Image, ImageDraw
 
     W, H = frame.size
-    out = Image.new('RGB', (W, H + int(band_h)), (0, 0, 0))
+    from render_theme import DARK as _TH
+    out = Image.new('RGB', (W, H + int(band_h)), _TH.rgb('chrome_band'))
     out.paste(frame, (0, 0))
     d = ImageDraw.Draw(out)
     font = _clock_font(H)
@@ -960,7 +961,7 @@ def add_clock_band(frame, lines, band_h):
             # cannot happen -- but a clipped clock is a wrong clock, not a
             # cosmetic problem, so it stops rather than drawing off the end.
             break
-        d.text((_CLOCK_PAD, y), ln, fill=(240, 240, 240), font=font)
+        d.text((_CLOCK_PAD, y), ln, fill=_TH.rgb('chrome_text'), font=font)
     return out
 
 

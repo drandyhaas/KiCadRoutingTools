@@ -106,29 +106,40 @@ from kicad_parser import parse_kicad_pcb                        # noqa: E402
 from route_render import BoardRenderer, load_font               # noqa: E402
 
 # --------------------------------------------------------------------------
-# palette -- one colour language for the whole film
+# palette -- one colour language for the whole film, and since #1011 it is the
+# SAME one language the routing movie and render_placement speak. These were
+# eleven constants of this file's own; they are now aliases onto
+# `py_router/render_theme`, value-for-value.
+#
+# Two of them are worth naming, because they are the finding rather than the
+# tidy-up: ADDED and REMOVED mean exactly what animate_route's _NEW and _RIP
+# mean -- "copper present now and not before", "present before and not now" --
+# and they are DIFFERENT VALUES. A rip is a rip in both films. #1013 collapses
+# them; #1011 only records that they were apart.
 # --------------------------------------------------------------------------
-BG = (10, 11, 13)
-PANEL = (20, 23, 28)
-PANEL_EDGE = (44, 50, 58)
-TEXT = (228, 232, 238)
-DIM = (138, 146, 158)
-FAINT = (78, 84, 94)
+from render_theme import DARK as _TH                            # noqa: E402
+
+BG = _TH.rgb('film_ground')
+PANEL = _TH.rgb('film_panel')
+PANEL_EDGE = _TH.rgb('chrome_panel_edge')
+TEXT = _TH.rgb('film_text')
+DIM = _TH.rgb('chrome_text_dim')
+FAINT = _TH.rgb('chrome_text_faint')
 
 # operator colours: every caption, border, arrow and lineage edge of a kind
 # uses its colour, so the kind is readable without reading the word.
 KIND_COLOUR = {
-    'seed':    (150, 162, 176),
-    'descend': (86, 206, 130),
-    'jump':    (242, 162, 58),
-    'cross':   (190, 130, 236),
+    'seed':    _TH.rgb('op_seed'),
+    'descend': _TH.rgb('op_descend'),
+    'jump':    _TH.rgb('op_jump'),
+    'cross':   _TH.rgb('op_cross'),
 }
-BEST = (255, 214, 88)
-KEPT = (86, 206, 130)
-DROPPED = (206, 78, 92)
+BEST = _TH.rgb('status_best')
+KEPT = _TH.rgb('status_kept')
+DROPPED = _TH.rgb('status_dropped')
 
-ADDED = (255, 248, 150)        # copper present now and not before
-REMOVED = (255, 70, 120)       # copper present before and not now (ghost)
+ADDED = _TH.rgb('event_added')      # copper present now and not before
+REMOVED = _TH.rgb('event_removed')  # copper present before and not now (ghost)
 
 
 def kind_colour(kind):

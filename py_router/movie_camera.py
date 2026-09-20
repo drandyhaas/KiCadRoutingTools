@@ -545,9 +545,16 @@ class Stage:
                   if ln == want or ln not in ('F.Cu', 'B.Cu')]
         far = None
         if want in self.r.copper_layers and layers:
+            # theme= is NOT optional here. This is the SECOND BoardRenderer
+            # in the system and no test covers it:
+            # tests/test_431_placement_movie.py:92-121 pins the renderer count
+            # on the NO-STAGE path, and this is the stage path. A second
+            # renderer that does not inherit the theme is exactly the drift
+            # render_theme exists to prevent (#1011).
             far = BoardRenderer(self.r.pcb, size=self.r.W, supersample=self.r.ss,
                                 layers=layers, dynamic_zones=self.r.dynamic_zones,
-                                view=getattr(self.r, '_view', None))
+                                view=getattr(self.r, '_view', None),
+                                theme=getattr(self.r, 'theme', None))
 
         segs = list(self.movie.live_s.values())
         vias = list(self.movie.live_v.values())

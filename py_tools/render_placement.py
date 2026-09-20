@@ -56,21 +56,43 @@ from kicad_parser import parse_kicad_pcb
 # `startup_checks.check_render_dependencies()` at ITS module scope, and every
 # draw path here reaches Pillow through `route_render`.
 
-# --- palette (OmniLayout's categories: outline / THT / top SMD / back SMD) ----
-C_COURT_F = (150, 152, 168)     # front courtyard
-C_COURT_B = (108, 132, 160)     # back courtyard (cooler, like B.Cu)
-C_COURT_DIM = (58, 60, 70)      # context part in delta-first mode
-C_LOCKED = (92, 88, 74)         # locked: dimmed, and hatched
-C_GHOST = (76, 76, 92)          # seed position
-C_ARROW = (236, 214, 110)       # displacement
-C_AIR = (86, 96, 112)           # ordinary airwire
-C_AIR_FAIL = (232, 72, 72)      # failed net
-C_AIR_BLOCK = (236, 158, 60)    # blocker net
-C_AIR_PICK = (96, 214, 170)     # net named by --ratsnest-nets
-C_LABEL = (226, 228, 238)
-C_PAD_THT = (196, 150, 74)      # through-hole
-C_PAD_F = (198, 172, 96)        # front SMD
-C_PAD_B = (104, 150, 196)       # back SMD
+# --- palette: aliases onto the shared theme (#946, #1011) --------------------
+#
+# `render_theme` is pure data over stdlib and imports no PIL, which is what
+# lets it be imported HERE at module scope: this module must keep importing
+# with `sys.modules['PIL'] = None` (tests/test_943_optional_render_dependency),
+# because `board_context.py` and the stress predictors import it for
+# `PlacementModel` / `legality_findings` and draw nothing.
+#
+# Every name survives, because callers read them by name --
+# `tests/test_431_render_placement.py:293-294` reads `C_AIR_PICK` that way.
+# The second block that used to sit MID-FILE (C_CONFLICT / C_HOLE /
+# C_COURT_OVL, declared after `draw_courtyards`) is folded in here: there was
+# no reason for a palette to be in two places except that nobody owned it.
+from render_theme import DARK as _THEME_DARK
+
+C_COURT_F = _THEME_DARK.rgb('place_court_front')   # front courtyard
+C_COURT_B = _THEME_DARK.rgb('place_court_back')    # back courtyard
+C_COURT_DIM = _THEME_DARK.rgb('place_court_dim')   # context part, delta-first
+C_LOCKED = _THEME_DARK.rgb('place_locked')         # locked: dimmed and hatched
+C_GHOST = _THEME_DARK.rgb('place_ghost')           # seed position
+C_ARROW = _THEME_DARK.rgb('place_arrow')           # displacement
+C_AIR = _THEME_DARK.rgb('place_airwire')           # ordinary airwire
+C_AIR_FAIL = _THEME_DARK.rgb('defect_net_fail')    # failed net
+C_AIR_BLOCK = _THEME_DARK.rgb('defect_net_block')  # blocker net
+C_AIR_PICK = _THEME_DARK.rgb('place_net_pick')     # --ratsnest-nets pick
+C_LABEL = _THEME_DARK.rgb('place_label')
+C_PAD_THT = _THEME_DARK.rgb('pad_tht')             # through-hole
+C_PAD_F = _THEME_DARK.rgb('pad_front')             # front SMD
+C_PAD_B = _THEME_DARK.rgb('pad_back')              # back SMD
+C_CONFLICT = _THEME_DARK.rgb('defect_conflict')    # pad/hole legality
+C_HOLE = _THEME_DARK.rgb('defect_hole')            # NPTH keepout circles
+C_COURT_OVL = _THEME_DARK.rgb('defect_courtyard')  # courtyard interpenetration
+
+#: The "required gap" amber. It had NO CONSTANT NAME AT ALL and was typed as a
+#: literal in five places, one of them its own legend row -- a semantic colour
+#: with no name is the clearest single symptom of a palette nobody owns.
+C_REQUIRED_GAP = _THEME_DARK.rgb('defect_required_gap')
 
 
 # ---------------------------------------------------------------------------
@@ -801,11 +823,6 @@ def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
             d.rectangle(box, outline=col, width=_wpx)
         if ref in locked:      # hatch so "locked" reads without a legend
             d.line([box[0], box[1], box[2], box[3]], fill=col, width=_w(r, 0.06))
-
-
-C_CONFLICT = (255, 64, 64)      # pad/hole legality conflicts
-C_HOLE = (255, 160, 64)         # NPTH keepout circles
-C_COURT_OVL = (255, 120, 40)    # run-23: courtyard-blocking interpenetration
 
 
 def draw_legality(d, r, model, *, side=None):
