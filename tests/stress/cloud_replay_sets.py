@@ -573,6 +573,12 @@ def stage_upload(args, sets, stress):
               f"{n} bytes here")
     for s, b, n in absent:
         print(f"  ABSENT from the volume: {s}/{b} ({n}-byte manifest here)")
+    print("  NOTE: every earlier arm replayed the volume's copy of these manifests, "
+          "so against such an arm these boards are chain-mismatched once "
+          "re-uploaded -- re-run the baseline arm too. (First seen 2026-09-19: "
+          "sets 6-10 on the volume predated the 09-03 --clearance -> "
+          "--clearance-ceiling rewrite, and every arm since, the v0.22.1 "
+          "validation included, replayed them under the old semantics.)")
     by_set = {}
     for s, b, *_ in stale + absent:
         by_set.setdefault(s, []).append(b)
