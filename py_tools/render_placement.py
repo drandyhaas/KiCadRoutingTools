@@ -1641,7 +1641,16 @@ def render_panel(spec: PanelSpec, *, size=1600, supersample=2, extra=None):
                               if spec.side in ('F', 'B')
                               and (spec.side + '.Cu') in
                               spec.model.pcb.board_info.copper_layers else None))
-    return r.frame(overlays=[overlay_for(spec)], label=caption(spec, extra))
+    # #1017: the DECLARED plan goes UNDER the placement overlay, so the parts
+    # read on top of the intent rather than the other way round -- the plan is
+    # context for what was drawn, not a mark on it.
+    _plan = getattr(spec.model, 'intent_plan', None)
+    _ovs = []
+    if _plan is not None:
+        import render_plan as _rp
+        _ovs.append(_rp.plan_overlay(_plan, alpha=0.55))
+    _ovs.append(overlay_for(spec))
+    return r.frame(overlays=_ovs, label=caption(spec, extra))
 
 
 # ---------------------------------------------------------------------------
@@ -1978,7 +1987,25 @@ def main(argv=None):
         try:
             from placement.floorplan import load_intent
             from placement.legality import format_waiver_warnings
-            model.intent_waivers = load_intent(args.intent).waiver_pairs()
+            _it = load_intent(args.intent)
+            model.intent_waivers = _it.waiver_pairs()
+            # #946 item 5 / #1017. The intent is a fully GEOMETRIC document --
+            # blocks[].zone, keepouts[].rect/circle,
+            # edge_connectors[].along_edge_band -- and this reader used it for
+            # exactly ONE thing: overlap_waivers. The plan existed only as JSON
+            # and as pass/fail counts out of check_floorplan, so a still (and
+            # the film built from these panels) showed parts with no indication
+            # of where they were supposed to go. `render_plan` draws it,
+            # through the same `frame(overlays=...)` seam everything else here
+            # uses, so it costs no frame geometry.
+            model.intent_plan = _it
+            if not args.quiet:
+                import render_plan as _rp
+                # Printed even when it drew NOTHING: an intent with no blocks
+                # must SAY so rather than silently rendering a clean-looking
+                # empty overlay, because a picture of nothing is
+                # indistinguishable from a picture of a plan that was met.
+                print(_rp.plan_summary(_it), file=sys.stderr)
         except Exception as exc:                                # noqa: BLE001
             print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
             return 2
