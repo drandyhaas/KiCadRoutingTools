@@ -154,7 +154,8 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                rip_hold=DEFAULT_RIP_HOLD, chunks=DEFAULT_CHUNKS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
                camera=None, camera_budget=60.0, tween=10,
-               panels=None, iso_opts=None, timing=None, theme=None):
+               panels=None, iso_opts=None, timing=None, theme=None,
+               layout=None, aspect=None):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -261,8 +262,22 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             except Exception:                                   # noqa: BLE001
                 ledger = None
     marks = [] if (want_iso or ledger) else None
+    # #1018: resolved once inside build_boards; collected here so the status
+    # line can say which layout ran and why, the way iso_status_line does.
+    geom_out = []
+    if layout is None or aspect is None:
+        try:
+            import env_knobs as _ek
+        except Exception:                                       # noqa: BLE001
+            _ek = None
+        if layout is None:
+            layout = getattr(_ek, 'MOVIE_LAYOUT', 'legacy')
+        if aspect is None:
+            aspect = getattr(_ek, 'MOVIE_ASPECT', '') or None
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
-                            rip_hold, chunks, stage=stage, marks=marks)
+                            rip_hold, chunks, stage=stage, marks=marks,
+                            theme=theme, layout=layout, aspect=aspect,
+                            geom_out=geom_out)
     if not frames:
         if not quiet:
             print("make_movie: no frames (nothing routed?)", file=sys.stderr)
@@ -316,6 +331,9 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         # The panel is opt-in, so this line only ever appears when it was asked
         # for.
         print(movie_panels.iso_status_line(report), file=sys.stderr)
+    if geom_out and not quiet:
+        import frame_layout
+        print(frame_layout.frame_status_line(geom_out[0]), file=sys.stderr)
     out = out or default_output(inputs)
     out = os.path.abspath(out)
     os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
@@ -364,6 +382,17 @@ def main():
                     help='also dump the raw PNG frames here')
     ap.add_argument('--png', action='store_true',
                     help='also write a full-resolution still of the final board')
+    ap.add_argument('--layout', default=None,
+                    help="'legacy' (default, or $KICAD_MOVIE_LAYOUT) "
+                         "| auto | stacked | sidebar | inset | split. "
+                         "auto picks stacked-vs-sidebar from the "
+                         "board's own aspect; inset-vs-split is a "
+                         "stance about what the viewer is there to "
+                         "read, so it is never inferred")
+    ap.add_argument('--aspect', default=None, metavar='W:H',
+                    help="target frame aspect, or $KICAD_MOVIE_ASPECT. "
+                         "'board' (default) keeps today's behaviour: "
+                         "the frame IS the board's bounding box")
     ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--camera', default=None,
@@ -477,6 +506,7 @@ def main():
 
     try:
         out = make_movie(args.inputs, out=args.output, theme=args.theme,
+                         layout=args.layout, aspect=args.aspect,
                          size=args.size, fps=args.fps,
                          supersample=args.supersample, layer_alpha=args.layer_alpha,
                          rip_hold=args.rip_hold, chunks=args.chunks,

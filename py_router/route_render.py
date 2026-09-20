@@ -247,6 +247,42 @@ class BoardRenderer:
         self._show_zones = show_zones
         self.set_view(view)
 
+    def set_canvas(self, width: int, height: int) -> None:
+        """Re-aim the renderer at a DIFFERENT canvas size (#946, #1018).
+
+        `__init__` derives W/H from the board's bounding box, which is why the
+        frame aspect has always BEEN the board's aspect and there was no output
+        ratio control anywhere. `frame_layout` decides a frame shape once per
+        film; this is how that decision reaches the renderer.
+
+        `awx/evolve_movie.py:549-554` already did exactly this, informally --
+        assign `r.W, r.H` then call `set_view` -- to get cell-sized boards out
+        of a board-shaped renderer. Naming it makes the seam supported and
+        removes the duplicate substrate build that poke caused.
+
+        **`_margin_px` is deliberately NOT recomputed.** It is
+        `margin_frac * size * ss`, keyed off `size` rather than off W/H, and
+        `tests/test_431_render_seams.py:42-53` pins that arithmetic to 1e-12.
+        A canvas override is about the BOX, not about the margin rule.
+        """
+        self.W, self.H = max(2, int(width)), max(2, int(height))
+        self.set_view(getattr(self, '_view', None))
+
+    def set_layers(self, layers: Optional[Sequence[str]] = None) -> None:
+        """Re-point the renderer at a different set of copper layers.
+
+        A per-layer strip needs one small board per layer, and
+        `tests/test_431_placement_movie.py:92-121` asserts exactly ONE
+        `BoardRenderer` is constructed on the no-stage path -- so the strip
+        cannot build ten renderers. It rebuilds the palette and the static
+        base on THIS one.
+        """
+        self.copper_layers = (list(layers) if layers
+                              else list(self.pcb.board_info.copper_layers))
+        self.palette = layer_palette(self.copper_layers, self.theme)
+        self._layer_set = set(self.copper_layers)
+        self.set_view(getattr(self, '_view', None))
+
     def set_view(self, view: Optional[Tuple[float, float, float, float]] = None) -> None:
         """Aim the renderer at a world rect ``(min_x, min_y, max_x, max_y)``;
         ``None`` = the whole board. This is the crop/zoom/pan seam -- a viewport

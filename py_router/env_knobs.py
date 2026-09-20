@@ -302,6 +302,15 @@ def refresh() -> None:
     # cannot be changed afterwards.
     g['RENDER_THEME'] = _s('KICAD_RENDER_THEME', 'dark')
 
+    # #946/#1018: the named frame layout, and the target aspect. 'legacy'
+    # (default) is EXACTLY the frame every movie has always had -- the frame IS
+    # the board's bounding box -- so every existing artifact stays bit-for-bit
+    # what it was. 'auto' is the adaptive stacked-vs-sidebar rule, read from
+    # board_bounds. Same shape and same reason as MOVIE_CAMERA and
+    # MOVIE_PANELS: one variable reaches every front end at once.
+    g['MOVIE_LAYOUT'] = _s('KICAD_MOVIE_LAYOUT', 'legacy')
+    g['MOVIE_ASPECT'] = _s('KICAD_MOVIE_ASPECT', '')
+
     # --- truthy diagnostics / overrides -------------------------------------
     g['UNBLOCK_DEBUG'] = _truthy('KICAD_UNBLOCK_DEBUG')
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')

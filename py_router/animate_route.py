@@ -341,7 +341,8 @@ def build_run(run_dir, size, ss, alpha, rip_hold, chunks):
 
 
 def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
-                 marks=None, theme=None):
+                 marks=None, theme=None, layout=None, aspect=None,
+                 geom_out=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
     final board. ``build_run`` is this with the chain discovered from a run dir.
 
@@ -365,6 +366,43 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # renderer.pcb, so re-pointing that attribute moves the parts.
     r, layers = _renderer(final, None, size, ss, alpha, dynamic_zones=True,
                           theme=theme)
+    # #1018. The frame shape is decided ONCE, here, before any frame exists --
+    # and only when a layout was actually asked for. 'legacy' (the default) is
+    # left completely alone so every existing movie stays bit-for-bit what it
+    # was, which is the same posture KICAD_MOVIE_CAMERA takes.
+    #
+    # `geom_out` follows the idiom `marks` already established in this
+    # signature: when a list is passed, it collects what a composer needs,
+    # without changing the return type.
+    # ALWAYS planned, including 'legacy'. The even-forcing is a FIX, not a
+    # layout feature: `_write_mp4` crops `a.shape[0] & ~1` AND
+    # `a.shape[1] & ~1`, so an odd frame has always been losing that row or
+    # column -- silently, in every movie this repo has written. Planning
+    # legacy too means the frame is even BEFORE the encoder, so nothing is
+    # cropped away.
+    #
+    # DISCLOSED: on a board whose aspect gives an odd dimension (most of them:
+    # routed_output at size 500 is 500x309) the legacy frame is now 1 px
+    # shorter or narrower than it used to be. That pixel was being thrown away
+    # by the encoder anyway; the difference is that now the picture knows.
+    if True:
+        import frame_layout
+        _g = frame_layout.plan_frame(
+            r.pcb.board_info.board_bounds, layout=layout or 'legacy',
+            ratio=frame_layout.parse_ratio(aspect), size=size,
+            panel=False, legacy_size=(r.W, r.H))
+        # Only when the layout genuinely MOVES the board box. On 'legacy' the
+        # box is the renderer's own size evened, and the evening is applied by
+        # cropping the composed frame instead -- because
+        # `tests/test_431_placement_movie.py:92-121` pins exactly ONE
+        # `set_view` on the no-stage path, and that assertion is this phase's
+        # own falsifier: if the layout work needs a second aim, the layout work
+        # is wrong.
+        moved = (_g.board.w, _g.board.h) != (r.W, r.H)
+        if _g.layout != 'legacy' and moved:
+            r.set_canvas(_g.board.w, _g.board.h)
+        if geom_out is not None:
+            geom_out.append(_g)
     m = Movie(r, layers, rip_hold=rip_hold)
     if stage is not None:
         stage.attach(m, r, layers)
@@ -429,6 +467,15 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     m.reconcile_to(*_board_rows(fpcb, layers), "routed")
     if stage is not None:
         stage.outro()
+    # #1018: the board was rendered into its PLANNED BOX; the frame is the
+    # planned FRAME. Composing here rather than leaving the box as the frame is
+    # what makes the size claim real -- the rail, the panel and the foot exist
+    # as reserved ground from this commit, and #1019/#1020/#1021 fill them.
+    #
+    # In place, so peak memory stays about two frames rather than twice the
+    # movie: the same reason `movie_panels.compose_two_panel` does it that way.
+    if geom_out:
+        _compose_into_frame(m.frames, geom_out[0], r)
     return m.frames
 
 
@@ -475,6 +522,66 @@ def _png_info(meta):
     return info
 
 
+def _compose_into_frame(frames, geom, r):
+    """Fit each board-box frame into its planned frame, IN PLACE.
+
+    Two cases, and the first is the common one:
+
+    * the frame IS the board box, to within the even-forcing -- so the frame is
+      CROPPED to the planned size. That is exactly what `_write_mp4` already
+      did with `& ~1`, made explicit and applied to the GIF path too, where it
+      was not happening at all;
+    * the frame is larger, because the layout reserved a rail, a panel or a
+      foot -- so the board is pasted into its box on a frame-sized canvas, and
+      the reserved regions are ground until #1019/#1020/#1021 fill them.
+    """
+    from PIL import Image
+    th = getattr(r, 'theme', None)
+    bg = th.rgb('ground') if th is not None else (14, 16, 18)
+    W, H = geom.frame.w, geom.frame.h
+    for i in range(len(frames)):
+        f = frames[i]
+        if f.size == (W, H):
+            continue
+        if f.width >= W and f.height >= H and geom.board.x == 0                 and geom.board.y == 0 and geom.panel is None:
+            frames[i] = f.crop((0, 0, W, H))
+            continue
+        canvas = Image.new('RGB', (W, H), bg)
+        canvas.paste(f, (geom.board.x, geom.board.y))
+        frames[i] = canvas
+
+
+def _uniform_or_pad(frames):
+    """Every frame at the first frame's size, letterboxed rather than squashed.
+
+    Returns `frames` unchanged when they already agree, so the common path
+    allocates nothing.
+    """
+    try:
+        import frame_layout
+        frame_layout.assert_frames_uniform([f.size for f in frames])
+        return frames
+    except Exception as exc:                                    # noqa: BLE001
+        if 'frame_layout' not in str(type(exc)) and not isinstance(exc, ValueError):
+            return frames
+    from PIL import Image
+    W, H = frames[0].size
+    print('animate_route: MIXED FRAME SIZES -- %s' % (
+        [f.size for f in frames if f.size != (W, H)][:3],), file=sys.stderr)
+    print('animate_route: padding every frame to %dx%d. Pillow would NOT have '
+          'raised: it writes a valid GIF in which every later frame has been '
+          'silently resized to the first.' % (W, H), file=sys.stderr)
+    out = []
+    for f in frames:
+        if f.size == (W, H):
+            out.append(f)
+            continue
+        pad = Image.new(f.mode, (W, H), (0, 0, 0))
+        pad.paste(f, ((W - f.width) // 2, (H - f.height) // 2))
+        out.append(pad)
+    return out
+
+
 def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None):
     """Write the frames to ``out``. Format follows the extension: `.mp4`
     (imageio-ffmpeg; falls back to a sibling `.gif` if unavailable) or `.gif`
@@ -495,6 +602,19 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None):
     if not frames:
         print("animate_route: no frames", file=sys.stderr)
         return False
+    # #946/#1018. THE choke point: make_movie, make_film.build_film,
+    # animate_fanout_clearance.render_gif and tests/stress/render_run.py all
+    # arrive here, so this is the one place a mixed-size film can be caught.
+    #
+    # It REPORTS AND PADS; it does not raise. Aborting a routing run for a
+    # cosmetic reason is something this repo refuses elsewhere too
+    # (`movie_panels._finite` coerces a mistyped tuning value rather than
+    # taking the movie down), and all three of today's outcomes are worse than
+    # a pad: Pillow silently resizes every later frame to the first, _write_mp4
+    # fails loudly and falls back to the GIF that then absorbs it, and nothing
+    # anywhere says a word. After this the film is produced, the defect is
+    # AUDIBLE, and the distortion is a letterbox rather than a squash.
+    frames = _uniform_or_pad(frames)
     hold = [frames[-1]] * max(1, int(end_hold * fps))
     seq = frames + hold
     ext = os.path.splitext(out)[1].lower()
