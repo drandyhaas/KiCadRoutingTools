@@ -254,9 +254,15 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
                 if not line:
                     continue
                 try:
-                    rows_in.append(json.loads(line))
+                    doc = json.loads(line)
                 except ValueError:
-                    pass          # a torn last line never loses the rest
+                    continue      # a torn last line never loses the rest
+                # A LINE IS ONLY A ROW IF IT IS AN OBJECT. A scalar or a list
+                # parses fine and then raises `AttributeError` on `.get` --
+                # inside `make_film.main()`, which calls this adapter
+                # UNGUARDED, so one stray line took the film down.
+                if isinstance(doc, dict):
+                    rows_in.append(doc)
     except OSError:
         return None
     if not rows_in:
@@ -311,13 +317,20 @@ def attempts_from_evolve_ledger(path: str) -> Optional[Track]:
         seen.add(w['name'])
         worlds.append((born, w))
 
+    # `born` FOLLOWS `awx.Ledger._ingest`: a world is born in the generation
+    # that made it NEW, and a world seen only in a `pop` list was carried over
+    # rather than created, so it keeps born 0 -- `_ingest` passes `born=None`
+    # for exactly those. Giving a pop-only world the generation it was carried
+    # INTO put it at the wrong x, and the two readers of one ledger then
+    # disagreed about the same world.
     for w in raw.get('pop0') or ():
         take(w, 0)
     for g in raw.get('gens') or ():
         for w in g.get('new') or ():
             take(w, int(g.get('gen', 0)))
+    for g in raw.get('gens') or ():
         for w in g.get('pop') or ():
-            take(w, int(g.get('gen', 0)))
+            take(w, 0)
     if not worlds:
         return None
     # The population a generation KEPT is its `pop`, so a world named there is
@@ -427,9 +440,22 @@ def _plot(box, cap_h=14, label_h=12):
 
 def best_so_far(rows: Sequence[Attempt], *, require_accepted=True,
                 require_admissible=False):
-    """`[(index, best), ...]` -- the running record, sampled at EVERY attempt.
+    """`[(index, best), ...]` -- the running record, ONE ENTRY PER DISTINCT
+    INDEX, holding the best eligible score among every attempt at or before it.
 
-    Per attempt rather than once per phase, for the reason
+    **Per INDEX, not per row, and the phase-11 verifier measured why.** The
+    first version emitted one entry per attempt, which is the same thing on the
+    routing side (each round has its own index) and is NOT the same thing on
+    the `awx` side, where a whole generation shares one `born`. Loading both
+    `Ribbon` classes side by side on one four-world registry: the original gave
+    `[(0, 98), (1, 91)]` and the per-row version gave
+    `[(0, 98), (1, 96), (1, 93), (1, 91)]` -- and `Ribbon.draw` labels each new
+    record once, so the film gained **two extra gold numbers for values that
+    were never the record at the end of any instant**. Four of five
+    registry-shaped cases diverged. "The algorithm is shared, the policy is
+    each caller's own" was false until this was per-index.
+
+    Sampled at every instant rather than once per phase, for the reason
     `evolve_movie.Ribbon` records in its own comment: "A descent that walks
     98 -> 96 -> 95 set two records inside one chapter, and a per-chapter sample
     keeps only the last of them."
@@ -448,19 +474,31 @@ def best_so_far(rows: Sequence[Attempt], *, require_accepted=True,
       must be OFF, or the staircase collapses: measured on a nine-round
       fixture it became a single point at the one round that reached zero.
 
-    `awx/evolve_movie.Ribbon` calls this with `require_accepted=False` so its
-    record line is byte-for-byte what it always was -- the algorithm is shared,
-    the policy is each caller's own.
+    `awx/evolve_movie.Ribbon` calls this with `require_accepted=False`, so its
+    record line is what it always was -- which the test now checks against a
+    re-implementation of the ORIGINAL's own per-instant loop, not against a
+    third algorithm.
+
+    A non-finite score (a `-Infinity` that reached a sidecar) is ignored rather
+    than allowed to win every comparison forever.
     """
-    out, best = [], None
-    for a in rows:
-        if (a.score is not None
+    def ok(a):
+        return (a.score is not None
+                and a.score == a.score           # not NaN
+                and a.score not in (float('inf'), float('-inf'))
                 and (a.accepted or not require_accepted)
-                and (a.admissible or not require_admissible)):
-            if best is None or a.score < best:
+                and (a.admissible or not require_admissible))
+
+    srt = sorted(rows, key=lambda a: a.index)
+    out, best, k = [], None, 0
+    for i in sorted({a.index for a in rows}):
+        while k < len(srt) and srt[k].index <= i:
+            a = srt[k]
+            k += 1
+            if ok(a) and (best is None or a.score < best):
                 best = a.score
         if best is not None:
-            out.append((a.index, best))
+            out.append((i, best))
     return out
 
 
@@ -475,11 +513,16 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
 
     `upto` is the visibility horizon, so the graph grows with the film.
 
+    **Returns True when it drew and False when it declined**, because a caller
+    cannot be asked to tell those apart by looking: the body is wrapped in a
+    bare `except`, so a decline and a crash and a success all return the same
+    `None`. `attach` reports the difference in its status line.
+
     Never raises: a band is an artifact, and taking a routing run down for a
     font metric is the trade this repo refuses (`movie_panels._finite`).
     """
     if box is None or box.h <= 0 or track is None or not track.attempts:
-        return
+        return False
     try:
         import render_theme
         from route_render import load_font
@@ -496,8 +539,10 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
         fs = load_font(max(8, min(13, int(box.h * 0.13))))
         px0, py0, px1, py1 = _plot(box, f.size + 6, fs.size + 4)
         if px1 <= px0 or py1 <= py0:
-            return
-        graded = [a.score for a in rows if a.score is not None]
+            return False
+        graded = [a.score for a in rows if a.score is not None
+                  and a.score == a.score
+                  and a.score not in (float('inf'), float('-inf'))]
         vmin = min(graded) if graded else 0.0
         vmax = max(graded) if graded else 1.0
         if vmax - vmin < 1e-9:
@@ -583,8 +628,9 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
             if a.accepted:
                 d.ellipse([cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3],
                           outline=th.rgb('status_kept'), width=1)
+        return True
     except Exception:                                          # noqa: BLE001
-        pass          # a band is never worth failing a render over
+        return False  # a band is never worth failing a render over
 
 
 def attach(frames, track: Optional[Track], *, theme=None, marks=None):
@@ -620,6 +666,15 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
     except Exception as exc:                                   # noqa: BLE001
         report['why'] = 'no PIL (%s)' % exc
         return frames, report
+    sizes = {f.size for f in frames}
+    if len(sizes) != 1:
+        # A caller that hands us a mixed list has a defect of its own, and
+        # pasting onto the first frame's size would CROP the others silently --
+        # the same class of quiet distortion this whole subsystem exists to
+        # refuse. Say so and decline.
+        report['why'] = ('the frames are not one size (%s); the band declines '
+                         'rather than cropping them' % sorted(sizes)[:3])
+        return frames, report
     W, H = frames[0].size
     bh = band_height(W, H)
     idx = [a.index for a in track.attempts]
@@ -644,13 +699,24 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
         th = None
     bg = th.rgb('ground') if th is not None else (14, 16, 18)
     box = frame_layout.Box(0, H, W, bh)
+    drew = False
     for i in range(len(frames)):
         f = frames[i]
         canvas = Image.new('RGB', (W, H + bh), bg)
         canvas.paste(f, (0, 0))
         up = horizons[i] if horizons else (lo + (hi - lo) * (i / float(n)))
-        draw_track(ImageDraw.Draw(canvas), box, track, upto=up, theme=th)
+        # `draw_track` RETURNS whether it drew: a band shorter than its own
+        # plot rectangle declines, and reporting `drawn=True` over a blank
+        # strip is an OFF state reading like success -- which is the one thing
+        # this module's degradation contract forbids.
+        ok = draw_track(ImageDraw.Draw(canvas), box, track, upto=up, theme=th)
+        drew = drew or bool(ok)
         frames[i] = canvas          # in place: peak memory stays ~2 frames
+    if not drew:
+        report.update(drawn=False, band_px=bh,
+                      why='the band is %d px, too short for its own plot; '
+                          'nothing was drawn in it' % bh)
+        return frames, report
     report.update(drawn=True, band_px=bh,
                   why='%d attempts from %s (%s)'
                       % (len(track.attempts), track.source, track.note))

@@ -84,10 +84,18 @@ def _loop_dir(d, accept_cmd=False):
         if fails is not None:
             met = {'failures': fails, 'iterations': 9000 - rnd,
                    'vias': 400 - rnd}
-            if accept_cmd:
-                # DELIBERATELY anti-correlated with `failures`: if the axis
-                # silently fell back, the staircase would be the other one and
-                # this fixture is the only thing that could tell.
+            # DELIBERATELY anti-correlated with `failures`: if the axis
+            # silently fell back, the staircase would be the other one and
+            # this fixture is the only thing that could tell.
+            #
+            # AND ROUND 0 CARRIES NONE, which is how the real producer writes
+            # it: `place_route_loop` keeps the baseline judge's answer in a
+            # local, not in `metrics`. Without that hole a per-ROW fallback is
+            # indistinguishable from a per-LIST choice, because every row has
+            # both keys -- the phase-11 verifier measured exactly that, and the
+            # row it built from the real `write_round_sidecar` is what this
+            # reproduces.
+            if accept_cmd and rnd > 0:
                 met['accept_score'] = float(fails * -1 + 100)
         doc = {'schema': 1, 'round': rnd,
                'board': None if scr else 'loop_round%d.kicad_pcb' % rnd,
@@ -184,8 +192,8 @@ def test_the_axis_is_the_accept_rule_and_is_never_mixed():
     # ONE metric over the WHOLE list. The fixture's accept_score is
     # anti-correlated with failures, so a per-row fallback shows up as a
     # different staircase rather than as a tie.
-    want = [None if f is None else float(-f + 100)
-            for _r, _a, _s, f in LOOP_ROWS]
+    want = [None if (f is None or r == 0) else float(-f + 100)
+            for r, _a, _s, f in LOOP_ROWS]
     got = [a.score for a in acc.attempts]
     if got != want:
         fail('the accept-score axis is mixed: %s vs %s' % (got, want))
@@ -196,6 +204,36 @@ def test_the_axis_is_the_accept_rule_and_is_never_mixed():
     if len(_FAIL) == _mark:
         print('    plain=%r  accept-cmd=%r' % (plain.metric, acc.metric))
         print('  PASS: one axis per film, named, following the accept rule')
+
+
+def test_the_lineage_is_resolved_from_the_parent_board():
+    """`parent` names a BOARD basename and the x-axis is the round number, so
+    the edge has to be resolved back through the board a round produced.
+
+    Unpinned, `parent=None` for every row passed all eleven checks -- the band
+    then draws a scatter with no lineage at all, which is the one thing the
+    `parent` field exists to make drawable. A rejected round's parent is the
+    last ACCEPTED board, which is exactly why the field exists.
+    """
+    _mark = len(_FAIL)
+    with tempfile.TemporaryDirectory() as td:
+        t = MA.attempts_from_loop_dir(_loop_dir(td))
+    got = {a.index: a.parent for a in t.attempts}
+    # round 0's parent is the chain INPUT, which no round wrote -- it is the
+    # root, and None there is correct rather than missing.
+    want = {0: None, 1: 0, 2: 0, 3: 2, 4: 2, 5: 4, 6: 4, 7: 6, 8: 6}
+    if got != want:
+        fail('lineage %s, expected %s' % (got, want))
+    if all(v is None for v in got.values()):
+        fail('no attempt has a parent at all -- the band would draw a scatter')
+    # and a REJECTED round hangs off the last ACCEPTED board, not off N-1
+    if got[5] == 4 and got[7] == 6:
+        print('    %d edges; rejected rounds hang off the last ACCEPTED board'
+              % sum(1 for v in got.values() if v is not None))
+    else:
+        fail('a rejected round is parented on N-1: %s' % got)
+    if len(_FAIL) == _mark:
+        print('  PASS: the search is a tree, and the tree is on disk')
 
 
 def test_an_ungraded_attempt_is_not_a_zero():
@@ -267,21 +305,40 @@ def test_the_shared_record_rule_did_not_change_awx():
             os.path.join(td, 'evolve_k51.json')))
     rows = list(t.attempts)
 
-    # the ORIGINAL rule, rewritten from `Ribbon.__init__` as it stood: best
-    # ADMISSIBLE score over every world born at or before each instant, with
-    # no accepted/kept condition at all.
+    # THE ORIGINAL RULE, transcribed from `Ribbon.__init__` as it stood at
+    # de52e40c5 -- ONE ENTRY PER UNIQUE `born` INSTANT, not per world:
+    #
+    #     times = sorted({w.born for w in reg.worlds.values() if w.grade})
+    #     for t in times:
+    #         for w in reg.worlds.values():
+    #             if w.born <= t and w.grade and not w.grade[0]: best = min(...)
+    #         if best is not None: record.append((t, best))
+    #
+    # The first version of this control looped per ROW, which is a THIRD
+    # algorithm: it agreed with neither the original nor the code it was
+    # guarding, so it could not fail on the change it existed to detect. The
+    # verifier measured the real divergence by loading both Ribbon classes
+    # side by side: 2 gold record labels at the parent, 4 at HEAD.
     ref, best = [], None
-    for a in rows:
+    for t in sorted({a.index for a in rows}):
         for b in rows:
-            if b.index <= a.index and b.admissible and b.score is not None:
+            if b.index <= t and b.admissible and b.score is not None:
                 if best is None or b.score < best:
                     best = b.score
         if best is not None:
-            ref.append((a.index, best))
+            ref.append((t, best))
     got = MA.best_so_far(rows, require_accepted=False, require_admissible=True)
-    if [v for _i, v in got] != [v for _i, v in ref]:
+    # WHOLE PAIRS, not just the values: the defect was an extra entry at an
+    # index that already had one, and comparing values alone would have let
+    # `[(1, 90), (1, 90)]` pass as `[(1, 90)]`.
+    if got != ref:
         fail('the shared rule disagrees with the original: %s vs %s'
              % (got, ref))
+    if len({i for i, _v in got}) != len(got):
+        fail('the record has two entries at one index: %s -- Ribbon.draw '
+             'labels each new record once, so that is a duplicate gold number '
+             'for a value that was never the record at the end of an instant'
+             % got)
     else:
         print('    awx policy reproduces %s' % [v for _i, v in ref])
     # and the two policies are genuinely different, or the control is vacuous
@@ -317,6 +374,26 @@ def test_nothing_is_synthesised():
             fail('discovery from a board path synthesised a search')
         if MA.attempts_from_loop_dir(td) is not None:
             fail('the loop adapter invented rounds from nothing')
+        # A MALFORMED LEDGER must not take the film down. `make_film.main()`
+        # calls this adapter UNGUARDED, and a line that parses as a scalar or
+        # a list raises AttributeError on `.get` -- one stray line, no film.
+        bad = os.path.join(td, 'bad.jsonl')
+        with open(bad, 'w', encoding='utf-8') as f:
+            for junk in ('42', '["not", "a", "row"]', '"a string"', 'null',
+                         '{oops'):
+                f.write(junk + '\n')
+            f.write(json.dumps({'iteration': 0, 'kind': 'completion',
+                                'result_sha': 'a' * 8, 'accepted': True,
+                                'score': {'blocking': 3}}) + '\n')
+        try:
+            t = MA.attempts_from_converge_ledger(bad)
+        except Exception as exc:                              # noqa: BLE001
+            fail('a malformed ledger raised %s -- make_film calls this '
+                 'unguarded' % exc.__class__.__name__)
+            t = None
+        if t is not None and len(t.attempts) != 1:
+            fail('the malformed lines were read as %d row(s)'
+                 % len(t.attempts))
     if len(_FAIL) == _mark:
         print('  PASS: no sidecars, no ledger, no band')
 
@@ -340,6 +417,11 @@ def test_the_off_arm_returns_the_same_objects():
     back2, rep2 = MA.attach(frames, one, theme=RT.DARK)
     if back2 is not frames or rep2.get('drawn'):
         fail('a single attempt drew a band')
+    # the SAME images too -- asserted on BOTH off arms, not only on the
+    # no-track one. A copy that happens to look the same is still a copy, and
+    # the contract is that the caller's list comes back untouched.
+    if [id(f) for f in back2] != ids:
+        fail('the single-attempt arm replaced the Image objects')
     if 'one attempt on disk' not in (rep2.get('why') or ''):
         fail('the single-attempt refusal is not named: %r' % rep2.get('why'))
     if len(_FAIL) == _mark:
@@ -488,9 +570,51 @@ def test_make_film_attaches_before_it_badges():
         print('  PASS: band first, badge second, border around the whole frame')
 
 
+def test_a_card_and_a_band_in_one_film_are_one_size():
+    """`make_film` cuts its spliced cards at `frames[0].size`, so the band has
+    to be attached BEFORE that size is read.
+
+    Hoisting the read above the band passes every other check in this file and
+    in `test_film_composition` while producing a demonstrably two-size film --
+    which Pillow does not raise on. This is the case that has both.
+    """
+    _mark = len(_FAIL)
+    try:
+        import make_film as mf
+        from PIL import Image as _I
+    except Exception as exc:                                  # noqa: BLE001
+        print('  SKIP: %s' % exc)
+        return
+    with tempfile.TemporaryDirectory() as td:
+        sys.path.insert(0, os.path.join(ROOT, 'tests'))
+        from test_film_composition import _variant
+        good = os.path.join(td, 'g.kicad_pcb')
+        _variant(BOARD, good, n=3)
+        png = os.path.join(td, 'why.png')
+        _I.new('RGB', (1234, 200), (10, 90, 160)).save(png)
+        t = MA.attempts_from_loop_dir(_loop_dir(td))
+        shots = ([mf.card_shot(png, 'the delta that motivated this')] +
+                 mf.parse_positional([BOARD, good], []))
+        frames = mf.build_film(shots, size=300, fps=6.0, camera='off',
+                               quiet=True, attempts=t)
+        if not frames:
+            fail('no frames')
+            return
+        sizes = {f.size for f in frames}
+        if len(sizes) != 1:
+            fail('a film with a card AND a band has %d sizes: %s -- the card '
+                 'was cut before the band was attached' % (len(sizes), sizes))
+        else:
+            print('    %d frames (card + band), one size %s'
+                  % (len(frames), sizes.pop()))
+    if len(_FAIL) == _mark:
+        print('  PASS: the band is attached before the cards are cut')
+
+
 TESTS = (
     test_three_producers_one_record_type,
     test_the_axis_is_the_accept_rule_and_is_never_mixed,
+    test_the_lineage_is_resolved_from_the_parent_board,
     test_an_ungraded_attempt_is_not_a_zero,
     test_the_staircase_is_the_loops_own_best,
     test_the_shared_record_rule_did_not_change_awx,
@@ -500,6 +624,7 @@ TESTS = (
     test_the_band_actually_draws,
     test_the_horizon_grows_with_the_film,
     test_make_film_attaches_before_it_badges,
+    test_a_card_and_a_band_in_one_film_are_one_size,
 )
 
 

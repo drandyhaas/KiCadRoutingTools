@@ -306,9 +306,13 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         # PRINTED EVEN WHEN QUIET, for the reason iso_status_line is: this is
         # the only channel that says whether the band ran, and the front end
         # the discovery exists for (place_route_loop's film, the GUI recorder)
-        # calls make_movie with quiet=True. It only ever says "not drawn" on a
-        # chain that HAS attempts on disk -- a plain chain says so in one line
-        # and that is the honest OFF state.
+        # calls make_movie with quiet=True.
+        #
+        # SILENT on a chain with no attempts on disk, which is most chains:
+        # the band is discovered rather than asked for, so a line saying it did
+        # not happen would appear on every ordinary movie. It speaks whenever
+        # there IS a search behind the film -- drawn or declined, with the
+        # reason.
         if _arep.get('drawn') or _arep.get('attempts'):
             print(movie_attempts.status_line(_arep), file=sys.stderr)
     except Exception as exc:                                    # noqa: BLE001
