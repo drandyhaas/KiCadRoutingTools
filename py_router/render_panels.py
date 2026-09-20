@@ -66,6 +66,15 @@ CELL_MIN_W = 26
 #: nothing said. Measured: without it a 10 px box solved to a cell -2 px wide.
 CELL_FLOOR_W = 8
 
+#: The same fault on the OTHER axis, which the first fix missed and the
+#: round-2 verifier measured: a cell's mini-board starts `caption_h` below the
+#: cell top, so a short cell inverts that rectangle and `d.rectangle` raises
+#: "y1 must be greater than or equal to y0". **1143 of 4010 (width, height)
+#: combinations** did it, at panel heights 13/14/20 px -- rects
+#: `frame_layout.plan_frame` produces on its own (`legacy --size 100` gives a
+#: 100x16 panel). Every one was swallowed into a blank box with nothing said.
+CELL_FLOOR_H = 6
+
 #: Gap between the layer name and its count. Below it they are touching, which
 #: is the defect this constant exists to refuse.
 LABEL_GAP_PX = 5
@@ -87,7 +96,7 @@ class Cell(NamedTuple):
     box: tuple
 
 
-def _cell_boxes(box, n, gap=6):
+def _cell_boxes(box, n, gap=6, caption_h=14):
     """`(boxes, n)` -- `n` cells across `box`, left to right.
 
     ALWAYS a 2-tuple. It used to return a bare `[]` on the empty path while its
@@ -95,8 +104,14 @@ def _cell_boxes(box, n, gap=6):
     into a bare `except` and the panel went blank with nothing said. Reachable
     only at `box.w <= 0`, which `plan_frame._self_check` `continue`s past
     rather than refusing -- so it was unreachable by luck, not by design.
+
+    **BOTH AXES ARE FLOORED**, which the first version of this guard got half
+    right: a cell has to hold its caption AND a mini-board below it, so a short
+    cell inverts the board rectangle and `d.rectangle` raises. Measured at 1143
+    of 4010 (width, height) combinations, at panel heights `plan_frame`
+    produces on its own.
     """
-    if n <= 0 or box is None or box.w <= 0:
+    if n <= 0 or box is None or box.w <= 0 or box.h <= 0:
         return [], 0
     cw = (box.w - gap * (n + 1)) / float(n)
     if cw < CELL_MIN_W:
@@ -104,10 +119,11 @@ def _cell_boxes(box, n, gap=6):
         # show a route costs pixels and answers nothing.
         n = max(1, int((box.w - gap) // (CELL_MIN_W + gap)))
         cw = (box.w - gap * (n + 1)) / float(n)
-    if cw < CELL_FLOOR_W or box.h <= 2 * gap:
+    ch = box.h - 2 * gap
+    if cw < CELL_FLOOR_W or ch < caption_h + CELL_FLOOR_H:
         return [], 0
     return [(int(box.x + gap + i * (cw + gap)), int(box.y + gap),
-             int(cw), int(box.h - 2 * gap)) for i in range(n)], n
+             int(cw), int(ch)) for i in range(n)], n
 
 
 def draw_layer_strip(d, box, *, bounds, segments, layers, palette, theme,
@@ -130,7 +146,7 @@ def draw_layer_strip(d, box, *, bounds, segments, layers, palette, theme,
         import render_theme
         from route_render import load_font
         th = theme or render_theme.DARK
-        boxes, n = _cell_boxes(box, len(layers))
+        boxes, n = _cell_boxes(box, len(layers), caption_h=caption_h)
         if not n:
             return []
         shown = layers[:n]
@@ -183,7 +199,11 @@ def draw_layer_strip(d, box, *, bounds, segments, layers, palette, theme,
                        fill=th.rgb('chrome_text_faint'), anchor='ra')
             out.append(Cell(ln, cnt, num, name, drew, (cx, cy, cw, ch)))
         if len(layers) > n:
-            d.text((box.x + box.w - 4, box.y + box.h - 14),
+            # In the CELL CAPTION band, beside the last cell's own name, not
+            # over its mini-board: drawn at the box's bottom it grazed the last
+            # cell's copper by 4 px in every case the verifier measured.
+            last = boxes[n - 1]
+            d.text((box.x + box.w - 2, last[1] + last[3] + 2),
                    '+%d more' % (len(layers) - n), font=font,
                    fill=th.rgb('chrome_text_faint'), anchor='ra')
         return out
@@ -273,25 +293,40 @@ def draw_summary(d, box, *, lines, theme):
         import render_theme
         from route_render import load_font
         th = theme or render_theme.DARK
-        # Sized so EVERY line fits: a summary that silently drops its last
-        # row is a summary you cannot read a closing frame off. Measured: at
-        # 15 pt in a 132 px box the fifth row (`vias`) was clipped away.
+        # EVERY row it was given must land. Two failures measured, in order:
+        # at a fixed 15 pt in a 132 px box the fifth row (`vias`) was clipped
+        # away; sizing the font from the row COUNT fixed that at `--size 1000`
+        # and still dropped one row on `stacked` at `--size 400` and three on
+        # `inset`. So when one column cannot hold them, it WRAPS to two --
+        # a summary that silently drops its last row is a summary you cannot
+        # read a closing frame against an opening one with.
         pad = 8
-        font = load_font(max(8, min(15, int((box.h - 2 * pad)
-                                            / (1.45 * max(1, len(lines)))))))
         d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
                     fill=th.rgb('chrome_panel'))
-        lh = int(font.size * 1.45)
-        y = box.y + pad
-        for label, value in lines:
-            if y + lh > box.y + box.h - pad:
+        n = max(1, len(lines))
+        cols = 1
+        while cols <= 3:
+            per = (n + cols - 1) // cols
+            size = int((box.h - 2 * pad) / (1.45 * max(1, per)))
+            if size >= 8 or cols == 3:
                 break
-            d.text((box.x + pad, y), str(label), font=font,
+            cols += 1
+        per = (n + cols - 1) // cols
+        font = load_font(max(7, min(15, int((box.h - 2 * pad)
+                                            / (1.45 * max(1, per))))))
+        lh = int(font.size * 1.45)
+        cw = box.w // cols
+        for i, (label, value) in enumerate(lines):
+            col, row = i // per, i % per
+            x = box.x + pad + col * cw
+            y = box.y + pad + row * lh
+            if y + lh > box.y + box.h or x + cw - pad > box.x + box.w:
+                break
+            d.text((x, y), str(label), font=font,
                    fill=th.rgb('chrome_text_dim'))
-            d.text((box.x + int(box.w * 0.46), y), str(value), font=font,
+            d.text((x + int(cw * 0.56), y), str(value), font=font,
                    fill=th.rgb('chrome_text'))
             drawn.append((str(label), str(value)))
-            y += lh
         return drawn
     except Exception:                                          # noqa: BLE001
         return drawn

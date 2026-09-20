@@ -18,8 +18,11 @@ What this file pins:
     on the no-stage path, so a strip of ten small boards cannot construct ten
     of them;
   * **the counts are the copper**, not a decoration -- a cell that says `390`
-    has 390 segments on that layer. Asserted against what `draw_layer_strip`
-    REPORTS HAVING DRAWN, not against a tally re-derived here. The phase
+    has 390 segments on that layer. Asserted against the `d.line` and `d.text`
+    calls the drawer ACTUALLY MADE, recorded through a delegating draw object,
+    because a self-reported `lines` field is the tally under another name: the
+    round-2 verifier's M18 stroked ONE line, reported 375, and survived a check
+    that compared the report to the board and probed only that ink EXISTS. The phase
     verifier measured why: the first version of this check built `want` from
     `pcb.segments` and never read the drawing, so a mutant stamping `cnt + 7`
     on every cell and a mutant counting EVERY segment on the board in EVERY
@@ -71,19 +74,45 @@ def fail(msg):
     print('  FAIL: %s' % msg)
 
 
+class _Recorder:
+    """An `ImageDraw` that delegates everything and records what was asked.
+
+    The strongest available check on a drawer: it is not the drawer's own word,
+    it is the call. `Cell.lines` is a counter the drawer increments, so a
+    mutant that skips the stroke and keeps the increment reports the truth
+    about nothing -- which is exactly the failure this class exists to catch.
+    """
+
+    def __init__(self, inner):
+        self._d = inner
+        self.lines = []
+        self.texts = []
+
+    def line(self, xy, *a, **kw):
+        self.lines.append(tuple(xy))
+        return self._d.line(xy, *a, **kw)
+
+    def text(self, xy, txt, *a, **kw):
+        self.texts.append((tuple(xy), txt))
+        return self._d.text(xy, txt, *a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._d, name)
+
+
 def _strip(box_w=560, box_h=110, n_layers=None):
     pcb = parse_kicad_pcb(BOARD)
     r = RR.BoardRenderer(pcb, size=400, supersample=1)
     layers = list(r.copper_layers)[:n_layers] if n_layers else list(
         r.copper_layers)
     img = Image.new('RGB', (box_w, box_h + 20), RT.DARK.rgb('ground'))
-    d = ImageDraw.Draw(img)
+    rec = _Recorder(ImageDraw.Draw(img))
     box = FL.Box(0, 10, box_w, box_h)
-    cells = RP.draw_layer_strip(d, box, bounds=r.bounds,
+    cells = RP.draw_layer_strip(rec, box, bounds=r.bounds,
                                 segments=pcb.segments, layers=layers,
                                 palette=r.palette, theme=RT.DARK,
                                 active=layers[0] if layers else None)
-    return img, cells, layers, pcb, r
+    return img, cells, layers, pcb, r, rec
 
 
 def test_the_strip_builds_no_second_renderer():
@@ -121,10 +150,14 @@ def test_the_counts_are_the_copper():
     """Asserted on what was DRAWN. The previous version re-derived the counts
     here and then compared them to nothing at all."""
     _mark = len(_FAIL)
-    _img, cells, layers, pcb, _r = _strip(box_w=900)
-    want = {}
+    _img, cells, layers, pcb, _r, rec = _strip(box_w=900)
+    want, seen = {}, {}
     for sg in pcb.segments:
         want[sg.layer] = want.get(sg.layer, 0) + 1
+        seen.setdefault(sg.layer, set()).add(
+            (round(sg.start_x, 4), round(sg.start_y, 4),
+             round(sg.end_x, 4), round(sg.end_y, 4)))
+    distinct = {k: len(v) for k, v in seen.items()}
     if not cells:
         fail('the strip drew no cells at all')
         return
@@ -138,10 +171,31 @@ def test_the_counts_are_the_copper():
         if c.count_text and c.count_text != str(true):
             fail('%s: the cell drew %r, the board has %d segment(s) on that '
                  'layer' % (c.layer, c.count_text, true))
-        if c.lines != true:
-            fail('%s: %d line(s) were stroked for %d segment(s) -- a cell is '
-                 'counting or drawing copper that is not its own'
-                 % (c.layer, c.lines, true))
+        # the NAME must be this cell's own layer -- a cell stamped with its
+        # neighbour's name is a strip in which position means nothing, which
+        # is the one thing this whole content exists to provide
+        if c.name_text != c.layer.replace('.Cu', ''):
+            fail('%s: the cell is labelled %r' % (c.layer, c.name_text))
+        # THE CALLS, not the counter. `lines` is the drawer's own word, and a
+        # mutant that skips the stroke while keeping the increment reports the
+        # truth about nothing (M18: stroked 1, reported 375, survived).
+        cx, cy, cw, ch = c.box
+        strokes = [xy for xy in rec.lines
+                   if cx <= xy[0] <= cx + cw and cy <= xy[1] <= cy + ch]
+        if len(strokes) != true:
+            fail('%s: %d stroke(s) landed in its cell for %d segment(s) on '
+                 'that layer' % (c.layer, len(strokes), true))
+        if c.lines != len(strokes):
+            fail('%s: reported %d line(s) and made %d call(s) -- the report is '
+                 'not the drawing' % (c.layer, c.lines, len(strokes)))
+        # and the strokes must be as DISTINCT as the copper is: N calls all
+        # drawing the same line is 4 px of ink reported as 375 segments, which
+        # a call count alone cannot tell from the real thing. Compared against
+        # the board's own distinct count, not against a re-derived transform.
+        if len(set(strokes)) != distinct.get(c.layer, 0):
+            fail('%s: %d distinct stroke(s) for %d distinct segment(s) -- the '
+                 'cell is redrawing one line'
+                 % (c.layer, len(set(strokes)), distinct.get(c.layer, 0)))
     stamped = [c for c in cells if c.count_text]
     if len(stamped) != len(cells):
         fail('a 900 px box dropped %d count(s); every cell there has room'
@@ -184,7 +238,7 @@ def test_a_count_that_would_touch_the_name_is_dropped():
     probe = ImageDraw.Draw(Image.new('RGB', (8, 8)))
     font = load_font(max(8, min(13, int(130 * 0.16))))
     for box_w in (180, 370, 240, 900):
-        _img, cells, _l, _p, _r = _strip(box_w=box_w)
+        _img, cells, _l, _p, _r, _rec = _strip(box_w=box_w)
         if not cells:
             fail('%d px box drew nothing' % box_w)
             continue
@@ -202,7 +256,7 @@ def test_a_count_that_would_touch_the_name_is_dropped():
               % (box_w, len(cells), sum(1 for c in cells if c.count_text)))
     # and the drop must be REAL at the narrow end, or this is asserting that a
     # condition which never fires never fires
-    _img, narrow, _l, _p, _r = _strip(box_w=180)
+    _img, narrow, _l, _p, _r, _rec = _strip(box_w=180)
     if narrow and all(c.count_text for c in narrow):
         fail('BROKEN TEST: no count was dropped even at 180 px, where the '
              'measured overlap was +23 px -- the guard is not engaged')
@@ -212,8 +266,8 @@ def test_a_count_that_would_touch_the_name_is_dropped():
 
 def test_cells_shrink_in_number_not_below_legibility():
     _mark = len(_FAIL)
-    _wi, wide, layers, _p, _r = _strip(box_w=900)
-    _na, narrow, _l, _p2, _r2 = _strip(box_w=180)
+    _wi, wide, layers, _p, _r, _rw = _strip(box_w=900)
+    _na, narrow, _l, _p2, _r2, _rn = _strip(box_w=180)
     n_wide, n_narrow = len(wide), len(narrow)
     if n_wide < n_narrow:
         fail('a narrower box drew MORE cells (%d vs %d)' % (n_narrow, n_wide))
@@ -310,6 +364,32 @@ def test_all_four_contents_are_reachable_and_draw():
         else:
             print('    %-10s %d colours, %d row(s) reported'
                   % (phase, len(cols), len(got)))
+    # EVERY row a summary is given must land -- the verifier measured
+    # `stacked --size 400` dropping `vias` and `inset` dropping three.
+    for h in (132, 96, 64, 44):
+        img = Image.new('RGB', (420, h), ground)
+        lines = RP.board_summary(pcb, pcb.segments, pcb.vias)
+        got = RP.draw_summary(ImageDraw.Draw(img), FL.Box(0, 0, 420, h),
+                              lines=lines, theme=RT.DARK)
+        if len(got) != len(lines):
+            fail('a %d px summary box landed %d of %d rows'
+                 % (h, len(got), len(lines)))
+    # and no panel rect plan_frame can produce may RAISE out of the never-fail
+    # wrapper: 1143 of 4010 (w, h) combinations did, on the height axis.
+    raised = []
+    for w in range(0, 420, 7):
+        for h in range(0, 60, 3):
+            try:
+                boxes, n = RP._cell_boxes(FL.Box(0, 0, w, h), 10)
+            except Exception as exc:                          # noqa: BLE001
+                raised.append((w, h, exc.__class__.__name__))
+                continue
+            for _x, _y, cw, chh in boxes:
+                if cw < RP.CELL_FLOOR_W or chh < 14 + RP.CELL_FLOOR_H:
+                    raised.append((w, h, 'cell %dx%d' % (cw, chh)))
+    if raised:
+        fail('%d degenerate box(es) produced an unusable cell, e.g. %s'
+             % (len(raised), raised[:3]))
     # and the SEEDING branch must be reachable from a label, which is the half
     # that was missing: nothing in production passed `unplaced`.
     if RP.phase_for('round 2 moving 4 part(s)', unplaced=True) != 'seeding':
@@ -323,6 +403,33 @@ def test_all_four_contents_are_reachable_and_draw():
     if 'inventory_counts' not in src:
         fail('nothing in animate_route builds the inventory, so the box has '
              'no data to draw it from')
+    # THE REACHABILITY, not a grep: `assess_placement` lives in py_placer,
+    # which py_router does not put on sys.path, so the import raised
+    # ModuleNotFoundError into a swallow and `unplaced` was always False --
+    # 'seeding' could not occur in a CLI film at all.
+    import animate_route as _A
+    r2 = RR.BoardRenderer(pcb, size=200, supersample=1)
+    m = _A.Movie(r2, list(r2.copper_layers))
+    m.want_panel = True
+    m.refresh_placement(pcb, BOARD)
+    if not m.inventory:
+        fail('refresh_placement built no inventory from a real board')
+    import subprocess
+    probe = ('import sys, os; sys.path.insert(0, %r); '
+             'sys.path.insert(0, %r); import animate_route as A; '
+             'from kicad_parser import parse_kicad_pcb as P; '
+             'r = __import__("route_render").BoardRenderer(P(%r), size=120); '
+             'm = A.Movie(r, list(r.copper_layers)); m.want_panel = True; '
+             'm.refresh_placement(P(%r), %r); '
+             'print("SEATED" if m.inventory else "NOINV")'
+             % (os.path.join(ROOT, 'py_router'), ROOT, BOARD, BOARD, BOARD))
+    pr = subprocess.run([sys.executable, '-X', 'utf8', '-c', probe],
+                        cwd=ROOT, capture_output=True, text=True)
+    if 'SEATED' not in (pr.stdout or ''):
+        fail('a py_router-only interpreter could not build the box\'s data: '
+             '%s' % ((pr.stderr or pr.stdout or '')[-200:]))
+    if 'placement.placement_state' not in src:
+        fail('nothing reads assess_placement, so unplaced is always False')
     if len(_FAIL) == _mark:
         print('  PASS: four contents, four drawers, all reachable')
 

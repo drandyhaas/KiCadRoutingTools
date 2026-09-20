@@ -216,6 +216,49 @@ class Movie:
             zone_net_ids=self.revealed_zones,
             overlays=[ov] if ov else None))
 
+    def refresh_placement(self, pcb, path=None):
+        """Re-read the lower box's non-routing data from THIS board.
+
+        Three defects the round-2 verifier measured, all in one place:
+
+        * `assess_placement` lives in `py_placer/placement/`, which `py_router`
+          does not put on `sys.path`, so the import raised `ModuleNotFoundError`
+          into the swallow and `unplaced` was ALWAYS False -- the 'seeding'
+          content could not occur in a CLI film at all. Proven with a genuinely
+          piled board: the CLI arm reported `{'bookend': 1}` and the GUI arm,
+          with `py_placer` already on the path, reported `{'seeding': 1}`. The
+          path is added here rather than at module scope, because a movie must
+          not pay for a placement import it may never need.
+        * it read the CHAIN'S FINAL board, so a film OF a seeding run asked a
+          board that is by then placed. Every step re-reads its own.
+        * the inventory was computed once, so the bars never emptied.
+
+        Never raises: without `py_placer` the inventory still counts parts, it
+        just cannot tell a seated one from a piled one, and that is a strictly
+        better answer than no box.
+        """
+        if not self.want_panel or pcb is None:
+            return
+        import render_panels as _rp
+        unseated = ()
+        try:
+            import os as _os
+            import sys as _sys
+            _pp = _os.path.join(_os.path.dirname(_os.path.dirname(
+                _os.path.abspath(__file__))), 'py_placer')
+            if _os.path.isdir(_pp) and _pp not in _sys.path:
+                _sys.path.insert(0, _pp)
+            from placement.placement_state import assess_placement
+            st = assess_placement(pcb, path)
+            self.unplaced = bool(st.unplaced)
+            unseated = st.stacked_suspect_refs
+        except Exception:                                      # noqa: BLE001
+            pass
+        try:
+            self.inventory = _rp.inventory_counts(pcb, unseated)
+        except Exception:                                      # noqa: BLE001
+            pass
+
     def _row(self, sg):
         """A live `_Seg` back as a trace row, for `copper_motion`."""
         return [sg.start_x, sg.start_y, sg.end_x, sg.end_y, sg.width,
@@ -591,20 +634,12 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     m.want_panel = bool(geom_out and geom_out[0].panel is not None
                         and geom_out[0].panel.h > 0)
     if m.want_panel:
-        import render_panels as _rp
-        _unseated = ()
+        # Seeded from the chain's FIRST board, not its last: the opening
+        # snapshot is of the board as it arrived, and a film of a seeding run
+        # asked the final board -- which is by then placed.
+        _seed = steps[0][1] if steps else final
         try:
-            # py_placer, which py_router does not put on sys.path; a movie is
-            # not worth failing over a placement import, and without it the
-            # inventory simply counts every part as seated.
-            from placement.placement_state import assess_placement
-            _st = assess_placement(r.pcb, final)
-            m.unplaced = bool(_st.unplaced)
-            _unseated = _st.stacked_suspect_refs
-        except Exception:                                      # noqa: BLE001
-            pass
-        try:
-            m.inventory = _rp.inventory_counts(r.pcb, _unseated)
+            m.refresh_placement(parse_kicad_pcb(_seed), _seed)
         except Exception:                                      # noqa: BLE001
             pass
     # #1019. THE RAIL COUNTS LAPS, NOT STEPS. A loop revisits the same step, so
@@ -637,6 +672,9 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         _first = len(m.frames)
         pcb = parse_kicad_pcb(board)
         seg_rows, via_rows = _board_rows(pcb, layers)
+        # #1020: this step's OWN board answers the box, so the inventory
+        # empties as the board fills and a seeding beat is a seeding beat.
+        m.refresh_placement(pcb, board)
         if mode == 'revert':
             if stage is not None:
                 r.pcb = pcb
@@ -680,6 +718,7 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
             marks.append((label, board, _first, len(m.frames)))
     # final trueup (in case the graded final differs from the last step board)
     fpcb = parse_kicad_pcb(final)
+    m.refresh_placement(fpcb, final)
     if stage is not None:
         r.pcb = fpcb
     for _z in (getattr(fpcb, 'zones', None) or []):   # ensure every pour shows
