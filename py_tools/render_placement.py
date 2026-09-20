@@ -2481,10 +2481,17 @@ def main(argv=None):
     # sends the reader after the wrong thing. Exit 2 is this tool's existing
     # "you asked for something the arguments cannot give" code. The panels are
     # still written and the render still stands.
+    # DEFERRED UNTIL AFTER THE DOCUMENT IS WRITTEN (#963). This returned here,
+    # and once the drivers' own templates started asking for a sheet that made
+    # one unwritable sheet path cost five of them their render document
+    # entirely -- `--json-out` never reached its `json.dump` below, so the
+    # caller had a PNG, an exit 2, and nothing to read. The sheet is one
+    # artifact of the run; the document is how every downstream gate sees the
+    # run at all. Both the code and the exit are unchanged; only the order is.
+    _sheet_exit = 2 if _sheet_failed else 0
     if _sheet_failed:
         print(f"error: --review-sheet {args.review_sheet} was requested and no "
               f"sheet was written: {_sheet_failed}", file=sys.stderr)
-        return 2
     _quiet = bool(args.quiet and args.json_out)
     # #898: the NARRATIVE obeys --quiet on its own. `_quiet` above is the
     # run-24 rule for the stdout JSON ECHO -- "data is never silenced into
@@ -2601,7 +2608,11 @@ def main(argv=None):
                   + (f" [{_xs} front<->back stack(s) also present -- "
                      f"opposite faces, NOT conflicts]" if _xs else ""),
                   file=sys.stderr)
-            return 4
+            # #898 decided this precedence and pinned it: a sheet that could
+            # not be written is not hidden by a failing gate, because the
+            # caller asked for an artifact and did not get one. #963 only
+            # moved WHEN that 2 is returned, never which number wins.
+            return _sheet_exit or 4
         # The cross-side stacks ride on BOTH verdicts: they look like
         # collisions in the panels and are not, so the line that says
         # "clear" must say how many of them the reader is about to see.
@@ -2612,7 +2623,10 @@ def main(argv=None):
               + (f" ({_xs} front<->back stack(s), opposite faces, not "
                  f"conflicts)" if _xs else ""),
               file=sys.stderr)
-    return 0
+    # The sheet failure LAST, after the document exists (#963). Which NUMBER
+    # wins when both apply was decided by #898 and is pinned at the --gate
+    # branch above; this change moved only WHEN the 2 is returned.
+    return _sheet_exit or 0
 
 
 if __name__ == '__main__':

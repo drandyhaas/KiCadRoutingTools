@@ -236,7 +236,10 @@ def test_the_kind_flag_does_not_bypass_the_contradiction():
             # A classification row names its shape since #963; without it this
             # refuses for that reason instead, and the check below would read
             # a different guard's refusal as this one's.
-            _shape = ['--shape', 'parameter'] if kind == 'classification' else []
+            # ...and its --lever, since #963: the row must record the
+            # measurement that named the shape, not just the shape.
+            _shape = (['--shape', 'parameter', '--lever', 'saturated faces']
+                      if kind == 'classification' else [])
             run_utils.check(
                 _argv(td, '--kind', kind, *_shape, '--final',
                       '--stop-condition', 'DONE-EXHAUSTED: everything passed',

@@ -1143,6 +1143,24 @@ def cmd_record(a):
               f"names none records that a decision was made without recording "
               f"which. Nothing was written.", file=sys.stderr)
         return 2
+    # ...AND THE MEASUREMENT THAT NAMED IT. `--shape` alone left the row
+    # writable by a command that records no evidence: a verifier measured run
+    # 29's exact false close-out ACCEPTED after one lever-less `record --kind
+    # classification --shape parameter`, which made the gate a formality
+    # rather than a demand for a decision. Same `.strip()` test, and the same
+    # reason, as `--exhausted-reason` thirty lines above: an unreasoned
+    # declaration is just a lower --flat with extra steps.
+    if a.kind == 'classification' and not (a.lever or '').strip():
+        print(f"record: --kind classification needs --lever \"<the shape, and "
+              f"the measurement that names it>\". The row's job is to say WHY "
+              f"the next re-entry changes what it changes; a shape with no "
+              f"measurement behind it is the default answer of a classifier "
+              f"that could not see congestion. The three shapes cost very "
+              f"different things to get wrong -- a mistaken `parameter` "
+              f"spends iterations on a board no parameter can fix, a mistaken "
+              f"`placement` throws away a routed board. Nothing was written.",
+              file=sys.stderr)
+        return 2
     if a.final and not a.stop_condition:
         print("record: --final requires --stop-condition (which of the run's "
               "stop conditions ended it). Nothing was written.",
@@ -1185,13 +1203,21 @@ def cmd_record(a):
     if a.final and _stop_token in UNFIXABLE_STOPS:
         _prior = Ledger(a.ledger).entries() if os.path.isfile(a.ledger) else []
         _cls = _classification_state(_prior)
-        _since = None if _cls is None else _cls['laps_since']['routing']
+        # EITHER HALF, unlike the retry gate. "This board cannot be fixed" is a
+        # claim about the whole board, so a placement lap after the decision
+        # makes it as stale as a routing lap does -- `classification(shape=
+        # placement)` followed by six placement laps used to reach this claim
+        # untouched. The RETRY gate counts routing only, and for the opposite
+        # reason: there, a placement lap is the decision being acted on.
+        _since = None if _cls is None else sum(_cls['laps_since'].values())
         if _cls is None or _since:
             _what = ('no classification row was ever recorded'
                      if _cls is None else
-                     f'{_since} routing lap(s) were recorded after the last '
+                     f'{_since} lap(s) were recorded after the last '
                      f'classification (iteration {_cls["iteration"]}, shape '
-                     f'{_cls["shape"]})')
+                     f'{_cls["shape"]}): '
+                     f'{_cls["laps_since"]["placement"]} placement, '
+                     f'{_cls["laps_since"]["routing"]} routing')
             print(f"record: --stop-condition {_stop_token} says the board is "
                   f"MEASURED-UNFIXABLE, and in this ledger {_what}.\n\n"
                   f"That is convergence.md's strongest claim and the one run "
@@ -1673,7 +1699,13 @@ def _is_lap(row, half):
     A row with no `kind` is in neither half. (Ledger.counts defaults a missing
     kind to `completion`; this does not, and that predates this function.)
     """
-    if _HALF.get(row.get('kind')) != half:
+    # `str(...)`, and a dict check, because this reads ROWS FROM A FILE. A
+    # hand-built or truncated ledger carrying `"kind": []` raised
+    # `TypeError: unhashable type` out of whichever stage was walking it --
+    # a reader crashing on a bad row rather than reading it as "not this half".
+    if not isinstance(row, dict):
+        return False
+    if _HALF.get(str(row.get('kind') or '')) != half:
         return False
     if row.get('final'):
         return False
@@ -1786,7 +1818,10 @@ def _classification_state(rows):
     """
     found, idx = None, -1
     for i, r in enumerate(rows):
-        if (r.get('kind') or '') == 'classification':
+        # ACCEPTED ONLY. `--rejected` on a classification says the decision
+        # was thrown away, and a discarded decision is not one the next lap
+        # can act on -- it satisfied the gate before this line existed.
+        if (r.get('kind') or '') == 'classification' and r.get('accepted'):
             found, idx = r, i
     if found is None:
         return None
@@ -1891,8 +1926,13 @@ def _half_state(rows, half, flat, board_sha=None):
     remaining levers; and the L2 freeze row changes the sha BY CONSTRUCTION
     while `test_904_not_a_lap` pins that a freeze must not retract. A sha
     cannot tell "rewrote the file, same poses" from "replaced the placement".
-    So this reports, and `_close_out` -- where the claim actually ships --
-    refuses.
+    So this REPORTS, and nothing gates on it. A first cut refused the ship
+    behind a stale declaration, and a verifier measured that refusal firing on
+    the chain's own prescribed ordering -- including the L2 freeze, which
+    changes the sha by construction and which `test_904_not_a_lap` pins as
+    non-retracting. What refuses is `record --exhausted` given a score that
+    grades another board, and a later lap of the half, which retracts with no
+    flag at all.
 
     THE COUNTER COUNTS REJECTED LAPS TOO, and that is the fix for a gate that
     could not be satisfied. It used to count accepted rows only, while L5's own
@@ -2407,10 +2447,20 @@ def cmd_verdict(a):
     # eight minutes -- `os-promote-placed` overwrote `frozen.kicad_pcb` nine
     # seconds after the row was written -- and the claim then outlived its
     # board and survived three L5 calls, because nothing here read the sha the
-    # row had carried all along. This REPORTS; `_close_out` is where shipping
-    # behind such a claim is refused, because that is where the claim is made
-    # to a reader.
+    # row had carried all along. This REPORTS, and nothing gates on it:
+    # `test_963_exhaustion_binding::test_the_ship_is_not_gated_on_the_board_
+    # having_moved` pins that, because a first cut did gate and refused the
+    # chain's own prescribed ordering.
     for h in ('placement', 'routing'):
+        if st[h].get('declared_board_unknown'):
+            # A READER for the key, without which it was one write site and
+            # nothing else: a hand-built or pre-#963 declaration carries no
+            # `result_sha`, so "no stale-board finding" there means "nobody
+            # could look", which is not the same as "it matched".
+            doc['reason'] += (
+                f' The live {h} exhaustion carries NO board of its own '
+                f'(a row written before the binding existed, or by hand), so '
+                f'whether it still applies to this board could not be checked.')
         _sb = st[h].get('declared_stale_board')
         if _sb:
             doc['reason'] += (

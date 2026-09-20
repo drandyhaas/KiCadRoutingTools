@@ -33,10 +33,23 @@ wrong rather than a belt-and-braces guard:
     is precisely run 29 -- so a predicate without this arm cannot catch the
     case it was written for.
 
-The threshold is ONE lap per decision, derived rather than tuned: L4's parameter
-arm says "Re-enter the FAILING ROUTING STEP ... Record it, then go back to L3
-with the new score". The first lap after a decision is the lap that decision
-bought; the second is the first lap no decision authorised.
+THE THRESHOLD IS TWO, and the first cut said one and called that derived. The
+derivation stopped one sentence early. L4's parameter arm reads in full:
+
+    Record it, then go back to L3 with the new score. If two parameter
+    iterations in a row do not move `blocking`, the shape was probably not
+    parameter -- re-measure rather than trying a third.
+
+So L4 authorises the second lap explicitly and asks for a re-measurement before
+the THIRD. A gate refusing the second put L3 and L4 in contradiction: the loop
+refusing what its own re-entry stage had just told the run to do.
+
+MEASURED COST, which the first cut did not measure at all: replayed over the 28
+`wk/**/ledger.jsonl` committed to this repo, the gate at ONE fires somewhere in
+18 of them -- including all four most recent runs -- with peak unclassified
+streaks of 31, 26, 24 and 16, and only 2 of the 28 hold a classification row at
+all. At TWO it still fires on those streaks, which is the point; it stops
+refusing the single retry L4 authorises.
 """
 import io
 import json
@@ -144,17 +157,18 @@ def test_classification_state_counts_laps_since_the_decision():
     print("  PASS: the last decision, and the laps recorded after it")
 
 
-def test_the_second_unclassified_routing_lap_is_refused():
-    """One lap per decision, and the second is the one nothing authorised."""
+def test_the_third_unclassified_routing_lap_is_refused():
+    """Two laps is what one decision buys; the third is L4's own re-measure."""
     with tempfile.TemporaryDirectory() as td:
-        out = _l5(td, [lap()])
-        assert not out.startswith('<error>'), (
-            'the first lap is the lap the last decision bought:\n' + out[:400])
-        out = _l5(td, [lap(), lap()])
+        for n in (1, 2):
+            out = _l5(td, [lap()] * n)
+            assert not out.startswith('<error>'), (
+                f'{n} lap(s) refused, and L4 authorises two:\n' + out[:400])
+        out = _l5(td, [lap()] * 3)
         assert out.startswith('<error>'), out[:400]
         assert 'kind classification' in out and '--shape' in out, out[:600]
         assert 'no classification row has ever been written' in out, out[:600]
-    print("  PASS: the second unclassified routing lap refuses, naming the row")
+    print("  PASS: the third unclassified routing lap refuses, naming the row")
 
 
 def test_the_refusal_asks_for_a_row_and_names_no_process():
@@ -166,7 +180,7 @@ def test_the_refusal_asks_for_a_row_and_names_no_process():
     reads like helpfulness.
     """
     with tempfile.TemporaryDirectory() as td:
-        out = _l5(td, [lap(), lap()])
+        out = _l5(td, [lap()] * 3)
     assert out.startswith('<error>'), out[:200]
     for banned in ('--stage L3', 'route_prompt', 'place_prompt', '--delegate'):
         assert banned not in out, (
@@ -185,7 +199,7 @@ def test_a_recorded_classification_clears_it_and_moves_no_verdict():
     would be charging a run for satisfying it.
     """
     with tempfile.TemporaryDirectory() as td:
-        rows = [lap(), lap()]
+        rows = [lap()] * 3
         assert _l5(td, rows).startswith('<error>')
         out = _l5(td, rows + [classification()])
         assert not out.startswith('<error>'), out[:400]
@@ -210,18 +224,18 @@ def test_a_recorded_classification_clears_it_and_moves_no_verdict():
 def test_the_three_ways_it_must_not_fire():
     """A gate measured only by what it refuses has an unmeasured cost."""
     with tempfile.TemporaryDirectory() as td:
-        out = _l5(td, [lap(), lap()], blocking=0)
+        out = _l5(td, [lap()] * 3, blocking=0)
         assert not out.startswith('<error>'), (
             'blocking == 0 must never be refused: L3 returns "nothing to '
             'classify" there, so the row the gate wants cannot be produced:\n'
             + out[:400])
 
-        out = _l5(td, [lap('placement')] * 4)
+        out = _l5(td, [lap('placement')] * 5)
         assert not out.startswith('<error>'), (
             'placement laps are not routing laps:\n' + out[:400])
 
-        out = _l5(td, [classification('placement'), lap('placement'),
-                       lap('placement')])
+        out = _l5(td, [classification('placement')]
+                  + [lap('placement')] * 4)
         assert not out.startswith('<error>'), (
             'placement laps after shape=placement are the classification '
             'being ACTED ON, not evidence that it went unread:\n' + out[:400])
@@ -230,24 +244,33 @@ def test_the_three_ways_it_must_not_fire():
 
 def test_the_waiver_is_reason_bearing_and_separate():
     with tempfile.TemporaryDirectory() as td:
-        out = _l5(td, [lap(), lap()],
+        out = _l5(td, [lap()] * 3,
                   extra=['--accept-unclassified', 'the board is gone'])
         assert not out.startswith('<error>'), out[:400]
+        # ...but not on whitespace. A waiver that records nothing is a waiver
+        # that spent a gate and left no trace, which is what the roll-call in
+        # the close-out text exists to prevent.
+        out = _l5(td, [lap()] * 3, extra=['--accept-unclassified', '   '])
+        assert out.startswith('<error>'), (
+            'a whitespace reason waived the gate:\n' + out[:300])
         # It is NOT --accept-unclosed's vocabulary: that one is the terminal
         # branch's, and sharing it would let a close-out waiver clear a retry.
-        out = _l5(td, [lap(), lap()],
+        out = _l5(td, [lap()] * 3,
                   extra=['--accept-unclosed', 'verifier'])
         assert out.startswith('<error>'), (
             '--accept-unclosed cleared a gate that is not its own:\n'
             + out[:400])
-    r = subprocess.run(
+    # THE REASON, not the code. An unrecognised flag also exits 2, so
+    # `returncode == 2` would pass just as happily if the flag did not exist.
+    # `allow`: an argparse message is exactly what this arm EXPECTS, and
+    # `check` screens those out as accidents by default -- which is right
+    # everywhere else in this file, and wrong here.
+    run_utils.check(
         [sys.executable, '-X', 'utf8',
          os.path.join(SCRIPTS, 'loop_driver.py'), '--stage', 'L5',
          '--board', BOARD, '--accept-unclassified'],
-        capture_output=True, text=True, cwd=ROOT)
-    assert r.returncode == 2, (
-        'a bare --accept-unclassified must not waive anything: '
-        f'exit {r.returncode}\n{r.stderr[-300:]}')
+        refuse='expected one argument', code=2,
+        allow=('error: argument',))
     print("  PASS: the waiver needs a reason, and is its own vocabulary")
 
 
@@ -311,8 +334,8 @@ def test_a_measured_unfixable_close_out_needs_a_live_classification():
         run_utils.check(
             _argv(['record', '--ledger', led3, '--board', BOARD, '--final',
                    '--kind', 'completion', '--stop-condition', '4'] + lenses),
-            refuse='routing lap(s) were recorded after the last '
-                   'classification', code=2)
+            refuse='lap(s) were recorded after the last classification',
+            code=2)
     print("  PASS: a measured-unfixable claim needs the measurement recorded")
 
 
@@ -335,6 +358,105 @@ def test_l3_and_l4_print_the_command_that_satisfies_the_gate():
         assert '--shape' in body, arm
     print("  PASS: L3 and L4 emit the row the gate asks for")
 
+
+
+def test_a_classification_row_must_name_its_measurement():
+    """`--shape` alone left the gate clearable by a command recording nothing.
+
+    Measured by a verifier on a reconstruction of run 29 (57 completion rows,
+    blocking 2, no classification): stop-4 refused, one lever-less `record
+    --kind classification --shape parameter` ran, stop-4 was then ACCEPTED.
+    The same `cmd_record`, thirty lines earlier, refuses `--exhausted` without
+    a non-empty reason for the same reason -- an unreasoned declaration is
+    just a lower --flat with extra steps.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        run_utils.check(
+            _argv(['record', '--ledger', led, '--board', BOARD,
+                   '--kind', 'classification', '--shape', 'parameter']),
+            refuse='needs --lever', code=2)
+        run_utils.check(
+            _argv(['record', '--ledger', led, '--board', BOARD,
+                   '--kind', 'classification', '--shape', 'parameter',
+                   '--lever', '   ']),
+            refuse='needs --lever', code=2)
+        assert not os.path.exists(led), 'nothing may be written on refusal'
+        assert _cv(['record', '--ledger', led, '--board', BOARD,
+                    '--kind', 'classification', '--shape', 'parameter',
+                    '--lever', 'lane supply 2 short at the west face']
+                   ).returncode == 0
+    print("  PASS: a classification names the measurement that named it")
+
+
+def test_a_rejected_classification_is_not_a_decision():
+    """A decision that was thrown away is not one the next lap can act on."""
+    st = C._classification_state(_rows(classification(accepted=False), lap()))
+    assert st is None, ('a --rejected classification satisfied the gate: '
+                        + str(st))
+    st = C._classification_state(_rows(classification(), lap()))
+    assert st is not None and st['laps_since']['routing'] == 1, st
+    print("  PASS: a rejected classification is not the decision of record")
+
+
+def test_a_measured_unfixable_claim_counts_laps_of_EITHER_half():
+    """Unlike the retry gate, and for the opposite reason.
+
+    "This board cannot be fixed" is a claim about the whole board, so a
+    placement lap after the decision makes it as stale as a routing lap does.
+    Measured before this: `classification(shape=placement)` plus six placement
+    laps reached stop-4 untouched.
+    """
+    lenses = []
+    with tempfile.TemporaryDirectory() as td:
+        for name in ('connectivity', 'drc', 'spec'):
+            p = os.path.join(td, f'verdict_{name}.txt')
+            io.open(p, 'w', encoding='utf-8').write(
+                f'VERDICT=PASS:lens={name}\n')
+            lenses += ['--lens-file', p]
+        led = os.path.join(td, 'l.jsonl')
+        assert _cv(['record', '--ledger', led, '--board', BOARD,
+                    '--kind', 'classification', '--shape', 'placement',
+                    '--lever', 'no lane exists at the escape faces']
+                   ).returncode == 0
+        assert _cv(['record', '--ledger', led, '--board', BOARD,
+                    '--kind', 'placement', '--lever', 'a placement lap']
+                   ).returncode == 0
+        run_utils.check(
+            _argv(['record', '--ledger', led, '--board', BOARD, '--final',
+                   '--kind', 'completion', '--stop-condition', '4'] + lenses),
+            refuse='1 placement, 0 routing', code=2)
+    print("  PASS: a placement lap makes an unfixability claim stale too")
+
+
+def test_l4_reads_the_shared_lap_predicate():
+    """The seventh bullet of its own commit, which no test covered.
+
+    `l4`'s stale-board list filtered `kind in ('completion', 'routing')`, and
+    `routing` is not a kind `record --kind` can write -- so that arm was dead
+    and restoring it changed no exit code anywhere.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        rows = [lap(), lap(final=True, stop_condition='STUCK'),
+                lap(exhausted={'half': 'routing', 'reason': 'spent'}),
+                {'kind': 'routing', 'accepted': True, 'result_sha': 'a' * 64}]
+        out = L.STAGES['L4'](L._args(
+            ['--board', BOARD, '--shape', 'placement',
+             '--ledger', _ledger(td, 'l4.jsonl', rows),
+             '--score', _score(td, 's4.json')]))
+        assert 'iteration 0' in out, (
+            'the one real routing lap is not listed as stale:\n' + out[:600])
+        for gone in ('iteration 1', 'iteration 2', 'iteration 3'):
+            assert gone not in out, (
+                f'{gone} is a close-out, a declaration or a kind nothing can '
+                f'write, and none of them is a lap:\n' + out[:600])
+        # And a malformed row is not a crash.
+        out = L.STAGES['L4'](L._args(
+            ['--board', BOARD, '--shape', 'placement',
+             '--ledger', _ledger(td, 'l4b.jsonl', [{'kind': [], 'accepted': 1}]),
+             '--score', _score(td, 's4b.json')]))
+        assert 'NONE RECORDED' in out, out[:400]
+    print("  PASS: L4 asks the one predicate, and a bad row is not a traceback")
 
 if __name__ == '__main__':
     run_utils.evidence(BOARD)

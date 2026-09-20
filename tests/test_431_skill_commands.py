@@ -1300,6 +1300,18 @@ def test_routed_board_lenses_exist_and_reenter_the_loop():
 #: opposite of what a line list does as it rots.
 _RENDER_LOUD = ('--pair', '--focus')
 
+#: ...and the same exemption derived from the PROSE rather than from a flag:
+#: a render whose own stage text sends the reader to a stdout narrative keeps
+#: its stdout. `--quiet` removes these blocks from stdout, they are NOT in the
+#: `--json-out` document (`doc['describe']` carries only `worst`) and NOT in
+#: the review sheet's facts strip, so quieting such a command deletes the thing
+#: its text is about. Measured on the two L2 hand-off renders, which a first
+#: cut of #963 quieted and which read "Anything its WHAT THIS PANEL SHOWS block
+#: names as off the outline, stacked or hole-conflicting will still be there
+#: after the route".
+_RENDER_NARRATIVE = ('WHAT THIS PANEL SHOWS', 'WHAT THE MOVE DID',
+                     'THE WORST N')
+
 
 def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
     """`--json-out` implies `--quiet`, unless the narrative IS the deliverable.
@@ -1326,25 +1338,44 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
     seen = exempt = 0
     loud, missing = [], []
     sheets = collections.Counter()
+    # EVERY render span, then branch -- not `if '--json-out' not in span:
+    # continue`, which is what this did and which made the bare-`--quiet`
+    # clause eleven lines below it dead code. Proved on the POPULATION rather
+    # than on the gate: rewriting one template into a bare `--quiet` with no
+    # `--json-out` left this PASSING, and `tests/test_963_render_templates.py::
+    # test_a_bare_quiet_would_be_the_worst_of_both` exists to justify a clause
+    # that could never fire.
     for src in DRIVERS + tuple(s for s in SOURCES if s.endswith('.md')):
         text = source_text(src)
         for b in _continued_blocks(text, tool):
+            # The prose this command is embedded in, so the exemption can be
+            # read off what the reader is TOLD to do rather than off a flag.
+            _at = text.find(b.splitlines()[0])
+            _after = text[_at:_at + 1400] if _at >= 0 else ''
+            _tells = next((n for n in _RENDER_NARRATIVE if n in _after), None)
             for span in _tool_spans(b, tool):
+                _cmd = ' '.join(span)[:110]
+                pass
                 if '--json-out' not in span:
+                    # A bare `--quiet` silences `describe` via `_quiet_text`
+                    # while `_quiet` stays False and the keys still print --
+                    # the exact inversion of what the flag is for.
+                    if '--quiet' in span:
+                        missing.append((src, 'bare --quiet: ' + _cmd))
                     continue
                 seen += 1
-                if any(f in span for f in _RENDER_LOUD):
+                _why = next((f for f in _RENDER_LOUD if f in span), None) \
+                    or (f'its text reads {_tells}' if _tells else None)
+                if _why:
                     exempt += 1
-                    loud.append((src, next(f for f in _RENDER_LOUD
-                                           if f in span)))
+                    loud.append((src, _why, _cmd))
                 elif '--quiet' not in span:
-                    missing.append((src, ' '.join(span)[:110]))
-                if '--review-sheet' in span:
-                    sheets[src.rsplit('/', 1)[-1]] += 1
-                if '--quiet' in span and '--json-out' not in span:
-                    missing.append((src, 'bare --quiet: ' + ' '.join(span)[:90]))
-    for src, why in sorted(set(loud)):
-        print(f'    loud on purpose ({why}): {src}')
+                    missing.append((src, _cmd))
+    # Per SPAN, not per (src, reason): `sorted(set(...))` collapsed nine
+    # exempt spans into four lines naming no command, so a reader could not
+    # tell WHICH command was exempt.
+    for src, why, cmd in sorted(loud):
+        print(f'    loud on purpose ({why}): {src.rsplit("/", 1)[-1]}: {cmd}')
     assert not missing, (
         'render commands that write their keys to a file and print them too:\n'
         + '\n'.join(f'  {s}: {t}' for s, t in missing)
@@ -1352,24 +1383,51 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
           'deliverable. `--quiet` with no --json-out is the worst of both: it '
           'silences `describe` and the JSON still prints '
           '(render_placement.py, _quiet vs _quiet_text).')
-    # Measured floors, not round ones: 38 spans and 9 exempt at the commit that
-    # added this. A gate that stops finding its population reads exactly like a
-    # gate that finds nothing wrong.
+    # Measured floors, not round ones. A gate that stops finding its
+    # population reads exactly like a gate that finds nothing wrong.
     assert seen >= 34, (
         f'only {seen} --json-out render span(s) found, measured 38; this gate '
         f'has stopped looking at the population it guards')
-    assert exempt >= 8, (
-        f'{exempt} exempt span(s), measured 9: the --pair/--focus arm is what '
-        f'keeps this from being a blanket rule, and it must stay exercised')
+    # BOUNDED ON BOTH SIDES. A floor alone is satisfied by widening the
+    # exemption: `_RENDER_LOUD = ('--json-out',)` exempts all 38 and passes,
+    # which is a gate that has been switched off from inside.
+    assert 8 <= exempt <= 14, (
+        f'{exempt} exempt span(s), measured 11: the --pair/--focus arm is what '
+        f'keeps this from being a blanket rule. Too few and it has stopped '
+        f'being exercised; too many and the predicate has been widened until '
+        f'it exempts the population it guards.')
     # And the drivers must keep ASKING for a sheet. Without `--review-sheet`
     # the render writes no `review_sheet` key, and
     # `placement_driver._guard_render`'s fifth check reads an absent key as
     # "never asked for" -- which is how that guard sat unable to fire on its
-    # own driver's renders until #963. Measured 18 and 6.
-    assert sheets.get('placement_driver.py', 0) >= 15, sheets
-    assert sheets.get('loop_driver.py', 0) >= 5, sheets
+    # own driver's renders until #963.
+    #
+    # COUNTED IN `--dump-all` ALONE, and that is the whole point. A count over
+    # both dumps is dominated by the refusal scenarios, which render ONE recipe
+    # sixteen times with a different temp path each: a floor of 15 over that
+    # population bound only the recipe, and deleting either --pair TEMPLATE
+    # left the gate green. The instructions dump renders each site once.
+    for _src, _dumpflag, _floor, _what in (
+            ('.claude/skills/plan-pcb-placement/scripts/placement_driver.py',
+             '--dump-all', 2, 'the P3 pair and the lap pair'),
+            # The _guard_render recipe is a REFUSAL, so it is in the other
+            # dump -- and it is the one site whose 16 renderings used to carry
+            # the whole floor.
+            ('.claude/skills/plan-pcb-placement/scripts/placement_driver.py',
+             '--dump-refusals', 1, 'the _guard_render recipe'),
+            ('.claude/skills/plan-pcb-placement-and-routing/scripts/'
+             'loop_driver.py', '--dump-all', 6,
+             'both hand-offs (two arms each) and the close-out')):
+        _dump, _rc = driver_dump(_src, _dumpflag)
+        _n = sum(1 for b in _continued_blocks(_dump, tool)
+                 for sp in _tool_spans(b, tool) if '--review-sheet' in sp)
+        sheets[(_src.rsplit('/', 1)[-1], _dumpflag)] = _n
+        assert _n >= _floor, (
+            f'{_src.rsplit("/", 1)[-1]} emits {_n} render command(s) asking '
+            f'for a review sheet in {_dumpflag}, measured {_floor}: {_what}. '
+            f'A site that stops asking makes _guard_render blind to it.')
     print(f'  PASS: {seen} --json-out render span(s), {exempt} loud on '
-          f'purpose, {sum(sheets.values())} asking for a sheet')
+          f'purpose, sheet sites per driver {dict(sheets)}')
 
 
 TESTS = [

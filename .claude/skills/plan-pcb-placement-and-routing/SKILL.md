@@ -380,6 +380,7 @@ written out of turn.
      `--accept-residue` (`buildable`, `verdict`, `locked_contacts`, `blocking`,
      `oob_pad_count`), `--accept-unclosed` (`instruments`, `fab_floors`,
      `ungraded`, `agreement`, `verifier`), `--accept-congestion <reason>`,
+     `--accept-unclassified <reason>`,
      `converge.py record --accept-incommensurable <reason>`, and the placement
      half's `--waive <name>:<reason>`. Write `none` when none were spent. Every
      one of those names a check that REFUSED and was overridden; an unlisted

@@ -202,11 +202,15 @@ def _cv_is_lap(row, half):
     caller is a DISPLAY list, so being conservative there costs a line of
     output, not a gate.
     """
+    if not isinstance(row, dict):
+        return False
     _cv = _converge_module('_is_lap')
     if _cv is not None:
         return _cv._is_lap(row, half)
     _kind = {'placement': 'placement', 'routing': 'completion'}.get(half)
-    return ((row.get('kind') or '') == _kind and not row.get('final')
+    # `str(...)`, not `or ''`: a hand-built row carrying `"kind": []` raised
+    # TypeError out of L4 rather than reading as "not this half".
+    return (str(row.get('kind') or '') == _kind and not row.get('final')
             and not isinstance(row.get('exhausted'), dict))
 
 
@@ -227,7 +231,12 @@ def _converge_module(*attrs):
     call rather than all at once.
     """
     try:
-        sys.path.insert(0, ROOT)
+        # ONLY IF IT IS NOT ALREADY THERE. This is called per LEDGER ROW by
+        # `_cv_is_lap`, and an unconditional insert left 441 duplicate ROOT
+        # entries on `sys.path` after one L4 call on a 439-row ledger -- every
+        # later import then walking a list that grows with the ledger.
+        if ROOT not in sys.path:
+            sys.path.insert(0, ROOT)
         import converge                                         # noqa: PLC0415
     except Exception:                                           # noqa: BLE001
         return None
@@ -1664,7 +1673,7 @@ afterwards every panel is placement plus whatever the router did:
 
   python3 -X utf8 py_tools/render_placement.py {_frozen} \\
       --clearance <the board's own floor> --ignore-nets <the poured nets> \\
-      --review-sheet {_hos} --json-out {_hoj} -o {_hop} --quiet
+      --review-sheet {_hos} --json-out {_hoj} -o {_hop}
 
 Anything its WHAT THIS PANEL SHOWS block names as off the outline, stacked or
 hole-conflicting will still be there after the route, and no router setting
@@ -1819,7 +1828,7 @@ become hard to separate by eye:
 
   python3 -X utf8 py_tools/render_placement.py {_frozen} \\
       --clearance <the board's own floor> --ignore-nets <the poured nets> \\
-      --review-sheet {_hos} --json-out {_hoj} -o {_hop} --quiet
+      --review-sheet {_hos} --json-out {_hoj} -o {_hop}
 
 Its WHAT THIS PANEL SHOWS block is what routing is being given. Anything it
 names as off the outline, stacked, or hole-conflicting will still be there after
@@ -2053,7 +2062,9 @@ holds what was recorded.
 
 Record it, then go back to L3 with the new score. If two parameter iterations
 in a row do not move `blocking`, the shape was probably not parameter --
-re-measure rather than trying a third.
+re-measure rather than trying a third. L5 refuses the third: two laps is what
+one decision buys, and a third with no new decision behind it is the shape
+run 29 repeated fifty-seven times.
 
 Next: --stage L3 --board {a.board} --score <new score>
 </stage_instructions>'''
@@ -2252,13 +2263,28 @@ def final_record_command(ledger, board, score, name, verdicts):
         f'      --score-file {score} --argv <the command that produced this board>')
 
 
-#: Routing laps one classification authorises. L4's parameter arm says
-#: "Re-enter the FAILING ROUTING STEP ... Record it, then go back to L3 with
-#: the new score" -- exactly one. The first lap after a decision is the lap
-#: that decision bought; the SECOND is the first lap no decision authorised.
+#: Routing laps one classification authorises. TWO, quoted from L4's parameter
+#: arm in full: "Record it, then go back to L3 with the new score. If two
+#: parameter iterations in a row do not move `blocking`, the shape was
+#: probably not parameter -- re-measure rather than trying a third."
+#:
+#: A first cut said ONE and called that derived. The derivation stopped one
+#: sentence early: L4 authorises the second lap explicitly and asks for
+#: re-measurement before the THIRD, so a gate refusing the second put L3 and
+#: L4 in contradiction -- the loop refusing what its own re-entry stage had
+#: just told the run to do.
+#:
+#: MEASURED COST, which the first cut did not measure at all: replayed over
+#: the 28 `wk/**/ledger.jsonl` committed to this repo, the gate at ONE fires
+#: somewhere in 18 of them, including all four most recent runs, with peak
+#: unclassified streaks of 31, 26, 24 and 16. Only 2 of the 28 contain a
+#: classification row at all. At TWO it still fires on those streaks -- which
+#: is the point, they are the defect -- but it stops refusing the single
+#: authorised retry.
+#:
 #: DELIBERATELY NOT `--flat`, which is 5 and means something else: two numbers
 #: with two meanings do not become one number by sharing a value.
-_LAPS_PER_CLASSIFICATION = 1
+_LAPS_PER_CLASSIFICATION = 2
 
 
 def _unclassified_retry(a, doc):
@@ -2295,7 +2321,9 @@ def _unclassified_retry(a, doc):
     shas differ on every honest run and an equality test would refuse all of
     them.
     """
-    if getattr(a, 'accept_unclassified', None):
+    # `.strip()`: a whitespace reason waived the gate and recorded nothing,
+    # which is the shape `--exhausted-reason` is checked against in converge.
+    if (getattr(a, 'accept_unclassified', None) or '').strip():
         return None
     if doc.get('blocking') in (0, None):
         return None
@@ -2314,10 +2342,11 @@ def _unclassified_retry(a, doc):
         _board = ''
     else:
         _head = (f'{since} routing laps have been recorded since the last '
-                 f'decision. Iteration {_where.get("iteration")} '
-                 f'(kind classification, shape {_where.get("shape")}) is the '
-                 f'last one on record, and nothing since says what the laps '
-                 f'after it were aimed at.')
+                 f'decision, and one decision buys '
+                 f'{_LAPS_PER_CLASSIFICATION}. Iteration '
+                 f'{_where.get("iteration")} (kind classification, shape '
+                 f'{_where.get("shape")}) is the last one on record; L4 asks '
+                 f'for a re-measurement before a third lap, and this is it.')
         _sha = str(_where.get('result_sha') or '')
         _board = ('' if not _sha else
                   f'\nThat decision was made about board {_sha[:12]}..., which '
@@ -2563,14 +2592,20 @@ tell a finished run from a stalled one.
     # invisible unless the number is on the page.
     _found = [d for d in (getattr(a, '_discovered_verdicts', None) or [])]
     _gone = list(getattr(a, '_absent_verdicts', None) or [])
+    _notes = list(getattr(a, '_discovered_notes', None) or [])
     _vreport = (
-        f'\nVERDICT FILES, cycle {_cyc}: '
+        f'\nVERDICT FILES, cycle {_cyc}: FOUND '
         + (', '.join(f'{os.path.basename(d["path"])} '
                      f'{(d.get("line") or "unreadable").split(";")[0]}'
-                     for d in _found) or 'none found')
+                     for d in _found) or 'none')
         + (f'. ABSENT: {", ".join(l for l, _p in _gone)}.' if _gone
-           else '. None absent.')
-        + '\nFound by the cycle map, not named -- the flag stays optional.\n')
+           else '. ABSENT: none.')
+        + '\nFound by the cycle map, not named -- the flag stays optional.\n'
+        # What the comparison SAW but did not refuse. These are the arms a
+        # first cut of #963 made refusals, which turned the honest
+        # fix-and-re-dispatch path into two refusals with no remedy printed.
+        # A report can be read; a refusal on the honest path gets waived.
+        + (''.join(f'  NOTE {n}\n' for n in _notes) if _notes else ''))
     return f'''<stage_instructions stage="L5" name="close out: {name}" of="{len(STAGES)}">
 {headline.get(name, name)}.{_binding_note()}{_vreport}
 
@@ -2585,7 +2620,8 @@ seconds before the sheet existed -- satisfying the letter of the old rule and
 defeating its purpose. That is why this block comes first in this text.
 
   python3 -X utf8 py_tools/render_placement.py {a.board} \
-      --review-sheet wk/close_sheet.png --json-out wk/close_sheet.json --quiet
+      --review-sheet wk/close_sheet.png --json-out wk/close_sheet.json \
+      -o wk/close_sheet_panels.png --quiet
 
 THEN confirm with the instruments, and put the numbers in the report beside the
 names of the instruments that produced them:
@@ -2725,7 +2761,8 @@ failure -- an unexplained one is.
 
 Name every WAIVER this run spent, with the flag, the token and the reason --
 --accept-residue, --accept-unclosed, --accept-congestion,
---accept-incommensurable, --waive -- or the word `none`. Each of those overrode
+--accept-incommensurable, --accept-unclassified, --waive -- or the word
+`none`. Each of those overrode
 a gate that refused, and a report that does not list them is a report about a
 run that looks cleaner than it was.
 
@@ -2974,77 +3011,97 @@ def _cross_check(a, name, doc):
                 f'--verifier-verdict {_p} (line {_no})', _line,
                 f'ledger iteration {_r.get("iteration")} (--final): {_raw}'))
 
-    # THE SAME FILES, FOUND RATHER THAN NAMED (#963) -- and judged by a
-    # NARROWER rule, because a discovered file answers a different question.
+    # THE SAME FILES, FOUND RATHER THAN NAMED (#963) -- and they REPORT.
+    # Exactly one arm of this binds, and the reason is the one the exhaustion
+    # binding reached first: an instrument that reports can be read, while an
+    # instrument that refuses the honest path gets waived and then ignored.
     #
-    # An explicit `--verifier-verdict` is the operator's claim that this
-    # verdict is already on the record, so "no --final row mentions this lens"
-    # is a real contradiction there. A DISCOVERED file is evidence that the
-    # record is not written yet, and on the FIRST L5 of any close-out it never
-    # is: this stage's own text is what tells the operator to write the
-    # `--final` row, so `live` is empty BY CONSTRUCTION. Run 29's two final
-    # rows are iterations 44 and 46, both written after its last L5 call.
-    # Feeding these through the arm above would print three refusals on every
-    # honest close-out, about a record the same stage is about to ask for.
+    # The honest path is "fix what the close-out named, re-dispatch the lens
+    # that disagreed, come back" -- L5's own refusal text says exactly that.
+    # Walk it and the ledger holds a `--final` row carrying the OLD verdict
+    # while the file on disk carries the new one. A first cut refused that
+    # twice, and the run 25 ledger has THREE `final: True` rows, so the
+    # premise "live is empty at the first L5" is true of a run with one
+    # close-out and false of any run that corrected itself.
+    #
+    # So a disagreement between a discovered file and a recorded row is
+    # REPORTED (it reaches `_vreport`, which the terminal text prints), and
+    # what still REFUSES is the shape no re-dispatch explains: a FAIL on disk
+    # beside two instruments that both say the board is finished.
+    _notes = []
     for _d in (getattr(a, '_discovered_verdicts', None) or []):
-        _where = (f'{os.path.basename(_d["path"])} '
-                  f'(found beside the ledger, not named)')
+        _base = os.path.basename(_d['path'])
         if _d.get('error'):
-            vpairs.append((_where, f'unreadable: {_d["error"]}',
-                           'a verdict file on this cycle\'s map must be '
-                           'openable -- its path is not a guess'))
+            _notes.append(f'{_base}: unreadable ({_d["error"]}) -- its path is '
+                          f'not a guess, so this is a file that exists and '
+                          f'cannot be read')
             continue
         _dln, _dline = _d.get('lens'), _d.get('line') or ''
         if not _dln:
-            vpairs.append((_where, _dline,
-                           'not a lens verdict -- a boundary check spells '
-                           '`check=<1-5>` and belongs in the report'))
+            _notes.append(f'{_base}: not a lens verdict ({_dline[:60]}) -- a '
+                          f'boundary check spells `check=<1-5>` and belongs '
+                          f'in the report')
             continue
+        if _d.get('expected') and _dln != _d['expected']:
+            # The file is named for one lens and speaks for another, so the
+            # lens this cycle's map went looking for is covered by nothing.
+            # `expected` was stored and read by nobody until this.
+            _notes.append(f'{_base}: names lens {_dln}, not {_d["expected"]} '
+                          f'-- {_d["expected"]} is covered by no file on this '
+                          f"cycle's map")
         _dfail = _dline.strip().startswith('VERDICT=FAIL')
         if _dln in live:
             _r, _raw = live[_dln]
-            # FRESHNESS BY CONTENT, NEVER BY MTIME. `--deadline` was removed
-            # from this toolchain because no result may depend on timing, and
-            # mtime is measurably unreliable on these very artifacts -- run
-            # 29's DONE marker reports an mtime 29 minutes after it was first
-            # written. The row already stores each lens file's sha256, so the
-            # honest question is whether the bytes are the ones it quoted.
-            _now = None
+            _now, _why = None, None
             try:
                 from board_store import sha256_file
                 _now = sha256_file(_d['path'])
-            except Exception:                               # noqa: BLE001
-                _now = None
+            except Exception as _e:                         # noqa: BLE001
+                # DISCLOSED, not swallowed. The neighbouring comment on
+                # `_score_board_mismatch` condemns exactly this shape, and an
+                # earlier cut of this block had it.
+                _why = f'{type(_e).__name__}: {_e}'
+            if _why:
+                _notes.append(f'{_base}: could not be hashed ({_why}), so '
+                              f'whether it is still the bytes the row quoted '
+                              f'was NOT checked')
             for _src in (_r.get('lens_source') or []):
                 if not isinstance(_src, dict) or not _now:
                     continue
-                if os.path.basename(str(_src.get('path') or '')) != \
-                        os.path.basename(_d['path']):
+                # ABSPATH FIRST. Matching on basename alone called a file in
+                # another directory "this same file" -- run 24's layout puts
+                # the lens files in a per-turn subdirectory, so that is not
+                # hypothetical.
+                _ap = str(_src.get('abspath') or '')
+                if _ap:
+                    if os.path.normcase(os.path.abspath(_ap)) != \
+                            os.path.normcase(os.path.abspath(_d['path'])):
+                        continue
+                elif os.path.basename(str(_src.get('path') or '')) != _base:
                     continue
                 if _src.get('sha256') and _src['sha256'] != _now:
-                    vpairs.append((
-                        _where, _dline,
-                        f'ledger iteration {_r.get("iteration")} quoted this '
-                        f'same file at sha {str(_src["sha256"])[:12]}...; it '
-                        f'is {_now[:12]}... now -- the verdict changed after '
-                        f'the row recorded it'))
+                    _notes.append(
+                        f'{_base}: iteration {_r.get("iteration")} quoted it '
+                        f'at sha {str(_src["sha256"])[:12]}..., it is '
+                        f'{_now[:12]}... now -- re-dispatched since that row, '
+                        f'or edited')
             if _dfail != _raw.strip().startswith('VERDICT=FAIL'):
-                vpairs.append((
-                    f'{_where} (line {_d.get("lineno")})', _dline,
-                    f'ledger iteration {_r.get("iteration")} (--final): '
-                    f'{_raw}'))
-        elif _dfail and name == 'DONE-EXHAUSTED' and _cv == 'DONE':
-            # The one arm a discovered file gets that needs no `--final` row,
-            # or discovery is decoration: a FAIL on disk beside two instruments
-            # both saying the board is finished. Calibration -- this would NOT
-            # have fired on run 29, whose stop was condition 4 and whose
-            # close-out was not DONE, because run 29 recorded its FAILs
-            # honestly. The defect there was that nobody read the files, not
-            # that the files lied.
+                _notes.append(
+                    f'{_base}: says {_dline.split(";")[0]} and iteration '
+                    f'{_r.get("iteration")} recorded {_raw.split(";")[0]} -- '
+                    f'the record is behind the file, or the other way round')
+        if _dfail and name == 'DONE-EXHAUSTED' and _cv == 'DONE':
+            # THE ONE ARM THAT BINDS, or discovery is decoration: a FAIL on
+            # disk beside converge saying DONE-EXHAUSTED and check_complete
+            # saying DONE. No re-dispatch explains that -- a corrected lens
+            # PASSES. Calibration: it would NOT have fired on run 29, whose
+            # stop was condition 4 and whose close-out was not DONE. Its
+            # defect was that nobody read the files, not that the files lied.
             vpairs.append((
-                _where, _dline,
-                f'converge says DONE-EXHAUSTED and check_complete says DONE, '
-                f'and this verdict is on disk beside them, unrecorded'))
+                f'{_base} (found beside the ledger, not named)', _dline,
+                'converge says DONE-EXHAUSTED and check_complete says DONE, '
+                'and this FAIL is on disk beside them'))
+    a._discovered_notes = _notes
 
     # Per-bucket, never one blanket early return.
     if _accept_close(a, 'agreement'):
@@ -3822,11 +3879,11 @@ def _refusal_scenarios(tmp):
     # #963: two routing laps and no decision behind them. Two ledgers, because
     # "no classification row has ever been written" and "the laps ran past the
     # last one" are different arms and the first is the one run 29 was.
-    unclass = ledger('unclassified.jsonl', [row, row])
+    unclass = ledger('unclassified.jsonl', [row] * 3)
     classified = ledger('classified.jsonl', [
         {'kind': 'classification', 'accepted': True, 'result_sha': sha,
-         'shape': 'parameter', 'lever': 'the escape faces are saturated'},
-        row, row])
+         'shape': 'parameter', 'lever': 'the escape faces are saturated'}]
+        + [row] * 3)
     _REPORT = {'blocking': 0, 'oob_pad_count': 0, 'buildable': True,
                'verdict': 'buildable (blocking 0)', 'locked_contacts': 0,
                'pad_conflicts': 0, 'hole_conflicts': 0, 'clearance': 0.2,
@@ -4106,7 +4163,7 @@ def _refusal_scenarios(tmp):
         # where run 29 sat: it took this branch six times and exited 0 each.
         ('a retry with no classification ever recorded',
          ['--board', board, '--ledger', unclass, '--score', score]),
-        ('a retry two laps past the last classification',
+        ('a retry past what one classification authorises',
          ['--board', board, '--ledger', classified, '--score', score]),
     ]
 
@@ -4877,15 +4934,16 @@ def _self_test():
                     'lever': 'the escape faces are saturated'}
         _s2 = scored({'blocking': 2}, 'two.json')
         out = STAGES['L5'](_args(base + [
-            '--ledger', ledger_of([_rlap], 'one_lap.jsonl'), '--score', _s2]))
-        want('not done yet' in out,
-             'one unclassified routing lap is the lap the last decision '
-             'bought, and is not refused')
-        out = STAGES['L5'](_args(base + [
             '--ledger', ledger_of([_rlap, _rlap], 'two_laps.jsonl'),
             '--score', _s2]))
+        want('not done yet' in out,
+             'TWO unclassified routing laps are what one decision buys -- L4 '
+             'authorises the second and asks for a re-measure before a third')
+        out = STAGES['L5'](_args(base + [
+            '--ledger', ledger_of([_rlap] * 3, 'three_laps.jsonl'),
+            '--score', _s2]))
         want(out.startswith('<error>') and 'kind classification' in out,
-             'the SECOND unclassified routing lap is refused, naming the row')
+             'the THIRD unclassified routing lap is refused, naming the row')
         # The DEMANDS, not the prose. An earlier draft of this pin banned the
         # word "teammate" and failed on a sentence whose whole point was that a
         # teammate is ONE acceptable producer among several -- banning the
@@ -4895,18 +4953,18 @@ def _self_test():
              'the refusal asks for a ROW, and names no stage to run and no '
              'prompt file to produce')
         out = STAGES['L5'](_args(base + [
-            '--ledger', ledger_of([_rlap, _rlap, _cls_row], 'classed.jsonl'),
+            '--ledger', ledger_of([_rlap] * 3 + [_cls_row], 'classed.jsonl'),
             '--score', _s2]))
         want('not done yet' in out,
              'recording the classification clears the gate, and that is the '
              'whole escape -- one command, no waiver')
         out = STAGES['L5'](_args(base + [
-            '--ledger', ledger_of([_rlap, _rlap], 'two_laps.jsonl'),
+            '--ledger', ledger_of([_rlap] * 3, 'three_laps.jsonl'),
             '--score', _s2, '--accept-unclassified', 'the board is gone']))
         want('not done yet' in out,
              '--accept-unclassified is the reason-bearing escape')
         out = STAGES['L5'](_args(base + [
-            '--ledger', ledger_of([_rlap, _rlap], 'two_laps.jsonl'),
+            '--ledger', ledger_of([_rlap] * 3, 'three_laps.jsonl'),
             '--score', scored({'blocking': 0}, 'zero.json')]))
         want('not done yet' in out,
              'blocking == 0 is never refused: L3 refuses to classify it, so '

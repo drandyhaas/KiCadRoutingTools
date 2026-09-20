@@ -346,6 +346,11 @@ CHEAT_FLAGS = (
                                    'refused', ()),
     ('WAIVER', '--accept-unclosed', 'closes a half that did not close', ()),
     ('WAIVER', '--accept-congestion', 'accepts a congestion regression', ()),
+    # #963: goes round again although the routing laps since the last decision
+    # outnumber what one decision buys. Rare by design -- the ordinary answer
+    # is to WRITE the decision, which is one command and moves no verdict.
+    ('WAIVER', '--accept-unclassified',
+     'retries with no decision on the record', ()),
     ('WAIVER', '--allow-unplaced', 'proceeds on a board the gate called '
                                    'unplaced', ()),
     ('WAIVER', '--allow-routed', 'places onto existing copper', ()),

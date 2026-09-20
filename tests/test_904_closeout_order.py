@@ -472,7 +472,32 @@ def test_an_explicit_flag_still_refuses_a_verdict_the_record_never_carries():
     print("  PASS: an explicitly named verdict still needs a row behind it")
 
 
-def test_a_file_whose_bytes_changed_after_the_row_quoted_it_refuses():
+def test_the_honest_fix_and_re_dispatch_path_is_not_refused():
+    """The regression a first cut of #963 shipped, and why it is a NOTE now.
+
+    L5's own refusal text says "fix what the close-out names and re-score,
+    re-dispatch the lens that disagrees". Walk that: the ledger holds a
+    `--final` row carrying the OLD verdict while the re-dispatched file on
+    disk carries the new one. Refusing that pair refuses the remedy, and the
+    refusal did not even carry the `record --final` command that would clear
+    it.
+
+    The premise it rested on -- "live is empty at the first L5" -- is true of
+    a run with ONE close-out and false of any run that corrected itself:
+    wk/run25/esp_prog/ledger.jsonl has three `final: True` rows.
+    """
+    files = {'verdict_spec.txt': 'VERDICT=PASS:lens=spec'}
+    rows = [_final('spec', verdict='FAIL')]
+    a, refusal = _discovered(rows, files, close_verdict='INCOMPLETE',
+                             name='STUCK')
+    assert refusal is None, (
+        'the fix-and-re-dispatch path was refused:\n' + str(refusal)[:400])
+    notes = '\n'.join(a._discovered_notes)
+    assert 'the record is behind the file' in notes, notes
+    print("  PASS: a re-dispatched lens is reported, not refused")
+
+
+def test_a_file_whose_bytes_changed_after_the_row_quoted_it_is_reported():
     """Freshness by CONTENT, never by mtime.
 
     `--deadline` was removed from this toolchain because no result may depend
@@ -484,8 +509,9 @@ def test_a_file_whose_bytes_changed_after_the_row_quoted_it_refuses():
     files = {'verdict_drc.txt': 'VERDICT=PASS:lens=drc'}
     src = [{'path': 'verdict_drc.txt', 'sha256': 'f' * 64, 'line': 1}]
     a, refusal = _discovered([_final('drc', sources=src)], files)
-    assert refusal and 'quoted this' in refusal, refusal
-    assert 'changed after' in refusal, refusal
+    assert refusal is None, refusal
+    notes = '\n'.join(a._discovered_notes)
+    assert 'quoted it at sha' in notes and 'it is' in notes, notes
     # ...and the SAME row with the real sha is not a finding. The digest is
     # read off the file AS WRITTEN rather than computed from the string: the
     # helper writes in text mode, so on Windows those bytes carry CRLF and a
@@ -496,7 +522,23 @@ def test_a_file_whose_bytes_changed_after_the_row_quoted_it_refuses():
     src_ok = [{'path': 'verdict_drc.txt', 'sha256': real, 'line': 1}]
     _a2, ok = _discovered([_final('drc', sources=src_ok)], files)
     assert ok is None, ok
-    print("  PASS: bytes that moved after the row quoted them are named")
+    assert not [n for n in _a2._discovered_notes if 'quoted it at sha' in n], \
+        _a2._discovered_notes
+
+    # ...and a row quoting a file of the SAME NAME in ANOTHER DIRECTORY is not
+    # this file. Matching on basename alone called it "this same file"; run
+    # 24's layout puts the lens files in a per-turn subdirectory, so that is
+    # not hypothetical. `lens_source.abspath` exists for exactly this and was
+    # unread.
+    _a3, other = _discovered(
+        [_final('drc', sources=[{'path': 'turn1/verdict_drc.txt',
+                                 'abspath': '/elsewhere/turn1/verdict_drc.txt',
+                                 'sha256': 'f' * 64, 'line': 1}])], files)
+    assert other is None, other
+    assert not [n for n in _a3._discovered_notes if 'quoted it at sha' in n], (
+        'a file in another directory was called "this same file": '
+        + str(_a3._discovered_notes))
+    print("  PASS: bytes that moved are named; another directory's are not")
 
 
 def test_a_discovered_fail_beside_two_finished_instruments_refuses():
@@ -510,7 +552,7 @@ def test_a_discovered_fail_beside_two_finished_instruments_refuses():
     files = {'verdict_drc.txt': 'VERDICT=FAIL:lens=drc;finding=short;evidence=x'}
     _a, refusal = _discovered([], files, close_verdict='DONE',
                               name='DONE-EXHAUSTED')
-    assert refusal and 'unrecorded' in refusal, refusal
+    assert refusal and 'on disk beside them' in refusal, refusal
     # and NOT on a run that is not claiming to be finished
     _a2, ok = _discovered([], files, close_verdict='INCOMPLETE', name='STUCK')
     assert ok is None, ok
@@ -536,12 +578,76 @@ def test_the_terminal_text_reports_found_and_absent():
                        errors='replace', cwd=ROOT, timeout=900)
     assert r.returncode == 0, r.stderr[-400:]
     assert 'VERDICT FILES' in r.stdout, 'the discovery report is not rendered'
-    assert 'found' in r.stdout and 'ABSENT' in r.stdout, (
-        'the report must name what it did NOT find as well as what it did')
-    assert 'cycle' in r.stdout.split('VERDICT FILES', 1)[1][:80], (
+    # ON THE REPORT LINE, not anywhere in the dump. Asserting `'found' in
+    # r.stdout` passed with the found half DELETED, because "found" appears
+    # five more times in the surrounding prose -- the same or-shaped pin this
+    # docstring cites test_431 for, rebuilt one line lower.
+    line = [ln for ln in r.stdout.splitlines() if 'VERDICT FILES' in ln][0]
+    assert 'FOUND' in line, ('the report names no found half: ' + line)
+    assert 'ABSENT' in line, ('the report names no absent half: ' + line)
+    assert 'cycle' in line, (
         'the cycle number is what makes a misnamed _c<n> file visible; '
-        '_paths takes the highest of the ledger index and what is on disk')
-    print("  PASS: the terminal text reports found AND absent, with the cycle")
+        '_paths takes the highest of the ledger index and what is on disk: '
+        + line)
+    print("  PASS: the report LINE names found, absent and the cycle")
+
+
+def test_l5_itself_discovers_the_files_with_nothing_named():
+    """Through the real stage, because `_cross_check` alone proves too little.
+
+    A mutation battery measured four rows SURVIVING every gate here --
+    including `_discover_verdicts` returning nothing at all, and discovery
+    writing into `a.verifier_verdict` -- because every test drove
+    `_cross_check` with a hand-built namespace. Nothing asserted that l5
+    CALLS discovery, which is the claim the whole change rests on.
+    """
+    import json as _json
+    import tempfile as _tf
+    td = _tf.mkdtemp()
+    board = os.path.join(td, 'b.kicad_pcb')
+    with open(board, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb)\n')
+    sys.path.insert(0, ROOT)
+    from board_store import sha256_file
+    sha = sha256_file(board)
+    led = os.path.join(td, 'l.jsonl')
+    row = {'kind': 'completion', 'accepted': True, 'result_sha': sha,
+           'score': {'blocking': 0, 'quality': {}}}
+    with open(led, 'w', encoding='utf-8') as fh:
+        for i, r in enumerate([dict(row, kind='placement')] * 6 + [row] * 6):
+            fh.write(_json.dumps(dict(r, iteration=i)) + '\n')
+    score = os.path.join(td, 's.json')
+    with open(score, 'w', encoding='utf-8') as fh:
+        _json.dump({'blocking': 0, 'quality': {}, 'ungraded': [],
+                    'board_sha': sha}, fh)
+    for lens in ('connectivity', 'drc'):
+        with open(os.path.join(td, f'verdict_{lens}.txt'), 'w',
+                  encoding='utf-8') as fh:
+            fh.write(f'VERDICT=PASS:lens={lens}\n')
+
+    close = os.path.join(td, 'c.json')
+    with open(close, 'w', encoding='utf-8') as fh:
+        _json.dump({'schema': 1, 'kind': 'board-complete', 'board': board,
+                    'score': {'blocking': 0},
+                    'components': {'orphan_stubs': {'ran': True}},
+                    'fab_floors': {'ran': True, 'relaxed': []},
+                    'verdict': 'DONE', 'reason': 'fixture', 'ungraded': []}, fh)
+    a = L._args(['--stage', 'L5', '--board', board, '--ledger', led,
+                 '--score', score, '--routing-close', close])
+    out = L.STAGES['L5'](a)
+    assert getattr(a, '_discovered_verdicts', None), (
+        'l5 did not call discovery at all -- every other test here drives '
+        '_cross_check with a hand-built namespace and cannot see that')
+    found = sorted(os.path.basename(d['path'])
+                   for d in a._discovered_verdicts)
+    assert found == ['verdict_connectivity.txt', 'verdict_drc.txt'], found
+    assert a.verifier_verdict is None, (
+        'discovery filled --verifier-verdict, so every refusal will name a '
+        'flag nobody passed')
+    assert 'VERDICT FILES' in out, out[:400]
+    assert 'spec' in out.split('VERDICT FILES', 1)[1][:200], (
+        'the absent lens is not named: ' + out.split('VERDICT FILES', 1)[1][:200])
+    print("  PASS: the real stage discovers, reports, and names the absent one")
 
 
 def test_the_verifier_waiver_covers_discovered_files_too():
