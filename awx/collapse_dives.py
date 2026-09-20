@@ -13,6 +13,8 @@ the caller (grade_k / check_drc / check_connected as ever).
 
 usage: collapse_dives.py BOARD --out OUT [--nets CSV] [--max-bridge MM]
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 import argparse
 import math
 import os

@@ -37,6 +37,8 @@ be two-layer realized AT ALL, whatever the vias. It is reported as such.
 """
 from __future__ import annotations
 
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
+
 import argparse
 import os
 import subprocess

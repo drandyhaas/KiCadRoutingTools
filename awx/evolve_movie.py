@@ -85,6 +85,8 @@ highlights the wrong copper, and both still produce a plausible-looking movie.
 """
 from __future__ import annotations
 
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
+
 import argparse
 import glob
 import json

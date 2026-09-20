@@ -44,6 +44,8 @@ until the article is pad-clean; `--rotate DEG` rotates the whole board
 attached to the pair's nets on the input (a fanned bench) is stripped
 first, so the source is always fanned out in its final pose.
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 import contextlib
 import os
 import re

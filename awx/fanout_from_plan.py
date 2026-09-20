@@ -3424,6 +3424,14 @@ def explain_plan(choice, st, names, out_path=None, board=None, achieved=None):
 
 
 def main():
+    if len(sys.argv) < 2 or sys.argv[1].startswith('-'):
+        # The first argument is the OUTPUT tag, not a flag: `--help` once
+        # ran a round and wrote --help_src1.kicad_pcb into the caller's
+        # directory (the #937 registry probes every script that way).
+        print(__doc__.strip().splitlines()[0])
+        print('usage: python3 awx/fanout_from_plan.py OUT_TAG [BASE=...] [K=...] '
+              '(see the module docstring; a tag beginning with "-" is refused)')
+        sys.exit(2)
     out_path = sys.argv[1]
     rest = [a for a in sys.argv[2:] if not a.startswith('-')]
     K = int(rest[0]) if rest else 21

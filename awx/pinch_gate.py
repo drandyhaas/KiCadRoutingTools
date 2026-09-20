@@ -27,6 +27,8 @@ on a held-out K, before anything prices a pinch.
 Usage: pinch_gate.py [--roots tmp,tmp/s7,tmp/s8,tmp/s9,tmp/s10] [--ks 28,35,41,51]
                      [--workers 4] [--out tmp/s10/pinch_gate.tsv]
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
 import argparse
 import contextlib
 import glob

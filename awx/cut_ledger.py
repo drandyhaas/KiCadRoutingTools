@@ -19,6 +19,8 @@ only for search -- which is the guarantee worth building toward.
 usage: cut_ledger.py FANOUT_BOARD K [--dest DU1] [--step 0.2]
        [--net NET: corridor containing NET; default the biggest]
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
 import argparse
 import os
 import subprocess

@@ -137,6 +137,8 @@ DEBT THIS FILE DOES NOT PAY (recorded, not fixed)
     whose bus class differs from its Default class needs a decision that
     does not exist yet on either side.
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'utility'}   # #937: a research tool (awx), catalogued, shown at no door
 import os
 import sys
 from dataclasses import dataclass, field

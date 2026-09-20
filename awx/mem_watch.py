@@ -8,6 +8,12 @@ RSS, so a peak read under load is low without the cmprs column).
 Stops when OUT + '.stop' exists."""
 import os, re, subprocess, sys, time
 
+if len(sys.argv) < 2 or sys.argv[1].startswith('-'):
+    # OUT is a file to write to, not a flag: `--help` once watched forever
+    # into a file named --help (the #937 registry probes every script so).
+    print(__doc__.strip().splitlines()[0])
+    print('usage: python3 awx/mem_watch.py OUT [interval]')
+    sys.exit(2)
 out = sys.argv[1]
 iv = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
 pat = re.compile(r'(fanout_from_plan|braid|check_drc|grade_k|coherent_nets'

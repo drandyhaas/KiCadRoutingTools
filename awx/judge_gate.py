@@ -33,6 +33,8 @@ Usage: judge_gate.py [--roots tmp,tmp/s7,tmp/s8,tmp/s9] [--ks 28,35,41,51]
 Rows are cached in the --out file: a later run re-reads it and only
 grades boards it has not seen (delete the file to regrade everything).
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
 import argparse
 import contextlib
 import glob

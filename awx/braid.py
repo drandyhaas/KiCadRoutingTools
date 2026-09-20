@@ -50,6 +50,8 @@ corridor's real copper. That is the v1 of inter-corridor crossings; the
 global allocation (which corridor yields, pushing corridors outward to
 leave the middle for a wide one) is the next thing to build.
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 import argparse
 import contextlib
 import math

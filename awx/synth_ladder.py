@@ -50,6 +50,8 @@ Times are printed as an OBSERVATION. Nothing here budgets on a clock.
 """
 from __future__ import annotations
 
+KRT_TOOL = {'scope': [], 'kind': 'driver'}   # #937: a research tool (awx), catalogued, shown at no door
+
 import argparse
 import contextlib
 import io

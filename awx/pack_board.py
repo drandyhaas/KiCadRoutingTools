@@ -9,6 +9,8 @@ braid took a minute: the way to iterate on the pack.
 
     BRAID_PACK_DEBUG=1 python3 pack_board.py tmp/pk0_k41.kicad_pcb --out tmp/x_k41
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
 import argparse
 import json
 import os

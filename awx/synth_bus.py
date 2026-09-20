@@ -85,6 +85,8 @@ what the chain pays for the obstruction.
 """
 from __future__ import annotations
 
+KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catalogued, shown at no door
+
 import argparse
 import hashlib
 import json

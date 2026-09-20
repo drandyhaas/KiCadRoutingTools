@@ -23,6 +23,8 @@ does the FLOOR drop, not just this net's vias.
 
 usage: ledger_cal.py BOARD K [--verbose]
 """
+
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
 import argparse
 import math
 import os

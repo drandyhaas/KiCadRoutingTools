@@ -13,6 +13,8 @@ in the second, and only the floor can see it.
 """
 from __future__ import annotations
 
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}   # #937: a research tool (awx), catalogued, shown at no door
+
 import argparse
 import glob as _glob
 import os

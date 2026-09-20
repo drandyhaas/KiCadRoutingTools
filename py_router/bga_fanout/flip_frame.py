@@ -30,7 +30,13 @@ Point = Tuple[float, float]
 
 
 def is_back_side(footprint: Footprint) -> bool:
-    return str(footprint.layer or '').startswith('B')
+    """Whether the part sits on the back -- THE side rule (#878), not a copy
+    of it: `placement.legality.footprint_side` is the one home of "which
+    face is this layer name", and `tests/test_878_side_rule_sites.py`
+    refuses a re-spelling of it anywhere in production source."""
+    import _placer_path  # noqa: F401  (placement lives in py_placer/)
+    from placement.legality import footprint_side
+    return footprint_side(footprint) == 'B'
 
 
 def other_layer(name):
