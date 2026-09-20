@@ -90,6 +90,17 @@ class Movie:
         self.r = renderer
         # Off the renderer by default, so no call site has to learn about it.
         self.theme = theme or getattr(renderer, 'theme', _THEME_DARK)
+        # #1014: which event roles this run has ACTUALLY produced, so far. The
+        # key draws only these -- #896's rule, ported from
+        # `render_placement.draw_legend`: a legend listing a mark the picture
+        # does not carry teaches the reader to look for something that is not
+        # there. A movie of a clean run rips nothing and must not advertise a
+        # rip colour.
+        #
+        # It grows FRAME BY FRAME rather than being computed once over the
+        # whole film, and that is the honest reading: at frame 40 the key says
+        # what has happened by frame 40, never what is coming.
+        self.seen_events = []
         self.layers = layers
         self.rip_hold = rip_hold
         self.live_s: Dict[Tuple, _Seg] = {}
@@ -104,12 +115,37 @@ class Movie:
         if net_id in self.zone_avail:
             self.revealed_zones.add(net_id)
 
+    def _note_event(self, role):
+        if role not in self.seen_events:
+            self.seen_events.append(role)
+
+    def _key_overlay(self):
+        """The in-frame key, drawn through `frame(overlays=...)`.
+
+        That seam draws at supersampled resolution above copper and below the
+        label, and -- the reason this is cheap -- it costs NO FRAME GEOMETRY.
+        #946 ranked the key as step 8, after several layout changes, because it
+        ranked by where a key APPEARS rather than by how it is DRAWN.
+        """
+        if not self.seen_events:
+            return None
+        from render_chrome import event_rows, draw_key
+        rows = event_rows(self.theme, seen=self.seen_events)
+
+        def _draw(d, r):
+            ss = max(1, int(getattr(r, 'ss', 1)))
+            draw_key(d, rows, width=r.W * ss, height=r.H * ss,
+                     theme=self.theme, corner='bl', pad_scale=ss)
+        return _draw
+
     def _frame(self, hl_s, hl_v, color, label, mark='solid'):
+        ov = self._key_overlay()
         self.frames.append(self.r.frame(
             segments=list(self.live_s.values()), vias=list(self.live_v.values()),
             highlight_segments=hl_s, highlight_vias=hl_v,
             highlight_color=color, highlight_mark=mark, label=label,
-            zone_net_ids=self.revealed_zones))
+            zone_net_ids=self.revealed_zones,
+            overlays=[ov] if ov else None))
 
     def snapshot(self, label):
         """A plain frame of the current state (no highlight)."""
@@ -133,6 +169,10 @@ class Movie:
             if fresh or not only_new:
                 new_v.append(self.live_v[k])
         if new_s or new_v:
+            role = ('event_restored'
+                    if _add_color(event, self.theme)
+                    == self.theme.rgb('event_restored') else 'event_new')
+            self._note_event(role)
             self._frame(new_s, new_v, _add_color(event, self.theme), label)
 
     def remove(self, seg_keys, via_keys, label, by=None):
@@ -143,6 +183,7 @@ class Movie:
             return
         rlabel = label + (f"  (rip by {by})" if by else '  (rip)')
         for _ in range(max(1, self.rip_hold)):
+            self._note_event('event_ripped')
             self._frame(hl_s, hl_v, self.theme.rgb('event_ripped'), rlabel,
                         mark=self.theme.mark('event_ripped'))
         for k in seg_keys:

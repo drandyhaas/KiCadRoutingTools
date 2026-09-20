@@ -1300,44 +1300,17 @@ def draw_legend(d, r, spec) -> None:
             rows.append((C_ARROW, 'arrow', 'moved since --before'))
         if spec.hot_nets:
             rows.append((C_AIR_FAIL, 'line', 'failed net'))
-    try:
-        # Overlays draw on the SUPERSAMPLED canvas, which is `ss` times the
-        # output size -- so `r.H` (the output height) put the legend at 1/ss of
-        # the way up the image, on top of the board, instead of at the bottom.
-        # The caption escapes this because _label draws on the final image.
-        ss = max(1, int(getattr(r, 'ss', 1)))
-        W, H = r.W * ss, r.H * ss
-        font = load_font(max(10, H // 78))
-        pad, sw = 6 * ss, max(10, H // 90)
-        lh = sw + 5
-        h = lh * len(rows) + 8
-        w = max(int(d.textlength(t, font=font)) for _, _, t in rows) + sw + 20
-        y0 = H - h - pad
-        d.rectangle([pad, y0, pad + w, y0 + h], fill=(0, 0, 0))
-        for i, (col, kind, text) in enumerate(rows):
-            yy = y0 + 4 + i * lh
-            box = [pad + 6, yy, pad + 6 + sw, yy + sw]
-            if kind == 'solid':
-                d.rectangle(box, fill=col)
-            elif kind == 'ring':
-                d.ellipse(box, outline=col, width=2)
-            elif kind == 'dashed':
-                for k in range(0, sw, 4):
-                    d.line([box[0] + k, box[1], box[0] + k + 2, box[1]], fill=col)
-                    d.line([box[0] + k, box[3], box[0] + k + 2, box[3]], fill=col)
-            elif kind == 'hatch':
-                d.rectangle(box, outline=col, width=1)
-                for k in range(0, sw, 3):
-                    d.line([box[0] + k, box[3], box[0] + sw, box[1] + k], fill=col)
-            elif kind == 'arrow':
-                d.line([box[0], box[3], box[2], box[1]], fill=col, width=2)
-            else:
-                d.line([box[0], (box[1] + box[3]) // 2,
-                        box[2], (box[1] + box[3]) // 2], fill=col, width=2)
-            d.text((pad + 6 + sw + 6, yy - 1), text, fill=(225, 225, 225),
-                   font=font)
-    except Exception:                                          # noqa: BLE001
-        pass          # a legend is never worth failing a render over
+    # #1014: the ROWS are still chosen here -- which keys this panel can show
+    # is a placement question -- but the DRAWING moved to
+    # `py_router/render_chrome.draw_key`, so `animate_route` can draw the
+    # movie's key with the same marks rather than a second implementation of
+    # them. `pad_scale=r.ss` because an overlay draws on the SUPERSAMPLED
+    # canvas: using the output height here once put the legend a fraction of
+    # the way up the image, on top of the board.
+    from render_chrome import draw_key
+    ss = max(1, int(getattr(r, 'ss', 1)))
+    draw_key(d, rows, width=r.W * ss, height=r.H * ss,
+             theme=getattr(r, 'theme', None), corner='bl', pad_scale=ss)
 
 
 def crop_findings(model, view) -> Dict[str, int]:
