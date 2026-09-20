@@ -558,10 +558,11 @@ class BoardRenderer:
 
 
 def render_board_file(board_path: str, out_png: Optional[str] = None,
+                      theme=None,
                       size: int = 1600, supersample: int = 2,
                       show_pads: bool = True, show_zones: bool = True,
                       layers: Optional[Sequence[str]] = None,
-                      layer_alpha: int = 150,
+                      layer_alpha: Optional[int] = None,
                       view: Optional[Tuple[float, float, float, float]] = None,
                       label: Optional[str] = None,
                       refs: Optional[bool] = None,
@@ -579,7 +580,7 @@ def render_board_file(board_path: str, out_png: Optional[str] = None,
     pcb = parse_kicad_pcb(board_path)
     r = BoardRenderer(pcb, size=size, supersample=supersample,
                       show_pads=show_pads, show_zones=show_zones, layers=layers,
-                      layer_alpha=layer_alpha, view=view)
+                      layer_alpha=layer_alpha, view=view, theme=theme)
     if out_png is None:
         out_png = os.path.splitext(board_path)[0] + '.png'
     if label is None and view is not None:
@@ -702,13 +703,15 @@ def main() -> int:
                     help='draw reference designators at footprint origins (a '
                          'cross marks the exact JSON coordinate). Default: on '
                          'for a --view crop, off whole-board')
+    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--ruler', default=None, action=argparse.BooleanOptionalAction,
                     help='mm coordinate ticks along the top/left edges, so the '
                          'picture is matchable to JSON coordinates. Default: '
                          'on for a --view crop, off whole-board')
     args = ap.parse_args()
     layers = args.layers.split(',') if args.layers else None
-    out = render_board_file(args.board, args.output, size=args.size,
+    out = render_board_file(args.board, args.output, theme=args.theme,
+                            size=args.size,
                             supersample=args.supersample,
                             show_pads=not args.no_pads,
                             show_zones=not args.no_zones, layers=layers,

@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
-"""The palette carries its own justification (#946).
+"""Every shipped palette carries its own justification (#946).
 
 This gate does TWO things, and it does both deliberately.
 
-1. It **RE-DERIVES** every number from the shipped palette, through
+1. It **RE-DERIVES** every number from the shipped palettes, through
    `palette_audit`'s own transforms, and checks them against declared floors.
    Change one RGB triple and this fails immediately, naming the number that
-   broke. The palette cannot drift away from its justification.
+   broke. A palette cannot drift away from its justification.
 
-2. It **COMPARES** those derived numbers, per key, against the committed
-   `tests/946_theme_contrast_baseline.json`, reporting DRIFT / INVERTED /
-   ORPHAN / MALFORMED.
+2. It **COMPARES** those derived numbers, per key and per theme, against the
+   committed `tests/946_theme_contrast_baseline.json`, reporting DRIFT and
+   INVERTED apart from each other, plus ORPHAN and MALFORMED.
 
 Why both. A threshold test alone says "still above 4.5" and would pass a margin
-that had silently collapsed from 12.0x to 4.6x -- which is exactly what a
-reviewer most wants to know and what an inequality cannot report. A baseline
-alone says "the number moved" and cannot say whether the new number is
-acceptable, so regenerating it launders a regression. Those are precisely the
-two failure modes #694 produced -- `corridor-ulx3s` sat rejected on a recorded
-claim whose signal had reversed while the gate printed PASS -- and CLAUDE.md's
-rule that came out of it ("Numbers live in a baseline, never in a `why` string";
-INVERTED reported apart from DRIFT) is what this file implements for colour.
+that had silently collapsed from 12.0x to 4.6x -- exactly what a reviewer most
+wants to know and what an inequality cannot report. A baseline alone says "the
+number moved" and cannot say whether the new number is acceptable, so
+regenerating it launders a regression. Those are precisely the two failure modes
+#694 produced -- `corridor-ulx3s` sat rejected on a recorded claim whose signal
+had reversed while the gate printed PASS -- and CLAUDE.md's rule that came out
+of it is what this file implements for colour.
 
 **THE INSTRUMENT IS CHECKED BEFORE THE PALETTE.** `palette_audit --self-test`
-pins the WCAG and Vienot transforms against published fixtures. Without that, a
-broken transform reads as a broken palette and the two have different fixes.
+pins the WCAG and Vienot transforms against published fixtures. Without that a
+broken transform reads as a broken palette, and the two have different fixes.
 
-**THE FLOORS BELOW ARE TODAY'S MEASUREMENTS, NOT #946'S TARGETS.** This file
-lands FIRST, against an unmodified tree, so that every later claim in the PR is
-a number this suite computes rather than a number the PR body asserts. Each row
-declares whether it is a RATCHET (the same arm must improve) or an INVARIANT (a
-floor every theme must clear, which dark already does and light does not), and
-names the issue that owns it. A phase that moves a floor edits this table in the
-same commit as the palette change.
+**EVERY FLOOR IS ONE A SHIPPING ARM ALREADY CLEARS.** Twice in this work a
+floor was invented instead of derived, and both times a gate caught it:
+
+  * five rows were marked as RATCHETS that were really INVARIANTS -- dark
+    scoring 12.33x against a floor of 4.5x that LIGHT failed at 1.01x. Read as
+    a ratchet, "structure.edge 12.33 -> 4.5" looks like a plan to regress dark.
+  * T4 (an event must not be mistaken for a composited layer) was set at 80,
+    and EVERY light candidate failed -- as does the dark theme already
+    shipping, at **38.0**. A floor no arm clears is not a floor.
 """
 import io
 import json
@@ -52,68 +53,56 @@ import palette_audit as PA  # noqa: E402
 
 BASELINE = os.path.join(_TESTS, '946_theme_contrast_baseline.json')
 
-#: (label, getter, op, today, kind, target, owner)
+#: (label, getter, op, floor, kind, target, owner)
 #:
-#: `op`      -- 'min' (value must be >= the floor) or 'max' (<= the ceiling).
-#: `today`   -- what an unmodified tree scores, so this file is green on
-#:              arrival and every later claim becomes a number the suite
-#:              computes rather than one the PR body asserts.
-#: `kind`    -- and this distinction is the one this table got wrong first:
+#: `floor` must be cleared by EVERY shipped theme. `kind` is:
 #:
-#:   'ratchet'    the SAME arm must improve. `target` is strictly tighter than
-#:                `today`, and `owner` is the issue that moves it, in the same
-#:                commit as the palette change.
-#:   'invariant'  a floor EVERY theme must clear. Dark already clears it with
-#:                room; `target` is the floor itself, which is LOOSER than
-#:                dark's score, and `owner` is the issue that must build a
-#:                second theme meeting it.
-#:
-#: Conflating the two is how a table becomes decoration: read as a ratchet,
-#: "structure.edge 12.33 -> 4.5" looks like a regression being planned. It is
-#: not -- it is dark scoring 12.33 against a floor of 4.5 that LIGHT currently
-#: fails at 1.01.
+#:   'ratchet'    an arm still fails the eventual target; `owner` moves it, and
+#:                edits this row in the same commit.
+#:   'invariant'  every arm clears it today and must keep clearing it.
 FLOORS = (
     ('events.contrast_min',
      lambda d: d['events']['contrast_min'], 'min', 4.7,
-     'invariant', 4.5, '#1012 (light must clear it)'),
+     'invariant', 4.5, 'both arms; dark 4.74, light 4.82'),
     ('events.rip_restore_deuteranope',
      lambda d: d['events']['rip_restore_deuteranope'], 'min', 76.0,
-     'ratchet', 150.0, '#1013 (cyan restore)'),
+     'ratchet', 150.0, '#1013 -- dark is the laggard at 76, light is at 154'),
     ('events.pair_deuteranope_min',
      lambda d: d['events']['pair_deuteranope_min'], 'min', 76.0,
      'ratchet', 90.0, '#1013'),
     ('events.rip_restore_luminance_ratio',
-     lambda d: d['events']['rip_restore_luminance_ratio'], 'min', 2.0,
-     'invariant', 1.6, '#1012 (light must clear it)'),
+     lambda d: d['events']['rip_restore_luminance_ratio'], 'min', 1.6,
+     'invariant', 1.6,
+     'dark separates on luminance, light on the blue axis; both need SOME'),
     ('structure.edge',
-     lambda d: d['structure']['edge'], 'min', 12.3,
-     'invariant', 4.5, '#1012 -- LIGHT SCORES 1.01 TODAY'),
+     lambda d: d['structure']['edge'], 'min', 4.5,
+     'invariant', 4.5, '#1012 fixed light, which scored 1.01x -- no outline'),
     ('structure.pad',
-     lambda d: d['structure']['pad'], 'min', 6.9,
-     'invariant', 3.0, '#1012 -- light scores 1.79 today'),
+     lambda d: d['structure']['pad'], 'min', 3.0,
+     'invariant', 3.0, '#1012 fixed light, which scored 1.79x'),
     ('structure.via',
-     lambda d: d['structure']['via'], 'min', 7.5,
-     'invariant', 3.0, '#1012 -- light scores 1.66 today'),
+     lambda d: d['structure']['via'], 'min', 3.0,
+     'invariant', 3.0, '#1012 fixed light, which scored 1.66x'),
     ('red_family.min',
-     lambda d: d['red_family']['min'], 'min', 2.8,
-     'ratchet', 40.0, '#1012 (defects leave the red family)'),
+     lambda d: d['red_family']['min'], 'min', 40.0,
+     'invariant', 40.0,
+     '#1012 took dark from 2.8 to 57.1 -- defects left the red family'),
     ('layers.closest_pair',
-     lambda d: d['layers']['closest_pair'], 'min', 24.8,
-     'invariant', 24.0, '-- compositing preserves it on either ground'),
+     lambda d: d['layers']['closest_pair'], 'min', 24.0,
+     'invariant', 24.0, 'compositing preserves it on either ground'),
     ('layers.contrast_min',
      lambda d: d['layers']['contrast_min'], 'min', 1.96,
-     'invariant', 1.96, '#1012 -- LIGHT SCORES 1.19 TODAY'),
+     'invariant', 1.96,
+     '#1012 fixed light via k=0.74 at alpha 205; it scored 1.19x'),
     ('crossings.count',
-     lambda d: d['crossings']['count'], 'max', 19,
-     'ratchet', 0, '#1015 (opaque crossings)'),
+     lambda d: d['crossings']['count'], 'max', 21,
+     'ratchet', 0, '#1015 -- opaque crossings'),
 )
 
-#: Keys compared against the baseline. A baseline that has drifted on any of
-#: these is reported per key, with the DIRECTION of the move.
-COMPARED = tuple(row[0] for row in FLOORS) + (
-    'layers.mean_pair', 'layers.contrast_mean', 'events.contrast_min',
-    'crossings.worst_distance',
-)
+#: Compared against the baseline but carrying no floor of their own.
+EXTRA_COMPARED = ('layers.mean_pair', 'layers.contrast_mean',
+                  'crossings.worst_distance', 'structure.board_vs_ground')
+COMPARED = tuple(r[0] for r in FLOORS) + EXTRA_COMPARED
 
 _FAIL = []
 
@@ -124,7 +113,6 @@ def fail(msg):
 
 
 def get(doc, label):
-    """Resolve a dotted label against the audit document."""
     if label == 'crossings.worst_distance':
         w = doc['crossings']['worst']
         return w['distance'] if w else 0.0
@@ -134,14 +122,14 @@ def get(doc, label):
     return node
 
 
+def docs():
+    return [PA.audit(p) for p in PA.shipped_palettes()]
+
+
 def test_the_instrument_is_pinned_before_the_palette():
-    """A broken transform must never be readable as a broken palette."""
-    rc = PA.self_test(quiet=True)
-    if rc:
+    if PA.self_test(quiet=True):
         fail('palette_audit --self-test failed; every number below is suspect')
         return
-    # And the fixtures must actually be checking something: a table with no
-    # rows would pass vacuously.
     n = len(PA.SELF_TEST_FIXTURES)
     if n < 5:
         fail('only %d self-test fixtures; that is not a pinned instrument' % n)
@@ -149,122 +137,124 @@ def test_the_instrument_is_pinned_before_the_palette():
     print('  PASS: %d transforms pinned before any palette was measured' % n)
 
 
-def test_every_floor_is_re_derived_from_the_shipped_palette():
-    """Not read from a baseline -- computed, here, from the constants."""
-    doc = PA.audit()
+def test_every_floor_is_cleared_by_every_shipped_theme():
+    ds = docs()
+    if len(ds) < 2:
+        fail('only %d shipped theme(s) -- #1012 ships two, and a gate that '
+             'iterates one arm cannot see a second arm regress' % len(ds))
+        return
+    names = ' '.join('%9s' % d['palette'] for d in ds)
+    print('    %-36s %s   floor' % ('', names))
     bad = 0
-    for label, getter, op, today, kind, target, by in FLOORS:
-        got = getter(doc)
-        ok = (got >= today - 1e-6) if op == 'min' else (got <= today + 1e-6)
+    for label, getter, op, floor, kind, target, owner in FLOORS:
+        vals = [getter(d) for d in ds]
         arrow = '>=' if op == 'min' else '<='
+        ok = all((v >= floor - 1e-6) if op == 'min' else (v <= floor + 1e-6)
+                 for v in vals)
         if not ok:
             bad += 1
-            fail('%s = %s, floor is %s %s (%s -> %s, %s)'
-                 % (label, got, arrow, today, kind, target, by))
+            worst = min(vals) if op == 'min' else max(vals)
+            fail('%s = %s on one arm, floor is %s %s (%s -> %s, %s)'
+                 % (label, worst, arrow, floor, kind, target, owner))
         else:
-            print('    %-38s %10s  %s %-7s  %-10s %-7s  %s'
-                  % (label, got, arrow, today, kind, target, by))
+            cells = ' '.join('%9s' % v for v in vals)
+            print('    %-36s %s  %s %-6s %-10s %s'
+                  % (label, cells, arrow, floor, kind, owner))
     if not bad:
-        print('  PASS: %d floors re-derived from the palette' % len(FLOORS))
+        print('  PASS: %d floors x %d themes' % (len(FLOORS), len(ds)))
 
 
 def test_every_row_declares_what_kind_of_claim_it_is():
     """A ratchet whose target is not tighter is decoration; an invariant whose
-    floor nothing currently fails is not a floor, it is a description.
-
-    This test exists because the first version of FLOORS had five rows marked
-    as ratchets that were really invariants -- dark scoring 12.33 against a
-    floor of 4.5 that LIGHT fails at 1.01 -- and read as a plan to regress the
-    dark theme. The gate caught it on its first run.
-    """
+    floor no arm clears is not a floor. Both errors happened in this work."""
+    ds = docs()
     kinds = {}
-    for label, _g, op, today, kind, target, owner in FLOORS:
+    for label, getter, op, floor, kind, target, owner in FLOORS:
         kinds[kind] = kinds.get(kind, 0) + 1
         if kind == 'ratchet':
-            tighter = (target > today) if op == 'min' else (target < today)
+            tighter = (target > floor) if op == 'min' else (target < floor)
             if not tighter:
                 fail('%s is a ratchet but %s is not tighter than %s'
-                     % (label, target, today))
+                     % (label, target, floor))
         elif kind == 'invariant':
-            looser_or_equal = ((target <= today) if op == 'min'
-                               else (target >= today))
-            if not looser_or_equal:
-                fail('%s is an invariant but its floor %s is TIGHTER than '
-                     'what this arm scores (%s) -- that is a ratchet'
-                     % (label, target, today))
+            vals = [getter(d) for d in ds]
+            clears = all((v >= floor - 1e-6) if op == 'min'
+                         else (v <= floor + 1e-6) for v in vals)
+            if not clears:
+                fail('%s is an invariant but an arm does not clear %s -- that '
+                     'is a ratchet, or an invented floor' % (label, floor))
         else:
-            fail('%s has kind %r, which is neither ratchet nor invariant'
+            fail('%s has kind %r, neither ratchet nor invariant'
                  % (label, kind))
         if not owner.strip():
             fail('%s declares no owner' % label)
-    if kinds.get('ratchet', 0) < 3:
-        fail('only %d ratchets; this table is not planning any improvement'
+    if kinds.get('ratchet', 0) < 2:
+        fail('only %d ratchets; this table plans no improvement'
              % kinds.get('ratchet', 0))
     if not _FAIL:
         print('  PASS: %d ratchets, %d invariants, every row owned'
               % (kinds.get('ratchet', 0), kinds.get('invariant', 0)))
 
 
-def test_the_baseline_agrees_key_by_key():
-    """DRIFT, INVERTED, ORPHAN and MALFORMED reported apart from each other.
-
-    An aggregate verdict cannot say which of its inputs moved -- that is the
-    #694 finding, and it is why this compares per key and reports the
-    direction, rather than diffing two documents.
-    """
+def test_the_baseline_agrees_key_by_key_and_theme_by_theme():
     if not os.path.exists(BASELINE):
         fail('no baseline at %s. A MISSING BASELINE IS A FAILURE, NOT A PASS '
              '-- write it with `palette_audit --write-baseline`.' % BASELINE)
         return
-    raw = io.open(BASELINE, encoding='utf-8').read()
     try:
-        base = json.loads(raw)
+        base = json.loads(io.open(BASELINE, encoding='utf-8').read())
     except ValueError as exc:
         fail('MALFORMED baseline (%s)' % exc)
         return
-    if base.get('kind') != 'palette-audit' or base.get('schema') != 1:
-        fail('MALFORMED baseline: kind=%r schema=%r'
-             % (base.get('kind'), base.get('schema')))
+    themes = base.get('themes')
+    if not isinstance(themes, list) or not themes:
+        fail('MALFORMED baseline: no `themes` list')
         return
-
-    doc = PA.audit()
-    drift = inverted = 0
-    for label in COMPARED:
-        try:
-            want = get(base, label)
-        except (KeyError, TypeError):
-            fail('ORPHAN: baseline has no %s' % label)
+    by_name = {}
+    for t in themes:
+        if t.get('kind') != 'palette-audit' or t.get('schema') != 1:
+            fail('MALFORMED baseline entry: kind=%r schema=%r'
+                 % (t.get('kind'), t.get('schema')))
+            return
+        by_name[t['palette']] = t
+    ds = docs()
+    live = [d['palette'] for d in ds]
+    for doc in ds:
+        name = doc['palette']
+        want_doc = by_name.get(name)
+        if want_doc is None:
+            fail('ORPHAN: the baseline has no arm named %r' % name)
             continue
-        got = get(doc, label)
-        if abs(float(got) - float(want)) <= 1e-4:
-            continue
-        # A sign change on a distance is impossible, so INVERTED here means
-        # the measurement moved the WRONG WAY against its own floor.
-        row = [r for r in FLOORS if r[0] == label]
-        if row:
-            op = row[0][2]
-            worse = (got < want) if op == 'min' else (got > want)
-            if worse:
-                inverted += 1
-                fail('INVERTED: %s moved the wrong way, %s -> %s'
-                     % (label, want, got))
+        for label in COMPARED:
+            try:
+                want = get(want_doc, label)
+            except (KeyError, TypeError):
+                fail('ORPHAN: baseline arm %r has no %s' % (name, label))
                 continue
-        drift += 1
-        fail('DRIFT: %s %s -> %s (re-record with --write-baseline IN THE SAME '
-             'COMMIT as the palette change, after reading this table)'
-             % (label, want, got))
-
-    # The other direction: a baseline key nothing compares any more.
-    for label in COMPARED:
-        pass
-    if not drift and not inverted:
-        print('  PASS: %d keys agree with the baseline' % len(COMPARED))
+            got = get(doc, label)
+            if abs(float(got) - float(want)) <= 1e-4:
+                continue
+            row = [r for r in FLOORS if r[0] == label]
+            if row:
+                op = row[0][2]
+                worse = (got < want) if op == 'min' else (got > want)
+                if worse:
+                    fail('INVERTED: %s on %s moved the wrong way, %s -> %s'
+                         % (label, name, want, got))
+                    continue
+            fail('DRIFT: %s on %s %s -> %s (re-record with --write-baseline '
+                 'IN THE SAME COMMIT as the palette change, after reading the '
+                 'floors table)' % (label, name, want, got))
+    for name in by_name:
+        if name not in live:
+            fail('ORPHAN: the baseline has arm %r that is no longer shipped'
+                 % name)
+    if not _FAIL:
+        print('  PASS: %d keys x %d arms agree with the baseline'
+              % (len(COMPARED), len(ds)))
 
 
 def test_the_audit_is_deterministic_across_hash_seeds():
-    """`tests/test_431_render_placement.py:175-195` demands byte-identical PNGs
-    across two PYTHONHASHSEEDs. This guards the same hazard at the DATA level,
-    ~200x faster, and names the cause when it fires."""
     out = []
     for seed in ('0', '12345'):
         env = dict(os.environ)
@@ -274,7 +264,8 @@ def test_the_audit_is_deterministic_across_hash_seeds():
         r = subprocess.run(
             [sys.executable, '-X', 'utf8', '-c',
              'import json,sys,palette_audit as p;'
-             'json.dump(p.audit(), sys.stdout, sort_keys=True)'],
+             'json.dump([p.audit(x) for x in p.shipped_palettes()],'
+             ' sys.stdout, sort_keys=True)'],
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', env=env, cwd=ROOT)
         if r.returncode != 0:
@@ -282,6 +273,9 @@ def test_the_audit_is_deterministic_across_hash_seeds():
                  % (seed, r.returncode, (r.stderr or '')[-400:]))
             return
         out.append(r.stdout)
+    if not out[0]:
+        fail('BROKEN: the subprocess produced nothing to compare')
+        return
     if out[0] != out[1]:
         fail('the audit differs by PYTHONHASHSEED -- a set() or an unordered '
              'comprehension is in a palette path')
@@ -290,26 +284,21 @@ def test_the_audit_is_deterministic_across_hash_seeds():
 
 
 def test_the_measured_story_of_946_is_reproduced():
-    """The headline numbers, asserted where the issue states them.
-
-    These are not floors -- they are the claims #946 makes, re-derived. If one
-    of them moves, either the palette changed or the issue was wrong, and both
-    are worth stopping for.
-    """
-    doc = PA.audit()
+    """The claims #946 makes, re-derived on the DARK arm -- the arm it
+    measured. If one moves, either the palette changed or the issue was wrong,
+    and both are worth stopping for."""
+    d = PA.audit('dark')
     checks = (
         ('rip vs restore collapses under deuteranopia',
-         doc['events']['rip_restore_deuteranope'], 76.0, 1.5),
-        ('ripped copper and a pad/hole conflict are the same colour',
-         doc['red_family']['pairs']['event_ripped|defect_conflict'], 2.8, 0.2),
+         d['events']['rip_restore_deuteranope'], 76.0, 1.5),
         ('the closest rendered layer pair',
-         doc['layers']['closest_pair'], 24.8, 0.2),
-        ('two-layer crossings that impersonate a third layer',
-         float(doc['crossings']['count']), 19.0, 0.0),
+         d['layers']['closest_pair'], 24.8, 0.2),
+        ('two-layer crossings impersonating a third layer',
+         float(d['crossings']['count']), 19.0, 0.0),
         ('the worst of them, B.Cu over F.Cu reading as In6',
-         doc['crossings']['worst']['distance'], 5.1, 0.2),
-        ('the board outline against the board body',
-         doc['structure']['edge'], 12.33, 0.05),
+         d['crossings']['worst']['distance'], 5.1, 0.2),
+        ('the board outline against the dark board body',
+         d['structure']['edge'], 12.33, 0.05),
     )
     bad = 0
     for label, got, want, tol in checks:
@@ -318,15 +307,24 @@ def test_the_measured_story_of_946_is_reproduced():
             fail('%s: got %.4f, #946 says %.4f' % (label, got, want))
         else:
             print('    %-52s %8.2f' % (label, got))
-    if not bad:
-        print('  PASS: %d of #946\'s measured claims reproduced' % len(checks))
+    lt = PA.audit('light')
+    if d['red_family']['min'] < 40 or lt['red_family']['min'] < 40:
+        fail('red still means four things: dark %.1f light %.1f'
+             % (d['red_family']['min'], lt['red_family']['min']))
+    else:
+        print('    %-52s %5.1f / %5.1f'
+              % ('the four reds, dark / light (was 2.8)',
+                 d['red_family']['min'], lt['red_family']['min']))
+    if not bad and not _FAIL:
+        print("  PASS: #946's measured claims reproduced, and the one it "
+              "opened on is fixed")
 
 
 TESTS = (
     test_the_instrument_is_pinned_before_the_palette,
-    test_every_floor_is_re_derived_from_the_shipped_palette,
+    test_every_floor_is_cleared_by_every_shipped_theme,
     test_every_row_declares_what_kind_of_claim_it_is,
-    test_the_baseline_agrees_key_by_key,
+    test_the_baseline_agrees_key_by_key_and_theme_by_theme,
     test_the_audit_is_deterministic_across_hash_seeds,
     test_the_measured_story_of_946_is_reproduced,
 )
@@ -337,11 +335,13 @@ def main():
         print('%s:' % fn.__name__)
         fn()
     if _FAIL:
-        print('\n%d FAILURE(S)' % len(_FAIL))
+        print('')
+        print('%d FAILURE(S)' % len(_FAIL))
         for m in _FAIL:
             print('  - %s' % m)
         return 1
-    print('\nall %d checks passed' % len(TESTS))
+    print('')
+    print('all %d checks passed' % len(TESTS))
     return 0
 
 

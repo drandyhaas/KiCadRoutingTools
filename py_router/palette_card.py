@@ -72,15 +72,27 @@ def _swatch_row(d, x, y, w, h, rgb, label, sub, show_cvd=True):
         _text(d, (x + w - 8, y + h // 2 - 7), sub, 11, ink, anchor='ra')
 
 
-def draw_card(doc=None, width=1180):
-    """The whole measurement as one image."""
+def draw_card(doc=None, width=1180, theme_name='dark'):
+    """The whole measurement as one image, drawn in the arm it reports on."""
     from PIL import Image, ImageDraw
+    import render_theme as RT
 
-    doc = PA.audit() if doc is None else doc
+    th = RT.theme(theme_name)
+    global _BG, _RULE, _INK, _DIM, _FAINT, _GOLD, _BAD, _OK
+    _BG = th.rgb('ground')
+    _RULE = th.rgb('chrome_rule')
+    _INK = th.rgb('chrome_text') if theme_name == 'dark' else th.rgb('chrome_text')
+    _DIM = th.rgb('chrome_text_dim')
+    _FAINT = th.rgb('chrome_text_faint')
+    _GOLD = th.rgb('pad')
+    _BAD = th.rgb('event_ripped')
+    _OK = th.rgb('status_kept')
+
+    doc = PA.audit(theme_name) if doc is None else doc
     ev, st, rf = doc['events'], doc['structure'], doc['red_family']
     ly, cr = doc['layers'], doc['crossings']
 
-    pal = PA.current_palette()
+    pal = PA.current_palette(theme_name)
     M, GAP = 34, 26
     colw = (width - M * 2 - GAP) // 2
     rowh, head = 34, 26
@@ -95,7 +107,8 @@ def draw_card(doc=None, width=1180):
 
     # ---- masthead
     _text(d, (M, 30), 'Routing movie palette', 30, _INK)
-    _text(d, (M, 68), 'measured off the source, %s' % doc['palette'], 14, _DIM)
+    _text(d, (M, 68), 'the %s arm, measured off the source' % doc['palette'],
+          14, _DIM)
     _text(d, (width - M, 34),
           'left half: as authored     right half: deuteranope (Vienot 1999)',
           12, _FAINT, anchor='ra')
@@ -115,6 +128,7 @@ def draw_card(doc=None, width=1180):
                     '%.2fx vs board' % ev['contrast_vs_board'][role])
         y += rowh + 4
     y += 10
+    worst_pre = rf['min']
     _text(d, (lx, y), 'RIP vs RESTORE', 12, _GOLD)
     _text(d, (lx + 150, y),
           '%.0f apart normally,  %.0f under deuteranopia'
@@ -123,7 +137,9 @@ def draw_card(doc=None, width=1180):
           _BAD if ev['rip_restore_deuteranope'] < 120 else _OK)
     y += head + 4
 
-    _text(d, (lx, y), 'RED MEANS FOUR THINGS', 12, _GOLD)
+    _text(d, (lx, y),
+          'RED MEANS FOUR THINGS' if worst_pre < 40 else
+          'FOUR MEANINGS, FOUR COLOURS', 12, _GOLD)
     y += head
     meanings = {
         'event_ripped': 'copper the router DESTROYED',
@@ -136,9 +152,11 @@ def draw_card(doc=None, width=1180):
                     show_cvd=False)
         y += rowh + 4
     worst = rf['min']
-    _text(d, (lx, y + 6),
-          'closest pair: %.1f apart  -- indistinguishable, opposite in kind'
-          % worst, 12, _BAD if worst < 40 else _OK)
+    note = ('closest pair: %.1f apart  -- indistinguishable, and opposite in '
+            'kind' % worst) if worst < 40 else (
+        'closest pair: %.1f apart  -- #1012 took this from 2.8; red now means '
+        'ONE thing' % worst)
+    _text(d, (lx, y + 6), note, 12, _BAD if worst < 40 else _OK)
     y_left = y + 6 + 18
 
     # ---- right: structure tokens, on both grounds
@@ -146,9 +164,10 @@ def draw_card(doc=None, width=1180):
     _text(d, (rx, y0 + 16),
           'contrast against the board body it is drawn on', 11, _FAINT)
     y = y0 + head + 16
-    LIGHT_BODY = (223, 227, 218)
-    cols = (('dark  (26,34,28)', pal['board_body']),
-            ('light (223,227,218)', LIGHT_BODY))
+    other = RT.theme('light' if theme_name == 'dark' else 'dark')
+    cols = ((('%s %s' % (th.name, th.rgb('board_body'))), th.rgb('board_body')),
+            (('%s %s' % (other.name, other.rgb('board_body'))),
+             other.rgb('board_body')))
     cw = (colw - 150) // 2
     _text(d, (rx + 150, y - 16), cols[0][0], 11, _DIM)
     _text(d, (rx + 150 + cw + 10, y - 16), cols[1][0], 11, _DIM)
@@ -167,11 +186,11 @@ def draw_card(doc=None, width=1180):
                   _BAD if c < 3.0 else ink, anchor='ra')
         y += rowh + 4
     _text(d, (rx, y + 8),
-          'the outline scores %.2fx on dark and %.2fx on light'
-          % (PA.contrast_ratio(pal['edge'], pal['board_body']),
-             PA.contrast_ratio(pal['edge'], LIGHT_BODY)), 12, _BAD)
+          'this arm draws its OWN structure tokens; the right column shows '
+          'them on the other ground', 12, _DIM)
     _text(d, (rx, y + 26),
-          'on a light ground the board has no edge at all', 12, _DIM)
+          'edge %.2fx here -- #946 never measured these'
+          % PA.contrast_ratio(pal['edge'], th.rgb('board_body')), 12, _DIM)
     y_right = y + 26 + 18
 
     # ---- the layer strip, as rendered
@@ -211,10 +230,11 @@ def main(argv=None):
         description='Draw the palette measurements as a picture (#946).')
     ap.add_argument('-o', '--output', default='palette_card.png')
     ap.add_argument('--width', type=int, default=1180)
+    ap.add_argument('--theme', default='dark')
     a = ap.parse_args(argv)
     if PA.self_test(quiet=True):
         return 1
-    img = draw_card(width=a.width)
+    img = draw_card(width=a.width, theme_name=a.theme)
     os.makedirs(os.path.dirname(os.path.abspath(a.output)) or '.',
                 exist_ok=True)
     img.save(a.output)

@@ -291,6 +291,17 @@ def refresh() -> None:
     # feature with no dialog control of its own reaches every front end at once.
     g['MOVIE_PANELS'] = _s('KICAD_MOVIE_PANELS', 'xray')
 
+    # #946/#1012: the render theme. 'dark' (default) is the domain convention
+    # -- KiCad's own canvas, and what every existing pixel-probing test
+    # assumes. Same shape and same reason as MOVIE_CAMERA and MOVIE_PANELS
+    # above: the GUI recorder passes no render parameters at all
+    # (movie_recorder.py:160 is `make_movie(boards, out=out, quiet=True)`), so
+    # one variable is how a feature with no dialog control of its own reaches
+    # every front end at once. The knob is for a PRODUCER making a figure for a
+    # light-background document, not for a viewer -- a rendered file's ground
+    # cannot be changed afterwards.
+    g['RENDER_THEME'] = _s('KICAD_RENDER_THEME', 'dark')
+
     # --- truthy diagnostics / overrides -------------------------------------
     g['UNBLOCK_DEBUG'] = _truthy('KICAD_UNBLOCK_DEBUG')
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')

@@ -212,13 +212,15 @@ class Movie:
 # ---------------------------------------------------------------------------
 # Drivers
 # ---------------------------------------------------------------------------
-def _renderer(board_path, layers, size, ss, alpha, dynamic_zones=False):
+def _renderer(board_path, layers, size, ss, alpha, dynamic_zones=False,
+              theme=None):
     from kicad_parser import parse_kicad_pcb
     from route_render import BoardRenderer
     pcb = parse_kicad_pcb(board_path)
     lyrs = layers or list(pcb.board_info.copper_layers)
     return BoardRenderer(pcb, size=size, supersample=ss, layers=lyrs,
-                         layer_alpha=alpha, dynamic_zones=dynamic_zones), lyrs
+                         layer_alpha=alpha, dynamic_zones=dynamic_zones,
+                         theme=theme), lyrs
 
 
 def build_single(trace, board_path, size, ss, alpha, rip_hold):
@@ -296,7 +298,7 @@ def build_run(run_dir, size, ss, alpha, rip_hold, chunks):
 
 
 def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
-                 marks=None):
+                 marks=None, theme=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
     final board. ``build_run`` is this with the chain discovered from a run dir.
 
@@ -318,7 +320,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # sitting under every frame from the start. It is ALSO what lets a Stage
     # animate part motion: with it, frame() draws pads per frame from
     # renderer.pcb, so re-pointing that attribute moves the parts.
-    r, layers = _renderer(final, None, size, ss, alpha, dynamic_zones=True)
+    r, layers = _renderer(final, None, size, ss, alpha, dynamic_zones=True,
+                          theme=theme)
     m = Movie(r, layers, rip_hold=rip_hold)
     if stage is not None:
         stage.attach(m, r, layers)

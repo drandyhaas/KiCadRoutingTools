@@ -114,31 +114,20 @@ def composite(fg: Sequence[int], bg: Sequence[int], alpha: int) -> RGB:
 # the palette under measurement
 # --------------------------------------------------------------------------
 
-#: Today's constants, harvested from the modules that own them. #1011 replaces
-#: this with `render_theme.THEMES`; the maths above does not change, which is
-#: the whole point of landing the instrument first.
-_TODAY = {
-    'name': 'dark (as shipped)',
-    'ground': (14, 16, 18),          # route_render._BG
-    'board_body': (26, 34, 28),      # route_render._BOARD_FILL
-    'edge': (225, 225, 210),         # route_render._EDGE
-    'pad': (192, 168, 96),           # route_render._PAD
-    'pad_hole': (10, 10, 10),        # route_render._PAD_HOLE
-    'via': (176, 176, 184),          # route_render._VIA
-    'hilite': (255, 60, 60),         # route_render._HILITE
-    'event_new': (250, 250, 250),    # animate_route._NEW
-    'event_restored': (86, 224, 96), # animate_route._RESTORE
-    'event_ripped': (255, 66, 66),   # animate_route._RIP
-    'defect_conflict': (255, 64, 64),    # render_placement.C_CONFLICT
-    'defect_net_fail': (232, 72, 72),    # render_placement.C_AIR_FAIL
-    'status_tried': (200, 60, 60),       # make_film._badge default
-    'layer_alpha': 150,
-    'layers': (
-        (208, 64, 58), (70, 130, 210), (96, 190, 96), (214, 190, 78),
-        (196, 110, 206), (94, 200, 200), (224, 150, 70), (150, 150, 224),
-        (170, 210, 90), (210, 120, 150),
-    ),
-}
+#: The palette under measurement is now whatever `render_theme` declares --
+#: #1011 made that module the single source, so this reads it rather than
+#: keeping a second copy that could drift from the thing it is auditing.
+def palette_from_theme(th) -> Dict:
+    """A theme, flattened into the shape the measurements below consume."""
+    out = {'name': th.name, 'layer_alpha': th.layer_alpha,
+           'layers': tuple(th.layers)}
+    for role in ('ground', 'board_body', 'edge', 'pad', 'pad_hole', 'via',
+                 'hilite', 'event_new', 'event_restored', 'event_ripped',
+                 'defect_conflict', 'defect_net_fail', 'status_tried'):
+        src = {'edge': 'board_edge'}.get(role, role)
+        out[role] = th.rgb(src)
+    return out
+
 
 #: Names in stack order, matching `route_render.layer_palette`'s assignment.
 LAYER_NAMES = ('F.Cu', 'B.Cu', 'In1', 'In2', 'In3',
@@ -152,12 +141,20 @@ RED_FAMILY = ('event_ripped', 'defect_conflict', 'defect_net_fail',
               'status_tried')
 
 
-def current_palette() -> Dict:
-    """Today's palette, as a plain dict. Returns a copy: a caller proposing a
-    variant must not mutate the shipped one underneath the gate."""
-    out = dict(_TODAY)
-    out['layers'] = tuple(_TODAY['layers'])
-    return out
+def current_palette(theme_name: str = 'dark') -> Dict:
+    """One shipped theme, flattened. A copy, so a caller proposing a variant
+    cannot mutate the shipped one underneath the gate."""
+    import render_theme
+    return palette_from_theme(render_theme.theme(theme_name))
+
+
+def shipped_palettes() -> Tuple[Dict, ...]:
+    """Every shipped theme, in name order. The gate iterates this, which is
+    the whole reason THEMES is a closed mapping: an unmeasured theme is worse
+    than no theme."""
+    import render_theme
+    return tuple(palette_from_theme(render_theme.THEMES[n])
+                 for n in sorted(render_theme.THEMES))
 
 
 # --------------------------------------------------------------------------
@@ -289,9 +286,17 @@ def measure_crossings(pal: Dict, threshold: float = 34.0,
             'worst': hits[0] if hits else None, 'hits': hits}
 
 
-def audit(pal: Dict = None) -> Dict:
-    """Every measurement, as one JSON-shaped document."""
-    pal = current_palette() if pal is None else pal
+def audit(pal=None) -> Dict:
+    """Every measurement, as one JSON-shaped document.
+
+    `pal` may be a flattened palette, a Theme, or a theme name.
+    """
+    if pal is None:
+        pal = current_palette()
+    elif isinstance(pal, str):
+        pal = current_palette(pal)
+    elif not isinstance(pal, dict):
+        pal = palette_from_theme(pal)
     return {
         'schema': 1,
         'kind': 'palette-audit',
@@ -419,15 +424,21 @@ def main(argv=None) -> int:
     if self_test(quiet=True):
         return 1
 
-    doc = audit()
+    docs = [audit(p) for p in shipped_palettes()]
+    doc = docs[0]
     if not a.quiet:
-        print(format_report(doc))
+        for i, dd in enumerate(docs):
+            if i:
+                print('')
+                print('=' * 74)
+                print('')
+            print(format_report(dd))
 
     if a.json:
         os.makedirs(os.path.dirname(os.path.abspath(a.json)) or '.',
                     exist_ok=True)
         with open(a.json, 'w', encoding='utf-8') as fh:
-            json.dump(doc, fh, indent=1, sort_keys=True)
+            json.dump({'themes': docs}, fh, indent=1, sort_keys=True)
             fh.write('\n')
         if not a.quiet:
             print('\nwrote %s' % a.json)
@@ -436,7 +447,7 @@ def main(argv=None) -> int:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         path = os.path.join(root, 'tests', '946_theme_contrast_baseline.json')
         with open(path, 'w', encoding='utf-8') as fh:
-            json.dump(doc, fh, indent=1, sort_keys=True)
+            json.dump({'themes': docs}, fh, indent=1, sort_keys=True)
             fh.write('\n')
         print('wrote baseline %s' % path)
 

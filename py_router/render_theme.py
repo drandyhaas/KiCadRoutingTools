@@ -199,11 +199,12 @@ _DARK = {
     'event_restored':     (86, 224, 96),     # _RESTORE  -- #1013 moves to cyan
     'event_ripped':       (255, 66, 66),     # _RIP
     # render_placement
-    'defect_conflict':    (255, 64, 64),     # C_CONFLICT
+    'defect_conflict':    (255, 140, 0),     # #1012: was (255,64,64),
+                                             # 2.8 from event_ripped
     'defect_hole':        (255, 160, 64),    # C_HOLE
     'defect_courtyard':   (255, 120, 40),    # C_COURT_OVL
     'defect_required_gap': (255, 200, 64),   # a literal in FIVE places, unnamed
-    'defect_net_fail':    (232, 72, 72),     # C_AIR_FAIL
+    'defect_net_fail':    (214, 96, 24),     # #1012: was (232,72,72)
     'defect_net_block':   (236, 158, 60),    # C_AIR_BLOCK
     'place_court_front':  (150, 152, 168),   # C_COURT_F
     'place_court_back':   (108, 132, 160),   # C_COURT_B
@@ -241,7 +242,10 @@ _DARK = {
     'chrome_rule':        (42, 50, 44),
     'chrome_error':       (196, 128, 128),   # movie_panels error text
     # editorial marks
-    'status_tried':       (200, 60, 60),     # make_film._badge default
+    'status_tried':       (160, 78, 20),     # #1012: was (200,60,60) --
+                                             # a red badge on a frame whose
+                                             # copper also flashes red is
+                                             # the same collision
     'status_best':        (255, 214, 88),    # evolve_movie.BEST
     'status_kept':        (86, 206, 130),    # evolve_movie.KEPT
     'status_dropped':     (206, 78, 92),     # evolve_movie.DROPPED
@@ -277,10 +281,126 @@ _DARK_MARKS = {
 
 DARK = Theme('dark', _DARK, _DARK_MARKS, _DARK_LAYERS, 150)
 
+# ---------------------------------------------------------------------------
+# LIGHT (#1012). NOT a background swap, and not a transform of DARK -- the
+# obvious light theme (darken the dark events) lands at 88.6 deuteranope
+# separation between ripped and restored, WORSE than the neighbourhood of the
+# red/green collision this whole issue is about. At contrast >= 4.5 over a
+# light body the usable gamut is the dark half of the cube, where dark-red and
+# dark-teal both lose their blue separation.
+#
+# Three things #946 concluded or never measured, and what measuring found:
+#
+#   * "the layer palette carries over unchanged" -- TRUE for separation
+#     BETWEEN layers (closest rendered pair 24.8 dark vs 24.3 light), FALSE
+#     for contrast against the board, which falls 1.96x/3.09x -> 1.19x/1.55x.
+#     `_LAYER_PALETTE` is a light-on-dark palette; over a bright board every
+#     entry is nearly the board. k = 0.74 at alpha 205 beats dark on all three
+#     measures at once, and keeps alpha < 255 so the crossing blend survives.
+#   * the STRUCTURE tokens were never measured at all. `board_edge` scores
+#     12.33x on the dark body and 1.01x on a light one -- the outline vanishes,
+#     and with the body only 1.17x off the ground a light frame has no board.
+#   * `pad_hole` is the one genuinely THEME-INVARIANT token, 1.22x -> 15.21x.
+#     A hole is a hole. Recorded so nobody later "fixes" it.
+#
+# The 27 decorative roles were derived by compressing each family's own
+# lightness ORDERING into the band that clears the floor -- three simpler rules
+# failed first, each destroying separation in its own way; the derivation
+# script records all three.
+# ---------------------------------------------------------------------------
+_LIGHT_LAYERS = (
+    (154, 47, 43),     # F.Cu  dark x 0.74
+    (52, 96, 155),     # B.Cu  dark x 0.74
+    (71, 141, 71),     # In1   dark x 0.74
+    (158, 141, 58),    # In2   dark x 0.74
+    (145, 81, 152),    # In3   dark x 0.74
+    (70, 148, 148),    # In4   dark x 0.74
+    (166, 111, 52),    # In5   dark x 0.74
+    (111, 111, 166),   # In6   dark x 0.74
+    (126, 155, 67),    # In7   dark x 0.74
+    (155, 89, 111),    # In8   dark x 0.74
+)
+
+_LIGHT = {
+    # --- structure
+    'ground':                (236, 238, 232),
+    'board_body':            (223, 227, 218),
+    'board_edge':            (78, 86, 72),
+    'zone_tint':             (110, 112, 106),
+    'pad':                   (150, 118, 24),
+    'pad_hole':              (10, 10, 10),
+    'via':                   (96, 100, 104),
+    'via_hole':              (10, 10, 10),
+    'hilite':                (190, 24, 38),
+    # --- event
+    'event_new':             (24, 26, 20),
+    'event_restored':        (0, 60, 150),
+    'event_ripped':          (190, 24, 38),
+    # --- defect
+    'defect_conflict':       (204, 90, 0),
+    'defect_hole':           (199, 100, 0),
+    'defect_courtyard':      (204, 76, 0),
+    'defect_required_gap':   (168, 120, 0),
+    'defect_net_fail':       (170, 70, 12),
+    'defect_net_block':      (189, 107, 5),
+    # --- place
+    'place_court_front':     (62, 64, 80),
+    'place_court_back':      (61, 80, 101),
+    'place_court_dim':       (113, 115, 125),
+    'place_locked':          (115, 111, 97),
+    'place_ghost':           (102, 102, 118),
+    'place_arrow':           (115, 96, 7),
+    'place_label':           (26, 28, 38),
+    'place_airwire':         (87, 97, 113),
+    'place_net_pick':        (23, 118, 82),
+    'pad_tht':               (162, 117, 42),
+    'pad_front':             (153, 126, 45),
+    'pad_back':              (51, 102, 153),
+    # --- fanout
+    'fanout_ground':         (238, 240, 234),
+    'fanout_field_edge':     (93, 101, 119),
+    'fanout_court':          (64, 64, 79),
+    'fanout_court_seed':     (115, 115, 123),
+    'fanout_label':          (27, 27, 37),
+    # --- chrome
+    'chrome_panel':          (245, 246, 241),
+    'chrome_panel_edge':     (178, 185, 170),
+    'chrome_strip':          (232, 234, 227),
+    'chrome_band':           (245, 246, 241),
+    'chrome_text':           (20, 24, 15),
+    'chrome_strip_text':     (30, 34, 25),
+    'chrome_text_dim':       (78, 86, 72),
+    'chrome_text_faint':     (125, 133, 118),
+    'chrome_rule':           (205, 210, 198),
+    'chrome_error':          (168, 40, 40),
+    # --- status
+    'status_tried':          (128, 58, 8),
+    'status_best':           (158, 119, 0),
+    'status_kept':           (33, 146, 74),
+    'status_dropped':        (168, 36, 50),
+    # --- film
+    'film_ground':           (241, 243, 237),
+    'film_panel':            (232, 234, 228),
+    'film_text':             (24, 28, 20),
+    'event_added':           (120, 104, 0),
+    'event_removed':         (176, 0, 60),
+    # --- op
+    'op_seed':               (89, 101, 115),
+    'op_descend':            (33, 146, 74),
+    'op_jump':               (189, 107, 0),
+    'op_cross':              (113, 16, 188),
+}
+
+
+#: Marks are a property of the ROLE, not of the theme: a rip is dashed in both.
+LIGHT = Theme('light', _LIGHT, _DARK_MARKS, _LIGHT_LAYERS, 205)
+
+
+
 #: The themes this repo ships. A CLOSED mapping, deliberately: the contrast
 #: gate's whole value is that it can iterate EVERY theme, and an unmeasured
 #: theme is worse than no theme.
-THEMES: Dict[str, Theme] = {'dark': DARK}
+THEMES: Dict[str, Theme] = {'dark': DARK, 'light': LIGHT}
 
 DEFAULT_THEME_NAME = 'dark'
 

@@ -1662,6 +1662,7 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
 def render_panel(spec: PanelSpec, *, size=1600, supersample=2, extra=None):
     from route_render import BoardRenderer
     r = BoardRenderer(spec.model.pcb, size=size, supersample=supersample,
+                      theme=(extra or {}).get('theme') if isinstance(extra, dict) else None,
                       show_pads=False, view=spec.view,
                       layers=([spec.side + '.Cu']
                               if spec.side in ('F', 'B')
@@ -1830,6 +1831,7 @@ Examples:
                         "JSON checklist then carries d={moved, expected, "
                         "match} -- mandate 8's question (d), quotable instead "
                         'of recalled (run-4 G5)')
+    p.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     p.add_argument('--quiet', action='store_true',
                    help='suppress narration. With --json-out it now also '
                         'suppresses the stdout JSON_SUMMARY echo and the '

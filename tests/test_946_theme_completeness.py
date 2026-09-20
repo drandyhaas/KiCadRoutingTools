@@ -9,8 +9,11 @@ looks like a rendering bug rather than a missing declaration. `Theme.__init__`
 refuses both directions -- a missing role, and a role that is not in `ROLES` --
 so this file mostly proves the refusal is armed on every shipped theme.
 
-**VALUE-PRESERVING, at #1011.** `DARK` is byte-for-byte the constants the repo
-shipped before the design system. The table below is the whole mapping as
+**VALUE-PRESERVING at #1011; three values moved at #1012.** `DARK` was
+byte-for-byte the constants the repo shipped before the design system, and
+#1012 moved exactly three of them -- `defect_conflict`, `defect_net_fail` and
+`status_tried` -- out of the red family, each justified by a measurement in
+`tests/test_946_palette_measures.py`. The table below is the whole mapping as
 literals, because that is the one form a reviewer can check against
 `git show upstream/main:<file>` without running anything. **A phase that
 changes a value edits this table in the same commit**, and
@@ -51,7 +54,7 @@ import render_theme as RT  # noqa: E402
 
 #: The whole DARK mapping, as literals. See the docstring: this is the form a
 #: reviewer can check against the merge-base by eye.
-DARK_AT_1011 = {
+DARK_AT_1012 = {
     'ground': (14, 16, 18),
     'board_body': (26, 34, 28),
     'board_edge': (225, 225, 210),
@@ -64,11 +67,11 @@ DARK_AT_1011 = {
     'event_new': (250, 250, 250),
     'event_restored': (86, 224, 96),
     'event_ripped': (255, 66, 66),
-    'defect_conflict': (255, 64, 64),
+    'defect_conflict': (255, 140, 0),
     'defect_hole': (255, 160, 64),
     'defect_courtyard': (255, 120, 40),
     'defect_required_gap': (255, 200, 64),
-    'defect_net_fail': (232, 72, 72),
+    'defect_net_fail': (214, 96, 24),
     'defect_net_block': (236, 158, 60),
     'place_court_front': (150, 152, 168),
     'place_court_back': (108, 132, 160),
@@ -97,7 +100,7 @@ DARK_AT_1011 = {
     'chrome_text_faint': (78, 84, 94),
     'chrome_rule': (42, 50, 44),
     'chrome_error': (196, 128, 128),
-    'status_tried': (200, 60, 60),
+    'status_tried': (160, 78, 20),
     'status_best': (255, 214, 88),
     'status_kept': (86, 206, 130),
     'status_dropped': (206, 78, 92),
@@ -123,15 +126,15 @@ def fail(msg):
 def test_dark_is_value_preserving():
     """#1011 changes no colour. Every value here came from a shipped constant,
     and the comment beside it in render_theme.py names which."""
-    missing = [r for r in DARK_AT_1011 if r not in RT.ROLES]
+    missing = [r for r in DARK_AT_1012 if r not in RT.ROLES]
     if missing:
         fail('table names %d role(s) ROLES does not: %s'
              % (len(missing), ', '.join(sorted(missing))))
-    untabled = [r for r in RT.ROLES if r not in DARK_AT_1011]
+    untabled = [r for r in RT.ROLES if r not in DARK_AT_1012]
     if untabled:
         fail('%d role(s) have no expected value -- an untabled role is an '
              'unreviewed one: %s' % (len(untabled), ', '.join(untabled)))
-    for role, want in DARK_AT_1011.items():
+    for role, want in DARK_AT_1012.items():
         if role not in RT.ROLES:
             continue
         got = RT.DARK.rgb(role)

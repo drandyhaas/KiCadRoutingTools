@@ -37,11 +37,17 @@ render actually works -- and after that the box height is fixed and a failed
 render keeps its box with the reason written inside it, rather than dropping a
 panel mid-list.
 
-**Why this is not wired into ``py_tools/make_film.py``.**
-``tests/test_film_composition.py:158-159`` probes pixel ``(0, f.height // 2)``
+**Why this was not wired into ``py_tools/make_film.py`` -- and what changed.**
+``tests/test_film_composition.py`` used to probe pixel ``(0, f.height // 2)``
 for the ``TRIED`` badge colour. Stacking a panel moves that probe point into the
 iso box and turns that test red for a reason that has nothing to do with
-badging. Anyone adding panels to the film needs to move that assertion first.
+badging, so this module refused to wire itself in.
+
+**That assertion has been moved (#946/#1012).** It now probes ``(0, 0)``, which
+is layout-independent: ``_badge`` draws nested rectangles around the WHOLE
+frame, so the corner is badge colour on a badged frame and never on an unbadged
+one, whatever is stacked below. The obstacle this paragraph described is gone;
+a panel may now be composed into the film.
 """
 from __future__ import annotations
 

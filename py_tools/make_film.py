@@ -312,7 +312,7 @@ def _badge(frame, text, rgb=None):
 
 def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                layer_alpha=150, rip_hold=2, chunks=6, camera='auto',
-               camera_budget=0.0, tween=10, quiet=False):
+               camera_budget=0.0, tween=10, quiet=False, theme=None):
     """Frames for the whole shot list. One render pass, one scale."""
     import animate_route as a
     boards = [s for s in shots if s['kind'] == 'board']
@@ -459,6 +459,7 @@ def main(argv=None):
                     help="frames per part move (0 snaps)")
     ap.add_argument('--png-dir', help="also dump every frame as a PNG")
     ap.add_argument('--shots-json', help="write the resolved shot list here")
+    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--quiet', action='store_true')
     a = ap.parse_args(argv)
 
@@ -488,7 +489,8 @@ def main(argv=None):
         with open(a.shots_json, 'w', encoding='utf-8') as f:
             json.dump(shots, f, indent=2)
 
-    frames = build_film(shots, size=a.size, fps=a.fps, supersample=a.supersample,
+    frames = build_film(shots, theme=a.theme,
+                        size=a.size, fps=a.fps, supersample=a.supersample,
                         layer_alpha=a.layer_alpha, rip_hold=a.rip_hold,
                         chunks=a.chunks, camera=a.camera,
                         camera_budget=a.camera_budget, tween=a.tween,
