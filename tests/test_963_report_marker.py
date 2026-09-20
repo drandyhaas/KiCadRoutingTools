@@ -159,10 +159,11 @@ def test_a_digest_the_marker_never_mentions_is_not_an_accusation():
     """The false-firing half, measured on this repo's own run dirs.
 
     "The first digest in the report" is a git commit on run 26, and
-    synthetically a part number or an ISO-basic date; 4 of the 11 in-repo
-    REPORT.md files open with a digest that is not a board's. Only a digest
-    the MARKER itself names as something other than shipped can produce the
-    finding.
+    synthetically a part number or an ISO-basic date. Measured over the
+    repo's own run dirs: 23 `REPORT.md` files, 11 carrying any digest, and
+    exactly ONE of those opening on the sha its DONE names as shipped -- so
+    the naive rule would accuse ten of eleven. Only a digest the MARKER
+    itself names as something other than shipped can produce the finding.
     """
     for opener in ('189f7e27',                       # a git commit (run 26)
                    '20260920',                       # an ISO-basic date

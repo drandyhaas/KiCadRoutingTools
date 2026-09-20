@@ -1787,8 +1787,8 @@ def _declaration(rows, half):
     `cmd_record` already writes `result_sha` on every row from
     `store.put(a.board)`, `--board` is required, and `BoardStore.put` COPIES the
     file, so the binding is on disk on every ledger ever written -- including
-    run 29's row 29, whose board `frozen.kicad_pcb` was overwritten nine seconds
-    later. A second key for one fact would be absent on every historical row,
+    run 29's row 29, whose board `frozen.kicad_pcb` was overwritten three
+    minutes later. A second key for one fact would be absent on every historical row,
     would need this same fallback anyway, and both paths would then live
     forever; two numbers for one fact is #941's defect in miniature.
 
@@ -2486,8 +2486,10 @@ def cmd_verdict(a):
 
     # A DECLARATION MADE ABOUT ANOTHER BOARD, named on every verdict (#963).
     # Run 29 declared placement exhausted against a board that existed for
-    # eight minutes -- `os-promote-placed` overwrote `frozen.kicad_pcb` nine
-    # seconds after the row was written -- and the claim then outlived its
+    # eight minutes -- `os-promote-placed` created it at 12:51:40,
+    # `ol-exh-place` declared against it at 12:56:04, and
+    # `ov-restore-frozen` overwrote `frozen.kicad_pcb` at 12:59:45, three
+    # minutes and 41 seconds after the row was written -- and it outlived its
     # board and survived three L5 calls, because nothing here read the sha the
     # row had carried all along. This REPORTS, and nothing gates on it:
     # `test_963_exhaustion_binding::test_the_ship_is_not_gated_on_the_board_

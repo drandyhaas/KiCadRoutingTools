@@ -232,9 +232,11 @@ def _converge_module(*attrs):
     """
     try:
         # ONLY IF IT IS NOT ALREADY THERE. This is called per LEDGER ROW by
-        # `_cv_is_lap`, and an unconditional insert left 441 duplicate ROOT
-        # entries on `sys.path` after one L4 call on a 439-row ledger -- every
-        # later import then walking a list that grows with the ledger.
+        # `_cv_is_lap`, so an unconditional insert adds one ROOT entry PER
+        # ROW -- every later import in the process then walking a list that
+        # grows with the ledger. (439 is run 29's COMMAND count, not its
+        # ledger's: that file holds 47 rows. The defect is the per-row
+        # growth, whatever the ledger's length.)
         if ROOT not in sys.path:
             sys.path.insert(0, ROOT)
         import converge                                         # noqa: PLC0415
@@ -2319,12 +2321,21 @@ def final_record_command(ledger, board, score, name, verdicts):
 #: MEASURED COST, which the first cut did not measure at all: replayed over
 #: the 28 `wk/**/ledger.jsonl` in this WORKING TREE -- `wk/` is gitignored, so
 #: they are run artifacts rather than fixtures and re-deriving this needs a
-#: tree that has them -- the gate at ONE fires
-#: somewhere in 18 of them, including all four most recent runs, with peak
-#: unclassified streaks of 31, 26, 24 and 16. Only 2 of the 28 contain a
-#: classification row at all. At TWO it still fires on those streaks -- which
-#: is the point, they are the defect -- but it stops refusing the single
-#: authorised retry.
+#: tree that has them. The numbers below index THIS CONSTANT, not the lap
+#: number, and the difference is easy to misread: at 1 (refusing from the
+#: SECOND lap) the gate fires somewhere in 18 of the 28; at 2, the value
+#: that ships and which refuses from the THIRD, 15 of the 28 -- among them
+#: run23, run24 and run25, but not run22, whose longest unclassified streak
+#: is exactly 2. Peak streaks 31, 26, 24, 16. Only 2 of the 28 contain a
+#: classification row at all.
+#:
+#: AND IT FIRES ON THE RUN IT WAS WRITTEN FOR, which is the number that
+#: matters and which is NOT in that census: run 29's ledger (47 rows, in
+#: another worktree) holds ZERO classification rows and a longest
+#: unclassified routing streak of 19, so at the shipped value 13 of its
+#: laps would have been refused. The contributor's synthetic control is a
+#: different matter: it carries ONE routing lap, so it is deliberately NOT
+#: refused -- refusing the first lap is what would contradict L4.
 #:
 #: DELIBERATELY NOT `--flat`, which is 5 and means something else: two numbers
 #: with two meanings do not become one number by sharing a value.
@@ -3388,7 +3399,11 @@ _ARM_CEILING = {
     'L3': 84, 'L4': 51, 'L5': 40,
     # 170 -> 174 (#963 item E): the REPORT_DONE marker and the sentence
     # saying what it is for, plus room for the 2-line blind note.
-    # Measured 171 clear, 173 blind.
+    # Measured 172 clear, 174 blind -- so the blind NOTE fits exactly and
+    # there is ZERO headroom left here. The next line added to a terminal
+    # arm fails `--dump-all` with the note set, which is the arm's own
+    # alarm working; raise the ceiling deliberately, with the reason, or
+    # take a line out.
     'L5 (DONE-EXHAUSTED)': 174, 'L5 (STUCK)': 174, 'L5 (BUDGET)': 174,
 }
 

@@ -416,10 +416,12 @@ def test_the_lazy_import_does_not_grow_sys_path_per_ledger_row():
     """`_converge_module` is called once per ROW, not once per run.
 
     `_cv_is_lap` asks for it on every ledger line, so an unconditional
-    `sys.path.insert(0, ROOT)` left 441 duplicate entries after ONE L4 call on
-    run 29's 439-row ledger -- and every import in the process after that walks
-    the longer list. A verifier mutated the `if ROOT not in sys.path` guard
-    away and nothing failed, because nothing counted. This counts.
+    `sys.path.insert(0, ROOT)` adds one entry PER ROW of the ledger being
+    walked -- and every import in the process after that walks the longer
+    list. (Run 29's LEDGER holds 47 rows; 439 is its command count, which an
+    earlier draft of this sentence confused with it.) A verifier mutated the
+    `if ROOT not in sys.path` guard away and nothing failed, because nothing
+    counted. This counts.
     """
     sys.path.insert(0, os.path.dirname(DRIVER))
     import loop_driver as L
@@ -432,7 +434,7 @@ def test_the_lazy_import_does_not_grow_sys_path_per_ledger_row():
     grew = len(sys.path) - before
     assert grew <= 1, (
         f'sys.path grew by {grew} entries over 50 calls -- the guard is gone, '
-        f'and a 439-row ledger would add that many again')
+        f'and it would add one per ledger ROW on a real walk')
     assert sys.path.count(L.ROOT) <= before_root + 1, (
         f'copies of ROOT went {before_root} -> {sys.path.count(L.ROOT)}')
     print("  PASS: the lazy import inserts ROOT at most once")

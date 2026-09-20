@@ -307,7 +307,7 @@ DRIVER_ROWS = [
     # battery; these are the loop_driver half of them.
     #
     # `_cv_is_lap` asks for the module once per ROW, so the dedup is what
-    # keeps a 439-row ledger from leaving 441 copies of ROOT on sys.path.
+    # keeps a ledger walk from leaving one copy of ROOT on sys.path per ROW.
     ('lazy-import-reinserts-per-row',
      "        if ROOT not in sys.path:\n"
      "            sys.path.insert(0, ROOT)",

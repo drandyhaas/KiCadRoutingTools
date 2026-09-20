@@ -1,7 +1,8 @@
 """An exhaustion is a claim about the board its own row names (#963).
 
 Run 29 recorded `--exhausted placement` against a board that existed for eight
-minutes: `os-promote-placed` overwrote `frozen.kicad_pcb` nine seconds after
+minutes: `ov-restore-frozen` overwrote `frozen.kicad_pcb` at 12:59:45, three
+minutes and 41 seconds after
 the row was written, and the claim then outlived its board and survived three
 L5 calls into the run's terminal record. Row 30 retracted rows 25-27 and not
 row 29.

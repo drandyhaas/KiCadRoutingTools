@@ -807,8 +807,11 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
             # The report OPENS on a digest the marker itself calls superseded.
             # Only DONE's own vocabulary can produce this, so a git commit, a
             # part number or an ISO date in the report cannot -- which is what
-            # a "first digest in the report" rule accused, on 4 of the 11
-            # REPORT.md files in this repo.
+            # a "first digest in the report" rule accuses nearly every
+            # report there is: of the 23 REPORT.md files under `wk/`, 11
+            # carry any digest at all and exactly ONE of those opens on
+            # the sha its own DONE names as shipped. The rest open on git
+            # commits, md5s, part numbers and dates.
             out.append(
                 'REPORT the first digest it names is %s..., which DONE names '
                 'as SUPERSEDED, not as shipped (%s) -- the headline artifact '

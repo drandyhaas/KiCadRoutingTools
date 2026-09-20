@@ -419,6 +419,10 @@ def _final(lens, verdict='PASS', blocking=0, sources=None):
 def test_discovery_reads_the_cycle_map_not_a_glob():
     """Run 29's own strays: 8 of its 17 verdict files are not routing lenses.
 
+    17 is the END state -- 13 of them existed before its last L5 call and
+    four landed afterwards. The stray COUNT is what this is about and it
+    does not depend on that, but "17 sat on disk while L5 ran" would.
+
     `legality`, `provenance`, `not-run`, `closeout` are placement-half and
     ad-hoc verdicts, every one a well-formed VERDICT= line that no ROUTING
     close-out should mention. A glob would have turned eight honest files into
@@ -668,11 +672,14 @@ def test_the_report_reaches_the_CONTINUE_branch_too():
     """The branch the measured run actually took, on every call it made.
 
     The first cut printed the verdict-file report on the terminal branch
-    alone, to keep prose off the hot path. Run 29 -- the run this item exists
-    for -- took CONTINUE on all seven of its L5 calls and never reached a
-    terminal arm, so that report is one its own case would not have seen. A
-    round-2 verifier measured it: three discovered files, three notes
-    computed, and `VERDICT FILES` nowhere in the text.
+    alone, to keep prose off the hot path. Read off run 29's own
+    `cmd_timing.jsonl`, its seven L5 calls were: one exit-2 argparse error,
+    THREE `not done yet` (this branch), one `close out: STUCK`, one exit-4
+    refusal and one `close out: DONE-EXHAUSTED`. So the report would have
+    been absent from three of the seven and from every call before 12:56 --
+    not from all of them, as a first draft of this said. A round-2 verifier
+    measured the branch itself: three discovered files, three notes computed,
+    and `VERDICT FILES` nowhere in the text.
 
     Asserted through the REAL stage, and on the NOTES as well as the header,
     because the notes are what carries a disagreement -- a header with no

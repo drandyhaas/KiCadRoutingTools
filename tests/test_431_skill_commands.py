@@ -1303,8 +1303,13 @@ _RENDER_LOUD = ('--pair', '--focus')
 #: The stdout-only blocks -- used as a PROHIBITION, not as a second
 #: exemption, and that inversion is the correction. A round-2 verifier
 #: measured the exempting version letting the two L2 hand-off renders print
-#: 7,178 characters over 34 lines (one `JSON_SUMMARY:` line of 4,119) at a
-#: boundary `SKILL.md:205-213` names by name and prescribes `--quiet` for.
+#: their whole checklist at a boundary `SKILL.md:205-213` names by name and
+#: prescribes `--quiet` for: re-measured on the in-repo fixture with the
+#: hand-off's own flags, 37 lines of stdout against 5, one of them a
+#: `JSON_SUMMARY:` echo. (LINES, not characters: the stdout carries the
+#: temp paths it was handed, so the character count moves with the
+#: directory and an earlier draft of this comment quoted one that nothing
+#: else can reproduce.)
 #: So the rule is the other way round: a render may not be quieted while its
 #: own stage text sends the reader to a block `--quiet` removes -- REWRITE
 #: THE SENTENCE to name the sheet and the document, which is what the two
@@ -1318,11 +1323,14 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
     """`--json-out` implies `--quiet`, unless the narrative IS the deliverable.
 
     Measured (#963): ten of the thirteen render commands the two drivers emit
-    omitted `--quiet`, so 10 of a run's 13 review sheets printed every
-    checklist key before the picture could be looked at -- 36 stdout lines and
-    8,513 characters, against 3 lines and 536 with the flag. The blind-first
-    ordering is the whole mechanism of the boundary review, and the commands
-    the review gates prescribe were the ones defeating it.
+    omitted `--quiet`, so 10 of run 29's 13 review sheets printed every
+    checklist key before the picture could be looked at -- 36 stdout lines
+    against 3 with the flag, on the `tigard_placed` fixture the issue's
+    addendum names. (LINES: the character counts the issue also quotes carry
+    the temp paths of the run that produced them and do not reproduce
+    elsewhere.) The blind-first ordering is the whole mechanism of the boundary
+    review, and the commands the review gates prescribe were the ones defeating
+    it.
 
     The exemption is `--pair`/`--focus` ALONE. A prose-derived exemption was
     tried and withdrawn: it let a boundary render re-open the very defect
@@ -1387,14 +1395,17 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
                 if _tells and '--quiet' in span:
                     quieted.append((src, f'silences the {_tells} block its '
                                          f'own text sends you to: ' + _cmd))
-                # And a DRIVER-emitted sheet command must say where the sheet
-                # goes. Without `-o` render_placement writes
+                # And a DRIVER-emitted render must say WHERE THE PICTURE GOES.
+                # Without `-o`, render_placement writes
                 # `<board>_placement.png` beside the BOARD -- on a fenced run,
                 # potentially beside the control (references/evidence-map.md).
-                # Drivers only: an `.md` template spells `<PATH>` and leaves
-                # the paths to the reader.
-                if (src in DRIVERS and '--review-sheet' in span
-                        and '-o' not in span):
+                # #963 started out naming this a DEFERRED defect, on two
+                # congestion one-liners; it is fixed instead, and this arm is
+                # what keeps it fixed. Drivers only: an `.md` template spells
+                # `<PATH>` and leaves the paths to the reader.
+                if (src in DRIVERS and '-o' not in span
+                        and ('--review-sheet' in span
+                             or '--json-out' in span)):
                     sheetless.append((src, _cmd))
                 if '--json-out' not in span:
                     # A bare `--quiet` silences `describe` via `_quiet_text`
@@ -1432,8 +1443,10 @@ def test_a_render_that_writes_its_keys_to_a_file_does_not_print_them():
           'the --json-out document (doc[\'describe\'] carries only `worst`) '
           'and NOT on the review sheet.')
     assert not sheetless, (
-        'driver-emitted review-sheet commands with no -o, so the sheet lands '
-        'beside the BOARD:\n' + '\n'.join(f'  {s}: {t}' for s, t in sheetless))
+        'driver-emitted render commands with no -o, so the picture lands '
+        'beside the BOARD:\n' + '\n'.join(f'  {s}: {t}' for s, t in sheetless)
+        + '\n\nMeasured at the commit that added this arm: 35 driver-emitted '
+          '--json-out spans, not one of them missing -o.')
     # Measured floors, not round ones. A gate that stops finding its
     # population reads exactly like a gate that finds nothing wrong.
     assert seen >= 34, (

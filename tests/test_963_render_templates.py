@@ -59,9 +59,13 @@ def test_quiet_takes_the_keys_off_stdout_and_keeps_both_files():
     """The measurement the issue reports, re-derived rather than quoted.
 
     #963 measured 36 lines / 8,513 characters without the flag and 3 / 536
-    with it, on run 29's board. The exact numbers are that board's; what has to
-    hold on any board is the SHAPE -- the checklist leaves stdout, stdout
-    shrinks, and neither file goes missing.
+    with it, on `tests/fixtures/run23/tigard_placed.kicad_pcb` -- the fixture
+    its addendum names, NOT run 29's board. And the CHARACTER counts are not
+    reproducible even there: the stdout carries the temp paths it was given,
+    so the same command in a different directory prints a different number.
+    The LINE counts survive that, and what has to hold on any board is the
+    SHAPE -- the checklist leaves stdout, stdout shrinks, and neither file
+    goes missing.
     """
     run_utils.evidence(BOARD, 'the fixture board')
     with tempfile.TemporaryDirectory() as td:
