@@ -831,13 +831,16 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
                    'pass is about a superseded board'
                    % (done_sha_at_audit[:12], now[:12]))
 
-    # 4. the report is newer than the last thing the run recorded.
-    for name in ('cmd_timing.jsonl', 'ledger.jsonl'):
-        p = os.path.join(workdir, name)
-        if os.path.isfile(p) and os.path.getmtime(p) > \
-                os.path.getmtime(report_path):
-            out.append('REPORT %s changed after the report was written -- the '
-                       'report describes a run that kept going' % name)
+    # 4. THERE IS NO CHECK 4, and its absence is the point. It compared
+    #    `getmtime(ledger.jsonl)` with `getmtime(REPORT.md)` and emitted an
+    #    accusation from the difference -- the ONE mtime-derived finding in
+    #    a file whose own docstring says freshness is sha256 and never
+    #    mtime, and whose sibling design (#1006) says the same. A pre-push
+    #    reviewer found it untested and un-mutated as well: deleting it left
+    #    every gate green, which is how a rule nobody checks survives its
+    #    own file's policy. The DONE-sha checks above cover what it was
+    #    reaching for -- a report about a board the run has since replaced
+    #    -- and they do it from CONTENT.
 
     # 5. the report's own digest and length, recorded so a later extension is
     #    detectable by anyone comparing. Never a finding on its own.

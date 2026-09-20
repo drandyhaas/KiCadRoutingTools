@@ -149,7 +149,7 @@ ROWS = [
     # ---- every populated arm is measured -----------------------------------
     # Drops one arm from the ceiling table; the dump must refuse an arm it
     # cannot hold, and test_431 asserts that dump exits 0. ~110 s.
-    # Re-anchored by #963, which raised L3 75 -> 82 and L4 45 -> 51 because
+    # Re-anchored by #963, which raised L3 75 -> 84 and L4 45 -> 51 because
     # both stages now PRINT the `record --kind classification` command their
     # own text asks for. The row is unchanged in what it does: drop L3's
     # ceiling entry and `--dump-all` must stop exiting 0.

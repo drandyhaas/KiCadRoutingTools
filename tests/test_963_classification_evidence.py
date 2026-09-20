@@ -559,6 +559,51 @@ def test_the_lever_may_not_be_the_shape_word_again():
     print("  PASS: a lever that only repeats the shape is not a measurement")
 
 
+
+def test_the_one_case_where_recording_it_DOES_move_the_verdict():
+    """"Side-effect free" is true of the plateau windows and of nothing else.
+
+    A pre-push reviewer built a 99-row ledger at the default `--budget 100`:
+    `verdict` said CONTINUE, the mandated remedy (`record --kind
+    classification`) was run, and `verdict` then said BUDGET. The gate's own
+    escape ended the run. It is not a defect -- a row is a row and the budget
+    counts rows -- but four places said "moves no verdict" with no exception,
+    and the one place it does move it is the place the reader has just been
+    sent to. This pins the mechanism so the sentence cannot drift back.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        rows = [lap() for _ in range(99)]
+        led = _ledger(td, 'budget.jsonl', rows)
+        sc = _score(td, 'sc.json')
+
+        def verdict():
+            r = _cv(['verdict', '--ledger', led, '--score', sc,
+                     '--budget', '100'])
+            # CONTINUE is exit 4 here and BUDGET is 3 -- the codes are the
+            # verdict, so this asserts only that the doc parsed.
+            assert r.stdout.strip().startswith('{'), r.stderr[-300:]
+            return json.loads(r.stdout)['verdict']
+
+        assert verdict() == 'CONTINUE', 'the fixture starts under budget'
+        assert _cv(['record', '--ledger', led, '--board', BOARD,
+                    '--kind', 'classification', '--shape', 'parameter',
+                    '--lever', 'the escape faces are saturated']
+                   ).returncode == 0
+        assert verdict() == 'BUDGET', (
+            'the 100th row did not end the run, so this test no longer '
+            'describes the boundary it was written for')
+        # ...and the plateau claim, which IS true, still holds: the row is in
+        # neither window.
+        doc = json.loads(_cv(['verdict', '--ledger', led, '--score', sc,
+                              '--budget', '400']).stdout)
+        assert doc['classification'] is not None
+        for half in ('placement', 'routing'):
+            assert 'classification' not in str(doc[half].get('why') or ''), \
+                doc[half]
+    print("  PASS: the row is outside both plateau windows and inside the "
+          "budget")
+
+
 if __name__ == '__main__':
     run_utils.evidence(BOARD)
     for k, v in sorted(globals().items()):

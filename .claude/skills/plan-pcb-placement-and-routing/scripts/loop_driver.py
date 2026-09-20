@@ -1718,7 +1718,7 @@ afterwards every panel is placement plus whatever the router did:
 
 LOOK at {_hos} and write what you see BEFORE opening {_hoj} -- the hand-off is
 one of the four boundaries the combined SKILL puts eyes on, and `--quiet` keeps
-it blind-first. Then read the document: anything its `checklist.a_off_outline`,
+it blind-first. Then read the document: anything its off-outline pad-copper,
 stacked-pad or hole-conflict rows name is still there after the route, and no
 router setting removes it. Keep that board: it is the baseline
 `check_channels --baseline` needs, and you return its path below.
@@ -1875,7 +1875,7 @@ become hard to separate by eye:
 
 That sheet is what routing is being given. LOOK at it and write what you see
 before opening {_hoj} -- `--quiet` keeps this boundary blind-first. Then read
-the document: anything its `checklist.a_off_outline`, stacked-pad or
+the document: anything its off-outline pad-copper, stacked-pad or
 hole-conflict rows name is still there after the route -- so if those lists
 are not empty, read this stage's refusals before spending a routing pass.
 
@@ -2767,9 +2767,12 @@ and the run-closing record is the call least able to afford being unwitnessed.
   python3 -X utf8 tests/stress/tee_cmd.py --workdir {work} final_record -- \\
       {final_record_command(a.ledger, a.board, a.score, name, P)}
 
-Then, and only then, write the DONE marker:
+Then, and only then, write the DONE marker -- and NAME THE BOARD AND ITS
+SHA IN IT. The report audit compares the sha the report calls shipped with
+the sha the board audits read, and a bare `echo done` gives it nothing to
+compare: the digest is the `result_sha` the record above just printed.
 
-  echo done > {work}/DONE
+  echo "done: board {a.board} sha256 <that result_sha>" > {work}/DONE
 
 DONE means THE COPPER IS FROZEN, not that the run is over. `run_watch.py cheats`
 blocks on this file and runs the fence and provenance audits when it appears --
@@ -3399,12 +3402,16 @@ _ARM_CEILING = {
     'L3': 84, 'L4': 51, 'L5': 40,
     # 170 -> 174 (#963 item E): the REPORT_DONE marker and the sentence
     # saying what it is for, plus room for the 2-line blind note.
-    # Measured 172 clear, 174 blind -- so the blind NOTE fits exactly and
-    # there is ZERO headroom left here. The next line added to a terminal
-    # arm fails `--dump-all` with the note set, which is the arm's own
-    # alarm working; raise the ceiling deliberately, with the reason, or
-    # take a line out.
-    'L5 (DONE-EXHAUSTED)': 174, 'L5 (STUCK)': 174, 'L5 (BUDGET)': 174,
+    # Then 174 -> 178 (#963, second pass): the DONE marker now NAMES the
+    # board and its sha, three lines, because `report_audit`'s
+    # shipped-sha check had NO PRODUCER without it -- the close-out text
+    # said `echo done`, and the check then reported, correctly and
+    # uselessly, that it could not compare anything. Re-measured: 175
+    # clear, 177 blind. The old 174 was pinned at exactly its own blind
+    # measurement, so the next line added anywhere in a terminal arm
+    # failed `--dump-all` with the note set -- which is the alarm
+    # working, and is why 178 leaves one line rather than none.
+    'L5 (DONE-EXHAUSTED)': 178, 'L5 (STUCK)': 178, 'L5 (BUDGET)': 178,
 }
 
 STAGES = {'L1': l1, 'L2': l2, 'L3': l3, 'L4': l4, 'L5': l5}
@@ -3451,7 +3458,8 @@ def _args(argv=None):
                          'authorises. Needs a REASON, and it is meant to be '
                          'rare: the ordinary answer is to WRITE the decision, '
                          'which is one `converge record --kind '
-                         'classification --shape <...>` and moves no verdict. '
+                         'classification --shape <...>`, which moves no verdict '
+                         'except at budget-1, where any row does. '
                          'This flag is for the case where the board the '
                          'decision was about is gone and cannot be '
                          're-derived. A THIRD waiver vocabulary on purpose, '

@@ -2511,8 +2511,12 @@ def cmd_verdict(a):
                 f' DECLARED ABOUT ANOTHER BOARD: the live {h} exhaustion was '
                 f'recorded against board {str(_sb)[:12]}..., and the board '
                 f'being judged is {str(board_sha)[:12]}... (from '
-                f'{board_sha_source}). The claim has outlived the board it was '
-                f'made about. Recover that board and see what changed:'
+                f'{board_sha_source}). EXPECTED after any accepted lap -- '
+                f'every lap of either half writes a new sha, and a routing '
+                f'lap says nothing about placement levers -- so this is not '
+                f'a finding against the run. What it says is that the claim '
+                f'has not been re-checked against the board in hand. '
+                f'Recover the one it was made about and see what changed:'
                 f' converge.py step-back --ledger <this ledger> --to {_sb} '
                 f'--out wk/declared.kicad_pcb')
 

@@ -356,7 +356,59 @@ def test_one_watcher_specification_and_the_run_prompt_defers():
         'SKILL.md still says the cheat watcher exits at DONE')
     for flag in ('--report-done', '--report-wait'):
         assert flag in _help, f'{flag} is not a real flag: ' + _help[:300]
+        assert flag in skill, (
+            f'{flag} changes how the watcher BEHAVES for a reader following '
+            f'this skill -- the cheats arm no longer exits at DONE, and a '
+            f'replay over a finished run dir blocks without the escape -- and '
+            f'the only specification of the mechanism does not mention it')
     print("  PASS: one spec, no contradiction, and the flags are real")
+
+
+
+def test_the_close_out_writes_a_DONE_the_audit_can_read():
+    """The shipped-sha check needs a producer, and it had none.
+
+    `report_audit`'s shipped-sha check reads the marker's own convention --
+    `sha256 <64 hex>` -- and the L5 close-out text said `echo done > DONE`. So
+    on every real run the check reported, correctly and uselessly, that the
+    marker names no digest and the comparison was NOT made: an instrument with
+    no production caller, which is the failure mode this repo has written down
+    twice. A pre-push reviewer ran `report_audit` on exactly the marker the
+    close-out prescribes and got that sentence.
+
+    Asserted on the TEXT the terminal arms emit, because that text IS the
+    producer -- there is no other code path that writes this file.
+    """
+    import subprocess
+    _DRIVER = os.path.join(ROOT, '.claude', 'skills',
+                           'plan-pcb-placement-and-routing', 'scripts',
+                           'loop_driver.py')
+    out = subprocess.run(
+        [sys.executable, '-X', 'utf8', _DRIVER, '--dump-all'],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        cwd=ROOT)
+    assert out.returncode == 0, out.stderr[-400:]
+    txt = out.stdout
+    assert '> {work}/DONE' not in txt, 'the dump did not interpolate'
+    marks = [l for l in txt.splitlines()
+             if '/DONE' in l and 'REPORT_DONE' not in l and 'echo' in l]
+    assert marks, 'no DONE-writing line in the terminal text at all'
+    for line in marks:
+        assert 'sha256' in line, (
+            'the close-out writes a DONE with no sha256, so report_audit\'s '
+            'shipped-sha check has no producer:\n  ' + line.strip())
+        assert 'board ' in line, (
+            'the marker names a digest but not the board it belongs to:\n  '
+            + line.strip())
+    # And the regex the audit reads it with must accept that shape once the
+    # placeholder is filled in.
+    import re
+    filled = re.sub(r'<[^>]+>', 'a' * 64, marks[0])
+    assert RW._DONE_SHIPPED_RE.search(filled), (
+        'the prescribed marker does not match the audit\'s own pattern:\n  '
+        + filled.strip())
+    print("  PASS: the close-out prescribes a DONE the shipped-sha check can "
+          "read")
 
 
 if __name__ == '__main__':

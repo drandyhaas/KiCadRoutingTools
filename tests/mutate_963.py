@@ -323,6 +323,15 @@ DRIVER_ROWS = [
      "        + (''.join(f'  NOTE {n}\\n' for n in _notes) if _notes else ''))",
      "        + '')",
      [T_ORDER]),
+    # ROUND 3 (pre-push review). The shipped-sha check had NO PRODUCER: the
+    # L5 close-out said `echo done > DONE`, so on every real run it reported,
+    # correctly and uselessly, that the marker named no digest -- an
+    # instrument with no production caller. Putting the sha in the close-out
+    # text is the fix; taking it out again is this row.
+    ('closeout-DONE-names-no-board',
+     '  echo "done: board {a.board} sha256 <that result_sha>" > {work}/DONE',
+     '  echo done > {work}/DONE',
+     [T_MARK]),
     # `expected` was stored by discovery and read by nobody until #963.
     ('expected-lens-unread',
      "        if _d.get('expected') and _dln != _d['expected']:",

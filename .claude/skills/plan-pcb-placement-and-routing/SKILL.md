@@ -228,15 +228,20 @@ first and the raw logs only when a section names one, into ONE file with a
 section per brief — not one file per brief, and never over a `watch/<name>.md`
 that already exists. `tests/stress/RUNBOOK.md` has the mechanics;
 `tests/stress/run_watch.py` is the part that costs nothing to leave running and
-should be started at the beginning.
+should be started at the beginning. Since #963 its `cheats` arm no longer
+exits at `DONE`: it audits, then waits for `REPORT_DONE` so the report is
+inside the audited set, bounded by `--report-wait` (default 5400 s). Replaying
+it over a FINISHED run dir that has no `REPORT_DONE` therefore blocks unless
+you pass `--report-done ''`, which restores the old exit.
 
 **This is the only specification of the watcher mechanism, and a run prompt
 defers to it.** A run prompt names the briefs, the work dir and the subject; a
 run prompt that re-specifies the spawn count, the trigger or the model is a
 second specification, and the two have already disagreed on all three. Measured
-(run 29): four watchers were dispatched twice over, `watch/cheats.md` was
-written twice with the second overwriting the first, and `tool_usage.md` — the
-brief whose findings changed the shipped board — never landed at all.
+(run 29): four watchers were dispatched twice over, and the
+brief whose findings changed the shipped board was written by TWO instances
+onto one path — it carries its own MERGE NOTE saying so, which is what a
+second specification buys you.
 
 ### The seven criteria, MEASURED and written down
 
@@ -794,7 +799,7 @@ seconds, so a hundred of them is an afternoon, not a week.
 | **completion** | changes the copper: routes a net, heals a separation, fixes a width | `route.py --nets QSPI_SD1 ... --rip-existing-nets ...` |
 | **placement** | moves footprints: a quench, a repair, a reconstruction — connects nothing, tunes no instrument | `place_seed --repair`, `place_reconstruct`, a 0c quench, a loop round |
 | **systemic** | changes how the chain routes, measures or grades — no net gets connected by it | pinning the fab floor, restoring net classes, filling zones, fixing a checker |
-| **classification** | the L3 lap that DECIDES the shape of the next re-entry. It changes no board, so like `systemic` it belongs to neither half — and it had to be filed AS `systemic` before this kind existed, which made a decision look like a tool change. **It is the EVIDENCE L5 asks for (#963)**, and it is bound to a row rather than to a stage: L3 produces exactly this lap, and a diagnosis made inline produces the same row with the same two required flags — `--shape` (which of the three the next re-entry changes) and `--lever` (the measurement that named it; repeating the shape word is refused). Recording it is side-effect free: it is in neither plateau window, so it moves no verdict | `converge.py record --kind classification --shape floorplan --lever "the escape faces are saturated: 11 of 12 lanes used"` |
+| **classification** | the L3 lap that DECIDES the shape of the next re-entry. It changes no board, so like `systemic` it belongs to neither half — and it had to be filed AS `systemic` before this kind existed, which made a decision look like a tool change. **It is the EVIDENCE L5 asks for (#963)**, and it is bound to a row rather than to a stage: L3 produces exactly this lap, and a diagnosis made inline produces the same row with the same two required flags — `--shape` (which of the three the next re-entry changes) and `--lever` (the measurement that named it; repeating the shape word is refused). Recording it is in neither plateau window, so it moves no verdict -- with one exception worth knowing, since the gate's own remedy is to write one: it is a ROW, so at `budget - 1` it is the row that ends the run | `converge.py record --kind classification --shape floorplan --lever "the escape faces are saturated: 11 of 12 lanes used"` |
 
 (`placement` exists because two runs had to file placement repairs as
 `systemic` for want of a kind, and `status`'s systemic-share warning cried
