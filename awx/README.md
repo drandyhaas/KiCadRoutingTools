@@ -889,3 +889,33 @@ abandoned with a measurement.
     unrun at its own budget. Not re-verified by this run, and still owed:
     the gates needing a local KiCad-python session, and TODO 7's per-board
     attribution, which gates a RELEASE rather than this merge.
+
+    **THE LOCAL KiCad-PYTHON GATES: RUN, ALL GREEN (2026-09-20).** All
+    **34** files in `tests/gui_parity/` -- which `run_all` does NOT collect,
+    so the cloud suite covered none of them -- run on this machine under
+    KiCad 10.0.0-103 / wx 4.2.2a1: **34 PASS, 0 fail, none unrun**,
+    including `test_714_mirror_pcbnew_parity` (18 s, the zero-tolerance flip
+    gate that must never self-skip), the branch's new
+    `test_fanout_backside_gui` (82 s), `test_gui_engine_parity` (73 s) and
+    `test_gui_livechain_rp2350` (631 s). Tree clean afterwards.
+
+    **AND A CORRECTION TO THE LINE ABOVE, which this run disproved.** The
+    four cloud self-skips are NOT "all for want of KiCad". Run HERE, with
+    KiCad present, they split two and two:
+
+      * `test_887_iso_render` (PASS, 161 s; wants the `kicad-cli` BINARY,
+        no display) and `test_910_fill_for_delivery` (PASS, 59 s; wants
+        KiCad's bundled python for arms 3-5) are genuinely KiCad-gated --
+        an image carrying KiCad would recover exactly these two.
+      * `test_887_run24_regression` and `test_run8_starved_face_gate`
+        **SELF-SKIP LOCALLY TOO.** They want `wk/run24/esp_prog/
+        cmd_timing.jsonl` and the recorded run-7 boards, and `wk/` is
+        gitignored (0 files tracked), so they skip on ANY clean clone --
+        cloud or laptop, with or without KiCad. Installing KiCad in the
+        image would not move them; only shipping the recorded artifacts
+        would.
+
+    Worth keeping straight because the two halves cost different things: a
+    `kicad-cli` binary needs no display, while the 34 `gui_parity` gates
+    need pcbnew AND wx, which on Linux needs Xvfb as well. No cloud script
+    in this repo installs either today.
