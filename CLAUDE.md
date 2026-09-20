@@ -304,15 +304,21 @@ Validate routed boards against the *real* spec, with the right checker — most
     `cloud_replay_sets.py --with-kicad` (default true, `--no-kicad` opts out)
     switches `modal_sweep/modal_app.py` onto `kicad/kicad:10.0.0` and PROVES
     both front-ends at build time (`import pcbnew` + `kicad-cli version`), so
-    the oracle legs actually run; such a wave suffixes its label `-kc`. That
-    recipe -- `from_registry` + `USER root` + `python-is-python3` +
-    `--break-system-packages` -- is the proven way to give the suite image
-    KiCad too, and would recover exactly the two genuinely KiCad-gated
-    self-skips (`test_887_iso_render` wants the kicad-cli BINARY,
-    `test_910_fill_for_delivery` KiCad's bundled python). The sweep keeps it
-    opt-in because a new base image is a NEW BASELINE ERA that voids
-    cross-wave numeric comparisons -- a reason that does NOT apply to the
-    pass/fail suite, which compares no numbers across runs.
+    the oracle legs actually run; such a wave suffixes its label `-kc`.
+    **The two defaults differ, so name the entry point:** `modal_app.py` read
+    on its own defaults `KICAD_SWEEP_WITH_KICAD` OFF, while
+    `cloud_replay_sets.py` -- the CLI you actually launch -- defaults it ON.
+    That recipe (`from_registry` + `USER root`, since the official image runs
+    as USER kicad; + `python-is-python3`, since Modal's builder shells out to
+    `python -m pip`; + `--break-system-packages` for PEP 668) is the proven
+    way to give the suite image KiCad too, and would recover exactly the two
+    genuinely KiCad-gated self-skips: `test_887_iso_render` (wants the
+    kicad-cli BINARY; Pillow, its other precondition, is already in
+    `requirements.txt`) and `test_910_fill_for_delivery` (wants KiCad's
+    bundled python). The env-level default is OFF because a new base image is
+    a NEW BASELINE ERA that voids cross-wave numeric comparisons -- a reason
+    that does NOT apply to the pass/fail suite, which compares no numbers
+    across runs.
     **Two other `run_all` self-skips are NOT about KiCad at all**:
     `test_887_run24_regression` and `test_run8_starved_face_gate` want
     recorded artifacts under `wk/`, which is gitignored (0 files tracked),

@@ -931,7 +931,9 @@ abandoned with a measurement.
     with no switch, which is why `run_all` self-skipped the two. So giving
     the suite KiCad is not new work: it is the proven recipe next door
     (`from_registry` + `USER root` + `python-is-python3` +
-    `--break-system-packages`). The sweep keeps it opt-in because a new base
-    image is a NEW BASELINE ERA voiding cross-wave numeric comparisons --
-    which does not apply to a pass/fail suite that compares no numbers
-    across runs. The `wk/` pair above is unaffected either way.
+    `--break-system-packages`). Name the entry point, because the two
+    defaults differ: `modal_app.py` read alone defaults the env var OFF,
+    while `cloud_replay_sets.py` -- the CLI actually launched -- defaults it
+    ON. The env-level default is OFF because a new base image is a NEW
+    BASELINE ERA voiding cross-wave numeric comparisons -- which does not
+    apply to a pass/fail suite that compares no numbers across runs. The `wk/` pair above is unaffected either way.
