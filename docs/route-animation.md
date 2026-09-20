@@ -395,6 +395,15 @@ python3 -X utf8 py_router/cmd_timing.py WORKDIR --json
 
 ## The render design system (#946)
 
+![one board, every layout, one pixel budget](946-layouts.png)
+
+![the same board in both measured themes](946-themes.png)
+
+![every event and defect role, authored and deuteranope](946-palette.png)
+
+![the attempts band](946-attempts.png)
+
+
 Two films are rendered from one engine, and before #946 they did not agree with
 each other. The issue opened on the narrowest symptom — ripped copper and
 restored copper told apart by hue alone, on the red–green axis, with no key in
