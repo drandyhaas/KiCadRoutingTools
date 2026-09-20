@@ -442,22 +442,150 @@ def corpus_has(sets: list, stress: Path) -> set:
     return have
 
 
+def local_manifests(sets: list, stress: Path) -> dict:
+    """{(set, run_dir_name, board): Path of the LOCAL redo_commands.sh}, one per
+    board from its preferred run dir -- the same choice `sweep_lib.discover_boards`
+    makes, so this is exactly the set of manifests a launch would replay."""
+    import sweep_lib as sl
+    out, seen = {}, set()
+    for s in sets:
+        for run_dir in sl.run_dirs_for(stress, s):
+            for d in sorted(run_dir.iterdir()):
+                m = d / "redo_commands.sh"
+                if not d.is_dir() or d.name.startswith(".") or d.name in seen:
+                    continue
+                if m.exists():
+                    seen.add(d.name)
+                    out[(s, run_dir.name, d.name)] = m
+    return out
+
+
+def manifest_preflight(sets: list, stress: Path) -> list:
+    """[(set, board, path)] for every LOCAL manifest the cloud placer could not
+    use. `modal_app` stages a board's corpus at the stress dir its manifest
+    records in `# cwd=<stress>/runs_<set>/<board>`; a manifest re-recorded from
+    anywhere else (butterstick's repair carried the SCRATCHPAD it was re-run
+    from, 2026-09-19) has no such line, and the container raised
+    `no '# cwd=' line` after the arm had been launched and paid for. Nothing
+    local caught it. Refuse here instead, naming the line to fix."""
+    import sweep_lib as sl
+    bad = []
+    for (s, _rd, b), m in local_manifests(sets, stress).items():
+        if not sl.recorded_corpus_prefix(m.read_text(errors="replace")):
+            bad.append((s, b, str(m)))
+    return bad
+
+
+def manifest_sizes_from_entries(entries) -> dict:
+    """{(run_dir_name, board): size} from a volume listing of `(path, size)`
+    pairs -- the manifests only, at depth run_dir/board/redo_commands.sh."""
+    out = {}
+    for path, size in entries:
+        parts = str(path).strip("/").split("/")
+        if len(parts) == 3 and parts[2] == "redo_commands.sh":
+            out[(parts[0], parts[1])] = int(size)
+    return out
+
+
+def volume_manifest_sizes(run_dir_names: list):
+    """{(run_dir_name, board): manifest size} from ONE recursive listing per run
+    dir on the corpus volume, or None (with a printed reason) when the volume
+    cannot be listed -- an unverified corpus is reported, never assumed fresh."""
+    try:
+        import modal
+        vol = modal.Volume.from_name(CORPUS_VOLUME)
+        entries = []
+        for rd in run_dir_names:
+            entries.extend((e.path, e.size)
+                           for e in vol.listdir(f"/{rd}", recursive=True))
+    except Exception as ex:                      # network, auth, a missing dir
+        print(f"  corpus freshness UNVERIFIED: could not list {CORPUS_VOLUME} "
+              f"({type(ex).__name__}: {str(ex)[:120]})")
+        return None
+    return manifest_sizes_from_entries(entries)
+
+
+def stale_manifests(local: dict, remote: dict):
+    """(stale, absent) over the boards in `local` ({(set, run_dir, board): Path}
+    or size): stale = the volume holds a manifest of a DIFFERENT SIZE, absent =
+    the volume has no manifest for the board at all.
+
+    Size, not content: one listing per set answers it without reading 150
+    files over the link, and every edit that adds, drops or re-argues a
+    command moves the byte count (the stale butterstick was 1853 bytes against
+    a repaired 3.6 KB). An edit that keeps the size exactly is invisible here,
+    and the report says so."""
+    stale, absent = [], []
+    for (s, rd, b), m in sorted(local.items()):
+        n = m if isinstance(m, int) else Path(m).stat().st_size
+        have = remote.get((rd, b))
+        if have is None:
+            absent.append((s, b, n))
+        elif have != n:
+            stale.append((s, b, n, have))
+    return stale, absent
+
+
 def stage_upload(args, sets, stress):
+    print("\n=== UPLOAD ===")
+    bad = manifest_preflight(sets, stress)
+    if bad:
+        for s, b, m in bad:
+            print(f"  UNREPLAYABLE on the cloud: {s}/{b}: no "
+                  f"'# cwd=<stress>/runs_<set>/<board>' line in {m}")
+        raise SystemExit(
+            "  the cloud placer stages each board at the stress dir its manifest "
+            "records; rewrite the '# cwd=' line(s) above to the board's own run "
+            "dir (the directory the manifest sits in) and re-run. Nothing spent.")
     have = corpus_has(sets, stress)
     missing = [s for s in sets if s not in have]
-    print(f"\n=== UPLOAD ===\n  corpus already has: "
-          f"{', '.join(sorted(have)) or '(none)'}")
-    if not missing:
+    print(f"  corpus already has: {', '.join(sorted(have)) or '(none)'}")
+    if missing:
+        print(f"  uploading: {', '.join(missing)}")
+        cmd = [sys.executable, str(SWEEP / "upload_corpus.py"),
+               "--sets", ",".join(missing), "--stress-dir", str(stress)]
+        if args.dry_run:
+            cmd.append("--dry-run")
+        r = sh(cmd)
+        if r.returncode != 0:
+            raise SystemExit(f"upload failed (rc={r.returncode})")
+    else:
         print("  nothing to upload")
+    # A set already on the volume is never re-uploaded, so a board repaired
+    # locally after its set went up used to replay the OLD manifest forever,
+    # silently (butterstick, 2026-09-17: the arms replayed a 3-command manifest
+    # that dies on a file no command produces, while the local 11-command chain
+    # verified fine). Compare what the volume holds against what this launch
+    # would replay, board by board, and re-upload the drift.
+    present = [s for s in sets if s in have]
+    if not present or getattr(args, "no_verify_corpus", False):
         return
-    print(f"  uploading: {', '.join(missing)}")
-    cmd = [sys.executable, str(SWEEP / "upload_corpus.py"),
-           "--sets", ",".join(missing), "--stress-dir", str(stress)]
-    if args.dry_run:
-        cmd.append("--dry-run")
-    r = sh(cmd)
-    if r.returncode != 0:
-        raise SystemExit(f"upload failed (rc={r.returncode})")
+    local = local_manifests(present, stress)
+    remote = volume_manifest_sizes(sorted({rd for (_s, rd, _b) in local}))
+    if remote is None:
+        return
+    stale, absent = stale_manifests(local, remote)
+    if not stale and not absent:
+        print(f"  corpus fresh: {len(local)} manifest(s) match the volume by size")
+        return
+    for s, b, n, have_n in stale:
+        print(f"  STALE on the volume: {s}/{b}: manifest {have_n} bytes there, "
+              f"{n} bytes here")
+    for s, b, n in absent:
+        print(f"  ABSENT from the volume: {s}/{b} ({n}-byte manifest here)")
+    by_set = {}
+    for s, b, *_ in stale + absent:
+        by_set.setdefault(s, []).append(b)
+    for s, boards in sorted(by_set.items()):
+        cmd = [sys.executable, str(SWEEP / "upload_corpus.py"), "--sets", s,
+               "--boards", ",".join(sorted(boards)), "--stress-dir", str(stress)]
+        if args.dry_run:
+            print(f"  would re-upload {s}: {', '.join(sorted(boards))}")
+            continue
+        print(f"  re-uploading {s}: {', '.join(sorted(boards))}")
+        r = sh(cmd)
+        if r.returncode != 0:
+            raise SystemExit(f"re-upload of {s} failed (rc={r.returncode})")
 
 
 # ---------------------------------------------------------------------- run
@@ -947,6 +1075,9 @@ def main():
                     help="sets re-graded in parallel during the baseline stage (default 6)")
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")
     ap.add_argument("--only", default="", help=f"run one/some stages: {'|'.join(STAGES)} (comma-separated)")
+    ap.add_argument("--no-verify-corpus", action="store_true",
+                    help="skip the per-board freshness check of the corpus volume "
+                         "(one listing per set; a stale manifest is re-uploaded)")
     ap.add_argument("--dry-run", action="store_true",
                     help="plan only, and make `upload` report sizes without pushing")
     ap.add_argument("--limit", type=int, default=0, help="keep only the N cheapest boards (smoke)")
