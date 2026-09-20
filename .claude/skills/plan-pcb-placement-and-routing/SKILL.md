@@ -352,10 +352,12 @@ written out of turn.
    verdict must be reproducible from the ledger as it stood the moment before.
 5. **The `DONE` marker** — written LAST of everything a machine waits on, and
    citing only files that already exist. DONE means the copper is frozen, not
-   that the run is over: `run_watch.py cheats --done` blocks on it, runs the
-   fence and provenance audits when it appears, and then exits, so a marker
-   written early declares a run finished while its own auditors have not
-   started.
+   that the run is over: `run_watch.py cheats --done` blocks on it and runs the
+   fence and provenance audits when it appears, so a marker written early
+   declares a run finished while its own auditors have not started. It does
+   NOT exit there — it waits for the second marker below. And do not rewrite
+   it: run 29 did, 29 minutes after those audits had read the board it then
+   superseded, so both verdicts in its watcher log are about the wrong board.
 6. **The report** — `REPORT.md`, written AFTER `DONE` so it can carry the two
    verdicts that only exist by then: the fence audit's and the provenance
    audit's, each quoted with its exit code. Then `echo done > <workdir>/

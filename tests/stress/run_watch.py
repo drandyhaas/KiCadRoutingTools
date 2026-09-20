@@ -706,6 +706,15 @@ REPORT_WAIT_SEC = 5400.0
 #: anything here abbreviates to.
 _SHA_RE = re.compile(r'\b[0-9a-f]{8,64}\b')
 
+#: The SHIPPED digests in a DONE marker, by the marker's own convention:
+#: `board routed.kicad_pcb sha256 <64 hex>`. Everything else hex in there is
+#: something the marker is TALKING ABOUT -- and on run 29 that is exactly the
+#: superseded board, quoted by DONE's own "an earlier DONE closed on sha
+#: 0b2f0d5e..." sentence. Collecting every hex token instead made the check
+#: silent on the one case it exists for: the superseded sha was in the set, so
+#: a report naming it "agreed" with the marker.
+_DONE_SHIPPED_RE = re.compile(r'sha256\s+([0-9a-f]{64})')
+
 
 def report_audit(workdir, report_path, done_path, done_sha_at_audit):
     """Lines about REPORT.md -- the artifact nothing could audit before.
@@ -762,26 +771,56 @@ def report_audit(workdir, report_path, done_path, done_sha_at_audit):
     # 2. the sha the report names as SHIPPED is the sha the audits examined.
     #    Run 29 fails this, and it is the check that makes the marker not
     #    theatre.
-    done_shas = set()
+    done_raw = ''
     try:
         with io.open(done_path, encoding='utf-8', errors='replace') as fh:
-            done_shas = set(_SHA_RE.findall(fh.read()))
+            done_raw = fh.read()
     except Exception:                                  # noqa: BLE001
         pass
-    first = _SHA_RE.search(raw)
-    if first and done_shas:
-        head = first.group(0)
-        if not any(h.startswith(head) or head.startswith(h)
-                   for h in done_shas):
+    shipped = set(_DONE_SHIPPED_RE.findall(done_raw))
+    # Every OTHER digest the marker mentions is one it is talking about rather
+    # than shipping -- a superseded board, a replaced arm.
+    others = set(_SHA_RE.findall(done_raw)) - shipped
+    others = {h for h in others
+              if not any(sh.startswith(h) for sh in shipped)}
+
+    def _named(hs):
+        return any(h[:8] in raw for h in hs)
+
+    if not shipped:
+        # SAID, not assumed clean. `wk/run20/DONE` is zero bytes, and a marker
+        # that names no board makes this check inert -- which looks exactly
+        # like agreement.
+        out.append('REPORT the DONE marker names no `sha256 <digest>`, so '
+                   'whether the report describes the board the audits read '
+                   'was NOT checked')
+    elif not _named(shipped):
+        out.append(
+            'REPORT names none of the digest(s) DONE ships (%s) anywhere in '
+            'its text -- the report does not say which board this is'
+            % ', '.join(sorted(h[:12] + '...' for h in shipped)))
+    else:
+        first = _SHA_RE.search(raw)
+        if first and others and any(first.group(0).startswith(h)
+                                    or h.startswith(first.group(0))
+                                    for h in others):
+            # The report OPENS on a digest the marker itself calls superseded.
+            # Only DONE's own vocabulary can produce this, so a git commit, a
+            # part number or an ISO date in the report cannot -- which is what
+            # a "first digest in the report" rule accused, on 4 of the 11
+            # REPORT.md files in this repo.
             out.append(
-                'REPORT the first board digest it names is %s..., and the DONE '
-                'marker names %s -- the headline artifact row is about a '
-                'different board than the one the audits read'
-                % (head[:12], ', '.join(sorted(h[:12] + '...'
-                                               for h in done_shas))))
+                'REPORT the first digest it names is %s..., which DONE names '
+                'as SUPERSEDED, not as shipped (%s) -- the headline artifact '
+                'row is about the wrong board'
+                % (first.group(0)[:12],
+                   ', '.join(sorted(h[:12] + '...' for h in shipped))))
 
     # 3. DONE did not change between the two triggers.
     now = _sha(done_path)
+    if done_sha_at_audit and not now:
+        out.append('REPORT the DONE marker could not be re-hashed, so whether '
+                   'it changed between the two audits was NOT checked')
     if done_sha_at_audit and now and now != done_sha_at_audit:
         out.append('REPORT the DONE marker was REWRITTEN between the board '
                    'audits and this one (sha %s... -> %s...) -- the audits '
@@ -820,7 +859,11 @@ def _await_report(workdir, done_path, done_sha, truthdir, root, report_done,
     if not report_done:
         return 0
     report = os.path.join(workdir, 'REPORT.md')
-    waited = 0.0
+    # A DEADLINE, not an accumulator. `waited += poll` never advances at
+    # `--poll 0`, so the bounded wait was unbounded for exactly the caller who
+    # asked it to spin. This reads a clock to bound a WAIT and to choose what
+    # to print; nothing here grades on it.
+    _deadline = time.monotonic() + report_wait if report_wait else None
     while True:
         if os.path.exists(report_done):
             now = _sha(done_path)
@@ -832,14 +875,13 @@ def _await_report(workdir, done_path, done_sha, truthdir, root, report_done,
             for line in report_audit(workdir, report, done_path, done_sha):
                 print(line, flush=True)
             return 0
-        if report_wait and waited >= report_wait:
+        if _deadline is not None and time.monotonic() >= _deadline:
             print('REPORT no %s after %g s -- REPORT.md was NOT audited '
                   '(verdict quoting, shipped-sha agreement and DONE stability '
                   'unchecked). That is not a pass.'
                   % (os.path.basename(report_done), report_wait), flush=True)
             return 0
-        time.sleep(poll)
-        waited += poll
+        time.sleep(max(poll, 0.01))
 
 
 def _board_audits(workdir, truthdir, root):
