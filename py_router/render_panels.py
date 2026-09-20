@@ -273,10 +273,15 @@ def draw_summary(d, box, *, lines, theme):
         import render_theme
         from route_render import load_font
         th = theme or render_theme.DARK
-        font = load_font(max(9, min(15, int(box.h * 0.15))))
+        # Sized so EVERY line fits: a summary that silently drops its last
+        # row is a summary you cannot read a closing frame off. Measured: at
+        # 15 pt in a 132 px box the fifth row (`vias`) was clipped away.
+        pad = 8
+        font = load_font(max(8, min(15, int((box.h - 2 * pad)
+                                            / (1.45 * max(1, len(lines)))))))
         d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
                     fill=th.rgb('chrome_panel'))
-        pad, lh = 8, int(font.size * 1.6)
+        lh = int(font.size * 1.45)
         y = box.y + pad
         for label, value in lines:
             if y + lh > box.y + box.h - pad:
