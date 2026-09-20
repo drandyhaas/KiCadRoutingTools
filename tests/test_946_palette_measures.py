@@ -97,9 +97,18 @@ FLOORS = (
      lambda d: d['layers']['contrast_min'], 'min', 1.96,
      'invariant', 1.96,
      '#1012 fixed light via k=0.74 at alpha 205; it scored 1.19x'),
+    # This is a property of TEN COLOURS AND AN ALPHA -- "if these were
+    # blended, would the blend impersonate a third layer" -- and #1015 did not
+    # change it, because #1015 stopped the renderer BLENDING. It stays here as
+    # a standing description of the palette, and the fix is measured where it
+    # actually happened: `tests/test_946_opaque_crossings.py` counts colours in
+    # the RENDERED IMAGE and takes dark 15 -> 0, light 43 -> 0, with an OFF arm
+    # proving the measurement can see the defect at all.
     ('crossings.count',
      lambda d: d['crossings']['count'], 'max', 21,
-     'ratchet', 0, '#1015 -- opaque crossings'),
+     'invariant', 21,
+     'a palette fact, unchanged by #1015; the render is gated by '
+     'test_946_opaque_crossings'),
 )
 
 #: Compared against the baseline but carrying no floor of their own.

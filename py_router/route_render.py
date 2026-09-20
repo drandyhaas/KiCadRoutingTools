@@ -53,7 +53,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from startup_checks import check_render_dependencies
 check_render_dependencies()
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -235,6 +235,14 @@ class BoardRenderer:
             self.W, self.H = max(1, int(round(size * bw / bh))), size
         self._margin_px = margin_frac * size * self.ss
 
+        #: #1015. Crossings draw opaque by default: a blend that
+        #: impersonates a third layer misleads EVERY viewer, and the
+        #: fix costs one mask per layer. `frame(opaque_crossings=)`
+        #: overrides per call.
+        self.opaque_crossings = True
+        #: How far a non-focused layer drops when `frame(focus_layer=)`
+        #: names one. 0.28 keeps it legible as CONTEXT.
+        self.context_alpha_frac = 0.28
         self._show_pads = show_pads
         self._show_zones = show_zones
         self.set_view(view)
@@ -265,6 +273,28 @@ class BoardRenderer:
         # (drawn AFTER the pour so they read on top of it, as in the static base).
         if self._show_pads and not self.dynamic_zones:
             self.draw_pads(d)
+        # #1015: pad copper is part of the stack. It is drawn into the STATIC
+        # base, so the crossing mask never saw it -- and a trace entering a pad
+        # then composited as a blend, which on the light arm produced exactly
+        # one colour (158,141,58) sitting 33.7 from In5's solo appearance. A
+        # trace over a pad is a stack, not a blend, for the same reason a
+        # trace over a trace is.
+        #
+        # Built on an RGB canvas and thresholded, NOT drawn straight onto an
+        # 'L' image: `draw_pads` also draws the DRILL, in `pad_hole`, and an
+        # RGB tuple on a mode-'L' image raises "color must be int or
+        # single-element tuple". Thresholding has the right semantics anyway --
+        # a hole is not copper, so it falls out of the mask on its own.
+        self._pad_mask = None
+        if self._show_pads:
+            m = Image.new('RGB', (Wp, Hp), (0, 0, 0))
+            try:
+                self.draw_pads(ImageDraw.Draw(m),
+                               fill_for=lambda p: (255, 255, 255))
+                self._pad_mask = m.convert('L').point(
+                    lambda v: 255 if v > 127 else 0)
+            except Exception:                                  # noqa: BLE001
+                self._pad_mask = None   # never fail a render over a mask
 
     # -- substrate -------------------------------------------------------
     def _draw_outline(self, d: ImageDraw.ImageDraw) -> None:
@@ -478,6 +508,8 @@ class BoardRenderer:
               highlight_vias: Optional[Iterable] = None,
               highlight_color: Optional[Tuple[int, int, int]] = None,
               highlight_mark: str = 'solid',
+              focus_layer: Optional[str] = None,
+              opaque_crossings: Optional[bool] = None,
               label: Optional[str] = None, zone_net_ids=None,
               overlays: Optional[Sequence] = None) -> Image.Image:
         """Composite the given copper onto the static substrate and return an
@@ -493,6 +525,8 @@ class BoardRenderer:
         """
         segs = self.pcb.segments if segments is None else segments
         vs = self.pcb.vias if vias is None else vias
+        if opaque_crossings is None:
+            opaque_crossings = self.opaque_crossings
         img = self._base.copy()
         if self.dynamic_zones:
             dz = ImageDraw.Draw(img)
@@ -512,14 +546,54 @@ class BoardRenderer:
                                     color=self.palette.get(layer))
         else:
             acc = img.convert('RGBA')
+            # #1015. Two problems live in this loop, and both come from the
+            # SAME fact: a layer is alpha-composited onto the accumulated
+            # image, so what reaches the screen is not what the palette says.
+            #
+            #   * every layer contracts toward the board body -- F.Cu
+            #     (208,64,58) arrives at (133,52,46) -- and after that
+            #     contraction the nearest rendered pairs are ~25 apart;
+            #   * an overlap is a BLEND, and the blend can land on a real
+            #     layer's solo appearance. 19 two-layer crossings land within
+            #     34 of some third layer; the worst, B.Cu over F.Cu, renders
+            #     (96,98,142) against In6's (99,102,143) -- **5.1 apart**. On a
+            #     6-layer board a back-over-front crossing is indistinguishable
+            #     from a trace on In6, for EVERY viewer.
+            #
+            # OPAQUE AT CROSSINGS. Keep alpha for the general wash, but where
+            # this layer covers copper an earlier layer already drew, composite
+            # it at full alpha: the crossing then reads as "red passes OVER
+            # blue" rather than as a new colour. That is also truer to the
+            # board -- copper does not blend, it stacks.
+            #
+            # FOCUS. When the caller names the layer the current event is on,
+            # every other layer drops to a context alpha. The movie already
+            # knows which layer each event touches, so the focus is free, and a
+            # crossing stops being ambiguous because only one side of it is
+            # lit.
+            covered = (self._pad_mask.copy()
+                       if getattr(self, '_pad_mask', None) is not None
+                       else Image.new('L', acc.size, 0))
             for layer in reversed(self.copper_layers):
                 lsegs = by_layer.get(layer)
                 if not lsegs:
                     continue
-                overlay = Image.new('RGBA', acc.size, (0, 0, 0, 0))
-                self._draw_segments(ImageDraw.Draw(overlay), lsegs,
-                                    color=self.palette[layer] + (self.layer_alpha,))
+                a = self.layer_alpha
+                if focus_layer is not None and layer != focus_layer:
+                    a = max(1, int(round(a * self.context_alpha_frac)))
+                cover = Image.new('L', acc.size, 0)
+                self._draw_segments(ImageDraw.Draw(cover), lsegs, color=255)
+                alpha = cover.point(lambda v, a=a: a if v else 0)
+                if opaque_crossings:
+                    # full alpha exactly where this layer meets earlier copper
+                    cross = ImageChops.multiply(cover, covered)
+                    alpha = ImageChops.lighter(
+                        alpha, cross.point(lambda v: 255 if v else 0))
+                overlay = Image.new('RGBA', acc.size,
+                                    tuple(self.palette[layer]) + (0,))
+                overlay.putalpha(alpha)
                 acc = Image.alpha_composite(acc, overlay)
+                covered = ImageChops.lighter(covered, cover)
             img = acc.convert('RGB')
         # Vias and highlights are drawn opaque on top so they stay unambiguous.
         d = ImageDraw.Draw(img)
