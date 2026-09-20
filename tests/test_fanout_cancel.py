@@ -51,7 +51,13 @@ QFN_BOARD = os.path.join(ROOT, 'kicad_files', 'haasoscope_pro_max_test.kicad_pcb
 
 # The measured, uncancelled ledger for `bga_fanout.py <BOARD> --component U9`
 # (~2s, every ball escapes -- fast, and with real work a cancel could abandon).
-BASE = {'requested': 75, 'escaped': 75, 'failed': 0, 'unescaped_nets': [],
+# Re-measured 2026-09-20 on bus622-take5: 75 -> 77. The fanout's nanometre
+# tie-breaks (nearest edge / channel / gap on this 2.54 mm PGA, where many
+# balls are EXACTLY equidistant) give the channel pass an assignment with no
+# collisions, so every ball escapes there; main's channel pass hit 32
+# collisions, dropped two balls and fell back to the under-pad engine, whose
+# ledger counted 75. Same board, same command, both arms 0 failed.
+BASE = {'requested': 77, 'escaped': 77, 'failed': 0, 'unescaped_nets': [],
         'skipped_nc': 24, 'component': 'U9'}
 BASE_DRC_TOTAL = 0
 

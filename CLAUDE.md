@@ -538,6 +538,15 @@ through there too.
   are the one PCBData field the GUI COMPUTES rather than reads — see the
   `_global_to_local` entry in `.gui-parity-checked` for the bug that motivated
   these.
+- `tests/gui_parity/test_fanout_backside_gui.py` — needs KiCad python; the
+  same shape for a **flipped BGA** (bus622-take5's `flip_frame`, which
+  re-derives every pad's locals when it turns the board over). Builds its own
+  fixture -- glasgow's U30 flipped to B.Cu through pcbnew's `FOOTPRINT.Flip`,
+  saved to a temp dir with its `.kicad_pro` -- drives the REAL FanoutTab,
+  replays the tab's kwargs through the text-parsed engine, and asserts the
+  mirror frame was TAKEN on both fronts (a spy on `to_front_frame`, the
+  change detector), identical tracks/vias/failed nets, and every surface
+  escape on the part's own face. Under a minute.
 - `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
   plan through the GUI engine path and grades against the CLI chain
   (`KICAD_DUMP_BATCH_KWARGS` diffs the full batch_route param set, ~105 keys).
