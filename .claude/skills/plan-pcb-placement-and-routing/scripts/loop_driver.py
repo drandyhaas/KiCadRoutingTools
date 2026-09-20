@@ -2447,6 +2447,13 @@ def l5(a):
     name, doc, _code = got
     why = doc.get('reason', '')
 
+    # THE VERIFIER'S OWN FILES, FOUND (#963). Once, here, so both `_cross_check`
+    # call sites below see the same set, and on its OWN attribute rather than
+    # by filling `a.verifier_verdict`: that flag's refusal texts interpolate
+    # `--verifier-verdict <path>`, and printing that for a file nobody passed
+    # tells the reader to look for a flag they did not use.
+    a._discovered_verdicts, a._absent_verdicts = _discover_verdicts(a)
+
     # A score that EXISTS but does not MEASURE is not a stop verdict -- it is a
     # missing measurement. This used to fall through to the terminal branch,
     # so an unparseable score file printed the full ship ceremony (including
@@ -2548,8 +2555,24 @@ tell a finished run from a stalled one.
     # still the trap, so it does not exist.
     _cyc, P = _paths(a)
     work = _work(a)
+    # WHAT THIS CALL FOUND, and what it did not (#963). Printed on the terminal
+    # branch only: CONTINUE is the hot branch, and a report there would be
+    # prose on every lap. The CYCLE is named because `_paths` takes the highest
+    # of the ledger's own cycle index and any `_c<n>` already on disk, so a
+    # verifier that misnames its output moves the whole map -- which is
+    # invisible unless the number is on the page.
+    _found = [d for d in (getattr(a, '_discovered_verdicts', None) or [])]
+    _gone = list(getattr(a, '_absent_verdicts', None) or [])
+    _vreport = (
+        f'\nVERDICT FILES, cycle {_cyc}: '
+        + (', '.join(f'{os.path.basename(d["path"])} '
+                     f'{(d.get("line") or "unreadable").split(";")[0]}'
+                     for d in _found) or 'none found')
+        + (f'. ABSENT: {", ".join(l for l, _p in _gone)}.' if _gone
+           else '. None absent.')
+        + '\nFound by the cycle map, not named -- the flag stays optional.\n')
     return f'''<stage_instructions stage="L5" name="close out: {name}" of="{len(STAGES)}">
-{headline.get(name, name)}.{_binding_note()}
+{headline.get(name, name)}.{_binding_note()}{_vreport}
 
 {why}
 
@@ -2767,6 +2790,66 @@ def _peek_close(a):
     return None if e else doc
 
 
+#: The lenses whose verdict files this stage looks for when none were named.
+#: THREE, not the four in `_ARTIFACTS`: `verdict_record.txt` is the close-out
+#: BOUNDARY check, it spells `check=<1-5>` rather than `lens=<name>`, and
+#: `_LENS_RE` refuses it on purpose -- adding it because it is in `_ARTIFACTS`
+#: is the obvious wrong simplification and would fire the "not a lens verdict"
+#: arm on every close-out.
+_DISCOVER_LENSES = ('connectivity', 'drc', 'spec')
+
+
+def _discover_verdicts(a):
+    """(rows, absent) -- this cycle's verdict files, FOUND rather than named.
+
+    #963: `--verifier-verdict` was passed on 0 of run 29's 7 L5 calls while 17
+    `verdict_*.txt` sat on disk, so the one gate that compares a verifier's own
+    file against the record could not fire. The paths were never a mystery --
+    `_ARTIFACTS` names them and `_paths` gives them this cycle's suffix -- they
+    simply had to be typed, and were not.
+
+    THE CYCLE MAP, NOT A GLOB, and the difference is measured: run 29's work
+    dir holds 17 `verdict_*.txt`, of which only nine are `_ARTIFACTS` names.
+    The other eight are placement-half and ad-hoc lenses (`legality`,
+    `provenance`, `not-run`, `closeout`, ...), every one a well-formed
+    `VERDICT=FAIL:` line that no ROUTING close-out should mention. A glob would
+    have turned eight honest files into eight refusals. Resolving through
+    `_paths` also makes a previous cycle's verdict unreachable by
+    construction: cycle 1's `verdict_spec.txt` is simply not in the cycle-3
+    map, so its stale PASS can never be read as this cycle's.
+
+    Nothing here decides. It finds, reads, and names what it could not read;
+    `_cross_check` does the comparing, and the REPORT is composed by the
+    caller, because a stage's text is composed in one place.
+    """
+    rows, absent = [], []
+    try:
+        _cyc, P = _paths(a)
+    except Exception:                                       # noqa: BLE001
+        return rows, absent
+    try:
+        sys.path.insert(0, ROOT)
+        from converge import lens_name, read_lens_file
+    except Exception:                                       # noqa: BLE001
+        return rows, absent
+    for lens in _DISCOVER_LENSES:
+        p = P.get(f'verdict_{lens}.txt')
+        if not p:
+            continue
+        if not os.path.isfile(p):
+            absent.append((lens, p))
+            continue
+        try:
+            line, no = read_lens_file(p)
+        except Exception as exc:                            # noqa: BLE001
+            rows.append({'lens': lens, 'path': p, 'line': None, 'lineno': None,
+                         'error': f'{type(exc).__name__}: {exc}'})
+            continue
+        rows.append({'lens': lens_name(line), 'path': p, 'line': line,
+                     'lineno': no, 'error': None, 'expected': lens})
+    return rows, absent
+
+
 def _cross_check(a, name, doc):
     """Refusal when two independent instruments disagree -- or None.
 
@@ -2883,6 +2966,79 @@ def _cross_check(a, name, doc):
             vpairs.append((
                 f'--verifier-verdict {_p} (line {_no})', _line,
                 f'ledger iteration {_r.get("iteration")} (--final): {_raw}'))
+
+    # THE SAME FILES, FOUND RATHER THAN NAMED (#963) -- and judged by a
+    # NARROWER rule, because a discovered file answers a different question.
+    #
+    # An explicit `--verifier-verdict` is the operator's claim that this
+    # verdict is already on the record, so "no --final row mentions this lens"
+    # is a real contradiction there. A DISCOVERED file is evidence that the
+    # record is not written yet, and on the FIRST L5 of any close-out it never
+    # is: this stage's own text is what tells the operator to write the
+    # `--final` row, so `live` is empty BY CONSTRUCTION. Run 29's two final
+    # rows are iterations 44 and 46, both written after its last L5 call.
+    # Feeding these through the arm above would print three refusals on every
+    # honest close-out, about a record the same stage is about to ask for.
+    for _d in (getattr(a, '_discovered_verdicts', None) or []):
+        _where = (f'{os.path.basename(_d["path"])} '
+                  f'(found beside the ledger, not named)')
+        if _d.get('error'):
+            vpairs.append((_where, f'unreadable: {_d["error"]}',
+                           'a verdict file on this cycle\'s map must be '
+                           'openable -- its path is not a guess'))
+            continue
+        _dln, _dline = _d.get('lens'), _d.get('line') or ''
+        if not _dln:
+            vpairs.append((_where, _dline,
+                           'not a lens verdict -- a boundary check spells '
+                           '`check=<1-5>` and belongs in the report'))
+            continue
+        _dfail = _dline.strip().startswith('VERDICT=FAIL')
+        if _dln in live:
+            _r, _raw = live[_dln]
+            # FRESHNESS BY CONTENT, NEVER BY MTIME. `--deadline` was removed
+            # from this toolchain because no result may depend on timing, and
+            # mtime is measurably unreliable on these very artifacts -- run
+            # 29's DONE marker reports an mtime 29 minutes after it was first
+            # written. The row already stores each lens file's sha256, so the
+            # honest question is whether the bytes are the ones it quoted.
+            _now = None
+            try:
+                from board_store import sha256_file
+                _now = sha256_file(_d['path'])
+            except Exception:                               # noqa: BLE001
+                _now = None
+            for _src in (_r.get('lens_source') or []):
+                if not isinstance(_src, dict) or not _now:
+                    continue
+                if os.path.basename(str(_src.get('path') or '')) != \
+                        os.path.basename(_d['path']):
+                    continue
+                if _src.get('sha256') and _src['sha256'] != _now:
+                    vpairs.append((
+                        _where, _dline,
+                        f'ledger iteration {_r.get("iteration")} quoted this '
+                        f'same file at sha {str(_src["sha256"])[:12]}...; it '
+                        f'is {_now[:12]}... now -- the verdict changed after '
+                        f'the row recorded it'))
+            if _dfail != _raw.strip().startswith('VERDICT=FAIL'):
+                vpairs.append((
+                    f'{_where} (line {_d.get("lineno")})', _dline,
+                    f'ledger iteration {_r.get("iteration")} (--final): '
+                    f'{_raw}'))
+        elif _dfail and name == 'DONE-EXHAUSTED' and _cv == 'DONE':
+            # The one arm a discovered file gets that needs no `--final` row,
+            # or discovery is decoration: a FAIL on disk beside two instruments
+            # both saying the board is finished. Calibration -- this would NOT
+            # have fired on run 29, whose stop was condition 4 and whose
+            # close-out was not DONE, because run 29 recorded its FAILs
+            # honestly. The defect there was that nobody read the files, not
+            # that the files lied.
+            vpairs.append((
+                _where, _dline,
+                f'converge says DONE-EXHAUSTED and check_complete says DONE, '
+                f'and this verdict is on disk beside them, unrecorded'))
+
     # Per-bucket, never one blanket early return.
     if _accept_close(a, 'agreement'):
         pairs = []
@@ -3266,11 +3422,16 @@ def _args(argv=None):
                          'the LIVE lens claim in the ledger --final row(s) and '
                          'refuses a disagreement -- including a verdict that '
                          'never reached the ledger at all, which is what a '
-                         'lost reply looks like. Not required: demanding it '
-                         'would refuse every run recorded before it existed; '
-                         'the L5 text is what makes it habitual. Waived by '
-                         '--accept-unclosed verifier, which is deliberately '
-                         'NOT the `agreement` token.')
+                         'lost reply looks like. Not required, and since #963 '
+                         'rarely needed: when it is omitted L5 DISCOVERS the '
+                         "three lens files from this cycle's own map and "
+                         'compares those instead -- by a narrower rule, '
+                         'because naming a file claims its verdict is already '
+                         'on the record while finding one is evidence the '
+                         'record is not written yet. Demanding the flag would '
+                         'still refuse every run recorded before it existed. '
+                         'Waived by --accept-unclosed verifier, which is '
+                         'deliberately NOT the `agreement` token.')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--dump-all', action='store_true')
     ap.add_argument('--dump-refusals', action='store_true',

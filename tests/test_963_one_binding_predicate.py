@@ -80,6 +80,9 @@ NOT_THE_PREDICATE = {
         'is this board IN the ledger -- compares to rows\' result_sha',
     ('loop_driver.py', '_ledger_collision'):
         'do two ledger files describe the same work -- compares file content',
+    ('loop_driver.py', '_cross_check'):
+        'are these the BYTES the --final row quoted -- compares a verdict '
+        "file's sha against the lens_source the row stored (#963 item C)",
 }
 
 
