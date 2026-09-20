@@ -56,13 +56,36 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
 sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 
+#: Hand-written candidates, kept only as the fallback. The REAL list comes
+#: from `kicad_exact_fill.kicad_python_candidates()` -- CALL the finder, do not
+#: mirror it.
+#:
+#: This list had the same defect #647 fixed in the engine and never propagated
+#: here: no KiCad >= 6 installs at the UNVERSIONED
+#: `C:\Program Files\KiCad\bin\python.exe` (it is `...\KiCad\10.0\bin\...`),
+#: so on Windows this gate printed `SKIP: no python with pcbnew + wx found` and
+#: exited 0 on a machine with KiCad 10.0.0 and wx 4.2.2 installed and working.
+#: A gate that self-skips on a capable machine is worse than one that fails:
+#: it reports every claim it guards as checked.
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
-    os.path.expandvars(r"C:\\Program Files\\KiCad\\bin\\python.exe"),
+    os.path.expandvars(r"C:\Program Files\KiCad\bin\python.exe"),
 ]
 
-BOARD = os.path.join(REPO, 'kicad_files', 'fanout_output.kicad_pcb')
+try:                                       # the engine's own finder, verified
+    sys.path.insert(0, os.path.join(REPO, 'py_router'))
+    from kicad_exact_fill import kicad_python_candidates as _kpc
+    KICAD_PYTHONS = list(_kpc()) + [c for c in KICAD_PYTHONS
+                                    if c not in set(_kpc())]
+except Exception:                                              # noqa: BLE001
+    pass
+
+#: `fanout_output.kicad_pcb` has no such file in the repo -- the boards
+#: are `fanout_output1` / `fanout_output2` -- so this gate printed
+#: `SKIP: fixture board missing` and exited 0, on top of the
+#: interpreter defect above. TWO self-skips in a row, both silent.
+BOARD = os.path.join(REPO, 'kicad_files', 'fanout_output1.kicad_pcb')
 GREEN = '\033[92m'
 
 failures = []
@@ -79,7 +102,15 @@ def _reexec_into_kicad():
         if cand != sys.executable and os.path.exists(cand):
             if subprocess.run([cand, '-c', 'import pcbnew, wx'],
                               capture_output=True).returncode == 0:
-                os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
+                argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
+                # SUBPROCESS ON WINDOWS, not execv. The CRT re-splits execv's
+                # argv on spaces, and the real install path is
+                # `C:\Program Files\KiCad\10.0\bin\python.exe` -- so the
+                # re-exec ran `C:\Program` with `Files\KiCad\...` as an
+                # argument and died before the gate started.
+                if os.name == 'nt':
+                    sys.exit(subprocess.run(argv).returncode)
+                os.execv(cand, argv)
     print("SKIP: no python with pcbnew + wx found")
     sys.exit(0)
 
