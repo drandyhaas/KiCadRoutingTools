@@ -108,13 +108,19 @@ class IsoOpts(object):
 
     __slots__ = ('max_renders', 'height_frac', 'yaw0_deg', 'sweep_deg',
                  'tilt_deg', 'quality', 'floor', 'perspective', 'zoom', 'jobs',
-                 'timeout', 'cli', 'keep_dir')
+                 'timeout', 'cli', 'keep_dir', 'require_models')
 
     def __init__(self, max_renders=24, height_frac=0.62, yaw0_deg=45.0,
                  sweep_deg=60.0, tilt_deg=-45.0, quality='basic', floor=False,
                  perspective=False, zoom=None, jobs=None, timeout=120.0,
-                 cli=None, keep_dir=None):
+                 cli=None, keep_dir=None, require_models=True):
         self.max_renders = int(max_renders)
+        #: #1016. Draw the panel only when the board has bodies to show. ON by
+        #: default: a panel that shows a bare rectangle rotating for 38% of
+        #: every frame is worse than no panel, and the fraction that decides it
+        #: was already computed -- it was just used as a caption. Turn it off
+        #: with `--iso-allow-bare` when the board as an OBJECT is the point.
+        self.require_models = bool(require_models)
         # FINITE, checked here rather than trusted. argparse's `type=float`
         # happily accepts `nan` and `inf`, and make_movie's main() catches only
         # FileNotFoundError -- so `--iso-height-frac nan` came out of
@@ -537,9 +543,53 @@ def compose_two_panel(frames, marks, final_board, opts=None):
     if not any(owner):
         return frames, _report('not_applicable', 'no chain boards to render')
 
+    # #946 item 3 / #1016. `plan_iso_shots`'s own docstring says it plainly:
+    # "copper sits under soldermask and the 3D view SHOWS NO ROUTING PROGRESS
+    # AT ALL; what it shows is the parts moving and the board turning." So in a
+    # ROUTING movie the largest element carries no routing information by
+    # design -- at height_frac 0.62 that is 620 px of a 1620 px film, 38% of
+    # every frame.
+    #
+    # That is a fair trade on a populated board, where the iso view is the only
+    # thing in the film that shows the board as an OBJECT, and the sweep is
+    # free. It is not a trade at all when there are no bodies to show:
+    # kit-dev-coldfire-xilinx_5213 resolves 1/160 models, orangecrab_ext_pll
+    # 5/148, splitflap_driver 3/58, watchy 7/75. On those, 38% of every frame
+    # is a bare rectangle rotating through a 60-degree sweep.
+    #
+    # The decision data already existed and was used only as a CAPTION:
+    # `models_note` computes the resolved fraction and `MOSTLY_BARE_FRACTION`
+    # is already the threshold. This reuses it as a GATE.
+    #
+    # Taken ONCE, here, before anything commits to a taller frame -- after the
+    # first composed frame the height is fixed and cannot change, which is the
+    # same reason the probe render happens where it does.
+    #
+    # And BEFORE resolving kicad-cli, deliberately: 'should this panel be
+    # drawn' is a cheaper and more fundamental question than 'can it be', it
+    # needs no binary, and putting it after meant a machine without kicad-cli
+    # reported `did_not_run` for a board that would have been gated anyway --
+    # a true statement that hides the more useful one.
+    if opts.require_models:
+        _gate_board = next((b for b in owner if b), None)
+        _models = kir.resolve_models(_gate_board) if _gate_board else None
+        _tot = (_models or {}).get('total') or 0
+        _found = (_models or {}).get('found') or 0
+        if _tot and _found < _tot * kir.MOSTLY_BARE_FRACTION:
+            return frames, _report(
+                'mostly_bare',
+                '%d of %d 3D models resolve (< %.0f%%)'
+                % (_found, _tot, kir.MOSTLY_BARE_FRACTION * 100),
+                models=_models)
+        if not _tot:
+            return frames, _report('mostly_bare',
+                                   'the board references no 3D models',
+                                   models=_models)
+
     cli, why = kir.resolve_cli(opts.cli)
     if not cli:
         return frames, _report('did_not_run', why)
+
 
     shots, frame_to_shot = plan_iso_shots(owner, opts)
     W, _H_top, H_iso, _total = panel_geometry(frames[0].size, opts.height_frac)
@@ -662,4 +712,11 @@ def iso_status_line(report):
         return 'movie: iso panel OFF -- DISABLED (%s). Single X-ray panel.' % detail
     if st == 'error':
         return 'movie: iso panel OFF -- UNAVAILABLE (%s).%s' % (detail, tail)
+    if st == 'mostly_bare':
+        # Worded so it cannot read as success, like its four siblings: this is
+        # a panel that was ASKED FOR and deliberately not drawn, which is a
+        # different thing from one that failed.
+        return ('movie: iso panel OFF -- MOSTLY BARE (%s), so the 3D view '
+                'would show a rotating rectangle and no routing.%s'
+                % (detail, tail))
     return 'movie: iso panel OFF -- not applicable (%s).' % (detail or 'nothing to render')

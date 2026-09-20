@@ -137,7 +137,7 @@ def test_the_two_panel_movie_writes_and_the_encoded_file_holds_one_size():
         out = os.path.join(d, 'm.gif')
         got = MM.make_movie([LVDS, QFN], out=out, size=240, quiet=True,
                             panels='xray+iso',
-                            iso_opts=mp.IsoOpts(max_renders=2, quality='basic'))
+                            iso_opts=mp.IsoOpts(require_models=False, max_renders=2, quality='basic'))
     finally:
         mp.compose_two_panel = real
     want(got and os.path.exists(got), 'the two-panel movie is written', got)
@@ -320,7 +320,7 @@ def test_a_real_board_with_no_resolvable_models_still_renders_and_says_bare():
     marks = []
     frames = A.build_boards(steps, final, 200, 1, 150, 2, 6, marks=marks)
     out, rep = mp.compose_two_panel(frames, marks, final,
-                                    mp.IsoOpts(max_renders=1))
+                                    mp.IsoOpts(require_models=False, max_renders=1))
     want(rep['state'] == 'ran',
          'a bare board is NOT a failure -- it renders fine, it just has no '
          'component bodies', rep['state'])

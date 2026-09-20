@@ -407,6 +407,11 @@ def main():
                      help='basic measured 1.4-2.7 s serial and 1.9-4.2 s '
                           'four at once; high measured 5.0-7.5 s on the '
                           'same four boards, about 3x (default: basic)')
+    iso.add_argument('--iso-allow-bare', action='store_true',
+                     help='draw the iso panel even when the 3D models do not '
+                          'resolve. #1016: by default a MOSTLY BARE board gets '
+                          'no panel, because 38%% of every frame would be a '
+                          'rotating rectangle showing no routing')
     iso.add_argument('--iso-floor', action='store_true',
                      help='kicad-cli --floor: shadows and post-processing')
     iso.add_argument('--iso-perspective', action='store_true',
@@ -465,6 +470,7 @@ def main():
         max_renders=args.iso_max_renders,
         height_frac=args.iso_height_frac, sweep_deg=args.iso_sweep,
         quality=args.iso_quality, floor=args.iso_floor,
+        require_models=not args.iso_allow_bare,
         perspective=args.iso_perspective, zoom=args.iso_zoom,
         jobs=args.iso_jobs, timeout=args.iso_timeout,
         cli=args.kicad_cli)
