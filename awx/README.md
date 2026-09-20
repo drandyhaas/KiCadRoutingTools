@@ -854,20 +854,23 @@ abandoned with a measurement.
     `blockers_of` double-counts half a track; `collapse_dives` calls
     `os.chdir` at import; `flip_frame` does not mirror `pad.polygons`.
 
-13. **Two suite failures the `py_router` delta causes, and one artifact**
-    (measured 2026-09-19 after the rebase; all three pass on main
-    `ad243b74`). `test_703_predictor_regen`: splitflap_driver's authored
-    row regenerates one segment and 0.06 mm differently (1155 segments
-    vs 1154 recorded) -- attributed by single-file revert to the
-    nanometre rounding of the pad keep-out's sub-cell offset in
-    `routing_utils`, so the translation-invariance change is NOT
-    copper-neutral on main's corpus: a cell sitting exactly on a keep-out
-    boundary is decided the other way. `test_fanout_cancel`: interf_u's
-    U9 fanout requests and escapes 77 balls where main's requests 75
-    (0 failed either way) -- the `bga_fanout` delta, not bisected
-    further. Both are the corpus A/B's business (item 7), and the
-    recorded baselines move with its verdict. `test_782_nondefault_
-    netclass_clamp` fails only in a checkout carrying a `venv/`: its
-    walker skips `.git`, `node_modules` and `.claude` but not `venv`, so
-    a numpy file joins the hit list -- a test fix for main, not a branch
-    defect. `test_459_group_routing` at its own 1200 s budget is unrun.
+13. **The suite on the branch: green after four re-recordings and fixes
+    (2026-09-20).** `run_all` on Modal at `8e395ed0` was 647 passed / 4
+    failed (50/50 shards, 25 min; 4 self-skipped for want of KiCad in the
+    cloud). Two were the `py_router` delta's own copper moves, attributed
+    and then RE-RECORDED as baselines: `test_703_predictor_regen`
+    (splitflap_driver's authored row 168/2913.82/1155 -> 168/2913.88/1154,
+    the nanometre rounding of the pad keep-out's sub-cell offset in
+    `routing_utils`, by single-file revert) and `test_fanout_cancel`
+    (interf_u U9 requests and escapes 77 balls where main's fanout dropped
+    two in the channel pass and counted 75 from the under-pad fallback;
+    0 failed either way). Two were main's structural gates the branch
+    had walked into, fixed: `test_878` (`flip_frame.is_back_side` now
+    calls `placement.legality.footprint_side`, the side rule's one home)
+    and `test_937` (14 runnable awx scripts declare `KRT_TOOL` into no
+    door; and its `--help` probe RUNS every script, so `fanout_from_plan`
+    and `mem_watch` now refuse a first argument beginning with `-` --
+    the probe had written `--help_src1.kicad_pcb` into the repo root).
+    `test_782_nondefault_netclass_clamp` fails only in a checkout carrying
+    a `venv/` its walker does not skip -- a test fix for main.
+    `test_459_group_routing` at its own 1200 s budget is unrun.
