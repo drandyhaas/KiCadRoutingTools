@@ -55,11 +55,18 @@ import copper_motion as CM         # noqa: E402
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'routed_output.kicad_pcb')
 
-#: A four-segment chain running away from the origin, all on layer 0.
-CHAIN = [[0.0, 0.0, 10.0, 0.0, 0.2, 0],
-         [10.0, 0.0, 20.0, 0.0, 0.2, 0],
-         [20.0, 0.0, 30.0, 0.0, 0.2, 0],
-         [30.0, 0.0, 40.0, 0.0, 0.2, 0]]
+#: A four-segment chain running away from the origin, all on layer 0 --
+#: DELIBERATELY SCRAMBLED and written end-for-end.
+#:
+#: The tidy version of this fixture is a trap: rows already in anchor order
+#: with their near end first make `order_from` a no-op, so a mutant that drops
+#: the ordering entirely passes. Measured -- `copper-dissolves-instead-of-
+#: retracting` survived the first version of this file. A file order is
+#: whatever the writer emitted, so this is also the realistic case.
+CHAIN = [[30.0, 0.0, 20.0, 0.0, 0.2, 0],
+         [0.0, 0.0, 10.0, 0.0, 0.2, 0],
+         [40.0, 0.0, 30.0, 0.0, 0.2, 0],
+         [10.0, 0.0, 20.0, 0.0, 0.2, 0]]
 #: Copper that stays, touching the chain's near end.
 LIVE = [[-5.0, 0.0, 0.0, 0.0, 0.2, 0]]
 

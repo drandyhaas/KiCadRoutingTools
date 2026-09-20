@@ -123,6 +123,70 @@ def test_a_declared_rect_lands_where_it_was_declared():
               'the frame size is unchanged')
 
 
+def test_the_keepout_hatch_stays_inside_its_own_box():
+    """A keep-out is a PROHIBITION, and a prohibition drawn bigger than it was
+    declared is worse than one drawn in the wrong colour.
+
+    The hatch is 45-degree diagonals across the rect, and the first version
+    drew the FULL diagonals -- they ran out past the keep-out on both sides.
+    The clip is the fix; this is the check that can see it. Asserted on the
+    keep-out's own colour, so the block zone and the edge band cannot mask a
+    leak.
+    """
+    _mark = len(_FAIL)
+    from placement.floorplan import load_intent
+    import render_theme as RT
+    pcb = parse_kicad_pcb(BOARD)
+    doc = _intent_doc(pcb)
+    # ONLY the keep-out: a rect elsewhere in the picture would make "is this
+    # pixel outside the keep-out" a question about the wrong shape.
+    doc['blocks'] = []
+    doc['edge_connectors'] = []
+    path = _write(doc)
+    try:
+        it = load_intent(path)
+    finally:
+        os.unlink(path)
+    r = BoardRenderer(pcb, size=700, supersample=1)
+    drawn = r.frame(segments=[], vias=[],
+                    overlays=[RPL.plan_overlay(it)]).convert('RGB')
+    keep = RT.default_theme().rgb('defect_courtyard')
+    _k0 = it.keepouts[0]
+    kx0, ky0, kx1, ky1 = (_k0.get('rect') if isinstance(_k0, dict)
+                          else _k0.rect)
+    p0, p1 = r.tf.pt(kx0, ky0), r.tf.pt(kx1, ky1)
+    bx0, by0 = min(p0[0], p1[0]), min(p0[1], p1[1])
+    bx1, by1 = max(p0[0], p1[0]), max(p0[1], p1[1])
+    inside = outside = 0
+    worst = None
+    W, H = drawn.size
+    for y in range(H):
+        for x in range(W):
+            if drawn.getpixel((x, y)) != keep:
+                continue
+            # 2 px of slack for the outline's own stroke width
+            if (bx0 - 2 <= x <= bx1 + 2) and (by0 - 2 <= y <= by1 + 2):
+                inside += 1
+            else:
+                outside += 1
+                d = max(bx0 - x, x - bx1, by0 - y, y - by1)
+                if worst is None or d > worst[0]:
+                    worst = (d, x, y)
+    if not inside:
+        fail('BROKEN TEST: the keep-out drew no ink in its own colour, so this '
+             'cannot tell a leak from a blank picture')
+        return
+    if outside:
+        fail('%d keep-out pixel(s) outside the declared rect, worst %.0f px '
+             'out at %s -- a prohibition drawn bigger than it was declared'
+             % (outside, worst[0], (worst[1], worst[2])))
+    else:
+        print('    %d px of hatch, 0 outside the %.0fx%.0f px rect'
+              % (inside, bx1 - bx0, by1 - by0))
+    if len(_FAIL) == _mark:
+        print('  PASS: the hatch is clipped to the rule it draws')
+
+
 def test_an_empty_intent_says_it_drew_nothing():
     """THE NEGATIVE CONTROL. A picture of nothing is indistinguishable from a
     picture of a plan that was met."""
@@ -210,6 +274,7 @@ def test_render_placement_announces_the_plan_either_way():
 
 TESTS = (
     test_a_declared_rect_lands_where_it_was_declared,
+    test_the_keepout_hatch_stays_inside_its_own_box,
     test_an_empty_intent_says_it_drew_nothing,
     test_the_verdict_recolours_held_and_drifted,
     test_render_placement_announces_the_plan_either_way,

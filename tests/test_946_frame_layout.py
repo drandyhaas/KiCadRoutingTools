@@ -191,8 +191,16 @@ def test_a_real_gif_encodes_at_one_size_per_layout():
 def test_the_guard_reports_and_pads_rather_than_squashing():
     """THE CONTROL. Without it, "one size" is true of any film."""
     _mark = len(_FAIL)
+    # The odd frame is SMALLER than the first, and that is the whole design of
+    # this control: a LARGER one is cropped by the centering paste and fills
+    # the canvas, which looks exactly like a squash. Smaller, a pad leaves the
+    # corners at the pad colour and a squash does not -- so the two outcomes
+    # are distinguishable by pixel, which is what the mutation
+    # `mixed-frame-sizes-are-squashed-silently` proved this check could not do
+    # when it only compared SIZES. Pillow's silent resize makes every outcome
+    # the same size; only the content tells them apart.
     good = [Image.new('RGB', (64, 40), (10, 10, 10)) for _ in range(2)]
-    odd = Image.new('RGB', (64, 52), (200, 10, 10))
+    odd = Image.new('RGB', (30, 18), (200, 10, 10))
     out = os.path.join(tempfile.mkdtemp(), 'mixed.gif')
     ok = A.save_movie(good + [odd], out, 6, 0.0)
     if not ok or not os.path.exists(out):
@@ -210,6 +218,30 @@ def test_the_guard_reports_and_pads_rather_than_squashing():
         pass
     if sizes != {(64, 40)}:
         fail('the padded film is %s, expected {(64, 40)}' % sizes)
+    # PADDED, not squashed: the corners of the odd frame must be the pad
+    # colour and its centre must be the frame's own content.
+    # the LAST frame, found by walking: the GIF encoder collapses runs of
+    # identical frames, so the odd one is not reliably at index 2.
+    im.seek(0)
+    last = 0
+    try:
+        while True:
+            im.seek(im.tell() + 1)
+            last = im.tell()
+    except EOFError:
+        pass
+    im.seek(last)
+    px = im.convert('RGB')
+    corner = px.getpixel((1, 1))
+    middle = px.getpixel((32, 20))
+    if corner == middle:
+        fail('the odd frame was SQUASHED to fill the canvas (corner %s == '
+             'centre %s) -- padding is what keeps a mis-sized frame honest'
+             % (corner, middle))
+    elif middle[0] < 100:
+        fail('the odd frame did not survive the pad: centre is %s' % (middle,))
+    else:
+        print('    padded: corner %s, centre %s' % (corner, middle))
     # and the guard must actually DETECT it, not merely survive
     try:
         FL.assert_frames_uniform([(64, 40), (64, 40), (64, 52)])

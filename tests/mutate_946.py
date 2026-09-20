@@ -154,10 +154,29 @@ ROWS = [
      (T_ISO,), 'KILLED'),
 
     # --- P7: the declared plan ---------------------------------------------
+    # The FULL diagonals, which is what the first version of this drew. The
+    # clip is implemented in three cooperating places -- the loop bound, the
+    # 45-degree adjust-and-skip, and the clamp on the line itself -- and
+    # removing any ONE of them changes nothing, which two attempts at this row
+    # measured. So the row removes the clip entirely, which is the change that
+    # restores the defect: a prohibition drawn bigger than it was declared.
     ('keepout-hatch-escapes-its-own-box', 'plan',
+     "            for i in range(int(y0 - (x1 - x0)), int(y1), step):\n"
+     "                ax, ay, bx, by = x0, i + (x1 - x0), x1, i\n"
+     "                # clamp the segment to y in [y0, y1] along its "
+     "45-degree slope\n"
+     "                if ay > y1:\n"
+     "                    ax += (ay - y1); ay = y1\n"
+     "                if by < y0:\n"
+     "                    bx -= (y0 - by); by = y0\n"
      "                if ax > bx or ay < y0 or by > y1:\n"
-     "                    continue\n",
-     "",
+     "                    continue\n"
+     "                d.line([max(x0, ax), min(y1, ay), min(x1, bx), "
+     "max(y0, by)],\n"
+     "                       fill=keep_c, width=1)",
+     "            for i in range(int(y0 - (x1 - x0)), int(y1), step):\n"
+     "                d.line([x0, i + (x1 - x0), x1, i], fill=keep_c, "
+     "width=1)",
      (T_PLAN,), 'KILLED'),
 
     # --- P8: the frame is decided ONCE -------------------------------------
