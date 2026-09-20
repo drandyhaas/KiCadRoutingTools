@@ -1,4 +1,4 @@
-cd866f47 2026-09-20 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+d2c9934c 2026-09-20 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit 96912901..cd866f47 on bus622-take5 (main's 66 commits since the last
 audit plus the branch's 168, rebased onto main ad243b74 on 2026-09-19).
 NO GAP FOUND. One gate ADDED (test_fanout_backside_gui). Seven gates green,
@@ -60,3 +60,9 @@ WHAT THIS AUDIT CANNOT SEE: the corpus A/B (awx/README TODO 7) says the
 branch's default-on changes move copper on cparti_fpga, scalenode_cm4,
 ulx5m_gatemate and smartknob_base; both fronts move identically, which is
 parity, not a verdict on the change.
+
+ADDENDUM d2c9934c (2026-09-20): flip_frame.is_back_side now calls
+placement.legality.footprint_side (test_878's one-home rule) instead of a
+copy of it -- the same answer on every layer name, and the back-side gate
+re-run on this commit: 11/11, copper identical. The 14 awx tools' KRT_TOOL
+declarations and the two --help guards touch no engine code.
