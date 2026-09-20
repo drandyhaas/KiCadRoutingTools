@@ -102,3 +102,21 @@ print(f'GRADE {os.path.basename(board)} K={len(nets)} clr={clr} '
       f'open={len(opens)} drc={ndrc} vias={m.group(1) if m else "?"} '
       f'segs={m.group(2) if m else "?"} k-net-drc={ndrc_k}'
       + (f'  open: {",".join(sorted(opens))}' if opens else ''))
+# THE PAIRS (pairs.py, 2026-09-20): when the run's nets contain differential
+# pairs by name, one line per pair -- routed or not, coupled fraction, P/N
+# skew, barrels -- so a grade can be judged on what the human's board is
+# judged on. Same instrument as pair_census.py; nothing else changes.
+try:
+    import pair_census as _pc
+    import contextlib as _ctx
+    import io as _io
+    from kicad_parser import parse_kicad_pcb as _parse
+    with _ctx.redirect_stdout(_io.StringIO()):
+        _pcb = _parse(board)
+    _c = _pc.census(_pcb, nets)
+    for _b, _r in _c.items():
+        print(f'  PAIR {_b}: ' + ('NOT ROUTED' if not _r['routed'] else
+              f'coupled {_r["coupled"]:.2f} at {_r["pitch"]:.2f} mm, skew {_r["skew"]:.2f} mm, '
+              f'vias {_r["vias_p"]}/{_r["vias_n"]} ({_r["vias_together"]} together)'))
+except Exception as _e:  # the grade line above is the verdict; the pair line must never break it
+    print(f'  PAIR census unavailable: {_e}')

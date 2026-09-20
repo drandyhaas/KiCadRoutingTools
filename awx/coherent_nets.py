@@ -47,9 +47,21 @@ def coherent_nets(K, board=BENCH):
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(board)
     by = {n.name.split('/')[-1]: n for n in pcb.nets.values()}
-    flat = [n for n in flat
-            if n in by and len(by[n].pads) == 2
-            and len({p.component_ref for p in by[n].pads}) == 2]
+    import pairs as _pairs
+    import rules as _rules
+
+    def two_ended(net):
+        # two pads on two components -- or more, when every extra pad is
+        # SERVED UNDER one of the two by a via-in-pad (pairs.under_pad: a
+        # back-side termination resistor under a DDR clock ball)
+        pads = list(net.pads)
+        if len({p.component_ref for p in pads}) < 2:
+            return False
+        if len(pads) == 2:
+            return True
+        ends = [p for p in pads if not any(_pairs.under_pad(q, p, _rules.VIA_SIZE) for q in pads if q is not p)]
+        return len(ends) == 2 and len({p.component_ref for p in ends}) == 2
+    flat = [n for n in flat if n in by and two_ended(by[n])]
     bn = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
     ok = []
     for n in flat:
