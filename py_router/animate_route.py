@@ -129,6 +129,15 @@ class Movie:
         self.active_layer = None
         self.layers = layers
         self.rip_hold = rip_hold
+        #: Layer name -> trace-row index, so a live `_Seg` can be turned back
+        #: into the row shape `copper_motion` works in.
+        self._li = {n: i for i, n in enumerate(layers)}
+        #: #1022. Retract a rip and grow its replacement instead of flashing
+        #: red for two frames. Tied to `rip_hold` deliberately rather than
+        #: given a knob of its own: `--rip-hold 0` already means "no rip
+        #: animation, just cut", and that is exactly the degradation this
+        #: needs. It changes frame COUNT, never frame SIZE.
+        self.motion = rip_hold > 0
         #: `{class: (seated, total)}` for the box's inventory content,
         #: computed ONCE over the board rather than per frame.
         self.inventory = {}
@@ -184,7 +193,12 @@ class Movie:
                             'inventory': self.inventory,
                             'active': self.active_layer})
 
-    def _frame(self, hl_s, hl_v, color, label, mark='solid'):
+    def _frame(self, hl_s, hl_v, color, label, mark='solid',
+               base_s=None, base_v=None):
+        """One frame. `base_s`/`base_v` override the live copper drawn under
+        the highlight -- #1022 needs that: a growth stage must NOT have its
+        finished self already drawn underneath it, and a retraction stage must
+        not have the copper it is pulling back from."""
         ov = self._key_overlay()
         self._note_chrome(label)
         # #1019: when a rail is going to carry this, the over-board strip is a
@@ -193,11 +207,69 @@ class Movie:
         if self.split_caption:
             label = None
         self.frames.append(self.r.frame(
-            segments=list(self.live_s.values()), vias=list(self.live_v.values()),
+            segments=(list(self.live_s.values()) if base_s is None
+                      else list(base_s)),
+            vias=(list(self.live_v.values()) if base_v is None
+                  else list(base_v)),
             highlight_segments=hl_s, highlight_vias=hl_v,
             highlight_color=color, highlight_mark=mark, label=label,
             zone_net_ids=self.revealed_zones,
             overlays=[ov] if ov else None))
+
+    def _row(self, sg):
+        """A live `_Seg` back as a trace row, for `copper_motion`."""
+        return [sg.start_x, sg.start_y, sg.end_x, sg.end_y, sg.width,
+                self._li.get(sg.layer, 0)]
+
+    def _near_live(self, rows, exclude=()):
+        """Live copper near `rows`, as rows -- the anchor search's haystack.
+
+        BOUNDED on purpose: `anchor_for` is O(|moving| x |live|), and a rip of
+        20 segments against a 1701-segment board would be 68k distance
+        computations per rip. Copper far from the doomed set cannot be the end
+        it is pulled back to, so a bbox filter loses nothing and keeps the cost
+        proportional to the neighbourhood.
+        """
+        if not rows:
+            return []
+        xs = [r[0] for r in rows] + [r[2] for r in rows]
+        ys = [r[1] for r in rows] + [r[3] for r in rows]
+        pad = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+        x0, x1 = min(xs) - pad, max(xs) + pad
+        y0, y1 = min(ys) - pad, max(ys) + pad
+        skip = set(exclude)
+        out = []
+        for k, sg in self.live_s.items():
+            if k in skip:
+                continue
+            if ((x0 <= sg.start_x <= x1 and y0 <= sg.start_y <= y1)
+                    or (x0 <= sg.end_x <= x1 and y0 <= sg.end_y <= y1)):
+                out.append(self._row(sg))
+        return out
+
+    def _motion_frames(self, rows, live_rows, base_s, color, label, mark,
+                       grow):
+        """Emit the retraction / growth stages. Returns how many it drew."""
+        import copper_motion
+        try:
+            plan = copper_motion.stages(rows, live=live_rows, grow=grow)
+        except Exception:                                      # noqa: BLE001
+            return 0            # motion is decoration; never lose the film
+        n = 0
+        for stage in plan:
+            if not stage and not grow:
+                # The empty last retraction stage IS the event -- the copper is
+                # gone -- so it is drawn: one frame of the board without it,
+                # still captioned as the rip.
+                self._frame([], [], color, label, mark=mark, base_s=base_s)
+                n += 1
+                continue
+            if not stage:
+                continue
+            self._frame([_Seg(r, self.layers) for r in stage], [], color,
+                        label, mark=mark, base_s=base_s)
+            n += 1
+        return n
 
     def snapshot(self, label):
         """A plain frame of the current state (no highlight)."""
@@ -233,7 +305,31 @@ class Movie:
             self.active_layer = next(
                 (sg.layer for sg in new_s if getattr(sg, 'layer', None)),
                 self.active_layer)
-            self._frame(new_s, new_v, _add_color(event, self.theme), label)
+            col = _add_color(event, self.theme)
+            # #1022. A RESTORE grows out of its anchor, which is the opposite
+            # motion to the rip that preceded it -- and direction survives
+            # every colour deficiency there is. Only restores move: a plain
+            # `new` add happens thousands of times in a film and animating
+            # each one would make every movie four times longer for an event
+            # that has no counterpart to be confused with.
+            if self.motion and role == 'event_restored' and new_s:
+                fresh = {seg_key_row(self._row(sg)) for sg in new_s}
+                rows = [self._row(sg) for sg in new_s]
+                near = self._near_live(rows, exclude=fresh)
+                base = [sg for k, sg in self.live_s.items() if k not in fresh]
+                # Every stage but the last: the last one is the full copper,
+                # and that frame is the ordinary one below, so the live state
+                # and the final frame cannot disagree.
+                import copper_motion
+                try:
+                    plan = copper_motion.stages(rows, live=near, grow=True)
+                except Exception:                              # noqa: BLE001
+                    plan = []
+                for stage in plan[:-1]:
+                    if stage:
+                        self._frame([_Seg(r, self.layers) for r in stage], [],
+                                    col, label, base_s=base)
+            self._frame(new_s, new_v, col, label)
 
     def remove(self, seg_keys, via_keys, label, by=None):
         """Flash the doomed copper red (still present), then drop it."""
@@ -242,14 +338,24 @@ class Movie:
         if not hl_s and not hl_v:
             return
         rlabel = label + (f"  (rip by {by})" if by else '  (rip)')
+        rip = self.theme.rgb('event_ripped')
+        dash = self.theme.mark('event_ripped')
         for _ in range(max(1, self.rip_hold)):
             self._note_event('event_ripped')
-            self._frame(hl_s, hl_v, self.theme.rgb('event_ripped'), rlabel,
-                        mark=self.theme.mark('event_ripped'))
+            self._frame(hl_s, hl_v, rip, rlabel, mark=dash)
+        # #1022. The rows BEFORE they leave, and the neighbourhood they are
+        # pulled back toward -- both read while the copper is still live.
+        rows = [self._row(sg) for sg in hl_s] if self.motion else []
+        near = self._near_live(rows, exclude=set(seg_keys)) if rows else []
         for k in seg_keys:
             self.live_s.pop(k, None)
         for k in via_keys:
             self.live_v.pop(k, None)
+        if rows:
+            # A via cannot retract -- it is a hole, not a length -- so it
+            # leaves with the flash and the tracks pull back after it.
+            self._motion_frames(rows, near, list(self.live_s.values()), rip,
+                                rlabel, dash, grow=False)
 
     def play_trace(self, trace, label_prefix='', only_new=False):
         """Replay a fine per-copper trace's events."""
