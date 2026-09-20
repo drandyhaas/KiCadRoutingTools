@@ -917,5 +917,21 @@ abandoned with a measurement.
 
     Worth keeping straight because the two halves cost different things: a
     `kicad-cli` binary needs no display, while the 34 `gui_parity` gates
-    need pcbnew AND wx, which on Linux needs Xvfb as well. No cloud script
-    in this repo installs either today.
+    need pcbnew AND wx, which on Linux needs Xvfb as well.
+
+    **CORRECTION (same day): the cloud ALREADY HAS KiCad -- just not in the
+    SUITE image.** An earlier draft of this entry said no cloud script in
+    the repo installs it. That is false, and the counter-example is
+    default-on: `cloud_replay_sets.py --with-kicad` has been the DEFAULT
+    since 2026-08-23 (`--no-kicad` opts out), building
+    `modal_sweep/modal_app.py` on `kicad/kicad:10.0.0` and PROVING both
+    front-ends in the image build (`import pcbnew` + `kicad-cli version`);
+    such a wave suffixes its label `-kc`. Only
+    `modal_suite/run_all_modal.py` -- a DIFFERENT app -- is `debian_slim`
+    with no switch, which is why `run_all` self-skipped the two. So giving
+    the suite KiCad is not new work: it is the proven recipe next door
+    (`from_registry` + `USER root` + `python-is-python3` +
+    `--break-system-packages`). The sweep keeps it opt-in because a new base
+    image is a NEW BASELINE ERA voiding cross-wave numeric comparisons --
+    which does not apply to a pass/fail suite that compares no numbers
+    across runs. The `wk/` pair above is unaffected either way.
