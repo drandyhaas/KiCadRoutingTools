@@ -874,3 +874,18 @@ abandoned with a measurement.
     `test_782_nondefault_netclass_clamp` fails only in a checkout carrying
     a `venv/` its walker does not skip -- a test fix for main.
     `test_459_group_routing` at its own 1200 s budget is unrun.
+
+    **MERGED TO MAIN AND RE-RUN THERE: ALL GREEN (2026-09-20).** The branch
+    merged into `main` as `5bad89f4` (`--no-ff` of `e1e09d4f` onto
+    `ad243b74`, a clean fast-forward relationship; merge tree `745fe72c`
+    byte-identical to the branch tip's). `run_all` on Modal AT THAT MERGE
+    COMMIT: **651 passed, 0 failed, 0 timed out, 50/50 shards reported,
+    every shard rc=0**, 1130 s wall. 651 is the earlier 647 plus the four
+    fixed above, so all four hold on the merged tree; each was also run
+    locally here first and exits 0. The 4 self-skips are unchanged and
+    assert nothing -- `test_887_iso_render`, `test_887_run24_regression`,
+    `test_910_fill_for_delivery`, `test_run8_starved_face_gate`, all for
+    want of KiCad in the cloud image. `test_459_group_routing` remains
+    unrun at its own budget. Not re-verified by this run, and still owed:
+    the gates needing a local KiCad-python session, and TODO 7's per-board
+    attribution, which gates a RELEASE rather than this merge.
