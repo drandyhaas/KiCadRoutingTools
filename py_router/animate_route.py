@@ -127,6 +127,11 @@ class Movie:
         self.unplaced = False
         #: The layer the current event is on, so the strip can light it.
         self.active_layer = None
+        #: An extra `fn(draw, renderer)` drawn through `frame(overlays=...)`
+        #: for as long as a caller keeps it set -- the seam a Stage needs to
+        #: draw a ghost and an arrow over a placement tween. It costs NO frame
+        #: geometry, which is why the overlay seam is the right place for it.
+        self.overlay = None
         self.layers = layers
         self.rip_hold = rip_hold
         #: Layer name -> trace-row index, so a live `_Seg` can be turned back
@@ -156,6 +161,10 @@ class Movie:
     def _note_event(self, role):
         if role not in self.seen_events:
             self.seen_events.append(role)
+
+    def _overlays(self):
+        """Everything to draw above the copper this frame, in draw order."""
+        return [o for o in (self.overlay, self._key_overlay()) if o]
 
     def _key_overlay(self):
         """The in-frame key, drawn through `frame(overlays=...)`.
@@ -204,7 +213,7 @@ class Movie:
         animates, so the live state is already correct there and passing it
         explicitly is pixel-identical (verified). `base_v` is gone for the same
         reason: it never had a caller."""
-        ov = self._key_overlay()
+        ov = self._overlays()
         self._note_chrome(label)
         # #1019: when a rail is going to carry this, the over-board strip is a
         # DUPLICATE, and a duplicate that sits on the copper is worse than no
@@ -218,7 +227,7 @@ class Movie:
             highlight_segments=hl_s, highlight_vias=hl_v,
             highlight_color=color, highlight_mark=mark, label=label,
             zone_net_ids=self.revealed_zones,
-            overlays=[ov] if ov else None))
+            overlays=ov or None))
 
     def refresh_placement(self, pcb, path=None):
         """Re-read the lower box's non-routing data from THIS board.
@@ -335,13 +344,20 @@ class Movie:
         return n
 
     def snapshot(self, label):
-        """A plain frame of the current state (no highlight)."""
+        """A plain frame of the current state (no highlight).
+
+        Carries `overlay` too: a placement tween is made of SNAPSHOTS, so a
+        ghost hooked only into `_frame` would never appear on the frames it
+        exists for.
+        """
+        ov = self._overlays()
         self._note_chrome(label)
         if self.split_caption:
             label = None
         self.frames.append(self.r.frame(
             segments=list(self.live_s.values()), vias=list(self.live_v.values()),
-            label=label, zone_net_ids=self.revealed_zones))
+            label=label, zone_net_ids=self.revealed_zones,
+            overlays=ov or None))
 
     def add(self, seg_rows, via_rows, event, label, only_new=False):
         """Add copper and emit a frame highlighting what landed."""

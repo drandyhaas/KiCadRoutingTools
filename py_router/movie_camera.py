@@ -684,11 +684,25 @@ class Stage:
                 _offset_to(fp, home[ref], 0.0, 0.0)
             self._snap(f"{label}  moved {len(deltas)} part(s)")
         else:
+            # #1020: the GHOST and the ARROW, through the overlay seam, so
+            # they cost no frame geometry. Without them a glide reads as the
+            # board assembling itself rather than as these parts moving from
+            # there to here -- the viewer sees where a part ARRIVED and never
+            # where it came from, which is the question a placement film
+            # exists to answer.
+            import place_motion
             for i in range(n):
                 t = smoothstep((i + 1) / n)
                 for ref, fp, dx, dy in deltas:
                     _offset_to(fp, home[ref], dx * (1 - t), dy * (1 - t))
+                try:
+                    self.movie.overlay = place_motion.ghost_overlay(
+                        place_motion.items_from_deltas(deltas, home),
+                        getattr(self.r, 'theme', None), t=t)
+                except Exception:                              # noqa: BLE001
+                    self.movie.overlay = None
                 self._snap(f"{label}  moving {len(deltas)} part(s)")
+            self.movie.overlay = None
             for ref, fp, _dx, _dy in deltas:      # exact restore
                 _offset_to(fp, home[ref], 0.0, 0.0)
         self._log.append(('action', start, len(self.movie.frames)))
