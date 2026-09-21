@@ -661,6 +661,12 @@ _BASELINE_GATES = {
         'tests/test_789_rule1_withdrawal.py',
     'tests/data/714_identity_sha256.json':
         'tests/test_714_identity_write_unchanged.py',
+    # #946. Re-derived per key AND per arm on every run, with DRIFT /
+    # INVERTED / ORPHAN / MALFORMED reported apart -- a threshold alone would
+    # pass a margin that collapsed from 12.0x to 4.6x, and a baseline alone
+    # cannot say whether the new number is acceptable.
+    'tests/946_theme_contrast_baseline.json':
+        'tests/test_946_palette_measures.py',
 }
 
 #: Committed baselines with NO gate, each with its reason. Being on this list
@@ -710,7 +716,7 @@ _UNGATED_BASELINE_COUNT = 7
 #: verbatim, because the print string has since been reworded and the counts
 #: have moved -- a "measured" line spliced from two versions is exactly what
 #: #879 is about.)
-_DECLARED_BASELINE_COUNT = 21
+_DECLARED_BASELINE_COUNT = 22
 
 #: Committed JSON/JSONL under `tests/` that is an INPUT, not a recorded
 #: measurement. Full-path regexes, each with its reason.
@@ -983,8 +989,9 @@ _UNRESOLVABLE = {}
 #: `mutate_974.py`; 51 before #982 added `mutate_982.py`; 52 before #975 added
 #: `mutate_975.py`; 53 before #983/#987/#988 added `mutate_983.py`; 54
 #: before #962 added `mutate_962.py`; 55 before #959 added `mutate_959.py`;
-#: 56 before #963 added `mutate_963.py`.
-_BATTERY_COUNT = 57
+#: 56 before #963 added `mutate_963.py`; 57 before #946 added
+#: `mutate_946.py`.
+_BATTERY_COUNT = 58
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

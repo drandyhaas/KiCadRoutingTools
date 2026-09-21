@@ -1,0 +1,696 @@
+{
+ "themes": [
+  {
+   "crossings": {
+    "count": 19,
+    "hits": [
+     {
+      "distance": 5.099,
+      "over": "B.Cu",
+      "reads_as": "In6",
+      "renders": [
+       96,
+       98,
+       142
+      ],
+      "under": "F.Cu"
+     },
+     {
+      "distance": 12.083,
+      "over": "In1",
+      "reads_as": "In7",
+      "renders": [
+       111,
+       133,
+       75
+      ],
+      "under": "F.Cu"
+     },
+     {
+      "distance": 16.1555,
+      "over": "B.Cu",
+      "reads_as": "In6",
+      "renders": [
+       100,
+       118,
+       145
+      ],
+      "under": "In5"
+     },
+     {
+      "distance": 17.0,
+      "over": "F.Cu",
+      "reads_as": "In5",
+      "renders": [
+       150,
+       90,
+       62
+      ],
+      "under": "In1"
+     },
+     {
+      "distance": 17.3205,
+      "over": "F.Cu",
+      "reads_as": "In8",
+      "renders": [
+       144,
+       75,
+       90
+      ],
+      "under": "B.Cu"
+     },
+     {
+      "distance": 21.6333,
+      "over": "In1",
+      "reads_as": "In7",
+      "renders": [
+       115,
+       154,
+       78
+      ],
+      "under": "In5"
+     },
+     {
+      "distance": 21.7715,
+      "over": "F.Cu",
+      "reads_as": "In8",
+      "renders": [
+       150,
+       92,
+       87
+      ],
+      "under": "In4"
+     },
+     {
+      "distance": 23.5372,
+      "over": "B.Cu",
+      "reads_as": "In4",
+      "renders": [
+       69,
+       128,
+       152
+      ],
+      "under": "In1"
+     },
+     {
+      "distance": 23.9583,
+      "over": "B.Cu",
+      "reads_as": "In6",
+      "renders": [
+       96,
+       111,
+       165
+      ],
+      "under": "In8"
+     },
+     {
+      "distance": 26.3249,
+      "over": "B.Cu",
+      "reads_as": "In6",
+      "renders": [
+       98,
+       128,
+       147
+      ],
+      "under": "In2"
+     },
+     {
+      "distance": 26.8701,
+      "over": "In1",
+      "reads_as": "In4",
+      "renders": [
+       78,
+       149,
+       112
+      ],
+      "under": "B.Cu"
+     },
+     {
+      "distance": 28.0891,
+      "over": "F.Cu",
+      "reads_as": "In5",
+      "renders": [
+       168,
+       94,
+       60
+      ],
+      "under": "In7"
+     },
+     {
+      "distance": 28.7054,
+      "over": "In5",
+      "reads_as": "In2",
+      "renders": [
+       159,
+       140,
+       69
+      ],
+      "under": "In1"
+     },
+     {
+      "distance": 29.7153,
+      "over": "B.Cu",
+      "reads_as": "In4",
+      "renders": [
+       87,
+       133,
+       150
+      ],
+      "under": "In7"
+     },
+     {
+      "distance": 30.1662,
+      "over": "In7",
+      "reads_as": "In2",
+      "renders": [
+       155,
+       145,
+       72
+      ],
+      "under": "F.Cu"
+     },
+     {
+      "distance": 30.249,
+      "over": "F.Cu",
+      "reads_as": "In8",
+      "renders": [
+       163,
+       80,
+       93
+      ],
+      "under": "In6"
+     },
+     {
+      "distance": 30.5941,
+      "over": "In1",
+      "reads_as": "In7",
+      "renders": [
+       113,
+       164,
+       80
+      ],
+      "under": "In2"
+     },
+     {
+      "distance": 32.3883,
+      "over": "In1",
+      "reads_as": "In2",
+      "renders": [
+       111,
+       133,
+       75
+      ],
+      "under": "F.Cu"
+     },
+     {
+      "distance": 33.9706,
+      "over": "B.Cu",
+      "reads_as": "In6",
+      "renders": [
+       87,
+       133,
+       150
+      ],
+      "under": "In7"
+     }
+    ],
+    "threshold": 34.0,
+    "worst": {
+     "distance": 5.099,
+     "over": "B.Cu",
+     "reads_as": "In6",
+     "renders": [
+      96,
+      98,
+      142
+     ],
+     "under": "F.Cu"
+    }
+   },
+   "events": {
+    "contrast_min": 4.7382,
+    "contrast_vs_board": {
+     "event_new": 15.6025,
+     "event_restored": 9.464,
+     "event_ripped": 4.7382
+    },
+    "pair_deuteranope_min": 89.5098,
+    "pairs": {
+     "event_new|event_restored": {
+      "deuteranope": 89.5098,
+      "normal": 174.7141
+     },
+     "event_new|event_ripped": {
+      "deuteranope": 239.3178,
+      "normal": 260.2633
+     },
+     "event_restored|event_ripped": {
+      "deuteranope": 186.5717,
+      "normal": 282.3508
+     }
+    },
+    "rip_restore_deuteranope": 186.5717,
+    "rip_restore_luminance_ratio": 1.9974
+   },
+   "kind": "palette-audit",
+   "layers": {
+    "alpha": 150,
+    "closest_pair": 24.8395,
+    "closest_pair_names": "In2|In5",
+    "contrast_mean": 3.0946,
+    "contrast_min": 1.9604,
+    "contrast_min_layer": "F.Cu",
+    "mean_pair": 78.346,
+    "rendered": {
+     "B.Cu": [
+      52,
+      90,
+      135
+     ],
+     "F.Cu": [
+      133,
+      52,
+      46
+     ],
+     "In1": [
+      67,
+      126,
+      68
+     ],
+     "In2": [
+      137,
+      126,
+      57
+     ],
+     "In3": [
+      126,
+      79,
+      133
+     ],
+     "In4": [
+      66,
+      132,
+      129
+     ],
+     "In5": [
+      142,
+      102,
+      53
+     ],
+     "In6": [
+      99,
+      102,
+      143
+     ],
+     "In7": [
+      111,
+      138,
+      64
+     ],
+     "In8": [
+      134,
+      85,
+      100
+     ]
+    }
+   },
+   "palette": "dark",
+   "red_family": {
+    "min": 57.0614,
+    "pairs": {
+     "defect_conflict|defect_net_fail": 64.7534,
+     "defect_conflict|status_tried": 115.1911,
+     "defect_net_fail|status_tried": 57.0614,
+     "event_ripped|defect_conflict": 99.1564,
+     "event_ripped|defect_net_fail": 65.9166,
+     "event_ripped|status_tried": 106.2309
+    }
+   },
+   "schema": 1,
+   "structure": {
+    "board_vs_ground": 1.1707,
+    "edge": 12.3321,
+    "pad": 6.9882,
+    "pad_hole": 1.2157,
+    "via": 7.5597
+   }
+  },
+  {
+   "crossings": {
+    "count": 21,
+    "hits": [
+     {
+      "distance": 19.9499,
+      "over": "In2",
+      "reads_as": "In5",
+      "renders": [
+       158,
+       135,
+       79
+      ],
+      "under": "In3"
+     },
+     {
+      "distance": 20.9045,
+      "over": "In2",
+      "reads_as": "In5",
+      "renders": [
+       160,
+       136,
+       73
+      ],
+      "under": "In8"
+     },
+     {
+      "distance": 23.1084,
+      "over": "In6",
+      "reads_as": "B.Cu",
+      "renders": [
+       109,
+       121,
+       165
+      ],
+      "under": "In4"
+     },
+     {
+      "distance": 23.2164,
+      "over": "In7",
+      "reads_as": "In1",
+      "renders": [
+       118,
+       149,
+       87
+      ],
+      "under": "B.Cu"
+     },
+     {
+      "distance": 24.4336,
+      "over": "In7",
+      "reads_as": "In1",
+      "renders": [
+       121,
+       157,
+       86
+      ],
+      "under": "In4"
+     },
+     {
+      "distance": 24.9199,
+      "over": "In4",
+      "reads_as": "B.Cu",
+      "renders": [
+       88,
+       141,
+       151
+      ],
+      "under": "In3"
+     },
+     {
+      "distance": 25.0599,
+      "over": "In2",
+      "reads_as": "In5",
+      "renders": [
+       153,
+       140,
+       81
+      ],
+      "under": "In6"
+     },
+     {
+      "distance": 27.0,
+      "over": "In6",
+      "reads_as": "B.Cu",
+      "renders": [
+       109,
+       120,
+       153
+      ],
+      "under": "In1"
+     },
+     {
+      "distance": 27.2213,
+      "over": "In4",
+      "reads_as": "B.Cu",
+      "renders": [
+       82,
+       145,
+       153
+      ],
+      "under": "In6"
+     },
+     {
+      "distance": 28.0713,
+      "over": "In3",
+      "reads_as": "In8",
+      "renders": [
+       150,
+       96,
+       140
+      ],
+      "under": "In2"
+     },
+     {
+      "distance": 29.0345,
+      "over": "In2",
+      "reads_as": "In5",
+      "renders": [
+       160,
+       129,
+       62
+      ],
+      "under": "F.Cu"
+     },
+     {
+      "distance": 29.3087,
+      "over": "In5",
+      "reads_as": "F.Cu",
+      "renders": [
+       165,
+       111,
+       74
+      ],
+      "under": "In3"
+     },
+     {
+      "distance": 29.4788,
+      "over": "In7",
+      "reads_as": "In1",
+      "renders": [
+       127,
+       151,
+       88
+      ],
+      "under": "In6"
+     },
+     {
+      "distance": 29.8831,
+      "over": "In4",
+      "reads_as": "B.Cu",
+      "renders": [
+       89,
+       142,
+       145
+      ],
+      "under": "In8"
+     },
+     {
+      "distance": 30.5614,
+      "over": "In3",
+      "reads_as": "In8",
+      "renders": [
+       145,
+       98,
+       141
+      ],
+      "under": "In7"
+     },
+     {
+      "distance": 30.6757,
+      "over": "In2",
+      "reads_as": "In7",
+      "renders": [
+       147,
+       145,
+       78
+      ],
+      "under": "In4"
+     },
+     {
+      "distance": 31.0322,
+      "over": "In3",
+      "reads_as": "In8",
+      "renders": [
+       151,
+       91,
+       139
+      ],
+      "under": "In5"
+     },
+     {
+      "distance": 31.3847,
+      "over": "In5",
+      "reads_as": "F.Cu",
+      "renders": [
+       166,
+       112,
+       68
+      ],
+      "under": "In8"
+     },
+     {
+      "distance": 31.4484,
+      "over": "In2",
+      "reads_as": "In5",
+      "renders": [
+       155,
+       146,
+       66
+      ],
+      "under": "In7"
+     },
+     {
+      "distance": 32.7109,
+      "over": "In2",
+      "reads_as": "In5",
+      "renders": [
+       147,
+       145,
+       78
+      ],
+      "under": "In4"
+     },
+     {
+      "distance": 33.6749,
+      "over": "In2",
+      "reads_as": "In5",
+      "renders": [
+       144,
+       137,
+       79
+      ],
+      "under": "B.Cu"
+     }
+    ],
+    "threshold": 34.0,
+    "worst": {
+     "distance": 19.9499,
+     "over": "In2",
+     "reads_as": "In5",
+     "renders": [
+      158,
+      135,
+      79
+     ],
+     "under": "In3"
+    }
+   },
+   "events": {
+    "contrast_min": 4.82,
+    "contrast_vs_board": {
+     "event_new": 13.4851,
+     "event_restored": 7.7334,
+     "event_ripped": 4.82
+    },
+    "pair_deuteranope_min": 120.2248,
+    "pairs": {
+     "event_new|event_restored": {
+      "deuteranope": 134.7219,
+      "normal": 136.4991
+     },
+     "event_new|event_ripped": {
+      "deuteranope": 120.2248,
+      "normal": 166.985
+     },
+     "event_restored|event_ripped": {
+      "deuteranope": 153.5708,
+      "normal": 223.4726
+     }
+    },
+    "rip_restore_deuteranope": 153.5708,
+    "rip_restore_luminance_ratio": 1.6044
+   },
+   "kind": "palette-audit",
+   "layers": {
+    "alpha": 205,
+    "closest_pair": 25.0599,
+    "closest_pair_names": "In2|In5",
+    "contrast_mean": 2.738,
+    "contrast_min": 2.0042,
+    "contrast_min_layer": "In7",
+    "mean_pair": 78.9377,
+    "rendered": {
+     "B.Cu": [
+      86,
+      122,
+      167
+     ],
+     "F.Cu": [
+      168,
+      82,
+      77
+     ],
+     "In1": [
+      101,
+      158,
+      100
+     ],
+     "In2": [
+      171,
+      158,
+      89
+     ],
+     "In3": [
+      160,
+      110,
+      165
+     ],
+     "In4": [
+      100,
+      163,
+      162
+     ],
+     "In5": [
+      177,
+      134,
+      85
+     ],
+     "In6": [
+      133,
+      134,
+      176
+     ],
+     "In7": [
+      145,
+      169,
+      97
+     ],
+     "In8": [
+      168,
+      116,
+      132
+     ]
+    }
+   },
+   "palette": "light",
+   "red_family": {
+    "min": 41.2311,
+    "pairs": {
+     "defect_conflict|defect_net_fail": 41.2311,
+     "defect_conflict|status_tried": 82.8493,
+     "defect_net_fail|status_tried": 43.8634,
+     "event_ripped|defect_conflict": 77.4338,
+     "event_ripped|defect_net_fail": 56.4978,
+     "event_ripped|status_tried": 76.8115
+    }
+   },
+   "schema": 1,
+   "structure": {
+    "board_vs_ground": 1.113,
+    "edge": 5.8711,
+    "pad": 3.2925,
+    "pad_hole": 15.214,
+    "via": 4.5844
+   }
+  }
+ ]
+}

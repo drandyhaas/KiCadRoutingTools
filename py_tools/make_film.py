@@ -253,7 +253,8 @@ def _card_frame(size_wh, image_path, caption):
     from PIL import Image, ImageDraw
     from route_render import load_font
     W, H = size_wh
-    canvas = Image.new('RGB', (W, H), (14, 14, 18))
+    from render_theme import DARK as _TH
+    canvas = Image.new('RGB', (W, H), _TH.rgb('chrome_panel'))
     strip = max(22, H // 9)
     if image_path and os.path.exists(image_path):
         try:
@@ -266,7 +267,7 @@ def _card_frame(size_wh, image_path, caption):
         except Exception as exc:
             print(f"make_film: could not read {image_path} ({exc})", file=sys.stderr)
     d = ImageDraw.Draw(canvas)
-    d.rectangle([0, H - strip, W, H], fill=(28, 28, 34))
+    d.rectangle([0, H - strip, W, H], fill=_TH.rgb('chrome_strip'))
     font = load_font(max(11, strip // 2))
     txt = caption or ''
     try:
@@ -274,17 +275,22 @@ def _card_frame(size_wh, image_path, caption):
     except Exception:
         tw = len(txt) * strip // 4
     d.text((max(6, (W - tw) // 2), H - strip + strip // 5), txt,
-           fill=(228, 228, 236), font=font)
+           fill=_TH.rgb('chrome_strip_text'), font=font)
     return canvas
 
 
-def _badge(frame, text, rgb=(200, 60, 60)):
+def _badge(frame, text, rgb=None):
     """Mark a frame as an attempt: a border and a tag, drawn in place.
 
     Without it a rejected beat is indistinguishable from a kept one, and a film
     that shows an undone change without saying so is worse than one that omits
     it -- which is exactly why the convergence movie omits it.
     """
+    # `rgb=None` -> the theme's `status_tried`. #1012 moves it off red: a red
+    # badge on a frame whose copper also flashes red is the same collision
+    # #946 is about. #1011 keeps the value.
+    from render_theme import DARK as _TH
+    rgb = _TH.rgb('status_tried') if rgb is None else rgb
     from PIL import ImageDraw
     from route_render import load_font
     W, H = frame.size
@@ -306,9 +312,19 @@ def _badge(frame, text, rgb=(200, 60, 60)):
 
 def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                layer_alpha=150, rip_hold=2, chunks=6, camera='auto',
-               camera_budget=0.0, tween=10, quiet=False):
-    """Frames for the whole shot list. One render pass, one scale."""
+               camera_budget=0.0, tween=10, quiet=False, theme=None,
+               attempts=None, attempts_from=None, layout=None, aspect=None):
+    """Frames for the whole shot list. One render pass, one scale.
+
+    `attempts` is a `movie_attempts.Track` -- the search behind this film. Left
+    `None` it is DISCOVERED from `attempts_from`, else from the boards' own
+    directory, because the sidecars that record the search sit next to the
+    boards a film is made from. `None` after that is a real answer: a chain
+    with no search behind it gets no band.
+    """
     import animate_route as a
+    import render_theme
+    _th = render_theme.theme(theme)
     boards = [s for s in shots if s['kind'] == 'board']
     if not boards:
         return []
@@ -341,10 +357,47 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                 print(f"make_film: no camera ({exc})", file=sys.stderr)
 
     marks = []
+    # `theme=` was accepted and DROPPED here until #1021: `--theme light`
+    # reached build_film and never reached the renderer, so the flag was a
+    # no-op on the film path. Same defect as make_movie's, found the same way.
+    # #1018's layout reaches the PLACEMENT film too. It did not until now,
+    # which is the wrong way round: this is the film that actually shows
+    # placement, so it is the one whose lower box has a placement content to
+    # hold and whose rail has laps to count. A film of a search rendered with
+    # no rail and no box was the one place the design system could not be
+    # seen doing its job.
+    _geom = []
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
-                            rip_hold, chunks, stage=stage, marks=marks)
+                            rip_hold, chunks, stage=stage, marks=marks,
+                            theme=_th, layout=layout, aspect=aspect,
+                            geom_out=_geom)
     if not frames:
         return []
+
+    # #1021. THE ATTEMPTS BAND, AND IT GOES HERE -- BEFORE THE BADGE LOOP.
+    # `_badge` draws a border on the frame it is given; attach the band
+    # afterwards and the border encloses only the board, which is exactly the
+    # trap `movie_panels.py:40-44` documents. It is also before `size_wh` is
+    # read, so the spliced cards are cut at the band-inclusive size and the
+    # film keeps ONE frame size.
+    #
+    # Discovered from the boards' own directory when the caller named no
+    # attempts: this film is usually made FROM a search, and the sidecars that
+    # record it are sitting next to the boards. Nothing is ever inferred from
+    # the boards themselves -- no sidecars means no band.
+    try:
+        import movie_attempts
+        if attempts is None and attempts_from != '':
+            attempts = movie_attempts.discover(
+                attempts_from or os.path.dirname(os.path.abspath(final)))
+        frames, _rep = movie_attempts.attach(frames, attempts, theme=_th,
+                                             marks=marks)
+        if not quiet:
+            print('make_film: ' + movie_attempts.status_line(_rep),
+                  file=sys.stderr)
+    except Exception as exc:                                    # noqa: BLE001
+        if not quiet:
+            print(f"make_film: no attempts band ({exc})", file=sys.stderr)
 
     # Badge every frame that belongs to an attempt.
     by_step = {}
@@ -453,6 +506,17 @@ def main(argv=None):
                     help="frames per part move (0 snaps)")
     ap.add_argument('--png-dir', help="also dump every frame as a PNG")
     ap.add_argument('--shots-json', help="write the resolved shot list here")
+    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--layout', default=None,
+                    help="frame layout: 'legacy' (default, today's frame), "
+                         "'stacked', 'sidebar', 'inset', 'split' or 'auto'. "
+                         "Anything but legacy reserves a rail and a lower "
+                         "box, which is where the placement content lives")
+    ap.add_argument('--aspect', default=None, metavar='W:H',
+                    help="target frame aspect; 'board' (default) keeps the "
+                         "board's own bounding box")
+    ap.add_argument('--no-attempts', action='store_true',
+                    help="drop the attempts band -- the boards alone")
     ap.add_argument('--quiet', action='store_true')
     a = ap.parse_args(argv)
 
@@ -482,11 +546,30 @@ def main(argv=None):
         with open(a.shots_json, 'w', encoding='utf-8') as f:
             json.dump(shots, f, indent=2)
 
-    frames = build_film(shots, size=a.size, fps=a.fps, supersample=a.supersample,
+    # #1021: the attempts come from whichever source this film came from --
+    # the loop dir's sidecars or the converge ledger -- and never from the
+    # boards themselves. `--no-attempts` is the OFF arm, and it says so in the
+    # status line rather than silently drawing nothing.
+    attempts = None
+    if not a.no_attempts:
+        import movie_attempts
+        if a.from_loop_dir:
+            attempts = movie_attempts.attempts_from_loop_dir(a.from_loop_dir)
+        elif a.from_ledger:
+            attempts = movie_attempts.attempts_from_converge_ledger(
+                a.from_ledger)
+    frames = build_film(shots, theme=a.theme,
+                        size=a.size, fps=a.fps, supersample=a.supersample,
                         layer_alpha=a.layer_alpha, rip_hold=a.rip_hold,
                         chunks=a.chunks, camera=a.camera,
                         camera_budget=a.camera_budget, tween=a.tween,
-                        quiet=a.quiet)
+                        quiet=a.quiet, layout=a.layout, aspect=a.aspect,
+                        attempts=attempts,
+                        attempts_from=('' if a.no_attempts else
+                                       (a.from_loop_dir or
+                                        (os.path.dirname(os.path.abspath(
+                                            a.from_ledger))
+                                         if a.from_ledger else None))))
     if not frames:
         print("make_film: nothing to animate", file=sys.stderr)
         return 1

@@ -78,6 +78,12 @@ DOCS = (
                  'SKILL.md'),
     os.path.join('.claude', 'skills', 'plan-pcb-placement', 'SKILL.md'),
     os.path.join('docs', 'api-routing-config.md'),
+    # #946: this file was in NO gate at all -- not this one, not
+    # test_doc_constants, not run_doc_examples -- while quoting flags and
+    # constants throughout. Added here rather than to run_doc_examples,
+    # which EXECUTES its ```python blocks: a render block there would need
+    # Pillow and a board and would write PNGs into the repo root.
+    os.path.join('docs', 'route-animation.md'),
 )
 
 #: What counts as LIVE: any non-test source file that registers the flag with

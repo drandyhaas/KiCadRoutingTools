@@ -1,3 +1,78 @@
+5363397f 2026-09-21 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of the #946 render-design-system branch (25 commits, ab8d0c364..5363397f).
+NO GAP FOUND in the engine/GUI boundary. One gate FIXED (see below), and it is
+the gate CLAUDE.md names for movie work.
+
+THE BRANCH'S SURFACE is 14 files under py_router/, 2 under py_tools/, 1 under
+awx/, and **ZERO files under kicad_routing_plugin/** -- checked with
+`git diff --stat ab8d0c364..HEAD -- kicad_routing_plugin/`, which is empty.
+Nothing for the engine to have drifted from on the plugin side.
+
+FIVE NEW CLI FLAGS, all on the MOVIE front ends:
+
+  make_movie.py   --theme  --layout  --aspect  --no-attempts  --iso-allow-bare
+  make_film.py    --theme  --no-attempts
+
+None of them gets a dialog control, and that is CLAUDE.md's parity rule taking
+its SECOND arm explicitly rather than by omission: the GUI's movie button
+passes no movie parameters at all (`movie_recorder.py:160` is
+`make_movie(boards, out=out, quiet=True)` -- verified, that line still says
+exactly that), so the reach is through env knobs, which is how
+KICAD_MOVIE_CAMERA and KICAD_MOVIE_PANELS already reach it. Three added beside
+them in `env_knobs.refresh()`: KICAD_RENDER_THEME, KICAD_MOVIE_LAYOUT,
+KICAD_MOVIE_ASPECT.
+
+  * `test_settings_roundtrip.py` is NOT implicated -- no dialog control was
+    added, renamed or removed. CONFIRMED by diff rather than assumed.
+  * `manifest_to_plan.FLAG_PARAMS` is not implicated either: these flags are on
+    `make_movie`/`make_film`, which are not routing STEPS in a recorded
+    manifest. `test_manifest_plan_parity.py` run and green.
+  * `test_cli_postpass_coverage.py` run and green. The two new whole-frame-list
+    passes (`movie_attempts.attach`, the attempts band; and the #1022 motion)
+    live INSIDE `make_movie()` and `build_film()`, which is the shared engine
+    function the GUI recorder calls -- not in a CLI `main()`. That is the
+    Class-2 drift this gate exists to block, and it is avoided by construction.
+
+GATES RUN ON THIS MACHINE (KiCad 10.0.0, wx 4.2.2a1 msw phoenix,
+wxWidgets 3.3.2, Windows):
+
+  tests/gui_parity/test_movie_recorder.py        PASS   <- see below
+  tests/gui_parity/test_manifest_plan_parity.py  PASS
+  tests/gui_parity/test_cli_postpass_coverage.py PASS
+
+THE GATE WAS FIXED, and it is the one this branch most needed. CLAUDE.md names
+`test_movie_recorder.py` as the gate to run when touching movie code. It
+printed `SKIP: no python with pcbnew + wx found` and exited 0 -- on a machine
+with KiCad and wx installed and working. THREE defects in the gate itself,
+stacked behind one another, each of which reports every claim it guards as
+checked:
+
+  1. the interpreter list carried #647's defect, never propagated out of the
+     engine: no KiCad >= 6 installs at the unversioned
+     `C:\Program Files\KiCad\bin\python.exe` (it is `...\KiCad\10.0\bin\...`).
+     It CALLS `kicad_exact_fill.kicad_python_candidates()` now, which handles
+     the versioned layout and VERIFIES a candidate can import pcbnew;
+  2. `os.execv` on Windows re-splits argv on spaces, so once the versioned path
+     was found the re-exec ran `C:\Program` with `Files\KiCad\...` as an
+     argument and died before the gate started. Subprocess-and-exit on nt;
+  3. the fixture board `kicad_files/fanout_output.kicad_pcb` does not exist,
+     and `fanout_output1` -- the obvious substitute -- is GENERATED and
+     gitignored, so naming either by path is the same self-skip one step
+     later. It builds the board through `fixture_boards.ensure()` now.
+
+DISCLOSED, and NOT fixed here: at least twelve other files carry the same stale
+interpreter list (including `tests/gui_parity/test_714_mirror_pcbnew_parity.py`,
+which is a KILLER gate for `tests/mutate_714.py` -- the worst place for it, since
+a killer gate that exits 0 reports every row it guards as SURVIVED). Untouched
+because each needs RUNNING to be worth claiming, over gates this branch does not
+implicate. That is a change to make on its own.
+
+NOT RUN: `test_gui_engine_parity.py` and `test_gui_livechain_rp2350.py` -- they
+route a chain and this branch changes no routing engine code, only rendering.
+`test_fanout_rotated_gui.py`, `test_ref_label_pcbnew_parity.py`,
+`test_settings_roundtrip.py` -- not implicated by a render-only change, per the
+diff above.
+
 b345eed9 2026-09-21 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of the MERGE of main (ab8d0c36, carrying the bus622-take5 py_router
 delta) into fix/962-paste-aperture. NO GAP FOUND. Eight gates re-run green on

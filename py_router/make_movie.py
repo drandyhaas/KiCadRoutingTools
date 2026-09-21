@@ -154,7 +154,8 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                rip_hold=DEFAULT_RIP_HOLD, chunks=DEFAULT_CHUNKS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
                camera=None, camera_budget=60.0, tween=10,
-               panels=None, iso_opts=None, timing=None):
+               panels=None, iso_opts=None, timing=None, theme=None,
+               layout=None, aspect=None, attempts=None):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -261,12 +262,67 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             except Exception:                                   # noqa: BLE001
                 ledger = None
     marks = [] if (want_iso or ledger) else None
+    # #1018: resolved once inside build_boards; collected here so the status
+    # line can say which layout ran and why, the way iso_status_line does.
+    geom_out = []
+    if layout is None or aspect is None:
+        try:
+            import env_knobs as _ek
+        except Exception:                                       # noqa: BLE001
+            _ek = None
+        if layout is None:
+            layout = getattr(_ek, 'MOVIE_LAYOUT', 'legacy')
+        if aspect is None:
+            aspect = getattr(_ek, 'MOVIE_ASPECT', '') or None
+    # The run directory's own name is the closest thing a multi-step chain has
+    # to a board name, and it is what the rail's stable left should carry.
+    _title = (os.path.basename(os.path.abspath(inputs[0]))
+              if len(inputs) == 1 and os.path.isdir(inputs[0]) else None)
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
-                            rip_hold, chunks, stage=stage, marks=marks)
+                            rip_hold, chunks, stage=stage, marks=marks,
+                            theme=theme, layout=layout, aspect=aspect,
+                            geom_out=geom_out, title=_title)
     if not frames:
         if not quiet:
             print("make_movie: no frames (nothing routed?)", file=sys.stderr)
         return None
+    # #1021. THE ATTEMPTS BAND, before the clock and before the iso panel:
+    # composition order is board -> attempts -> clock -> iso, so the band sits
+    # adjacent to the board it annotates and the iso panel still stacks last.
+    #
+    # Imported HERE, like movie_panels below, so the GUI recorder and the
+    # in-process callers do not pay for a feature they did not ask for.
+    try:
+        import movie_attempts
+        # `False` is the OFF arm (`--no-attempts`); `None` means "look", which
+        # is the default because the sidecars sit next to the boards and the
+        # feature has no GUI control of its own -- same posture as the camera
+        # and panels knobs.
+        if attempts is False:
+            _track = None
+        elif attempts is not None:
+            _track = attempts
+        else:
+            _track = movie_attempts.discover(
+                os.path.dirname(os.path.abspath(final)))
+        frames, _arep = movie_attempts.attach(frames, _track, theme=theme,
+                                              marks=marks)
+        # PRINTED EVEN WHEN QUIET, for the reason iso_status_line is: this is
+        # the only channel that says whether the band ran, and the front end
+        # the discovery exists for (place_route_loop's film, the GUI recorder)
+        # calls make_movie with quiet=True.
+        #
+        # SILENT on a chain with no attempts on disk, which is most chains:
+        # the band is discovered rather than asked for, so a line saying it did
+        # not happen would appear on every ordinary movie. It speaks whenever
+        # there IS a search behind the film -- drawn or declined, with the
+        # reason.
+        if _arep.get('drawn') or _arep.get('attempts'):
+            print(movie_attempts.status_line(_arep), file=sys.stderr)
+    except Exception as exc:                                    # noqa: BLE001
+        if not quiet:
+            print('make_movie: no attempts band (%s)' % exc, file=sys.stderr)
+
     frame_meta = None
     if ledger:
         try:
@@ -316,11 +372,14 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         # The panel is opt-in, so this line only ever appears when it was asked
         # for.
         print(movie_panels.iso_status_line(report), file=sys.stderr)
+    if geom_out and not quiet:
+        import frame_layout
+        print(frame_layout.frame_status_line(geom_out[0]), file=sys.stderr)
     out = out or default_output(inputs)
     out = os.path.abspath(out)
     os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
     if not a.save_movie(frames, out, fps=fps, end_hold=end_hold,
-                        png_dir=png_dir, frame_meta=frame_meta):
+                        png_dir=png_dir, frame_meta=frame_meta, theme=theme):
         return None
     # save_movie falls back .mp4 -> .gif when imageio-ffmpeg is missing; report
     # the file that actually exists so callers (and the GUI) point at it.
@@ -364,6 +423,23 @@ def main():
                     help='also dump the raw PNG frames here')
     ap.add_argument('--png', action='store_true',
                     help='also write a full-resolution still of the final board')
+    ap.add_argument('--layout', default=None,
+                    help="'legacy' (default, or $KICAD_MOVIE_LAYOUT) "
+                         "| auto | stacked | sidebar | inset | split. "
+                         "auto picks stacked-vs-sidebar from the "
+                         "board's own aspect; inset-vs-split is a "
+                         "stance about what the viewer is there to "
+                         "read, so it is never inferred")
+    ap.add_argument('--aspect', default=None, metavar='W:H',
+                    help="target frame aspect, or $KICAD_MOVIE_ASPECT. "
+                         "'board' (default) keeps today's behaviour: "
+                         "the frame IS the board's bounding box")
+    ap.add_argument('--no-attempts', action='store_true',
+                    help="drop the attempts band (#1021). The band is drawn "
+                         "when loop_round*.json sidecars or a converge ledger "
+                         "sit next to the boards; a chain with no search "
+                         "behind it has none and says so.")
+    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--camera', default=None,
                     choices=('off', 'auto'),
@@ -406,6 +482,11 @@ def main():
                      help='basic measured 1.4-2.7 s serial and 1.9-4.2 s '
                           'four at once; high measured 5.0-7.5 s on the '
                           'same four boards, about 3x (default: basic)')
+    iso.add_argument('--iso-allow-bare', action='store_true',
+                     help='draw the iso panel even when the 3D models do not '
+                          'resolve. #1016: by default a MOSTLY BARE board gets '
+                          'no panel, because 38%% of every frame would be a '
+                          'rotating rectangle showing no routing')
     iso.add_argument('--iso-floor', action='store_true',
                      help='kicad-cli --floor: shadows and post-processing')
     iso.add_argument('--iso-perspective', action='store_true',
@@ -464,12 +545,15 @@ def main():
         max_renders=args.iso_max_renders,
         height_frac=args.iso_height_frac, sweep_deg=args.iso_sweep,
         quality=args.iso_quality, floor=args.iso_floor,
+        require_models=not args.iso_allow_bare,
         perspective=args.iso_perspective, zoom=args.iso_zoom,
         jobs=args.iso_jobs, timeout=args.iso_timeout,
         cli=args.kicad_cli)
 
     try:
-        out = make_movie(args.inputs, out=args.output, size=args.size, fps=args.fps,
+        out = make_movie(args.inputs, out=args.output, theme=args.theme,
+                         layout=args.layout, aspect=args.aspect,
+                         size=args.size, fps=args.fps,
                          supersample=args.supersample, layer_alpha=args.layer_alpha,
                          rip_hold=args.rip_hold, chunks=args.chunks,
                          end_hold=args.end_hold, png_dir=args.png_dir,
@@ -478,6 +562,7 @@ def main():
                        camera_budget=args.camera_budget,
                        tween=args.tween,
                        panels=args.panels, iso_opts=iso_opts,
+                       attempts=(False if args.no_attempts else None),
                        timing=args.timing)
     except FileNotFoundError as e:
         print(f"make_movie: no such board: {e}", file=sys.stderr)

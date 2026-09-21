@@ -16,6 +16,15 @@ and grades the parts that decide whether the movie is correct:
 RUN_ALL_FAST_OK: it shells out for nothing; the one subprocess-free import guard
 is Pillow, which route_render already requires.
 """
+
+# #1016 NOTE. Several tests below pass `require_models=False`. They exercise
+# the panel's MECHANICS -- frame growth, failure accounting, the status line,
+# the even-height rule -- on `tigard`, which resolves 0 of 84 3D models. Since
+# #1016 a board that bare gets NO PANEL by default, which is the right default
+# and would turn every one of those tests into a test of the gate instead.
+# Opting them out keeps each one measuring the thing it was written to measure;
+# the gate itself is `tests/test_946_iso_gate.py`.
+
 import os
 import sys
 import tempfile
@@ -171,7 +180,7 @@ def test_no_kicad_cli_says_why_and_keeps_one_panel():
     kicad_oracle.find_kicad_cli = lambda *a, **k: None
     try:
         real_msg = kir.resolve_cli(None)[1]
-        out, rep = mp.compose_two_panel(fr, marks, final)
+        out, rep = mp.compose_two_panel(fr, marks, final, mp.IsoOpts(require_models=False))
     finally:
         kicad_oracle.find_kicad_cli = saved
     want({f.size for f in out} == ref, 'the frame size is untouched', ref)
@@ -191,7 +200,7 @@ def test_a_kicad_cli_that_is_not_kicad_is_an_error_not_a_crash():
     fr, marks, final = _frames()
     ref = {f.size for f in fr}
     out, rep = mp.compose_two_panel(fr, marks, final,
-                                    mp.IsoOpts(cli=sys.executable))
+                                    mp.IsoOpts(require_models=False, cli=sys.executable))
     want(rep['state'] == 'error', 'a failing probe render is an error state',
          rep['state'])
     want({f.size for f in out} == ref,
@@ -254,7 +263,7 @@ def test_the_stacked_frame_is_one_constant_even_size():
         Image.new('RGBA', (616, 448), (20, 90, 40, 255)).save(png) or png, '')
     try:
         out, rep = mp.compose_two_panel(fr, marks, final,
-                                        mp.IsoOpts(max_renders=4))
+                                        mp.IsoOpts(require_models=False, max_renders=4))
     finally:
         kir.render_many, kir.resolve_cli, kir.render_iso = (
             saved_r, saved_c, saved_iso)
@@ -281,7 +290,7 @@ def test_the_iso_panel_never_touches_the_xray_panel():
         Image.new('RGBA', (616, 448), (20, 90, 40, 255)).save(png) or png, '')
     try:
         out, _rep = mp.compose_two_panel(fr, marks, final,
-                                         mp.IsoOpts(max_renders=2))
+                                         mp.IsoOpts(require_models=False, max_renders=2))
     finally:
         kir.render_many, kir.resolve_cli, kir.render_iso = (
             saved_r, saved_c, saved_i)
@@ -393,7 +402,7 @@ def test_a_failed_render_keeps_the_box_and_says_so():
         Image.new('RGBA', (616, 448), (20, 90, 40, 255)).save(png) or png, '')
     try:
         out, rep = mp.compose_two_panel(fr, marks, final,
-                                        mp.IsoOpts(max_renders=3))
+                                        mp.IsoOpts(require_models=False, max_renders=3))
     finally:
         kir.render_many, kir.resolve_cli, kir.render_iso = (
             saved_r, saved_c, saved_i)
@@ -433,7 +442,7 @@ def test_a_render_that_succeeds_but_will_not_decode_is_counted_as_failed():
         Image.new('RGBA', (616, 448), (20, 90, 40, 255)).save(png) or png, '')
     try:
         out, rep = mp.compose_two_panel(fr, marks, final,
-                                        mp.IsoOpts(max_renders=3))
+                                        mp.IsoOpts(require_models=False, max_renders=3))
     finally:
         kir.render_many, kir.resolve_cli, kir.render_iso = (
             saved_r, saved_c, saved_i)
@@ -637,7 +646,7 @@ def test_each_panels_caption_describes_its_own_board():
 
     mp.iso_panel = spy
     try:
-        mp.compose_two_panel(fr, marks, final, mp.IsoOpts(max_renders=4))
+        mp.compose_two_panel(fr, marks, final, mp.IsoOpts(require_models=False, max_renders=4))
     finally:
         kir.render_many, kir.resolve_cli, kir.render_iso = (
             saved_r, saved_c, saved_i)
@@ -809,7 +818,7 @@ def test_a_temp_dir_failure_is_a_named_state_not_a_traceback():
 
     mp.tempfile.mkdtemp = boom
     try:
-        out, rep = mp.compose_two_panel(fr, marks, final)
+        out, rep = mp.compose_two_panel(fr, marks, final, mp.IsoOpts(require_models=False))
     finally:
         kir.resolve_cli, mp.tempfile.mkdtemp = saved_c, saved_mk
     want(rep['state'] == 'error',
