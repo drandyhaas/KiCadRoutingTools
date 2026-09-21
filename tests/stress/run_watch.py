@@ -13,27 +13,51 @@ laps, a `blocking` that went UP -- and `cheats` matches the ways a run could
 report success without earning it: the answer key read, a scope narrowed to
 the nets that were failing, a grader floor overridden.
 
-Neither watcher BUDGETS on time. `cheats` ends when the run's DONE marker
-appears -- a fact on disk, the same on every machine -- and `bugs` runs until
-you stop it. Nothing here compares an elapsed time to a threshold and decides
-something. The three `subprocess.run(..., timeout=)` values below are the
-ordinary guard against a hung CHILD process, and each one is reported when it
-fires rather than swallowed.
+NEITHER WATCHER GRADES ON TIME. `cheats` ends at a MARKER -- a fact on disk,
+the same on every machine -- and `bugs` runs until you stop it. Nothing here
+compares an elapsed time to a threshold and decides something. The
+`subprocess.run(..., timeout=)` values below are the ordinary guard against a
+hung CHILD process, and `--report-wait` bounds how long the last marker is
+waited for; each one is REPORTED when it fires rather than swallowed, and
+none of them changes a verdict. (That paragraph used to say "Neither watcher
+BUDGETS on time ... Nothing here compares an elapsed time to a threshold",
+which `--report-wait` would have made a lie about its own file.)
+
+TWO MARKERS, because there are two things to audit and they do not exist at
+the same moment. `DONE` means THE COPPER IS FROZEN, and it triggers the audits
+that read the BOARD. `REPORT.md` is written after those, because it has to
+carry their verdicts -- which used to make it, in SKILL.md's own words, "the
+one artifact the cheat watcher cannot audit". So `cheats` now stays alive past
+DONE and ends at `REPORT_DONE`. Measured on run 29: three of its four watcher
+files were written before DONE, its `REPORT.md` grew 287 -> 393 lines while a
+watcher was reading it and finished at 686, and its DONE marker was REWRITTEN
+29 minutes after the board audits had already run against the board it then
+superseded.
+
+`logs/<label>.done` is a DIFFERENT marker family -- tee_cmd's per-command
+completion signal -- and is not this.
 
     # every new problem, as it appears (many events, until you stop it)
     python3 -X utf8 tests/stress/run_watch.py bugs --workdir wk/run20
 
-    # ways the run could pass without earning it; ends at the DONE marker
+    # ways the run could pass without earning it; ends at the REPORT marker
     python3 -X utf8 tests/stress/run_watch.py cheats --workdir wk/run20 \
-        --truthdir wk/run20_truth --done wk/run20/DONE
+        --truthdir wk/run20_truth --done wk/run20/DONE \
+        --report-done wk/run20/REPORT_DONE
+
+    # the pre-#963 contract, for replaying over a finished run
+    python3 -X utf8 tests/stress/run_watch.py cheats --workdir wk/run20 \
+        --truthdir wk/run20_truth --report-done ''
 
 Exit codes: 0 normal, 2 usage, 1 from `--self-test` when a self-check fails.
 `bugs` never exits on its own.
 """
 import argparse
 import hashlib
+import io
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -322,6 +346,11 @@ CHEAT_FLAGS = (
                                    'refused', ()),
     ('WAIVER', '--accept-unclosed', 'closes a half that did not close', ()),
     ('WAIVER', '--accept-congestion', 'accepts a congestion regression', ()),
+    # #963: goes round again although the routing laps since the last decision
+    # outnumber what one decision buys. Rare by design -- the ordinary answer
+    # is to WRITE the decision, which is one command and moves no verdict.
+    ('WAIVER', '--accept-unclassified',
+     'retries with no decision on the record', ()),
     ('WAIVER', '--allow-unplaced', 'proceeds on a board the gate called '
                                    'unplaced', ()),
     ('WAIVER', '--allow-routed', 'places onto existing copper', ()),
@@ -666,7 +695,308 @@ def _git_dirty(root):
     return out
 
 
-def watch_cheats(workdir, truthdir, done_path, poll):
+#: How long `cheats` waits for the report marker after DONE, in seconds.
+#: 5400 is 1.4x the ONE measurement available -- run 29's DONE -> REPORT.md gap
+#: was 63 minutes -- and it is written here as that, not as a principle. It
+#: bounds a WAIT and changes only what is printed; nothing here grades on it.
+REPORT_WAIT_SEC = 5400.0
+
+#: A digest as this repo's artifacts spell one: full sha256, or the truncated
+#: form a report writes in prose. Eight hex characters is the shortest prefix
+#: anything here abbreviates to.
+_SHA_RE = re.compile(r'\b[0-9a-f]{8,64}\b')
+
+#: The SHIPPED digests in a DONE marker, by the marker's own convention:
+#: `board routed.kicad_pcb sha256 <64 hex>`. Everything else hex in there is
+#: something the marker is TALKING ABOUT -- and on run 29 that is exactly the
+#: superseded board, quoted by DONE's own "an earlier DONE closed on sha
+#: 0b2f0d5e..." sentence. Collecting every hex token instead made the check
+#: silent on the one case it exists for: the superseded sha was in the set, so
+#: a report naming it "agreed" with the marker.
+_DONE_SHIPPED_RE = re.compile(r'sha256\s+([0-9a-f]{64})')
+
+
+def report_audit(workdir, report_path, done_path, done_sha_at_audit):
+    """Lines about REPORT.md -- the artifact nothing could audit before.
+
+    `REPORT.md` is written AFTER `DONE`, and correctly: it has to carry the
+    fence and provenance verdicts, which do not exist until DONE triggers them.
+    SKILL.md concedes the consequence in its own words -- "that makes the
+    report the one artifact the cheat watcher cannot audit". This is the
+    consequence removed, by keeping the watcher alive past DONE rather than by
+    reordering a run that is not wrong.
+
+    Run 29 is the case that makes it worth doing. `REPORT.md:23` -- the "What
+    ships" table, the FIRST table in the document -- names sha `0b2f0d5e...`,
+    while `:546` concedes that board is superseded and `:551` names
+    `c22ab32b...` as shipped. The headline artifact row is about the wrong
+    board, and a single substring comparison at REPORT time finds it.
+
+    WHAT THIS DOES NOT CHECK, so its silence is not read as a clean bill: the
+    marker is written by the run being audited, so a run can write it, be
+    audited, and then extend the file -- which is exactly what run 29 did to
+    DONE. Check 5 records the report's own digest and length at audit time so a
+    later reader can tell. And the waiver coverage the close-out demands is not
+    checked here: the flag set lives in `watch_cheats`'s own scan loop and
+    handing it down is a larger change than this earns.
+    """
+    out = []
+    if not os.path.isfile(report_path):
+        return ['REPORT no %s on disk, so nothing was audited -- that is not '
+                'a pass' % os.path.basename(report_path)]
+    raw = ''
+    try:
+        with io.open(report_path, encoding='utf-8', errors='replace') as fh:
+            raw = fh.read()
+    except Exception as e:                             # noqa: BLE001
+        return ['REPORT could not read %s (%s) -- that is not a pass'
+                % (report_path, type(e).__name__)]
+    if not raw.strip():
+        out.append('REPORT %s is empty -- that is not a pass' % report_path)
+
+    # 1. the two terminal verdicts, QUOTED. This process printed them; the
+    #    report is supposed to carry them verbatim rather than summarised,
+    #    which is SKILL.md's own reason for quoting them.
+    for who in ('FENCE', 'PROVENANCE'):
+        lines = [ln for ln in raw.splitlines() if who in ln.upper()]
+        if not lines:
+            out.append('REPORT names no %s verdict -- SKILL.md requires both '
+                       'quoted verbatim, with their exit codes' % who)
+        elif not any(('exit' in ln.lower() or 'VERDICT' in ln.upper())
+                     for ln in lines):
+            out.append('REPORT mentions %s but quotes no verdict or exit code '
+                       'for it -- a summary is what the quoting rule exists '
+                       'to prevent' % who)
+
+    # 2. the sha the report names as SHIPPED is the sha the audits examined.
+    #    Run 29 fails this, and it is the check that makes the marker not
+    #    theatre.
+    done_raw = ''
+    try:
+        with io.open(done_path, encoding='utf-8', errors='replace') as fh:
+            done_raw = fh.read()
+    except Exception:                                  # noqa: BLE001
+        pass
+    shipped = set(_DONE_SHIPPED_RE.findall(done_raw))
+    # Every OTHER digest the marker mentions is one it is talking about rather
+    # than shipping -- a superseded board, a replaced arm.
+    others = set(_SHA_RE.findall(done_raw)) - shipped
+    others = {h for h in others
+              if not any(sh.startswith(h) for sh in shipped)}
+
+    def _named(hs):
+        return any(h[:8] in raw for h in hs)
+
+    if not shipped:
+        # SAID, not assumed clean. `wk/run20/DONE` is zero bytes, and a marker
+        # that names no board makes this check inert -- which looks exactly
+        # like agreement.
+        out.append('REPORT the DONE marker names no `sha256 <digest>`, so '
+                   'whether the report describes the board the audits read '
+                   'was NOT checked')
+    elif not _named(shipped):
+        out.append(
+            'REPORT names none of the digest(s) DONE ships (%s) anywhere in '
+            'its text -- the report does not say which board this is'
+            % ', '.join(sorted(h[:12] + '...' for h in shipped)))
+    else:
+        first = _SHA_RE.search(raw)
+        if first and others and any(first.group(0).startswith(h)
+                                    or h.startswith(first.group(0))
+                                    for h in others):
+            # The report OPENS on a digest the marker itself calls superseded.
+            # Only DONE's own vocabulary can produce this, so a git commit, a
+            # part number or an ISO date in the report cannot -- which is what
+            # a "first digest in the report" rule accuses nearly every
+            # report there is: of the 23 REPORT.md files under `wk/`, 11
+            # carry any digest at all and exactly ONE of those opens on
+            # the sha its own DONE names as shipped. The rest open on git
+            # commits, md5s, part numbers and dates.
+            out.append(
+                'REPORT the first digest it names is %s..., which DONE names '
+                'as SUPERSEDED, not as shipped (%s) -- the headline artifact '
+                'row is about the wrong board'
+                % (first.group(0)[:12],
+                   ', '.join(sorted(h[:12] + '...' for h in shipped))))
+
+    # 3. DONE did not change between the two triggers.
+    now = _sha(done_path)
+    if done_sha_at_audit and not now:
+        out.append('REPORT the DONE marker could not be re-hashed, so whether '
+                   'it changed between the two audits was NOT checked')
+    if done_sha_at_audit and now and now != done_sha_at_audit:
+        out.append('REPORT the DONE marker was REWRITTEN between the board '
+                   'audits and this one (sha %s... -> %s...) -- the audits '
+                   'above were re-run, and anything quoted from the earlier '
+                   'pass is about a superseded board'
+                   % (done_sha_at_audit[:12], now[:12]))
+
+    # 4. THERE IS NO CHECK 4, and its absence is the point. It compared
+    #    `getmtime(ledger.jsonl)` with `getmtime(REPORT.md)` and emitted an
+    #    accusation from the difference -- the ONE mtime-derived finding in
+    #    a file whose own docstring says freshness is sha256 and never
+    #    mtime, and whose sibling design (#1006) says the same. A pre-push
+    #    reviewer found it untested and un-mutated as well: deleting it left
+    #    every gate green, which is how a rule nobody checks survives its
+    #    own file's policy. The DONE-sha checks above cover what it was
+    #    reaching for -- a report about a board the run has since replaced
+    #    -- and they do it from CONTENT.
+
+    # 5. the report's own digest and length, recorded so a later extension is
+    #    detectable by anyone comparing. Never a finding on its own.
+    out.append('REPORT audited %s: sha %s..., %d bytes, %d lines'
+               % (os.path.basename(report_path), (_sha(report_path) or '?')[:12],
+                  len(raw.encode('utf-8')), len(raw.splitlines())))
+    return out
+
+
+def _await_report(workdir, done_path, done_sha, truthdir, root, report_done,
+                  report_wait, poll):
+    """Wait past DONE for the report marker, then audit REPORT.md.
+
+    Three arms for an OLD run directory, because replaying this watcher over a
+    finished run must not hang for ninety minutes:
+
+      * `report_done` falsy -- the pre-#963 contract, exit at DONE;
+      * the marker already there -- audit at once;
+      * nothing, and `report_wait` elapses -- say so in one line and exit 0.
+        This watcher REPORTS; it does not grade.
+    """
+    if not report_done:
+        return 0
+    report = os.path.join(workdir, 'REPORT.md')
+    # A DEADLINE, not an accumulator. `waited += poll` never advances at
+    # `--poll 0`, so the bounded wait was unbounded for exactly the caller who
+    # asked it to spin. This reads a clock to bound a WAIT and to choose what
+    # to print; nothing here grades on it.
+    _deadline = time.monotonic() + report_wait if report_wait else None
+    while True:
+        if os.path.exists(report_done):
+            now = _sha(done_path)
+            if now and done_sha and now != done_sha:
+                print('DONE was REWRITTEN between the two audits (sha %s... -> '
+                      '%s...) -- re-running the audits that read the BOARD'
+                      % (done_sha[:12], now[:12]), flush=True)
+                _board_audits(workdir, truthdir, root)
+            for line in report_audit(workdir, report, done_path, done_sha):
+                print(line, flush=True)
+            return 0
+        if _deadline is not None and time.monotonic() >= _deadline:
+            print('REPORT no %s after %g s -- REPORT.md was NOT audited '
+                  '(verdict quoting, shipped-sha agreement and DONE stability '
+                  'unchecked). That is not a pass.'
+                  % (os.path.basename(report_done), report_wait), flush=True)
+            return 0
+        time.sleep(max(poll, 0.01))
+
+
+def _board_audits(workdir, truthdir, root):
+    """The two audits that read the BOARD rather than the log.
+
+    Lifted out of `watch_cheats` (#963) because they have to be runnable
+    TWICE. Run 29 shows why: `os.path.exists(DONE)` fired at 14:22:23 and
+    this watcher returned 0, and the DONE on disk today says "THIS MARKER
+    WAS REWRITTEN" and names a different shipped sha. So `FENCE VERDICT:
+    CLEAN` and `PROVENANCE VERDICT: UNAIDED VIOLATION` in that run's
+    watcher log are verdicts about a board superseded 29 minutes later by
+    ledger rows 45 and 46.
+
+    Prints its own lines, as before. Returns nothing: this watcher
+    reports, it does not grade.
+    """
+    import subprocess
+    control = os.path.join(truthdir or '', 'control.kicad_pcb')
+    if truthdir and os.path.isfile(control):
+        try:
+            r = subprocess.run(
+                [sys.executable, '-X', 'utf8',
+                 os.path.join(root, 'tests', 'stress',
+                              'fence_audit.py'),
+                 '--control', control, '--workdir', workdir],
+                capture_output=True, text=True, timeout=900)
+            _said = False
+            for line in (r.stdout or '').splitlines():
+                if 'VERDICT' in line or line.startswith('  LEAK'):
+                    print(f'FENCE {line.strip()}', flush=True)
+                    _said = True
+            # 0 CLEAN and 4 LEAK are the audit's ANSWERS. Anything
+            # else is the audit failing to run, and printing nothing
+            # for it reads exactly like a clean fence -- the failure
+            # this whole file exists to avoid.
+            if r.returncode not in (0, 4) or not _said:
+                _tail = ((r.stderr or r.stdout or '').strip()
+                         .splitlines() or [''])[-1]
+                print(f'FENCE did NOT report a verdict '
+                      f'(exit {r.returncode}): {_tail[:160]} -- that '
+                      f'is not a pass', flush=True)
+        except Exception as e:                 # noqa: BLE001
+            print(f'FENCE could not run ({type(e).__name__}: {e}) -- '
+                  f'that is not a pass', flush=True)
+    else:
+        print('FENCE no control board found, so blindness was NOT '
+              'verified -- that is not a pass', flush=True)
+    try:
+        r = subprocess.run(
+            [sys.executable, '-X', 'utf8',
+             os.path.join(root, 'tests', 'stress',
+                          'provenance_audit.py'),
+             '--workdir', workdir],
+            capture_output=True, text=True, timeout=900)
+        _said = False
+        for line in _provenance_lines(r.stdout):
+            print(f'PROVENANCE {line}', flush=True)
+            _said = True
+        # 0/4/5 are its verdicts (CLEAN / VIOLATION / UNPROVEN); 2 is
+        # a usage error and anything else is a crash. Silence there
+        # reads as CLEAN.
+        if r.returncode not in (0, 4, 5) or not _said:
+            _tail = ((r.stderr or r.stdout or '').strip()
+                     .splitlines() or [''])[-1]
+            print(f'PROVENANCE did NOT report a verdict '
+                  f'(exit {r.returncode}): {_tail[:160]} -- that is '
+                  f'not a pass', flush=True)
+        if r.returncode == 4:
+            print('PROVENANCE exit 4 -- a pose in the delivered board '
+                  'traces to no registered lever, or is not where the '
+                  'recorded writes put it, i.e. something moved parts '
+                  'that was not the engine', flush=True)
+        if r.returncode == 5:
+            # NAMED, not graded. Before #903 nothing armed a regime,
+            # so 5 was the only reachable answer and saying anything
+            # about it would have been noise. Both stagers arm now, so
+            # a 5 on a staged work dir has three causes worth telling
+            # apart -- and it stays exit 0 here, because
+            # provenance_audit's own docstring makes 5 load-bearing:
+            # "I cannot prove it" and "I proved it false" must be
+            # different numbers. Grading it would also fail every
+            # work dir staged before this change.
+            print('PROVENANCE exit 5 -- UNPROVEN. Since #903 both '
+                  'stagers ARM the regime, so a dir they staged '
+                  'should not read 5. The reasons: this dir was '
+                  'staged by neither stager; it was MOVED after '
+                  'staging (the manifest holds an absolute path); the '
+                  'manifest describes a different board than the '
+                  'staged one; no delivered board sits beside the '
+                  'staged one (pass --delivered); NOTHING MOVED -- no '
+                  'ledger and no pose differs from the staged board, '
+                  'which on a finished run is the interesting one; a '
+                  'part the lineage expects is missing (deleted or '
+                  'renamed); a recorded write read a board no '
+                  'recorded write produced and re-moved every part '
+                  'that differs (#972); the pose digests cannot link; '
+                  'or the audit itself raised (no VERDICT line above, '
+                  'the exception is on its stderr). Read the '
+                  'reason line above rather than guessing from this '
+                  'list. Not a violation -- but the claim "the engine '
+                  'placed this board" is unproven, so it may not be '
+                  'made', flush=True)
+    except Exception as e:                     # noqa: BLE001
+        print(f'PROVENANCE could not run ({type(e).__name__}: {e})',
+              flush=True)
+
+
+def watch_cheats(workdir, truthdir, done_path, poll, report_done=None,
+                 report_wait=REPORT_WAIT_SEC):
     """Ways this run could report success without earning it.
 
     NOT an accusation channel. Every flag below is legitimate somewhere, and
@@ -816,100 +1146,21 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                   f'possibly easier damage, or a re-piled board), and the run '
                   f'must say which one it reports', flush=True)
 
-        # 4. done: run the two audits that check the board rather than the log.
+        # 4. done: run the two audits that check the board rather than
+        #    the log -- and do NOT stop there. `cheats` used to return 0
+        #    here, which is why run 29's audits graded a board that was
+        #    replaced half an hour later, and why REPORT.md -- written
+        #    after DONE, because it has to carry these two verdicts --
+        #    was audited by nobody. Its own cheat watcher recorded the
+        #    file growing 287 -> 393 lines WHILE it was reading it; the
+        #    final file is 686.
         if os.path.exists(done_path):
             print('DONE declared -- running the audits that read the BOARD, '
                   'not the log', flush=True)
-            import subprocess
-            control = os.path.join(truthdir or '', 'control.kicad_pcb')
-            if truthdir and os.path.isfile(control):
-                try:
-                    r = subprocess.run(
-                        [sys.executable, '-X', 'utf8',
-                         os.path.join(root, 'tests', 'stress',
-                                      'fence_audit.py'),
-                         '--control', control, '--workdir', workdir],
-                        capture_output=True, text=True, timeout=900)
-                    _said = False
-                    for line in (r.stdout or '').splitlines():
-                        if 'VERDICT' in line or line.startswith('  LEAK'):
-                            print(f'FENCE {line.strip()}', flush=True)
-                            _said = True
-                    # 0 CLEAN and 4 LEAK are the audit's ANSWERS. Anything
-                    # else is the audit failing to run, and printing nothing
-                    # for it reads exactly like a clean fence -- the failure
-                    # this whole file exists to avoid.
-                    if r.returncode not in (0, 4) or not _said:
-                        _tail = ((r.stderr or r.stdout or '').strip()
-                                 .splitlines() or [''])[-1]
-                        print(f'FENCE did NOT report a verdict '
-                              f'(exit {r.returncode}): {_tail[:160]} -- that '
-                              f'is not a pass', flush=True)
-                except Exception as e:                 # noqa: BLE001
-                    print(f'FENCE could not run ({type(e).__name__}: {e}) -- '
-                          f'that is not a pass', flush=True)
-            else:
-                print('FENCE no control board found, so blindness was NOT '
-                      'verified -- that is not a pass', flush=True)
-            try:
-                r = subprocess.run(
-                    [sys.executable, '-X', 'utf8',
-                     os.path.join(root, 'tests', 'stress',
-                                  'provenance_audit.py'),
-                     '--workdir', workdir],
-                    capture_output=True, text=True, timeout=900)
-                _said = False
-                for line in _provenance_lines(r.stdout):
-                    print(f'PROVENANCE {line}', flush=True)
-                    _said = True
-                # 0/4/5 are its verdicts (CLEAN / VIOLATION / UNPROVEN); 2 is
-                # a usage error and anything else is a crash. Silence there
-                # reads as CLEAN.
-                if r.returncode not in (0, 4, 5) or not _said:
-                    _tail = ((r.stderr or r.stdout or '').strip()
-                             .splitlines() or [''])[-1]
-                    print(f'PROVENANCE did NOT report a verdict '
-                          f'(exit {r.returncode}): {_tail[:160]} -- that is '
-                          f'not a pass', flush=True)
-                if r.returncode == 4:
-                    print('PROVENANCE exit 4 -- a pose in the delivered board '
-                          'traces to no registered lever, or is not where the '
-                          'recorded writes put it, i.e. something moved parts '
-                          'that was not the engine', flush=True)
-                if r.returncode == 5:
-                    # NAMED, not graded. Before #903 nothing armed a regime,
-                    # so 5 was the only reachable answer and saying anything
-                    # about it would have been noise. Both stagers arm now, so
-                    # a 5 on a staged work dir has three causes worth telling
-                    # apart -- and it stays exit 0 here, because
-                    # provenance_audit's own docstring makes 5 load-bearing:
-                    # "I cannot prove it" and "I proved it false" must be
-                    # different numbers. Grading it would also fail every
-                    # work dir staged before this change.
-                    print('PROVENANCE exit 5 -- UNPROVEN. Since #903 both '
-                          'stagers ARM the regime, so a dir they staged '
-                          'should not read 5. The reasons: this dir was '
-                          'staged by neither stager; it was MOVED after '
-                          'staging (the manifest holds an absolute path); the '
-                          'manifest describes a different board than the '
-                          'staged one; no delivered board sits beside the '
-                          'staged one (pass --delivered); NOTHING MOVED -- no '
-                          'ledger and no pose differs from the staged board, '
-                          'which on a finished run is the interesting one; a '
-                          'part the lineage expects is missing (deleted or '
-                          'renamed); a recorded write read a board no '
-                          'recorded write produced and re-moved every part '
-                          'that differs (#972); the pose digests cannot link; '
-                          'or the audit itself raised (no VERDICT line above, '
-                          'the exception is on its stderr). Read the '
-                          'reason line above rather than guessing from this '
-                          'list. Not a violation -- but the claim "the engine '
-                          'placed this board" is unproven, so it may not be '
-                          'made', flush=True)
-            except Exception as e:                     # noqa: BLE001
-                print(f'PROVENANCE could not run ({type(e).__name__}: {e})',
-                      flush=True)
-            return 0
+            _done_sha = _sha(done_path)
+            _board_audits(workdir, truthdir, root)
+            return _await_report(workdir, done_path, _done_sha, truthdir,
+                                 root, report_done, report_wait, poll)
         time.sleep(poll)
 
 
@@ -986,13 +1237,33 @@ def main(argv=None):
     b.add_argument('--poll', type=float, default=POLL_SEC)
 
     c = sub.add_parser('cheats', help='ways the run could pass without '
-                                      'earning it; ends at DONE')
+                                      'earning it; ends at the REPORT '
+                                      'marker, or at DONE with '
+                                      "--report-done ''")
     c.add_argument('--workdir', required=True)
     c.add_argument('--truthdir', help='the answer key, fingerprinted at arm '
                                       'time and re-checked (default: '
                                       'WORKDIR + "_truth")')
     c.add_argument('--done', help='path whose existence triggers the final '
                                   'audits (default: WORKDIR/DONE)')
+    c.add_argument('--report-done', default=None,
+                   help='path whose existence triggers the REPORT.md audit '
+                        '(default: WORKDIR/REPORT_DONE). DONE means the '
+                        'copper is frozen and is what the board audits wait '
+                        'for; REPORT.md is written after them, because it '
+                        'carries their verdicts. Pass an EMPTY string to '
+                        'exit at DONE, which is what this watcher did '
+                        'before #963. Not logs/<label>.done -- that is '
+                        "tee_cmd's per-command marker and a different "
+                        'family.')
+    c.add_argument('--report-wait', type=float, default=REPORT_WAIT_SEC,
+                   metavar='SECONDS',
+                   help='how long to wait for that marker before saying it '
+                        'was not audited and exiting 0 (default %(default)g, '
+                        'which is 1.4x the one measurement there is: run '
+                        "29's DONE -> REPORT.md gap was 63 minutes). 0 "
+                        'waits forever. It bounds a WAIT and changes only '
+                        'what is printed.')
     c.add_argument('--poll', type=float, default=POLL_SEC)
 
     a = p.parse_args(argv)
@@ -1011,7 +1282,10 @@ def main(argv=None):
     truth = a.truthdir or (a.workdir.rstrip('/\\') + '_truth')
     done = a.done or os.path.join(a.workdir, 'DONE')
     try:
-        return watch_cheats(a.workdir, truth, done, a.poll)
+        _rd = (os.path.join(a.workdir, 'REPORT_DONE')
+               if a.report_done is None else a.report_done)
+        return watch_cheats(a.workdir, truth, done, a.poll,
+                            report_done=_rd, report_wait=a.report_wait)
     except KeyboardInterrupt:
         return 0
 

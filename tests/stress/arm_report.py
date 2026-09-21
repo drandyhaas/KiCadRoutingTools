@@ -529,6 +529,28 @@ def main(argv=None):
                    'fence': fence_verdict, 'rows': all_rows}, fh, indent=1,
                   sort_keys=True, default=str)
     print(f'JSON   -> {jp}')
+    # THE SECOND MARKER (#963). `REPORT.md` is written after `DONE` -- it has
+    # to be, because it carries the fence and provenance verdicts DONE
+    # triggers -- which made it the one artifact `run_watch.py cheats` could
+    # not audit: that watcher returned 0 at DONE. It waits for this file now.
+    #
+    # WRITTEN BY BOTH PRODUCERS, because `<workdir>/REPORT.md` has two. Run
+    # 29's was a 686-line agent narrative, not this tool's recovery table (its
+    # sibling REPORT.json is absent there), so a marker written only here is a
+    # marker that is usually missing. The L5 close-out text tells the agent to
+    # write it too. Worth naming and not fixing here: this tool would
+    # overwrite such a narrative, `open(dest, 'w')` and all.
+    _marker = os.path.join(os.path.dirname(os.path.abspath(dest)),
+                           'REPORT_DONE')
+    try:
+        with open(_marker, 'w', encoding='utf-8') as fh:
+            fh.write(f'report written: {os.path.basename(dest)}\n')
+        print(f'MARKER -> {_marker}')
+    except OSError as exc:
+        # Never fatal: the report IS written, and a watcher that never sees
+        # the marker says so in one line and exits.
+        print(f'MARKER could not be written ({type(exc).__name__}) -- the '
+              f'cheat watcher will report REPORT.md as NOT audited')
     return 0
 
 

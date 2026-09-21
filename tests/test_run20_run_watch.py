@@ -338,7 +338,8 @@ def _declares(tool, flag):
 #: git flag -- so "which tool declares it" is the wrong question. They are
 #: listed by name so the exemption cannot silently grow.
 _TOOL_AGNOSTIC = {'--accept-residue', '--accept-unclosed',
-                  '--accept-congestion', '--allow-unplaced', '--allow-routed',
+                  '--accept-congestion', '--accept-unclassified',
+                  '--allow-unplaced', '--allow-routed',
                   '--force', '--no-verify', '--no-delegate'}
 _dead_entries = []
 for _lab, _flag, _why, _tools in RW.CHEAT_FLAGS:

@@ -236,6 +236,13 @@ def test_record_final_wants_the_lens_verdicts():
                     td, drc='VERDICT=FAIL:lens=drc;finding=short;evidence=x'))
         r = _cv(base + ['--stop-condition', '1'])
         assert r.returncode == 2 and 'lens FAILED' in r.stderr, r.stderr
+        # Stop condition 4 is "measured-unfixable", and since #963 the claim
+        # needs the measurement on the record. This test uses 4 as a
+        # FAIL-compatible TOKEN, so it supplies the decision and carries on.
+        assert _cv(['record', '--ledger', led, '--board', BOARD,
+                    '--kind', 'classification', '--shape', 'placement',
+                    '--lever', 'no lane exists at the escape faces']
+                   ).returncode == 0
         r = _cv(base + ['--stop-condition', '4'])
         assert r.returncode == 0, r.stderr
         assert json.loads(r.stdout).get('lenses')[1].startswith('VERDICT=FAIL')
@@ -275,7 +282,12 @@ def test_record_refuses_a_lens_verdict_its_own_score_contradicts():
         assert not os.path.exists(led), 'nothing may be written on refusal'
 
         # ...and the honest verdict IS accepted (stop condition 4: measured
-        # unfixable and said so).
+        # unfixable and said so) -- once the measurement is on the record,
+        # which since #963 is what 4 means.
+        assert _cv(['record', '--ledger', led, '--board', BOARD,
+                    '--kind', 'classification', '--shape', 'placement',
+                    '--lever', '32 nets need a lane no parameter creates']
+                   ).returncode == 0
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
                  '--kind', 'completion', '--stop-condition', '4',
                  '--score-file', run17]

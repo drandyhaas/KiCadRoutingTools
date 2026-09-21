@@ -382,6 +382,25 @@ FAIL_COMPATIBLE_STOPS = ('2', '4', 'STUCK', 'BUDGET')
 #: interpolates. FAIL_COMPATIBLE_STOPS is the subset legal beside a FAIL lens.
 STOP_TOKENS = ('1', '2', '3', '4', 'DONE-EXHAUSTED', 'STUCK', 'BUDGET')
 
+#: The three re-entry shapes, named once. The same three words loop_driver's L4
+#: demands, and `--shape` records which one a lap acted on. Spelled as a
+#: constant since #963 required one on a classification row: the refusal and
+#: the argparse choices must be the same list, or the message can name a word
+#: the parser refuses.
+SHAPES = ('parameter', 'placement', 'floorplan')
+
+#: The stop token that claims the board is MEASURED-UNFIXABLE rather than
+#: merely not finished -- convergence.md §3's fourth condition. Run 29 recorded
+#: exactly this, falsely, about an impedance clause whose own log's next two
+#: lines read `SE fallback: 2/2 member net(s) routed`, with no classification
+#: row anywhere in its ledger.
+#:
+#: `STUCK` is deliberately NOT here, and the distinction is the point: STUCK is
+#: `verdict`'s own name for "neither half improved in its last N laps", which
+#: is §3's THIRD condition, a plateau. A plateau is a statement about a search;
+#: "unfixable" is a statement about a board.
+UNFIXABLE_STOPS = ('4',)
+
 #: MSYS2's argv-rewrite signature. Git Bash rewrites any argument starting with
 #: `/` into a Windows path unless MSYS2_ARG_CONV_EXCL is set, and EVERY KiCad
 #: net name is `/`-prefixed -- so `/D_P` reaches the tool as
@@ -462,6 +481,60 @@ def score_component(score, key):
     return None
 
 
+#: The answers `score_board_binding` can give, in the order a reader meets
+#: them: the payload grades this board, it grades another one, it names no
+#: board at all, or the question could not be answered here.
+SCORE_BINDINGS = ('this', 'other', 'unbound', 'unknown')
+
+
+def score_board_binding(board, payload, board_sha=None):
+    """(binding, payload_sha) -- does this score payload grade THIS board?
+
+    ONE implementation of a question FIVE sites used to answer separately, and
+    they answered it at different STRENGTHS: `record` warned, L3 and L5
+    refused at exit 4, and the close-out compare refused about a different
+    document. #963's contributor measured that asymmetry from the outside -- a
+    stale score `record` accepted with `accepted: true` was refused by the very
+    next stage -- and named it "different enforcement strengths". The strengths
+    are a policy each caller may legitimately choose; the PREDICATE is not, and
+    it is the predicate that had drifted into five copies.
+
+    FOUR-VALUED RATHER THAN A BOOL, because `unbound` is a different operator
+    action from `other`: a payload with no `board_sha` at all is a pre-B4
+    board_score or a hand-built JSON, and `record` discloses that in its own
+    sentence. Collapsing it into False deletes that disclosure silently, which
+    is why `_grades_another_board` below is a WRAPPER and not the interface.
+
+    WHAT THIS DOES NOT COVER, said here rather than implied: it is the only
+    implementation in `converge.py` and `loop_driver.py`, and those are the two
+    files `tests/test_963_one_binding_predicate.py` scans. There is a sibling
+    of the same shape in `py_tools/render_placement.py` (~:570, ~:641-651),
+    hand-rolled on `hashlib` and degrading the same way, which #963 does not
+    touch and no gate here can see.
+
+    `unknown` is "I could not tell" -- no board, unreadable, board_store
+    unimportable -- and it must NEVER read as a mismatch. A check that switched
+    itself ON because it could not answer would be the same class of mistake it
+    exists to catch.
+
+    `board_sha` lets a caller that has ALREADY hashed the board hand the digest
+    in (`cmd_record` has it from `store.put`), so the board is not read twice
+    for one answer.
+    """
+    psha = payload.get('board_sha') if isinstance(payload, dict) else None
+    if not psha:
+        return ('unbound', None)
+    if board_sha:
+        return ('this' if board_sha == psha else 'other', psha)
+    if not board or not os.path.isfile(board):
+        return ('unknown', psha)
+    try:
+        from board_store import sha256_file
+        return ('this' if sha256_file(board) == psha else 'other', psha)
+    except Exception:                                           # noqa: BLE001
+        return ('unknown', psha)
+
+
 def _grades_another_board(board, score):
     """Does this score payload demonstrably grade a DIFFERENT board?
 
@@ -471,15 +544,12 @@ def _grades_another_board(board, score):
     candidate (record already WARNS about that), and a check that compared a
     verdict about board A against board B's numbers would be the same class of
     mistake it exists to catch.
+
+    Kept as a one-line wrapper over `score_board_binding` rather than deleted
+    because the bool is the shape its one caller wants -- the lens-vs-score
+    skip in `cmd_record`, which needs "is this foreign" and nothing finer.
     """
-    psha = (score or {}).get('board_sha') if isinstance(score, dict) else None
-    if not psha or not board or not os.path.isfile(board):
-        return False
-    try:
-        from board_store import sha256_file
-        return sha256_file(board) != psha
-    except Exception:                                           # noqa: BLE001
-        return False
+    return score_board_binding(board, score)[0] == 'other'
 
 
 def read_lens_file(path):
@@ -1035,6 +1105,77 @@ def cmd_record(a):
               f"is just a lower --flat with extra steps. Nothing was written.",
               file=sys.stderr)
         return 2
+    # A DECLARATION IS A CLAIM ABOUT --board, SO IT IS REFUSED, NOT WARNED
+    # (#963). An ordinary row keeps the warning below and must: a baseline row
+    # legitimately attaches a parent score to a rejected candidate, which is
+    # what tests/test_converge.py::test_record_warns_on_unbound_or_mismatched_
+    # score pins. A declaration has no such case -- its whole content is "this
+    # board's half has nothing left", so numbers taken on a different board are
+    # not weak evidence for it, they are evidence about something else.
+    # Checked HERE, before `store.put`, so the message can honestly say nothing
+    # was written; the shared predicate hashes the board itself, which costs
+    # one extra read on the rare `--exhausted` + `--score` path.
+    if a.exhausted and isinstance(_score_doc, dict):
+        _eb, _eps = score_board_binding(a.board, _score_doc)
+        if _eb == 'other':
+            print(f"record: --exhausted {a.exhausted} was given a score that "
+                  f"grades a DIFFERENT board (score board_sha "
+                  f"{str(_eps)[:12]}... is not --board "
+                  f"{os.path.abspath(a.board)}).\n\nA declaration is a claim "
+                  f"about the board it names, and it outlives the run: run 29 "
+                  f"declared placement exhausted against a board that existed "
+                  f"for eight minutes, and the claim survived three close-out "
+                  f"calls. Score the board you are declaring about, or drop "
+                  f"the score -- an unscored declaration is still a "
+                  f"declaration. Nothing was written.", file=sys.stderr)
+            return 2
+    # A CLASSIFICATION WITH NO SHAPE IS A DECISION THAT RECORDED NO DECISION
+    # (#963). `--shape` defaults to None and nothing required it, so the one
+    # row the retry gate reads could be written by a command that names
+    # nothing -- which would make that gate a formality one flagless call
+    # clears. The three words are not interchangeable and the cost of guessing
+    # is asymmetric: a wrong `parameter` spends iterations on a board no
+    # parameter can fix, a wrong `placement` throws away a routed board.
+    if a.kind == 'classification' and not a.shape:
+        print(f"record: --kind classification needs --shape "
+              f"{' | '.join(SHAPES)}. The shape IS the decision -- it is what "
+              f"the next re-entry changes, and a classification row that "
+              f"names none records that a decision was made without recording "
+              f"which. Nothing was written.", file=sys.stderr)
+        return 2
+    # ...AND THE MEASUREMENT THAT NAMED IT. `--shape` alone left the row
+    # writable by a command that records no evidence: a verifier measured run
+    # 29's exact false close-out ACCEPTED after one lever-less `record --kind
+    # classification --shape parameter`, which made the gate a formality
+    # rather than a demand for a decision. Same `.strip()` test, and the same
+    # reason, as `--exhausted-reason` thirty lines above: an unreasoned
+    # declaration is just a lower --flat with extra steps.
+    # ...AND IT MAY NOT JUST SAY THE SHAPE BACK. `--shape parameter --lever
+    # parameter` cleared every gate in this item, which is `--lever ""` with a
+    # word typed in it. This catches THAT SPELLING ONLY and nothing cleverer:
+    # no gate reads a sentence and knows whether a measurement is behind it,
+    # and a length or word-count rule would refuse an honest short lever while
+    # still passing `--lever "congestion"`. The limit is disclosed rather than
+    # papered over -- see #963's sub-issue A.
+    if (a.kind == 'classification'
+            and (a.lever or '').strip().strip('.:;,-').lower() in SHAPES):
+        print(f"record: --lever {a.lever!r} only names the shape again. The "
+              f"lever is the MEASUREMENT that made `{a.shape}` the answer -- "
+              f"the congestion read, the escape-face census, the DRC cluster "
+              f"-- so that the next reader can check the decision instead of "
+              f"taking it. Nothing was written.", file=sys.stderr)
+        return 2
+    if a.kind == 'classification' and not (a.lever or '').strip():
+        print("record: --kind classification needs --lever \"<the shape, and "
+              "the measurement that names it>\". The row's job is to say WHY "
+              "the next re-entry changes what it changes; a shape with no "
+              "measurement behind it is the default answer of a classifier "
+              "that could not see congestion. The three shapes cost very "
+              "different things to get wrong -- a mistaken `parameter` "
+              "spends iterations on a board no parameter can fix, a mistaken "
+              "`placement` throws away a routed board. Nothing was written.",
+              file=sys.stderr)
+        return 2
     if a.final and not a.stop_condition:
         print("record: --final requires --stop-condition (which of the run's "
               "stop conditions ended it). Nothing was written.",
@@ -1063,6 +1204,57 @@ def cmd_record(a):
               "written.", file=sys.stderr)
         return 2
     _stop_reason = (a.stop_reason or '').strip() or _stop_reason
+    # A "MEASURED-UNFIXABLE" CLAIM NEEDS THE MEASUREMENT ON THE RECORD (#963).
+    # Run 29 closed with stop condition 4 on an impedance clause whose own log
+    # said, two lines later, `SE fallback: 2/2 member net(s) routed`. Its
+    # ledger held no classification row at all -- L3 and L4 were never invoked
+    # across 439 commands -- so the claim rested on 57 inline routing calls
+    # nothing had classified. An outside verifier refuted it an hour later and
+    # the re-route took BLOCKING 2 -> 0.
+    #
+    # BOUND TO THE ROW THAT MAKES THE CLAIM, not to the stage that prints it:
+    # run 29's close-out was written without L5's advice carrying at all, so a
+    # gate in the driver would have been another thing to walk past.
+    if a.final and _stop_token in UNFIXABLE_STOPS:
+        _prior = Ledger(a.ledger).entries() if os.path.isfile(a.ledger) else []
+        _cls = _classification_state(_prior)
+        # EITHER HALF, unlike the retry gate. "This board cannot be fixed" is a
+        # claim about the whole board, so a placement lap after the decision
+        # makes it as stale as a routing lap does -- `classification(shape=
+        # placement)` followed by six placement laps used to reach this claim
+        # untouched. The RETRY gate counts routing only, and for the opposite
+        # reason: there, a placement lap is the decision being acted on.
+        _since = None if _cls is None else sum(_cls['laps_since'].values())
+        _rej = _classification_rejected(_prior)
+        if _cls is None or _since:
+            _what = ((f'{_rej} classification row(s) were recorded and '
+                      f'every one was --rejected, so none of them is a '
+                      f'decision this close-out can rest on'
+                      if _rej else 'no classification row was ever '
+                                   'recorded')
+                     if _cls is None else
+                     f'{_since} lap(s) were recorded after the last '
+                     f'classification (iteration {_cls["iteration"]}, shape '
+                     f'{_cls["shape"]}): '
+                     f'{_cls["laps_since"]["placement"]} placement, '
+                     f'{_cls["laps_since"]["routing"]} routing')
+            print(f"record: --stop-condition {_stop_token} says the board is "
+                  f"MEASURED-UNFIXABLE, and in this ledger {_what}.\n\n"
+                  f"That is convergence.md's strongest claim and the one run "
+                  f"29 recorded falsely: an impedance clause declared "
+                  f"geometrically unsatisfiable on a log whose next two lines "
+                  f"read `SE fallback: 2/2 member net(s) routed`, over 57 "
+                  f"routing calls nothing had classified. Write the decision "
+                  f"the claim rests on, then record the close-out:\n\n"
+                  f"  python3 -X utf8 py_placer/converge.py record --ledger "
+                  f"{a.ledger} \\\n"
+                  f"      --board {a.board} --kind classification "
+                  f"--shape <{'|'.join(SHAPES)}> \\\n"
+                  f"      --lever \"<the measurement that names the shape>\"\n\n"
+                  f"A plateau is a different claim and needs none of this: "
+                  f"--stop-condition 3, or the STUCK the verdict prints. "
+                  f"Nothing was written.", file=sys.stderr)
+            return 2
     # #901: these two are about --final, NOT about which half it closes.
     # They sat inside the `kind == 'completion'` gate below, so
     # `--kind systemic --final --stop-condition DONE-EXHAUSTED --lens
@@ -1180,16 +1372,21 @@ def cmd_record(a):
     # different board than the one being recorded. A warning rather than a
     # refusal: baseline rows legitimately attach a parent score to a
     # rejected candidate -- but never silently.
+    _binding, _payload_sha = 'unbound', None
     if a.score:
-        try:
-            _payload_sha = json.loads(a.score).get('board_sha')
-        except Exception:
-            _payload_sha = None
-        if _payload_sha is None:
+        # Through the SHARED predicate, and with the digest `store.put` just
+        # computed handed in: this used to re-parse `a.score` behind a bare
+        # `except Exception` even though `_score_doc` was already parsed and
+        # validated above, so the mismatch was judged on a second, weaker read
+        # of the same string. Passing `board_sha=sha` also spares the board a
+        # second hash -- `store.put` computed exactly this digest one line up.
+        _binding, _payload_sha = score_board_binding(a.board, _score_doc,
+                                                     board_sha=sha)
+        if _binding == 'unbound':
             print("record WARNING: score payload carries no board_sha "
                   "(pre-B4 board_score, or hand-built JSON) -- the ledger "
                   "cannot verify it grades THIS board.", file=sys.stderr)
-        elif _payload_sha != sha:
+        elif _binding == 'other':
             print(f"record WARNING: score payload grades a DIFFERENT board "
                   f"(payload board_sha {_payload_sha[:12]}... != recorded "
                   f"board {sha[:12]}...). Run-3 shipped three stale-payload "
@@ -1390,6 +1587,20 @@ def cmd_record(a):
     if a.exhausted:
         entry['exhausted'] = {'half': a.exhausted,
                               'reason': a.exhausted_reason.strip()}
+    if _binding in ('other', 'unbound') and isinstance(_score_doc, dict):
+        # THE WARNING, ON THE ROW (#963). It has always gone to stderr and
+        # vanished, while the row kept a score `_score_key` will happily rank
+        # -- so no later reader could tell a warned row from a clean one, which
+        # is the contributor's "stale scores may be stored only as explicitly
+        # labelled attachments". NOTHING READS THIS YET, deliberately: making
+        # `_score_key` or `_half_state` skip such a row would move plateau
+        # windows on every historical ledger, which is a large behaviour change
+        # to hide inside a "just record it" line.
+        # No `board_sha` key here: it would be `result_sha` on this same row,
+        # byte for byte, and two numbers for one fact is the defect
+        # `_declaration`'s docstring refuses a field for.
+        entry['score_stale'] = {'binding': _binding,
+                                'payload_sha': _payload_sha}
     if a.accept_incommensurable:
         # The disposition belongs in the row, not only in the console the
         # refusal was cleared from. Same shape as --exhausted: what is recorded
@@ -1508,7 +1719,13 @@ def _is_lap(row, half):
     A row with no `kind` is in neither half. (Ledger.counts defaults a missing
     kind to `completion`; this does not, and that predates this function.)
     """
-    if _HALF.get(row.get('kind')) != half:
+    # `str(...)`, and a dict check, because this reads ROWS FROM A FILE. A
+    # hand-built or truncated ledger carrying `"kind": []` raised
+    # `TypeError: unhashable type` out of whichever stage was walking it --
+    # a reader crashing on a bad row rather than reading it as "not this half".
+    if not isinstance(row, dict):
+        return False
+    if _HALF.get(str(row.get('kind') or '')) != half:
         return False
     if row.get('final'):
         return False
@@ -1558,19 +1775,34 @@ def _score_key(score):
 
 
 def _declaration(rows, half):
-    """(reason, live) for the last `--exhausted <half>` row, else None.
+    """(reason, live, board_sha) for the last `--exhausted <half>` row, else None.
 
     `live` is False when a lap of that half was recorded AFTER the declaration:
     the half went back to work, so the claim "there is nothing further" is
     stale. Superseding it needs no flag and no deletion -- running the half
     again is the retraction.
+
+    `board_sha` is the declaration row's OWN `result_sha` -- the board the claim
+    was made about (#963). It is not a new field and deliberately not one:
+    `cmd_record` already writes `result_sha` on every row from
+    `store.put(a.board)`, `--board` is required, and `BoardStore.put` COPIES the
+    file, so the binding is on disk on every ledger ever written -- including
+    run 29's row 29, whose board `frozen.kicad_pcb` was overwritten three
+    minutes later. A second key for one fact would be absent on every historical row,
+    would need this same fallback anyway, and both paths would then live
+    forever; two numbers for one fact is #941's defect in miniature.
+
+    The sha is captured on the row that RE-ARMS the walk, not on an earlier
+    declaration's: a self-declaring row restarts `found`, and the claim being
+    judged is the last one made.
     """
-    found, live = None, False
+    found, live, sha = None, False, None
     for r in rows:
         dec = r.get('exhausted')
         if isinstance(dec, dict) and dec.get('half') == half:
             found, live = (str(dec.get('reason') or '').strip()
                            or 'no reason recorded'), True
+            sha = r.get('result_sha')
         elif found is not None and _is_lap(r, half):
             # _is_lap, not a bare _HALF match, and this is the sharper half of
             # the fix: "the half went back to work" must mean a LAP was run.
@@ -1578,7 +1810,70 @@ def _declaration(rows, half):
             # `kind completion` and neither turns the loop, so either one
             # silently retracted a declaration a person had written down.
             live = False
-    return None if found is None else (found, live)
+    return None if found is None else (found, live, sha)
+
+
+def _classification_rejected(rows):
+    """How many `kind: classification` rows were recorded `--rejected`.
+
+    `_classification_state` counts ACCEPTED rows only, and rightly -- a
+    discarded decision is not one the next lap can act on. But the refusal
+    it feeds then said "no classification row was ever recorded" to a
+    ledger holding three of them, which is a false sentence about the
+    reader's own file and the fastest way to lose their trust in the gate.
+    Published beside it so the text can say which of the two it is.
+    """
+    return sum(1 for r in rows
+               if isinstance(r, dict)
+               and (r.get('kind') or '') == 'classification'
+               and not r.get('accepted'))
+
+
+def _classification_state(rows):
+    """The last L3 DECISION on the record, and what has happened since (#963).
+
+    `None` when the ledger holds no `kind: classification` row AT ALL, which is
+    not the same as "no laps since one" and is the difference that decides
+    whether this catches anything. Run 29 recorded ZERO classification rows
+    across 439 commands while L5 printed the `--stage L3` command three times,
+    so a predicate phrased only as "laps since the last classification" is
+    vacuously satisfied on exactly the run it was written for. A caller must
+    handle `None` explicitly; `verdict` publishes each half's total `laps`
+    beside this, which is the count that applies then.
+
+    `laps_since` is published for BOTH halves, and only ROUTING is gated on --
+    see the refusal in loop_driver's L5. A placement lap recorded after
+    `shape=placement` is the classification being ACTED ON, not invalidated:
+    gating on it would refuse the loop for doing what the decision said. That
+    sentence is the whole reason both numbers are here rather than one, and
+    deleting it is how the next reader adds the wrong conjunct.
+
+    Counted with `_is_lap`, so a `--final` row, a declaration, a freeze and a
+    `systemic` or `classification` row are none of them laps -- one predicate,
+    the same one `_declaration` and `_half_state` use.
+    """
+    found, idx = None, -1
+    for i, r in enumerate(rows):
+        # A LEDGER LINE NEED NOT BE AN OBJECT. `_is_lap` was hardened for
+        # exactly this and is unreachable from here: the walk below runs
+        # first, so a bare string or list on any line tracebacked out of
+        # `record --final --stop-condition 4` before the laps were counted.
+        if not isinstance(r, dict):
+            continue
+        # ACCEPTED ONLY. `--rejected` on a classification says the decision
+        # was thrown away, and a discarded decision is not one the next lap
+        # can act on -- it satisfied the gate before this line existed.
+        if (r.get('kind') or '') == 'classification' and r.get('accepted'):
+            found, idx = r, i
+    if found is None:
+        return None
+    after = rows[idx + 1:]
+    return {'iteration': found.get('iteration'),
+            'shape': found.get('shape'),
+            'result_sha': found.get('result_sha'),
+            'lever': found.get('lever'),
+            'laps_since': {h: sum(1 for r in after if _is_lap(r, h))
+                           for h in ('placement', 'routing')}}
 
 
 def placement_terms(score):
@@ -1655,12 +1950,31 @@ def parent_score(rows, row):
     return hits[0].get('score')
 
 
-def _half_state(rows, half, flat):
+def _half_state(rows, half, flat, board_sha=None):
     """Can this half still improve? -- with the evidence it was decided from.
 
     Returns a dict: flat, laps, accepted, rejected, why, and (when they apply)
-    declared / declared_superseded / incommensurable / compared. `why` is one of
+    declared / declared_board / declared_stale_board / declared_superseded /
+    incommensurable / compared. `why` is one of
     declared-exhausted, too-few-laps, no-comparison, plateau, improving.
+
+    `board_sha` is the board being JUDGED, and it is keyword-with-a-default
+    because this function is called positionally at some thirty-five sites
+    across the test suite. It only ever adds `declared_stale_board`: `flat` and
+    `why` do not change, on purpose (#963). "Any digest change invalidates a
+    declaration" sounds safe and is inert-making -- every accepted lap of
+    EITHER half writes a new sha, so a placement exhaustion would die on the
+    next routing lap although routing copper says nothing about placement's
+    remaining levers; and the L2 freeze row changes the sha BY CONSTRUCTION
+    while `test_904_not_a_lap` pins that a freeze must not retract. A sha
+    cannot tell "rewrote the file, same poses" from "replaced the placement".
+    So this REPORTS, and nothing gates on it. A first cut refused the ship
+    behind a stale declaration, and a verifier measured that refusal firing on
+    the chain's own prescribed ordering -- including the L2 freeze, which
+    changes the sha by construction and which `test_904_not_a_lap` pins as
+    non-retracting. What refuses is `record --exhausted` given a score that
+    grades another board, and a later lap of the half, which retracts with no
+    flag at all.
 
     THE COUNTER COUNTS REJECTED LAPS TOO, and that is the fix for a gate that
     could not be satisfied. It used to count accepted rows only, while L5's own
@@ -1706,6 +2020,21 @@ def _half_state(rows, half, flat):
            'flat': False, 'why': 'too-few-laps'}
     if dec and dec[1]:
         out.update(flat=True, why='declared-exhausted', declared=dec[0])
+        # LAP SUPERSESSION FIRST, ALWAYS -- and it already has, because this
+        # branch is the live one. The ledger test is total and always
+        # answerable; the board test depends on a sha the caller may not have
+        # supplied, so reporting both about one declaration would be two
+        # findings for one fact.
+        if dec[2]:
+            out['declared_board'] = dec[2]
+            if board_sha and board_sha != dec[2]:
+                out['declared_stale_board'] = dec[2]
+        else:
+            # A hand-built or pre-#963 row can carry no `result_sha`. FAILING
+            # OPEN is right -- nothing can be judged -- but failing open in
+            # silence is not, because a reader sees the same absent key as a
+            # declaration that matched.
+            out['declared_board_unknown'] = True
         return out
     if dec and not dec[1]:
         out['declared_superseded'] = dec[0]
@@ -1982,7 +2311,42 @@ def cmd_verdict(a):
                    'not zero. Re-score, then ask for a verdict.')
         return _no_score(why)
     blocking = key[0]
-    st = {h: _half_state(rows, h, a.flat) for h in ('placement', 'routing')}
+    # THE BOARD BEING CLOSED, for the exhaustion binding (#963). The score's
+    # own `board_sha` is primary -- board_score writes it, and L5 has already
+    # proven it equals `--board` before it shells out to here, so reading it
+    # costs nothing. `--board` is the second channel, for a pre-B4 or
+    # hand-built score that carries no sha. Absent on BOTH is unanswerable and
+    # invalidates nothing: every hand-built score in tests/test_converge.py
+    # lacks the key, and a question that cannot be answered must not decide.
+    board_sha = score.get('board_sha') if isinstance(score, dict) else None
+    board_sha_source = 'score' if board_sha else None
+    if getattr(a, 'board', None):
+        _bind, _psha = score_board_binding(
+            a.board, score if isinstance(score, dict) else None)
+        if _bind == 'other':
+            print(f"verdict: --board and --score disagree about which board "
+                  f"is being judged (score board_sha {str(_psha)[:12]}... is "
+                  f"not {os.path.abspath(a.board)}). A stop verdict read off "
+                  f"one board's ledger and another board's numbers is the "
+                  f"defect this binding exists to catch. Re-score the board "
+                  f"you are closing out. Nothing was judged.", file=sys.stderr)
+            return 2
+        if not board_sha:
+            try:
+                from board_store import sha256_file
+                board_sha, board_sha_source = sha256_file(a.board), '--board'
+            except Exception as exc:                        # noqa: BLE001
+                # NEVER SILENT. `--board` pointing at a directory or a path
+                # that is not there used to leave `board_sha_source: null` and
+                # say nothing, so a caller who passed the flag precisely to get
+                # the binding checked was told nothing had been checked only by
+                # reading a null they had no reason to look at.
+                print(f"verdict NOTE: --board {os.path.abspath(a.board)} "
+                      f"could not be hashed ({type(exc).__name__}), so the "
+                      f"exhaustion binding was NOT checked from it. The score "
+                      f"carries no board_sha either.", file=sys.stderr)
+    st = {h: _half_state(rows, h, a.flat, board_sha=board_sha)
+          for h in ('placement', 'routing')}
     flat_p, flat_r = st['placement']['flat'], st['routing']['flat']
     laps_p, laps_r = st['placement']['laps'], st['routing']['laps']
     why_p, why_r = st['placement']['why'], st['routing']['why']
@@ -1993,6 +2357,17 @@ def cmd_verdict(a):
            'quality': score.get('quality'),
            'ungraded': sorted(score.get('ungraded') or []),
            'unknown': sorted(score.get('unknown') or []),
+           # The last L3 decision on the record, published on EVERY verdict
+           # rather than only on the branch that reads it -- the posture the
+           # incommensurable block already takes. `null` means no
+           # classification row exists at all, which is run 29's case and the
+           # one a reader most needs told.
+           'classification': _classification_state(rows),
+           # WHICH INPUT the board binding came from, published beside it: an
+           # aggregate verdict cannot say which of its inputs moved (#694), and
+           # `null` here is the honest answer for a score with no board_sha and
+           # no --board -- not a passing one.
+           'board_sha': board_sha, 'board_sha_source': board_sha_source,
            # `accepted_laps` is kept and still means accepted laps only; `laps`
            # is what the plateau test counts, and it counts REJECTED laps too
            # -- see _half_state. They differ, so both are published rather than
@@ -2108,6 +2483,42 @@ def cmd_verdict(a):
             f'is legitimate; calling the board finished is not. Itemise every '
             f'remaining blocker with the measurement that proves it.'))
         code = STUCK
+
+    # A DECLARATION MADE ABOUT ANOTHER BOARD, named on every verdict (#963).
+    # Run 29 declared placement exhausted against a board that existed for
+    # eight minutes -- `os-promote-placed` created it at 12:51:40,
+    # `ol-exh-place` declared against it at 12:56:04, and
+    # `ov-restore-frozen` overwrote `frozen.kicad_pcb` at 12:59:45, three
+    # minutes and 41 seconds after the row was written -- and it outlived its
+    # board and survived three L5 calls, because nothing here read the sha the
+    # row had carried all along. This REPORTS, and nothing gates on it:
+    # `test_963_exhaustion_binding::test_the_ship_is_not_gated_on_the_board_
+    # having_moved` pins that, because a first cut did gate and refused the
+    # chain's own prescribed ordering.
+    for h in ('placement', 'routing'):
+        if st[h].get('declared_board_unknown'):
+            # A READER for the key, without which it was one write site and
+            # nothing else: a hand-built or pre-#963 declaration carries no
+            # `result_sha`, so "no stale-board finding" there means "nobody
+            # could look", which is not the same as "it matched".
+            doc['reason'] += (
+                f' The live {h} exhaustion carries NO board of its own '
+                f'(a row written before the binding existed, or by hand), so '
+                f'whether it still applies to this board could not be checked.')
+        _sb = st[h].get('declared_stale_board')
+        if _sb:
+            doc['reason'] += (
+                f' DECLARED ABOUT ANOTHER BOARD: the live {h} exhaustion was '
+                f'recorded against board {str(_sb)[:12]}..., and the board '
+                f'being judged is {str(board_sha)[:12]}... (from '
+                f'{board_sha_source}). EXPECTED after any accepted lap -- '
+                f'every lap of either half writes a new sha, and a routing '
+                f'lap says nothing about placement levers -- so this is not '
+                f'a finding against the run. What it says is that the claim '
+                f'has not been re-checked against the board in hand. '
+                f'Recover the one it was made about and see what changed:'
+                f' converge.py step-back --ledger <this ledger> --to {_sb} '
+                f'--out wk/declared.kicad_pcb')
 
     # LOUD, on every verdict, never only on the one it happened to change.
     # A plateau or an improvement read off two totals that graded different
@@ -2364,7 +2775,7 @@ def build_parser():
                         'keeps the MEASUREMENT can tell a later reader what '
                         'the lap was for; a ledger that keeps a paragraph '
                         'about it cannot.')
-    r.add_argument('--shape', choices=('parameter', 'placement', 'floorplan'),
+    r.add_argument('--shape', choices=SHAPES,
                    default=None,
                    help='the re-entry shape this lap acted on (the same word '
                         'L4 demands). Stored as entry["shape"].')
@@ -2479,6 +2890,13 @@ def build_parser():
     v.add_argument('--ledger', required=True)
     v.add_argument('--score', required=True,
                    help="the current board's score JSON (board_score --json)")
+    v.add_argument('--board',
+                   help='the board being closed out. Optional: the score '
+                        "already carries board_sha and that is read first. "
+                        'Pass it when the score is pre-B4 or hand-built, so an '
+                        'exhaustion declared about a board that no longer '
+                        'exists can still be named. Given BOTH and they '
+                        'disagree, nothing is judged (exit 2).')
     v.add_argument('--budget', type=int, default=100,
                    help='ledger entries this run may write (default 100, the '
                         'figure convergence.md already states)')

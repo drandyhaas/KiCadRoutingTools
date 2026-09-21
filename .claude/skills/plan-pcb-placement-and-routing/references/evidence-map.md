@@ -56,10 +56,15 @@ The `JSON_SUMMARY` goes to **stdout only**; `tee` is what makes it citable.
 
 ---
 
-## C. `render_placement.py ... --json --ignore-nets <same set as B> -o wk/view/`
+## C. `render_placement.py ... --json-out wk/view.json --ignore-nets <same set as B> -o wk/view/`
 
 Always pass `-o`. Without it the tool writes `<board>_placement.png` **next to
 the board**.
+
+`--json-out`, not a bare `--json`: the keys below are a document to read back,
+and a document is a file. This section is a KEY TABLE, so it does **not** ask
+for `--quiet` — the tables elsewhere that ask you to LOOK first do, because
+that is where reading the keys before the picture costs something.
 
 **Pass the same `--ignore-nets` you gave `place_optimize`, or the re-measurement
 below compares two different net sets and always "fails".** B's numbers exclude

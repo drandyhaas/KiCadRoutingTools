@@ -976,7 +976,8 @@ yourself** (#892). The engine legalises; it does not decide:
 2. write the arrangement as `place_pose.py` verbs (poses, rotations, locks);
 3. `place_pose.py` applies it and grades it — exit 4 names what got worse and
    the nearest legal pose, so a refusal tells you where to aim next;
-4. `render_placement.py --review-sheet --json-out ...` and LOOK at it;
+4. `render_placement.py --review-sheet --json-out ... --quiet` and LOOK at it
+   (`--quiet` is what keeps the read blind: the keys go to the file);
 5. adjust with more `place_pose.py` calls;
 6. `place_seed --repair` / the quench only as the final polish.
 
