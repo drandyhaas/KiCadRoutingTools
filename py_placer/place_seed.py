@@ -29,6 +29,19 @@ author can settle. Measured, run 27: a fixed USB socket declared
 `along_edge: center` within 0.6 mm sits 1.75 mm off centre, and every one of
 ten seeds failed on it, so nothing the seeder did could ever be ranked.
 
+Exit 5 (#959): the PLAN is refused before anything is written --
+`floorplan.plan_check` found an ERROR no arrangement can satisfy and the
+seeder has no per-member answer for (`floorplan.PLAN_SEED_REFUSES`: a zone
+smaller than its members' summed area, a part longer than its edge, a board
+too small by area, a real reference used as a glob). Fix the zone plan; the
+board is untouched. `JSON_SUMMARY.refused` is `plan_check` and the findings
+ride with it. Every other plan finding is PRINTED (`PLAN [...]`) and the seed
+proceeds: a zone a keep-out or a stranger's exclusive zone swallows is seeded
+so the seeder can name the member it could not seat and why (#701, #797), and
+a FILE-locked member already outside its zone keeps the pinned-part contract
+above. `--repair` / `--reseat` REPORT everything and proceed, since a repair
+works from a placement rather than a plan.
+
 Every JSON_SUMMARY also carries `connector_requirements` (#974): which declared
 edge-connector requirements were graded and on what basis, which were not
 measured, and the connector errors on each side of the pinned split. It
@@ -61,6 +74,12 @@ import argparse
 import json
 import os
 import sys
+
+#: #959 (#998): the zone plan is refused before anything is written -- a
+#: plan no arrangement can satisfy. Distinct from 3 (the BOARD cannot be
+#: seeded) and 4 (a seed WAS written and its grade failed): a caller acting
+#: on 3 stops, on 4 inspects the board, and on 5 fixes the plan.
+PLAN_REFUSED_EXIT = 5
 
 
 def _split_pinned(graded, output_file, intent):
@@ -457,6 +476,35 @@ Examples:
               f"{st.vias} via(s); seeding moves footprints and would strand "
               f"every track. Seed the unrouted board.", file=sys.stderr)
         return UNPLACED_EXIT
+    # #959 (#998): the plan, checked against itself and the board BEFORE the
+    # first write. Run 29 found its zone plan's errors at lap 5 because the
+    # only check ran after the seed had been written.
+    try:
+        _plan_found, _plan_meas = floorplan.plan_check(
+            intent, pcb, args.input_file, group_sources=sources or (),
+            clearance=args.clearance,
+            board_edge_clearance=args.board_edge_clearance)
+    except floorplan.UntrustworthyOutline:
+        _plan_found, _plan_meas = [], {}
+    # Only the findings the seeder has no per-member answer for refuse
+    # here (`PLAN_SEED_REFUSES` says which and why); the rest are printed.
+    _plan_err = [v for v in _plan_found if v.severity == floorplan.ERROR
+                 and v.rule in floorplan.PLAN_SEED_REFUSES]
+    for _v in _plan_found:
+        print(f"  PLAN [{'ERROR' if _v.severity == floorplan.ERROR else 'warn'}]"
+              f" {_v.rule}: {_v.message}")
+    if _plan_err and not (args.repair or args.reseat is not None):
+        print(f"place_seed: the zone plan is refused before anything is "
+              f"written -- {len(_plan_err)} finding(s) no arrangement can "
+              f"satisfy. Fix the plan and re-run; "
+              f"`check_floorplan.py {args.input_file} --intent {args.intent} "
+              f"--plan-only` checks it without seeding.", file=sys.stderr)
+        print("JSON_SUMMARY: " + json.dumps({
+            'refused': 'plan_check', 'exit_code': PLAN_REFUSED_EXIT,
+            'output': None, 'written': False,
+            'plan_findings': [_v.to_dict() for _v in _plan_found],
+            'plan_measured': _plan_meas}, sort_keys=True, default=str))
+        return PLAN_REFUSED_EXIT
     if args.repair or args.reseat is not None:
         import math as _math
         import tempfile

@@ -775,12 +775,38 @@ order:
    decided, and the seed only fills it — and P1 ranks SEVERAL seeds from it
    with `compare_seeds.py` (next) rather than taking the first.
 
+   **Check the plan before the first seed** (#959): `check_floorplan.py
+   BOARD --intent PLAN --plan-only` needs no placed board. It prints the
+   plan's own findings with the rule roster: ERRORs where no arrangement
+   can satisfy the plan (members that cannot fit their zone within the
+   overlap budget the plan DECLARES, a part longer than its edge, an
+   exclusive zone a member cannot avoid, a real reference used as a glob
+   that lands a part in two disjoint zones), and WARNs for the same quantities with a
+   margin. P1 refuses every ERROR. `place_seed` refuses only the area,
+   edge and glob ones, at exit 5 with nothing written; for the rest it seeds
+   and names the member it could not seat. P1 also counts every footprint
+   BLOCK, pad-less logos included. Lock a pad-less block in the board, or
+   name it under `refs` in the plan's `dispositions` with a reason; one that
+   sits in a zoned block must be locked, or taken out of that block's
+   `refs` if it draws no courtyard. A rule the plan leaves dark, where the
+   board says it applies, is armed or answered under `rules` there. A plan
+   that drops or contradicts a design-brief clause is refused by clause id,
+   and `--waive brief-clause:<id>:<why>` answers it. A `mechanical.json`
+   beside the board is read: each of its refs that carries pads must be
+   locked at its recorded pose, unless its value lost a contradiction; a
+   pad-less one is refused only if it has drifted from that pose; and a
+   contradiction between two recorded channels is answered under
+   `contradictions`. Every refusal names its measured values and the key
+   that answers it. Answer with a fact, never an invented limit.
+
    The seeder turns the intent's constructs into placement (edge bands →
    edge poses, single-ref zones → the spec coordinate, multi-ref zones →
    a packed block, everything else → its connectivity centroid), stamps
    `must_lock` refs `(locked yes)`, polishes, and **grades its own output
    against the same intent** — exit 4 means the seed does not satisfy the
-   intent it was built from, and says which rule broke. Rotations: the input
+   intent it was built from, and says which rule broke; exit 5 means the
+   PLAN was refused before anything was written, so fix the plan, not the
+   seed. Rotations: the input
    rotation is kept when it fits, with a noted 90° lattice fallback when it
    does not; a part whose rotation is a DECISION (pin order) must be locked —
    the intent schema cannot express one, and an unlocked load-bearing
@@ -1133,7 +1159,16 @@ python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
     set U3 --near 130 98 --rot 270         # approximate: the engine seats it
 python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
     face U1 W USB1 rotate CON2 180 lock U1 CON2
+python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
+    set U3 129.9 98.3 --intent plan.json   # also refuse leaving U3's zone
 ```
+
+**Once a zone plan exists, pass it as `--intent`** (#959). A pose that leaves
+a moved part further outside its block's zone (an ERROR `zone_containment`
+finding; one the plan demoted to warn is written and reported) refuses at
+exit 4, and
+`zone_check` names the block and the overrun. Run 29 moved `Ref*` out of its
+own plan's zone on lap 10 and found out only after the write.
 
 Several verbs in one call are ONE arrangement (every op reads the input
 board), the sibling `.kicad_pro`/`.kicad_dru` travel with the output, and

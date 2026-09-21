@@ -240,9 +240,30 @@ def build_artifacts(tmp):
     r_fresh = _run([seed, FIXTURE, os.path.join(tmp, 'seed_fresh.kicad_pcb'),
                     '--intent', ps_intent, '--force', '--no-polish',
                     '--seed', '0'], expect=(0, 4))
+    # #959: the REFUSED-plan document (exit 5) is a fourth shape -- its
+    # `refused` / `plan_findings` / `plan_measured` exist only there. A zone
+    # that holds each member alone but not all six (75 mm2 against 82.9),
+    # under a declared overlap budget of 0, is an overlap no arrangement can
+    # avoid. (A zone smaller than a member's courtyard would not do: that is
+    # an ANCHOR by design, and anchors are not charged.)
+    with open(ps_intent, encoding='utf-8') as fh:
+        plan = json.load(fh)
+    plan['blocks'] = [{'name': 'too-small',
+                       'refs': ['U1', 'Y1', 'CON1', 'U2', 'C1', 'C2'],
+                       'zone': [120.0, 93.0, 126.5, 102.0],
+                       'note': 'deliberately overfull (#959 gate)'}]
+    plan['legality_budget'] = {'overlap_area': 0.0, 'oob_count': 0}
+    refused_intent = os.path.join(tmp, 'intent_refused.json')
+    with open(refused_intent, 'w', encoding='utf-8') as fh:
+        json.dump(plan, fh)
+    r_ref = _run([seed, FIXTURE, os.path.join(tmp, 'seed_refused.kicad_pcb'),
+                  '--intent', refused_intent, '--force', '--no-polish',
+                  '--seed', '0'], expect=(5,))
     art['place_seed.py'] = [('JSON_SUMMARY --reseat', _summary(r.stdout)),
                             ('JSON_SUMMARY --dry-run', _summary(r_dry.stdout)),
-                            ('JSON_SUMMARY fresh', _summary(r_fresh.stdout))]
+                            ('JSON_SUMMARY fresh', _summary(r_fresh.stdout)),
+                            ('JSON_SUMMARY plan refused',
+                             _summary(r_ref.stdout))]
     _declare_health(intent)
     # --health because section E's own heading carries it, and the `health_*`
     # keys exist ONLY when it is passed.

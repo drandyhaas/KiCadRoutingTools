@@ -423,7 +423,10 @@ def test_the_sibling_reaches_the_grade_and_no_brief_reproduces_the_old_doc():
         assert by_ref['USB1']['center_on_edge'] == {'tolerance_mm': 0.5}
         assert by_ref['CON2']['along_edge_band'] == {'from': 0.25, 'to': 0.75}
         assert len(doc['keepouts']) == 1, doc['keepouts']
-        assert doc['min_reader'] == 2
+        # 6, not 2, since #959 (#1000): the fixture's brief declares
+        # `user_top_side` with user-facing connectors, which compiles each
+        # one's `side` -- a reader-6 field.
+        assert doc['min_reader'] == 6, doc.get('min_reader')
 
         without = os.path.join(td, 'without.json')
         run_utils.check([sys.executable, '-X', 'utf8',

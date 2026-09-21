@@ -53,6 +53,14 @@ unplaced pile it exists to arrange. `--strict-legal` is the absolute arm for a
 caller who wants it; `--force` writes anyway and says so in the summary (the
 cheats watcher labels `--force` a WAIVER, which is the correct reading).
 
+WITH `--intent PATH` (#959) each moved part is also graded against that
+floorplan intent's zones, by the grade's own `zone_containment` rule: a pose
+that leaves a part further outside its block's zone than it was (an ERROR
+finding) is refused at exit 4 with nothing written, and `JSON_SUMMARY.
+zone_check` names the block, the zone and the overrun. Relative, like the
+legality verdict, so a move that brings a part from the pile toward its zone
+is never refused for not arriving. `--force` writes anyway and says so.
+
 There is no `--allow-unplaced`: this tool has no unplaced gate, because placing
 the parts of a pile one decision at a time is what it is for. An unplaced board
 is NOTED, not refused.
@@ -151,6 +159,11 @@ def build_parser(with_verbs=True):
                    help="Write the pose even when it grades worse. A WAIVER: "
                         "the summary records `forced` and the run_watch "
                         "cheats scan labels this flag for what it is")
+    p.add_argument('--intent', default=None, metavar='PATH',
+                   help="a floorplan intent: refuse a pose that leaves a "
+                        "moved part further outside its block's zone (an "
+                        "ERROR zone_containment) than it was; --force "
+                        "writes anyway (#959)")
     p.add_argument('--allow-routed', action='store_true',
                    help="Run even when the board already carries copper. Off "
                         "by default: placement moves FOOTPRINTS and not "
@@ -361,6 +374,14 @@ def main(argv=None):
             "board, or pass --allow-routed if you mean to."
             % (st.segments, st.vias), UNPLACED_EXIT,
             segments=st.segments, vias=st.vias)
+    intent = None
+    if args.intent:
+        from placement import floorplan
+        from placement.groups import parse_sources
+        try:
+            intent = floorplan.load_intent(args.intent)
+        except floorplan.IntentError as exc:
+            return _refuse(args, "cannot read the intent: %s" % exc, 2)
     if st.unplaced:
         # A NOTE, not a gate (see the module docstring): arranging a pile one
         # decision at a time is what this tool is for, and the relative
@@ -381,7 +402,10 @@ def main(argv=None):
             snap=args.snap or near_snap, snap_radius=args.radius,
             snap_step=args.snap_step, snap_tries=args.snap_tries,
             strict=args.strict_legal, force=args.force,
-            dry_run=args.dry_run)
+            dry_run=args.dry_run, intent=intent,
+            # What check_floorplan resolves `group` blocks with by default,
+            # so this check and the grade read the same members.
+            group_sources=parse_sources('auto') if intent else ())
     except pose_ops.PoseRefusal as exc:
         # The VERB is the caller's to print, not the finding's: the reason
         # text is reprinted verbatim by the --force path on a run that WROTE,
@@ -496,6 +520,15 @@ def _report(summary):
         # say so where the operator is looking, not only in the JSON.
         print("note: --snap/--near did not apply -- %s" % _sc['skipped'],
               file=sys.stderr)
+    zc = summary.get('zone_check') or {}
+    if zc.get('unmeasured'):
+        print("note: --intent did not grade zones -- %s" % zc['unmeasured'],
+              file=sys.stderr)
+    for r in zc.get('rows', ()):
+        print("  zone   %-8s block %r: %.2f -> %.2f mm outside%s" % (
+            r['ref'], r['block'], r['outside_mm_before'],
+            r['outside_mm_after'],
+            '' if r['severity'] in (None, 'error') else ' (warn)'))
     if summary.get('forced'):
         # NOT the refusal sentence verbatim: it ends "Refused rather than
         # written", which is false on a run that wrote.

@@ -11,13 +11,20 @@ down.
 
 WHY EVERY STRANGER HERE SITS IN AN *ANCHOR* ZONE, measured rather than chosen.
 The obvious fixture -- give the stranger its own zone inside the reserved rect
--- is rejected by the engine before it places anything:
+-- is refused, though NOT for the reason this docstring first gave. The seeder
+wrote the seed and its self-grade then printed
 
     GRADE ERROR [intent_zone_overlap] zones 'rf' and 's' overlap by 28.00mm2
     on the same side; no placement can satisfy both
 
-So two zones may not overlap at all, and a stranger with an ordinary zone can
-never be aimed into someone else's reserved area. What CAN, and is the real
+which was false for non-exclusive zones in general (#959 measured run 29's own
+board satisfying two such pairs). Since #959 the overlap is a WARN and the
+unsatisfiable case is its own finding, `plan_zone_exclusive_unsatisfiable`:
+a member whose zone lies inside a stranger's EXCLUSIVE zone has no pose that
+avoids it. The P1 plan gate refuses that plan; `place_seed` prints the finding
+and seeds anyway, so the seeder can name the member it could not seat -- which
+is what the arms below pin. So a stranger with an ordinary zone still cannot
+be aimed into someone else's reserved area. What CAN, and is the real
 shape of this bug, is a zone SMALLER than the courtyard: `seeder.zone_gate`
 switches to its ANCHOR branch and constrains the footprint ORIGIN, leaving the
 courtyard free to spill across the zone boundary into the reserved rect next
@@ -403,8 +410,10 @@ def _z_board(path):
 def arm_Z_jointly_blocked(wd):
     """Two DISJOINT exclusive zones that each free NOTHING when lifted alone.
 
-    Nesting them -- #701's own joint fixture -- is impossible here: overlapping
-    zones are refused outright as `intent_zone_overlap`. The shape that works
+    Nesting them -- #701's own joint fixture -- is impossible here: a member
+    whose zone lies inside another block's EXCLUSIVE zone is the ERROR
+    `plan_zone_exclusive_unsatisfiable` (#959; this said `intent_zone_overlap`,
+    which since #959 is a WARN for overlaps a member can avoid). The shape that works
     instead is the whole board split into two bands with a 1.0mm gap between
     them. Two things follow, and BOTH are needed:
 

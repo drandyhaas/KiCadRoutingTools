@@ -202,6 +202,18 @@ direct move — name the ref in `unlock` in the same call if you mean it;
 `--force` deliberately does not open that, and the unlock is verified on the
 staged board before anything is promoted.
 
+With `--intent PATH` (#959) each MOVED part is also graded against that
+floorplan intent's zones, by the grade's own `zone_containment` rule. A pose
+that leaves a part further outside its block's zone than it was, as an ERROR
+finding, refuses at exit 4, and nothing is written; with the rule demoted to
+warn the pose is written and the row reported. `JSON_SUMMARY.zone_check` names the block, the
+zone and the overrun before and after. The check is relative, like the legality
+verdict: a move from the pile toward its zone is never refused for not
+arriving. `--force` writes anyway and says so. A call that only locks or
+unlocks moves nothing and records `zone_check.skipped`. Run 29's lap-10
+`set Ref* ...` walked a part out of the plan's own zone and was caught only
+after the write. With a plan in hand, pass it.
+
 `--snap` is a two-rung ladder, because one rung was not enough: `pose_score`
 ranks first (it knows about wirelength and crossings), then the bare lattice
 around the aimed point, and **every** candidate from either rung is re-graded
@@ -242,6 +254,10 @@ with identical route args. Emits a ranked table, `seeds.json`, and a
 `JSON_SUMMARY` with `best_seed`. Exit 0 with a ranked winner, 4 when
 nothing was rankable -- including when every probe ran but produced no
 verdict, which returned 0 with `best_seed: null` until #713 fixed it.
+When `place_seed` refuses the zone PLAN (its exit 5, #959), the plan is the
+same for every seed, so the comparator stops at the first refusal and exits 4
+with the row marked `refused: plan_check`. `check_floorplan --intent PLAN
+--plan-only` checks a plan without seeding.
 
 There is **no probe timeout**. `--route-timeout` was removed (#713): a probe
 whose verdict a clock erased was not ranked worse, it was DROPPED from the

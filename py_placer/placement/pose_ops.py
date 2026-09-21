@@ -508,9 +508,20 @@ def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
     st = pose_score.make_state(pcb, board_path, clearance=clearance,
                                board_edge_clearance=board_edge_clearance)
     diag: Dict = {}
-    ranked = pose_score.rank_poses(pcb, board_path, ref, radius=radius,
-                                   step=step, limit=24, state=st,
-                                   rotations=(rot,), diagnostics=diag)
+    try:
+        ranked = pose_score.rank_poses(pcb, board_path, ref, radius=radius,
+                                       step=step, limit=24, state=st,
+                                       rotations=(rot,), diagnostics=diag)
+    except pose_score.PoseUnrankable as exc:
+        # #959 (#999): `place_pose` catches PoseRefusal only, so a pad-less
+        # block reached a traceback here. The code carries over unchanged;
+        # the advice does not -- this caller IS `place_pose set`, so it is
+        # told what to do instead of the snap, not to run itself.
+        raise PoseRefusal(
+            f"{ref} cannot be snapped: {exc.why}. A snap searches the poses "
+            f"the ranking can score, and there are none for this block -- "
+            f"give it an exact pose instead (drop --near / --snap / "
+            f"--strict-legal) and lock it", code=exc.code, ref=ref) from exc
     # The Euclidean bound, because `_offsets` walks SQUARE rings: a corner of
     # the r=4 ring sits 5.66 mm out, and a caller who typed `--radius 4` read
     # it as a distance (measured: a snap moved a part 5.0 mm under 4).
@@ -612,8 +623,14 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 snap: bool = False, snap_radius: float = 2.0,
                 snap_step: float = 0.25, snap_tries: int = 6,
                 strict: bool = False,
-                force: bool = False, dry_run: bool = False) -> Dict:
+                force: bool = False, dry_run: bool = False,
+                intent=None, group_sources: Sequence[str] = ()) -> Dict:
     """Apply `ops` to `board_path`, grade the result, write it to `out_path`.
+
+    `intent` (a loaded floorplan `Intent`, #959): a moved part that ends
+    further outside its block's zone than it started, by an ERROR-severity
+    `zone_containment`, is refused like a legality regression (`force`
+    writes anyway). Without it no zone is read.
 
     Returns the summary a caller prints as `JSON_SUMMARY`. Raises `PoseRefusal`
     when the request cannot be honoured -- an unknown ref, a face with no pads,
@@ -733,10 +750,21 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             # cheapest pose the other instrument liked".
             ref = placements[0]['reference']
             want_rot = placements[0]['new_rotation']
-            poses, census = snap_candidates(
-                cand, ref, rot=want_rot, clearance=clearance,
-                board_edge_clearance=board_edge_clearance,
-                radius=snap_radius, step=snap_step, pcb_data=cand_pcb)
+            try:
+                poses, census = snap_candidates(
+                    cand, ref, rot=want_rot, clearance=clearance,
+                    board_edge_clearance=board_edge_clearance,
+                    radius=snap_radius, step=snap_step, pcb_data=cand_pcb)
+            except PoseRefusal as exc:
+                # The refusal rides in the SAME summary every other refusal
+                # here carries -- ops, knobs and lock intent included -- so a
+                # snap that cannot rank does not print an empty document. And
+                # like every other refusal, it names no output: nothing was
+                # written.
+                summary['refused'] = exc.reason
+                summary['output'] = None
+                raise PoseRefusal(exc.reason, code=exc.code, ref=ref,
+                                  summary=summary) from exc
             summary['nearest_legal'] = next(
                 (p for p in poses if p['rung'] == 'ranked'), None)
             summary['nearest_legal_basis'] = (
@@ -918,6 +946,26 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 raise PoseRefusal(summary['refused'], summary=summary)
             summary['forced'] = True
 
+        if intent is not None and not placements:
+            summary['zone_check'] = {
+                'intent': getattr(intent, 'source_path', '') or None,
+                'refs': [], 'rows': [], 'worse': [],
+                'skipped': 'no op in this call moves a part, so no zone '
+                           'can get worse'}
+        if intent is not None and placements:
+            zc = zone_check(intent, pcb, board_path, cand_pcb, cand,
+                            [p_['reference'] for p_ in placements],
+                            group_sources=group_sources, clearance=clearance,
+                            board_edge_clearance=board_edge_clearance)
+            summary['zone_check'] = zc
+            if zc.get('worse'):
+                findings.append(zc['reason'])
+                summary['refused'] = '; '.join(findings)
+                if not force:
+                    summary['output'] = None      # nothing was written
+                    raise PoseRefusal(summary['refused'], summary=summary)
+                summary['forced'] = True
+
         if bad or (strict and not summary['legal']):
             if summary['nearest_legal'] is None and len(placements) == 1:
                 # Name the alternative even when the caller did not ask to
@@ -953,8 +1001,13 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                         'rotations': [placements[0]['new_rotation']]}
                 except Exception as exc:                     # noqa: BLE001
                     summary['nearest_legal'] = None
+                    # `PoseUnrankable.why` is the bare cause: its full reason
+                    # tells the reader to run `place_pose set`, which is this
+                    # very command (#959).
                     summary['nearest_legal_census'] = {
-                        'error': '%s: %s' % (type(exc).__name__, exc)}
+                        'error': '%s: %s' % (type(exc).__name__,
+                                             getattr(exc, 'why', None)
+                                             or exc)}
             findings.append(_refusal_reason(bad, strict, before, after,
                                             summary))
             summary['refused'] = '; '.join(findings)
@@ -1004,6 +1057,64 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         return summary
     finally:
         stage.cleanup()
+
+
+def zone_check(intent, pcb, board_path, cand_pcb, cand_path, refs, *,
+               group_sources: Sequence[str] = (), clearance=None,
+               board_edge_clearance=None) -> Dict:
+    """`zone_containment` for the moved refs, on the input and on the
+    candidate (#959, #998). Run 29 wrote `Ref*` out of its own zone plan at
+    lap 10 and learned it only from the next grade.
+
+    WORSE, never "outside": this verb's legality verdict is relative for the
+    reason its module docstring gives, and a part on an unplaced pile starts
+    outside every zone -- an absolute gate would refuse the moves that bring
+    it home. So a row is worse when the candidate has an ERROR-severity
+    finding and it sits further out than the input did (0 when the input was
+    inside tolerance). A WARN row is reported, never refused: an author who
+    demoted `zone_containment` said the zone is advisory. A zone smaller than
+    the courtyard is graded on the part centre on both sides, as the rule
+    grades it; a rotation that changes which way a part is graded compares
+    the two readings as they come."""
+    from placement import floorplan as _fp
+    kw = dict(group_sources=group_sources, clearance=clearance,
+              board_edge_clearance=board_edge_clearance)
+    doc: Dict = {'intent': getattr(intent, 'source_path', '') or None,
+                 'refs': sorted(set(refs)), 'rows': [], 'worse': []}
+    try:
+        was = _fp.zone_containment_of(intent, pcb, board_path, refs, **kw)
+        now = _fp.zone_containment_of(intent, cand_pcb, cand_path, refs, **kw)
+    except _fp.UntrustworthyOutline as exc:
+        doc['unmeasured'] = ('the board outline is not one the grader may '
+                             'rely on (%s), so zone_containment cannot run '
+                             'here either' % exc)
+        return doc
+    for key in sorted(set(was) | set(now)):
+        a, b = now.get(key), was.get(key)
+        v = a or b
+        row = {'ref': key[0], 'block': key[1],
+               'zone': v.expected.get('zone'),
+               'tolerance_mm': v.expected.get('tolerance_mm'),
+               'outside_mm_before': b.measured['outside_mm'] if b else 0.0,
+               'outside_mm_after': a.measured['outside_mm'] if a else 0.0,
+               'axis': a.measured.get('axis') if a else None,
+               'severity': a.severity if a else None}
+        doc['rows'].append(row)
+        if (a is not None and a.severity == _fp.ERROR
+                and row['outside_mm_after'] > row['outside_mm_before'] + 1e-9):
+            doc['worse'].append(row)
+    if doc['worse']:
+        doc['reason'] = '; '.join(
+            "%s would sit %.2fmm past the %s edge of block %r (zone %s, "
+            "tolerance %gmm; it was %s) -- the intent's zone_containment is "
+            "an ERROR. Move it inside the zone, change the plan, or pass "
+            "--force" % (
+                r['ref'], r['outside_mm_after'], r['axis'], r['block'],
+                r['zone'], r['tolerance_mm'],
+                ('%.2fmm past it' % r['outside_mm_before'])
+                if r['outside_mm_before'] else 'inside it')
+            for r in doc['worse'])
+    return doc
 
 
 def _promote(staged: str, out_path: str, summary: Optional[Dict] = None, *,

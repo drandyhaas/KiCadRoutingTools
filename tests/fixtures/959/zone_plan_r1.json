@@ -1,0 +1,289 @@
+{
+ "assembly": {
+  "sides": "F",
+  "why": "observed: 18 pad-bearing part(s) on F and 0 on B, 1 reflow pass(es). every footprint BLOCK (#726): blocks sharing one reference are keyed with an ordinal suffix and counted separately. `pad_bearing` restricts that to blocks carrying at least one pad, and it is the count the populated-side verdict is taken from -- a zero-pad graphic on the back does not make a board double-sided."
+ },
+ "blocks": [
+  {
+   "name": "xtal-loop",
+   "note": "12MHz loop on U1 pins 9/10, which at U1 rot90 sit at the NORTH end of its east pad row (134.62, 95.08/95.73). This is the free band between U1's north copper (94.91) and the north edge; it keeps the loop under ~3mm and leaves the U1<->USB1 gap free as the board's only north-south corridor.",
+   "refs": [
+    "Y1",
+    "C2",
+    "C4"
+   ],
+   "zone": [
+    130.5,
+    91.4,
+    138.6,
+    94.7
+   ]
+  },
+  {
+   "name": "serial-series-r",
+   "note": "R3/R4 terminate U1 pins 3/4 (east row, south end at y 99.63/98.98) and carry /U0RXD and /U0TXD onward to the connectors. This pocket is south of the D+/D- lane (y 98.25-98.90) and west of USB1's copper (139.73), so the pair is not boxed in.",
+   "refs": [
+    "R3",
+    "R4"
+   ],
+   "zone": [
+    135.55,
+    99.2,
+    139.5,
+    102.4
+   ]
+  },
+  {
+   "name": "vbus-regulator",
+   "note": "VBUS -> C1 -> U2 -> /+3.3V is the only loop that must stay compact and carry current; its three anchors are USB1 pin1 (140.70, 99.64), CON2 pin7 (132.12, 104.30) and U2 itself. This is the free south-east pocket east of CON2 and south of USB1's copper.",
+   "refs": [
+    "U2",
+    "C1"
+   ],
+   "zone": [
+    133.25,
+    102.65,
+    145.4,
+    105.2
+   ]
+  },
+  {
+   "name": "u1-decoupling",
+   "note": "C3 is U1's /+3.3V decoupling; U1's +3.3V pin 19 is on its WEST row at (127.38, 100.28), so the cap belongs immediately west/south-west of U1 rather than beside the regulator.",
+   "refs": [
+    "C3"
+   ],
+   "zone": [
+    122.3,
+    99.9,
+    126.5,
+    102.9
+   ]
+  },
+  {
+   "name": "auto-reset",
+   "note": "/DTR and /RTS leave U1's WEST row (pins 15/16 at (127.38, 97.68/98.33)); Q1+R1 and Q2+R2 are the two cross-coupled legs and their /DCOM and /EN outputs run on to CON1 (west edge) and CON2 (south). This is the west corridor, the largest free area left once the three connectors are seated.",
+   "refs": [
+    "Q1",
+    "Q2",
+    "R1",
+    "R2"
+   ],
+   "zone": [
+    116.3,
+    93.3,
+    125.8,
+    99.7
+   ]
+  },
+  {
+   "name": "fiducial-nw",
+   "note": "Ref* is a netless 1x1 fiducial and is movable residue: USB1's declared east seat covers its carried pose. A fiducial wants a clear corner on the populated side, and the north-west corner is the only one not claimed by USB1 (east), CON2 (south) or CON1 (west-centre). Ref[*] is an fnmatch literal so this block cannot capture the locked Ref*~2.",
+   "refs": [
+    "Ref[*]"
+   ],
+   "zone": [
+    114.3,
+    91.3,
+    116.9,
+    93.1
+   ]
+  }
+ ],
+ "board": "board.kicad_pcb",
+ "context": {
+  "brief": {
+   "absent": [],
+   "contradictions": [],
+   "counts": {
+    "fixed": 0,
+    "interfaces": 3,
+    "keepouts": 1
+   },
+   "declared": [
+    "interfaces[CON2].along_edge",
+    "interfaces[CON2].cable_entry",
+    "interfaces[CON2].edge",
+    "interfaces[CON2].mount_mode",
+    "interfaces[CON2].user_facing",
+    "interfaces[USB1].along_edge",
+    "interfaces[USB1].cable_entry",
+    "interfaces[USB1].edge",
+    "interfaces[USB1].mount_mode",
+    "interfaces[USB1].overhang_mm",
+    "interfaces[USB1].user_facing",
+    "keepouts[usb-shell-shadow]",
+    "product.form_factor",
+    "product.held_by",
+    "product.primary_axis",
+    "product.user_top_side"
+   ],
+   "fixed": [],
+   "not_graded": [
+    "interfaces[CON2].cable_entry",
+    "interfaces[CON2].mount_mode",
+    "interfaces[USB1].cable_entry",
+    "interfaces[USB1].mount_mode",
+    "product.form_factor",
+    "product.user_top_side"
+   ],
+   "path": "wk/run29/esp_prog/board.design-brief.json",
+   "product": {
+    "form_factor": "usb_stick",
+    "held_by": "hand; plugs directly into a host USB-A port",
+    "primary_axis": "east-west",
+    "user_top_side": "F"
+   },
+   "unknown": [
+    "interfaces[CON1].along_edge",
+    "interfaces[CON1].edge",
+    "interfaces[CON1].user_facing",
+    "mounting_datum",
+    "panel"
+   ],
+   "unmatched": [],
+   "unmatched_checked": true
+  },
+  "budget_withheld": {
+   "overlap_area": "83 blocking body pair(s) on the emitting board (run-6)"
+  },
+  "cutouts": [],
+  "decap_census": {
+   "beyond_radius": 1,
+   "beyond_radius_refs": [
+    "C1"
+   ],
+   "ics": 1,
+   "max_mm": 0.0,
+   "max_mm_display": 0.0,
+   "median_mm": 0.0,
+   "metric": "cap footprint centroid to IC bounding box, clamped to 0 inside (placement.groups.decap_tethers)",
+   "no_rail_chip": 0,
+   "no_rail_chip_refs": [],
+   "population": 4,
+   "search_radius_mm": 5.0,
+   "seeder_pin_scope": 4,
+   "source": "auto-tethers",
+   "tethers": 3,
+   "unaccounted": 0,
+   "worst_beyond_mm": 8.655
+  },
+  "edge_contours": 0,
+  "file_locked": [],
+  "keepouts_note": "1 keep-out(s) DECLARED by the design brief board.design-brief.json. A keep-out is a mechanical fact and cannot be read off a board, so the emitter writes none; these came from the one channel that can state one. Since #701 the seat search honours them, not only the grade.",
+  "note": "read-only, describing the board as it is. The outline is not editable by this toolchain: size, cutouts and slots are mechanical decisions the user owns"
+ },
+ "decaps": {},
+ "defaults": {
+  "zone_tolerance_mm": 0.5
+ },
+ "edge_connectors": [
+  {
+   "class": "connector_affinity",
+   "context": {
+    "brief_row": 2,
+    "edge_declared_unknown": true,
+    "role": "aux_io",
+    "was_source": "auto-class"
+   },
+   "note": "the brief declares this connector with edge \"unknown\" -- no edge is claimed, and any edge the emitter inferred is dropped",
+   "overhang_mm": {
+    "min": 0.0
+   },
+   "ref": "CON1",
+   "source": "brief"
+  },
+  {
+   "along_edge_band": {
+    "from": 0.25,
+    "to": 0.75
+   },
+   "class": "edge_receptacle",
+   "context": {
+    "brief_row": 1,
+    "cable_entry": "perpendicular_top",
+    "mount_mode": "through_edge",
+    "requirement": "PROG-CONN02",
+    "role": "target_debug_header",
+    "was_source": "auto-class",
+    "why": "7 x 2.54 = 15.24mm, 48% of the 31.75mm board length; a mid-board row is not reachable"
+   },
+   "edge": "south",
+   "note": "connector-family part, no edge claim; measured 6.36mm from the nearest edge",
+   "overhang_mm": {
+    "min": 0.0
+   },
+   "ref": "CON2",
+   "source": "brief"
+  },
+  {
+   "center_on_edge": {
+    "tolerance_mm": 0.5
+   },
+   "class": "edge_receptacle",
+   "context": {
+    "brief_row": 0,
+    "cable_entry": "in_plane",
+    "mount_mode": "edge_mount",
+    "requirement": "PROG-CONN01",
+    "role": "host_uplink",
+    "was_source": "auto-class",
+    "why": "the board IS the plug body; off-axis reads as a defect on sight"
+   },
+   "edge": "east",
+   "note": "edge-receptacle class in an implausible pose (1.30 mm from the nearest edge, no overhang): no edge declared -- reconstruct/repair must derive it",
+   "overhang_mm": {
+    "max": 0.65,
+    "min": 0.0
+   },
+   "ref": "USB1",
+   "source": "brief"
+  }
+ ],
+ "envelope": {
+  "rect": [
+   114.0,
+   91.0,
+   145.75,
+   105.5
+  ],
+  "tolerance_mm": 0.5
+ },
+ "keepouts": [
+  {
+   "allow": [
+    "USB1"
+   ],
+   "context": {
+    "kind": "cable_shadow",
+    "source": "brief",
+    "why": "the host receptacle body overlaps the board here"
+   },
+   "name": "usb-shell-shadow",
+   "rect": [
+    143.0,
+    96.0,
+    145.75,
+    100.5
+   ],
+   "sides": [
+    "F",
+    "B"
+   ]
+  }
+ ],
+ "kind": "floorplan-intent",
+ "legality_budget": {
+  "oob_count": 0
+ },
+ "min_reader": 2,
+ "must_lock": [
+  "USB1",
+  "CON2",
+  "CON1",
+  "U1",
+  "Ref[*]~2"
+ ],
+ "schema": 1,
+ "units": "mm"
+}

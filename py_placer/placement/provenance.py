@@ -489,12 +489,26 @@ def read_ledger(root: str) -> List[Dict]:
     return out
 
 
+def locked_poses(board_path: str) -> Dict[str, List[float]]:
+    """`{block key: [x, y, rot]}` for every FILE-locked footprint (#959)."""
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(board_path)
+    return {k: [round(f.x, 6), round(f.y, 6),
+                round((f.rotation or 0.0) % 360.0, 6)]
+            for k, f in sorted((pcb.footprints or {}).items())
+            if getattr(f, 'locked', False)}
+
+
 def start_regime(workdir: str, staged_board: str, **extra) -> str:
     """Mark a work dir unaided and seed the chain with the staged board."""
     os.makedirs(workdir, exist_ok=True)
+    # The locks the staged board carries NOW, and where, before any lever
+    # runs (#959): the only locks that are a pre-run fact. The staged file
+    # itself is edited in place later, so it cannot answer this afterwards.
     doc = {'schema': SCHEMA, 'kind': 'unaided-regime',
            'staged_board': os.path.abspath(staged_board),
            'staged_sha256': sha256_file(staged_board),
+           'staged_lock_poses': locked_poses(staged_board),
            'lever_registry': list(LEVER_REGISTRY), **extra}
     path = os.path.join(workdir, REGIME_NAME)
     with open(path, 'w', encoding='utf-8') as f:
