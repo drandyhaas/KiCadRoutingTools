@@ -124,6 +124,15 @@ if _HERE not in sys.path:
 BAND_FRAC = 0.16
 BAND_MIN_PX = 64
 
+#: And a CEILING, because the floor above has no opinion about the frame it is
+#: floored in. Measured on a long thin board (`legacy`, 560x86): the band took
+#: **74% of the frame**, and 52% at 124 px -- a time series about the run
+#: dwarfing the film it annotates. Above this share the frame is simply too
+#: short to carry a band, and `band_height` returns 0 so `attach` declines and
+#: says why. Refusing is the honest arm: a 64 px band on an 86 px frame is not
+#: a smaller band, it is a different picture.
+BAND_MAX_FRAC = 0.34
+
 #: An attempt whose `kind` is not one of these draws in `op_seed`'s grey. The
 #: names are the vocabulary the two producers already use: `place_route_loop`
 #: rounds are descents, `converge` rows carry a `kind`, and `evolve` carries an
@@ -443,7 +452,10 @@ def band_height(width: int, height: int) -> int:
     except Exception:                                          # noqa: BLE001
         def even(v):
             return int(v) - (int(v) % 2)
-    return max(BAND_MIN_PX, even(int(height * BAND_FRAC)))
+    want = max(BAND_MIN_PX, even(int(height * BAND_FRAC)))
+    if want > height * BAND_MAX_FRAC:
+        return 0          # too short to carry one; `attach` declines and says so
+    return want
 
 
 def _plot(box, cap_h=14, label_h=12):
@@ -698,6 +710,11 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
         return frames, report
     W, H = frames[0].size
     bh = band_height(W, H)
+    if not bh:
+        report['why'] = ('the frame is %dx%d; a legible band would be over '
+                         '%.0f%% of it, so there is no room for one'
+                         % (W, H, BAND_MAX_FRAC * 100))
+        return frames, report
     idx = [a.index for a in track.attempts]
     lo, hi = min(idx), max(idx)
     n = max(1, len(frames) - 1)

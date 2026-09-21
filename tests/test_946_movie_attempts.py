@@ -441,6 +441,19 @@ def test_the_band_keeps_the_frame_invariant():
     _mark = len(_FAIL)
     with tempfile.TemporaryDirectory() as td:
         t = MA.attempts_from_loop_dir(_loop_dir(td))
+    # A SHORT frame has no room for one, and says so rather than taking most
+    # of the picture: measured at 74% of an 86 px frame before the ceiling.
+    short = [Image.new('RGB', (560, 86), (7, 7, 7)) for _ in range(3)]
+    ids = [id(f) for f in short]
+    back, rep = MA.attach(short, t, theme='dark')
+    if rep.get('drawn'):
+        fail('a 560x86 frame drew a band anyway')
+    if [id(f) for f in back] != ids:
+        fail('the too-short arm rebuilt the frames')
+    if 'no room' not in (rep.get('why') or ''):
+        fail('the too-short refusal does not say why: %r' % rep.get('why'))
+    else:
+        print('    560x86: %s' % MA.status_line(rep))
     for w, h in ((320, 200), (160, 160), (901, 309)):
         frames = [Image.new('RGB', (w, h), (7, 7, 7)) for _ in range(5)]
         n_before = len(frames)
@@ -453,12 +466,28 @@ def test_the_band_keeps_the_frame_invariant():
             fail('%dx%d: the band changed the frame COUNT %d -> %d'
                  % (w, h, n_before, len(back)))
         got = sizes.pop()
-        if got[0] != w or got[1] <= h:
+        if got[0] != w:
             fail('%dx%d: became %s -- the band grows the HEIGHT only'
                  % (w, h, got))
+        if not rep.get('drawn'):
+            # A frame too short for a legible band declines, and both arms
+            # are correct -- what is NOT correct is growing by a band nobody
+            # can read, or shrinking.
+            if got != (w, h):
+                fail('%dx%d: declined but the frame still changed to %s'
+                     % (w, h, got))
+            print('    %4dx%-4d -> declined: %s'
+                  % (w, h, (rep.get('why') or '')[:54]))
+            continue
+        if got[1] <= h:
+            fail('%dx%d: drawn but the frame did not grow: %s' % (w, h, got))
         if got[1] - h < MA.BAND_MIN_PX:
             fail('%dx%d: band is %d px, below the %d px legibility floor'
                  % (w, h, got[1] - h, MA.BAND_MIN_PX))
+        if (got[1] - h) > h * MA.BAND_MAX_FRAC:
+            fail('%dx%d: the band is %.0f%% of the frame -- a time series '
+                 'about the run must not dwarf the film it annotates'
+                 % (w, h, 100.0 * (got[1] - h) / h))
         try:
             FL.assert_frames_uniform([f.size for f in back])
         except FL.FrameSizeError as exc:
@@ -548,10 +577,14 @@ def test_make_film_attaches_before_it_badges():
         # placement-only attempt changes NO copper, so its beat is one frame
         # and nothing is badged -- the probe would then pass vacuously on an
         # unbadged film. `test_film_composition` uses the same arm.
+        # `layout='split'` because the band now REFUSES a frame too short to
+        # carry it, and this board is 6.5:1 -- at size 400 its legacy frame is
+        # 400x62, where a legible band would be over a third of the picture.
+        # A declared layout gives the frame its own aspect and the band room.
         off = mf.build_film(shots, size=400, fps=6.0, camera='auto',
-                            quiet=True, attempts_from='')
+                            quiet=True, attempts_from='', layout='split')
         on = mf.build_film(shots, size=400, fps=6.0, camera='auto',
-                           quiet=True, attempts=t)
+                           quiet=True, attempts=t, layout='split')
         if not off or not on:
             fail('no frames')
             return
@@ -604,7 +637,7 @@ def test_a_card_and_a_band_in_one_film_are_one_size():
         shots = ([mf.card_shot(png, 'the delta that motivated this')] +
                  mf.parse_positional([BOARD, good], []))
         frames = mf.build_film(shots, size=300, fps=6.0, camera='off',
-                               quiet=True, attempts=t)
+                               quiet=True, attempts=t, layout='split')
         if not frames:
             fail('no frames')
             return

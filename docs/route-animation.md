@@ -678,10 +678,23 @@ status line says so in words. One attempt is also an OFF arm — `attach` then
 returns the frame list completely untouched, the same list object holding the
 same images.
 
+**And it refuses a frame too short to carry it.** `BAND_MIN_PX` is a floor with no opinion about the frame it is floored in: on a long thin board rendered `legacy` at 560x86 the band took **74% of the picture**, and 52% at 124 px — a time series about the run dwarfing the film it annotates. Above `BAND_MAX_FRAC` there is no room for one, and `attach` declines and says so rather than shipping a band nobody can read.
+
 | constant | value |
 |---|---|
 | `BAND_FRAC` (`py_router/movie_attempts.py`) | 0.16 |
 | `BAND_MIN_PX` (`py_router/movie_attempts.py`) | 64 |
+| `BAND_MAX_FRAC` (`py_router/movie_attempts.py`) | 0.34 |
+
+### The ghost and the arrow
+
+A placement tween glides parts from their source pose to their parsed one, and watched frame by frame that reads as *the board assembling itself* rather than as *these parts moved, from there to here*. `py_router/place_motion.py` draws a **ghost** at the source pose and an **arrow** to the part's current one, through the `overlays=` seam, so it costs no frame geometry.
+
+The arrow **grows** — it runs from the ghost to where the part is *now*, so it starts at zero length and spans the whole journey by the end — and the ghost **fades in** rather than out, because at t=0 it sits on top of the part and says nothing while at t=1 it is the only thing marking the origin. A part that moved less than `MIN_TRAVEL_MM` gets neither: the ghost would be a smear on the part and the arrow a dot.
+
+| constant | value |
+|---|---|
+| `MIN_TRAVEL_MM` (`py_router/place_motion.py`) | 1.5 |
 
 ### A rip retracts; its replacement grows
 
