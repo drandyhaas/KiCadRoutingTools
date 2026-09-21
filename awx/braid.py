@@ -6605,15 +6605,28 @@ class Corridor:
             return any(lo <= s <= hi for (lo, hi) in self.bwin[nm])
         return True
 
+    def _dive_extra(self, nm):
+        """How much longer than a single's a PAIR member's dive zones are:
+        a pair's layer change is two barrels side by side (its via
+        envelope, 2 * via_half + via wide), placed by the pose router
+        where the band opens both layers -- at a single's DIVE_GAP (0.15)
+        it fits nowhere (zynq K44: both pairs refused at the launch, boxed
+        0.6 mm past the tips where the band closed the tooth's layer).
+        BRAID_PAIR_DIVE_EXTRA, mm each side of a change."""
+        if nm not in (getattr(self.ctx, 'pairs', None) or {}):
+            return 0.0
+        return PAIR_DIVE_EXTRA
+
     def allowed_vec(self, nm, S, L):
         ok = np.ones(S.shape, dtype=bool)
+        x = self._dive_extra(nm)
         for (xa, xb, RL) in self.req.get(nm, ()):
             if RL != L:
-                ok &= ~((S >= xa) & (S <= xb))
+                ok &= ~((S >= xa + x) & (S <= xb - x))
         if L == 'B.Cu':
             inb = np.zeros(S.shape, dtype=bool)
             for (lo, hi) in self.bwin[nm]:
-                inb |= (S >= lo) & (S <= hi)
+                inb |= (S >= lo - x) & (S <= hi + x)
             ok &= inb
         return ok
 
@@ -6784,11 +6797,11 @@ class Corridor:
                     if (lp is not None and not open_layers and nm in self.exit_block
                             and i_l == len(legs_) - 1):
                         # level 5: the exit leg's own layer profile, along o
-                        okl = self._piece_ok(lp, Os, oa, ob, L, DIVE_GAP)
+                        okl = self._piece_ok(lp, Os, oa, ob, L, DIVE_GAP + self._dive_extra(nm))
                     elif (hp is not None and not open_layers and i_l == 0
                             and nm in getattr(self, 'join_block', {})):
                         # level 5 (HEAD_L5): the join leg's, tooth side first
-                        okl = self._piece_ok(hp, Os, oa, ob, L, DIVE_GAP)
+                        okl = self._piece_ok(hp, Os, oa, ob, L, DIVE_GAP + self._dive_extra(nm))
                     oks |= rect & okl
                 jp = getattr(self, 'jog_prof', {}).get(nm)
                 hjp = getattr(self, 'hjog_prof', {}).get(nm)
@@ -6799,11 +6812,11 @@ class Corridor:
                     if (jp is not None and not open_layers and nm in self.exit_block
                             and abs(sb - self.se[nm][0]) < 1e-6 and abs(ob - self.se[nm][1]) < 1e-6):
                         # level 5: the exit jog's own layer profile, along s
-                        okj = self._piece_ok(jp, Ss, sa, sb, L, DIVE_GAP)
+                        okj = self._piece_ok(jp, Ss, sa, sb, L, DIVE_GAP + self._dive_extra(nm))
                     elif (hjp is not None and not open_layers
                             and abs(sa - self.st[nm][0]) < 1e-6 and abs(oa - self.st[nm][1]) < 1e-6):
                         # level 5 (HEAD_L5): the join jog's, from the tooth
-                        okj = self._piece_ok(hjp, Ss, sa, sb, L, DIVE_GAP)
+                        okj = self._piece_ok(hjp, Ss, sa, sb, L, DIVE_GAP + self._dive_extra(nm))
                     oks |= rect & okj
                 ok[i:i + STRIP] = oks
             return ok
@@ -7227,7 +7240,7 @@ class Corridor:
             return None, None
         return [c for c in cand_a if c], [c for c in cand_b if c]
 
-    def route_pair_lane(self, nm, virt, virt_vias=None):
+    def route_pair_lane(self, nm, virt, virt_vias=None, slack=None, free=None):
         """A PAIR member's lane (pairs.py, BRAID_PAIRS): the production pair
         router between the two teeth and the two berths, inside the
         member's band widened by half the pair pitch a side, against the
@@ -7256,12 +7269,15 @@ class Corridor:
         # dive zones and slope pitches are sized for one track, and the
         # pair's centreline (half a pitch of extra clearance) found a
         # neck in each; free, the same search landed them at last call.
-        free_pair = os.environ.get('BRAID_PAIR_FREE', '1') != '0'
+        free_pair = (os.environ.get('BRAID_PAIR_FREE', '1') != '0') if free is None else bool(free)
+        if slack is not None:
+            half = slack
         if free_pair:
             band = None
             margin = max(margin, 2.0)
         else:
             band = None if swim else self.band_of(nm, slack=half)
+            margin = max(margin, half + 0.6)
         virt = list(virt or []) + reserve(ctx, nm)
         rep = {}
         _ca, _cb = self._pair_conn_points(nm)
@@ -7310,7 +7326,7 @@ class Corridor:
         ctx.pcb.segments.extend(segs_o)
         ctx.pcb.vias.extend(vias_o)
         self.log(f'    pair {nm} landed: {len(segs_o)} segment(s), {len(vias_o)} via(s)'
-                 + (' [swim]' if swim else ' [band]'))
+                 + (' [swim]' if swim else (' [free]' if free_pair else f' [band +{half:.2f}]')))
         return segs_o, vias_o
 
     def _pair_debug_image(self, nm, virt, rep, tp_, tn_, sp_, sn_, virt_vias=None):
@@ -8589,6 +8605,116 @@ def main(argv=None):
 
 
 PAIRS_FIRST_FREE = os.environ.get('BRAID_PAIRS_FIRST_FREE', '1') != '0'
+# BRAID_PAIRS_PLANNED (default on): THE PAIR IS PART OF THE PLAN (Andy,
+# 2026-09-20). Every pair is a corridor member -- its slot, page and dives
+# are the one plan's -- and after the plan each pair is routed FIRST in its
+# own planned band, widened by the first of BRAID_PAIR_SLACKS that lands it,
+# the other members' planned lanes reserved, its layers the schedule's;
+# then free in a window as the last resort. Its copper is protected and the
+# singles are routed by the same plan around it. =0: the earlier flow, the
+# pairs routed free before any plan and the plan made round their copper.
+PAIRS_PLANNED = os.environ.get('BRAID_PAIRS_PLANNED', '1') != '0'
+PAIR_SLACKS = [float(v) for v in os.environ.get('BRAID_PAIR_SLACKS', '0.6,1.2').split(',') if v.strip()]
+PAIR_FANIN = float(os.environ.get('BRAID_PAIR_FANIN', '2.5') or 0)
+PAIR_DIVE_EXTRA = float(os.environ.get('BRAID_PAIR_DIVE_EXTRA', '0.6') or 0)
+
+
+def _route_pairs_planned_in_order(ctx, corridors, log, order):
+    """route_pairs_planned's worker over one order of the pairs; returns {pair: (segments, vias)}, the copper left on ctx.pcb."""
+    done = {}
+    for nm in order:
+        c = next(c for c in corridors if nm in c.members)
+        M = c.members
+        if True:
+            t0 = _time.time()
+            pn, nn = ctx.pairs[nm]
+            pid, nid_n = ctx.byname[pn][0], ctx.byname[nn][0]
+            others = [om for om in M if om != nm]
+            # the others' planned lanes reserved in the corridor; at the
+            # FAN-IN (within PAIR_FANIN mm of either of the pair's ends)
+            # only their EXIT STUBS are, a millimetre from each tooth and
+            # berth: the lanes there are born on the tooth's layer and cross
+            # in front of the pair's teeth, and a pair's pose needs room
+            # no single lane needs (measured K36: every pair refused in
+            # its planned band with the full lanes reserved, three of
+            # three landed with the stubs)
+            R = PAIR_FANIN
+            e_a, e_b = c.teeth[nm], c.stubs[nm]
+
+            from kicad_parser import Segment as _S
+
+            def near_end(p, q):
+                # by the piece's ENDPOINTS (measured: the segment's distance
+                # freed more of the fan-in and cost H3 four vias, 84 -> 88)
+                return (min(math.hypot(p[0] - e[0], p[1] - e[1]), math.hypot(q[0] - e[0], q[1] - e[1])) < R
+                        for e in (e_a, e_b))
+            stubs = []
+            for om in others:
+                for k_, dirs in ((0, ctx.tooth_dir), (1, ctx.stub_dir)):
+                    d = dirs.get(om)
+                    e = ctx.ends[om][k_]
+                    L = (ctx.tooth_layer if k_ == 0 else ctx.dest_layer)[om]
+                    if d is not None and e is not None:
+                        stubs.append(((e[0], e[1]), (e[0] + d[0] * 1.0, e[1] + d[1] * 1.0), L))
+            virt = [(p, q, L) for (p, q, L) in c.virtual_of(others) if not any(near_end(p, q))] + stubs
+            vv = [v for v in c.virtual_vias_of(others)
+                  if min(math.hypot(v[0] - e[0], v[1] - e[1]) for e in (e_a, e_b)) >= R]
+            ways = _pairs.pair_waypoints(ctx.pcb, pid, nid_n, ctx.src_ref.get(nm) or ctx.src_ref.get(pn), ctx.ends[nm][2])
+            res = None
+            how = ''
+            if ways:
+                (tp_, tn_), (sp_, sn_) = ctx.pair_ends[nm]
+                res = _route_pair_legs(ctx, nm, pid, nid_n, (tp_, tn_), (sp_, sn_), ways, virt, log)
+                if res is not None:
+                    why = _pairs.intra_ok(res[0], res[1], pid, nid_n, TRACK, VIA_SIZE, SPEC_CLEARANCE)
+                    if why is not None:
+                        log(f'  pair {nm}: through its waypoints but not clean ({why})')
+                        res = None
+                    else:
+                        ctx.pcb.segments.extend(res[0])
+                        ctx.pcb.vias.extend(res[1])
+                        how = f'through {", ".join(w[0].component_ref for w in ways)}'
+            else:
+                for sl in PAIR_SLACKS:
+                    res = c.route_pair_lane(nm, virt, vv, slack=sl, free=False)
+                    if res is not None:
+                        how = f'in its planned band +{sl:.1f} mm'
+                        break
+                if res is None:
+                    res = c.route_pair_lane(nm, virt, vv, free=True)
+                    if res is not None:
+                        how = 'free (its band refused)'
+                if res is None:
+                    # the last resort: free of the plan's lanes altogether, only
+                    # the others' exit stubs reserved, a 6 mm window, no
+                    # connectors -- exactly the free-first flow's call, which
+                    # landed these pairs (K47: both DQS pairs refused every
+                    # planned attempt); the singles' plan was not made round
+                    # this copper, so their corridor's rescue pays for it --
+                    # against a pair left open, which nothing pays for
+                    (tp_, tn_), (sp_, sn_) = ctx.pair_ends[nm]
+                    rep = {}
+                    res = cn.connect_pair(ctx.pcb, pid, nid_n, tp_, tn_, ctx.tooth_layer[nm],
+                                          sp_, sn_, ctx.dest_layer[nm], ctx.cfg, band=None, margin=6.0,
+                                          virtual=stubs or None, gap=_pairs.GAP,
+                                          a_dir=ctx.tooth_dir.get(nm), b_dir=ctx.stub_dir.get(nm),
+                                          a_n_layer=ctx.pair_layers[nm][0], b_n_layer=ctx.pair_layers[nm][1],
+                                          report=rep)
+                    if res is not None:
+                        why = _pairs.intra_ok(res[0], res[1], pid, nid_n, TRACK, VIA_SIZE, SPEC_CLEARANCE)
+                        if why is not None:
+                            res = None
+                        else:
+                            ctx.pcb.segments.extend(res[0])
+                            ctx.pcb.vias.extend(res[1])
+                            how = 'free of the plan (its band and its lane refused)'
+            if res is None:
+                log(f'  pair {nm}: NOT routed first ({_time.time() - t0:.1f}s) -- its corridor tries again in order')
+                continue
+            done[nm] = res
+            log(f'  pair {nm} routed FIRST and protected {how}: {len(res[0])} segment(s), {len(res[1])} via(s) '
+                f'({_time.time() - t0:.1f}s)')
+    return done
 
 
 # BRAID_PAIR_TUBE (mm, default 0 = off): route each pair ALSO inside a tube
@@ -8600,6 +8726,47 @@ PAIRS_FIRST_FREE = os.environ.get('BRAID_PAIRS_FIRST_FREE', '1') != '0'
 # instrument; the free route is the default.
 PAIR_TUBE = float(os.environ.get('BRAID_PAIR_TUBE', '0') or 0)
 
+
+
+def route_pairs_planned(ctx, corridors, log):
+    """The pairs routed first IN THEIR PLANNED BANDS (see PAIRS_PLANNED):
+    for each corridor, each pair member, the band ladder then free; a pair
+    through waypoints (a termination part) goes by _route_pair_legs. A pair
+    that lands is protected; one that refuses stays a member and is tried
+    again in its corridor's order (coupled or refused, never singles)."""
+    base_segs, base_vias = list(ctx.pcb.segments), list(ctx.pcb.vias)
+    order = [nm for c in corridors for nm in c.members if nm in ctx.pairs]
+    best = None
+    tried = []
+    while True:
+        ctx.pcb.segments = list(base_segs)
+        ctx.pcb.vias = list(base_vias)
+        done = _route_pairs_planned_in_order(ctx, corridors, log, order)
+        tried.append(order)
+        score = (len(done), -sum(len(v) for _s, v in done.values()))
+        if best is None or score > best[0]:
+            best = (score, order, done, list(ctx.pcb.segments), list(ctx.pcb.vias))
+        refused = [b for b in order if b not in done]
+        # the ORDER retried, as route_pairs_free does: a refused pair first
+        nxt = next(([b] + [o for o in order if o != b] for b in refused
+                    if [b] + [o for o in order if o != b] not in tried), None)
+        if nxt is None or len(done) == len(order):
+            break
+        log(f'  pairs: {refused} refused in the order {order}; trying {nxt}')
+        order = nxt
+    score, order, done, segs, vias = best
+    ctx.pcb.segments = segs
+    ctx.pcb.vias = vias
+    if len(tried) > 1:
+        log(f'  pairs: order {order} kept ({len(done)} of {len(order)} pairs)')
+    for nm in done:
+        ctx.landed.add(nm)
+    ctx.protected = set(done)
+    ctx.pre_segs = {b: s for b, (s, _v) in done.items()}
+    ctx.pre_vias = {b: v for b, (_s, v) in done.items()}
+    ctx.base_segments = list(ctx.pcb.segments)
+    ctx.base_vias = list(ctx.pcb.vias)
+    return done
 
 def _lane_tube(poly, W):
     """A band callable (connect._band_cell_strips) open within W mm of a
@@ -8937,7 +9104,10 @@ def run(board, nets, dest, out):
     ctx, groups = setup(a.board, names, a.dest, log, pairs=bool(PAIRS))
     ctx.pre_segs, ctx.pre_vias, ctx.protected = {}, {}, set()
     pairs_first = bool(PAIRS and getattr(ctx, 'pairs', None) and PAIRS_FIRST_FREE)
-    if pairs_first and PAIR_TUBE > 0:
+    pairs_planned = bool(PAIRS and getattr(ctx, 'pairs', None) and PAIRS_PLANNED)
+    if pairs_planned:
+        pass                          # the pairs stay members: route_pairs_planned after the plan
+    elif pairs_first and PAIR_TUBE > 0:
         # THE GRAIN: the corridors planned once WITH the pairs as members,
         # for the pairs' planned lanes only -- on a COPY of the context,
         # so the plan that routes the singles is made exactly as without
@@ -8997,6 +9167,8 @@ def run(board, nets, dest, out):
     ctx.laid_tubes = []
     ctx.pcb.segments = list(ctx.base_segments)
     ctx.pcb.vias = list(ctx.base_vias)
+    if pairs_planned:
+        route_pairs_planned(ctx, corridors, log)
     for c in corridors:
         c.run()
         ctx.corr_done.add(c.idx)

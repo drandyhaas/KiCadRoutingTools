@@ -601,6 +601,42 @@ vias, stands. K47 chain, pairs first: 0 open / 0 DRC / 133 vias, CK
 coupled 0.77 through R20, DQS0 0.83, DQS1 0.85; the human 109 with 0.87 /
 0.84 / 0.87; pairs off 105 with 3 open (R20 unreached, DQS0 refused).
 
+**THE PAIR IS PART OF THE PLAN (2026-09-20, latest; `BRAID_PAIRS_PLANNED`,
+default on).** Andy: "we need the diff pair to be part of the planning."
+Every pair is a corridor member -- its slot, page and dives are the one
+plan's -- and after the plan each pair is routed FIRST inside its own
+planned band (`route_pair_lane` with the slack ladder `BRAID_PAIR_SLACKS`
+0.6, 1.2 mm), the other members' planned lanes reserved except at the
+FAN-IN (within `BRAID_PAIR_FANIN` 2.5 mm of the pair's ends only their
+1 mm exit stubs: the lanes there are born on the tooth's layer and cross in
+front of the pair's teeth, and a pair's pose needs room no single needs),
+its dive zones wider than a single's (`BRAID_PAIR_DIVE_EXTRA` 0.6 mm each
+side of a planned change: two barrels side by side), a refusal with no
+frontier -- the router's own intra-pair check on the pose it chose --
+retried with straight approaches twice and three times as long, the
+converging approach bent onto the planned lane when the tips lie far apart
+along a comb, then free in a window, then free of the plan (the
+free-first call) as the last resort; a pair through a termination part by
+its legs; the pairs' order retried. Its copper is protected and the same
+plan routes the singles round it (`route_pairs_planned`, the corridor
+skips protected members). Measured on the chain against the earlier flow
+(pairs routed free before any plan, `BRAID_PAIRS_PLANNED=0`):
+
+| chain | free first | in the plan | human |
+|---|---|---|---|
+| H3 K36 | 87 | **84**, 0 open | 62 |
+| zynq K44 | 116 | **100**, 0 open | 103 |
+| zynq K47 (CK) | 133, 0 open | 111, 1 open (WE) | 109 |
+
+Every pair coupled in every run (K36 0.54 / 0.89 / 0.64, K44 0.85 /
+0.84, K47 CK 0.76 through R20 / 0.83 / 0.85). What was tried and measured
+worse on the way: routing the pairs in their bands with the FULL planned
+lanes reserved (every pair refused at the fan-in), the segment-distance
+fan-in test (H3 84 -> 88), and the pre-plan/re-plan tube flow above. On
+K47 both DQS pairs land only by the last resort, so their copper is not
+in the singles' plan and one single stays open; the free-first flow ships
+it at 133. Pairs off is byte-identical to the recorded K34 braid.
+
 **Instruments:** `grade_k.py` prints one PAIR line per pair (routed or
 not, coupled fraction at the inferred pitch, skew, barrels);
 `pair_census.py` is the same on any board; `BRAID_PAIR_DEBUG=1` prints each

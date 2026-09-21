@@ -753,7 +753,7 @@ def _routed_connector(pcb, p_id, n_id, tip_p, tip_n, d, layer, far, cfg, half, v
 def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                        cfg, band, margin, band_slack, virtual, window_pts,
                        virtual_vias, report, gap, a_dir=None, b_dir=None, half=None,
-                       a_conn=None, b_conn=None):
+                       a_conn=None, b_conn=None, appr_scale=1.0, attempt=0):
     """connect_pair on the production pair router (see connect_pair), given
     CLEAN ENDS: a coupled APPROACH is laid first at each end -- each leg
     from its tip straight out along the escape direction for a via pitch,
@@ -767,7 +767,8 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     from diff_pair_routing import route_diff_pair_with_obstacles
     coord = GridCoord(cfg.grid_step)
     layer_map = build_layer_map(cfg.layers)
-    appr = round(cfg.via_size + cfg.clearance, 6)
+    appr = round((cfg.via_size + cfg.clearance) * appr_scale, 6)
+    a_p0, a_n0, a_layer0, b_p0, b_n0, b_layer0, a_dir0, b_dir0 = a_p, a_n, a_layer, b_p, b_n, b_layer, a_dir, b_dir
     approach = []
     connectors = []
     conn_vias = []
@@ -853,12 +854,45 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
             connected.add(end)
     if a_dir is not None and b_dir is not None and half is not None \
             and os.environ.get('BRAID_PAIR_APPROACH', '1') != '0':
-        def _appr(tip_p, tip_n, d, layer):
+        def _appr(tip_p, tip_n, d, layer, lane=None):
             mid = _pairs.mid(tip_p, tip_n)
             n = _pairs._left(d)
             sgn = 1.0 if _pairs._cross(d, (tip_p[0] - mid[0], tip_p[1] - mid[1])) >= 0 else -1.0
             sep = abs((tip_p[0] - tip_n[0]) * n[0] + (tip_p[1] - tip_n[1]) * n[1])
             why = None
+            if lane is not None and vw is not None and sep > 2 * half + 2 * cfg.track_width:
+                # ONTO THE PLANNED LANE: tips far apart along a comb, each leg
+                # runs on along its escape until the two can bend onto the
+                # lane's point `far`, at the pair pitch either side of it,
+                # heading the lane's way (a straight convergence along the
+                # escape ends in a neighbour's slot: zynq K47, both DQS pairs
+                # refused in every order at 2.2 mm past their teeth)
+                far, ld = lane
+                nl = _pairs._left(ld)
+                sg2 = 1.0 if _pairs._cross(ld, (tip_p[0] - far[0], tip_p[1] - far[1])) >= 0 else -1.0
+                ep = (far[0] + sg2 * nl[0] * half, far[1] + sg2 * nl[1] * half)
+                en = (far[0] - sg2 * nl[0] * half, far[1] - sg2 * nl[1] * half)
+                run = 0.0
+                while run <= 3.0 + 1e-9:
+                    kp = (tip_p[0] + d[0] * run, tip_p[1] + d[1] * run)
+                    kn = (tip_n[0] + d[0] * run, tip_n[1] + d[1] * run)
+                    legs = []
+                    if run > 1e-6:
+                        legs += [Segment(tip_p[0], tip_p[1], kp[0], kp[1], cfg.track_width, layer, p_id),
+                                 Segment(tip_n[0], tip_n[1], kn[0], kn[1], cfg.track_width, layer, n_id)]
+                    legs += [Segment(kp[0], kp[1], ep[0], ep[1], cfg.track_width, layer, p_id),
+                             Segment(kn[0], kn[1], en[0], en[1], cfg.track_width, layer, n_id)]
+                    # the bends must not cross each other
+                    if _pairs._seg_seg_dist(legs[-1], legs[-2]) >= cfg.track_width + cfg.clearance - 1e-6:
+                        why = _legs_clear(vw, legs, [p_id, n_id], cfg, virtual, layer_map)
+                        if why is None:
+                            if os.environ.get('BRAID_PAIR_DEBUG'):
+                                print(f"    approach: tips {sep:.2f} mm apart -- legs run {run:.1f} mm, then bend onto the "
+                                      f"planned lane at ({far[0]:.2f},{far[1]:.2f}) heading ({ld[0]:.2f},{ld[1]:.2f})")
+                            return legs, ep, en, ld
+                    run += 0.1
+                if os.environ.get('BRAID_PAIR_DEBUG'):
+                    print(f"    approach: no clean bend onto the planned lane within 3 mm ({why}); converging along the escape")
             if sep > 2 * half + 2 * cfg.track_width and vw is not None:
                 # TIPS FAR APART across the escape (a comb of teeth between
                 # them, or two columns' balls): each leg runs on along its
@@ -885,19 +919,25 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                         if os.environ.get('BRAID_PAIR_DEBUG'):
                             print(f"    approach: tips {sep:.2f} mm apart -- legs run {run:.1f} mm along the escape, "
                                   f"then converge over {conv:.2f} mm")
-                        return legs, ep, en
+                        return legs, ep, en, d
                     run += 0.1
                 if os.environ.get('BRAID_PAIR_DEBUG'):
                     print(f"    approach: tips {sep:.2f} mm apart -- no clean convergence within 3 mm ({why}); straight approach")
             end_p = (mid[0] + d[0] * appr + sgn * n[0] * half, mid[1] + d[1] * appr + sgn * n[1] * half)
             end_n = (mid[0] + d[0] * appr - sgn * n[0] * half, mid[1] + d[1] * appr - sgn * n[1] * half)
             return [Segment(tip_p[0], tip_p[1], end_p[0], end_p[1], cfg.track_width, layer, p_id),
-                    Segment(tip_n[0], tip_n[1], end_n[0], end_n[1], cfg.track_width, layer, n_id)], end_p, end_n
+                    Segment(tip_n[0], tip_n[1], end_n[0], end_n[1], cfg.track_width, layer, n_id)], end_p, end_n, d
+
+        def _lane_of(conn):
+            c0 = (conn[0] if isinstance(conn, list) else conn) if conn else None
+            if isinstance(c0, tuple) and len(c0) == 2 and isinstance(c0[0], tuple):
+                return (c0[0], c0[1])
+            return None
         if 'a' not in connected:
-            sa, a_p, a_n = _appr(a_p, a_n, a_dir, a_layer)
+            sa, a_p, a_n, a_dir = _appr(a_p, a_n, a_dir, a_layer, lane=_lane_of(a_conn))
             approach += sa
         if 'b' not in connected:
-            sb, b_p, b_n = _appr(b_p, b_n, b_dir, b_layer)
+            sb, b_p, b_n, b_dir = _appr(b_p, b_n, b_dir, b_layer, lane=_lane_of(b_conn))
             approach += sb
     pts = [a_p, a_n, b_p, b_n] + list(window_pts or [])
     # ...and 1.5 mm past each end along its direction: a connector's ends
@@ -1044,9 +1084,25 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                                             forced_source_dir=a_dir,
                                             forced_target_dir=b_dir)
     if not result or result.get('failed'):
+        blocked = (list((result or {}).get('blocked_cells_forward') or [])
+                   + list((result or {}).get('blocked_cells_backward') or []))
+        if result and not blocked and attempt < 2:
+            # a refusal with NO frontier is the router's own check on the
+            # pose it chose -- its connectors crossing the legs, or an
+            # intra-pair graze ("rejecting the pair rather than shipping a
+            # short") -- not a wall: the same ends are tried again with
+            # STRAIGHT approaches, twice then three times as long, which
+            # puts the pose further out and square to the tips (zynq K44
+            # DQS1 at its berth, 2026-09-20)
+            if os.environ.get('BRAID_PAIR_DEBUG'):
+                print(f"    pair route refused with no frontier -- retrying with straight approaches x{attempt + 2}")
+            return _connect_pair_prod(pcb, p_id, n_id, a_p0, a_n0, a_layer0, b_p0, b_n0, b_layer0,
+                                      cfg, band, margin, band_slack, virtual, window_pts,
+                                      virtual_vias, report, gap, a_dir0, b_dir0, half,
+                                      a_conn=None, b_conn=None, appr_scale=float(attempt + 2),
+                                      attempt=attempt + 1)
         if report is not None and result:
-            report['blocked'] = (list(result.get('blocked_cells_forward') or [])
-                                 + list(result.get('blocked_cells_backward') or []))
+            report['blocked'] = blocked
             report['window'] = window
             report['cfg'] = cfg
         return None
