@@ -143,6 +143,10 @@ do not trust a block:
 ```jsonc
 {"iteration": 3,                       // position in the ledger
  "kind": "completion",                 // completion | placement | systemic | classification
+ //   a `classification` row needs --shape AND --lever (#963): L5 refuses a
+ //   second unclassified routing retry, and `--final --stop-condition 4`
+ //   refuses without a live one. A lever that only repeats the shape word
+ //   is refused too -- the lever is the MEASUREMENT that named the shape.
  "parent_sha": "9c41f0...",            // result_sha of the last ACCEPTED entry
  "result_sha": "2ab77e...",            // content hash; step-back checks it out byte-exact
  "lever": "rip lever: --rip-existing-nets GPIO7, width pinned",

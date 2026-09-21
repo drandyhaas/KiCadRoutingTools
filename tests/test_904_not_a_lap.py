@@ -129,7 +129,7 @@ def test_a_cross_half_declaration_does_not_retract_the_other_halfs():
 
     again = lap('placement',
                 exhausted={'half': 'placement', 'reason': 'and again'})
-    assert C._declaration(_rows(dec, again), 'placement') == \
+    assert C._declaration(_rows(dec, again), 'placement')[:2] == \
         ('and again', True), 'a self-declaring row RE-ARMS, it does not retract'
     print("  PASS: a cross-half declaration is not this half going back to work")
 
@@ -257,6 +257,101 @@ def test_a_lap_after_a_close_out_is_not_measured_against_it():
             'it was compared against the close-out row instead:\n' + r.stderr)
         assert 'FEWER components' not in r.stderr, r.stderr
     print("  PASS: the previous lap is a lap, not the close-out")
+
+
+# --- #963: the declaration is bound to the board its own row names ----------
+#
+# These live here rather than in a file of their own because `_declaration` and
+# `_half_state` are what they are about, and this file already owns the
+# hand-built-row idiom for both. A separate file would have had to re-invent
+# `lap()` and `_rows()`, and a second copy of a fixture builder is how two
+# tests come to disagree about what a lap is.
+
+DEC_SHA = 'a' * 64          # the board the claim was made about
+LATER_SHA = 'b' * 64        # a board produced after it
+
+
+def _decl(sha=DEC_SHA, half='placement', reason='every lever spent'):
+    return {'kind': 'systemic', 'accepted': True, 'result_sha': sha,
+            'exhausted': {'half': half, 'reason': reason}}
+
+
+def test_a_declaration_names_the_board_it_was_made_about():
+    """`result_sha` was on the row all along; nothing read it.
+
+    Run 29 declared placement exhausted against a board that existed for eight
+    minutes, and the claim outlived it. The binding did not have to be added --
+    `cmd_record` writes `result_sha` on every row and `--board` is required --
+    so a new `exhausted.board_sha` key would have been a second number for one
+    fact, absent on every ledger already written.
+    """
+    got = C._declaration(_rows(_decl()), 'placement')
+    assert got == ('every lever spent', True, DEC_SHA), got
+    again = _decl(sha=LATER_SHA, reason='and again')
+    got = C._declaration(_rows(_decl(), again), 'placement')
+    assert got[2] == LATER_SHA, (
+        'the sha must come from the row that RE-ARMS the walk, not from an '
+        f'earlier declaration: {got}')
+    print("  PASS: a declaration carries the board it was made about")
+
+
+def test_a_declaration_about_another_board_is_reported_not_retracted():
+    st = C._half_state(_rows(lap(), _decl()), 'placement', 5,
+                       board_sha=LATER_SHA)
+    assert st['flat'] and st['why'] == 'declared-exhausted', st
+    assert st['declared_board'] == DEC_SHA, st
+    assert st['declared_stale_board'] == DEC_SHA, st
+    print("  PASS: a stale board is named, and the half stays declared")
+
+
+def test_a_declaration_survives_five_routing_laps():
+    """The anti-"any digest change invalidates" test.
+
+    That is the contributor's own "safe initial implementation", and it is not
+    safe -- it is inert-making. Every accepted lap of EITHER half writes a new
+    board and a new sha, so a placement declaration would die on the very next
+    routing lap, although routing copper says nothing about placement's
+    remaining levers. Under such a rule this assertion fails.
+    """
+    rows = _rows(_decl(), *[lap('routing') for _ in range(5)])
+    st = C._half_state(rows, 'placement', 5, board_sha=LATER_SHA)
+    assert st['flat'] and st['why'] == 'declared-exhausted', st
+    assert 'declared_superseded' not in st, st
+    print("  PASS: routing laps do not retract a placement declaration")
+
+
+def test_the_board_test_never_speaks_over_lap_supersession():
+    """Two findings for one fact is one finding too many.
+
+    If a lap of the half was recorded after the declaration, the half went back
+    to work and `declared_superseded` says so. Adding `declared_stale_board`
+    beside it would report the same retraction twice, in two vocabularies.
+    """
+    st = C._half_state(_rows(_decl(), lap('placement')), 'placement', 5,
+                       board_sha=LATER_SHA)
+    assert st.get('declared_superseded') == 'every lever spent', st
+    assert 'declared_stale_board' not in st, st
+    assert st['why'] != 'declared-exhausted', st
+    print("  PASS: supersession wins, and is reported once")
+
+
+def test_an_unanswerable_board_question_invalidates_nothing():
+    """Every hand-built score in the suite lacks `board_sha`.
+
+    A question nobody can answer must not decide: absent on the score and
+    absent on `--board` means the declaration is judged exactly as it was
+    before this existed.
+    """
+    for sha in (None, ''):
+        st = C._half_state(_rows(lap(), _decl()), 'placement', 5,
+                           board_sha=sha)
+        assert st['flat'] and st['why'] == 'declared-exhausted', (sha, st)
+        assert 'declared_stale_board' not in st, (sha, st)
+    same = C._half_state(_rows(lap(), _decl()), 'placement', 5,
+                         board_sha=DEC_SHA)
+    assert 'declared_stale_board' not in same, same
+    assert same['declared_board'] == DEC_SHA, same
+    print("  PASS: no sha, and the same sha, both invalidate nothing")
 
 
 if __name__ == '__main__':

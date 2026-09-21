@@ -27,6 +27,8 @@ __all__ = ['merge_summaries', 'merge_route_summaries', 'summary_min',
            'RECONCILE_ABORTED', 'EFFORT_KEYS']
 
 SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
+# #962: `fab_notes`' ship-time via_in_pad record, printed after the summaries
+VIA_IN_PAD_RE = re.compile(r'VIA_IN_PAD_JSON: (\{.*\})')
 
 # The one-line compact tally route.py prints at the end of every OUTERMOST
 # run (CLI and GUI alike): the merged verdict in <1KB, where the big
@@ -243,7 +245,14 @@ def merge_route_summaries(log: str) -> Optional[Dict]:
         return None
     summaries = [json.loads(s) for s in raw]
     aborted = log.rfind(RECONCILE_ABORTED) > log.rfind(raw[-1])
-    return merge_summaries(summaries, aborted)
+    merged = merge_summaries(summaries, aborted)
+    # #962: the ship-time Type VII record runs after every JSON_SUMMARY line,
+    # so it is printed on its own line; route.py sets the same record on the
+    # merged `--json-out` document. The last one is the shipped board's.
+    vip = VIA_IN_PAD_RE.findall(log)
+    if merged is not None and vip:
+        merged['via_in_pad'] = json.loads(vip[-1])
+    return merged
 
 
 def summary_min(merged: Dict, name_cap: int = 20) -> Dict:

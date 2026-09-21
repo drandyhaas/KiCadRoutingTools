@@ -303,6 +303,12 @@ def dirty_net_ids(pcb_routed, drc_json_path: str) -> List[int]:
                if n.name}
     out = set()
     for item in (doc.get('items') or ()):
+        # #962: a via in a paste opening that is ACCEPTED (filled+capped,
+        # inherited, or undeclarable in the file format) does not make its
+        # net DRC-dirty; every via the tool stamps would otherwise do so.
+        if (item.get('type') == 'via-in-paste'
+                and str(item.get('accepted', '')).endswith('via-in-paste')):
+            continue
         for key in ('net1', 'net2'):
             nid = by_name.get(item.get(key))
             if nid is not None:

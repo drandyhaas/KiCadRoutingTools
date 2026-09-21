@@ -423,10 +423,11 @@ def test_the_loader_refuses_every_malformed_along_edge_claim():
     # distinguishes a chosen one from a generator default.
     assert fp.READER_VERSION >= 2, (
         f"{fp.READER_VERSION}: #712's fields need a reader that knows them")
-    assert fp.READER_VERSION == 5, (
+    # 6 since #959 (#1000): `edge_connectors[].side`, the connector's face.
+    assert fp.READER_VERSION == 6, (
         f"{fp.READER_VERSION}: the field vocabulary grew. Re-state this "
-        f"literal and say which field arrived, the way #712, #837, #902 and "
-        f"#893 did")
+        f"literal and say which field arrived, the way #712, #837, #902, "
+        f"#893 and #959 did")
     # What this pair checks is the GATE -- a document may demand at most what
     # this build can serve. Written against `READER_VERSION` rather than a
     # literal 2/3, because the change-detector duty is already carried by the

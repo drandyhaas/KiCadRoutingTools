@@ -625,7 +625,7 @@ def fit_section(pcb, pcb_file, extents, step, clearance, edge, skipped):
 # tell which half of a brief for an unplaced board to believe -- and every
 # section here used to read alike.
 SOURCES_NOTE = {
-    'design_brief': 'placement.design_brief.load_brief + compile_brief '
+    'design_brief': 'placement.design_brief.load_brief + compile_with_consequences '
                     '[requires: a sibling <board>.design-brief.json, or '
                     '--brief. This is the only DECLARED section: every other '
                     'one is measured or inferred from the board]',
@@ -721,8 +721,8 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
         # with --requirements" -- a channel nothing reads. This is where that
         # advice now lands, structured.
         from placement import design_brief as _db
-        _frag, _rep = _db.compile_brief(
-            design_brief, board_refs=sorted(pcb.footprints or {}))
+        _frag, _rep = _db.compile_with_consequences(
+            design_brief, pcb, pcb_file)
         brief['design_brief'] = {
             'path': design_brief_path,
             'declared': _rep['declared'],
@@ -733,6 +733,7 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
             'product': _rep['product'],
             'fixed': _rep['fixed'],
             'counts': _rep['counts'],
+            'consequences': _rep.get('consequences') or [],
             'note': ('DECLARED, not measured. Read this beside `mechanical`, '
                      'which is INFERENCE from part class: where the two '
                      'disagree the declaration is the authority, and '
@@ -960,8 +961,9 @@ def main(argv=None):
                         "(enclosure, connector edges, thermal, EMI). Carried "
                         "VERBATIM")
     p.add_argument("--requirements-file", default=None)
-    from placement.cli_gates import add_brief_arg
+    from placement.cli_gates import add_brief_arg, add_mechanical_arg
     add_brief_arg(p)
+    add_mechanical_arg(p)
     p.add_argument("--fit", action="append", metavar="WxH",
                    help="Also report where a part of this extent fits at all "
                         "(repeatable)")
@@ -1001,6 +1003,13 @@ def main(argv=None):
     dbrief, dbrief_path, _rc = load_brief_or_exit(a, a.board)
     if _rc:
         return _rc
+    # #959 (#1001): the RECORDED mechanical facts, beside the `mechanical`
+    # section's INFERENCE -- under their own key, because the two answer
+    # different questions ("what looks mechanical" vs "what was declared").
+    from placement.cli_gates import load_mechanical_or_exit
+    mech, mech_path, _mrc = load_mechanical_or_exit(a, a.board)
+    if _mrc:
+        return _mrc
 
     render_doc = None
     if a.render_json:
@@ -1017,8 +1026,21 @@ def main(argv=None):
                         requirements=req, fit=_parse_fit(a.fit),
                         fit_step=a.fit_step, render_doc=render_doc,
                         design_brief=dbrief, design_brief_path=dbrief_path)
+    if mech is not None:
+        from placement import reconcile as _rc_mod
+        _prov = _rc_mod.mechanical_provenance(mech, a.board)
+        brief['mechanical_declared'] = {
+            'path': mech_path, 'shape': mech['shape'],
+            'sha256': mech['sha256'], 'provenance': _prov[0],
+            'provenance_why': _prov[1],
+            'poses': mech['poses'], 'edges': mech['edges'],
+            'floors': mech['floors']}
     if not a.quiet:
         print(format_text(brief))
+        if mech is not None:
+            print(f"mechanical declaration {mech_path}: "
+                  f"{len(mech['poses'])} pose(s), {len(mech['edges'])} "
+                  f"edge(s) -- recorded facts ({_prov[0]}: {_prov[1]})")
     if a.json:
         with open(a.json, 'w', encoding='utf-8') as f:
             json.dump(brief, f, indent=1, sort_keys=True, default=str)

@@ -3196,6 +3196,10 @@ def create_plane(
     # copper in different ORDER, and list position leaks into decisions.
     from kicad_parser import canonicalize_pcb_data_order
     canonicalize_pcb_data_order(pcb_data)
+    # #962: the input's vias as values, for the Type VII stamp (only vias this
+    # run ADDS are stamped; see fab_notes.via_protection_stamps)
+    from fab_notes import via_snapshot as _via_snapshot962
+    _input_vias962 = _via_snapshot962(pcb_data.vias)
 
     # --plane-layers takes BARE copper layer names positionally matched to
     # --nets, but the natural thing to type (and what the routing skill's R1
@@ -4012,12 +4016,6 @@ def create_plane(
                 ripped_names.append(net.name if net else f"net_{rid}")
             print(f"  Nets excluded from output: {', '.join(ripped_names)}")
 
-    # Via-in-pad is a FAB requirement this run may just have created (#489 §8).
-    # Emitted from the shared engine so the GUI planes tab reports it too.
-    from fab_notes import print_via_in_pad_note
-    print_via_in_pad_note(all_new_vias, pcb_data.pads_by_net,
-                          context="plane stitching vias")
-
     # Finalize plane tap copper ONCE, before the write/dry-run split, so the
     # GUI (dry_run=True, return_results) and the CLI (writes the file) emit
     # identical copper for identical inputs: neck grazes -> graze prune /
@@ -4033,6 +4031,20 @@ def create_plane(
         track_width, grid_step, via_size, via_drill, hole_to_hole_clearance,
         net_clearances=net_clearances, strip_sink=_finalize_strips,
         same_net_pad_clearance=same_net_pad_clearance)  # #581
+
+    # Via-in-pad / via-in-paste is a FAB requirement this run may just have
+    # created (#489 §8, #962). It is DECLARED on the via itself, as
+    # (capping yes) (filling yes), and recorded. It runs AFTER the finalize,
+    # which merges and nudges vias, so it describes the vias that ship. It is
+    # set on the dicts before the write/return split, so the CLI writer
+    # (plane_io) and the GUI planes tab (apply_via_protection) both get it.
+    from fab_notes import (via_protection_stamps as _vps962,
+                           apply_stamps_in_memory as _asim962,
+                           print_via_protection_record as _pvpr962)
+    _stamps962, _via_in_pad962 = _vps962(all_new_vias, _input_vias962, pcb_data)
+    _asim962(_stamps962)
+    _pvpr962(_via_in_pad962, "plane stitching vias")
+    create_plane.last_via_in_pad = _via_in_pad962
 
     # Route trace (#482): emit the finalized plane-tap tracks/vias, grouped by
     # net so each plane's taps land as one animation event, then write
@@ -4320,7 +4332,7 @@ Examples:
                         default=None,
                         help="Edge-to-edge clearance (mm) between placed vias and same-net pads. "
                              "> 0 keeps ALL of this step's vias (stitching, taps, joins) off "
-                             "same-net pads and is recorded in the sibling .kicad_pro so later "
+                             "same-net pads and the net's solder-paste openings (#962) and is recorded in the sibling .kicad_pro so later "
                              "chain steps (route/route_diff/fanout/repair) inherit it (#581); "
                              "0 keeps its legacy stitching-only meaning; -1 explicitly allows "
                              "via-in-pad. Default: the project's recorded value, else -1.")
@@ -4640,6 +4652,13 @@ Examples:
                 'layers': v.layers,
                 'free': getattr(v, 'free', False)
             } for v in gnd_vias]
+            # #962: a GND return via this adds in a pad or paste opening
+            # declares Type VII like every other tool-added via (all new here).
+            from fab_notes import (via_protection_stamps, apply_stamps_in_memory,
+                                   print_via_protection_record)
+            _st962, _rec962 = via_protection_stamps(via_dicts, [], pcb_data)
+            apply_stamps_in_memory(_st962)
+            print_via_protection_record(_rec962, "GND return vias")
 
             # Write vias to output file
             add_tracks_and_vias_to_pcb(

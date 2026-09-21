@@ -103,9 +103,10 @@ ROWS = [
     # version BELOW the one #712's fields need, so `5 -> 4` would be a bump
     # merely smaller rather than absent -- a row that could survive for the
     # wrong reason. `5 -> 1` is the same claim the row has always made.
-    # RE-ANCHORED for #893, which took READER_VERSION 4 -> 5.
+    # RE-ANCHORED for #893, which took READER_VERSION 4 -> 5, and #959
+    # (#1000), which took it 5 -> 6.
     ('reader-version-not-bumped', 'fp',
-     "READER_VERSION = 5",
+     "READER_VERSION = 6",
      "READER_VERSION = 1",
      (TSCH, T712), KILLED),
 

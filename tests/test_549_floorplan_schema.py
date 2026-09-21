@@ -126,7 +126,9 @@ KEY_SETS = {
         'schema', 'kind', 'board', 'units', 'min_reader', 'envelope',
         'defaults', 'blocks', 'keepouts', 'edge_connectors', 'decaps',
         'must_lock', 'legality_budget', 'health', 'severity', 'context',
-        'overlap_waivers', 'assembly', 'proximity'},
+        'overlap_waivers', 'assembly', 'proximity',
+        # #959 (#997): written answers to P1's refusals, never a verdict.
+        'dispositions'},
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
@@ -141,7 +143,10 @@ KEY_SETS = {
         'observed_overhang_mm', 'context',
         # #712: WHERE ALONG the edge. Mutually exclusive, absent by default,
         # and never written by `emit_intent`.
-        'center_on_edge', 'along_edge_band'},
+        'center_on_edge', 'along_edge_band',
+        # #959 (#1000): the face, compiled from the brief. Absent by
+        # default and never written by `emit_intent` itself.
+        'side'},
     '_OVERHANG_KEYS': {'min', 'max'},
     '_CENTER_ON_EDGE_KEYS': {'tolerance_mm'},
     '_ALONG_EDGE_BAND_KEYS': {'from', 'to'},
@@ -163,6 +168,8 @@ KEY_SETS = {
     # sugar that `compile_brief` expands before it reaches this schema.
     '_PROXIMITY_KEYS': {'ref', 'near', 'max_mm', 'basis', 'pads', 'note',
                         'source', 'context'},
+    # #959 (#997): one map per kind of question P1 refuses on.
+    '_DISPOSITION_KEYS': {'rules', 'withheld', 'refs', 'contradictions'},
 }
 
 
@@ -213,6 +220,7 @@ def test_the_key_sets_are_exactly_what_is_documented():
         '_EDGE_CONNECTOR_KEYS': 'edge_connectors[]',
         '_ASSEMBLY_KEYS': 'assembly',
         '_PROXIMITY_KEYS': 'proximity[]',
+        '_DISPOSITION_KEYS': 'dispositions',
     }
     checked = 0
     for name, row in sorted(TABLE_ROWS.items()):
@@ -283,12 +291,22 @@ def test_an_intent_using_every_known_key_loads():
                    'affinity_exempt_net_ids': [3], 'ignore_net_ids': [1, 2],
                    'max_fanout': 30, 'block_displacement_mm': 4.0,
                    'plane_layers': ['In1.Cu', 'In2.Cu']},
-        'severity': {name: WARN for name in sorted(_SEVERITY_KEYS)},
+        # WARN everywhere it is accepted. `mechanical_drift` is promote-only
+        # (#959: the declared pose is a recorded fact), so it takes the one
+        # value it accepts.
+        'severity': {name: (ERROR if name == 'mechanical_drift' else WARN)
+                     for name in sorted(_SEVERITY_KEYS)},
         'context': {'note': 'read-only'},
         'overlap_waivers': [{'pair': ['U1', 'U2'], 'reason': 'net tie',
                              'context': {'why': 'w'}}],
         'assembly': {'sides': 'F', 'why': 'one reflow pass',
                      'context': {'quoted': 'the fab'}},
+        # #959. `rules` is EMPTY here on purpose: this intent arms every
+        # rule, and a disposition for an armed rule is refused at load.
+        'dispositions': {'rules': {},
+                         'withheld': {'overlap_area': 'w'},
+                         'refs': {'MH1': 'w'},
+                         'contradictions': {'J1:edge': 'w'}},
         # #902. `source` is compiler-written, `note` and `context` are the
         # prose slots, and `pads` names only refs this claim mentions.
         'proximity': [{'ref': 'Y1', 'near': 'U1', 'max_mm': 2.0,
@@ -316,6 +334,7 @@ def test_an_intent_using_every_known_key_loads():
     seen |= set(raw['overlap_waivers'][0])
     seen |= set(raw['assembly'])
     seen |= set(raw['proximity'][0])
+    seen |= set(raw['dispositions'])
     for k in raw['keepouts']:
         seen |= set(k)
     missing = sorted({k for keys in KEY_SETS.values() for k in keys} - seen)
@@ -582,11 +601,32 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'keepout_allow_unresolved',
                                         'decap_pin_distance_inferred',
                                         'decap_pin_uncovered',
-                                        'proximity_unresolved'}
+                                        'proximity_unresolved',
+                                        # #959 (#1001)
+                                        'mechanical_drift',
+                                        # #959 (#998): plan_check
+                                        'plan_zone_exclusive_unsatisfiable',
+                                        'block_glob_literal',
+                                        'plan_fixed_outside_zone',
+                                        'plan_zone_overfull',
+                                        'plan_zone_crowded',
+                                        'plan_edge_overfull',
+                                        'plan_edge_crowded',
+                                        'plan_board_overfull',
+                                        'plan_board_crowded',
+                                        'plan_fixed_overlap',
+                                        'plan_fixed_overlap_budget',
+                                        # #959 (#1000)
+                                        'edge_connector_side'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
-        i = intent_from_dict(_base(severity={name: WARN}))
-        assert i.severity_of(name) == WARN, name
+        # Two names accept one direction only, and say so at load:
+        # `edge_connector_side` cannot be raised (nothing moves a part
+        # between faces), `mechanical_drift` cannot be demoted (the pose is
+        # a recorded fact).
+        want = ERROR if name == 'mechanical_drift' else WARN
+        i = intent_from_dict(_base(severity={name: want}))
+        assert i.severity_of(name) == want, name
     print(f"  PASS: {len(expected)} settable rule names accepted, "
           f"a typo refused (RULES has {len(RULES)})")
 

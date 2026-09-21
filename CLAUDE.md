@@ -204,6 +204,20 @@ Validate routed boards against the *real* spec, with the right checker — most
   `height` are refused BY NAME -- the outline is not ours to change, and nothing
   in the placement stack measures z, so a declared height limit would grade
   nothing at all. See `docs/design-brief.md`.
+  **Since #959 the connector declarations COMPILE** (`design_brief.
+  compile_with_consequences`, which `check_floorplan`, `board_brief` and the
+  placement skill's P1 call, so emit, grade and drift see the same clauses).
+  `edge_mount` / `through_edge` compile to a 0.75 mm setback, read on the drawn
+  body for an edge-mount part or an edge receptacle (a class `user_facing`,
+  the emitter or a declared edge assigns) and on the courtyard otherwise. A vertical mount is exempt from the receptacle seat.
+  A perpendicular cable plus `user_top_side` compiles to an advisory face.
+  A declared `cable_envelope_mm` compiles to a keep-out, off a FILE-locked
+  part only. Each derived number is labelled `derived_default` rather than
+  passed off as a declaration. `mechanical.json` beside the board is read the
+  same way (`--mechanical` / `--no-mechanical`): reconciled against the brief
+  and the outline, value by value with an authority, and compiled into
+  grade-only anchors, whose refs P1 requires to be locked. `docs/floorplan-intent.md` has the
+  authority table.
 - **Protected nets (#521): matched groups and routed diff pairs are recorded in
   the sibling `.kicad_pro`** (`kicad_routing_tools.protected_nets`, written next
   to the DRC-floor writeback, carried down chains by the project copy) and later
@@ -377,6 +391,21 @@ at all, so it converts one-for-one into `unrouted` and `broken`. Measured, run
 Read it off `render_placement --json-out`'s
 `checklist.a_off_outline.pad_copper` — a whole-board pass/fail verdict is the
 wrong channel for it.
+
+**Footprint GRAPHIC copper past the outline is the same defect (#962)**, and
+it used to be invisible: a drawn tab or antenna is not a pad, and check_drc's
+`immutable-graphic` waiver accepted any footprint graphic at the edge.
+`place_pose set U2 115.34 93.6 --rot 90` put esp_prog U2's F.Cu tab 1.11 mm off
+the board with place_pose `legal`, check_drc clean and check_assembly
+buildable. It is now one measurement, `check_drc.footprint_graphic_outline_census`,
+read by check_drc (`graphic-off-board`), by `grade_pad_legality`
+(`oob_graphic_copper_*`, which place_pose gates on) and by
+`render_placement`'s `checklist.a_off_outline.graphic_copper`. A LOCK is not
+a waiver: placement stamps locks itself, so a lock would launder the overrun
+the last lap made. Grazes INSIDE the outline stay accepted as library art,
+but only `check_drc --baseline <the run's starting board>` can tell an
+inherited graze from one a part move created (`graphic-board-edge`); without
+it they read `unverified`. Pass `--baseline` whenever you have that board.
 
 **Scope a placement search to the refs the gate names.** When a gate names
 specific parts, free exactly those and lock everything else. A global sweep
@@ -705,6 +734,20 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   (NOT `pcb.stackup`). Empty list if the board has no stackup section.
 - StackupLayer fields: `name`, `layer_type` ('copper', 'core', 'prepreg', ...),
   `thickness` (mm), `epsilon_r`, `loss_tangent`, `material`
+- `pcb.board_info.pad_to_paste_clearance` / `_ratio` - the board's paste
+  margin, the last term of a pad's paste-margin resolution (#962)
+- `pcb.board_info.via_protection_setup` - the board's via protection policy,
+  all five tokens, from either setup form; an undeclared token takes KiCad's
+  factory value. What a via is FABRICATED with is
+  `fab_notes.effective_via_protection(via.tenting_attrs, setup)`, token by
+  token (#962)
+- `pcb.paste_apertures` - every solder-paste OPENING (#962): pad openings
+  grown by their resolved margin, paste-only pads, and paste-layer graphics
+  (esp_prog U2's F.Paste tab around an F.Cu-only pad). Which nets an opening
+  concerns is `paste_apertures.apertures_for_net` -- a graphic opening belongs
+  to the owner's copper it overlaps, SMD or through-hole. A declared pad
+  rectangle is NOT its paste opening; anything asking "is this via under
+  solder" must read these
 
 ### Footprint Attributes
 
@@ -750,7 +793,14 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   with copper pads owns a land pattern (modelled, and NOT relocated to silk any
   more; it used to be, on every write, on both fronts), a pad-less one is a
   logo (relocated, as #146 has always done, and therefore not modelled). NPTH
-  pads do not count. Only the PERIMETER is modelled, never the interior fill.
+  pads do not count. Only the PERIMETER is modelled as an obstacle, never the
+  interior fill. #962 adds what a MEASUREMENT needs: `segment.drawn_width`
+  (the stroke as drawn -- `width` models a stroke-0 fill at the track width),
+  `graphic_kind`, `graphic_circle` (the true circle; the outline is a 16-gon)
+  and `graphic_filled`, and `pcb.graphic_copper_unmeasured` names the copper
+  the parser skips (logos, bezier curves, copper text) so a grade can say what
+  it did not see. The own-pad lift below does NOT make that copper free to
+  put vias in: its paste opening is `pcb.paste_apertures`.
   **The obstacle map's own-pad lift is the half that is not free**: net-0
   copper is foreign to every net including the pad it was drawn around, so
   `check_drc.graphic_own_pad_nets` lifts the graphic segments that touch a pad
@@ -858,11 +908,28 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   specified nothing. Read by BOTH parse paths in the same normalized form. Pass it
   back via `generate_via_sexpr(..., tenting_attrs=...)` for any via that already
   existed — a RE-PLACED via (rip-up, sub-grid nudge, tap relocation) otherwise
-  loses its spec and is re-stamped with front+back tenting, which is wrong for
-  via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
+  loses its spec and ships inheriting the board's setup instead, which is wrong
+  for via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
   emit **no protection token at all**, so they inherit the board's own
   `(setup ...)` policy — what pcbnew does for a via the GUI adds and KiCad for
-  one the user places. Probed against pcbnew 10.0.0: a via at
+  one the user places. **The one exception (#962):** a via under solder -- its
+  barrel overlaps a same-net SMD pad or a paste opening of its own net --
+  DECLARES Type VII, `(capping yes) (filling yes)`
+  (`fab_notes.via_protection_stamps`), at ship time, when THIS run created
+  the site: it added the via, or a part it moved put a pad or paste opening on
+  an input via (`site_created`; place_fanout_clearance pulls cap pads onto
+  same-net vias by design). Not stamped: a via the input already had under
+  solder (kept as it was -- and given the input's spec BACK if it was stripped
+  and laid again), a via whose spec DECIDES capping or filling (a tenting-only
+  spec gets Type VII merged in), a board whose setup already says
+  filled+capped, and a board whose FILE FORMAT predates the tokens (KiCad
+  9.0's parser has no case for them, read from its source, not probed; those
+  count `unstampable`). The record is `via_in_pad` in the route step's merged
+  `--json-out`, and `check_drc` reports what still ships unprotected as
+  `via-in-paste` (`--baseline` accepts only a via the input had under solder,
+  unprotected; on a pre-KiCad-10 file every other such via is accepted
+  `undeclarable-via-in-paste` and counted, since the file cannot declare it).
+  Probed against pcbnew 10.0.0: a via at
   `*_MODE_FROM_BOARD` serialises with NO token and a token appears **only** for
   an explicit override, so anything stamped turns an inheriting via into an
   override. The old rules — a hardcoded front+back tenting, then
@@ -875,14 +942,13 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   tented — a fab error, hidden because KiCad's FACTORY policy is tented so the
   two agree on an ordinary board. `prevailing_via_protection` still exists and is
   still correct; it is just not a default any more. When RE-PLACING a via, also pass
-  `inherit_when_unspecified=True` (#741). `None` **and `{}`** otherwise both mean
-  "the caller has no opinion", which on KiCad 10 output stamps front+back
-  tenting (on a numeric-net board they emit nothing) — and `{}` is exactly what
-  `Via.tenting_attrs` holds for a via that carries no spec, so handing it back
-  verbatim is the bug. With the flag an empty spec emits nothing, so the via
-  keeps inheriting the board's `(setup ...)` — what it had, and what the GUI
-  side (`gui_utils.apply_via_protection`, early-return on an empty spec) has
-  always done. Spell it `tenting_attrs=v.tenting_attrs,
+  `inherit_when_unspecified=True` (#741). An empty spec now emits nothing in
+  every case (`kicad_writer.via_protection_sexpr`), so the via keeps inheriting
+  the board's `(setup ...)` — what it had, and what the GUI side
+  (`gui_utils.apply_via_protection`, early-return on an empty spec) has always
+  done; `None` and `{}` used to stamp front+back tenting on KiCad 10 output,
+  and the flag was the fix. It is still passed: it records at the call site
+  that the via ALREADY EXISTED. Spell it `tenting_attrs=v.tenting_attrs,
   inherit_when_unspecified=True` — a keyword rather than a sentinel VALUE,
   because the repo's own idiom for carrying a spec is `dict(...)`, which would
   turn any dict-shaped sentinel back into a plain `{}` and silently restore the

@@ -82,7 +82,13 @@ The DRC checker validates:
 11. **Track width** - Segments are at least the fab-floor minimum track width (the active `--fab-tier`'s deepest floor; standard = JLC 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
 12. **Via / hole size** - Via outer diameter and drill are at least the deepest fab via the tier can reach — the advanced (small/fine) via the router escalates to: JLC 0.25mm/0.15mm. Pass `--fab-tier` so grading matches how the board was routed (see [Fab Tier Options](configuration.md#fab-tier-options)).
 
+13. **Footprint graphic copper past the outline** (`graphic-off-board`, #962) - Copper a footprint draws (a SOT-89 tab, an antenna) reaching past the board outline, measured with the stroke as drawn, circles on their true curve, and inside a FILLED shape. One row per shape. It runs even when the edge check is off (severity `ignore`), and regardless of `--nets` (graphic copper is net 0). Waived only for board-level art and for a footprint that owns the board outline; a lock is not a waiver. Copper the parser does not model (pad-less logos, bezier curves, copper text) is printed as not measured.
+14. **Graphic copper grazing the edge** - Inside the outline but within the edge clearance, footprint graphic copper is accepted as `immutable-graphic` (library art no routing pass can fix). With `--baseline BOARD`, a graze on a part whose pose differs from the baseline is a `graphic-board-edge` violation (`origin: placement`); an unmoved one is accepted `inherited`. Without it, grazes are accepted `unverified` and a console line says so.
+15. **Via in a solder-paste opening** (`via-in-paste`, #962) - A via whose barrel overlaps a paste opening of its own net and is not filled AND capped (IPC-4761 Type VII; the via's own spec, then the board setup, then KiCad's factory value, token by token). Paste wicks into such a barrel, and KiCad has no such check. A filled+capped via is accepted `protected-via-in-paste`; with `--baseline BOARD`, a via the baseline already had inside an opening, unprotected, is accepted `inherited-via-in-paste`; on a file older than KiCad 10 (version < 20250000), which cannot carry per-via capping/filling at all, every other such via is accepted `undeclarable-via-in-paste` (the requirement belongs on the fab drawing). A buried via, or a blind via that does not reach the paste side, is not a hit. A console line and the `--json` `via_in_paste` block count every class.
+
 Checks 11–12 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
+
+`--baseline BOARD` is the board this one was derived from (the unrouted input, or the placement run's starting board). It is a checker option, not a routing parameter; pass it whenever you have that board, or pre-existing vias in paste openings read as violations against the run.
 
 ### Clearance Margin
 
@@ -196,6 +202,18 @@ direct move — name the ref in `unlock` in the same call if you mean it;
 `--force` deliberately does not open that, and the unlock is verified on the
 staged board before anything is promoted.
 
+With `--intent PATH` (#959) each MOVED part is also graded against that
+floorplan intent's zones, by the grade's own `zone_containment` rule. A pose
+that leaves a part further outside its block's zone than it was, as an ERROR
+finding, refuses at exit 4, and nothing is written; with the rule demoted to
+warn the pose is written and the row reported. `JSON_SUMMARY.zone_check` names the block, the
+zone and the overrun before and after. The check is relative, like the legality
+verdict: a move from the pile toward its zone is never refused for not
+arriving. `--force` writes anyway and says so. A call that only locks or
+unlocks moves nothing and records `zone_check.skipped`. Run 29's lap-10
+`set Ref* ...` walked a part out of the plan's own zone and was caught only
+after the write. With a plan in hand, pass it.
+
 `--snap` is a two-rung ladder, because one rung was not enough: `pose_score`
 ranks first (it knows about wirelength and crossings), then the bare lattice
 around the aimed point, and **every** candidate from either rung is re-graded
@@ -236,6 +254,10 @@ with identical route args. Emits a ranked table, `seeds.json`, and a
 `JSON_SUMMARY` with `best_seed`. Exit 0 with a ranked winner, 4 when
 nothing was rankable -- including when every probe ran but produced no
 verdict, which returned 0 with `best_seed: null` until #713 fixed it.
+When `place_seed` refuses the zone PLAN (its exit 5, #959), the plan is the
+same for every seed, so the comparator stops at the first refusal and exits 4
+with the row marked `refused: plan_check`. `check_floorplan --intent PLAN
+--plan-only` checks a plan without seeding.
 
 There is **no probe timeout**. `--route-timeout` was removed (#713): a probe
 whose verdict a clock erased was not ranked worse, it was DROPPED from the

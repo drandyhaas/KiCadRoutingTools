@@ -334,7 +334,12 @@ def stage(src, out_board, truth_dir=None, mechanical_out=None):
     # overwritten manifest: those older rows still populate `claimed`, so a
     # previous run's claim can cover a ref this one wrote, and an undisclosed
     # count is the only thing that would make that invisible.
+    # `mechanical_sha256` (#959): what lets a later reader tell the file this
+    # stage wrote from one the run rewrote. Without it a `mechanical.json` is
+    # trusted on its location alone, and a run could "declare" a fact by
+    # writing it.
     _PV.start_regime(_wd, out_board, mechanical=os.path.abspath(mech),
+                     mechanical_sha256=_PV.sha256_file(mech),
                      prior_ledger_rows=_prior,
                      prior_stagings=_prior_stagings)
     if _outer is not None and os.path.abspath(_outer) != _wd:

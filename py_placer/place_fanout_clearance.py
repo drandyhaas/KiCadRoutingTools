@@ -148,6 +148,11 @@ Examples:
 
     print(f"Loading {args.input_file}...")
     pcb_data = parse_kicad_pcb(args.input_file)
+    # #962: which vias are under solder BEFORE any cap moves. The engine pulls
+    # cap pads onto same-net vias by design, and a via that lands under a pad
+    # that way needs Type VII declared like any other via-in-pad.
+    from fab_notes import via_snapshot as _via_snapshot962
+    _input_vias962 = _via_snapshot962(pcb_data.vias, pcb_data)
 
     result = repair_fanout_clearance(
         pcb_data,
@@ -265,6 +270,10 @@ Examples:
                             new_segments=result.get('new_segments'),
                             pcb_data=pcb_data)
         print(f"Wrote {args.output_file}")
+        # #962: a via this run's moves put under a pad or paste opening
+        # declares Type VII (the GUI fanout tab's twin is in fanout_gui).
+        from fab_notes import ship_via_protection_file as _ship962
+        _ship962(args.output_file, _input_vias962, context='place_fanout_clearance')
         # Carry the input board's .kicad_pro to the output (issue #160 chain of
         # custody). Without this, the next pipeline step finds no sibling
         # project, seeds a minimal one, and the board's own DRC rules -- notably

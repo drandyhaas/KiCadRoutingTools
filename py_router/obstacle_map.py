@@ -2793,9 +2793,127 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
     _ledger_close(obstacles, _pre, "remove_vias_list")
 
 
+def _aperture_keepout_cells(ap, coord: "GridCoord", margin: float) -> "np.ndarray":
+    """(N, 2) grid cells whose centre lies within `margin` mm of a paste
+    opening (#962). The shape decides the rasteriser:
+    - a pad opening uses the pad rasteriser the #581 pad branch uses, over
+      the inflated pad;
+    - a closed graphic uses `_rasterize_polygon_box`: its area when filled,
+      plus a band of half the stroke;
+    - a circle is exact;
+    - an open stroke is rasterised by its segment distance.
+    """
+    from routing_utils import pad_blocked_cells_array
+    step = coord.grid_step
+    sp = ap.shape_pad
+    if sp is not None:
+        gx, gy = coord.to_grid(sp.global_x, sp.global_y)
+        hw, hh = sp.size_x / 2, sp.size_y / 2
+        if sp.shape in ('circle', 'oval'):
+            cr = min(hw, hh)
+        elif sp.shape == 'roundrect':
+            cr = getattr(sp, 'roundrect_rratio', 0.25) * min(sp.size_x, sp.size_y)
+        else:
+            cr = 0
+        return pad_blocked_cells_array(
+            gx, gy, hw, hh, margin, step, cr,
+            off_x=sp.global_x - gx * step, off_y=sp.global_y - gy * step,
+            rotation_deg=getattr(sp, 'rect_rotation', 0.0) or 0.0)
+    reach = margin + ap.width / 2.0
+    if ap.circle is not None:
+        cx, cy, r = ap.circle
+        gx0, gy0 = coord.to_grid(cx - r - reach, cy - r - reach)
+        gx1, gy1 = coord.to_grid(cx + r + reach, cy + r + reach)
+        gxs, gys = np.meshgrid(np.arange(gx0, gx1 + 1, dtype=np.int32),
+                               np.arange(gy0, gy1 + 1, dtype=np.int32))
+        d = np.hypot(gxs * step - cx, gys * step - cy)
+        edge = np.maximum(d - r, 0.0) if ap.filled else np.abs(d - r)
+        m = edge < reach
+        return np.stack([gxs[m], gys[m]], axis=1).astype(np.int32)
+    chunks = []
+    for ring in ap.rings:
+        if ap.closed and len(ring) >= 3:
+            gx_lo, gy_lo, nx, ny, inside, edge_dist = _rasterize_polygon_box(
+                ring, coord, reach)
+            if inside is None:
+                continue
+            mask = edge_dist < reach
+            if ap.filled:
+                mask = mask | inside
+            cx_, cy_ = _box_masked_cells(gx_lo, gy_lo, nx, mask)
+            if len(cx_):
+                chunks.append(np.stack([cx_, cy_], axis=1))
+        else:
+            pts = np.asarray(ring, dtype=np.float64)
+            xs, ys = pts[:, 0], pts[:, 1]
+            gx0, gy0 = coord.to_grid(xs.min() - reach, ys.min() - reach)
+            gx1, gy1 = coord.to_grid(xs.max() + reach, ys.max() + reach)
+            gxs, gys = np.meshgrid(np.arange(gx0, gx1 + 1, dtype=np.int32),
+                                   np.arange(gy0, gy1 + 1, dtype=np.int32))
+            px, py = gxs * step, gys * step
+            best = np.full(px.shape, np.inf)
+            for (x1, y1), (x2, y2) in zip(ring, ring[1:]):
+                dx, dy = x2 - x1, y2 - y1
+                L2 = dx * dx + dy * dy
+                t = np.clip(((px - x1) * dx + (py - y1) * dy) / L2, 0, 1) if L2 > 0 else 0.0
+                best = np.minimum(best, np.hypot(px - (x1 + t * dx), py - (y1 + t * dy)))
+            m = best < reach
+            if m.any():
+                chunks.append(np.stack([gxs[m], gys[m]], axis=1))
+    if not chunks:
+        return np.empty((0, 2), dtype=np.int32)
+    return np.concatenate(chunks).astype(np.int32)
+
+
+def paste_keepout_apertures(pcb_data: PCBData, net_id: int):
+    """The paste openings a net-`net_id` via must keep out of under
+    `--same-net-pad-clearance` (#962).
+
+    These are `paste_apertures.apertures_for_net` minus pad openings the pad
+    keep-out already covers: a copper pad whose margin is <= 0 on both axes
+    (its opening lies inside the pad), and a through-hole pad (exempt from
+    #581, like its copper). What remains is the part the pad rectangle cannot
+    see: graphic openings (esp_prog U2's tab), paste-only windowpanes, and a
+    pad opening LARGER than its pad.
+    """
+    try:
+        from paste_apertures import apertures_for_net
+    except ImportError:
+        return []
+    out = []
+    for ap in apertures_for_net(pcb_data, net_id):
+        if ap.source == 'pad':
+            sp = ap.shape_pad
+            if getattr(sp, 'drill', 0):
+                continue
+            if max(ap.margin) <= 0:
+                continue
+        out.append(ap)
+    return out
+
+
+def paste_aperture_keepout_cells(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                                 same_net_pad_clearance: float,
+                                 apertures=None) -> "np.ndarray":
+    """(N, 2) via-block cells over the paste openings a net's vias must keep
+    out of, at via/2 + `same_net_pad_clearance` + grid/2 from the opening's edge.
+    That is the same margin the #581 pad branch uses, so an opening and its
+    pad are kept clear alike. `apertures` restricts the answer (the #907 seal
+    diagnosis), and defaults to `paste_keepout_apertures`."""
+    if same_net_pad_clearance is None or same_net_pad_clearance < 0:
+        return np.empty((0, 2), dtype=np.int32)
+    coord = GridCoord(config.grid_step)
+    margin = config.via_size / 2 + same_net_pad_clearance + config.grid_step / 2
+    aps = paste_keepout_apertures(pcb_data, net_id) if apertures is None else apertures
+    chunks = [c for c in (_aperture_keepout_cells(ap, coord, margin) for ap in aps) if len(c)]
+    if not chunks:
+        return np.empty((0, 2), dtype=np.int32)
+    return np.concatenate(chunks)
+
+
 def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
                                    config: GridRouteConfig,
-                                   pads=None) -> "np.ndarray":
+                                   pads=None, apertures=None) -> "np.ndarray":
     """#581: (N, 2) via-block cells over the net's own SMD pads when an active
     (> 0) same_net_pad_clearance is on the config; empty otherwise.
 
@@ -2807,7 +2925,14 @@ def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
     `pads` restricts the answer to those pads (#907): the seal diagnosis needs
     to know which cells around ONE pad this flag is responsible for, without
     rebuilding or mutating the map. Defaults to every pad of the net, which is
-    what the stampers ask for."""
+    what the stampers ask for.
+
+    #962: the net's solder-paste OPENINGS are kept clear too (see
+    `paste_keepout_apertures`). The pad rectangle is not where solder goes:
+    esp_prog U2's pad 2 is F.Cu-only inside a 4.5 x 1.6 mm F.Paste opening, and
+    a via 0.55 mm off the pad still sat in the paste. `apertures` restricts
+    that half the way `pads` restricts this one. With neither given, both
+    halves are included; with only one given, only that half is."""
     snpc = getattr(config, 'same_net_pad_clearance', -1.0)
     if snpc is None or snpc <= 0:
         return np.empty((0, 2), dtype=np.int32)
@@ -2815,6 +2940,17 @@ def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
     coord = GridCoord(config.grid_step)
     margin = config.via_size / 2 + snpc + config.grid_step / 2
     chunks = []
+    if pads is None and apertures is not None:
+        pads = []
+    if apertures is None and pads is None:
+        _ap_cells = paste_aperture_keepout_cells(pcb_data, net_id, config, snpc)
+    elif apertures:
+        _ap_cells = paste_aperture_keepout_cells(pcb_data, net_id, config, snpc,
+                                                 apertures=apertures)
+    else:
+        _ap_cells = np.empty((0, 2), dtype=np.int32)
+    if len(_ap_cells):
+        chunks.append(_ap_cells)
     for pad in (pcb_data.pads_by_net.get(net_id, []) if pads is None else pads):
         if getattr(pad, 'drill', 0):
             continue

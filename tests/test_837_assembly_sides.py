@@ -514,8 +514,9 @@ def main():
     # vocabulary change deliberate rather than absorbed.) It is also the only
     # one `run_all.py --fast` cannot see, because this file is classified
     # integration, so a red here reads as a green suite.
+    # 6 since #959 (#1000), which added `edge_connectors[].side`.
     check("reader version names the field it learned",
-          fp.READER_VERSION == 5, fp.READER_VERSION)
+          fp.READER_VERSION == 6, fp.READER_VERSION)
 
     check("graded every fixture", graded == len(EXPECT), f"{graded}")
     print(f"\n{'FAIL' if FAILURES else 'PASS'}: #837 census over {graded} "

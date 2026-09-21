@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "kind": "design-brief",
+  "units": "mm",
+  "board": "ulx3s.kicad_pcb",
+  "product": {
+    "form_factor": "fpga_dev_board",
+    "primary_axis": "east-west",
+    "user_top_side": "F"
+  },
+  "interfaces": [
+    {
+      "ref": "US1",
+      "user_facing": true,
+      "edge": "north",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "FCI 10118192 micro-B receptacle; F.Fab body 0.495mm past the north edge",
+      "role": "usb_prog"
+    },
+    {
+      "ref": "US2",
+      "user_facing": true,
+      "edge": "north",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "FCI 10118192 micro-B receptacle; F.Fab body 0.495mm past the north edge",
+      "role": "usb_user"
+    },
+    {
+      "ref": "GPDI1",
+      "user_facing": true,
+      "edge": "north",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "FCI 10029449-111RLF right-angle HDMI receptacle; F.Fab body 0.392mm inside the north edge",
+      "role": "video"
+    },
+    {
+      "ref": "AUDIO1",
+      "user_facing": true,
+      "edge": "north",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "CUI SJ-43516-SMT right-angle 3.5mm jack; F.Fab body 0.92mm past the north edge",
+      "role": "audio"
+    },
+    {
+      "ref": "SD1",
+      "user_facing": true,
+      "edge": "south",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "micro-SD slot SCHD3A0100 / Molex 104031-0811 (card inserts in-plane); F.Fab body 0.32mm inside the south edge",
+      "role": "sd"
+    },
+    {
+      "ref": "J1",
+      "user_facing": true,
+      "edge": "west",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "Socket_Strip_Angled_2x20 (right-angle female header); silk body extends 8.83mm PAST the west edge",
+      "role": "gpio_west"
+    },
+    {
+      "ref": "J2",
+      "user_facing": true,
+      "edge": "east",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "Socket_Strip_Angled_2x20 (right-angle female header); silk body extends 8.83mm PAST the east edge",
+      "role": "gpio_east"
+    },
+    {
+      "ref": "J4",
+      "user_facing": "unknown",
+      "edge": "south",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "Socket_Strip_Straight_2x03 (vertical female header); 1.27mm from the south edge",
+      "role": "aux_2x3"
+    }
+  ],
+  "keepouts": [],
+  "fixed": [],
+  "unknown": []
+}

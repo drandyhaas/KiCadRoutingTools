@@ -90,6 +90,20 @@ def _accept(td, *args):
     return json.loads(r.stdout)
 
 
+def _classified(td, shape='parameter'):
+    """Put a classification row in this ledger first (#963).
+
+    Stop condition 4 is convergence.md's "measured-unfixable", and since #963
+    `record` refuses that claim when nothing in the ledger says what was
+    measured. These tests use 4 as a convenient FAIL-compatible TOKEN -- their
+    subject is argv and stop-token parsing -- so they supply the decision the
+    claim rests on and carry on testing what they were testing.
+    """
+    run_utils.check(_argv(td, '--kind', 'classification', '--shape', shape,
+                          '--lever', 'the escape faces are saturated'),
+                    accept=True)
+
+
 def test_a_mangled_argv_token_is_refused():
     print('\n-- 1. an MSYS2-rewritten net name in --argv --')
     run_utils.evidence(BOARD, 'the fixture board')
@@ -151,6 +165,7 @@ def test_a_token_with_a_reason_is_accepted_both_ways():
     lens, and the token and the reason land in separate fields."""
     print('\n-- 5. token + prose, with and without a FAIL lens --')
     with tempfile.TemporaryDirectory() as td:
+        _classified(td)
         e = _accept(td, '--final', '--stop-condition',
                     '4 (this half): the pair is parity-fixed', *lenses(td))
         check('token stored alone', e.get('stop_condition') == '4',
@@ -164,6 +179,7 @@ def test_a_token_with_a_reason_is_accepted_both_ways():
               e.get('stop_reason') == '(this half): the pair is parity-fixed',
               e.get('stop_reason'))
     with tempfile.TemporaryDirectory() as td:
+        _classified(td)
         e = _accept(td, '--final', '--stop-condition',
                     '4: measured unfixable', *fail_lenses(td))
         check('the same shape is accepted beside a FAIL lens',
@@ -217,9 +233,17 @@ def test_the_kind_flag_does_not_bypass_the_contradiction():
     print('\n-- 6b. --kind must not be a bypass --')
     for kind in ('systemic', 'placement', 'classification'):
         with tempfile.TemporaryDirectory() as td:
+            # A classification row names its shape since #963; without it this
+            # refuses for that reason instead, and the check below would read
+            # a different guard's refusal as this one's.
+            # ...and its --lever, since #963: the row must record the
+            # measurement that named the shape, not just the shape.
+            _shape = (['--shape', 'parameter', '--lever', 'saturated faces']
+                      if kind == 'classification' else [])
             run_utils.check(
-                _argv(td, '--kind', kind, '--final', '--stop-condition',
-                      'DONE-EXHAUSTED: everything passed', *fail_lenses(td)),
+                _argv(td, '--kind', kind, *_shape, '--final',
+                      '--stop-condition', 'DONE-EXHAUSTED: everything passed',
+                      *fail_lenses(td)),
                 refuse='contradiction', code=2)
     # ...and an ordinary (non-final) lap carrying a FAIL lens is still fine:
     # the checks are about --final, not about having a failing lens.
@@ -250,6 +274,7 @@ def test_a_reason_given_twice_and_differently_is_refused():
                   '--stop-reason', 'a different story', *lenses(td)),
             refuse='given twice', code=2)
     with tempfile.TemporaryDirectory() as td:
+        _classified(td)
         e = _accept(td, '--final', '--stop-condition', '4',
                     '--stop-reason', 'the only story', *lenses(td))
         check('--stop-reason alone works',

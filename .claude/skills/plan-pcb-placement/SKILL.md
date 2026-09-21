@@ -42,6 +42,12 @@ Read it from `render_placement --json-out`'s
 `checklist.a_off_outline.pad_copper`. A whole-board pass/fail verdict is the
 wrong channel to learn it from — check the per-part list.
 
+A footprint's own GRAPHIC copper (a drawn tab, an antenna) past the outline is
+the same defect and is read beside it, from
+`checklist.a_off_outline.graphic_copper`, with what could not be measured in
+`graphic_copper_unmeasured` (#962). check_drc reports it as
+`graphic-off-board`, and a lock does not waive it.
+
 ### Scope the search to the refs the gate names
 
 When a gate names specific parts, free exactly those and lock everything else.
@@ -283,7 +289,7 @@ that door appears in neither.
 | you have | reach for | not |
 |---|---|---|
 | a pile, no placement at all | decide the fixed parts and the connectors yourself and LOCK them (`place_pose`), then `place_seed` from a zone plan, and rank several with `compare_seeds` | `place_optimize` — there is nothing to refine yet |
-| one part in the wrong place, and you know where it belongs | `place_pose` — set, rotate, face or lock; it grades the pose and refuses one that makes the board's pad legality worse | a whole-board search, which orders violators by its own priority and may never reach yours |
+| one part in the wrong place, and you know where it belongs | `place_pose` — set, rotate, face or lock; it grades the pose and refuses one that makes the board's placement legality worse (pad and hole clearance, pad copper against the outline and its edge-clearance floor, footprint graphic copper against the outline; its summary's `legal_scope` names what it grades and `legal_unmeasured` what it does not) | a whole-board search, which orders violators by its own priority and may never reach yours |
 | a rough, imported or generated placement, all legal | `place_optimize --max-displacement 3` | `place_reconstruct` |
 | a placement that is WRONG — copper-free DRC violations, or a mechanically-fixed part where mechanics forbid | `place_reconstruct` for structural damage, `place_seed --repair` for local violations | `place_optimize` — the quench is a local search and this is not a local problem |
 | a need for OPTIONS rather than one answer | `place_portfolio` explores around ONE seed; `compare_seeds` ranks ACROSS seeds. The portfolio cannot cross seeds, so rank first | |
@@ -641,7 +647,8 @@ Each lap:
 1. **Measure** — three instruments, JSONs kept as evidence:
 
    ```bash
-   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0
+   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0 \
+       --baseline <the ORIGINAL input board>
    python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb \
        --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
    python3 -X utf8 py_tools/check_channels.py board.kicad_pcb \
@@ -768,12 +775,38 @@ order:
    decided, and the seed only fills it — and P1 ranks SEVERAL seeds from it
    with `compare_seeds.py` (next) rather than taking the first.
 
+   **Check the plan before the first seed** (#959): `check_floorplan.py
+   BOARD --intent PLAN --plan-only` needs no placed board. It prints the
+   plan's own findings with the rule roster: ERRORs where no arrangement
+   can satisfy the plan (members that cannot fit their zone within the
+   overlap budget the plan DECLARES, a part longer than its edge, an
+   exclusive zone a member cannot avoid, a real reference used as a glob
+   that lands a part in two disjoint zones), and WARNs for the same quantities with a
+   margin. P1 refuses every ERROR. `place_seed` refuses only the area,
+   edge and glob ones, at exit 5 with nothing written; for the rest it seeds
+   and names the member it could not seat. P1 also counts every footprint
+   BLOCK, pad-less logos included. Lock a pad-less block in the board, or
+   name it under `refs` in the plan's `dispositions` with a reason; one that
+   sits in a zoned block must be locked, or taken out of that block's
+   `refs` if it draws no courtyard. A rule the plan leaves dark, where the
+   board says it applies, is armed or answered under `rules` there. A plan
+   that drops or contradicts a design-brief clause is refused by clause id,
+   and `--waive brief-clause:<id>:<why>` answers it. A `mechanical.json`
+   beside the board is read: each of its refs that carries pads must be
+   locked at its recorded pose, unless its value lost a contradiction; a
+   pad-less one is refused only if it has drifted from that pose; and a
+   contradiction between two recorded channels is answered under
+   `contradictions`. Every refusal names its measured values and the key
+   that answers it. Answer with a fact, never an invented limit.
+
    The seeder turns the intent's constructs into placement (edge bands →
    edge poses, single-ref zones → the spec coordinate, multi-ref zones →
    a packed block, everything else → its connectivity centroid), stamps
    `must_lock` refs `(locked yes)`, polishes, and **grades its own output
    against the same intent** — exit 4 means the seed does not satisfy the
-   intent it was built from, and says which rule broke. Rotations: the input
+   intent it was built from, and says which rule broke; exit 5 means the
+   PLAN was refused before anything was written, so fix the plan, not the
+   seed. Rotations: the input
    rotation is kept when it fits, with a noted 90° lattice fallback when it
    does not; a part whose rotation is a DECISION (pin order) must be locked —
    the intent schema cannot express one, and an unlocked load-bearing
@@ -943,7 +976,8 @@ yourself** (#892). The engine legalises; it does not decide:
 2. write the arrangement as `place_pose.py` verbs (poses, rotations, locks);
 3. `place_pose.py` applies it and grades it — exit 4 names what got worse and
    the nearest legal pose, so a refusal tells you where to aim next;
-4. `render_placement.py --review-sheet --json-out ...` and LOOK at it;
+4. `render_placement.py --review-sheet --json-out ... --quiet` and LOOK at it
+   (`--quiet` is what keeps the read blind: the keys go to the file);
 5. adjust with more `place_pose.py` calls;
 6. `place_seed --repair` / the quench only as the final polish.
 
@@ -1126,7 +1160,16 @@ python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
     set U3 --near 130 98 --rot 270         # approximate: the engine seats it
 python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
     face U1 W USB1 rotate CON2 180 lock U1 CON2
+python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
+    set U3 129.9 98.3 --intent plan.json   # also refuse leaving U3's zone
 ```
+
+**Once a zone plan exists, pass it as `--intent`** (#959). A pose that leaves
+a moved part further outside its block's zone (an ERROR `zone_containment`
+finding; one the plan demoted to warn is written and reported) refuses at
+exit 4, and
+`zone_check` names the block and the overrun. Run 29 moved `Ref*` out of its
+own plan's zone on lap 10 and found out only after the write.
 
 Several verbs in one call are ONE arrangement (every op reads the input
 board), the sibling `.kicad_pro`/`.kicad_dru` travel with the output, and

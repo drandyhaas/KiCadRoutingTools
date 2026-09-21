@@ -378,6 +378,49 @@ def _write_summary_min_file(json_out: Optional[str], status: str) -> None:
               f"{type(_e).__name__}: {_e}")
 
 
+def _ship_via_protection962(pcb_data, output_file, return_results, results_data,
+                            input_snapshot):
+    """Declare IPC-4761 Type VII on the shipped vias that need it (#962).
+
+    A via the router put in a same-net SMD pad or a paste opening used to
+    inherit the board's `(setup ...)`, which on esp_prog is `(capping no)
+    (filling no)`, the opposite of what solder over a barrel needs. The rule
+    lives in `fab_notes.via_protection_stamps`: only vias THIS run added, never
+    over a spec, never when the board already declares Type VII.
+
+    - GUI (`return_results`): stamps the in-memory vias in `results`, which
+      `swig_gui._add_via_to_board` applies through `apply_via_protection`,
+      and publishes the record as `results_data['via_in_pad']`.
+    - CLI: every pass wrote through to the file, so it stamps the file.
+
+    The record is also printed as a `VIA_IN_PAD_JSON:` line, which
+    `route_summary.merge_route_summaries` folds into the merged tally, so the
+    `--json-out` file and the merged stdout stay one document (#830).
+
+    Returns the record, or None.
+    """
+    record = None
+    try:
+        import fab_notes
+        if return_results:
+            rd = results_data or {}
+            vias = [v for r in (rd.get('results') or []) for v in (r.get('new_vias') or [])]
+            vias += list(rd.get('all_swap_vias') or [])
+            stamps, record = fab_notes.via_protection_stamps(vias, input_snapshot, pcb_data)
+            fab_notes.apply_stamps_in_memory(stamps)
+            fab_notes.print_via_protection_record(record, 'route')
+            if results_data is not None:
+                results_data['via_in_pad'] = record
+        elif output_file and os.path.exists(output_file):
+            record = fab_notes.ship_via_protection_file(output_file, input_snapshot, 'route')
+    except Exception as e:                                       # noqa: BLE001
+        print(f"  (via protection stamp skipped: {type(e).__name__}: {e})")
+        record = None
+    if record is not None:
+        print('VIA_IN_PAD_JSON: ' + json.dumps(record))
+    return record
+
+
 def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
                           protect_unfinished, keep_input_copper, skip_routing):
     """Sweep pad-less copper islands off the FINAL board (#659).
@@ -961,6 +1004,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _orig_via_by_net: Dict[int, list] = {}
     for _v in pcb_data.vias:
         _orig_via_by_net.setdefault(_v.net_id, []).append(_v)
+    # #962: the input's vias as VALUES (net, x, y, size), not object references
+    # (a nudge moves the objects). The ship-time Type VII stamp uses it to tell
+    # a via this run ADDED from one the board already had.
+    from fab_notes import via_snapshot as _via_snapshot962
+    _input_vias962 = _via_snapshot962(pcb_data.vias)
 
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
@@ -6085,6 +6133,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         locals().get('results_data'), _protect_unfinished, keep_input_copper,
         skip_routing)
 
+    # #962: declare Type VII on every via this run put in a pad or a paste
+    # opening. It runs HERE because this is after the last pass that adds or
+    # moves a via (the #666 re-emit, the in-run finalize, the oracle, the
+    # reconcile sub-run, the #678 weld, the late sweep above), so the record
+    # describes the board that ships. Outermost call only.
+    _via_in_pad962 = None
+    if final_reconcile and not skip_routing:
+        _via_in_pad962 = _ship_via_protection962(
+            pcb_data, output_file, return_results, locals().get('results_data'),
+            _input_vias962)
+
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
     # rescues, Phase-3 tap order, costs -- assembled from state.
@@ -6092,6 +6151,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         try:
             from route_summary import merge_summaries, write_summary_file
             _merged = merge_summaries(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
+            # #962: set on the MERGED document. The printed JSON_SUMMARY
+            # predates the finalize, so it cannot carry this.
+            if _merged is not None and _via_in_pad962 is not None:
+                _merged['via_in_pad'] = _via_in_pad962
             # ALL-OR-NOTHING (#830). This was `open(json_out,'w')` +
             # `json.dump`, which truncates the destination before the first
             # chunk is encoded and then STREAMS into it -- so a failure partway
@@ -6709,7 +6772,8 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--same-net-pad-clearance", type=float, default=None,
                         help="Edge-to-edge clearance (mm) between EVERY placed via and "
                              "same-net pads (#581). > 0 keeps vias off same-net SMD pads "
-                             "(escape vias, via-in-pad rescue, tap vias) and is recorded "
+                             "AND off the net's solder-paste openings (#962) (escape vias, "
+                             "via-in-pad rescue, tap vias) and is recorded "
                              "in the sibling .kicad_pro so later chain steps inherit it; "
                              "-1 explicitly allows via-in-pad. Default: the project's "
                              "recorded value, else via-in-pad allowed.")
