@@ -10372,6 +10372,24 @@ def write_out(a, ctx, corridors, names, log):
         log(f'refusal reasons -> {rp}')
     # deferred berth trim: each successfully-routed net's FINAL lane
     # decides its joint; a refused net's stub stays whole
+    # THE RE-ESCAPE (re_escape.py, BRAID_RE_ESCAPE mm, 0 = off): a lane whose
+    # stub + lane run far over its pad-to-berth airline is routed again from
+    # its PAD, free, and ships only when cheaper at ECON_MM_PER_VIA and no
+    # worse in scoped DRC -- the other half of the source trim; BEFORE the
+    # trims, which re-anchor a lane's ends and drop stub tips (K36 SDQ0 was
+    # routed to a berth the berth trim had just removed: open)
+    import re_escape as _re
+    ctx.re_escapes = {}
+    ctx.re_escape_vias = []
+    if _re.RE_ESCAPE > 0:
+        _cands = [nm for nm in names if out_segs.get(nm) and nm not in refused and nm not in _legs]
+        _cands.sort(key=lambda nm: -_re.excess(ctx, nm, out_segs[nm]))     # the worst offender first
+        _mm2 = sum(_re.re_escape(ctx, nm, out_segs[nm], out_vias.setdefault(nm, []), a.board, log, cn,
+                                 ECON_MM_PER_VIA if ECON_MM_PER_VIA > 0 else 6.0)
+                   for nm in _cands)
+        if ctx.re_escapes:
+            log(f're-escape: {len(ctx.re_escapes)} lane(s) routed again from their pads, -{_mm2:.1f} mm '
+                f'({", ".join(f"{k} {v[1]}->{v[2]} via(s)" for k, v in sorted(ctx.re_escapes.items()))})')
     for nm in names:
         if out_segs.get(nm) and nm not in refused and nm not in _legs:
             note_joint(ctx, nm, out_segs[nm])
@@ -10529,6 +10547,8 @@ def write_out(a, ctx, corridors, names, log):
     if smoothed:
         kid_names = {pcb.nets[i].name for i in kids if i in pcb.nets}
         txt = strip_net_segments(txt, kids, kid_names)
+        if getattr(ctx, 're_escape_vias', None):
+            txt = _re.strip_vias_at(txt, ctx.re_escape_vias)
         n_deg = n_dup = 0
         for nm in names:
             keep_ = []

@@ -725,6 +725,62 @@ Every pair in its planned band at K36 (SDQS1 and SCK at 0 vias) and at K47
 (all three at 0 vias, DQS0 +1.2 mm, DQS1 +0.6, CK through R20), coupled
 0.54-0.88. K28's +2 is the guard refusing SA1's 24 mm for 2 vias.
 
+**AWAY TEETH AND THE RE-ESCAPE (2026-09-21).** Andy: "both renders show
+away teeth with long roundabouts -- I thought we'd fixed that in the
+past?" Two different things. On H3 the looping nets (SCAS, SA7, SRAS,
+SODT0/1, SWE, SA13, SA9, SA12) sit at the bottom-left of a 0.65 mm ball
+field the lanes cannot cross, and the human loops them the same way (its
+SCAS/SA7/SRAS/SA13 run 38-39 mm and reach 4-5 mm below the array); on the
+zynq three of them are real away teeth -- BA0, WE and DQ15, balls on the
+EAST side of U1 (x 80-84, U2 east at 100+), teeth at the WEST edge
+(x 68). The two flags built for this were measured and both STAY OFF:
+`SRC_AWAY_BAN=1` (the single most-opposed face dropped from the source
+menu; it was already one face on every bench and `escape_moves.away_faces`
+now returns at most one by construction) gave K28 34 / K36 pairs 75 / K41
+80 / zynq K47 139 with 1 open against 36 / 71 / 74 / 97 -- those three out
+the east face run into the columns wall, and the human ALSO takes BA0 and
+WE round the west edge (2-3 vias, 40 mm, its matched length); `PLAN_RATE=1`
+(length at 7.5 mm a via everywhere, the source wrap included) gave K28
+**30** / K36 pairs **66** / K41 **89** -- the 0915 mixed picture again
+(stopped at Andy's word; it moved BA0, DQ15 and DM0 east at K47, WE stayed).
+
+What does help is Andy's other reading: "the long west tooth can clearly
+be removed after the fact by a re-lay". `re_escape.py`
+(`BRAID_RE_ESCAPE`, mm over the airline; RE_ESCAPE_DEFAULT) is the other
+half of the write-time source trim: the trim can only splice a lane that
+ran back along its own stub, the re-escape takes a lane whose stub + lane
+run more than this far over its PAD-to-berth airline, lifts the lane and
+the WHOLE source-side stub (dogbone via included -- the tip chain alone
+left a via and its pad segment dangling), routes the net again from its
+pad, free, against everything else as laid, and ships the new copper only
+when it is cheaper at `BRAID_ECON_MM_PER_VIA` (6 mm a via) and no worse
+in scoped DRC. It runs BEFORE the trims (routed to a berth the berth trim
+had just removed: open), takes the lanes worst-offender first (SCAS's
+route from its pad was there until SRAS, the adjacent ball, went first
+and took the channel), and strikes the lifted fanout vias from the board
+text (the writer starts from the fanout FILE, which spells vias in the
+net-name dialect; a re-placed via on the same site read as a hole-to-hole
+DRC). K36 braid arm A: 8 lanes routed again, -97 mm -- SCAS 43 -> 26,
+SRAS 38 -> 26, SODT0 34 -> 25, SDQ8 33 -> 9, SDQ15 37 -> 12 -- at the
+same 71 vias, 0 open, DRC 0. Same-fanout control on zynq K47 (both
+arms, DRC 0): arm A 110 vias / 1 open -> 106 / 1 open (the open is DM0's
+last-call refusal, untouched) for -96 mm, arm B 97 / 0 -> 100 / 0 for
+-104 mm -- the 6 mm rule buying 104 mm with 3 vias. The chain's grade
+counts vias, so the pass reads as +2..+3 where it trades under the rate;
+`BRAID_RE_ESCAPE=0` is the vias-only regime. The rest of the bottom-face
+group stays: a
+route from the pad costs 2 vias for 8-10 mm there, a wash at 6 mm a via
+(SA7 0 vias / 54 mm vs 2 / 41), which is also what the human pays.
+
+| chain | re-escape off | on | human |
+|---|---|---|---|
+| H3 K36, pairs | 71 | 71, -97 mm | 62 |
+| H3 K28 | 36 | 36, -22 mm | 46 |
+| H3 K41 | 74 | 76, -24 mm | 70 |
+| H3 K51 | 96 | 99, -44 mm | 81 |
+| zynq K44, pairs | 102 | **98**, -72 mm | 103 |
+| zynq K47, pairs + CK | 97 | 100, -104 mm | 109 |
+
 **Instruments:** `grade_k.py` prints one PAIR line per pair (routed or
 not, coupled fraction at the inferred pitch, skew, barrels);
 `pair_census.py` is the same on any board; `BRAID_PAIR_DEBUG=1` prints each

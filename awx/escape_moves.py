@@ -215,7 +215,13 @@ def away_faces(src_bbox, dst_bbox, frac: float = 0.25):
     n = (dx * dx + dy * dy) ** 0.5
     if n < 1e-9:
         return set()
-    return {d for d, (ux, uy) in DIRS.items() if (ux * dx + uy * dy) / n < -frac}
+    # ONE face: the most opposed (Andy, 2026-09-21: "the src away ban
+    # should only ban the exact away face; N and S, where E is towards,
+    # should still be allowed"). On a turned frame the flow runs at an
+    # angle and a SIDE face fell under the threshold too: zynq K47 with
+    # both banned went 97 / 0 open -> 139 / 1 open.
+    worst = min(DIRS.items(), key=lambda kv: (kv[1][0] * dx + kv[1][1] * dy) / n)
+    return {worst[0]} if (worst[1][0] * dx + worst[1][1] * dy) / n < -frac else set()
 LAYERS = ('F.Cu', 'B.Cu')
 # escape_moves owns both: it imports nothing of ours, so every module
 # can take them from here instead of keeping its own copy
