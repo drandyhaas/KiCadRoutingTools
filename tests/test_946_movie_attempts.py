@@ -83,7 +83,15 @@ def _loop_dir(d, accept_cmd=False):
         met = {}
         if fails is not None:
             met = {'failures': fails, 'iterations': 9000 - rnd,
-                   'vias': 400 - rnd}
+                   'vias': 400 - rnd,
+                   # The placement-only PROXIES a real loop also records.
+                   # They are a SCREEN, not the judge -- deliberately moving
+                   # the OPPOSITE way from `failures`, so an axis that picked
+                   # one of them would draw a staircase pointing the wrong way
+                   # and this fixture is what notices.
+                   'ratsnest_crossings': 100 + rnd * 5,
+                   'ratsnest_hpwl': 1000 + rnd * 40,
+                   'ratsnest_length': 2000 + rnd * 30}
             # DELIBERATELY anti-correlated with `failures`: if the axis
             # silently fell back, the staircase would be the other one and
             # this fixture is the only thing that could tell.
@@ -611,9 +619,47 @@ def test_a_card_and_a_band_in_one_film_are_one_size():
         print('  PASS: the band is attached before the cards are cut')
 
 
+def test_a_placement_run_is_graded_on_the_ROUTED_result():
+    """The question every reader of a placement film asks, pinned.
+
+    `place_route_loop` is a place-AND-route loop: a round moves parts, routes,
+    and is kept or thrown away on `better()`, whose leading term is `failures`
+    -- copper, from the route summary. So the y-axis of a PLACEMENT film is the
+    routed result, and that is the run's own accept rule rather than a
+    placement score.
+
+    The sidecar also carries `ratsnest_crossings` / `hpwl` / `length`, which
+    are placement-only proxies and a SCREEN rather than the judge. This fixture
+    moves them the OPPOSITE way from `failures`, so an axis that picked one
+    would draw a staircase pointing the wrong way -- and it would still look
+    perfectly plausible.
+    """
+    _mark = len(_FAIL)
+    with tempfile.TemporaryDirectory() as td:
+        t = MA.attempts_from_loop_dir(_loop_dir(td))
+    if 'failures' not in t.metric:
+        fail('a place-and-route loop is not graded on failures: %r' % t.metric)
+    got = [a.score for a in t.attempts]
+    want = [None if f is None else float(f) for _r, _a, _s, f in LOOP_ROWS]
+    if got != want:
+        fail('the axis is not `failures`: %s vs %s' % (got, want))
+    # the proxies move the other way, so the record would INVERT on them
+    rec = [v for _i, v in MA.best_so_far(t.attempts)]
+    if rec != sorted(rec, reverse=True):
+        fail('the record does not fall: %s' % rec)
+    for bad in ('crossings', 'hpwl', 'length', 'ratsnest'):
+        if bad in t.metric:
+            fail('a placement PROXY reached the axis label: %r' % t.metric)
+    print('    axis %r; record %s (the proxies rise while this falls)'
+          % (t.metric, rec))
+    if len(_FAIL) == _mark:
+        print('  PASS: the judge is the routed result, not the screen')
+
+
 TESTS = (
     test_three_producers_one_record_type,
     test_the_axis_is_the_accept_rule_and_is_never_mixed,
+    test_a_placement_run_is_graded_on_the_ROUTED_result,
     test_the_lineage_is_resolved_from_the_parent_board,
     test_an_ungraded_attempt_is_not_a_zero,
     test_the_staircase_is_the_loops_own_best,

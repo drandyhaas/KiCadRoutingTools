@@ -42,6 +42,27 @@ So the metric is decided **once over the whole attempt list** and named in the
 axis label. **NEVER MIXED**: a film whose axis changes meaning halfway is worse
 than no film.
 
+**ON A PLACEMENT RUN THE AXIS IS STILL THE ROUTED RESULT**, and that surprises
+people, so it is worth saying plainly. `place_route_loop` is a place-AND-route
+loop: a round moves parts, routes the board, and is kept or thrown away on
+`better()`, whose leading term is `failures` -- copper, from the route summary
+(`failed_single + open_single + the multipoint pad deficit`). So the y-axis of
+a placement film reads "how much is still unrouted after moving the parts".
+That IS the run's own accept rule; a placement score would not be.
+
+The sidecar also carries `ratsnest_crossings`, `ratsnest_hpwl` and
+`ratsnest_length`, which are placement-only proxies, and this deliberately does
+NOT plot them. `_ratsnest_screen` uses them to decide whether a candidate is
+worth paying a routing run for -- it is a SCREEN, not the judge, and the loop's
+own comment marks them report-only. Plotting a screen where the verdict belongs
+is the "staircase pointing one way beside rings pointing the other" failure in
+its exact form, and CLAUDE.md has the measurement behind it: on a run-16 board
+crossings were *anti-correlated* with correctness.
+
+A placement tool that does not route -- `place_optimize`, `place_seed`,
+`place_portfolio` -- writes no `loop_round*.json` at all, so there is no band
+and nothing is invented. That is the degradation arm, not a gap.
+
 **A SCREENED ROUND STILL GETS A NODE.** Its sidecar has `board: None`,
 `routed: None`, `metrics: {}` -- written that way precisely so a consumer
 "cannot tell 'screened' from 'crashed'". It draws as a tick on the axis rail --

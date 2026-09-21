@@ -625,6 +625,25 @@ the accept rule draws a staircase pointing one way beside accept/reject rings
 pointing the other. **Never mixed**: a film whose axis changes meaning halfway
 is worse than no film.
 
+**On a PLACEMENT run the axis is still the routed result**, which surprises
+people. `place_route_loop` is a place-*and*-route loop: a round moves parts,
+routes the board, and is kept or thrown away on `better()`, whose leading term
+is `failures` — copper, from the route summary. So the y-axis of a placement
+film reads *"how much is still unrouted after moving the parts"*. That is the
+run's own accept rule; a placement score would not be.
+
+The sidecar also carries `ratsnest_crossings`, `ratsnest_hpwl` and
+`ratsnest_length`, and the band deliberately does **not** plot them.
+`_ratsnest_screen` uses them to decide whether a candidate is worth paying a
+routing run for — it is a *screen*, not the judge. Plotting a screen where the
+verdict belongs is the same failure in its exact form, and there is a
+measurement behind it: on one run crossings were **anti-correlated** with
+correctness.
+
+A placement tool that does not route — `place_optimize`, `place_seed`,
+`place_portfolio` — writes no `loop_round*.json` at all, so there is no band
+and nothing is invented.
+
 `best_so_far` is one algorithm with two policy flags, shared with
 `awx/evolve_movie.Ribbon`: on this side a *rejected* round cannot set a record
 (the loop rejects exactly what `better()` says is not better), and on the `awx`
