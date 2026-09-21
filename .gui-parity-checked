@@ -1,3 +1,45 @@
+b345eed9 2026-09-21 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of the MERGE of main (ab8d0c36, carrying the bus622-take5 py_router
+delta) into fix/962-paste-aperture. NO GAP FOUND. Eight gates re-run green on
+this machine under KiCad 10.0.0-103 / wx 4.2.2a1.
+
+WHY THIS AUDIT EXISTS. The branch's own audit (82522c1e, below) was taken
+against ad243b74, BEFORE main merged take5 (5bad89f4). take5 changed
+py_router/bga_fanout/{__init__,underpad,escape,rotate_frame,flip_frame}.py,
+single_ended_routing.py and routing_utils.py; #962 ALSO touches both fanouts.
+Git AUTO-merged bga_fanout/__init__.py and underpad.py with no conflict, which
+is not the same as being correct, so the fanout gates were re-run on the merged
+tree specifically to check that auto-merge.
+
+GATES RE-RUN AT b345eed9, all green:
+  test_cli_postpass_coverage  -- #962 adds a CLI post-pass
+                                 (route.py _ship_via_protection962); the gate
+                                 that blocks Class-2 CLI-only drift accepts it.
+  test_962_paste_parity       -- both parse paths agree on the paste model,
+                                 against pcbnew's own GetSolderPasteMargin.
+  test_962_native_graphic_overrun
+  test_fanout_rotated_gui     -- the take5 x #962 fanout intersection.
+  test_fanout_backside_gui    -- likewise, through take5's flip_frame.
+  test_settings_roundtrip     -- gui_utils / fanout_gui / planes_gui changed.
+  test_manifest_plan_parity
+  test_gui_engine_parity      -- VERDICT PARITY, copper sets IDENTICAL,
+                                 1078 segments / 128 vias, drc 0 both fronts.
+
+ALSO MEASURED AT b345eed9 (not GUI parity, recorded here as the merge's
+evidence): full suite 662 passed / 0 failed / 2 self-skipped (the two that
+want gitignored wk/ artifacts); tests/mutate_962.py 42 rows, 42 killed;
+mutation_anchors 55 batteries / 1508 anchors / 0 unresolved; and the
+default-flag routed copper is BYTE-IDENTICAL to main on esp_prog, sonde_u and
+splitflap_driver -- the latter two being boards take5 itself had moved.
+
+NOT RUN in this pass (unchanged since 82522c1e and not touched by the merge):
+test_726_parse_path_parity, test_751_via_protection_readback, the 733/746/768/
+772 cap gates, test_plane_all_layers_parity, test_gui_livechain_rp2350.
+
+STILL OWED BEFORE SHIP, and NOT a GUI-parity item: the corpus A/B under
+--same-net-pad-clearance > 0 on BGA-fanout boards. The branch's A/B was run
+against ad243b74 and does not describe this tree.
+
 d2c9934c 2026-09-20 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit 96912901..cd866f47 on bus622-take5 (main's 66 commits since the last
 audit plus the branch's 168, rebased onto main ad243b74 on 2026-09-19).
