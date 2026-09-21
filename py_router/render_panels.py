@@ -252,30 +252,53 @@ def draw_inventory(d, box, *, counts, placed, total, theme):
         import render_theme
         from route_render import load_font
         th = theme or render_theme.DARK
-        font = load_font(max(9, min(14, int(box.h * 0.13))))
         d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
                     fill=th.rgb('chrome_panel'))
         rows = sorted(counts.items(), key=lambda kv: (-kv[1][1], kv[0]))
-        pad, lh = 8, int(font.size * 1.7)
-        y = box.y + pad
-        for name, (done, tot) in rows:
-            if y + lh > box.y + box.h - pad - font.size:
+        pad = 8
+        # EVERY CLASS LANDS, or the footer contradicts the bars on screen.
+        # Measured: a 6-class board drew 3 rows summing to 12 beside a footer
+        # reading `20 of 65`. `draw_summary` had the identical fault and was
+        # fixed; this is its sibling, in the same file, and was not. The layout
+        # is chosen from the row COUNT -- one column if they fit, two if they
+        # do not -- exactly as the summary does.
+        avail = box.h - 2 * pad - 18          # 18 = the footer's own line
+        n = max(1, len(rows))
+        cols = 1
+        while cols <= 2:
+            per = (n + cols - 1) // cols
+            if avail / max(1, per) >= 13 or cols == 2:
                 break
-            d.text((box.x + pad, y), name, font=font,
-                   fill=th.rgb('chrome_text_dim'))
-            bx = box.x + int(box.w * 0.42)
-            bw = int(box.w * 0.46)
+            cols += 1
+        per = (n + cols - 1) // cols
+        font = load_font(max(8, min(14, int(avail / (1.7 * max(1, per))))))
+        lh = int(font.size * 1.7)
+        cw = box.w // cols
+        shown = 0
+        for i, (name, (done, tot)) in enumerate(rows):
+            col, row = i // per, i % per
+            x = box.x + pad + col * cw
+            y = box.y + pad + row * lh
+            if y + lh > box.y + box.h - pad - 18:
+                break
+            d.text((x, y), name, font=font, fill=th.rgb('chrome_text_dim'))
+            bx = x + int(cw * 0.30)
+            bw = int(cw * 0.42)
             d.rectangle([bx, y + 2, bx + bw, y + font.size],
                         fill=th.rgb('chrome_rule'))
             if tot:
                 d.rectangle([bx, y + 2, bx + int(bw * done / float(tot)),
                              y + font.size], fill=th.rgb('status_kept'))
             txt = '%d/%d' % (done, tot)
-            d.text((box.x + box.w - pad, y), txt, font=font,
+            d.text((x + cw - pad, y), txt, font=font,
                    fill=th.rgb('chrome_text_faint'), anchor='ra')
             drawn.append((name, txt))
-            y += lh
+            shown += 1
         foot = '%d of %d placed' % (placed, total)
+        # AND IF A CLASS STILL DID NOT FIT, the footer says so rather than
+        # letting the bars quietly disagree with it.
+        if shown < len(rows):
+            foot += '   (+%d class(es) not shown)' % (len(rows) - shown)
         d.text((box.x + pad, box.y + box.h - pad - font.size), foot,
                font=font, fill=th.rgb('pad'))
         drawn.append(('', foot))

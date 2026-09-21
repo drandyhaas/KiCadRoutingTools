@@ -503,7 +503,7 @@ of every existing artifact — the GUI recorder's, `place_route_loop`'s
 | `sidebar` | board left, panel a right column | 1.78:1 | 12.38 | 100 050 |
 | `inset` | board fills frame, panel a corner inset | 1.85:1 | **15.76** | 28 490 |
 | `split` | board on top, lower box split | 1.60:1 | 11.06 | **128 800** |
-| `auto` | `sidebar` on a wide board, `stacked` otherwise | — | — | — |
+| `auto` | `sidebar` on a wide board, `stacked` otherwise, **`legacy` on an extreme one** | — | — | — |
 
 *(one pixel budget — 1.62 Mpx — on a 1.85:1 board, four cells across the
 panel.)* **Re-derive it rather than trusting it:**
@@ -528,6 +528,23 @@ falls exactly at `ADAPTIVE_ASPECT_CUT`, which is the number `auto` branches on. 
 > Picking between the first pair from `board_info.board_bounds` costs one
 > comparison and is right across the corpus. Choosing `inset` over `split` is a
 > decision about what the film is *for*, so it is a flag, never an inference.
+
+**`auto` gives up its chrome outside `EXTREME_ASPECT_LO`..`EXTREME_ASPECT_HI`.** Every chrome layout has a FIXED board-box aspect and only `legacy` inherits the board's, so a board far outside the corpus range fills very little of whichever box it is given — and the adaptive cut, tuned on 0.5–2.5, picked the *second worst* option for a 6.5:1 board. Measured at size 560 on such a board:
+
+| layout | board box aspect | the board fills |
+|---|---|---|
+| `legacy` | 6.51 | **100%** |
+| `split` | 2.95 | 45% |
+| `inset` | 14.74 | 44% |
+| `sidebar` | 1.53 | 24% |
+| `stacked` | 0.98 | 15% |
+
+In a real placement film that showed up as the board holding **4.6–4.9% of the frame** during the beats where parts were moving — the camera zoomed *in* and the subject got *smaller*. Chrome you cannot afford is not a feature, so outside the band `auto` returns `legacy` and says so.
+
+| constant | value |
+|---|---|
+| `EXTREME_ASPECT_LO` (`py_router/frame_layout.py`) | 0.50 |
+| `EXTREME_ASPECT_HI` (`py_router/frame_layout.py`) | 3.00 |
 
 `FrameGeometry.chosen_by` carries the sentence — `"adaptive: board aspect 1.41 >
 1.25"` — and `frame_layout.frame_status_line` prints it.

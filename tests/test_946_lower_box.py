@@ -364,6 +364,36 @@ def test_all_four_contents_are_reachable_and_draw():
         else:
             print('    %-10s %d colours, %d row(s) reported'
                   % (phase, len(cols), len(got)))
+    # EVERY CLASS the inventory is given must land, or the footer must SAY
+    # how many did not. Measured on a real 6-class board: three rows were
+    # drawn, summing to 12, beside a footer reading `20 of 65 placed` -- a
+    # direct contradiction on screen, in the sibling of the function whose
+    # identical fault was already fixed.
+    inv6 = {'J': (0, 17), 'R': (0, 13), 'C': (12, 12), 'U': (0, 10),
+            'H': (2, 7), 'D': (6, 6)}
+    done6 = sum(a for a, _b in inv6.values())
+    tot6 = sum(b for _a, b in inv6.values())
+    for h in (132, 96, 70, 44):
+        img = Image.new('RGB', (560, h), ground)
+        got = RP.draw_inventory(ImageDraw.Draw(img), FL.Box(0, 0, 560, h),
+                                counts=inv6, placed=done6, total=tot6,
+                                theme=RT.DARK)
+        bars = [g for g in got if g[0]]
+        foot = [g for g in got if not g[0]]
+        if not foot:
+            fail('a %d px inventory drew no footer at all' % h)
+            continue
+        shown = sum(int(t.split('/')[0]) for _n, t in bars)
+        if len(bars) == len(inv6):
+            if shown != done6:
+                fail('%d px: every class drawn but the bars sum to %d against '
+                     'a footer of %d' % (h, shown, done6))
+        elif 'not shown' not in foot[0][1]:
+            fail('%d px: %d of %d classes drawn and the footer does NOT say '
+                 'so (%r) -- the bars and the footer disagree on screen'
+                 % (h, len(bars), len(inv6), foot[0][1]))
+    print('    inventory: 6 classes reconcile at 132/96 px, disclosed at '
+          '70/44 px')
     # EVERY row a summary is given must land -- the verifier measured
     # `stacked --size 400` dropping `vias` and `inset` dropping three.
     for h in (132, 96, 64, 44):

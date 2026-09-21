@@ -109,8 +109,14 @@ def test_every_named_box_is_inside_the_frame():
 
 def test_a_vs_b_is_inferred_and_c_vs_d_is_never():
     _mark = len(_FAIL)
+    # 'very tall' is 0.40, which is OUTSIDE the band where a chrome box is
+    # affordable, so `auto` hands it `legacy`. That expectation MOVED with the
+    # change that moves it, and the reason is arithmetic rather than taste: at
+    # 0.40 the board fills 41% of `stacked`'s 0.98:1 box and 100% of legacy's,
+    # because legacy's board box IS the board. Chrome you cannot afford is not
+    # a feature -- see `resolve_layout` for the 6.5:1 table this came from.
     want = {'wide 1.85': 'sidebar', '4:3': 'sidebar', 'square': 'stacked',
-            'tall 1:1.6': 'stacked', 'very tall': 'stacked'}
+            'tall 1:1.6': 'stacked', 'very tall': 'legacy'}
     for sn, bb in SHAPES.items():
         g = FL.plan_frame(bb, layout='auto', size=800, panel=True)
         if g.layout != want[sn]:
@@ -126,6 +132,29 @@ def test_a_vs_b_is_inferred_and_c_vs_d_is_never():
         if stance in inferred:
             fail('auto chose %r -- C and D are stances about what the viewer '
                  'is there to read, and must never be inferred' % stance)
+    # THE EXTREME BAND. Every chrome layout has a FIXED board-box aspect and
+    # only `legacy` inherits the board's, so a board far outside the corpus
+    # range fills very little of whichever box it is given -- and the adaptive
+    # cut, tuned on 0.5..2.5, cheerfully picked the SECOND WORST option for a
+    # 6.5:1 board. Measured in a real placement film: the board held 4.6-4.9%
+    # of the frame during the beats where parts were moving.
+    for a, want_k in ((0.30, 'legacy'), (0.49, 'legacy'), (0.60, 'stacked'),
+                      (2.90, 'sidebar'), (3.10, 'legacy'), (6.50, 'legacy')):
+        k, why = FL.resolve_layout('auto', (0, 0, 100.0, 100.0 / a))
+        if k != want_k:
+            fail('auto on aspect %.2f chose %s, expected %s' % (a, k, want_k))
+        elif want_k == 'legacy' and 'outside' not in why:
+            fail('auto fell back to legacy without saying why: %r' % why)
+    # and the band must actually BITE -- a band nothing falls outside of is
+    # not a band, it is a comment.
+    outside = [a for a in (0.30, 0.49, 3.10, 6.50)
+               if FL.resolve_layout('auto', (0, 0, 100.0, 100.0 / a))[0]
+               == 'legacy']
+    if len(outside) != 4:
+        fail('only %d of 4 extreme aspects fell back' % len(outside))
+    else:
+        print('    extreme band %.2f..%.2f -> legacy, with the reason stated'
+              % (FL.EXTREME_ASPECT_LO, FL.EXTREME_ASPECT_HI))
     if len(_FAIL) == _mark:
         print('  PASS: A/B inferred with a stated reason; C/D never')
 

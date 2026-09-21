@@ -62,6 +62,16 @@ FOOT_MIN_PX = 26
 #: where the measurement puts the crossover -- `py_router/layout_budget.py` computes these; `tests/test_946_layout_budget.py` pins them.
 ADAPTIVE_ASPECT_CUT = 1.25
 
+#: Outside this band `'auto'` gives up its chrome and returns `'legacy'`.
+#: The bounds are where the board stops filling half of the better of the two
+#: adaptive boxes: `sidebar`'s box is ~1.53:1 and `stacked`'s ~0.98:1, so a
+#: board narrower than ~0.50 or wider than ~3.00 fills under half of whichever
+#: it would be given. Derived from the boxes rather than chosen -- see
+#: `resolve_layout` for the measurement, and `layout_budget.py` for the
+#: instrument that produces the box figures.
+EXTREME_ASPECT_LO = 0.50
+EXTREME_ASPECT_HI = 3.00
+
 STACKED_PANEL_FRAC = 0.28           # of frame HEIGHT           (A)
 SIDEBAR_BOARD_FRAC = 0.73           # of frame WIDTH            (B)
 INSET_PANEL_FRAC = (0.30, 0.26)     # of frame W, H             (C)
@@ -189,6 +199,32 @@ def resolve_layout(name, board_bounds, *, quiet=False) -> Tuple[str, str]:
     bw = max(max_x - min_x, 1e-6)
     bh = max(max_y - min_y, 1e-6)
     a = bw / bh
+    # AN EXTREME BOARD GETS NO CHROME AT ALL, and that is an inference from
+    # `board_bounds` like the other one rather than a new kind of decision.
+    #
+    # Every chrome layout has a FIXED board-box aspect; only `legacy` inherits
+    # the board's. So a board far outside the corpus range fills very little of
+    # whichever box it is given, and the adaptive cut -- tuned on aspects
+    # 0.5..2.5 -- happily picks the SECOND WORST option for it. Measured on a
+    # 6.5:1 board (splitflap_driver) at size 560:
+    #
+    #     legacy   board box 6.51 aspect   board fills 100%
+    #     split    2.95                                 45%
+    #     inset    14.74                                44%
+    #     sidebar  1.53                                 24%   <- what auto chose
+    #     stacked  0.98                                 15%
+    #
+    # and in a real placement film that showed up as the board holding
+    # 4.6-4.9% of the frame during the beats where parts were moving -- the
+    # camera zoomed IN and the subject got SMALLER.
+    #
+    # Outside the band, the honest answer is the layout whose box IS the
+    # board: no rail, no lower box, and all of the frame for the thing the
+    # film is about. Chrome you cannot afford is not a feature.
+    if a < EXTREME_ASPECT_LO or a > EXTREME_ASPECT_HI:
+        return 'legacy', ('adaptive: board aspect %.2f is outside %.2f..%.2f, '
+                          'where every chrome box wastes most of the frame'
+                          % (a, EXTREME_ASPECT_LO, EXTREME_ASPECT_HI))
     if a > ADAPTIVE_ASPECT_CUT:
         return 'sidebar', ('adaptive: board aspect %.2f > %.2f'
                            % (a, ADAPTIVE_ASPECT_CUT))
