@@ -3418,7 +3418,16 @@ _ARM_CEILING = {
     # measurement, so the next line added anywhere in a terminal arm
     # failed `--dump-all` with the note set -- which is the alarm
     # working, and is why 178 leaves one line rather than none.
-    'L5 (DONE-EXHAUSTED)': 178, 'L5 (STUCK)': 178, 'L5 (BUDGET)': 178,
+    # Then 178 -> 185 (#962, on the merge into main): check_drc grew a
+    # --baseline, and the close-out must both PASS it and say what it is
+    # for -- without it every via the ORIGINAL board already had under
+    # solder reads as a violation, and every graphic-copper graze is
+    # accepted `unverified`, so a lap can create one and still grade
+    # clean. Seven lines of command plus disclosure. Neither #963 nor
+    # #962 breached 178 alone; the sum did, which is the alarm working.
+    # Re-measured: 182 clear, 184 blind -- 185 keeps the one line of
+    # headroom the rule above asks for.
+    'L5 (DONE-EXHAUSTED)': 185, 'L5 (STUCK)': 185, 'L5 (BUDGET)': 185,
 }
 
 STAGES = {'L1': l1, 'L2': l2, 'L3': l3, 'L4': l4, 'L5': l5}
