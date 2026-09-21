@@ -378,8 +378,14 @@ EXPECTED = {
                # 2026-09-14 (#958 phase 2): segs 1422 -> 1155, copper
                # 2915.15 -> 2913.82 (-0.05%); vias unmoved. The only row whose
                # copper moved -- see the re-record note in the header.
-               'quality': {'vias': 168, 'copper_mm': 2913.82,
-                           'segments': 1155}},
+               # 2026-09-20 (bus622-take5: the pad keep-out's sub-cell offset
+               # rounded to a nanometre in routing_utils, so a cell exactly on
+               # the boundary is decided the same way in every frame):
+               # 168/2913.82/1155 -> 168/2913.88/1154. Attributed by a
+               # single-file revert; the fanout and plane-fill roundings of
+               # the same change leave this row alone.
+               'quality': {'vias': 168, 'copper_mm': 2913.88,
+                           'segments': 1154}},
         predictors={
             'crossings': 300, 'hpwl': 2504.4400000000014,
             'halo': 297.4273114820511, 'overlap_area': 1.7621459846850488e-13,

@@ -37,8 +37,11 @@ mean anything.
 Grader mixing
 -------------
 Harvest re-grades locally, but a board whose artifact was not kept is re-added
-to summary.json marked `regraded: False` and keeps its CLOUD grade -- and the
-cloud image has no kicad-cli, so its `drc_real` falls back to raw DRC. Pairing
+to summary.json marked `regraded: False` and keeps its CLOUD grade -- and on a
+wave built WITHOUT KiCad the image has no kicad-cli, so its `drc_real` falls
+back to raw DRC. (Check before assuming: `--with-kicad` has been the DEFAULT
+since 2026-08-23 and such a wave is labelled `-kc`, so a modern wave DOES have
+kicad-cli; an older one, or an explicit `--no-kicad`, does not.) Pairing
 a locally-graded row in one arm against a cloud-graded row in another measures
 the GRADER, which is RUNBOOK rule 2 and has produced a sign error before. Such
 rows are dropped by default (`--keep-cloud-graded` opts out); the count is

@@ -36,8 +36,10 @@ def preferred_escape_dirs(pcb_data, footprint) -> Dict[Tuple[float, float], str]
         if not targets:
             continue
         px, py = pad.global_x, pad.global_y
-        tx, ty = min(targets, key=lambda t: (t[0] - px) ** 2 + (t[1] - py) ** 2)
-        dx, dy = tx - px, ty - py
+        tx, ty = min(targets, key=lambda t: round((t[0] - px) ** 2 + (t[1] - py) ** 2, 6))
+        # rounded: a far end on the array's own diagonal is EXACTLY as far
+        # in x as in y, and the last bit otherwise picked the side
+        dx, dy = round(tx - px, 6), round(ty - py, 6)
         if abs(dx) >= abs(dy):
             d = 'right' if dx > 0 else 'left'
         else:
@@ -67,8 +69,8 @@ def preferred_pair_dirs(pcb_data, footprint, diff_pairs) -> Dict[str, str]:
             continue
         cx = (pair.p_pad.global_x + pair.n_pad.global_x) / 2
         cy = (pair.p_pad.global_y + pair.n_pad.global_y) / 2
-        tx, ty = min(targets, key=lambda t: (t[0] - cx) ** 2 + (t[1] - cy) ** 2)
-        dx, dy = tx - cx, ty - cy
+        tx, ty = min(targets, key=lambda t: round((t[0] - cx) ** 2 + (t[1] - cy) ** 2, 6))
+        dx, dy = round(tx - cx, 6), round(ty - cy, 6)
         if abs(dx) >= abs(dy):
             prefs[pair_id] = 'right' if dx > 0 else 'left'
         else:
@@ -104,10 +106,15 @@ def find_escape_channel(pad_x: float, pad_y: float,
     if is_edge:
         return None, edge_dir
 
-    dist_left = pad_x - grid.min_x
-    dist_right = grid.max_x - pad_x
-    dist_up = pad_y - grid.min_y
-    dist_down = grid.max_y - pad_y
+    # Rounded to a nanometre: a corner ball is EQUALLY far from two edges
+    # in exact arithmetic and the last bit of the difference otherwise
+    # chose its exit (the same board shifted in memory took the other
+    # edge, #622 pose gate 2026-09-08); equal stays equal, and the list
+    # order below decides, the same everywhere
+    dist_left = round(pad_x - grid.min_x, 6)
+    dist_right = round(grid.max_x - pad_x, 6)
+    dist_up = round(pad_y - grid.min_y, 6)
+    dist_down = round(grid.max_y - pad_y, 6)
 
     # Build list of (distance, direction, orientation) options
     options = [
@@ -132,12 +139,12 @@ def find_escape_channel(pad_x: float, pad_y: float,
         if orientation == 'horizontal':
             h_channels = [c for c in channels if c.orientation == 'horizontal']
             if h_channels:
-                best = min(h_channels, key=lambda c: abs(c.position - pad_y))
+                best = min(h_channels, key=lambda c: round(abs(c.position - pad_y), 6))
                 return best, escape_dir
         else:  # vertical
             v_channels = [c for c in channels if c.orientation == 'vertical']
             if v_channels:
-                best = min(v_channels, key=lambda c: abs(c.position - pad_x))
+                best = min(v_channels, key=lambda c: round(abs(c.position - pad_x), 6))
                 return best, escape_dir
 
     # Fallback: return closest edge direction even without channel
@@ -177,10 +184,10 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
         return []  # Edge pairs have fixed escape direction
 
     # Calculate distances to each edge
-    dist_left = center_x - grid.min_x
-    dist_right = grid.max_x - center_x
-    dist_up = center_y - grid.min_y
-    dist_down = grid.max_y - center_y
+    dist_left = round(center_x - grid.min_x, 6)
+    dist_right = round(grid.max_x - center_x, 6)
+    dist_up = round(center_y - grid.min_y, 6)
+    dist_down = round(grid.max_y - center_y, 6)
 
     min_pad_y = min(p_pad_y, n_pad_y)
     max_pad_y = max(p_pad_y, n_pad_y)
@@ -202,7 +209,7 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
     elif channels_above:
         h_channel = max(channels_above, key=lambda c: c.position)
     else:
-        h_channel = min(h_channels, key=lambda c: abs(c.position - center_y)) if h_channels else None
+        h_channel = min(h_channels, key=lambda c: round(abs(c.position - center_y), 6)) if h_channels else None
 
     if h_channel:
         h_dir = 'left' if dist_left <= dist_right else 'right'
@@ -222,7 +229,7 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
     elif channels_left:
         v_channel = max(channels_left, key=lambda c: c.position)
     else:
-        v_channel = min(v_channels, key=lambda c: abs(c.position - center_x)) if v_channels else None
+        v_channel = min(v_channels, key=lambda c: round(abs(c.position - center_x), 6)) if v_channels else None
 
     if v_channel:
         v_dir = 'up' if dist_up <= dist_down else 'down'
@@ -568,10 +575,10 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
             continue
 
         # Calculate distance to nearest edge
-        dist_left = center_x - grid.min_x
-        dist_right = grid.max_x - center_x
-        dist_up = center_y - grid.min_y
-        dist_down = grid.max_y - center_y
+        dist_left = round(center_x - grid.min_x, 6)
+        dist_right = round(grid.max_x - center_x, 6)
+        dist_up = round(center_y - grid.min_y, 6)
+        dist_down = round(grid.max_y - center_y, 6)
         min_dist = min(dist_left, dist_right, dist_up, dist_down)
 
         pair_info.append((pair_id, pair, min_dist, center_x, center_y))
@@ -1031,4 +1038,73 @@ def direct_route_candidates(pcb_data, footprint, net_filter=None,
             continue
         names.add(nm)
     notes = [n for n in notes if n[0] in names]
+    return names, notes
+
+
+UNDER_PART_PLANE_BALLS = 6   # a net with this many balls here is the plane drop's business
+
+
+def under_part_candidates(pcb_data, footprint, net_filter=None):
+    """Nets to DEFER from fanout because they are SERVED UNDER THE PART
+    (2026-09-19): every same-net pad off this footprint lies inside the
+    ball field itself -- a ZQ resistor or a decoupling cap on the far side,
+    straight under the ball (the H3 bench's SZQ: ball V10 to R6.2, 0.1 mm
+    away on B.Cu, and the fanout had drawn it a 2.4 mm stub toward the
+    edge). An escape to the field's edge is copper the connection never
+    uses; the right connection is a via at the ball and a short far-side
+    track, which the route step lays -- the deferred balls stay routable
+    through the same bare-ball zone exemption as #472's.
+
+    A ball qualifies when its net has at least one off-footprint pad and
+    every one of them lies within half a pitch of the ball field's extent;
+    a net qualifies when every one of its balls here does, and it carries
+    fewer than UNDER_PART_PLANE_BALLS balls (a plane-class net is dropped
+    to its plane instead). Returns (net_names_set, per_ball_notes), the
+    shape of direct_route_candidates. Purely advisory."""
+    from bga_fanout.grid import analyze_bga_grid
+    grid = analyze_bga_grid(footprint)
+    if grid is None:
+        return set(), []
+    cols, rows = list(grid.cols), list(grid.rows)
+    if len(cols) < 2 or len(rows) < 2:
+        return set(), []
+    pitch = max(min(b - a for a, b in zip(cols, cols[1:])),
+                min(b - a for a, b in zip(rows, rows[1:])))
+    m = pitch / 2.0
+    x0, y0, x1, y1 = min(cols) - m, min(rows) - m, max(cols) + m, max(rows) + m
+    ref = footprint.reference
+    by_net = {}
+    for fp in pcb_data.footprints.values():
+        if fp.reference == ref:
+            continue
+        for p in fp.pads:
+            if p.net_id > 0:
+                by_net.setdefault(p.net_id, []).append(p)
+    balls = {}
+    for pad in footprint.pads:
+        if pad.net_id > 0 and not pad.drill:
+            balls.setdefault(pad.net_id, []).append(pad)
+    names, notes = set(), []
+    for nid, pads in balls.items():
+        nm = pads[0].net_name
+        if not nm or nm.lower().startswith('unconnected-'):
+            continue
+        if len(pads) >= UNDER_PART_PLANE_BALLS:
+            continue
+        targets = by_net.get(nid)
+        if not targets:
+            continue
+        if not all(x0 <= t.global_x <= x1 and y0 <= t.global_y <= y1 for t in targets):
+            continue
+        if net_filter:
+            from net_queries import matches_net_filter
+            if not matches_net_filter(nm, net_filter):
+                continue
+        names.add(nm)
+        for pad in pads:
+            tp = min(targets, key=lambda t: (t.global_x - pad.global_x) ** 2 + (t.global_y - pad.global_y) ** 2)
+            d = math.hypot(tp.global_x - pad.global_x, tp.global_y - pad.global_y)
+            notes.append((nm, pad.pad_number,
+                          f"served under the part: {tp.component_ref}.{tp.pad_number} {d:.2f}mm away, "
+                          f"{len(targets)} target pad(s) all inside the field"))
     return names, notes

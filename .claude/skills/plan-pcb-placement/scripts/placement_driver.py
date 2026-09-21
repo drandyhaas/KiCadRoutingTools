@@ -328,7 +328,7 @@ Walk the ladder in order and say which rung applies:
       (which edge, where along it, which way the mating face points), the
       mechanically-fixed parts, anything a spec pins. P2 is the stage that
       enumerates them; `place_pose set/rotate/lock` is the verb, and it
-      refuses a pose that makes the board's pad legality worse.
+      refuses a pose that makes the board's placement legality worse.
    b. Seed the rest FROM THE PLAN, several seeds, and rank only the ones that
       pass their own gate (exit 4 names the rule; none passing is the PLAN's
       problem, not the seeder's -- run 26 had none pass and hand-placed
@@ -552,7 +552,7 @@ broken at the cap is NAMED with its measurement, not carried silently.
 
 MEASURE (all four, every lap, on the copper-free board):
 
-  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0
+  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0 --baseline <the board this RUN started from>
   python3 -X utf8 py_tools/check_assembly.py {a.board} --baseline <the board this RUN started from>
   python3 -X utf8 py_tools/check_channels.py {a.board} --baseline <the board this RUN started from> --gate
   python3 -X utf8 check_rigid_consistency.py {a.before} {a.board}
@@ -563,7 +563,8 @@ do NOT pass <floor> to them -- omitting it is what gets the board's floor.
 They used to default to a flat 0.25 / 0.3 regardless: on a 0.2 board that
 track width invented a "U2 N short 1 lane" deficit that does not exist
 (supply 14, demand 12), and it was handed forward as floorplan-shaped residue.
-check_drc still wants it spelled out.
+check_drc still wants it spelled out; its --baseline grades a graphic-copper graze
+a lap's MOVE created (without it, accepted `unverified`, so a lap grades clean).
 
 READ THE PRINTED SOURCE. `[board netclass]` / `[board constraint]` means the
 board answered; `[fixed default]` means it declared nothing and the number is
@@ -2038,6 +2039,20 @@ def _implicated_refs(paths):
                 # contain dots; pad numbers do.
                 if v:
                     refs.add(v.split('.', 1)[0])
+            # #962: check_drc names footprint GRAPHIC copper by its owner
+            # (graphic-off-board / graphic-board-edge). Only from counted
+            # rows: an ACCEPTED immutable-graphic row is inherited art (a
+            # library antenna), and reading it would implicate that part on
+            # every run.
+            # Graphic rows only: a via-in-paste row also carries an owner_ref
+            # (the opening's part), but it complains about a VIA, not a pose.
+            if (item.get('owner_ref') and not item.get('accepted')
+                    and item.get('type') in ('graphic-off-board', 'graphic-board-edge')):
+                refs.add(str(item['owner_ref']))
+        # check_assembly's graphic-copper channel ([[ref, mm], ...])
+        for ref_mm in doc.get('oob_graphic_copper_refs') or ():
+            if isinstance(ref_mm, (list, tuple)) and ref_mm:
+                refs.add(str(ref_mm[0]))
     return refs
 
 

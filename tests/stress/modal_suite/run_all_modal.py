@@ -27,10 +27,18 @@ summary line at all, and a driver that decided on parsed counts would read that
 silence as zero failures. Silence is not success: an unaccounted shard fails
 the run and is named.
 
-NOTE ON COVERAGE: the cloud image has NO KiCad, so every test needing pcbnew/wx
-self-skips (exit 77 with a `SKIP:` reason). Those are reported in their own
-bucket and are NOT passes. The wx/pcbnew parity gates in tests/gui_parity/ are
-not collected by run_all at all and still need a local KiCad-python session.
+NOTE ON COVERAGE: THIS image has no KiCad (plain debian_slim, no switch), so
+every test needing pcbnew/wx self-skips (exit 77 with a `SKIP:` reason). Those
+are reported in their own bucket and are NOT passes. The wx/pcbnew parity gates
+in tests/gui_parity/ are not collected by run_all at all and still need a local
+KiCad-python session.
+
+That is true of THIS app and not of "the cloud": the stress app has carried
+KiCad since 2026-08-23 (cloud_replay_sets.py passes --with-kicad by default,
+building modal_sweep/modal_app.py on kicad/kicad:10.0.0). Giving this image
+KiCad would mean copying that recipe; it would recover the two self-skips that
+are really about KiCad, and NOT the ones wanting artifacts under the gitignored
+wk/, which self-skip on any clean checkout.
 """
 from __future__ import annotations
 
@@ -317,7 +325,9 @@ def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
             print(f"  {n}")
     if tot["self_skipped"]:
         print(f"\n{tot['self_skipped']} self-skipped -- these asserted NOTHING "
-              f"(the cloud image has no KiCad). They are not passes.")
+              f"and are not passes. The reasons DIFFER: this image has no "
+              f"KiCad, and some tests want recorded artifacts absent from a "
+              f"clean checkout. Read each SKIP: line rather than assuming.")
     # A shard that never reported is the failure mode this block exists for:
     # its tests did not run, and without this the run would print green.
     if missing:

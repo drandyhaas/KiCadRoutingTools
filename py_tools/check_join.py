@@ -159,10 +159,16 @@ def _stage_board(board, out_path, pcb, net_id, cand_segs, cand_vias):
         blocks.append(generate_segment_sexpr(
             (s.start_x, s.start_y), (s.end_x, s.end_y), s.width, s.layer,
             net_id, net_name=net_name))
+    # #962: a join via in a pad or paste opening declares Type VII, exactly as
+    # a routed one would, so the staged board is graded as it would ship.
+    from fab_notes import via_protection_stamps, apply_stamps_in_memory
+    _st962, _rec962 = via_protection_stamps(list(cand_vias), [], pcb)
+    apply_stamps_in_memory(_st962)
     for v in cand_vias:
         blocks.append(generate_via_sexpr(v.x, v.y, v.size, v.drill,
                                          v.layers, net_id,
-                                         net_name=net_name))
+                                         net_name=net_name,
+                                         tenting_attrs=getattr(v, 'tenting_attrs', None)))
     tail = content.rstrip()
     if not tail.endswith(')'):
         raise ValueError(f"{board} does not end with a closing paren")

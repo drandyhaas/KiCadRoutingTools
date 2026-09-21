@@ -40,8 +40,16 @@ The tools are of two kinds, and the difference decides how you use one:
 | | **ACTOR** | **INSTRUMENT** |
 |---|---|---|
 | what it does | changes the board | says what is wrong with it |
-| here | `route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py` | `check_connected.py`, `check_drc.py`, `check_complete.py`, `board_score.py`, `check_weird.py`, `check_cycles.py` |
+| here | `route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py` | `check_connected.py`, `check_drc.py`, `check_complete.py`, `board_score.py`, `check_weird.py`, `check_cycles.py`, `tests/stress/kicad_drc_compare.py` |
 | how you use it | name it in the plan and let it run | run it -- never optional |
+
+`tests/stress/kicad_drc_compare.py` grades the board with KiCad's own DRC beside
+`check_drc` and names the copper findings only one of them makes. It was never run
+in run 29, where KiCad's DRC was the only channel that saw copper against a
+part's own net-0 tab (#962, #994). It needs `kicad-cli`,
+and `krt_registry` does not list it because it lives under `tests/`. Without
+`kicad-cli` it prints SKIP, compares 0 boards and exits 0: record that as NOT
+RUN, never as agreement.
 
 Every runnable tool in this clone declares which door it serves and which of
 those two kinds it is. The routing door's own view, with each tool's purpose:
