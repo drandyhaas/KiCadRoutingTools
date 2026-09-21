@@ -2061,6 +2061,18 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                 # both stand (K36 pf7: SDQS1's teeth 0.96 mm apart passed the
                 # reach, with SDQ11 and SDQ8 between them on a 0.32 mm comb;
                 # the pair could not be launched coupled)
+                # ...but NOT in the relaxed case (tried 2026-09-20 for zynq
+                # K47 DQS0, whose teeth straddle DQ6's and DQ0's: a third
+                # tooth with a one-move menu made the model INFEASIBLE, the
+                # greedy fallback moved DQS0_N to another face and split
+                # DQS1's berths across layers -- K44 100/0 open -> 116/2
+                # open). The layer a straddled tooth LEAVES on is the braid
+                # schedule's page, and that is where such a rule belongs
+                # (braid.py Corridor._straddled bounds a straddled changer's
+                # dive in the one-dive levels, off by default; the default
+                # Schedule would need a forced other-page exit -- not done,
+                # the convergence zone and the plain-approach retry landed
+                # the pairs without it)
                 n_between = 0
                 for j, ks in ([] if relaxed else okj.items()):
                     a = A[j]

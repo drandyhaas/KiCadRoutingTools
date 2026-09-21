@@ -637,6 +637,94 @@ K47 both DQS pairs land only by the last resort, so their copper is not
 in the singles' plan and one single stays open; the free-first flow ships
 it at 133. Pairs off is byte-identical to the recorded K34 braid.
 
+**THE ECONOMY'S GUARD, THE JOINT RE-LAY AND THE COMB DISCIPLINE (2026-09-20,
+Andy's magenta route).** Andy drew the obvious route for K36's SBA1 over the
+render: the chain had it at 0 vias and 44.7 mm -- round the outside of the
+DDR and back up under its balls to its own dogbone via -- where 2 vias and
+20 mm, or 0 vias and 22 mm, were there. Two defects, both general:
+the ECON RE-LAY (the post-completion pass that rips a heavy lane and keeps
+a re-lay with fewer vias) accepted fewer vias AT ANY LENGTH (SBA1 2 -> 0
+for +24 mm; SDQ0 5 -> 3 for +20 mm; K28's SA1 the same 21 -> 45 mm, and
+the recorded 34 contains it), and SA0, refused in its band and routed at
+the LAST CALL with an open search, had hugged the DDR's comb 0.2 mm in
+front of SBA1's berth, so the way in from above was taken. Three rules:
+
+- `BRAID_ECON_MM_PER_VIA` (6 mm; 0 = the old rule): a re-lay may buy a
+  via with at most this much copper. The human's own economy is about
+  4 mm a via; a DDR lane 24 mm over its group is 24 mm of meander on
+  every other lane of the group at the length-matching phase.
+- `BRAID_ECON_JOINT` (1): when a lane's cheaper re-lay is too long for the
+  guard, or an extra-long lane has no cheaper lane alone, `rip_for`'s
+  min-cut probe -- a tight window round the planned lane, every lane of
+  this run priced at 1 mm a cell, not blocked -- names the lane(s) its
+  short path would cross; the trial rips them, lays the lane FREE round
+  its planned path, re-lays each victim (band first), and the set is kept
+  only when it is cheaper IN ALL: fewer vias under the same guard, no lane
+  ending with more vias than it had, no lane growing past its own guard,
+  and never for millimetres alone. Measured on the way there: a set judged
+  by its direct victims alone shipped +6 vias on three lanes a nested
+  negotiation had re-laid (so nested rips are off in econ and every changed
+  lane is counted); a via moved onto a neighbour (SDQ12 2 -> 4 for SDQ13's
+  5 -> 3) reshaped the board and cost SA7 and SA8 their 0-via re-lays after
+  it; a length-only joint (SODT0 3 mm shorter by ripping SODT1) took the
+  space SA2's 0-via re-lay needed (K41 arm B 46 -> 48); the joint offered
+  to every lane with a via was 82 at 64 s against 79 at 35 s.
+- `BRAID_APPROACH_RESERVE` (1.0 mm): at the last call, every other
+  member's berth approach -- a millimetre out from its berth along the
+  arrival direction, on its arrival layer -- is virtual copper, so a lane
+  searched free of its band cannot park in front of a neighbour's berth.
+  Neutral on K36 (SA0 then arrives at 45 degrees like a comb lane); inside
+  the econ pass it cost SA7 and SA8 their 0-via re-lays (79 -> 83), so
+  `BRAID_APPROACH_RESERVE_ECON` is 0.
+
+SBA1 itself ends at 2 vias and 20 mm: its 0-via path crosses three
+byte-lane lanes, not one neighbour.
+
+**THE ROOM A PAIR'S CONVERGING APPROACH NEEDS AT THE COMB (2026-09-20).**
+zynq K47's DQS pairs landed only free of the plan and a single stayed open
+(111 vias, 1 open). The probe (`tmp/probe_k47_pair.py`, the band mask
+printed at the fan-in) showed the pair's teeth 1.55 mm apart with DQ6's and
+DQ0's teeth BETWEEN them, and the pair's band a single lane's wedge from the
+pair's centre: one cell of it at the P tooth, and the converged tips 2 mm
+out outside it altogether. The pair diagnostics (`BRAID_PAIR_DEBUG`) then
+showed the planned attempts dying at the BERTH: the lane-guided connector
+hooks into the berths from the north 0.3 mm from them, between a reserved
+lane and cap C102.2, and the router gave up before laying copper ("stopped
+at the source (no copper)" was the message; the source was free), while the
+free-of-plan call arriving along the berths' own direction landed at once.
+
+- `BRAID_PAIR_FANIN_BAND` (0.6 mm): the CONVERGENCE ZONE -- the pair's band
+  ORed with a box at each end, `BRAID_PAIR_FANIN` mm out along the escape
+  (arrival) direction from the two ends' midpoint, half the ends'
+  separation plus this across, on that end's layers
+  (`Corridor._pair_fanin_band`; the boxes' corners join the window).
+- connect.py: a pair route that makes NO copper with a lane-guided
+  connector at either end is tried again with the plain approaches along
+  the escape and arrival directions, inside the same band, before it is
+  refused -- like the frontier-less retry.
+- A third tooth between a pair's teeth on the pair's layer: the planner's
+  nothing-between clauses in the RELAXED case were tried and REVERTED (a
+  one-move third menu made the model infeasible, the greedy fallback moved
+  DQS0_N to another face and split DQS1's berths across layers: K44 100 ->
+  116 with 2 open). `Corridor._straddled` names such teeth and the one-dive
+  levels (`BRAID_ONE_DIVE` >= 1, off by default) bound a straddled changer's
+  dive to its fan-in; in the default Schedule (schedule.py) the rule would
+  be a forced other-page exit, not done -- the two rules above landed the
+  pairs without it.
+
+| chain | before | after | human |
+|---|---|---|---|
+| H3 K36, pairs | 84 | **71**, 0 open | 62 |
+| H3 K28 | 34 | 36, 0 open | 46 |
+| H3 K41 | 74 | 74, 0 open | 70 |
+| H3 K51 | 98 | **96**, 0 open | 81 |
+| zynq K44, pairs | 100 | 102, 0 open | 103 |
+| zynq K47, pairs + CK | 111, 1 open | **97**, 0 open | 109 |
+
+Every pair in its planned band at K36 (SDQS1 and SCK at 0 vias) and at K47
+(all three at 0 vias, DQS0 +1.2 mm, DQS1 +0.6, CK through R20), coupled
+0.54-0.88. K28's +2 is the guard refusing SA1's 24 mm for 2 vias.
+
 **Instruments:** `grade_k.py` prints one PAIR line per pair (routed or
 not, coupled fraction at the inferred pitch, skew, barrels);
 `pair_census.py` is the same on any board; `BRAID_PAIR_DEBUG=1` prints each

@@ -1111,6 +1111,20 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     if not result.get('new_segments'):
         # a probe that stopped at the source returns no failure flag and no
         # copper -- and a lane of approach pieces alone "landed" (K36 SDQS0)
+        if attempt < 2 and (a_conn is not None or b_conn is not None):
+            # ...most often because a LANE-GUIDED connector's pose has no
+            # room at its end (zynq K47 DQS0: the planned lane hooks into
+            # the berths from the north, 0.3 mm from them, between a
+            # reserved lane and a cap; the same pair lands at once along
+            # the berths' own direction): the ends are tried again with
+            # the plain approaches along the escape and arrival directions
+            if os.environ.get('BRAID_PAIR_DEBUG'):
+                print("    pair route made no copper -- retrying with the plain approaches at both ends")
+            return _connect_pair_prod(pcb, p_id, n_id, a_p0, a_n0, a_layer0, b_p0, b_n0, b_layer0,
+                                      cfg, band, margin, band_slack, virtual, window_pts,
+                                      virtual_vias, report, gap, a_dir0, b_dir0, half,
+                                      a_conn=None, b_conn=None, appr_scale=appr_scale,
+                                      attempt=attempt + 1)
         if report is not None:
             report['empty'] = True
         return None
