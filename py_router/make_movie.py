@@ -274,10 +274,14 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             layout = getattr(_ek, 'MOVIE_LAYOUT', 'legacy')
         if aspect is None:
             aspect = getattr(_ek, 'MOVIE_ASPECT', '') or None
+    # The run directory's own name is the closest thing a multi-step chain has
+    # to a board name, and it is what the rail's stable left should carry.
+    _title = (os.path.basename(os.path.abspath(inputs[0]))
+              if len(inputs) == 1 and os.path.isdir(inputs[0]) else None)
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
                             theme=theme, layout=layout, aspect=aspect,
-                            geom_out=geom_out)
+                            geom_out=geom_out, title=_title)
     if not frames:
         if not quiet:
             print("make_movie: no frames (nothing routed?)", file=sys.stderr)

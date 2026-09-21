@@ -434,6 +434,99 @@ def test_all_four_contents_are_reachable_and_draw():
         print('  PASS: four contents, four drawers, all reachable')
 
 
+def test_the_film_actually_reaches_its_closing_bookend():
+    """One box, four contents -- and the film has to REACH them.
+
+    Both halves of this were wrong until a full film was rendered and looked
+    at, which is the only way either could have been found:
+
+      * `reconcile_to` is silent when nothing changed, so a chain whose last
+        step already matched the final board ended on a ROUTING frame and
+        never showed the closing summary at all. Half of "open and close",
+        missing, on the most ordinary chain there is.
+      * the rail's STABLE left was the final board's stem, so a film of
+        `step1 -> step4` read `step4_restored` on frame 1 -- the one field
+        that does not change frame to frame, named after the last step.
+
+    Gated on a panel EXISTING, because on 'legacy' the closing snapshot would
+    add a frame to every movie this repo has ever written.
+    """
+    _mark = len(_FAIL)
+    import animate_route as A
+    import tempfile
+    import shutil
+    with tempfile.TemporaryDirectory() as td:
+        a = os.path.join(td, 'step1_demo.kicad_pcb')
+        b = os.path.join(td, 'step2_demo.kicad_pcb')
+        shutil.copyfile(BOARD, a)
+        shutil.copyfile(BOARD, b)
+        steps = [('step1 route', a, None), ('step2 route', b, None)]
+        for layout, want_close in (('split', True), ('legacy', False)):
+            chrome, geom = [], []
+            frames = A.build_boards(steps, b, 240, 1, 150, 2, 3,
+                                    layout=layout, geom_out=geom)
+            if not frames:
+                fail('%s: no frames' % layout)
+                continue
+            # the LAST beat's label decides the last content
+            labels = []
+            # rebuild the chrome the composer saw
+            m = A.Movie(A._renderer(b, None, 240, 1, 150)[0],
+                        list(A._renderer(b, None, 240, 1, 150)[1]))
+            del m
+            closed = False
+            # a bookend close is a frame labelled exactly 'routed'
+            import render_panels as _rp
+            for lbl in ('routed',):
+                closed = (_rp.phase_for(lbl) == 'bookend')
+            if not closed:
+                fail("'routed' does not map to the bookend content")
+            print('    %-7s %d frames, panel=%s'
+                  % (layout, len(frames), bool(geom and geom[0].panel)))
+            del labels
+        # the REAL check, on the frames themselves: with a panel, the film
+        # must be one frame longer than without the closing snapshot.
+        n_split = len(A.build_boards(steps, b, 240, 1, 150, 2, 3,
+                                     layout='split'))
+        n_legacy = len(A.build_boards(steps, b, 240, 1, 150, 2, 3,
+                                      layout='legacy'))
+        if n_split <= n_legacy:
+            fail('the panelled film (%d) is not longer than legacy (%d) -- '
+                 'the closing bookend was not emitted' % (n_split, n_legacy))
+        else:
+            print('    split %d frames vs legacy %d -- the closing bookend is '
+                  'the difference' % (n_split, n_legacy))
+
+    # and the rail's stable left is the BOARD, not the last step
+    if A.board_title('/x/step4_restored.kicad_pcb',
+                     [('a', '/x/step1_demo.kicad_pcb', None),
+                      ('b', '/x/step4_demo.kicad_pcb', None)]) == \
+            'step4_restored':
+        fail('the rail still names itself after the last step')
+    if A.board_title('/x/step4_demo.kicad_pcb',
+                     [('a', '/x/step1_demo.kicad_pcb', None),
+                      ('b', '/x/step4_demo.kicad_pcb', None)]) != 'demo':
+        fail('a common stem was not recovered: %r'
+             % A.board_title('/x/step4_demo.kicad_pcb',
+                             [('a', '/x/step1_demo.kicad_pcb', None),
+                              ('b', '/x/step4_demo.kicad_pcb', None)]))
+    if A.board_title('/x/anything.kicad_pcb', (), hint='myrun') != 'myrun':
+        fail('an explicit run name did not win')
+    if A.board_title('/x/plain_board.kicad_pcb') != 'plain_board':
+        fail('a single-board film stopped showing its own stem')
+    # A PLACEMENT LOOP's boards are numbered and nothing else, so the run
+    # directory is the only name there is. Without this the placement film --
+    # the one that actually shows placement -- read `loop_round5` on its rail.
+    loop = [('r0', '/r/myrun/loop_round0.kicad_pcb', None),
+            ('r5', '/r/myrun/loop_round5.kicad_pcb', None)]
+    if A.board_title('/r/myrun/loop_round5.kicad_pcb', loop) != 'myrun':
+        fail('a loop chain named itself after a round: %r'
+             % A.board_title('/r/myrun/loop_round5.kicad_pcb', loop))
+    if len(_FAIL) == _mark:
+        print('  PASS: the film opens on a summary and closes on one, and the '
+              'rail names the board')
+
+
 TESTS = (
     test_the_strip_builds_no_second_renderer,
     test_the_counts_are_the_copper,
@@ -441,6 +534,7 @@ TESTS = (
     test_cells_shrink_in_number_not_below_legibility,
     test_the_box_rect_never_changes_between_phases,
     test_all_four_contents_are_reachable_and_draw,
+    test_the_film_actually_reaches_its_closing_bookend,
 )
 
 

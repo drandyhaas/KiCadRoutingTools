@@ -313,7 +313,7 @@ def _badge(frame, text, rgb=None):
 def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                layer_alpha=150, rip_hold=2, chunks=6, camera='auto',
                camera_budget=0.0, tween=10, quiet=False, theme=None,
-               attempts=None, attempts_from=None):
+               attempts=None, attempts_from=None, layout=None, aspect=None):
     """Frames for the whole shot list. One render pass, one scale.
 
     `attempts` is a `movie_attempts.Track` -- the search behind this film. Left
@@ -360,9 +360,17 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
     # `theme=` was accepted and DROPPED here until #1021: `--theme light`
     # reached build_film and never reached the renderer, so the flag was a
     # no-op on the film path. Same defect as make_movie's, found the same way.
+    # #1018's layout reaches the PLACEMENT film too. It did not until now,
+    # which is the wrong way round: this is the film that actually shows
+    # placement, so it is the one whose lower box has a placement content to
+    # hold and whose rail has laps to count. A film of a search rendered with
+    # no rail and no box was the one place the design system could not be
+    # seen doing its job.
+    _geom = []
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
-                            theme=_th)
+                            theme=_th, layout=layout, aspect=aspect,
+                            geom_out=_geom)
     if not frames:
         return []
 
@@ -499,6 +507,14 @@ def main(argv=None):
     ap.add_argument('--png-dir', help="also dump every frame as a PNG")
     ap.add_argument('--shots-json', help="write the resolved shot list here")
     ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--layout', default=None,
+                    help="frame layout: 'legacy' (default, today's frame), "
+                         "'stacked', 'sidebar', 'inset', 'split' or 'auto'. "
+                         "Anything but legacy reserves a rail and a lower "
+                         "box, which is where the placement content lives")
+    ap.add_argument('--aspect', default=None, metavar='W:H',
+                    help="target frame aspect; 'board' (default) keeps the "
+                         "board's own bounding box")
     ap.add_argument('--no-attempts', action='store_true',
                     help="drop the attempts band -- the boards alone")
     ap.add_argument('--quiet', action='store_true')
@@ -547,7 +563,8 @@ def main(argv=None):
                         layer_alpha=a.layer_alpha, rip_hold=a.rip_hold,
                         chunks=a.chunks, camera=a.camera,
                         camera_budget=a.camera_budget, tween=a.tween,
-                        quiet=a.quiet, attempts=attempts,
+                        quiet=a.quiet, layout=a.layout, aspect=a.aspect,
+                        attempts=attempts,
                         attempts_from=('' if a.no_attempts else
                                        (a.from_loop_dir or
                                         (os.path.dirname(os.path.abspath(

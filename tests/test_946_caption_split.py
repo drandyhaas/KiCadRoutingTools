@@ -141,17 +141,63 @@ def test_the_rail_counts_laps_not_steps():
 
 
 def test_the_over_board_strip_is_gone_when_a_rail_carries_it():
+    """Asserted on the FRAMES, not on the source.
+
+    The first version of this grepped `animate_route.py` for the exact
+    expression `split_caption = bool(geom_out and geom_out[0].rail.h ...)`. It
+    went red on a pure RENAME -- `geom_out` became a private `_geom` when
+    `geom_out` stopped being the switch and went back to being only an output
+    collector -- while the behaviour it names was unchanged. A source grep
+    pins a spelling; this pins the thing the spelling is for.
+
+    The claim: a caption drawn over the copper AND repeated in the rail is a
+    duplicate, and a duplicate sitting on the board is worse than no strip at
+    all. So the over-board strip exists on `legacy` (no rail) and not on a
+    layout that reserves one.
+    """
     _mark = len(_FAIL)
+    import animate_route as A
+    import shutil
+    import tempfile
+    from kicad_parser import parse_kicad_pcb
+    board = os.path.join(ROOT, 'kicad_files', 'routed_output.kicad_pcb')
+    with tempfile.TemporaryDirectory() as td:
+        b = os.path.join(td, 'step2_x.kicad_pcb')
+        shutil.copyfile(board, b)
+        steps = [('step1 route', board, None), ('step2 route', b, None)]
+        ink = {}
+        for layout in ('legacy', 'split'):
+            m = A.build_boards(steps, b, 300, 1, 150, 2, 3, layout=layout)
+            if not m:
+                fail('%s: no frames' % layout)
+                continue
+            # `_label` stamps the strip in `chrome_strip` at the TOP LEFT of
+            # the BOARD; count that colour in the first 30 rows of the board
+            # box, which on legacy is the whole frame's top.
+            import render_theme as _rt
+            strip = _rt.DARK.rgb('chrome_band')   # _label's own box fill
+            f = m[len(m) // 2].convert('RGB')
+            top = f.crop((0, 0, f.width, min(30, f.height)))
+            ink[layout] = sum(n for n, c in top.getcolors(1 << 20)
+                              if c == strip)
+        if 'legacy' in ink and 'split' in ink:
+            if not ink['legacy']:
+                fail('BROKEN TEST: legacy drew no over-board strip at all, so '
+                     'this cannot tell suppression from an empty frame')
+            elif ink['split'] >= ink['legacy']:
+                fail('the over-board strip survives on a layout WITH a rail: '
+                     'legacy %d px vs split %d px -- that is a duplicate '
+                     'sitting on the copper' % (ink['legacy'], ink['split']))
+            else:
+                print('    over-board strip: legacy %d px, split %d px'
+                      % (ink['legacy'], ink['split']))
+    # and the switch is still conditional on a rail EXISTING, by name
     src = open(os.path.join(ROOT, 'py_router', 'animate_route.py'),
                encoding='utf-8').read()
     if 'split_caption' not in src:
         fail('nothing suppresses the over-board caption')
-        return
-    # and it is only suppressed when a rail EXISTS
-    if not re.search(r'split_caption\s*=\s*bool\(geom_out and '
-                     r'geom_out\[0\]\.rail\.h', src):
-        fail('the suppression is not conditional on a rail existing -- the '
-             'legacy frame has no rail and must keep its caption')
+    if not re.search(r'split_caption\s*=\s*bool\([^)]*\.rail\.h', src):
+        fail('the suppression is not conditional on a rail existing')
     if len(_FAIL) == _mark:
         print('  PASS: suppressed only when a rail exists; legacy keeps its '
               'strip')

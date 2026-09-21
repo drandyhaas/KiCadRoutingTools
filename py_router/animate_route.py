@@ -580,9 +580,46 @@ def render_chrome_lap(n, laps, label):
     return lap_text(label, lap=lap, laps=len(laps), phase=phase)
 
 
+def board_title(final, steps=(), hint=None):
+    """What the rail's STABLE left should say: the board, not a step.
+
+    `hint` wins -- `make_movie` passes the run directory's name when the chain
+    came from one, which is the closest thing a multi-step run has to a board
+    name. Otherwise the step prefix is stripped off the final board's stem,
+    because the rail's left is the one field that does NOT change frame to
+    frame and naming it after the LAST step contradicts that: a film of
+    `step1 -> step4` read `step4_restored` on frame 1.
+
+    Falls back to the stem unchanged, which is what a single-board film has
+    always shown.
+    """
+    if hint:
+        return str(hint)
+    stem = os.path.splitext(os.path.basename(final or ''))[0]
+    if len(steps) < 2:
+        return stem
+    # The two shapes a chain's boards actually take, neither of which contains
+    # a board name: `stepN_<what>` from a routing chain, `loop_roundN` /
+    # `roundN` from a placement loop. Strip the run prefix; if every step
+    # leaves the SAME tail that tail is the board, and if they leave nothing
+    # (a loop's boards are numbered and nothing else) the run directory is the
+    # only name there is.
+    pre = re.compile(r'^(?:step|loop_round|round|iter)\d*[_-]?')
+    if not pre.match(stem):
+        return stem
+    stems = [os.path.splitext(os.path.basename(str(st[1])))[0]
+             for st in steps if len(st) > 1]
+    tails = {pre.sub('', x) for x in stems}
+    if len(tails) == 1:
+        only = tails.pop()
+        if only:
+            return only
+    return os.path.basename(os.path.dirname(os.path.abspath(final))) or stem
+
+
 def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                  marks=None, theme=None, layout=None, aspect=None,
-                 geom_out=None):
+                 geom_out=None, title=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
     final board. ``build_run`` is this with the chain discovered from a run dir.
 
@@ -625,6 +662,7 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # routed_output at size 500 is 500x309) the legacy frame is now 1 px
     # shorter or narrower than it used to be. That pixel was being thrown away
     # by the encoder anyway; the difference is that now the picture knows.
+    _geom = None
     if True:
         import frame_layout
         _g = frame_layout.plan_frame(
@@ -645,14 +683,21 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         moved = (_g.board.w, _g.board.h) != (r.W, r.H)
         if _g.layout != 'legacy' and moved:
             r.set_canvas(_g.board.w, _g.board.h)
+        # `geom_out` is an OUTPUT collector, never the switch. It was both
+        # until a full film was rendered twice: `build_boards(layout='split')`
+        # WITHOUT a `geom_out` list silently produced today's frame -- no rail,
+        # no lower box, no composition -- so the layout took effect only for a
+        # caller that happened to ask for the geometry back. `make_film` is
+        # exactly such a caller.
+        _geom = _g
         if geom_out is not None:
             geom_out.append(_g)
     m = Movie(r, layers, rip_hold=rip_hold)
     # #1020: the lower box's non-routing contents, decided ONCE. `want_panel`
     # also gates the per-frame copper snapshot, so a legacy film -- which has
     # no box -- retains nothing.
-    m.want_panel = bool(geom_out and geom_out[0].panel is not None
-                        and geom_out[0].panel.h > 0)
+    m.want_panel = bool(_geom is not None and _geom.panel is not None
+                        and _geom.panel.h > 0)
     if m.want_panel:
         # Seeded from the chain's FIRST board, not its last: the opening
         # snapshot is of the board as it arrived, and a film of a seeding run
@@ -671,8 +716,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     _laps = sorted({int(mm.group(1)) for mm in
                     (re.match(r'round (\d+)', str(st[0])) for st in steps)
                     if mm})
-    m.rail_left = os.path.splitext(os.path.basename(final))[0]
-    m.split_caption = bool(geom_out and geom_out[0].rail.h > 0)
+    m.rail_left = board_title(final, steps, title)
+    m.split_caption = bool(_geom is not None and _geom.rail.h > 0)
     if stage is not None:
         stage.attach(m, r, layers)
     m.snapshot("input")
@@ -743,7 +788,17 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         r.pcb = fpcb
     for _z in (getattr(fpcb, 'zones', None) or []):   # ensure every pour shows
         m.reveal_zone(_z.net_id)
+    _before = len(m.frames)
     m.reconcile_to(*_board_rows(fpcb, layers), "routed")
+    # THE CLOSING BOOKEND. `reconcile_to` is silent when nothing changed, so a
+    # film whose last step already matched the final board ended on a ROUTING
+    # frame and never reached the bookend content at all -- half the "open and
+    # close" the lower box is designed around, missing.
+    #
+    # Only when a box EXISTS to hold it: on 'legacy' this would add a frame to
+    # every existing movie, and legacy is the arm that must not move.
+    if m.want_panel and len(m.frames) == _before:
+        m.snapshot("routed")
     if stage is not None:
         stage.outro()
     # #1018: the board was rendered into its PLANNED BOX; the frame is the
@@ -753,8 +808,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     #
     # In place, so peak memory stays about two frames rather than twice the
     # movie: the same reason `movie_panels.compose_two_panel` does it that way.
-    if geom_out:
-        _compose_into_frame(m.frames, geom_out[0], r, m.chrome)
+    if _geom is not None:
+        _compose_into_frame(m.frames, _geom, r, m.chrome)
     return m.frames
 
 
