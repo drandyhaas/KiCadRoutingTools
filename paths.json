@@ -370,5 +370,67 @@
    "title": "/releases/tag/v0.22.0",
    "uniques": 44
   }
+ ],
+ "2026-09-21": [
+  {
+   "count": 2026,
+   "path": "/drandyhaas/KiCadRoutingTools",
+   "title": "Overview",
+   "uniques": 1305
+  },
+  {
+   "count": 211,
+   "path": "/drandyhaas/KiCadRoutingTools/issues",
+   "title": "/issues",
+   "uniques": 57
+  },
+  {
+   "count": 161,
+   "path": "/drandyhaas/KiCadRoutingTools/pulls",
+   "title": "/pulls",
+   "uniques": 21
+  },
+  {
+   "count": 154,
+   "path": "/drandyhaas/KiCadRoutingTools/discussions/810",
+   "title": "/discussions/810",
+   "uniques": 138
+  },
+  {
+   "count": 131,
+   "path": "/drandyhaas/KiCadRoutingTools/tree/main",
+   "title": "/tree/main",
+   "uniques": 75
+  },
+  {
+   "count": 117,
+   "path": "/drandyhaas/KiCadRoutingTools/releases",
+   "title": "/releases",
+   "uniques": 73
+  },
+  {
+   "count": 106,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_all.png",
+   "title": "/blob/main/docs/routed_all.png",
+   "uniques": 93
+  },
+  {
+   "count": 88,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/routed_kit.png",
+   "title": "/blob/main/docs/routed_kit.png",
+   "uniques": 70
+  },
+  {
+   "count": 81,
+   "path": "/drandyhaas/KiCadRoutingTools/blob/main/docs/claude-skills.md",
+   "title": "/blob/main/docs/claude-skills.md",
+   "uniques": 54
+  },
+  {
+   "count": 68,
+   "path": "/drandyhaas/KiCadRoutingTools/commits/main",
+   "title": "/commits/main",
+   "uniques": 23
+  }
  ]
 }
