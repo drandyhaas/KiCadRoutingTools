@@ -31,6 +31,41 @@ def _rivers(board=BENCH):
     return rivers
 
 
+def admissible(pcb, net):
+    """A net the bus router can route ball to ball: two pads on two parts
+    -- or more, when every extra pad is SERVED UNDER one of the two by a
+    via-in-pad (pairs.under_pad: a back-side termination resistor under a
+    DDR clock ball) or is a pad of a two-pad part whose other pad is on the
+    PARTNER leg of a differential pair (the pair's termination, which the
+    pair passes through: pairs.pair_waypoints -- the zynq's R20 on CK).
+    make_bench selects the bench's nets by it and coherent_nets keeps them,
+    so a net the bench fans out is one the ladder admits."""
+    import pairs as _pairs
+    import rules as _rules
+    bn_all = {n.name.split('/')[-1] for n in pcb.nets.values()}
+    prs = _pairs.pair_names(list(bn_all))
+    partner = {}
+    for _b, (_pn, _nn) in prs.items():
+        partner[_pn], partner[_nn] = _nn, _pn
+    pads = list(net.pads)
+    if len({p.component_ref for p in pads}) < 2:
+        return False
+    if len(pads) == 2:
+        return True
+    short = net.name.split('/')[-1]
+    mate = partner.get(short)
+
+    def waypoint(p):
+        fp = pcb.footprints.get(p.component_ref)
+        if fp is None or mate is None or len(fp.pads) != 2:
+            return False
+        other = [q for q in fp.pads if q is not p][0]
+        return pcb.nets[other.net_id].name.split('/')[-1] == mate if other.net_id in pcb.nets else False
+    ends = [p for p in pads if not waypoint(p)
+            and not any(_pairs.under_pad(q, p, _rules.VIA_SIZE) for q in pads if q is not p)]
+    return len(ends) == 2 and len({p.component_ref for p in ends}) == 2
+
+
 def coherent_nets(K, board=BENCH):
     """The first K routable nets of the coherent ladder: two-pad nets
     between two components that are fanned out on `board` (a free
@@ -47,20 +82,7 @@ def coherent_nets(K, board=BENCH):
     with contextlib.redirect_stdout(sys.stderr):
         pcb = parse_kicad_pcb(board)
     by = {n.name.split('/')[-1]: n for n in pcb.nets.values()}
-    import pairs as _pairs
-    import rules as _rules
-
-    def two_ended(net):
-        # two pads on two components -- or more, when every extra pad is
-        # SERVED UNDER one of the two by a via-in-pad (pairs.under_pad: a
-        # back-side termination resistor under a DDR clock ball)
-        pads = list(net.pads)
-        if len({p.component_ref for p in pads}) < 2:
-            return False
-        if len(pads) == 2:
-            return True
-        ends = [p for p in pads if not any(_pairs.under_pad(q, p, _rules.VIA_SIZE) for q in pads if q is not p)]
-        return len(ends) == 2 and len({p.component_ref for p in ends}) == 2
+    two_ended = lambda net: admissible(pcb, net)
     flat = [n for n in flat if n in by and two_ended(by[n])]
     bn = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
     ok = []

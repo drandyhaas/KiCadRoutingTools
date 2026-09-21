@@ -570,6 +570,37 @@ singles; blocks 22 vias against 16, coupled 0.88 / 0.85 against 0.56 /
 0.29 (the census's pitch is now the mode among PAIR-LIKE distances, so
 two legs a ball pitch apart read as 0.00, not 0.92).
 
+**Along the corridor's grain, tried (2026-09-20, late).** `BRAID_PAIR_TUBE=W`
+routes each pair ALSO inside a tube W mm either side of its planned lane
+(the corridors planned once with the pairs as members, on a copy of the
+context, for their lanes only) and keeps the shorter of tube and free
+(`BRAID_PAIR_PICK=len`, or `cross` for the one crossing fewer planned
+lanes). Measured on the chain: H3 K36 free 87 / every pair in its tube 81
+(SCK 36 -> 24 mm) / picked per pair 87; zynq K44 free 116 / tubes 126 with
+2 open / picked 116-123. The pre-plan on the LIVE context changed the plan
+that followed it (116 -> 126 with identical pair copper), and keeping the
+pairs as protected members of that one plan was worse still (143): hence
+the copy. No local rule reproduced the H3 gain without the zynq loss, so
+the tube is off by default and stays an instrument.
+
+**A pair's termination is a waypoint (2026-09-20, late).** A two-pad part
+with one pad on P and the other on N -- the zynq's R20 on CK, 4 mm from
+U1's balls -- is a place the pair PASSES THROUGH, as the human takes it
+(four segment ends on its pad). `coherent_nets.admissible` admits such a
+net (its ends are still the two arrays), `make_bench.pair_nets` selects by
+the same rule (the bench rebuilt as `tmp/zynq/zynqCK`, 47 nets), and
+`braid._route_pair_legs` routes the pair in legs, teeth -> the part's pads
+-> berths, each leg by the same router, the pads leaving square to the
+part on the side of the next stop (a slanted direction had the router's
+connector graze the partner's pad by 0.03 mm). A part UNDER the balls is
+not a waypoint: the tie via serves it. And the pairs' ORDER is retried: a
+pair refused because the pairs before it took its room (K47: DQS1 walled
+by DQS0's copper, the free window exhausted at 20000 cells) is tried first
+in a new order, and the order landing the most pairs, then the fewest
+vias, stands. K47 chain, pairs first: 0 open / 0 DRC / 133 vias, CK
+coupled 0.77 through R20, DQS0 0.83, DQS1 0.85; the human 109 with 0.87 /
+0.84 / 0.87; pairs off 105 with 3 open (R20 unreached, DQS0 refused).
+
 **Instruments:** `grade_k.py` prints one PAIR line per pair (routed or
 not, coupled fraction at the inferred pitch, skew, barrels);
 `pair_census.py` is the same on any board; `BRAID_PAIR_DEBUG=1` prints each

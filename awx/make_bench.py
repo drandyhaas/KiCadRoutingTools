@@ -105,9 +105,16 @@ def two_layer(txt):
 
 
 def pair_nets(pcb, src, dst):
+    # the nets the bench fans out are the nets the ladder admits
+    # (coherent_nets.admissible: two ends on the two arrays, plus a pad
+    # served under a ball or a pair's termination part the pair passes
+    # through -- the zynq's R20 on CK, 2026-09-20)
+    from coherent_nets import admissible
     return sorted(n.name for n in pcb.nets.values()
-                  if len(n.pads) == 2
-                  and {p.component_ref for p in n.pads} == {src, dst})
+                  if admissible(pcb, n)
+                  and {src, dst} <= {p.component_ref for p in n.pads}
+                  and {p.component_ref for p in n.pads if len(pcb.footprints.get(p.component_ref).pads) > 2
+                       if pcb.footprints.get(p.component_ref)} <= {src, dst})
 
 
 def fanout_source(board, out, src, names, layers=None):

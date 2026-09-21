@@ -374,6 +374,34 @@ def hand(direction, p_pt, n_pt, arriving: bool = False) -> int:
     return 0 if abs(c) < 1e-6 else (1 if c > 0 else -1)
 
 
+def pair_waypoints(pcb, p_id: int, n_id: int, src_ref: str, dst_ref: str):
+    """The two-pad parts a pair PASSES THROUGH between its arrays: a part
+    with one pad on P and the other on N (a differential termination
+    resistor), neither array. Returns [(pad_p, pad_n)] ordered from the
+    source array outward."""
+    out = []
+    arrays = [pcb.footprints.get(r) for r in (src_ref, dst_ref)]
+    array_pads = [q for fp in arrays if fp is not None for q in fp.pads if q.net_id in (p_id, n_id)]
+    for fp in pcb.footprints.values():
+        if fp.reference in (src_ref, dst_ref) or len(fp.pads) != 2:
+            continue
+        nets = {q.net_id for q in fp.pads}
+        if nets == {p_id, n_id}:
+            pp = [q for q in fp.pads if q.net_id == p_id][0]
+            pn = [q for q in fp.pads if q.net_id == n_id][0]
+            # a part UNDER the array's balls is served by a tie via at the
+            # ball (fanout_from_plan.tie_vias_under), not passed through
+            if any(under_pad(b, q, 0.25) for q in (pp, pn) for b in array_pads):
+                continue
+            out.append((pp, pn))
+    src = pcb.footprints.get(src_ref)
+    if src is not None and len(out) > 1:
+        cx = sum(q.global_x for q in src.pads) / len(src.pads)
+        cy = sum(q.global_y for q in src.pads) / len(src.pads)
+        out.sort(key=lambda w: math.hypot(w[0].global_x - cx, w[0].global_y - cy))
+    return out
+
+
 def harmonise(choice: dict, menus: dict, names: Sequence[str], pitch: float,
               conflict, log=print) -> List[str]:
     """THE PAIR'S TWO BERTHS AS ONE MOVE, after a plan chose them one by one
