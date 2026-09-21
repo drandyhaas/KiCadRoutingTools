@@ -169,10 +169,16 @@ def main():
         grade["drc_kicad_only"] = data["kicad_only"]
         grade["drc_checkdrc_only"] = data["checkdrc_only"]
         # by_type + raw-final of the ROUTER-ATTRIBUTABLE items, via the same helpers
-        cd = run_check_drc(fp, grade_clr)
+        # #962: via-in-paste is its own channel (compare_board_data's
+        # `via_in_paste`), never a copper-clearance item, as in `drc` above
+        from kicad_drc_compare import CD_VIA_PASTE_TYPES
+        cd = [c for c in run_check_drc(fp, grade_clr)
+              if c["type"] not in CD_VIA_PASTE_TYPES]
         grade["drc_final_raw"] = len(cd)
+        grade["drc_via_in_paste"] = (data.get("via_in_paste") or {}).get("check_drc")
         if base:
-            cd, _ = _subtract_baseline(cd, run_check_drc(base, grade_clr))
+            cd, _ = _subtract_baseline(cd, [c for c in run_check_drc(base, grade_clr)
+                                            if c["type"] not in CD_VIA_PASTE_TYPES])
         from collections import Counter
         grade["by_type"] = dict(Counter(v.get("type", "?") for v in cd))
     except Exception as e:
@@ -193,6 +199,12 @@ def main():
             # numeric type name cannot reintroduce the same silence.
             grade["by_type"] = dict((k.strip(), int(v)) for k, v in
                                     re.findall(r"^([A-Z0-9][A-Z0-9 -]+?) violations \((\d+)\)[^\n]*:", o, re.M))
+            # #962: via-in-paste out of the copper count, as on the core path
+            _vip = grade["by_type"].pop("VIA-IN-PASTE", 0)
+            if grade["drc"] is not None:
+                grade["drc"] -= _vip
+                grade["drc_final_raw"] = grade["drc"]
+            grade["drc_via_in_paste"] = _vip
         except Exception as e2:
             grade["drc"] = None; grade["drc_err"] = str(e2)[:100]
     try:

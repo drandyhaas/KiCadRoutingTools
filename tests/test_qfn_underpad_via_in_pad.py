@@ -57,7 +57,11 @@ def _fanout(out_path, allow_via_in_pad):
 def _drc_clean(out_path):
     # check_sizes=False: the fanout intentionally routes 0.1mm escapes (below the
     # 2-layer fab floor); this test asserts clearance, not the issue #176 fab floor.
-    return not run_drc(out_path, clearance=CLEARANCE, quiet=True, check_sizes=False)
+    # run_drc returns its ACCEPTED rows too (#962: a filled+capped via in a
+    # paste opening is published as `protected-via-in-paste`), so clean means
+    # no COUNTED row, which is what check_drc's own exit status reads.
+    return not [v for v in run_drc(out_path, clearance=CLEARANCE, quiet=True,
+                                   check_sizes=False) if not v.get('accepted')]
 
 
 def main():

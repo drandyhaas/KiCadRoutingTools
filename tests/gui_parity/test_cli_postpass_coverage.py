@@ -98,6 +98,18 @@ REGISTRY = {
     # mains); GUI twin applies the shared compute core to the live board.
     'retract_castellated_landings': ['apply_castellated_landing_retract',
                                      'compute_castellated_landing_retract'],
+    # #962: the ship-time Type VII stamp on a WRITTEN board (repair_planes'
+    # main, after its oracle reconnect). The GUI decides with the same core,
+    # fab_notes.via_protection_stamps, on the vias it creates
+    # (gui_utils.run_kicad_oracle_on_live_board), and applies them through
+    # apply_via_protection.
+    'ship_via_protection_file': ['via_protection_stamps'],
+    # #962: route_planes' main stamps its --add-gnd-vias dicts with the core
+    # itself; the GUI runs the core wherever it creates vias.
+    'via_protection_stamps': ['via_protection_stamps'],
+    'apply_stamps_in_memory': ['via_protection_stamps'],
+    'print_via_protection_record': ['via_protection_stamps'],
+    'via_snapshot': ['via_protection_stamps'],
 }
 # NOTE (deliberately NOT registered): move_copper_graphics_to_silkscreen runs
 # inside the shared plane WRITER (plane_io), not a main() -- so this gate, which
@@ -133,7 +145,10 @@ REGISTRY = {
 # never-before-seen symbol from these, called in a CLI main, must be reviewed.
 # #381 D8: added 'check_drc' -- the fanout mains run a post-engine DRC graze
 # audit (check_drc.run_drc) that the lint's module list couldn't see.
-POSTPASS_MODULES = ['kicad_oracle', 'fix_kicad_drc_settings', 'check_drc']
+POSTPASS_MODULES = ['kicad_oracle', 'fix_kicad_drc_settings', 'check_drc',
+                    # #962: fab_notes now changes the board (the Type VII
+                    # stamp), so a CLI main calling it is a post-pass too.
+                    'fab_notes']
 
 # Symbols intentionally exempt from discovery (helpers/args, not passes).
 # read_project_edge_clearance (#338): a pure READER (project edge rule ->

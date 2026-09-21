@@ -429,6 +429,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         pcb_data = parse_kicad_pcb(input_file, keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
+    # #962: the input's vias as values, for the ship-time Type VII stamp
+    from fab_notes import via_snapshot as _via_snapshot962
+    _input_vias962 = _via_snapshot962(pcb_data.vias)
 
     # Route trace (#482, KICAD_ROUTE_TRACE=1): record diff-pair copper as it is
     # committed/ripped/restored for animating the run. Default-off; gated on a
@@ -1822,6 +1825,30 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                       f"unchanged to {output_file} so the pipeline can continue "
                       f"(route the pair single-ended next)")
 
+    # #962: declare Type VII on every via this run put in a pad or a paste
+    # opening, after the write/return split and after everything that lays
+    # copper. GUI: the in-memory vias `differential_gui` applies. CLI: the
+    # written file.
+    try:
+        import fab_notes as _fn962
+        _rec962 = None
+        if return_results:
+            _v962 = [v for r in (results_data.get('results') or [])
+                     for v in (r.get('new_vias') or [])]
+            _v962 += list(results_data.get('all_swap_vias') or all_swap_vias or [])
+            _st962, _rec962 = _fn962.via_protection_stamps(_v962, _input_vias962, pcb_data)
+            _fn962.apply_stamps_in_memory(_st962)
+            _fn962.print_via_protection_record(_rec962, 'route_diff')
+            results_data['via_in_pad'] = _rec962
+        elif output_file and os.path.exists(output_file):
+            _rec962 = _fn962.ship_via_protection_file(output_file, _input_vias962,
+                                                      'route_diff')
+        if _rec962 and _rec962.get('count') and not return_results:
+            import json as _json962
+            print(f"VIA_IN_PAD_JSON: {_json962.dumps(_rec962)}")
+    except Exception as _e962:                                  # noqa: BLE001
+        print(f"  (via protection stamp skipped: {type(_e962).__name__}: {_e962})")
+
     # Update schematics with swap info if directory specified
     if schematic_dir and (target_swap_info or pad_swaps):
         schematic_swaps = []
@@ -2126,7 +2153,8 @@ Examples:
     parser.add_argument("--same-net-pad-clearance", type=float, default=None,
                         help="Edge-to-edge clearance (mm) between EVERY placed via and "
                              "same-net pads (#581). > 0 keeps vias off same-net SMD pads "
-                             "(escape vias, via-in-pad rescue, tap vias) and is recorded "
+                             "AND off the net's solder-paste openings (#962) (escape vias, "
+                             "via-in-pad rescue, tap vias) and is recorded "
                              "in the sibling .kicad_pro so later chain steps inherit it; "
                              "-1 explicitly allows via-in-pad. Default: the project's "
                              "recorded value, else via-in-pad allowed.")

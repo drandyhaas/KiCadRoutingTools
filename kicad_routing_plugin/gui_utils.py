@@ -256,21 +256,37 @@ def apply_via_protection(pcb_via, tenting_attrs):
             except Exception:
                 pass
 
-    for token, setter_name, yes_name, no_name in (
-            ('capping', 'SetCappingMode', 'CAPPING_MODE_CAPPED', 'CAPPING_MODE_NOT_CAPPED'),
-            ('filling', 'SetFillingMode', 'FILLING_MODE_FILLED', 'FILLING_MODE_NOT_FILLED')):
+    for token, setter_name, yes_name, no_name, flag_setter in (
+            ('capping', 'SetCappingMode', 'CAPPING_MODE_CAPPED', 'CAPPING_MODE_NOT_CAPPED',
+             'SetPrimaryDrillCappedFlag'),
+            ('filling', 'SetFillingMode', 'FILLING_MODE_FILLED', 'FILLING_MODE_NOT_FILLED',
+             'SetPrimaryDrillFilledFlag')):
         if token not in tenting_attrs:
-            continue
-        yes_const = getattr(pcbnew, yes_name, None)
-        no_const = getattr(pcbnew, no_name, None)
-        setter = getattr(pcb_via, setter_name, None)
-        if yes_const is None or no_const is None or setter is None:
             continue
         value = (tenting_attrs[token] or '').strip().lower()
         if value not in ('yes', 'no'):
             continue
+        yes_const = getattr(pcbnew, yes_name, None)
+        no_const = getattr(pcbnew, no_name, None)
+        setter = getattr(pcb_via, setter_name, None)
+        if yes_const is not None and no_const is not None and setter is not None:
+            try:
+                setter(yes_const if value == 'yes' else no_const)
+                applied = True
+                continue
+            except Exception:
+                pass
+        # #962: the shipping KiCad 10.0.0 SWIG exports no *_MODE_* constants
+        # (#751), so the enum setter above cannot be called. The plain-bool
+        # flag setter can: probed, SetPrimaryDrillCappedFlag(True) /
+        # SetPrimaryDrillFilledFlag(True) save as `(capping yes)` /
+        # `(filling yes)` and nothing else. Without this, a Type VII stamp was
+        # a silent no-op in the GUI.
+        fsetter = getattr(pcb_via, flag_setter, None)
+        if fsetter is None:
+            continue
         try:
-            setter(yes_const if value == 'yes' else no_const)
+            fsetter(value == 'yes')
             applied = True
         except Exception:
             pass
@@ -1109,7 +1125,23 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
             track.SetLayer(board.GetLayerID(s.layer))
             track.SetNetCode(s.net_id)
             board.Add(track)
-        for v in orc.get('new_vias') or []:
+        # #962: the oracle's vias are new copper. One placed in a pad or paste
+        # opening declares Type VII, decided by the same core the CLI fronts
+        # use (fab_notes.via_protection_stamps), against the live board.
+        _orc_vias = orc.get('new_vias') or []
+        if _orc_vias:
+            try:
+                from kicad_parser import build_pcb_data_from_board
+                from fab_notes import (via_protection_stamps, apply_stamps_in_memory,
+                                       print_via_protection_record)
+                _st962, _rec962 = via_protection_stamps(
+                    _orc_vias, [], build_pcb_data_from_board(board))
+                apply_stamps_in_memory(_st962)
+                print_via_protection_record(_rec962, 'KiCad-oracle (GUI)')
+                orc['via_in_pad'] = _rec962
+            except Exception as _e962:
+                print(f"KiCad-oracle (GUI): via protection stamp skipped: {_e962}")
+        for v in _orc_vias:
             via = pcbnew.PCB_VIA(board)
             via.SetPosition(pcbnew.VECTOR2I(mm_to_iu(v.x), mm_to_iu(v.y)))
             via.SetDrill(mm_to_iu(v.drill))
@@ -1118,6 +1150,7 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
             lys = v.layers or ['F.Cu', 'B.Cu']
             via.SetLayerPair(board.GetLayerID(lys[0]),
                              board.GetLayerID(lys[-1]))
+            apply_via_protection(via, getattr(v, 'tenting_attrs', None))
             board.Add(via)
         if orc.get('links_routed'):
             print(f"KiCad-oracle (GUI): routed {orc['links_routed']} "

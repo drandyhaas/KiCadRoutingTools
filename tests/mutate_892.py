@@ -88,8 +88,8 @@ ROWS = [
      (T_POSE,), 'KILLED'),
 
     ('off-board-amount-stops-being-an-arm', 'o',
-     "MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall')",
-     "MAGNITUDE_KEYS = ('pad_shortfall', 'pad_edge_shortfall')",
+     "MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall',",
+     "MAGNITUDE_KEYS = ('pad_shortfall', 'pad_edge_shortfall',",
      (T_POSE,), 'KILLED'),
 
     ('is_clean-ignores-the-magnitudes', 'o',

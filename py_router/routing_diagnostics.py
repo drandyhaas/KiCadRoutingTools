@@ -694,10 +694,27 @@ def same_net_pad_seal_hint(pcb_data, config, net_id, net_name=None,
                     return True
         return False
 
+    # #962: the flag also keeps vias out of the net's paste OPENINGS. An
+    # opening near a pad takes part in sealing it, so its cells are removed
+    # together with the pad's and the hint names it.
+    try:
+        from obstacle_map import paste_keepout_apertures
+        _keepout_aps = paste_keepout_apertures(pcb_data, net_id)
+    except Exception:
+        _keepout_aps = []
     for pad in pads:
+        _reach = max(pad.size_x, pad.size_y) / 2 + reach_mm + config.via_size
+        _aps = [ap for ap in _keepout_aps
+                if ap.bounds[0] - _reach <= pad.global_x <= ap.bounds[2] + _reach
+                and ap.bounds[1] - _reach <= pad.global_y <= ap.bounds[3] + _reach]
         try:
             cells = same_net_pad_via_keepout_cells(pcb_data, net_id, config,
                                                    pads=[pad])
+            if _aps:
+                _ac = same_net_pad_via_keepout_cells(pcb_data, net_id, config,
+                                                     pads=[], apertures=_aps)
+                if len(_ac):
+                    cells = (_np.concatenate([cells, _ac]) if len(cells) else _ac)
         except Exception:
             continue
         if not len(cells):
@@ -741,16 +758,22 @@ def same_net_pad_seal_hint(pcb_data, config, net_id, net_name=None,
         where = f"{pad.component_ref}.{pad.pad_number}"
         name = net_name or pad.net_name or f"net{net_id}"
         need = config.via_size / 2 + snpc + config.grid_step / 2
+        _ap_labels = [ap.label() for ap in _aps]
+        _ap_clause = (f" (with the paste opening(s) {', '.join(_ap_labels)} it "
+                      f"also keeps clear, #962)" if _ap_labels else "")
         hint = (f"Hint: pad {where} is sealed by --same-net-pad-clearance "
-                f"{snpc:g} -- with that flag's keep-out removed a legal via "
-                f"site appears, and with it there is none within the "
+                f"{snpc:g}{_ap_clause} -- with that flag's keep-out removed a "
+                f"legal via site appears, and with it there is none within the "
                 f"{reach_mm:g}mm escape-stub reach. It needs {need:.3f}mm of "
                 f"clear pad surround (via/2 {config.via_size / 2:.3f} + "
                 f"clearance {snpc:g} + grid/2 {config.grid_step / 2:.3f}), so "
                 f"{name} cannot change layer here. Re-run with "
                 f"--same-net-pad-clearance 0 to allow via-in-pad on this "
-                f"board, or widen the channel around {where} in placement.")
+                f"board (a via then placed in a pad or paste opening is "
+                f"stamped filled+capped, #962), or widen the channel around "
+                f"{where} in placement.")
         return _ret(hint, {'verdict': 'sealed_by_snpc', 'pad': where,
+                           'aperture': _ap_labels,
                            'same_net_pad_clearance': float(snpc),
                            'required_surround_mm': round(need, 4),
                            'escape_reach_mm': round(reach_mm, 3),
