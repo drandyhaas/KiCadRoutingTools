@@ -781,6 +781,43 @@ route from the pad costs 2 vias for 8-10 mm there, a wash at 6 mm a via
 | zynq K44, pairs | 102 | **98**, -72 mm | 103 |
 | zynq K47, pairs + CK | 97 | 100, -104 mm | 109 |
 
+**THE PAIRS BENCH AT K41 AND K51, AND THE CROSS-CORRIDOR RESERVATION
+(2026-09-21).** K41 with the pairs: 95 -> **91**, 0 open (human 70 on the
+same list; pairs-off 76), all three pairs in their planned bands. K51 with
+the pairs: **144, 5 open** (SA15, SA3, SCKE0, SDQ12, SRST; human 88;
+pairs-off 99 / 0 open), every portfolio arm 5-13 open, 20 lanes at the last
+call -- SCK refused in its band, widened and free, landed free of the plan,
+and the singles' plan was blind to its copper. Its refusal had two layers.
+The first was a launch pocket in front of its berths, the same 402 cells
+every attempt: the map rebuilt piecewise (a probe, not kept)
+showed copper alone leaves those cells free and the virtual pieces block
+them, and the piece was the 1.5 mm end stamp of a lane from ANOTHER
+corridor -- SA10, a one-net corridor berthing 1.2 mm east of SCK's on the
+DDR's comb -- which the pair's fan-in rule had never covered. It does now
+(`BRAID_PAIR_CROSS_FANIN`, 1): a cross-corridor piece with an end within
+`BRAID_PAIR_FANIN` of either of the pair's ends is left out. K41 95 -> 91
+is this rule; zynq K44 98 and K47 100 are unchanged by it. The second
+layer stands: SCK's lane runs the length of the DDR's top edge, where four
+neighbouring berths' lanes converge at the fanout's 0.4 mm pitch round the
+pair's berths, SCKE0's berth, via and stub between the pair's two, and the
+pose clouds from the two ends never meet (a whole-window frontier in every
+band). Two things tried there and measured HARMFUL, neither kept: leaving a
+third end's exit stub unreserved when it lies between the pair's ends (then
+even the free-of-plan last resort fails) and dropping reserved dives within
+0.6 mm of the pair's planned lane (zynq K44 98 -> 112, K47 100 -> 106). The corridor's
+slot for a pair member is already the pair's width (`lane_w`); the comb
+run is the fanout's pitch. The likely lever is the planner's comb: no
+third berth between a pair's two, layer or no layer. Not done.
+
+The population search (`evolve.py`) on the pairs bench, K36 and K41, one to
+three seeds, near and chain jumps: no gain. Descents gain nothing, the
+cross finds no differing ends (every K36 chain today landed the same plan),
+and a jump world's pairs come back open -- 56 and 60 vias with all six pair
+legs open at K36, the K41 world stuck at 80 with the SCK pair open -- which
+the descent cannot close, since it moves single nets' ends. A pair must
+land at the chain stage; a seed needs its `.pack.json` beside the routed
+board.
+
 **Instruments:** `grade_k.py` prints one PAIR line per pair (routed or
 not, coupled fraction at the inferred pitch, skew, barrels);
 `pair_census.py` is the same on any board; `BRAID_PAIR_DEBUG=1` prints each

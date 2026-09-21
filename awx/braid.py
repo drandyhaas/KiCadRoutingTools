@@ -7341,7 +7341,27 @@ class Corridor:
             if band is not None and PAIR_FANIN_BAND > 0:
                 band, corners = self._pair_fanin_band(nm, band)
                 wpts += corners
-        virt = list(virt or []) + reserve(ctx, nm)
+        # the CROSS-CORRIDOR reservation (other corridors' planned lanes,
+        # their ends 1.5 mm on the end layers) under the pair's fan-in rule
+        # too: a piece with an end within PAIR_FANIN of either of the pair's
+        # ends is left out. Measured K51 SCK (2026-09-21): SA10, a one-net
+        # corridor, berths 1.2 mm east of SCK's on the DDR's comb; its end
+        # stamp on F.Cu ran through SCK's launch zone, the pair refused in
+        # its band, widened and free with the same 402-cell pocket, landed
+        # only free of the plan, and five singles stayed open behind it
+        pe_ = getattr(ctx, 'pair_ends', {}) or {}
+        if nm in pe_ and PAIR_FANIN > 0 and PAIR_CROSS_FANIN:
+            (tp_, tn_), (sp_, sn_) = pe_[nm]
+            ends_ = [e for e in (tp_, tn_, sp_, sn_) if e is not None]
+
+            def far_(pc):
+                (p, q, _L) = pc
+                return all(min(math.hypot(p[0] - e[0], p[1] - e[1]), math.hypot(q[0] - e[0], q[1] - e[1])) >= PAIR_FANIN
+                           for e in ends_)
+            cross_ = [pc for pc in reserve(ctx, nm) if far_(pc)]
+        else:
+            cross_ = reserve(ctx, nm)
+        virt = list(virt or []) + cross_
         rep = {}
         _ca, _cb = self._pair_conn_points(nm)
         if os.environ.get('BRAID_PAIR_DEBUG') and virt_vias:
@@ -8923,6 +8943,8 @@ PAIRS_FIRST_FREE = os.environ.get('BRAID_PAIRS_FIRST_FREE', '1') != '0'
 PAIRS_PLANNED = os.environ.get('BRAID_PAIRS_PLANNED', '1') != '0'
 PAIR_SLACKS = [float(v) for v in os.environ.get('BRAID_PAIR_SLACKS', '0.6,1.2').split(',') if v.strip()]
 PAIR_FANIN = float(os.environ.get('BRAID_PAIR_FANIN', '2.5') or 0)
+# BRAID_PAIR_CROSS_FANIN (1): the cross-corridor reservation under the pair's fan-in rule
+PAIR_CROSS_FANIN = int(os.environ.get('BRAID_PAIR_CROSS_FANIN', '1') or 0)
 PAIR_DIVE_EXTRA = float(os.environ.get('BRAID_PAIR_DIVE_EXTRA', '0.6') or 0)
 # BRAID_PAIR_FANIN_BAND (mm, 0 = off): the convergence zone's extra half-width
 # beyond the ends' separation (Corridor._pair_fanin_band)
