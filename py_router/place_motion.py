@@ -103,15 +103,23 @@ def ghost_overlay(items, theme, t=0.0):
                 b = r.tf.pt(nx, ny)
                 if math.hypot(b[0] - a[0], b[1] - a[1]) < 3 * ss:
                     continue
-                d.line([a[0], a[1], b[0], b[1]], fill=arrow, width=max(1, ss))
-                # the head, pointing the way the part is going
+                # HALOED, because the arrow crosses copper it is close to.
+                # Measured: `place_arrow` vs `pad` is 65.2 apart on dark and
+                # **44.7 on light** (40.1 deuteranope) -- barely above the 34
+                # this issue treats as indistinguishable, on a 1-2 px line
+                # drawn straight across the pads. A darker stroke underneath
+                # separates it from whatever it crosses without touching a
+                # single palette value, which is this issue's own lesson: give
+                # it a second channel rather than a new colour.
                 ang = math.atan2(b[1] - a[1], b[0] - a[0])
                 hl = max(4, 5 * ss)
-                for s in (2.6, -2.6):
-                    d.line([b[0], b[1],
-                            b[0] + hl * math.cos(ang + s),
-                            b[1] + hl * math.sin(ang + s)],
-                           fill=arrow, width=max(1, ss))
+                head = [(b[0] + hl * math.cos(ang + k),
+                         b[1] + hl * math.sin(ang + k)) for k in (2.6, -2.6)]
+                for col, wid in ((body, max(3, 3 * ss)),
+                                 (arrow, max(1, ss))):
+                    d.line([a[0], a[1], b[0], b[1]], fill=col, width=wid)
+                    for hx, hy in head:
+                        d.line([b[0], b[1], hx, hy], fill=col, width=wid)
         except Exception:                                      # noqa: BLE001
             pass       # a ghost is never worth failing a render over
     return _draw

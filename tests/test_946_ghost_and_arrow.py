@@ -193,6 +193,65 @@ def test_the_ghost_and_the_arrow_share_one_frame_of_reference():
         print('  PASS: one frame of reference, tail inside its own ghost')
 
 
+def test_the_arrow_is_haloed_where_it_crosses_copper():
+    """`place_arrow` vs `pad` is 65.2 apart on dark and **44.7 on light** --
+    barely above the 34 this issue treats as indistinguishable, on a 1-2 px
+    line drawn straight across the pads. A darker stroke underneath separates
+    it without touching a palette value, which is this issue's own lesson."""
+    _mark = len(_FAIL)
+    import palette_audit as PA
+    for name in ('dark', 'light'):
+        th = RT.theme(name)
+        d = PA.rgb_distance(th.rgb('place_arrow'), th.rgb('pad'))
+        if d > 80:
+            fail('%s: arrow and pad are %.1f apart; the halo is answering a '
+                 'problem that no longer exists' % (name, d))
+    # THE CALLS, not the ink. The halo is `board_body`-coloured, because its
+    # job is to sit between the arrow and the PADS it crosses -- so on the
+    # board it is invisible by design and no pixel count can see it. Record
+    # what the drawer asked for instead.
+    class _Rec:
+        def __init__(self, inner):
+            self._d = inner
+            self.lines = []
+
+        def line(self, xy, *a, **kw):
+            self.lines.append((tuple(xy), kw.get('fill'), kw.get('width')))
+            return self._d.line(xy, *a, **kw)
+
+        def __getattr__(self, n):
+            return getattr(self._d, n)
+
+    r = _r()
+    b = r.bounds
+    cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    img = Image.new('RGB', (r.W, r.H), RT.DARK.rgb('ground'))
+    rec = _Rec(ImageDraw.Draw(img))
+    PM.ghost_overlay([_item('U1', cx - 20, cy, cx + 20, cy)],
+                     RT.DARK, t=1.0)(rec, r)
+    body = RT.DARK.rgb('board_body')
+    arrow = RT.DARK.rgb('place_arrow')
+    halo = [l for l in rec.lines if l[1] == body]
+    over = [l for l in rec.lines if l[1] == arrow]
+    if not halo:
+        fail('no halo stroke was issued at all')
+    elif len(halo) != len(over):
+        fail('%d halo strokes against %d arrow strokes -- every arrow segment '
+             'needs one under it' % (len(halo), len(over)))
+    elif not all(h[2] > o[2] for h, o in zip(halo, over)):
+        fail('a halo is not wider than the arrow it carries: %s vs %s'
+             % ([h[2] for h in halo], [o[2] for o in over]))
+    elif [h[0] for h in halo] != [o[0] for o in over]:
+        fail('the halo does not follow the arrow')
+    elif rec.lines.index(halo[0]) > rec.lines.index(over[0]):
+        fail('the halo is drawn OVER the arrow rather than under it')
+    else:
+        print('    %d segment(s): halo width %d under arrow width %d, same '
+              'endpoints' % (len(over), halo[0][2], over[0][2]))
+    if len(_FAIL) == _mark:
+        print('  PASS: a second channel, not a new colour')
+
+
 def test_it_costs_no_frame_geometry_and_never_raises():
     _mark = len(_FAIL)
     r = _r()
@@ -260,6 +319,7 @@ TESTS = (
     test_the_ghost_fades_IN,
     test_a_part_that_barely_moved_gets_nothing,
     test_the_ghost_and_the_arrow_share_one_frame_of_reference,
+    test_the_arrow_is_haloed_where_it_crosses_copper,
     test_it_costs_no_frame_geometry_and_never_raises,
     test_the_stage_clears_it_when_the_glide_ends,
 )
