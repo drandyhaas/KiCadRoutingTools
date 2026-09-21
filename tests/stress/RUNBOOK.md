@@ -780,6 +780,30 @@ boards" and "which commit broke connectivity".
   differ by more than the knob — the arm name records the sha it was launched
   at, so check that both wave dirs carry the same one.
 
+  **The upload stage now checks two things before anything is spent
+  (2026-09-19).** A set already on the volume was never re-uploaded, so a
+  board repaired locally after its set went up replayed the OLD manifest in
+  every later arm, silently (butterstick: a 3-command manifest that dies on a
+  file no command produces, while the local 11-command chain verified fine).
+  The stage lists each present set's run dir on the volume once and compares
+  every manifest's SIZE with the local one -- a stale or absent board is
+  named and re-uploaded (`upload_corpus.py --sets S --boards ...`; `--dry-run`
+  only reports; `--no-verify-corpus` skips). Size is a proxy: an edit that
+  keeps the byte count exactly is invisible to it. A re-upload changes the
+  chain those boards replay, so every EARLIER arm is chain-mismatched on
+  them from then on -- re-run the baseline arm as well. The first live run
+  of the check (2026-09-19) found the volume's sets 6-10 still carried the
+  manifests from before the 09-03 `--clearance` -> `--clearance-ceiling`
+  rewrite: every cloud arm since, the v0.22.1 validation included, replayed
+  those sets under the old bare-clearance semantics (both arms of each A/B
+  alike, so the deltas stand; the absolute numbers do not match a local
+  replay). And a local manifest with
+  no `# cwd=<stress>/runs_<set>/<board>` line is REFUSED by name: the cloud
+  placer stages the corpus at that path, so such a board raises inside its
+  container after the arm is launched and paid for -- a manifest re-recorded
+  from somewhere else (a scratchpad) carries that directory as its cwd, and
+  the fix is to rewrite the line(s) to the board's own run dir.
+
   **Manifests recorded before #530 read `--clearance` as a ceiling.** Since
   decision 2 an explicit `--clearance` IS the Default class for the run;
   before, it capped every class at `min(class, value)`, so a late chain step

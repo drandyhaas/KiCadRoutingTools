@@ -1,3 +1,72 @@
+d2c9934c 2026-09-20 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 96912901..cd866f47 on bus622-take5 (main's 66 commits since the last
+audit plus the branch's 168, rebased onto main ad243b74 on 2026-09-19).
+NO GAP FOUND. One gate ADDED (test_fanout_backside_gui). Seven gates green,
+run live on this machine under KiCad 10.0.0-103 / wx 4.2.2a1.
+
+MAIN'S SIDE OF THE RANGE touches the plugin in exactly two files,
+kicad_routing_plugin/deps_check.py and swig_gui.py (the numpy floor of the
+deps gate, 32dc9276), and no engine code: nothing for the engine to have
+drifted from.
+
+THE BRANCH'S ROUTING SURFACE is 13 files under py_router/, ZERO files under
+kicad_routing_plugin/, and ZERO CLI flags (the add_argument diff over every
+routing main is empty). Checked item by item:
+
+  * CLI mains: untouched, except check_drc.run_drc and
+    check_connected.run_connectivity_check gaining an ADDITIVE pcb_data=
+    kwarg (a caller with the board parsed hands it over; the default parses
+    as ever). No front changes behaviour.
+  * NEW ENGINE KWARG at the front-end boundary: generate_bga_fanout(...,
+    escape_dir_hints=None), a per-ball planned move for programmatic callers
+    (the awx chain). NEITHER front passes it -- bga_fanout.py has no flag and
+    fanout_gui.py no control -- so the two fronts agree by construction. It
+    is NOT Claude-settable through the GUI plan executor; if a control is
+    ever wanted it needs the full CLAUDE.md wiring (control named after the
+    param, reset_params_to_defaults, FLAG_PARAMS, settings_persistence).
+  * NEW ENV KNOBS: KICAD_SEG_DIST_EXACT, KICAD_FANOUT_FRAME_QUARTER,
+    KICAD_FANOUT_SKIP_UNDER -- all default OFF, read the way their siblings
+    are (env_knobs / os.environ at import) on both fronts. Env-only like
+    KICAD_FANOUT_DIRECT before them; no GUI control, deliberately.
+  * DEFAULT-ON changes live INSIDE the shared engine functions, so both
+    fronts get them for free: the back-side mirror frame (flip_frame), the
+    rotation frame turning the whole board, nanometre tie-breaks in the
+    fanout's edge/channel/gap/victim choices, the reroute hit epsilon, the
+    router's rounded pad keep-out offset, the plane drop's rounded argmin.
+    Every board field the two frames read is a declared PCBData/BoardInfo/
+    Pad dataclass field (zones, guide_paths, keepout_zones, board_bounds,
+    board_outline, board_cutouts, hole_x/hole_y ...), so the pcbnew-built
+    board cannot lack one. THE ONE THAT DEPENDS ON A GUI-COMPUTED FIELD is
+    the mirror frame (it re-derives pad locals), and that is what the new
+    gate pins: identical copper, frame taken on both fronts.
+  * POST-PASSES: test_cli_postpass_coverage green -- 9 registered, 17 in
+    CLI use, 2 CLI-only acknowledged (write_filled_board; the fanout mains'
+    run_drc graze audit), 0 unreachable. The branch adds none.
+
+GATES, run live 2026-09-19/20:
+  tests/gui_parity/test_manifest_plan_parity.py      OK
+  tests/gui_parity/test_cli_postpass_coverage.py     OK (0 failures, 0 warnings)
+  tests/gui_parity/test_settings_roundtrip.py        exit 0
+  tests/gui_parity/test_fanout_rotated_gui.py        10/10
+  tests/gui_parity/test_gui_engine_parity.py         copper sets identical: True
+  tests/gui_parity/test_fanout_backside_gui.py       11/11  (NEW)
+  tests/test_fanout_flip_frame.py (wx-free twin)     via run_all
+NOT RUN: test_714_mirror_pcbnew_parity (the branch touches no file under
+py_placer/, so the placement writer's flip path is as audited at 96912901);
+test_gui_livechain_rp2350 (the engine-parity gate covers the plan path; the
+#562 chain shape is unchanged by this range).
+
+WHAT THIS AUDIT CANNOT SEE: the corpus A/B (awx/README TODO 7) says the
+branch's default-on changes move copper on cparti_fpga, scalenode_cm4,
+ulx5m_gatemate and smartknob_base; both fronts move identically, which is
+parity, not a verdict on the change.
+
+ADDENDUM d2c9934c (2026-09-20): flip_frame.is_back_side now calls
+placement.legality.footprint_side (test_878's one-home rule) instead of a
+copy of it -- the same answer on every layer name, and the back-side gate
+re-run on this commit: 11/11, copper identical. The 14 awx tools' KRT_TOOL
+declarations and the two --help guards touch no engine code.
+
 82522c1e 2026-09-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit 96912901..82522c1e: upstream's 66 commits since the last audit plus the
 #962 branch (fix/962-paste-aperture). THREE GAPS FOUND AND FIXED on the branch;

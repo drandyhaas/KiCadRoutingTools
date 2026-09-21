@@ -2354,7 +2354,10 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
         free = [(a, b) for (a, b) in free if b - a > eps]
         if not free:
             return None
-        a, b = max(free, key=lambda ab: ab[1] - ab[0])
+        # Widest gap, width to a nanometre: two equal slivers either
+        # side of a via sitting on the corridor line are a tie, and the
+        # first (lower coordinate) wins rather than the last bit.
+        a, b = max(free, key=lambda ab: round(ab[1] - ab[0], 6))
         return (a + b) / 2.0
 
     for fnet in list(failed_nets):
@@ -2366,10 +2369,13 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
                 continue
             bx, by = p.global_x, p.global_y
             nid = p.net_id
-            # Four exits, nearest edge first.
+            # Four exits, nearest edge first -- distances rounded to a
+            # nanometre, so a corner ball's two equal edges stay equal and
+            # the list order decides (the last bit used to, and the same
+            # board shifted in memory took the other edge)
             exits = sorted([
                 ('S', maxy - by), ('N', by - miny),
-                ('E', maxx - bx), ('W', bx - minx)], key=lambda t: t[1])
+                ('E', maxx - bx), ('W', bx - minx)], key=lambda t: round(t[1], 6))
             for d, _dist in exits:
                 horiz = d in ('E', 'W')
                 sgn = 1 if d in ('S', 'E') else -1
@@ -2467,6 +2473,7 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
             escaped_via_nets.setdefault(nm, []).append((v['x'], v['y']))
 
     from geometry_utils import point_to_segment_distance as _p2s_r
+    from itertools import groupby as _groupby
 
     for fnet in list(failed_nets):
         fpads = pads_by_net.get(fnet, [])
@@ -2499,9 +2506,19 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                        t['end'][0], t['end'][1])
             if d < 1.5:
                 cand_d[nm] = min(cand_d.get(nm, 9e9), d)
-        cands = sorted((d, nm) for nm, d in cand_d.items())
-        rescued = False
-        for d, victim in cands[:max_victims]:
+        # Distance to a nanometre: two neighbours equally far (the
+        # symmetric pair on a regular pitch) are an exact tie, and the
+        # last bit used to order them -- the same board moved 10 mm
+        # evicted the other one (0.42499 vs 0.42500 printed as 0.42 and
+        # 0.43) and the whole pass followed it. Ties go by name.
+        cands = sorted((round(d, 6), nm) for nm, d in cand_d.items())
+
+        def _attempt(victim, d):
+            """One eviction, three shapes in turn: the pair re-run through
+            the engine; the failed ball's vialess surface walk with the
+            victim re-escaped around it; both by surface walks. Returns the
+            write lists it would ship (plus the escape-via bookkeeping and
+            the log line), or None. Touches nothing outside."""
             vic_nids = {p.net_id for p in pads_by_net.get(victim, ())}
             t2base = [t for t in tracks if nid2name.get(t['net_id']) != victim]
             v2base = [v for v in vias_to_add if nid2name.get(v['net_id']) != victim]
@@ -2529,33 +2546,27 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                 del pcb_data.segments[n_seg0:]
                 del pcb_data.vias[n_via0:]
             if fnet not in f2 and victim not in f2:
-                tracks = t2base + t2
-                vias_to_add = v2base + v2
-                failed_nets = [n for n in failed_nets if n != fnet]
-                escaped_via_nets[victim] = [
-                    (v['x'], v['y']) for v in v2 if v['net_id'] in vic_nids]
-                escaped_via_nets[fnet] = [
-                    (v['x'], v['y']) for v in v2
-                    if nid2name.get(v['net_id']) == fnet]
-                print(f"  Rip-swap rescue (#652): evicted {victim} "
-                      f"(copper {d:.2f}mm away), re-escaped BOTH it and "
-                      f"{fnet} at the fab floor")
-                warn_fab_escalation('rip-swap escape rescue')
-                rescued = True
-                break
+                return {
+                    'tracks': t2base + t2, 'vias': v2base + v2,
+                    'evn': {victim: [(v['x'], v['y']) for v in v2
+                                     if v['net_id'] in vic_nids],
+                            fnet: [(v['x'], v['y']) for v in v2
+                                   if nid2name.get(v['net_id']) == fnet]},
+                    'msg': (f"  Rip-swap rescue (#652): evicted {victim} "
+                            f"(copper {d:.2f}mm away), re-escaped BOTH it and "
+                            f"{fnet} at the fab floor")}
             # Attempt B: the via world may be closed regardless (the fab-
             # floor via can bust the half-pitch budget outright) -- with
             # this victim evicted, try the vialess SURFACE walk for the
             # failed ball, then re-escape the victim through the engine
             # against the surface track.
             if not env_knobs.FANOUT_SURFACE_RESCUE:
-                continue
+                return None
             t_surf, f_surf = _surface_gap_escape(
                 footprint, pcb_data, t2base, v2base, [fnet],
                 tw, cl, up_kw.get('exit_margin', 0.5))
             if fnet in f_surf:
-                continue
-            surf_new = t_surf[len(t2base):]
+                return None
             n_seg0, n_via0 = len(pcb_data.segments), len(pcb_data.vias)
             try:
                 for t in t_surf:
@@ -2579,17 +2590,13 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                 del pcb_data.segments[n_seg0:]
                 del pcb_data.vias[n_via0:]
             if victim not in f3:
-                tracks = t_surf + t3
-                vias_to_add = v2base + v3
-                failed_nets = [n for n in failed_nets if n != fnet]
-                escaped_via_nets[victim] = [
-                    (v['x'], v['y']) for v in v3 if v['net_id'] in vic_nids]
-                print(f"  Rip-swap rescue (#652): evicted {victim} "
-                      f"(copper {d:.2f}mm away); {fnet} escaped by VIALESS "
-                      f"surface walk, {victim} re-escaped around it")
-                warn_fab_escalation('rip-swap escape rescue')
-                rescued = True
-                break
+                return {
+                    'tracks': t_surf + t3, 'vias': v2base + v3,
+                    'evn': {victim: [(v['x'], v['y']) for v in v3
+                                     if v['net_id'] in vic_nids]},
+                    'msg': (f"  Rip-swap rescue (#652): evicted {victim} "
+                            f"(copper {d:.2f}mm away); {fnet} escaped by VIALESS "
+                            f"surface walk, {victim} re-escaped around it")}
             # The victim may ALSO be surface-escapable (the classic shape:
             # a last-row ball whose original escape was a long surface
             # walkabout through the failed ball's corridor -- orangecrab
@@ -2600,16 +2607,47 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                     footprint, pcb_data, t_surf, v2base, [victim],
                     tw, cl, up_kw.get('exit_margin', 0.5))
                 if victim not in f_surf2:
-                    tracks = t_surf2
-                    vias_to_add = v2base
-                    failed_nets = [n for n in failed_nets if n != fnet]
-                    escaped_via_nets.pop(victim, None)
-                    print(f"  Rip-swap rescue (#652): evicted {victim} "
-                          f"(copper {d:.2f}mm away); BOTH it and {fnet} "
-                          f"re-escaped by vialess surface walks")
-                    warn_fab_escalation('rip-swap escape rescue')
-                    rescued = True
-                    break
+                    return {
+                        'tracks': t_surf2, 'vias': v2base,
+                        'evn': {victim: None},
+                        'msg': (f"  Rip-swap rescue (#652): evicted {victim} "
+                                f"(copper {d:.2f}mm away); BOTH it and {fnet} "
+                                f"re-escaped by vialess surface walks")}
+            return None
+
+        def _copper(tl):
+            return sum(math.hypot(t['end'][0] - t['start'][0],
+                                  t['end'][1] - t['start'][1]) for t in tl)
+
+        # Nearest victim first, one at a time -- except that victims at the
+        # SAME distance (the symmetric pair on a regular pitch, an exact tie
+        # to the nanometre) are all tried and the RESULT decides: fewest
+        # vias, least copper, then name. The last bit of the distance used
+        # to pick one, and the same board moved 10 mm picked the other.
+        rescued = False
+        for d, grp in _groupby(cands[:max_victims], key=lambda t: t[0]):
+            outs = []
+            for _d, victim in grp:
+                o = _attempt(victim, d)
+                if o is not None:
+                    outs.append((o, victim))
+            if not outs:
+                continue
+            o, victim = min(outs, key=lambda ov: (
+                len(ov[0]['vias']), round(_copper(ov[0]['tracks']), 6), ov[1]))
+            tracks = o['tracks']
+            vias_to_add = o['vias']
+            failed_nets = [n for n in failed_nets if n != fnet]
+            for nm, lst in o['evn'].items():
+                if lst is None:
+                    escaped_via_nets.pop(nm, None)
+                else:
+                    escaped_via_nets[nm] = lst
+            print(o['msg'] + (f" [{len(outs)} equally near victims tried, "
+                              f"judged by vias then copper]" if len(outs) > 1 else ""))
+            warn_fab_escalation('rip-swap escape rescue')
+            rescued = True
+            break
         if not rescued and cands:
             print(f"  Rip-swap rescue (#652): {fnet} still dropped after "
                   f"trying {min(len(cands), max_victims)} eviction(s)")
@@ -2635,6 +2673,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         escape_method: str = 'auto',
                         grid_step: float = 0.0,
                         layer_costs: Optional[List[float]] = None,
+                        escape_dir_hints: Optional[Dict[Tuple[float, float],
+                                                        str]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
                         _single_pass: bool = False,
@@ -2691,6 +2731,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
+    _entry_args = dict(locals())   # the call as made, for the face wrapper below
     # #621 escape-pass head. EVERY escape pass -- the rotated-frame recursion,
     # both escape-priority passes, the single-pass coverage probe and the
     # under-pad auto-fallback -- is a call to THIS function, so one check here
@@ -2758,12 +2799,118 @@ def _generate_bga_fanout_core(footprint: Footprint,
               f"(largest per-layer rule on the escape layers, #498)")
         clearance = _mx_498
 
-    from bga_fanout.rotate_frame import (is_orthogonal, to_axis_aligned_frame,
+    from bga_fanout.flip_frame import (is_back_side, to_front_frame, flip_hints,
+                                       flip_results, other_layer)
+    if is_back_side(footprint):
+        # a part on the BACK fans out as the mirror of the same part on
+        # the front: the board turned over in memory, the core run again
+        # on the part now on F (so the rotation wrapper below still
+        # applies), the copper mirrored back
+        print(f"  {footprint.reference} sits on {footprint.layer} - routing the board "
+              f"turned over and mirroring back (flip_frame)")
+        rp, back = to_front_frame(pcb_data, footprint.reference)
+        _args = dict(_entry_args)
+        _args['footprint'] = rp.footprints[footprint.reference]
+        _args['pcb_data'] = rp
+        _args['escape_dir_hints'] = flip_hints(escape_dir_hints, footprint, rp, back)
+        # ...AND EVERY ARGUMENT THAT NAMES A LAYER (2026-09-17). The frame
+        # renames F.Cu<->B.Cu on every pad, segment, via, zone and
+        # footprint, so a name the caller passed still means the side it
+        # meant on the REAL board -- which inside the frame is the other
+        # one. Forwarded unmapped, a back part told to avoid F.Cu laid 14
+        # tracks ON F.Cu and none on its own B.Cu (4-layer fixture,
+        # awx/repro/repro_flip_layer_args.py).
+        #
+        # TWO STEPS, and the second is why a plain rename is not enough.
+        # `layer_costs` is POSITIONAL (aligned with `layers`, #519), so the
+        # rename alone keeps costs on the right layers -- but the engine
+        # ALSO reads `layers[0]` as "the top escape layer" (:3236 refuses
+        # to have it forbidden) while underpad instead resolves
+        # `layers.index(footprint.layer)`. Under the symmetric default
+        # ['F.Cu','B.Cu'] the rename REORDERS the pair and moves layers[0]
+        # off the face the part is on, which broke the back==mirror(front)
+        # guarantee (test_fanout_flip_frame 16/16 -> 15/16). So after
+        # renaming, bring the part's own (turned) layer back to the front,
+        # permuting `layer_costs` by the SAME permutation so costs stay on
+        # their layers. A caller who already leads with the part's layer
+        # (the 4-layer case) is unaffected -- it is already at index 0.
+        if layers:
+            _m = [other_layer(_L) for _L in layers]
+            _c = list(layer_costs) if layer_costs else None
+            _own = str(_args['footprint'].layer or '')
+            if _own in _m and _m.index(_own) != 0:
+                _i = _m.index(_own)
+                _perm = [_i] + [_j for _j in range(len(_m)) if _j != _i]
+                _m = [_m[_j] for _j in _perm]
+                if _c is not None and len(_c) == len(_perm):
+                    _c = [_c[_j] for _j in _perm]
+            _args['layers'] = _m
+            if _c is not None:
+                _args['layer_costs'] = _c
+        for _a in ('_fanout_all_foreign_immovable',):
+            if hasattr(pcb_data, _a):
+                setattr(rp, _a, getattr(pcb_data, _a))
+        _res = _generate_bga_fanout_core(**_args)
+        if hasattr(rp, '_fanout_plan_report'):
+            pcb_data._fanout_plan_report = rp._fanout_plan_report
+        tracks, vias_to_add, vias_to_remove, failed_nets = _res
+        flip_results(tracks, vias_to_add, vias_to_remove, back)
+        return tracks, vias_to_add, vias_to_remove, failed_nets
+
+    from bga_fanout.rotate_frame import (needs_frame, to_axis_aligned_frame,
                                          back_transform_results)
-    if not is_orthogonal(footprint.rotation):
+    if needs_frame(footprint.rotation):
         print(f"  {footprint.reference} placed at {footprint.rotation:.1f}° - routing "
-              f"in the footprint frame and mapping back (issue #137)")
+              f"in the footprint frame and mapping back (issue #137; every "
+              f"rotation since #622's pose gate)")
         rp, back = to_axis_aligned_frame(pcb_data, footprint.reference)
+        # escape_dir_hints are keyed by BOARD pad position and name
+        # BOARD directions; the core runs in the footprint frame, so
+        # re-key each hint to the rotated pad and rotate its direction
+        _hints = escape_dir_hints
+        if _hints:
+            import math as _m
+            _rot = {p.pad_number: p for p in rp.footprints[
+                footprint.reference].pads}
+            _vec = {'right': (1.0, 0.0), 'left': (-1.0, 0.0),
+                    'down': (0.0, 1.0), 'up': (0.0, -1.0)}
+            from bga_fanout.rotate_frame import forward_transform
+            _fwd = forward_transform(pcb_data, footprint.reference)
+            # a face turns exactly as the geometry does: the same map,
+            # applied to a unit vector. (It used to turn by MINUS the
+            # angle, the opposite sense to the frame; the chain's first
+            # quarter-turn array then asked for the face opposite its
+            # exit point and every escape fell back to via-in-pad.)
+            _o = _fwd(footprint.x, footprint.y)
+            _moved = {}
+            for p in footprint.pads:
+                d = _hints.get((round(p.global_x, 3), round(p.global_y, 3)))
+                q = _rot.get(p.pad_number)
+                if d is None or q is None:
+                    continue
+                _full = d if isinstance(d, dict) else None
+                d = _full['face'] if _full else d
+                if d not in _vec:
+                    continue
+                vx, vy = _vec[d]
+                _r = _fwd(footprint.x + vx, footprint.y + vy)
+                rx, ry = _r[0] - _o[0], _r[1] - _o[1]
+                nd = min(_vec, key=lambda k: (_vec[k][0] - rx) ** 2
+                         + (_vec[k][1] - ry) ** 2)
+                if _full:
+                    # a full move's exit and via site are BOARD points: carry
+                    # them into the routing frame with the pads
+                    _m = dict(_full)
+                    _m['face'] = nd
+                    if _m.get('exit') is not None:
+                        _m['exit'] = _fwd(*_m['exit'])
+                    if _m.get('site') is not None:
+                        _m['site'] = _fwd(*_m['site'])
+                    if _m.get('path'):
+                        _m['path'] = [_fwd(*q) for q in _m['path']]
+                    nd = _m
+                _moved[(round(q.global_x, 3), round(q.global_y, 3))] = nd
+            _hints = _moved
         tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
             rp.footprints[footprint.reference], rp,
             net_filter=net_filter, diff_pair_patterns=diff_pair_patterns, layers=layers,
@@ -2773,6 +2920,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             via_size=via_size, via_drill=via_drill, check_for_previous=check_for_previous,
             no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
             grid_step=grid_step, layer_costs=layer_costs,
+            escape_dir_hints=_hints,
             same_net_pad_clearance=same_net_pad_clearance,
             cancel_check=cancel_check,
             progress_callback=progress_callback)
@@ -2805,6 +2953,25 @@ def _generate_bga_fanout_core(footprint: Footprint,
             _direct_route_nets = set(_names)
     elif _pad_filter is None and not _single_pass:
         _direct_route_nets = set()
+    # served-under-the-part deferral (KICAD_FANOUT_SKIP_UNDER=1, 2026-09-19):
+    # a ball whose net's every off-footprint pad lies inside the ball field
+    # (a ZQ resistor, a decoupling cap on the far side) gets NO stub -- its
+    # connection is a via at the ball and a short far-side track, never an
+    # escape to the edge. Same plumbing as #472: '!' exclusions inherited by
+    # both engines and both passes, the balls kept routable by the route
+    # steps' bare-ball zone exemption through _direct_route_nets.
+    if (_pad_filter is None and not _single_pass
+            and env_knobs.FANOUT_SKIP_UNDER):
+        from bga_fanout.escape import under_part_candidates
+        _u_names, _u_notes = under_part_candidates(
+            pcb_data, footprint, net_filter=net_filter)
+        if _u_names:
+            print(f"  served-under-the-part deferral: {len(_u_names)} net(s) skip "
+                  f"fanout (their targets lie inside the ball field):")
+            for _nm, _pn, _why in _u_notes:
+                print(f"    {_nm} (ball {_pn}): {_why}")
+            net_filter = list(net_filter or ['*']) + ['!' + n for n in _u_names]
+            _direct_route_nets = set(_direct_route_nets) | set(_u_names)
 
     # Escape priority for multi-ball nets (issue #129). Escape channels are
     # the scarce resource on a dense array (#122), and a net only NEEDS one
@@ -2870,7 +3037,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 rebalance_escape=rebalance_escape, via_size=via_size,
                 via_drill=via_drill, no_inner_top_layer=no_inner_top_layer,
                 escape_method=escape_method, grid_step=grid_step,
-                layer_costs=layer_costs,
+                layer_costs=layer_costs, escape_dir_hints=escape_dir_hints,
                 same_net_pad_clearance=same_net_pad_clearance,
                 cancel_check=cancel_check,
                 progress_callback=progress_callback)
@@ -3221,6 +3388,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             grid_step=grid_step,
             only_pad_keys=_pad_filter,
             dogbone=(escape_method == 'dogbone'),
+            escape_dir_hints=escape_dir_hints,
             no_via_in_pad=(same_net_pad_clearance is not None
                            and same_net_pad_clearance > 0),  # #581
             # Rides _up_kw so the shrink rescue's re-run reports too.
@@ -3490,13 +3658,23 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # each pad's escape direction biases toward its net's nearest
         # off-footprint pad; the smart layer assignment then spreads the
         # extra same-direction competition across layers.
-        _toward_targets = {}
+        # the caller's planned directions (escape_dir_hints, keyed by
+        # pad position) take precedence; the target-side preference
+        # fills in the rest when it is on
+        # a hint may be a bare face or a FULL planned move (a dict, see
+        # underpad._move_of); the channel engine reads the face of either
+        _toward_targets = {_k: (_v['face'] if isinstance(_v, dict) else _v)
+                           for _k, _v in (escape_dir_hints or {}).items()}
+        _n_planned = len(_toward_targets)
         if env_knobs.FANOUT_TOWARD_TARGETS:
             from bga_fanout.escape import preferred_escape_dirs
-            _toward_targets = preferred_escape_dirs(pcb_data, footprint)
-            if _toward_targets:
-                print(f"  Target-side escape preference active for "
-                      f"{len(_toward_targets)} pad(s)")
+            for _k, _v in preferred_escape_dirs(pcb_data, footprint).items():
+                _toward_targets.setdefault(_k, _v)
+        if _toward_targets:
+            print(f"  Escape direction preference active for "
+                  f"{len(_toward_targets)} pad(s)"
+                  + (f" ({_n_planned} from the caller's plan)"
+                     if _n_planned else ""))
 
         for pad in footprint.pads:
             if not pad.net_name or pad.net_id == 0:
@@ -3863,7 +4041,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 via_size=via_size, via_drill=via_drill,
                 check_for_previous=check_for_previous,
                 no_inner_top_layer=no_inner_top_layer, escape_method=method,
-                grid_step=grid_step, _pad_filter=_pad_filter,
+                grid_step=grid_step, escape_dir_hints=escape_dir_hints,
+                _pad_filter=_pad_filter,
                 _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass,
                 same_net_pad_clearance=same_net_pad_clearance,
                 progress_callback=progress_callback,
@@ -4126,10 +4305,50 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
                 layers=v.get('layers') or ['F.Cu', 'B.Cu'],
                 net_id=v['net_id']))
-        from bga_fanout.rotate_frame import (is_orthogonal,
+        from bga_fanout.flip_frame import (is_back_side, to_front_frame,
+                                           flip_results, other_layer)
+        if is_back_side(footprint):
+            # RECURSE, do not call generate_plane_drops directly: the
+            # rotation frame (#137) is applied by the block BELOW this one,
+            # and returning from here skipped it for back-side parts. The
+            # signal path at _generate_bga_fanout_core recurses for exactly
+            # this reason. A bottom-mounted BGA at a non-orthogonal angle
+            # otherwise had its plane-drop vias computed on a grid not
+            # aligned to its ball array -- the original #137 bug, back for
+            # back-side parts only. (The copper this pass already
+            # materialised into pcb_data travels into the turned frame with
+            # it, so the drops still see the signal escape.)
+            rp, back = to_front_frame(pcb_data, footprint.reference)
+            # the layer NAMES travel with the frame, exactly as the signal
+            # path above: inside the turned board a caller's 'B.Cu' is the
+            # real F.Cu. Unmapped, a DECLARED PLANE was modelled on the
+            # wrong face, and a ball could skip its drop via on the
+            # strength of fill that is on the other side of the board --
+            # a #678 pour-served promise the post-route audit would then
+            # fail on the real board.
+            _rpf = rp.footprints[footprint.reference]
+            _lay_f = layers
+            if layers:
+                _lay_f = [other_layer(_L) for _L in layers]
+                _own = str(_rpf.layer or '')
+                if _own in _lay_f and _lay_f.index(_own) != 0:
+                    _i = _lay_f.index(_own)
+                    _lay_f = [_lay_f[_i]] + [_lay_f[_j]
+                                             for _j in range(len(_lay_f)) if _j != _i]
+            _pnl_f = ({_n: [other_layer(_L) for _L in _ls]
+                       for _n, _ls in plane_net_layers.items()}
+                      if plane_net_layers else plane_net_layers)
+            d_tracks, d_vias, rep = _plane_drop_pass(
+                _rpf, rp, [], [], net_filter,
+                _lay_f, track_width, clearance, via_size, via_drill,
+                grid_step, plane_net_layers=_pnl_f,
+                no_via_in_pad=no_via_in_pad)
+            flip_results(d_tracks, d_vias, [], back)
+            return d_tracks, d_vias, rep
+        from bga_fanout.rotate_frame import (needs_frame,
                                              to_axis_aligned_frame,
                                              back_transform_results)
-        if not is_orthogonal(footprint.rotation):
+        if needs_frame(footprint.rotation):
             rp, back = to_axis_aligned_frame(pcb_data, footprint.reference)
             d_tracks, d_vias, rep = generate_plane_drops(
                 rp.footprints[footprint.reference], rp, layers,
@@ -4169,6 +4388,8 @@ def generate_bga_fanout(footprint: Footprint,
                         escape_method: str = 'auto',
                         grid_step: float = 0.0,
                         layer_costs: Optional[List[float]] = None,
+                        escape_dir_hints: Optional[Dict[Tuple[float, float],
+                                                        str]] = None,
                         plane_drop: str = 'auto',
                         plane_net_layers: Optional[Dict[str, List[str]]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
@@ -4273,6 +4494,7 @@ def generate_bga_fanout(footprint: Footprint,
         check_for_previous=check_for_previous,
         no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
         grid_step=grid_step, layer_costs=layer_costs, cancel_check=_cc,
+        escape_dir_hints=escape_dir_hints,
         progress_callback=progress_callback,
         _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
         _single_pass=_single_pass,

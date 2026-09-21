@@ -15,7 +15,7 @@ import os
 import numpy as np
 from collections import defaultdict
 from typing import List, Tuple, Set, Optional, Dict, Any
-from kicad_parser import parse_kicad_pcb, Segment, Via, Pad
+from kicad_parser import parse_kicad_pcb, Segment, Via, Pad, PCBData
 from geometry_utils import (
     point_to_segment_distance,
     closest_point_on_segment,
@@ -2692,6 +2692,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             check_pad_edge: bool = False, print_summary: bool = True,
             net_clearances: Optional[Dict[str, float]] = None,
             respect_edge_severity: bool = True,
+            pcb_data: Optional[PCBData] = None,
             baseline=None):
     """Run DRC checks on the PCB file.
 
@@ -2743,7 +2744,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     elif not quiet:
         print(f"Loading {pcb_file}...")
 
-    pcb_data = parse_kicad_pcb(pcb_file)
+    if pcb_data is None:
+        # a caller that has the board parsed already (a probe grading its own
+        # output, #622) hands it over; the file is the same board
+        pcb_data = parse_kicad_pcb(pcb_file)
     # #337: unify copper-graphic nets by connectivity before pair checks
     _build_graphic_unification(pcb_data)
 

@@ -294,10 +294,36 @@ Validate routed boards against the *real* spec, with the right checker — most
     container that OOMs prints no summary line at all, so a driver deciding on
     counts would read that silence as zero failures. A shard that never
     reported fails the run and is named.
-  - **The cloud image has NO KiCad**, so every pcbnew/wx test self-skips
-    (exit 77) into its own bucket and is NOT a pass -- and `tests/gui_parity/`
+  - **The SUITE image has no KiCad** -- `modal_suite/run_all_modal.py` builds
+    `debian_slim` and has no switch -- so every pcbnew/wx test self-skips
+    (exit 77) into its own bucket and is NOT a pass, and `tests/gui_parity/`
     is not collected by `run_all` at all. Those still need a local
     KiCad-python session (see the parity-gates list below).
+    **This is the SUITE app only; do not generalise it to "the cloud".** The
+    STRESS app carries KiCad BY DEFAULT since 2026-08-23:
+    `cloud_replay_sets.py --with-kicad` (default true, `--no-kicad` opts out)
+    switches `modal_sweep/modal_app.py` onto `kicad/kicad:10.0.0` and PROVES
+    both front-ends at build time (`import pcbnew` + `kicad-cli version`), so
+    the oracle legs actually run; such a wave suffixes its label `-kc`.
+    **The two defaults differ, so name the entry point:** `modal_app.py` read
+    on its own defaults `KICAD_SWEEP_WITH_KICAD` OFF, while
+    `cloud_replay_sets.py` -- the CLI you actually launch -- defaults it ON.
+    That recipe (`from_registry` + `USER root`, since the official image runs
+    as USER kicad; + `python-is-python3`, since Modal's builder shells out to
+    `python -m pip`; + `--break-system-packages` for PEP 668) is the proven
+    way to give the suite image KiCad too, and would recover exactly the two
+    genuinely KiCad-gated self-skips: `test_887_iso_render` (wants the
+    kicad-cli BINARY; Pillow, its other precondition, is already in
+    `requirements.txt`) and `test_910_fill_for_delivery` (wants KiCad's
+    bundled python). The env-level default is OFF because a new base image is
+    a NEW BASELINE ERA that voids cross-wave numeric comparisons -- a reason
+    that does NOT apply to the pass/fail suite, which compares no numbers
+    across runs.
+    **Two other `run_all` self-skips are NOT about KiCad at all**:
+    `test_887_run24_regression` and `test_run8_starved_face_gate` want
+    recorded artifacts under `wk/`, which is gitignored (0 files tracked),
+    so they self-skip on ANY clean clone -- verified locally WITH KiCad
+    present. No image change moves them.
   - The image is a clean checkout of HEAD, so it is reproducible and you can
     keep editing while it runs; `KICAD_SWEEP_DIRTY=1` ships the working tree
     instead and stamps the provenance `+dirty` (use it to run the suite over
@@ -553,6 +579,15 @@ through there too.
   are the one PCBData field the GUI COMPUTES rather than reads — see the
   `_global_to_local` entry in `.gui-parity-checked` for the bug that motivated
   these.
+- `tests/gui_parity/test_fanout_backside_gui.py` — needs KiCad python; the
+  same shape for a **flipped BGA** (bus622-take5's `flip_frame`, which
+  re-derives every pad's locals when it turns the board over). Builds its own
+  fixture -- glasgow's U30 flipped to B.Cu through pcbnew's `FOOTPRINT.Flip`,
+  saved to a temp dir with its `.kicad_pro` -- drives the REAL FanoutTab,
+  replays the tab's kwargs through the text-parsed engine, and asserts the
+  mirror frame was TAKEN on both fronts (a spy on `to_front_frame`, the
+  change detector), identical tracks/vias/failed nets, and every surface
+  escape on the part's own face. Under a minute.
 - `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
   plan through the GUI engine path and grades against the CLI chain
   (`KICAD_DUMP_BATCH_KWARGS` diffs the full batch_route param set, ~105 keys).
