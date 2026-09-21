@@ -103,8 +103,24 @@ class _Occ:
         self._ones = b'\x01' * self.ny
         self._disk_memo = {}       # #864: see disk_cells
 
+    # The lattice is a NODE lattice: cell (ix, iy) is the point
+    # x0 + ix*res (see `xy`), and a coordinate is quantised by truncation.
+    # A point within a billionth of a cell of a node belongs to THAT node,
+    # in every frame. Balls sit exactly on nodes whenever the window
+    # margin is a whole number of cells (0.8 / 1.0 / 0.5 mm pitches on the
+    # 0.025 grid), and a plain truncation then let the last bit of the
+    # coordinate choose between the node and the one below it, so the same
+    # board shifted in memory by whole cells fanned out differently (#622
+    # pose gate, 2026-09-08: a corner ball out of the other face, five nets
+    # re-assigned by the rescue). The LOWER cell was tried first and was
+    # translation-invariant too, but it moved every on-node ball one cell
+    # down: a via-in-pad at the ball centre with its stub starting a cell
+    # away (tests/test_bga_fanout_dogbone.py, ulx3s B12).
+    CELL_EPS = 1e-9
+
     def cell(self, x, y):
-        return (int((x - self.x0) / self.res), int((y - self.y0) / self.res))
+        return (int((x - self.x0) / self.res + self.CELL_EPS),
+                int((y - self.y0) / self.res + self.CELL_EPS))
 
     def xy(self, ix, iy):
         return (self.x0 + ix * self.res, self.y0 + iy * self.res)
@@ -119,8 +135,16 @@ class _Occ:
         flip a boundary cell), but computed with one sqrt per column instead
         of float math per cell. The 28.6M-yield _disk generator was 42% of a
         BGA fanout profile; the block_* writers blit these spans instead."""
-        fx = (x - self.x0) / self.res
-        fy = (y - self.y0) / self.res
+        # The centre in cell units, to a billionth of a cell: a point on a
+        # node (every ball, when the window margin is whole cells) is an
+        # exact integer here, and boundary cells at an exact integer
+        # radius (i*i + j*j == (r/res)**2, e.g. 3-4-5) are then decided
+        # the same way in every frame. Raw, the last bit of the
+        # coordinate difference decided them: the same board moved
+        # 10 mm stamped 244 boundary cells differently (#622 pose
+        # gate, 2026-09-08) and one net's jog took the other side.
+        fx = round((x - self.x0) / self.res, 9)
+        fy = round((y - self.y0) / self.res, 9)
         cx, cy = int(fx), int(fy)
         rc = int(r / self.res) + 2
         thr = (r / self.res) ** 2
@@ -243,10 +267,14 @@ class _Occ:
         """
         res = self.res
         inv = 1.0 / res
-        fx0 = (p[0] - self.x0) * inv
-        fy0 = (p[1] - self.y0) * inv
-        fx1 = (q[0] - self.x0) * inv
-        fy1 = (q[1] - self.y0) * inv
+        # Endpoints in cell units to a billionth of a cell (see
+        # _disk_spans): an edge of the capsule landing exactly on a node
+        # row is then decided the same way in every frame -- everything
+        # below is arithmetic on these four numbers and R.
+        fx0 = round((p[0] - self.x0) * inv, 9)
+        fy0 = round((p[1] - self.y0) * inv, 9)
+        fx1 = round((q[0] - self.x0) * inv, 9)
+        fy1 = round((q[1] - self.y0) * inv, 9)
         R = r * inv
         thr = R * R
         lo_x = fx0 if fx0 < fx1 else fx1
@@ -506,6 +534,8 @@ def generate_underpad_escape(footprint: Footprint,
                              grid_step: float = 0.0,
                              only_pad_keys: Optional[Set[Tuple[float, float]]] = None,
                              dogbone: bool = False,
+                             escape_dir_hints: Optional[Dict[
+                                 Tuple[float, float], str]] = None,
                              plane_drop_nets: Optional[Set[int]] = None,
                              plane_drop_report: Optional[Dict] = None,
                              plane_net_layers: Optional[Dict[str, List[str]]] = None,
@@ -1219,13 +1249,69 @@ def generate_underpad_escape(footprint: Footprint,
     def heur(ix, iy):
         return max(0, min(ix - bx0, bx1 - ix, iy - by0, by1 - iy))
 
+    # A caller's planned side (escape_dir_hints): the search is then
+    # aimed at THAT boundary and may leave the array on it only. The
+    # nearest-boundary heuristic is the right guess for a ball on its
+    # own and the wrong one for a ball joining a bundle that leaves on
+    # a particular side, since the search races to the near edge and
+    # the plan is lost with no error anywhere.
+    _SIDE_H = {
+        'left': lambda ix, iy: max(0, ix - bx0),
+        'right': lambda ix, iy: max(0, bx1 - ix),
+        'up': lambda ix, iy: max(0, iy - by0),
+        'down': lambda ix, iy: max(0, by1 - iy),
+    }
+
+    def _left_on(side, cx, cy):
+        """Did the path leave the array on `side`?"""
+        if side == 'left':
+            return cx < bx0
+        if side == 'right':
+            return cx > bx1
+        if side == 'up':
+            return cy < by0
+        return cy > by1
+
+    def _hint_of(p):
+        return (escape_dir_hints or {}).get((round(p.global_x, 3),
+                                             round(p.global_y, 3)))
+
+    def _side_of(p):
+        """The planned FACE: a bare hint string, or the 'face' of a full
+        planned move (see _move_of)."""
+        h = _hint_of(p)
+        return h.get('face') if isinstance(h, dict) else h
+
+    def _move_of(p):
+        """A FULL planned move, or None. A dict hint carries what the plan
+        chose for this ball beyond the face: 'exit' (the board point on the
+        boundary line where the tooth should end -- only its coordinate ALONG
+        the face is used), 'layer' (the layer the run leaves on), 'kind'
+        ('surface' | 'via_in_pad' | 'dogbone') and 'site' (the dog-bone via
+        point). The plan-follow phase lays these balls to the most of that
+        it can achieve overall, not one ball at a time."""
+        h = _hint_of(p)
+        return h if isinstance(h, dict) else None
+    _hint_missed = []
+
     def depth(p):
-        return min(p.global_x - grid.min_x, grid.max_x - p.global_x,
-                   p.global_y - grid.min_y, grid.max_y - p.global_y)
+        # Rounded to a nanometre: balls on one ring are EQUALLY deep in
+        # exact arithmetic, and the last bit of a coordinate difference
+        # otherwise decides their order -- the same array shifted 1 mm
+        # in x routed its rings in another order, one ball's escape then
+        # failed and the rip-swap rescue re-assigned five nets (502
+        # against 447 tracks, #622 pose gate 2026-09-08). Equal depths
+        # now stay equal and the stable sort keeps the footprint's own
+        # pad order, which moves and turns with the part.
+        return round(min(p.global_x - grid.min_x, grid.max_x - p.global_x,
+                         p.global_y - grid.min_y, grid.max_y - p.global_y), 6)
 
     def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
-              carve=None, start_layer=None, cost_out=None):
-        """Route from the pad to any boundary cell.
+              carve=None, start_layer=None, cost_out=None, side=None,
+              goal=None, reach_out=None):
+        """Route from the pad to any boundary cell -- or, with `goal`, to
+        THAT boundary cell only (a planned exit gap): the search may then
+        leave the window nowhere else.
 
         `route_layers` = the set of layer indices the track may run on. The pad
         sits on the BGA's own layer (top_idx); if that layer is not in
@@ -1236,6 +1322,15 @@ def generate_underpad_escape(footprint: Footprint,
         `carve` = optional (all_layers_cells, {layer: cells}) from
         _carve_foreign: home cells that carry a FOREIGN stamp and therefore
         keep blocking despite the home exemption (#393).
+
+        `reach_out` (with `goal`): a set the search fills with every
+        outside-window cell a legal step could have reached. Meaningful only
+        when the search FAILS -- it then ran to exhaustion, so a goal at any
+        cell not in the set would fail the same way, and a caller walking
+        candidate goals (the plan-follow gap ladder) can skip them instead
+        of exhausting the region once per goal. The recorded cells pass the
+        same window, side and corner-cutting tests the goal cell passes, so
+        membership is exactly "this search would have found a path to it".
         """
         cv_all, cv_lay = carve if carve is not None else (_EMPTY, None)
 
@@ -1250,7 +1345,14 @@ def generate_underpad_escape(footprint: Footprint,
 
         start = (sx, sy, top_idx if start_layer is None else start_layer)
         g = {start: 0.0}
-        pq = [(heur(sx, sy), start)]
+        _h = _SIDE_H[side] if side else heur
+        if goal is not None:
+            _gx, _gy = goal
+
+            def _h(ix, iy):
+                ddx, ddy = abs(ix - _gx), abs(iy - _gy)
+                return 1.6 * min(ddx, ddy) + abs(ddx - ddy)
+        pq = [(_h(sx, sy), start)]
         came = {}
         # #561 hot-loop: byte-equivalent mechanical speedup -- localize the
         # per-iteration lookups and index the occupancy bytearrays directly
@@ -1263,15 +1365,35 @@ def generate_underpad_escape(footprint: Footprint,
         _onx = occ.nx
         _ogrid = occ.grid
         _has_soft = occ.has_soft
-        _soft_foreign = occ.soft_foreign
+        _soft = occ.soft
+        _soft_owner = occ.soft_owner
         _steps = _STEPS
         _home = home
         _pour_soft = getattr(occ, 'pour_soft', None)
         _vcache = {}
+        # The three helpers the neighbour loop called per step -- exempt(),
+        # occ.soft_foreign() and the heuristic -- are written out inline
+        # below: the same expressions, the same order of tests, so the same
+        # cells are pushed at the same costs (byte-equivalent, like #561).
+        # K41's fanout stage profiled 200M such calls, a quarter of the
+        # search time (2026-09-06). `hm`: 0 = goal (octile to the goal),
+        # 1..4 = side (left, right, up, down), 5 = the boundary heuristic.
+        if goal is not None:
+            hm = 0
+        elif side:
+            hm = {'left': 1, 'right': 2, 'up': 3, 'down': 4}[side]
+        else:
+            hm = 5
+        _cv_lay = cv_lay if cv_lay else None
         while pq:
             _, cur = _heappop(pq)
             cx, cy, L = cur
-            if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+            if goal is not None:
+                _done = (cx, cy) == goal
+            else:
+                _done = (not (bx0 <= cx <= bx1 and by0 <= cy <= by1)
+                         and (side is None or _left_on(side, cx, cy)))
+            if _done:
                 if cost_out is not None:
                     # outside the window the tie-break heuristic is 0, so the
                     # popped priority IS the path's g-cost (#563 layer compare)
@@ -1285,40 +1407,79 @@ def generate_underpad_escape(footprint: Footprint,
             cg = g[cur]
             if L in route_layers:
                 _gL = _ogrid[L]
+                cvL = _cv_lay.get(L) if _cv_lay is not None else None
+                _softL = _soft[L] if _has_soft else None
                 for dx, dy in _steps:
                     nx, ny = cx + dx, cy + dy
                     if not (0 <= nx < _onx and 0 <= ny < _ony):
                         continue
-                    if (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
-                            and _gL[nx * _ony + ny] \
-                            and not exempt(L, (nx, ny)):
+                    inwin = bx0 <= nx <= bx1 and by0 <= ny <= by1
+                    if side is not None and not inwin \
+                            and not _left_on(side, nx, ny):
                         continue
-                    # No corner-cutting: a diagonal step past a blocked orthogonal
-                    # neighbour clips that obstacle's clearance (the diagonal line
-                    # passes nearer the via/pad than either cell). Forbid it.
                     if dx != 0 and dy != 0:
-                        if (_gL[(cx + dx) * _ony + cy] and not exempt(L, (cx + dx, cy))) or \
-                           (_gL[cx * _ony + cy + dy] and not exempt(L, (cx, cy + dy))):
+                        # No corner-cutting: a diagonal step past a blocked
+                        # orthogonal neighbour clips that obstacle's clearance
+                        # (the diagonal line passes nearer the via/pad than
+                        # either cell). Forbid it. (exempt() inlined.)
+                        if _gL[(cx + dx) * _ony + cy]:
+                            c1 = (cx + dx, cy)
+                            corner = not (c1 in _home and c1 not in cv_all
+                                          and not (cvL and c1 in cvL))
+                        else:
+                            corner = False
+                        if not corner and _gL[cx * _ony + cy + dy]:
+                            c2 = (cx, cy + dy)
+                            corner = not (c2 in _home and c2 not in cv_all
+                                          and not (cvL and c2 in cvL))
+                    else:
+                        corner = False
+                    if goal is not None and not inwin and (nx, ny) != goal:
+                        if reach_out is not None and not corner:
+                            reach_out.add((nx, ny))
+                        continue
+                    nidx = nx * _ony + ny
+                    if inwin and _gL[nidx]:
+                        nc = (nx, ny)
+                        if not (nc in _home and nc not in cv_all
+                                and not (cvL and nc in cvL)):
                             continue
+                    if corner:
+                        continue
                     step = 1.0 if (dx == 0 or dy == 0) else 1.6   # discourage zig-zag
                     # Soft keep-out (#278): stepping through a movable
                     # passive's pad zone is legal but leaves a graze the
                     # cap-placement step may be unable to clear -- pay a
                     # steep per-cell premium so routes detour when any
                     # detour exists, and only graze when boxed in.
-                    if _has_soft and (nx, ny) not in _home and \
-                            _soft_foreign(L, nx, ny, net_id):
+                    # (occ.soft_foreign inlined.)
+                    if _softL is not None and (nx, ny) not in _home and \
+                            _softL[nidx] and _soft_owner.get((L, nidx)) != net_id:
                         step += 4.0
                     if _pour_soft is not None:
                         _ps = _pour_soft.get(L)
                         if _ps is not None:
-                            step += _ps[nx * _ony + ny]
+                            step += _ps[nidx]
                     nxt = (nx, ny, L)
                     ng = cg + step
                     if ng < _g_get(nxt, 1e18):
                         g[nxt] = ng
                         came[nxt] = cur
-                        _heappush(pq, (ng + max(0, min(nx - bx0, bx1 - nx, ny - by0, by1 - ny)), nxt))
+                        if hm == 0:
+                            ddx = abs(nx - _gx)
+                            ddy = abs(ny - _gy)
+                            h = 1.6 * min(ddx, ddy) + abs(ddx - ddy)
+                        elif hm == 1:
+                            h = max(0, nx - bx0)
+                        elif hm == 2:
+                            h = max(0, bx1 - nx)
+                        elif hm == 3:
+                            h = max(0, ny - by0)
+                        elif hm == 4:
+                            h = max(0, by1 - ny)
+                        else:
+                            h = max(0, min(nx - bx0, bx1 - nx, ny - by0, by1 - ny))
+                        _heappush(pq, (ng + h, nxt))
             # The single via, only in the ball's own pad. A through via spans
             # all layers, so the site must also clear immovable foreign copper
             # on layers the run-blocking test never looks at (via_ok, #253/
@@ -1594,7 +1755,7 @@ def generate_underpad_escape(footprint: Footprint,
     def _via_spot(pad, use_via):
         """Where this ball's escape via will sit: its dog-bone gap site when
         one was assigned (#128), else the pad centre (via-in-pad)."""
-        if use_via and dogbone:
+        if use_via and (dogbone or id(pad) in db_site):
             s = db_site.get(id(pad))
             if s is not None:
                 return s
@@ -1742,7 +1903,11 @@ def generate_underpad_escape(footprint: Footprint,
             return False
         Lc = half_axis - half_sp        # 45-degree converge length
         # Two escape directions perpendicular to the axis; nearer boundary first.
-        cand_e = sorted([(-ay, ax), (ay, -ax)], key=lambda e: boundary_dist(mx, my, e))
+        # (distance to a nanometre: a pair centred in the array has two
+        # equally near boundaries, and the list order -- not the last
+        # bit -- should decide, or the same board moved takes the other)
+        cand_e = sorted([(-ay, ax), (ay, -ax)],
+                        key=lambda e: round(boundary_dist(mx, my, e), 6))
         homes = home_of(pp) | home_of(nn)
         # Foreign copper in the pair's home lens keeps blocking (#393). The
         # partner's OWN pad/reservation is not carved (both pair nets exempt):
@@ -1811,7 +1976,10 @@ def generate_underpad_escape(footprint: Footprint,
                 return True
         return False
 
-    escaped = set()      # id(pad) of balls already committed (top-layer escapes)
+    # (an `escaped` set of id(pad) lived here and was WRITE-ONLY -- never
+    # read. Removed 2026-09-12: provably inert, and an id()-keyed set one
+    # edit away from being iterated, which is the defect class that
+    # produced the address-ordered rip list fixed in this same file.)
 
     def try_coupled_endon(pp, nn, candidates):
         """Escape a 'stacked' pair (the two balls in line toward the nearest edge)
@@ -1900,7 +2068,6 @@ def generate_underpad_escape(footprint: Footprint,
                                            'layer': layers[L], 'net_id': pad.net_id})
                         if use_via:
                             _drop_escape_via(pad)
-                    escaped.update((id(pp), id(nn)))
                     return True
         return False
 
@@ -1934,50 +2101,9 @@ def generate_underpad_escape(footprint: Footprint,
         if (try_coupled(pp, nn, [(top_idx, False)])
                 or try_coupled_endon(pp, nn, [(top_idx, False)])):
             n_coupled += 1
-            escaped.update((id(pp), id(nn)))
         else:
             remaining_pairs.append((base, pp, nn))  # try an inner coupled escape
 
-    # Phase A: via-less escapes on the BGA layer, OUTSIDE-IN (#424): peel the
-    # onion -- ring 1 escapes straight out claiming minimal rim, ring 2
-    # threads between those stubs, and so on as deep as the surface allows.
-    # Outside-in ordering means a deep ball can never strand a shallow one,
-    # which is what makes trying EVERY ball (outer_rings default now
-    # unlimited) safe; each failure simply falls through to the inner
-    # (via-in-pad) phase, which keeps its deepest-first order. Fewer
-    # under-package barrels measured directly as completion on ottercast
-    # (via-in-pad 14 -> 11 final issues with only ~20 barrels).
-    # (Paired balls are handled coupled below.)
-    inner_pads = list(single_pads)
-    if nl > 1:
-        inner_pads = []
-        _order = sorted(single_pads, key=depth)
-        for _si, p in enumerate(_order):
-            if cancel_check and cancel_check():    # #621
-                # Untried balls are NOT pushed into inner_pads: they were never
-                # attempted, so they must not reach the failure ledger either.
-                break
-            if depth(p) > outer_depth:
-                inner_pads.append(p)
-                continue
-            _prog(_si + 1, len(_order), f"top-layer escape {p.net_name}")
-            sx, sy = occ.cell(p.global_x, p.global_y)
-            home = home_of(p)
-            carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
-            path = astar(sx, sy, home, {top_idx}, allow_via=False,
-                         net_id=p.net_id, carve=carve)
-            if path is not None:
-                commit(p, path, carve)
-                n_fcu += 1
-            else:
-                inner_pads.append(p)
-
-    # Phase B: reserve EVERY via-in-pad keepout BEFORE routing any inner track -
-    # the inner single balls AND both balls of every pair that still needs an
-    # inner (via) escape. Otherwise a track running under pad P (placed before
-    # P's via) and P's later via collide (via-segment short). Pairs that already
-    # escaped via-less on top are NOT reserved, so deeper inner runs stay open
-    # beneath them.
     def _reserve_via_site(p):
         vk = vkeep_for_pad(p)
         occ.block_all(p.global_x, p.global_y, vk)
@@ -2141,6 +2267,166 @@ def generate_underpad_escape(footprint: Footprint,
         db_site[id(p)] = site
         db_path[id(p)] = pts
 
+
+    def _dogbone_site_valid(p, site):
+        """A CALLER-chosen dog-bone gap site for p (a planned move), checked
+        exactly as _choose_dogbone_site checks its own k=0 candidates: a
+        legal via site clear of every registered copper and reservation,
+        and a clear pad->site stub on the top layer. Returns (site, stub
+        polyline) or None."""
+        gx, gy = p.global_x, p.global_y
+        vx, vy = site
+        hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
+        if math.hypot(vx - gx, vy - gy) > 1.2 * math.hypot(hx, hy):
+            return None                      # not an adjacent gap of this ball
+        # strictly an INTER-ball gap: a site on the boundary line leaves a
+        # run of a few microns from the via to the exit, no tooth at all
+        if not (grid.min_x + hx * 0.5 < vx < grid.max_x - hx * 0.5
+                and grid.min_y + hy * 0.5 < vy < grid.max_y - hy * 0.5):
+            return None
+        ctx = _via_ctx(p.net_id, gx, gy, extra=max(hx, hy))
+        if locked_smd_pads and not via_site_ok(vx, vy, via_size / 2.0):
+            return None
+        if _via_site_conflict(vx, vy, p.net_id, ctx) is not None:
+            return None
+        if _stub_conflict(p, vx, vy, ctx):
+            return None
+        pad_ex = occ.disk_cells(gx, gy, max(pad_keep, via_keep))
+        ex_cells = pad_ex | occ.disk_cells(vx, vy, via_keep)
+        if not occ.seg_clear(top_idx, (gx, gy), (vx, vy), exempt=ex_cells):
+            return None
+        return (vx, vy), [(gx, gy), (vx, vy)]
+
+    def _dogbone_path_valid(p, site, path):
+        """A CALLER-chosen dog-bone site reached by a WALKED stub (#622, the
+        human's DU1: a short surface run from the ball to the diagonal
+        elbow, then along the inter-row or inter-column lane -- a band's
+        edge line, or a row gap -- to a free via site up to a few pitches
+        away; the engine's own lane-walk chooser, #652, with the site
+        chosen by the plan). `path` is [(ball), (elbow), (site)]; each leg
+        is checked as the chooser checks its k >= 1 candidates: a legal via
+        site clear of every registered copper and reservation, both legs
+        clear by the exact registries and on the raster with the flanking
+        own-footprint pads exempted. Returns (site, stub polyline) or None."""
+        gx, gy = p.global_x, p.global_y
+        vx, vy = site
+        hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
+        pts = [(gx, gy)] + [tuple(q) for q in path[1:]]
+        if len(pts) < 2 or math.hypot(pts[-1][0] - vx, pts[-1][1] - vy) > 1e-6:
+            return None
+        if not (grid.min_x - 1e-6 <= vx <= grid.max_x + 1e-6
+                and grid.min_y - 1e-6 <= vy <= grid.max_y + 1e-6):
+            return None
+        span = max(math.hypot(q[0] - gx, q[1] - gy) for q in pts)
+        ctx = _via_ctx(p.net_id, gx, gy, extra=span + max(hx, hy))
+        if locked_smd_pads and not via_site_ok(vx, vy, via_size / 2.0):
+            return None
+        if _via_site_conflict(vx, vy, p.net_id, ctx) is not None:
+            return None
+        pad_ex = occ.disk_cells(gx, gy, max(pad_keep, via_keep))
+        via_ex = occ.disk_cells(vx, vy, via_keep)
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            if _seg_conflict(p.net_id, ax, ay, bx, by, ctx):
+                return None
+            lane_ex = set()
+            for p2 in footprint.pads:
+                if _pt_seg_d(p2.global_x, p2.global_y, ax, ay, bx, by) \
+                        < max(grid.pitch_x, grid.pitch_y) * 0.55:
+                    lane_ex |= occ.disk_cells(p2.global_x, p2.global_y, pad_keep)
+            if not occ.seg_clear(top_idx, (ax, ay), (bx, by),
+                                 exempt=pad_ex | via_ex | lane_ex):
+                return None
+        return (vx, vy), pts
+
+    # Plan-follow, part 1 (planned FULL moves, see _move_of): these balls
+    # leave the generic phases -- Phase A would lay a surface escape for a
+    # ball the plan wants on the back layer, and Phase B would reserve a
+    # via-in-pad for one the plan wants on the surface. Their via sites are
+    # reserved NOW, before any surface track can run under a pad that must
+    # take a via; the routing is part 2, before Phase D.
+    _planned = [p for p in single_pads if _move_of(p) is not None]
+    _plan_rep = {}
+    if _planned:
+        single_pads = [p for p in single_pads if _move_of(p) is None]
+        for p in sorted(_planned, key=depth, reverse=True):
+            mv = _move_of(p)
+            miss = []
+            kind = mv.get('kind')
+            if kind == 'dogbone' and mv.get('site'):
+                ok = None
+                if mv.get('path'):
+                    ok = _dogbone_path_valid(p, tuple(mv['site']), mv['path'])
+                if ok is None:
+                    ok = _dogbone_site_valid(p, tuple(mv['site']))
+                if ok is not None:
+                    _reserve_dogbone(p, ok[0], ok[1])
+                else:
+                    picked = _choose_dogbone_site(p)
+                    if picked is not None:
+                        _reserve_dogbone(p, picked[0], picked[1])
+                        miss.append('site')
+                    else:
+                        _reserve_via_site(p)
+                        miss.append('kind')
+            elif kind == 'dogbone':
+                picked = _choose_dogbone_site(p)
+                if picked is not None:
+                    _reserve_dogbone(p, picked[0], picked[1])
+                else:
+                    _reserve_via_site(p)
+                    miss.append('kind')
+            elif kind == 'via_in_pad':
+                _reserve_via_site(p)
+            _plan_rep[id(p)] = {'pad': p, 'asked': mv, 'reserve_miss': miss}
+
+    # Phase A: via-less escapes on the BGA layer, OUTSIDE-IN (#424): peel the
+    # onion -- ring 1 escapes straight out claiming minimal rim, ring 2
+    # threads between those stubs, and so on as deep as the surface allows.
+    # Outside-in ordering means a deep ball can never strand a shallow one,
+    # which is what makes trying EVERY ball (outer_rings default now
+    # unlimited) safe; each failure simply falls through to the inner
+    # (via-in-pad) phase, which keeps its deepest-first order. Fewer
+    # under-package barrels measured directly as completion on ottercast
+    # (via-in-pad 14 -> 11 final issues with only ~20 barrels).
+    # (Paired balls are handled coupled below.)
+    inner_pads = list(single_pads)
+    if nl > 1:
+        inner_pads = []
+        _order = sorted(single_pads, key=depth)
+        for _si, p in enumerate(_order):
+            if cancel_check and cancel_check():    # #621
+                # Untried balls are NOT pushed into inner_pads: they were never
+                # attempted, so they must not reach the failure ledger either.
+                break
+            if depth(p) > outer_depth:
+                inner_pads.append(p)
+                continue
+            _prog(_si + 1, len(_order), f"top-layer escape {p.net_name}")
+            sx, sy = occ.cell(p.global_x, p.global_y)
+            home = home_of(p)
+            carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
+            _side = _side_of(p)
+            path = None
+            if _side:
+                path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                             net_id=p.net_id, carve=carve, side=_side)
+                if path is None:
+                    _hint_missed.append(p.net_name)
+            if path is None:
+                path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                             net_id=p.net_id, carve=carve)
+            if path is not None:
+                commit(p, path, carve)
+                n_fcu += 1
+            else:
+                inner_pads.append(p)
+
+    # Phase B: reserve EVERY via-in-pad keepout BEFORE routing any inner track -
+    # the inner single balls AND both balls of every pair that still needs an
+    # inner (via) escape. Otherwise a track running under pad P (placed before
+    # P's via) and P's later via collide (via-segment short). Pairs that already
+    # escaped via-less on top are NOT reserved, so deeper inner runs stay open
+    # beneath them.
     if dogbone:
         # Deepest-first so interior balls claim their toward-exit gaps before
         # shallower neighbours take them (adjacent balls share gap sites).
@@ -2224,55 +2510,10 @@ def generate_underpad_escape(footprint: Footprint,
         nvia += 1
         n_db_esc += 1
 
-    # Phase D: route the inner balls single-ended (deepest-first - the interior
-    # claims the scarce central space before the shallower balls).
-    n_db_esc = 0
-    inner_pads.sort(key=depth, reverse=True)
-    for _ii, p in enumerate(inner_pads):
-        if cancel_check and cancel_check():    # #621
-            break
-        _prog(_ii + 1, len(inner_pads), f"inner escape {p.net_name}")
-        # Dog-bone route (#128): the via already has a reserved gap site; the
-        # inner run starts AT the via, so the ball-grid position stays free.
-        # Any failure falls through to the classic via-in-pad A* (the classic
-        # path may still place its via off-centre in the home disk).
-        _site = db_site.get(id(p)) if dogbone else None
-        if _site is not None:
-            home = home_of(p)
-            carve = _carve_foreign(db_path.get(id(p))
-                                   or [(p.global_x, p.global_y), _site],
-                                   home, {p.net_id})
-            vsx, vsy = occ.cell(*_site)
-            path = None
-            if getattr(occ, 'pour_soft', None) is not None:
-                # #563: layer choice was first-path-wins, so per-cell pour
-                # costs could never move an escape off a flooded layer. With
-                # the field active, route EVERY candidate layer and keep the
-                # cheapest total (pour charge included); ties keep the lowest
-                # layer index (the old deterministic order).
-                best = None
-                for _L in sorted(inner_layers):
-                    _co = []
-                    _pth = astar(vsx, vsy, home, {_L}, allow_via=False,
-                                 net_id=p.net_id, carve=carve, start_layer=_L,
-                                 cost_out=_co)
-                    if _pth is not None and (best is None or _co[0] < best[0]):
-                        best = (_co[0], _pth)
-                if best is not None:
-                    path = best[1]
-            else:
-                for _L in sorted(inner_layers):
-                    path = astar(vsx, vsy, home, {_L}, allow_via=False,
-                                 net_id=p.net_id, carve=carve, start_layer=_L)
-                    if path is not None:
-                        break
-            if path is not None:
-                commit_dogbone(p, _site, path, carve)
-                continue
-        sx, sy = occ.cell(p.global_x, p.global_y)
-        home = home_of(p)
-        _anchors = [(p.global_x, p.global_y)] + ([_site] if _site else [])
-        carve = _carve_foreign(_anchors, home, {p.net_id})
+    def _make_via_ok(p):
+        """The inner-phase via gate for ball p (via-in-pad centre checked
+        against real copper, off-centre sites against the registry, #581
+        off-pad rule, locked-SMD rule) -- shared with the plan-follow phase."""
         _cs, _cd = clamp_via_to_pad(via_size, via_drill, p, floors)[:2]
         _ctx = _via_ctx(p.net_id, p.global_x, p.global_y)
         _memo = {}
@@ -2327,8 +2568,601 @@ def generate_underpad_escape(footprint: Footprint,
                 _m[key] = ok
             return ok
 
-        path = astar(sx, sy, home, inner_layers, allow_via=True,
-                     via_ok=_via_ok, net_id=p.net_id, carve=carve)
+        return _via_ok
+
+    def _follow_plan():
+        """Plan-follow, part 2: lay every planned ball to the most of its
+        planned move that can be achieved OVERALL. Exact moves first
+        (deepest first, the engine's proven claim order); a ball whose exact
+        move is blocked by earlier same-call escapes negotiates -- the
+        blockers are found by routing the move on the pre-commit occupancy,
+        ripped, the ball laid exactly, the blockers re-laid -- and the new
+        state is kept only if the count of balls that landed as asked rises
+        (escaped balls first, then exact, then face+layer, then face, then
+        fewer vias); what is still short degrades along the least damaging
+        dimension: gap, then layer/kind, then face. Every ball's outcome is
+        reported per dimension."""
+        nonlocal nvia, failed
+        L_idx = {name: i for i, name in enumerate(layers)}
+        by_id = {id(p): p for p in _planned}
+        NEG_MAX_BLOCKERS = 3
+        NEG_MAX_TRIES = 16
+        # STRICT plan-follow (a 'strict' key on any planned move, 2026-09-11):
+        # the plan's berths are the planner's to choose, so (a) a
+        # negotiation is kept only when the count of balls laid EXACTLY
+        # rises -- the lexicographic score used to accept a trade that
+        # swapped one exact berth for another while a secondary count rose
+        # (K41: SA6 exact for SA12 walked 1.6 mm, SA11 for SA15, SCS1 for
+        # SODT0), and the caller then banned the ripped net's move as if
+        # the plan were infeasible; (b) the degrade ladder stops at level 2
+        # -- a ball with no berth on its asked FACE is left unescaped and
+        # reported, for the planner to re-plan against the laid copper,
+        # instead of being dumped on another face where it takes a gap the
+        # plan gave to someone else.
+        strict = any(bool(_move_of(p).get('strict')) for p in _planned)
+        max_level = 2 if strict else 3
+
+        def goal_cell(mv):
+            """The boundary cell at the asked gap, or None when the asked
+            gap lies outside the ball window (a planner's 'gap' beyond the
+            outer row or column): clamping it onto a ball line laid the
+            escape somewhere the plan never asked for."""
+            if mv.get('exit') is None:
+                return None            # a face-only ask: no gap of its own
+            gx, gy = occ.cell(*mv['exit'])
+            face = mv['face']
+            if face in ('right', 'left'):
+                if not (by0 <= gy <= by1):
+                    return None
+                return (bx1 + 1 if face == 'right' else bx0 - 1, gy)
+            if not (bx0 <= gx <= bx1):
+                return None
+            return (gx, by1 + 1 if face == 'down' else by0 - 1)
+
+        def face_of_cell(c):
+            if c[0] > bx1:
+                return 'right'
+            if c[0] < bx0:
+                return 'left'
+            if c[1] > by1:
+                return 'down'
+            return 'up'
+
+        GAP_WALK = 6
+
+        def gap_goals(mv):
+            """Goal cells for the asked gap's neighbours, nearest first
+            (+-1, +-2, ... pitches along the face), inside the window."""
+            g = goal_cell(mv)
+            if g is None:
+                return []
+            ax = 1 if mv['face'] in ('left', 'right') else 0
+            step = (grid.pitch_y if ax else grid.pitch_x) / res
+            lo, hi = (by0, by1) if ax else (bx0, bx1)
+            out = []
+            for k in range(1, GAP_WALK + 1):
+                for sgn in (-1, 1):
+                    c = int(round(g[ax] + sgn * k * step))
+                    if lo <= c <= hi:
+                        out.append((g[0], c) if ax else (c, g[1]))
+            return out
+
+        def exact_lane(p, mv):
+            """The plan's move laid on ITS OWN LEGS (EXACT_LANE, 2026-09-10):
+            each leg checked against the exact registries and the raster
+            with the ball's own pad, its via site and the flanking
+            own-footprint pads exempted (as _dogbone_path_valid checks a
+            walked stub), then rasterised into the cell path commit()
+            consumes. None when a leg is blocked -- the ladder then runs as
+            before. Level 0's search reaches the asked EXIT by any cells,
+            and a stub it audited exact ran four rows down the neighbouring
+            gap (K35 SA6), taking the lane two other asks held."""
+            legs = mv.get('legs')
+            if not legs:
+                return None
+            kind = mv.get('kind', 'surface')
+            # `home` is the ball's own EXEMPTION CELL SET (home_of returns
+            # cells, not a layer). `home_li` is the ball's LAYER INDEX, in
+            # the same space as L_idx/commit. They were the same name
+            # (2026-09-17 review): `home` was used for both, so
+            # `li == home` compared an int against a set and was ALWAYS
+            # FALSE -- the exact-registry check below never ran on the
+            # ball's own layer, leaving only occ.seg_clear, whose
+            # exemptions blank the very disks around the pad that
+            # _seg_conflict exists to cover (#393). And a set reaching
+            # commit() as a layer reads as a layer CHANGE against the
+            # next cell's int, so a 'surface' lane could emit a full-span
+            # via at the ball and leave the first run a single cell --
+            # a spurious via plus an open stub.
+            home = home_of(p)
+            home_li = top_idx
+            gx, gy = p.global_x, p.global_y
+            site = db_site.get(id(p))
+            goal = goal_cell(mv)
+            if goal is None:
+                return None
+            gxy = occ.xy(*goal)
+            span = max(math.hypot(b[0] - gx, b[1] - gy) for (_a, b, _L) in legs)
+            ctx = _via_ctx(p.net_id, gx, gy, extra=span + max(grid.pitch_x, grid.pitch_y))
+            pad_ex = set(occ.disk_cells(gx, gy, max(pad_keep, via_keep)))
+            if site is not None:
+                pad_ex |= occ.disk_cells(site[0], site[1], via_keep)
+            # the legs the engine still has to lay: a surface stub whole; a
+            # dog-bone's run from its (reserved, stamped) site; a via-in-pad's
+            # run from the ball
+            run_L = mv.get('layer')
+            if kind == 'surface':
+                lay = [(a, b, L) for (a, b, L) in legs]
+            elif kind == 'dogbone':
+                # the run only, on the plan's run layer, from the reserved
+                # site (a via'd ball is HOMED to its run layer, so 'not the
+                # home layer' kept the stub leg and commit_dogbone, which
+                # takes the run's layer from the first cell, laid the run on
+                # the ball's layer -- seven B runs on F at K35, banned every
+                # pass)
+                if site is None:
+                    return None
+                lay = [(a, b, L) for (a, b, L) in legs if L == run_L]
+                if not lay:
+                    return None
+                lay[0] = ((site[0], site[1]), lay[0][1], lay[0][2])
+            else:
+                lay = [(a, b, L) for (a, b, L) in legs if L == run_L] or list(legs)
+            lay = [(a, b, L) for (a, b, L) in lay if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-6]
+            if not lay:
+                return None
+            # the last leg ends at the window's boundary cell
+            a_, b_, L_ = lay[-1]
+            lay[-1] = (a_, gxy, L_)
+            cells = []
+            for (a, b, Lname) in lay:
+                li = L_idx.get(Lname)
+                if li is None:
+                    return None
+                if li == home_li and _seg_conflict(p.net_id, a[0], a[1], b[0], b[1], ctx):
+                    return None
+                lane_ex = set()
+                for p2 in footprint.pads:
+                    if _pt_seg_d(p2.global_x, p2.global_y, a[0], a[1], b[0], b[1]) \
+                            < max(grid.pitch_x, grid.pitch_y) * 0.55:
+                        lane_ex |= occ.disk_cells(p2.global_x, p2.global_y, pad_keep)
+                if not occ.seg_clear(li, a, b, exempt=pad_ex | lane_ex):
+                    if os.environ.get('EXACT_LANE_DEBUG'):
+                        # the first blocked stretch along the leg
+                        nn = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / (res * 2)) + 1)
+                        where = None
+                        for k in range(nn):
+                            q0 = (a[0] + (b[0] - a[0]) * k / nn, a[1] + (b[1] - a[1]) * k / nn)
+                            q1 = (a[0] + (b[0] - a[0]) * (k + 1) / nn, a[1] + (b[1] - a[1]) * (k + 1) / nn)
+                            if not occ.seg_clear(li, q0, q1, exempt=pad_ex | lane_ex):
+                                where = q0
+                                break
+                        probe = ''
+                        if where is not None:
+                            q1 = (where[0] + (b[0] - a[0]) / nn, where[1] + (b[1] - a[1]) / nn)
+                            probe = (f'; clear with no exemption {occ.seg_clear(li, where, q1)},'
+                                     f' pad disk only {occ.seg_clear(li, where, q1, exempt=pad_ex)},'
+                                     f' lane disks only {occ.seg_clear(li, where, q1, exempt=lane_ex)},'
+                                     f' cell {occ.cell(*where)} grid {occ.grid[li][occ.cell(*where)[1] * occ.nx + occ.cell(*where)[0]] if hasattr(occ, "nx") else "?"}')
+                        near = ''
+                        if where is not None:
+                            wx, wy = where
+                            tt = [(t['net_id'], t['layer'], tuple(round(v, 2) for v in t['start']), tuple(round(v, 2) for v in t['end']))
+                                  for t in tracks if _pt_seg_d(wx, wy, t['start'][0], t['start'][1], t['end'][0], t['end'][1]) < 0.4]
+                            vv = [(v['net_id'], round(v['x'], 2), round(v['y'], 2)) for v in vias_to_add
+                                  if math.hypot(v['x'] - wx, v['y'] - wy) < 0.6]
+                            near = f'; committed near: tracks {tt[:4]} vias {vv[:4]}'
+                        print(f'    exact-lane {p.net_id} {kind}: leg {a}->{b} on {Lname} BLOCKED on the raster'
+                              f' at {tuple(round(v, 3) for v in where) if where else "?"}' + probe + near)
+                    return None
+                n = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / (res * 0.5)) + 1)
+                for k in range(n + 1):
+                    t = k / n
+                    c = occ.cell(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                    if not cells or cells[-1][:2] != c or cells[-1][2] != li:
+                        cells.append((c[0], c[1], li))
+            if not cells:
+                return None
+            sx, sy = occ.cell(gx, gy)
+            if kind == 'surface':
+                path = ([(sx, sy, home_li)] if cells[0][:2] != (sx, sy) else []) + cells
+                mode = 'surface'
+            elif kind == 'dogbone':
+                path, mode = cells, 'dogbone'
+            else:
+                first = cells[0][2]
+                path = [(sx, sy, home_li), (sx, sy, first)] + [c for c in cells if c[:2] != (sx, sy)]
+                mode = 'via_in_pad'
+            carve = _carve_foreign(db_path.get(id(p)) or [(gx, gy)] + ([site] if site else []),
+                                   home, {p.net_id})
+            if os.environ.get('EXACT_LANE_DEBUG'):
+                print(f'    exact-lane {p.net_id} {kind}: LAID {len(lay)} leg(s) {[(a, b, L) for (a, b, L) in lay]}')
+            return mode, path, carve
+
+        def attempt(p, mv, level, goal_override=None, reach=None):
+            """(mode, path, carve) for the ladder level: 0 exact (face, gap,
+            layer, kind); 1 same face and layer at the NEAREST free gap, then
+            any gap; 2 same face, the other layer/kind; 3 any face. None
+            when nothing routes.
+
+            The level-1 walk tries the asked gap's neighbours nearest first,
+            a full search each; a gap that cannot be reached exhausts the
+            whole reachable region, and every later unreachable gap used to
+            exhaust it again (K41: 500 of 1,174 searches, 105 of 179 s,
+            2026-09-06 profile). One failed search now records what the
+            region can reach (astar's reach_out, per search configuration in
+            `reach`) and the later gaps outside it are skipped -- the same
+            walk order, the same first success, the same path."""
+            if level == 0 and goal_override is None and mv.get('legs'):
+                r = exact_lane(p, mv)
+                if r is not None:
+                    return r
+            if level == 1 and goal_override is None:
+                reach = {}
+                for gc in gap_goals(mv):
+                    r = attempt(p, mv, 1, goal_override=gc, reach=reach)
+                    if r[1] is not None:
+                        return r
+            face, kind = mv['face'], mv.get('kind', 'surface')
+            lay = L_idx.get(mv.get('layer'), top_idx)
+            sx, sy = occ.cell(p.global_x, p.global_y)
+            home = home_of(p)
+            site = db_site.get(id(p))
+            anchors = [(p.global_x, p.global_y)] + ([site] if site else [])
+            carve = _carve_foreign(db_path.get(id(p)) or anchors, home, {p.net_id})
+            goal = goal_cell(mv) if level == 0 else goal_override
+            if level == 0 and goal is None:
+                return None, None, None      # the asked gap is not in the window
+            side = face if level < 3 else None
+
+            def search(key, *a, **kw):
+                # one goal search; with a walk's `reach` record, a goal the
+                # same configuration already proved unreachable is refused
+                # without a search, and a failure records the reach
+                if reach is None or goal is None:
+                    return astar(*a, goal=goal, **kw)
+                known = reach.get(key)
+                if known is not None and goal not in known:
+                    return None
+                out = set()
+                pth = astar(*a, goal=goal, reach_out=out, **kw)
+                if pth is None:
+                    reach[key] = out
+                return pth
+
+            def surface():
+                return search(('surface',), sx, sy, home, {top_idx}, allow_via=False,
+                              net_id=p.net_id, carve=carve, side=side)
+
+            def inpad(lset):
+                return search(('inpad', frozenset(lset)), sx, sy, home, set(lset),
+                              allow_via=True, via_ok=_make_via_ok(p), net_id=p.net_id,
+                              carve=carve, side=side)
+
+            def dog(lset):
+                if site is None:
+                    return None
+                vsx, vsy = occ.cell(*site)
+                for L in sorted(lset):
+                    pth = search(('dog', L), vsx, vsy, home, {L}, allow_via=False,
+                                 net_id=p.net_id, carve=carve, start_layer=L,
+                                 side=side)
+                    if pth is not None:
+                        return pth
+                return None
+            asked = {lay} if lay in inner_layers else set()
+            other = inner_layers - asked
+            if level <= 1:
+                if kind == 'surface':
+                    order = [('surface', surface)]
+                elif kind == 'dogbone' and site is not None:
+                    order = [('dogbone', lambda: dog(asked or inner_layers))]
+                else:
+                    order = [('via_in_pad', lambda: inpad(asked or inner_layers))]
+            elif level == 2:
+                if kind == 'surface':
+                    order = [('via_in_pad', lambda: inpad(inner_layers))]
+                elif kind == 'dogbone' and site is not None:
+                    order = [('dogbone', lambda: dog(other or inner_layers)),
+                             ('surface', surface)]
+                else:
+                    order = [('surface', surface),
+                             ('via_in_pad', lambda: inpad(other or inner_layers))]
+            else:
+                order = ([('dogbone', lambda: dog(inner_layers))] if site else []) + \
+                    [('surface', surface),
+                     ('via_in_pad', lambda: inpad(inner_layers)),
+                     ('via_in_pad', lambda: inpad(set(range(nl))))]
+            for mode, fn in order:
+                path = fn()
+                if path is not None:
+                    return mode, path, carve
+            return None, None, None
+
+        def dims_of(p, mv, mode, path):
+            c = (path[-1][0], path[-1][1])
+            g = goal_cell(mv)
+            ax = 1 if mv['face'] in ('left', 'right') else 0
+            got_face = face_of_cell(c)
+            got_layer = layers[path[-1][2]]
+            return {'face': got_face == mv['face'],
+                    'gap': (g is not None and got_face == mv['face']
+                            and abs(c[ax] - g[ax]) <= 1),
+                    'layer': got_layer == mv.get('layer'),
+                    'kind': mode == mv.get('kind'),
+                    'got': (mode, got_face, got_layer, occ.xy(*c))}
+
+        base_t, base_v = len(tracks), len(vias_to_add)
+        snap0 = [bytearray(g) for g in occ.grid]
+        alive = {}
+
+        def do_commit(p, mv, mode, path, carve, level):
+            t0, v0 = len(tracks), len(vias_to_add)
+            if mode == 'dogbone':
+                commit_dogbone(p, db_site[id(p)], path, carve)
+            else:
+                commit(p, path, carve)
+            vk = []
+            for v in vias_to_add[v0:]:
+                at_pad = (abs(v['x'] - p.global_x) < 1e-6
+                          and abs(v['y'] - p.global_y) < 1e-6)
+                vk.append(vkeep_for_pad(p) if at_pad else via_keep)
+            return {'pad': p, 'tracks': list(tracks[t0:]),
+                    'vias': list(vias_to_add[v0:]), 'vkeep': vk,
+                    'dims': dims_of(p, mv, mode, path), 'level': level}
+
+        def apply_state(state):
+            for L in range(nl):
+                occ.grid[L][:] = snap0[L]
+            del tracks[base_t:]
+            del vias_to_add[base_v:]
+            for r in state.values():
+                for t in r['tracks']:
+                    tracks.append(t)
+                    occ.block_segment(L_idx[t['layer']], t['start'], t['end'], trk_keep)
+                for v, k in zip(r['vias'], r['vkeep']):
+                    vias_to_add.append(v)
+                    occ.block_all(v['x'], v['y'], k)
+
+        def score(state):
+            # exact first: a pending ball is laid by the degrade ladder in
+            # any case, so escaping it by ripping exact neighbours is no
+            # gain (K8: three exact balls ripped to land one, 5 -> 4 exact,
+            # accepted because 'escaped' came first)
+            d = [r['dims'] for r in state.values()]
+            return (sum(1 for x in d if x['face'] and x['gap'] and x['layer']),
+                    sum(1 for x in d if x['face'] and x['layer']),
+                    sum(1 for x in d if x['face']),
+                    len(d),
+                    -sum(len(r['vias']) for r in state.values()))
+
+        def blockers_of(p, mv, state):
+            saved = occ.grid
+            occ.grid = [bytearray(g) for g in snap0]
+            try:
+                mode, path, _c = attempt(p, mv, 0)
+            finally:
+                occ.grid = saved
+            if path is None:
+                return None
+            cells = [(occ.xy(ix, iy), L) for (ix, iy, L) in path]
+            out = set()
+            for pid, r in state.items():
+                hit = False
+                for (x, y), L in cells:
+                    for t in r['tracks']:
+                        if L_idx[t['layer']] == L and _pt_seg_d(
+                                x, y, t['start'][0], t['start'][1],
+                                t['end'][0], t['end'][1]) < trk_keep + res:
+                            hit = True
+                            break
+                    if not hit:
+                        for v in r['vias']:
+                            if math.hypot(x - v['x'], y - v['y']) < via_keep + res:
+                                hit = True
+                                break
+                    if hit:
+                        break
+                if hit:
+                    out.add(pid)
+            return out
+
+        # a FACE-ONLY ask (no exit: fanout_from_plan's ask for a net the
+        # selector could not place) goes after every exact ask -- laid in
+        # depth order it took planned gaps first (K41 e7: 13 refusals)
+        order = sorted(_planned, key=lambda p: (_move_of(p).get('exit') is not None, depth(p)),
+                       reverse=True)
+        pending = []
+        for p in order:
+            mv = _move_of(p)
+            mode, path, carve = attempt(p, mv, 0)
+            if path is not None:
+                alive[id(p)] = do_commit(p, mv, mode, path, carve, 0)
+            else:
+                pending.append(p)
+        n_tried = n_acc = 0
+        neg_log = []            # (net, outcome) for the report
+        for p in list(pending):
+            if n_tried >= NEG_MAX_TRIES:
+                neg_log.append((p.net_name, 'not tried (budget)'))
+                break
+            mv = _move_of(p)
+            bl = blockers_of(p, mv, alive)
+            if bl is None:
+                neg_log.append((p.net_name, 'exact move infeasible even alone'))
+                continue
+            if not bl:
+                neg_log.append((p.net_name, 'no same-call blocker found'))
+                continue
+            if len(bl) > NEG_MAX_BLOCKERS:
+                neg_log.append((p.net_name, f'{len(bl)} blockers, over the '
+                                f'{NEG_MAX_BLOCKERS} limit'))
+                continue
+            n_tried += 1
+            # DETERMINISTIC BLOCKER ORDER (2026-09-12). `bl` is a SET of
+            # id(pad) -- memory addresses -- so iterating it, or letting a
+            # stable sort break ties with it, orders the rip and the re-lay
+            # by whatever the allocator did that run. Measured: two runs of
+            # IDENTICAL code on the identical board printed
+            # ripped ['SDQ14','SBA0','SDQ6'] and ['SDQ14','SDQ6','SBA0'].
+            # The re-lay order is load-bearing (which blocker gets its gap
+            # back first decides the copper), so this was a wall-clock-class
+            # defect: the same input could give different output. Tie-break
+            # on the pad's own identity instead, which is a property of the
+            # board rather than of the process.
+            def _bl_key(i):
+                q = by_id[i]
+                return (-depth(q), str(q.net_name), str(q.pad_number))
+            bl = sorted(bl, key=_bl_key)
+            _bl_names = [by_id[i].net_name.split('/')[-1] for i in bl]
+            before = dict(alive)
+            s0 = score(alive)
+            for pid in bl:
+                alive.pop(pid)
+            apply_state(alive)
+            mode, path, carve = attempt(p, mv, 0)
+            if path is None:
+                neg_log.append((p.net_name, f'ripped {_bl_names}: still no exact route'))
+                alive = before
+                apply_state(alive)
+                continue
+            alive[id(p)] = do_commit(p, mv, mode, path, carve, 0)
+            for pid in bl:          # already in _bl_key order
+                q = by_id[pid]
+                mq = _move_of(q)
+                for lvl in range(max_level + 1):
+                    m2, p2, c2 = attempt(q, mq, lvl)
+                    if p2 is not None:
+                        alive[pid] = do_commit(q, mq, m2, p2, c2, lvl)
+                        break
+            if (score(alive)[0] > s0[0]) if strict else (score(alive) > s0):
+                n_acc += 1
+                pending.remove(p)
+                neg_log.append((p.net_name, f'ripped {_bl_names}: accepted '
+                                f'{s0} -> {score(alive)}'))
+            else:
+                neg_log.append((p.net_name, f'ripped {_bl_names}: rejected '
+                                f'{s0} -> {score(alive)}'))
+                alive = before
+                apply_state(alive)
+        for p in pending:
+            mv = _move_of(p)
+            for lvl in range(1, max_level + 1):
+                mode, path, carve = attempt(p, mv, lvl)
+                if path is not None:
+                    alive[id(p)] = do_commit(p, mv, mode, path, carve, lvl)
+                    break
+            else:
+                failed.append(p.net_name)
+        nvia = len(vias_to_add)
+        # the report: per ball, what was asked and what was laid
+        rep = {}
+        for p in _planned:
+            r = alive.get(id(p))
+            mv = _move_of(p)
+            entry = {'asked': mv, 'reserve_miss': _plan_rep[id(p)]['reserve_miss']}
+            if r is None:
+                entry['got'] = None
+            else:
+                entry.update(r['dims'])
+                entry['level'] = r['level']
+            rep[p.net_name] = entry
+        pcb_data._fanout_plan_report = rep
+        n_exact = sum(1 for e in rep.values() if e.get('got') and e['face'] and e['gap'] and e['layer'])
+        n_fl = sum(1 for e in rep.values() if e.get('got') and e['face'] and e['layer']) - n_exact
+        n_f = sum(1 for e in rep.values() if e.get('got') and e['face']) - n_exact - n_fl
+        n_other = sum(1 for e in rep.values() if e.get('got') and not e['face'])
+        n_none = sum(1 for e in rep.values() if not e.get('got'))
+        if verbose:
+            print(f"  Plan-follow: {len(_planned)} planned ball(s) -- exact {n_exact}, "
+                  f"face+layer {n_fl}, face only {n_f}, other face {n_other}, "
+                  f"unescaped {n_none}; negotiation tried {n_tried}, accepted {n_acc}")
+            for nm, e in sorted(rep.items()):
+                if e.get('got') and e['face'] and e['gap'] and e['layer'] and not e['reserve_miss']:
+                    continue
+                mv = e['asked']
+                ask = (f"{mv.get('kind')}/{mv['face']}/{str(mv.get('layer'))[:1]}"
+                       + (f"@({mv['exit'][0]:.2f},{mv['exit'][1]:.2f})" if mv.get('exit') else '@(face only)'))
+                if e.get('got'):
+                    mode, gf, gl, (ex, ey) = e['got']
+                    lost = [k for k in ('face', 'gap', 'layer', 'kind') if not e[k]]
+                    print(f"    {nm.split('/')[-1]}: asked {ask} -> laid {mode}/{gf}/{gl[:1]}"
+                          f"@({ex:.2f},{ey:.2f}) level {e['level']} lost {lost}"
+                          + (f" site {e['reserve_miss']}" if e['reserve_miss'] else ''))
+                else:
+                    print(f"    {nm.split('/')[-1]}: asked {ask} -> NOT escaped")
+            for nm, why in neg_log:
+                print(f"    negotiation {nm.split('/')[-1]}: {why}")
+
+    n_db_esc = 0
+    if _planned:
+        _follow_plan()
+
+    # Phase D: route the inner balls single-ended (deepest-first - the interior
+    # claims the scarce central space before the shallower balls).
+    inner_pads.sort(key=depth, reverse=True)
+    for _ii, p in enumerate(inner_pads):
+        if cancel_check and cancel_check():    # #621
+            break
+        _prog(_ii + 1, len(inner_pads), f"inner escape {p.net_name}")
+        # Dog-bone route (#128): the via already has a reserved gap site; the
+        # inner run starts AT the via, so the ball-grid position stays free.
+        # Any failure falls through to the classic via-in-pad A* (the classic
+        # path may still place its via off-centre in the home disk).
+        _site = db_site.get(id(p))     # dog-bone mode, or a planned dog-bone
+        if _site is not None:
+            home = home_of(p)
+            carve = _carve_foreign(db_path.get(id(p))
+                                   or [(p.global_x, p.global_y), _site],
+                                   home, {p.net_id})
+            vsx, vsy = occ.cell(*_site)
+            path = None
+            if getattr(occ, 'pour_soft', None) is not None:
+                # #563: layer choice was first-path-wins, so per-cell pour
+                # costs could never move an escape off a flooded layer. With
+                # the field active, route EVERY candidate layer and keep the
+                # cheapest total (pour charge included); ties keep the lowest
+                # layer index (the old deterministic order).
+                best = None
+                for _L in sorted(inner_layers):
+                    _co = []
+                    _pth = astar(vsx, vsy, home, {_L}, allow_via=False,
+                                 net_id=p.net_id, carve=carve, start_layer=_L,
+                                 cost_out=_co)
+                    if _pth is not None and (best is None or _co[0] < best[0]):
+                        best = (_co[0], _pth)
+                if best is not None:
+                    path = best[1]
+            else:
+                for _L in sorted(inner_layers):
+                    path = astar(vsx, vsy, home, {_L}, allow_via=False,
+                                 net_id=p.net_id, carve=carve, start_layer=_L)
+                    if path is not None:
+                        break
+            if path is not None:
+                commit_dogbone(p, _site, path, carve)
+                continue
+        sx, sy = occ.cell(p.global_x, p.global_y)
+        home = home_of(p)
+        _anchors = [(p.global_x, p.global_y)] + ([_site] if _site else [])
+        carve = _carve_foreign(_anchors, home, {p.net_id})
+        _via_ok = _make_via_ok(p)
+
+        _side = _side_of(p)
+        path = None
+        if _side:
+            path = astar(sx, sy, home, inner_layers, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                         side=_side)
+            if path is None and nl > 1:
+                path = astar(sx, sy, home, set(range(nl)), allow_via=True,
+                             via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                             side=_side)
+            if path is None:
+                _hint_missed.append(p.net_name)
+        if path is None:
+            path = astar(sx, sy, home, inner_layers, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve)
         if path is None and nl > 1:
             path = astar(sx, sy, home, set(range(nl)), allow_via=True,
                          via_ok=_via_ok, net_id=p.net_id, carve=carve)
@@ -2664,6 +3498,12 @@ def generate_underpad_escape(footprint: Footprint,
         if clamp_stats['clamped']:
             print(f"  Under-pad: clamped {clamp_stats['clamped']} via-in-pad(s) to "
                   f"fit their pad edge (#202)")
+        if _hint_missed:
+            print(f"  Under-pad: {len(_hint_missed)} ball(s) had no route out "
+                  f"the side the caller asked for and escaped elsewhere "
+                  f"[{', '.join(sorted(_hint_missed)[:6])}"
+                  + (f", +{len(_hint_missed) - 6} more" if len(_hint_missed) > 6
+                     else "") + "]")
         if clamp_stats['escalated']:
             warn_fab_escalation(f"under-pad {clamp_stats['escalated']} via-in-pad(s) "
                                 f"(sub-0.45mm pads)")
@@ -2684,8 +3524,8 @@ def generate_underpad_escape(footprint: Footprint,
                   f" a smaller --via-drill, a fab tier whose floor this pitch"
                   f" can meet, or the board's own min_hole_to_hole")
     # The FAB requirement under-pad escape creates (#489 §8): via-in-pad needs
-    # IPC-4761 Type VII. Emitted from the shared engine so both fronts report it.
-    from fab_notes import print_via_in_pad_note
-    print_via_in_pad_note(vias_to_add, pcb_data.pads_by_net,
-                          context="BGA under-pad escape")
+    # IPC-4761 Type VII. #962: it is DECLARED once, on every via the BGA fanout
+    # returns, at the end of `generate_bga_fanout` -- the channel escape's
+    # in-pad vias, this escape's and the plane drops alike. Stamping here
+    # alone left the channel path's via-in-pad unstamped.
     return tracks, vias_to_add, failed

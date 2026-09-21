@@ -224,6 +224,47 @@ class PlacementModel:
         return pts
 
 
+def _graphic_copper_findings(model, state) -> Dict[str, list]:
+    """#962: `[[ref, overrun_mm]]` for footprint graphic copper past the
+    outline at the model's proposed poses, and what is not measured.
+
+    Calls `check_drc.footprint_graphic_outline_census` on a shallow copy of the
+    board whose footprints carry the proposed poses. The census re-poses each
+    part's graphic copper from its parse pose, and reports a part that
+    changed SIDE as unmeasured rather than guessing its mirror.
+    """
+    import copy as _copy
+    import dataclasses as _dc
+    try:
+        from check_drc import footprint_graphic_outline_census, GRAPHIC_WAIVED_STATES
+        pcb = model.pcb
+        fps = {}
+        for k, fp in pcb.footprints.items():
+            p = state.parts.get(k) if state is not None else None
+            if p is None:
+                fps[k] = fp
+                continue
+            layer = fp.layer
+            side = getattr(p, 'side', None)
+            if side in ('F', 'B') and not str(fp.layer).startswith(side + '.'):
+                layer = side + '.Cu'
+            fps[k] = _dc.replace(fp, x=p.x, y=p.y, rotation=p.rot, layer=layer)
+        clone = _copy.copy(pcb)
+        clone.footprints = fps
+        census = footprint_graphic_outline_census(clone)
+    except Exception as e:                                   # noqa: BLE001
+        return {'refs': [], 'unmeasured': [['*', 'error', '%s: %s'
+                                            % (type(e).__name__, e)]]}
+    best = {}
+    for row in census['rows']:
+        if row['overrun_mm'] > 1e-6 and row['owner_state'] not in GRAPHIC_WAIVED_STATES:
+            k = row['owner_ref'] or '<board>'
+            best[k] = max(best.get(k, 0.0), row['overrun_mm'])
+    return {'refs': sorted([k, round(v, 4)] for k, v in best.items()),
+            'unmeasured': [[u.get('owner_ref', ''), u.get('kind', ''),
+                            u.get('reason', '')] for u in census['unmeasured']]}
+
+
 def legality_findings(model) -> Dict[str, object]:
     """Named legality findings, computed ONCE per model (run-4 G).
 
@@ -247,6 +288,7 @@ def legality_findings(model) -> Dict[str, object]:
     if cached is not None:
         return cached
     out = {'oob_refs_pad_copper': [], 'oob_refs_courtyard': [],
+           'oob_refs_graphic_copper': [], 'graphic_copper_unmeasured': [],
            'pad_conflict_pairs_refs': [], 'hole_conflict_pairs_refs': [],
            'body_overlap_pairs_refs': [],
            'courtyard_overlap_pairs_refs': [],
@@ -325,6 +367,14 @@ def legality_findings(model) -> Dict[str, object]:
                        + max(0.0, b[1] - ext[1]) + max(0.0, ext[3] - b[3]))
             if oob > 1e-6:
                 out['oob_refs_pad_copper'].append([ref, round(oob, 4)])
+        # #962: the second off-outline channel, footprint GRAPHIC copper,
+        # at the model's PROPOSED poses. It is check_drc's own census on a
+        # copy of the board whose footprints carry those poses; the census
+        # re-poses graphic copper from each part's parse pose, so this
+        # agrees with check_drc on the written board.
+        _gc = _graphic_copper_findings(model, state)
+        out['oob_refs_graphic_copper'] = _gc['refs']
+        out['graphic_copper_unmeasured'] = _gc['unmeasured']
         refs = sorted(ctx.parts)
         for i, a in enumerate(refs):
             pa = state.parts.get(a)
@@ -2373,7 +2423,10 @@ def main(argv=None):
         'checklist': {
             'a_off_outline': {
                 'pad_copper': fnd['oob_refs_pad_copper'],
-                'courtyard': fnd['oob_refs_courtyard']},
+                'courtyard': fnd['oob_refs_courtyard'],
+                # #962: footprint graphic copper past the outline
+                'graphic_copper': fnd.get('oob_refs_graphic_copper', []),
+                'graphic_copper_unmeasured': fnd.get('graphic_copper_unmeasured', [])},
             # run-6 key honesty: the old 'b_overlap_pairs' NAME carried
             # the PAD-CLEARANCE channel, and a reader auditing overlap
             # with b_overlap_pairs=[] concluded there was none while two
@@ -2535,6 +2588,8 @@ def main(argv=None):
                 len(doc['checklist']['a_off_outline']['pad_copper']),
             'a_off_outline.courtyard':
                 len(doc['checklist']['a_off_outline']['courtyard']),
+            'a_off_outline.graphic_copper':
+                len(doc['checklist']['a_off_outline']['graphic_copper']),
             'b_pad_clearance_pairs':
                 len(doc['checklist']['b_pad_clearance_pairs']),
             'b_body_overlap_pairs':

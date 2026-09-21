@@ -982,8 +982,9 @@ _UNRESOLVABLE = {}
 #: 45 before #893/#916 added `mutate_893_916.py`; 50 before #974 added
 #: `mutate_974.py`; 51 before #982 added `mutate_982.py`; 52 before #975 added
 #: `mutate_975.py`; 53 before #983/#987/#988 added `mutate_983.py`; 54
-#: before #959 added `mutate_959.py`; 55 before #963 added `mutate_963.py`.
-_BATTERY_COUNT = 56
+#: before #962 added `mutate_962.py`; 55 before #959 added `mutate_959.py`;
+#: 56 before #963 added `mutate_963.py`.
+_BATTERY_COUNT = 57
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

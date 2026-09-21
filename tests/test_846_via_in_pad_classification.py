@@ -167,6 +167,19 @@ def main():
         check(f'{board} {ref}: the commit loop and the IPC-4761 fab note '
               f'classify the same vias', engine <= noted,
               f'engine-only: {sorted(engine - noted)[:4]}')
+        # #962: and every such via DECLARES Type VII on itself (the engine
+        # stamps the dicts), while a via off every pad carries no token.
+        from fab_notes import TYPE_VII_STAMP
+        noted_ids = {id(v) for v, _pad in via_in_pad_sites(vias, pcb.pads_by_net)}
+        unstamped = [(round(v['x'], 3), round(v['y'], 3)) for v in vias
+                     if id(v) in noted_ids and v.get('tenting_attrs') != TYPE_VII_STAMP]
+        stray = [(round(v['x'], 3), round(v['y'], 3)) for v in vias
+                 if id(v) not in noted_ids and v.get('tenting_attrs')]
+        check(f'{board} {ref}: every via-in-pad is stamped (capping yes) '
+              f'(filling yes) and no other via is (#962)',
+              not unstamped and not stray,
+              f'unstamped {unstamped[:3]} stray {stray[:3]}')
+        seen['stamped'] = seen.get('stamped', 0) + len(noted_ids)
 
         # 4. A via that misses its pad entirely keeps the nominal size: the fix
         #    must not clamp everything.
@@ -192,6 +205,8 @@ def main():
           seen['offcentre'], f"{seen['offcentre']} of them")
     check('...and DISJOINT vias, so "clamp everything" is detectable',
           seen['disjoint'], f"{seen['disjoint']} of them")
+    check('...and via-in-pad vias whose Type VII stamp was checked (#962)',
+          seen.get('stamped', 0), f"{seen.get('stamped', 0)} of them")
 
     # 6. THE 12.5 MICRON CASE, stated as geometry rather than as an outcome:
     #    pad centres are off the routing lattice, so snap() cannot place a via

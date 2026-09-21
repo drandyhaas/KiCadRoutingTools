@@ -42,6 +42,12 @@ Read it from `render_placement --json-out`'s
 `checklist.a_off_outline.pad_copper`. A whole-board pass/fail verdict is the
 wrong channel to learn it from — check the per-part list.
 
+A footprint's own GRAPHIC copper (a drawn tab, an antenna) past the outline is
+the same defect and is read beside it, from
+`checklist.a_off_outline.graphic_copper`, with what could not be measured in
+`graphic_copper_unmeasured` (#962). check_drc reports it as
+`graphic-off-board`, and a lock does not waive it.
+
 ### Scope the search to the refs the gate names
 
 When a gate names specific parts, free exactly those and lock everything else.
@@ -283,7 +289,7 @@ that door appears in neither.
 | you have | reach for | not |
 |---|---|---|
 | a pile, no placement at all | decide the fixed parts and the connectors yourself and LOCK them (`place_pose`), then `place_seed` from a zone plan, and rank several with `compare_seeds` | `place_optimize` — there is nothing to refine yet |
-| one part in the wrong place, and you know where it belongs | `place_pose` — set, rotate, face or lock; it grades the pose and refuses one that makes the board's pad legality worse | a whole-board search, which orders violators by its own priority and may never reach yours |
+| one part in the wrong place, and you know where it belongs | `place_pose` — set, rotate, face or lock; it grades the pose and refuses one that makes the board's placement legality worse (pad and hole clearance, pad copper against the outline and its edge-clearance floor, footprint graphic copper against the outline; its summary's `legal_scope` names what it grades and `legal_unmeasured` what it does not) | a whole-board search, which orders violators by its own priority and may never reach yours |
 | a rough, imported or generated placement, all legal | `place_optimize --max-displacement 3` | `place_reconstruct` |
 | a placement that is WRONG — copper-free DRC violations, or a mechanically-fixed part where mechanics forbid | `place_reconstruct` for structural damage, `place_seed --repair` for local violations | `place_optimize` — the quench is a local search and this is not a local problem |
 | a need for OPTIONS rather than one answer | `place_portfolio` explores around ONE seed; `compare_seeds` ranks ACROSS seeds. The portfolio cannot cross seeds, so rank first | |
@@ -641,7 +647,8 @@ Each lap:
 1. **Measure** — three instruments, JSONs kept as evidence:
 
    ```bash
-   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0
+   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0 \
+       --baseline <the ORIGINAL input board>
    python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb \
        --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
    python3 -X utf8 py_tools/check_channels.py board.kicad_pcb \

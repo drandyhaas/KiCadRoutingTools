@@ -1,3 +1,162 @@
+b345eed9 2026-09-21 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of the MERGE of main (ab8d0c36, carrying the bus622-take5 py_router
+delta) into fix/962-paste-aperture. NO GAP FOUND. Eight gates re-run green on
+this machine under KiCad 10.0.0-103 / wx 4.2.2a1.
+
+WHY THIS AUDIT EXISTS. The branch's own audit (82522c1e, below) was taken
+against ad243b74, BEFORE main merged take5 (5bad89f4). take5 changed
+py_router/bga_fanout/{__init__,underpad,escape,rotate_frame,flip_frame}.py,
+single_ended_routing.py and routing_utils.py; #962 ALSO touches both fanouts.
+Git AUTO-merged bga_fanout/__init__.py and underpad.py with no conflict, which
+is not the same as being correct, so the fanout gates were re-run on the merged
+tree specifically to check that auto-merge.
+
+GATES RE-RUN AT b345eed9, all green:
+  test_cli_postpass_coverage  -- #962 adds a CLI post-pass
+                                 (route.py _ship_via_protection962); the gate
+                                 that blocks Class-2 CLI-only drift accepts it.
+  test_962_paste_parity       -- both parse paths agree on the paste model,
+                                 against pcbnew's own GetSolderPasteMargin.
+  test_962_native_graphic_overrun
+  test_fanout_rotated_gui     -- the take5 x #962 fanout intersection.
+  test_fanout_backside_gui    -- likewise, through take5's flip_frame.
+  test_settings_roundtrip     -- gui_utils / fanout_gui / planes_gui changed.
+  test_manifest_plan_parity
+  test_gui_engine_parity      -- VERDICT PARITY, copper sets IDENTICAL,
+                                 1078 segments / 128 vias, drc 0 both fronts.
+
+ALSO MEASURED AT b345eed9 (not GUI parity, recorded here as the merge's
+evidence): full suite 662 passed / 0 failed / 2 self-skipped (the two that
+want gitignored wk/ artifacts); tests/mutate_962.py 42 rows, 42 killed;
+mutation_anchors 55 batteries / 1508 anchors / 0 unresolved; and the
+default-flag routed copper is BYTE-IDENTICAL to main on esp_prog, sonde_u and
+splitflap_driver -- the latter two being boards take5 itself had moved.
+
+NOT RUN in this pass (unchanged since 82522c1e and not touched by the merge):
+test_726_parse_path_parity, test_751_via_protection_readback, the 733/746/768/
+772 cap gates, test_plane_all_layers_parity, test_gui_livechain_rp2350.
+
+STILL OWED BEFORE SHIP, and NOT a GUI-parity item: the corpus A/B under
+--same-net-pad-clearance > 0 on BGA-fanout boards. The branch's A/B was run
+against ad243b74 and does not describe this tree.
+
+d2c9934c 2026-09-20 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 96912901..cd866f47 on bus622-take5 (main's 66 commits since the last
+audit plus the branch's 168, rebased onto main ad243b74 on 2026-09-19).
+NO GAP FOUND. One gate ADDED (test_fanout_backside_gui). Seven gates green,
+run live on this machine under KiCad 10.0.0-103 / wx 4.2.2a1.
+
+MAIN'S SIDE OF THE RANGE touches the plugin in exactly two files,
+kicad_routing_plugin/deps_check.py and swig_gui.py (the numpy floor of the
+deps gate, 32dc9276), and no engine code: nothing for the engine to have
+drifted from.
+
+THE BRANCH'S ROUTING SURFACE is 13 files under py_router/, ZERO files under
+kicad_routing_plugin/, and ZERO CLI flags (the add_argument diff over every
+routing main is empty). Checked item by item:
+
+  * CLI mains: untouched, except check_drc.run_drc and
+    check_connected.run_connectivity_check gaining an ADDITIVE pcb_data=
+    kwarg (a caller with the board parsed hands it over; the default parses
+    as ever). No front changes behaviour.
+  * NEW ENGINE KWARG at the front-end boundary: generate_bga_fanout(...,
+    escape_dir_hints=None), a per-ball planned move for programmatic callers
+    (the awx chain). NEITHER front passes it -- bga_fanout.py has no flag and
+    fanout_gui.py no control -- so the two fronts agree by construction. It
+    is NOT Claude-settable through the GUI plan executor; if a control is
+    ever wanted it needs the full CLAUDE.md wiring (control named after the
+    param, reset_params_to_defaults, FLAG_PARAMS, settings_persistence).
+  * NEW ENV KNOBS: KICAD_SEG_DIST_EXACT, KICAD_FANOUT_FRAME_QUARTER,
+    KICAD_FANOUT_SKIP_UNDER -- all default OFF, read the way their siblings
+    are (env_knobs / os.environ at import) on both fronts. Env-only like
+    KICAD_FANOUT_DIRECT before them; no GUI control, deliberately.
+  * DEFAULT-ON changes live INSIDE the shared engine functions, so both
+    fronts get them for free: the back-side mirror frame (flip_frame), the
+    rotation frame turning the whole board, nanometre tie-breaks in the
+    fanout's edge/channel/gap/victim choices, the reroute hit epsilon, the
+    router's rounded pad keep-out offset, the plane drop's rounded argmin.
+    Every board field the two frames read is a declared PCBData/BoardInfo/
+    Pad dataclass field (zones, guide_paths, keepout_zones, board_bounds,
+    board_outline, board_cutouts, hole_x/hole_y ...), so the pcbnew-built
+    board cannot lack one. THE ONE THAT DEPENDS ON A GUI-COMPUTED FIELD is
+    the mirror frame (it re-derives pad locals), and that is what the new
+    gate pins: identical copper, frame taken on both fronts.
+  * POST-PASSES: test_cli_postpass_coverage green -- 9 registered, 17 in
+    CLI use, 2 CLI-only acknowledged (write_filled_board; the fanout mains'
+    run_drc graze audit), 0 unreachable. The branch adds none.
+
+GATES, run live 2026-09-19/20:
+  tests/gui_parity/test_manifest_plan_parity.py      OK
+  tests/gui_parity/test_cli_postpass_coverage.py     OK (0 failures, 0 warnings)
+  tests/gui_parity/test_settings_roundtrip.py        exit 0
+  tests/gui_parity/test_fanout_rotated_gui.py        10/10
+  tests/gui_parity/test_gui_engine_parity.py         copper sets identical: True
+  tests/gui_parity/test_fanout_backside_gui.py       11/11  (NEW)
+  tests/test_fanout_flip_frame.py (wx-free twin)     via run_all
+NOT RUN: test_714_mirror_pcbnew_parity (the branch touches no file under
+py_placer/, so the placement writer's flip path is as audited at 96912901);
+test_gui_livechain_rp2350 (the engine-parity gate covers the plan path; the
+#562 chain shape is unchanged by this range).
+
+WHAT THIS AUDIT CANNOT SEE: the corpus A/B (awx/README TODO 7) says the
+branch's default-on changes move copper on cparti_fpga, scalenode_cm4,
+ulx5m_gatemate and smartknob_base; both fronts move identically, which is
+parity, not a verdict on the change.
+
+ADDENDUM d2c9934c (2026-09-20): flip_frame.is_back_side now calls
+placement.legality.footprint_side (test_878's one-home rule) instead of a
+copy of it -- the same answer on every layer name, and the back-side gate
+re-run on this commit: 11/11, copper identical. The 14 awx tools' KRT_TOOL
+declarations and the two --help guards touch no engine code.
+
+82522c1e 2026-09-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 96912901..82522c1e: upstream's 66 commits since the last audit plus the
+#962 branch (fix/962-paste-aperture). THREE GAPS FOUND AND FIXED on the branch;
+the gates below run green at 82522c1e.
+
+UPSTREAM'S SHARE is one GUI change: 32dc92769 makes the routing dialog's
+dependency probe CALL startup_checks.dependency_problems instead of a
+hand-mirrored list -- a parity closer, not a gap. No CLI routing front
+(route.py, route_diff.py, route_planes.py, repair_planes.py, the fanouts)
+changed in that range; the rest is placement (#985/#986/#990) and tests.
+
+#962'S SHARE adds ship-time IPC-4761 Type VII stamping and a paste-opening
+keep-out, both inside shared engines except where a CLI main writes the file.
+Every CLI stamp site was checked for a GUI twin; the verifiers found three
+that had none, all fixed and now covered:
+  - planes_gui's GND return vias were not stamped where
+    `route_planes --add-gnd-vias` stamps them (a CALL check in
+    test_962_type_vii_stamp, and a battery row, guard it);
+  - place_fanout_clearance.main stamps a via its cap moves put under a pad
+    (`site_created`); the GUI twin is fanout_gui._optimize_decoupling_caps;
+  - the GUI fallback oracle (gui_utils.run_kicad_oracle_on_live_board)
+    stamps orc['new_vias'] before building its PCB_VIAs.
+The keep-out lives in obstacle_map / plane_obstacle_builder /
+pcb_modification / routing_diagnostics, which both fronts call. The format
+gate (no per-via capping/filling on a pre-KiCad-10 file) reads the parsed
+file version on the CLI and asks the running pcbnew for the setters on a live
+board. apply_via_protection falls back to the bool setters because the
+shipping 10.0.0 SWIG exports no *_MODE_* constants (#751).
+
+GATES RUN AT 82522c1e (KiCad 10.0.0 python): test_settings_roundtrip,
+test_726_parse_path_parity, test_751_via_protection_readback,
+test_962_paste_parity (corpus + synthetic witnesses, both paths agree on the
+paste model, graphic_filled and the unmeasured list), test_962_native_graphic_
+overrun, test_manifest_plan_parity, test_cli_postpass_coverage,
+test_engine_kwarg_parity, test_cli_defaults_parity, test_733 / 746 / 768 /
+772 cap gates, test_plane_all_layers_parity, test_gui_engine_parity (copper
+sets IDENTICAL, 1078 segments / 128 vias) -- all green.
+test_gui_livechain_rp2350: green (create 0/0, route 0/0) ONLY with its grader
+subprocess given an environment without PYTHON* variables. Run under KiCad's
+python on this machine, KiCad exports PYTHONUSERBASE, so `_grade`'s bare
+`python3` child cannot import numpy and every stage reads -1 on BOTH fronts.
+The cause is independent of the branch (the base's `_grade` spawns the same
+bare `python3`); the base run itself was not repeated.
+NOT green here, and failing identically on 32dc92769 (the branch's original
+base, run as the control): test_fanout_rotated_gui (the GUI leg captures 0
+tracks) and test_fanout_threaded_gui (5 pump checks), when run directly under
+KiCad's python; their own interpreter probes skip on this box.
+
 96912901 2026-09-17 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit a633f898..96912901 on main (16 commits: PR #981's #974 work, and the fanout
 clearance-ceiling fix). NO GAP FOUND. Eight gates green, run live on this

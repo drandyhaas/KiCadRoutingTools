@@ -2665,9 +2665,16 @@ names of the instruments that produced them:
 
   python3 -X utf8 check_complete.py {a.board} --clearance <floor> \\
       --authored-from <the CYCLE-1 wk/frozen.kicad_pcb, NOT the original board>
-  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0.1
+  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0.1 \\
+      --baseline <the ORIGINAL board this run started from>
   python3 -X utf8 py_router/check_connected.py {a.board}
   python3 -X utf8 py_tools/check_assembly.py {a.board}
+
+check_drc's --baseline accepts a via the original already had in a solder-paste
+opening (`inherited-via-in-paste`) and grades a graze of footprint graphic
+copper that a part MOVE created (`graphic-board-edge`). Without it every
+pre-existing via-in-paste reads as a violation, and every graze is accepted
+`unverified`, so a lap can create one and grade clean.
 
 check_complete is the one that fails CLOSED: board_score exits 0 with four of
 nine components ungraded, and it has no component at all for orphan stubs,
