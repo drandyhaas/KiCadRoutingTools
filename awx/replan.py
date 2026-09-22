@@ -2427,7 +2427,8 @@ def main():
             import traceback
             log(f'  round {rnd}: ABORTED -- {type(_e).__name__}: {str(_e)[:160]} '
                 f'(the boards kept so far stand)')
-            log('    ' + traceback.format_exc().strip().splitlines()[-1][:200])
+            for _ln in traceback.format_exc().strip().splitlines()[-9:]:
+                log('    ' + _ln[:200])       # WHERE it died, not only what it said
             break
     final = stem + '.kicad_pcb'
     copy_board(R, final, eco=True)
