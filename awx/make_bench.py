@@ -117,8 +117,16 @@ def pair_nets(pcb, src, dst):
                        if pcb.footprints.get(p.component_ref)} <= {src, dst})
 
 
-def fanout_source(board, out, src, names, layers=None):
+def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_method='auto'):
     """fanout_from_plan.fanout_once's engine call, on the SOURCE array.
+
+    `diff_pairs` (2026-09-21): the pair BASE names among `names` (pairs.
+    pair_names), handed to the engine as `diff_pair_patterns` at the braid's
+    own pair gap, so a pair's two escapes are laid TOGETHER -- the pair's
+    exit at its centre, its slot claimed, no third tooth between -- as the
+    chain's real fanout step lays them. Without it the source comb is
+    pair-blind: on the H3 bench SA6's stub ran BETWEEN SCKP's and SCKN's,
+    which no plan could route as a pair (K51, 2026-09-21).
 
     `layers` (the `--fanout-layers` flag; default `fp.LAYERS` = F + B) is the
     escape layer set. Restricting it to ONE layer is what the synthetic
@@ -130,12 +138,17 @@ def fanout_source(board, out, src, names, layers=None):
     on F. Default unchanged."""
     pcb = parse_kicad_pcb(board)
     pcb._fanout_all_foreign_immovable = True
+    extra = {}
+    if diff_pairs:
+        import pairs as _pairs
+        extra = dict(diff_pair_patterns=[f'{b}*' for b in diff_pairs],
+                     diff_pair_gap=_pairs.GAP)
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
         pcb.footprints[src], pcb, net_filter=names,
         layers=list(layers) if layers else list(fp.LAYERS),
         track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE,
-        via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method='auto',
-        plane_drop='off')
+        via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method=escape_method,
+        plane_drop='off', **extra)
     if tracks:
         add_tracks_and_vias_to_pcb(
             board, out, tracks, vias_add, vias_rm,

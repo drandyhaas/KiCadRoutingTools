@@ -1275,3 +1275,65 @@ abandoned with a measurement.
     ON. The env-level default is OFF because a new base image is a NEW
     BASELINE ERA voiding cross-wave numeric comparisons -- which does not
     apply to a pass/fail suite that compares no numbers across runs. The `wk/` pair above is unaffected either way.
+
+**ONE PAIR AT A TIME AT K51, AND THE HUMAN'S COMB (2026-09-21 evening, Andy:
+"rethink how pairs are incorporated; add one pair at a time; compare to the
+human's SE and pair routing, fanout, berths").** `BRAID_PAIR_ONLY=SCK,SDQS0`
+(pairs.py) couples only the named pairs -- every other pair's legs are singles
+in the plan's clauses, harmonise, the judge and the braid alike -- and the
+ladder's admission ignores it (`coherent_nets.admissible` passes `admit_all`),
+so every arm routes the same 51 nets. Measured on the pairs bench (chain):
+
+| arm | vias | open | pairs |
+|---|---|---|---|
+| the six pair legs as plain singles (BRAID_PAIRS=0) | **143** | 4 | -- |
+| SCK the only pair | 141 | 7 | SCK open |
+| SDQS0 the only pair | 146 | 2 | 0.85 |
+| SDQS1 the only pair | 148 | 3 | 0.82 |
+| all three (the recorded chain of the day) | 156 | 4 | 0.86 / 0.86 / 0.65 |
+| the human, the same 51 nets | 88 | 0 | 0.90 / 0.83 / 0.92 |
+
+So coupling the three pairs costs 13 vias and no open over the SAME nets as
+singles. The "98 / 0" this was measured against is the pair-less bench's K51
+-- 48 DIFFERENT nets (minus SA14, SDQ1, SZQ; without the six legs): the six
+pair NETS, as singles, take the chain from 99 / 0 to 143 / 4 where the human
+pays two vias each. Their balls all stand on the rows FACING THE DEPOPULATED
+BAND (SCK J7/K7 and SDQS1 C7/B7 on the top block's bottom row, SDQS0 F3/G3 on
+the lower block's top row); the human serves every one by a dogbone INTO the
+band, and brings 13 of the 51 nets in through the DDR's WEST edge riding the
+band on both layers (on B SDQS1N@64.59 SDQS1P@65.04 SDQ9 SDQ11 SDQS0N
+SDQS0P@66.61 at ~0.4 pitch, on F SDQ15 SDQ13 SDQM0 SDQ2 at 0.56). Our plan
+gives the west edge 6 berths and the bottom edge 26 (the human 13 and 19).
+SCK: the human keeps its teeth on U1's south face (F, 125.56/125.87), runs
+east UNDER every lane, climbs B up the J/K columns from a via south of the
+DDR into the band -- zero crossings, 2 vias a leg; our plan moves the teeth
+to the east face on B and berths on the top comb, so the lane crosses the
+whole byte-lane bundle, 3 vias a leg. SCK alone is refused at its own teeth:
+the bench's source comb (the production fanout, which knows no pairs) reads
+SA5@125.08 SCKP@125.38 SA6@125.73 SCKN@126.03, a foreign tooth between the
+pair's. `make_bench.fanout_source(diff_pairs=, escape_method=)` hands the
+engine `diff_pair_patterns` at the braid's pair gap, and `refan_pairs.py IN
+OUT SRC` re-fans every pair leg and every tooth between a pair's teeth that
+way: with the under-pad engine the comb is the human's (SCKP@125.58
+SCKN@125.85, SDQS1 adjacent on B, SDQS0 on F, no DRC, the same ladder) --
+`fb_t2q_pairs2.kicad_pcb`. On that bench the plan still moved SCK's teeth to
+the east face (three pairs 131 / 8; legs as singles 156 / 6).
+
+Where the loss is, from the planner's own log: the CP-SAT's page model counts
+8 swimmers with SCK on page B and the byte lanes crossing it on F; the braid's
+schedule seeds pages by born layer and counts 17; the re-solve meant to move a
+swimmer's berth is INFEASIBLE with 34 nets held at one move, and with
+`PLAN_PAGES_WIDEN=0` the greedy plan ships, under a via-count berth price that
+prefers a surface berth two faces away to a dogbone into the band.
+
+Tried at K51 on top of the day's rules and NOT kept (reverted 2026-09-22,
+Andy: keep a fix that fundamentally does something better and was shown to
+improve across the board; the re-escape stays, it improves a real thing --
+copper length -- and is correct): the comb's rules for a pair and the pair's
+page (K36 71 -> 71, K41 91 -> 91, zynq K47 100 -> 94, K44 98 -> 100, K51
+144/5 -> 156/4); a pair-comb repair realized as its own group (SCK alone 141/7 -> 188/4); the
+held berth keyed by the braid's real target offset (156/4 -> 153/3, one
+bench); the CP-SAT's pages as the braid's seeds (138/4, one bench); the
+excluders freed on an infeasible re-solve (inert); SPLIT_BLOCKS at K51 (pairs
+130/5, singles 137/9). The instruments stay: `BRAID_PAIR_ONLY`, the pair-aware
+bench builder and `refan_pairs.py`, `fb_t2q_pairs2`.

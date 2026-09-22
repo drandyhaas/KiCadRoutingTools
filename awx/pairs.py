@@ -43,14 +43,24 @@ MAX_SEP = float(os.environ.get('BRAID_PAIR_SEP', '0') or 0) or 2.0 * _rules.DEFA
 
 _SUFFIX = re.compile(r'^(.*?)(_P|_N|P|N|\+|-|_p|_n)$')
 
+# BRAID_PAIR_ONLY (2026-09-21): a comma list of pair BASE names (SCK,SDQS0).
+# A pair not named has its legs planned and routed as SINGLES everywhere --
+# the plan's pair clauses, harmonise, the judge's penalty, the braid's
+# member -- which is the instrument for "one pair at a time": the same 51
+# nets, one pair coupled, the rest as they were before pairs existed. Unset
+# = every pair the suffix rule finds. The ladder's ADMISSION (coherent_nets)
+# ignores it (admit_all), so every arm routes the same net list.
+ONLY = {s.strip() for s in os.environ.get('BRAID_PAIR_ONLY', '').split(',') if s.strip()}
+
 
 def pitch(track: float = None) -> float:
     """Centre-to-centre pitch of the two legs."""
     return (_rules.TRACK if track is None else track) + GAP
 
 
-def pair_names(names: Sequence[str]) -> Dict[str, Tuple[str, str]]:
-    """{base: (P name, N name)} over the given net names, by suffix."""
+def pair_names(names: Sequence[str], admit_all: bool = False) -> Dict[str, Tuple[str, str]]:
+    """{base: (P name, N name)} over the given net names, by suffix.
+    BRAID_PAIR_ONLY narrows it to the named pairs unless admit_all."""
     by: Dict[str, Dict[str, str]] = {}
     for nm in names:
         m = _SUFFIX.match(nm)
@@ -59,7 +69,10 @@ def pair_names(names: Sequence[str]) -> Dict[str, Tuple[str, str]]:
         base, suf = m.group(1), m.group(2)
         pol = 'P' if suf in ('_P', 'P', '+', '_p') else 'N'
         by.setdefault(base, {})[pol] = nm
-    return {b: (d['P'], d['N']) for b, d in by.items() if 'P' in d and 'N' in d}
+    out = {b: (d['P'], d['N']) for b, d in by.items() if 'P' in d and 'N' in d}
+    if ONLY and not admit_all:
+        out = {b: v for b, v in out.items() if b in ONLY}
+    return out
 
 
 def members(names: Sequence[str]) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:

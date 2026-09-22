@@ -43,7 +43,7 @@ def admissible(pcb, net):
     import pairs as _pairs
     import rules as _rules
     bn_all = {n.name.split('/')[-1] for n in pcb.nets.values()}
-    prs = _pairs.pair_names(list(bn_all))
+    prs = _pairs.pair_names(list(bn_all), admit_all=True)   # admission ignores BRAID_PAIR_ONLY
     partner = {}
     for _b, (_pn, _nn) in prs.items():
         partner[_pn], partner[_nn] = _nn, _pn
