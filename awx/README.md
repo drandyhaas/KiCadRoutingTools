@@ -798,12 +798,12 @@ ribbon rounds the part in 45-degree legs (26 vias, far fewer segments).*
 <img src="img/gate_mirror_article.png" alt="The bench turned over" width="760">
 
 *The pose gate: the bench flipped through its plane, every part on the
-other face, every stub on the other layer. The translation and the
-quarter turns grade as the control to the via and the segment (K15: 21
-vias, 203 segments, 2026-09-22); the selector and the braid each run a
-pair in the pair's own canonical frame. The MIRROR does not, since the
-pages-first plan (2026-09-14): the turned-over article routes 29 vias
-and 452 segments -- TODO 5.*
+other face, every stub on the other layer. Every isometry grades as the
+control to the via and the segment (K15: 21 vias, 203 segments, the
+translation, the quarter turns and the mirror alike, 2026-09-22); the
+selector and the braid each run a pair in the pair's own canonical
+frame, and the plan's candidates, the engine's per-pad asks and the
+in-memory DRC gate are turned into that frame with it.*
 
 <img src="img/zynq_k44.png" alt="The second array pair, all 44 nets" width="380"> <img src="img/zynq_k44_human.png" alt="The same 44 nets as the human routed them" width="380">
 
@@ -1003,36 +1003,27 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
    the stack) makes its wall the slowest operator, and width is free. The
    memo store wants a shared volume.
 
-4. **The pages-first plan is not mirror-invariant.** The pose gate's
-   MM article (the bench turned over through its plane) grades 29 vias
-   / 452 segments against the control's 21 / 203 at K15; the
-   translation and the quarter turns grade identically. Bisected to the
-   planner commit a3b57607 (2026-09-14): under `PLAN_PAGES=1` the chain
-   leans on the board's sign somewhere between the selector's chirality
-   frame and the CP-SAT's keys (`pages_first.py`, `select_moves.py`);
-   the flag-off chain of that day passed.
-
-5. **K51's last two vias.** The next move class past the single-net
+4. **K51's last two vias.** The next move class past the single-net
    classes is a GROUP move: re-layer a lane together with its crossing
    partners in one probe (the coupled probe already routes such a set);
    or jumps that land nearer than two random nets.
 
-6. **The chain's seeds.** The evolution optimises past the plan's
+5. **The chain's seeds.** The evolution optimises past the plan's
    objective, but better seeds are a better start. The berth menu is
    one-per-face at `CANDS=4` (row pruning, not column generation), and a
    plan-time floor over the PLANNED LANES rather than the channel is the
    one untested ranker.
 
-7. **The planner's comb for a pair.** No third berth between a pair's
+6. **The planner's comb for a pair.** No third berth between a pair's
    two, layer or no layer; and the room a pair's converging approach
    needs at the comb, given at plan time rather than found at the last
    call.
 
-8. **Pairs and the evolution.** The descent moves single nets' ends, so
+7. **Pairs and the evolution.** The descent moves single nets' ends, so
    a pair must land at the chain stage; a move class that moves a pair's
    two ends together would let the population improve a pairs board.
 
-9. **Generality.** Tuned on one bench. What the zynq article shows: a
+8. **Generality.** Tuned on one bench. What the zynq article shows: a
    singleton corridor's source tooth may be planned on the FAR face of
    the source array (the count judge sees a via saved, the length judge
    prices the lane from the tooth's exit and the berth's run but not the
@@ -1040,21 +1031,21 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
    is the missing term), and the top rungs lose their in-band execution.
    Off-axis poses (R30, R45) still break the plan's compass faces.
 
-10. **The corpus A/B for the `py_router` changes, then the PR to main.**
-    `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
-    alone; the A/B decides whether it turns on, with a per-board
-    attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
-    are the suspect).
+9. **The corpus A/B for the `py_router` changes, then the PR to main.**
+   `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
+   alone; the A/B decides whether it turns on, with a per-board
+   attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
+   are the suspect).
 
-11. **The `.kicad_dru` is read with real layer names inside the turned
+10. **The `.kicad_dru` is read with real layer names inside the turned
     frame**; a per-layer rule lands on the opposite face for a back-side
     part. Shipped `py_router` code, so it blocks the merge.
 
-12. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
+11. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
 
-13. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
+12. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
     `pages-first:` line and reads like "never ran".
 
-14. **Unverified review findings**: `dedupe_boards` fingerprints copper
+13. **Unverified review findings**: `dedupe_boards` fingerprints copper
     but not the sidecar; `blockers_of` double-counts half a track;
     `flip_frame` does not mirror `pad.polygons`.

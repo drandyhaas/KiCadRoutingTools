@@ -294,6 +294,21 @@ def braid_slots(st, board, names, seed, src_seed, D, S, log):
             log(f'  pages-first: corridor {c.idx} not planned ({e})')
     tkeys, lkeys, corr = {}, {}, {}
     jkeys, joiner = {}, {}
+    # A CHIRALITY -1 PAIR IS BRAIDED ON THE BOARD TURNED OVER (braid.setup:
+    # y mirrored about a lattice line, layers swapped, the plan mirrored
+    # into that frame). The menus' candidates arrive here in the BOARD's
+    # frame, so each one is turned the same way before the corridor keys
+    # it -- exactly mirror_plan's rule for the plan's own alts. Without it
+    # the mirror of an article planned differently from the article (the
+    # pose gate's MM pose: 29 vias against the control's 21 at K15,
+    # 2026-09-22), the only stage of the chain that leaned on the sign.
+    _M = ctx.M
+    def _fr_pt(pt):
+        return list(_M(*pt)) if _M is not None else list(pt)
+    def _fr_L(L):
+        return te.other_layer(L) if _M is not None else L
+    def _fr_dir(d):
+        return [d[0], -d[1]] if _M is not None else list(d)
     errs: Dict[str, list] = {}       # net -> [(end, candidate, exception)] for the candidates no key could be built for          # PAGES_JOINKEY: the joined variant of each dest key; joiner flag per source candidate
     for c in corridors:
         if not hasattr(c, 'launch_o') or not hasattr(c, 'target_o'):
@@ -316,12 +331,13 @@ def braid_slots(st, board, names, seed, src_seed, D, S, log):
             # is the largest port term any candidate of this corridor can
             # take (half the farthest stub's distance past s1) plus a pitch --
             # a fixed number would be a scale read off one board
-            s_far = max([sp.project_pt(tuple(mv.exit_pt))[0] for om in c.members if om in D
+            s_far = max([sp.project_pt(tuple(_fr_pt(mv.exit_pt)))[0] for om in c.members if om in D
                          for mv in D[om]] + [c.s1])
             join_shift = 0.5 * max(0.0, s_far - c.s1) + te.LPITCH
             for m in D[nm]:
                 try:
-                    g = c._alt_geo(nm, {'exit': list(m.exit_pt), 'layer': m.layer, 'dir': list(DIRS[m.direction])})
+                    g = c._alt_geo(nm, {'exit': _fr_pt(m.exit_pt), 'layer': _fr_L(m.layer),
+                                        'dir': _fr_dir(DIRS[m.direction])})
                     d_ = DIRS[m.direction]
                     along = d_[0] * dn[0] + d_[1] * dn[1]
                     # mode 2: a side-face candidate is keyed by the comb whether
@@ -374,7 +390,7 @@ def braid_slots(st, board, names, seed, src_seed, D, S, log):
                     jf.append(nm in getattr(c, 'join_block', {}))
                     continue
                 try:
-                    g = c._alt_geo(nm, {'end': 'src', 'exit': list(s.exit_pt), 'layer': s.layer})
+                    g = c._alt_geo(nm, {'end': 'src', 'exit': _fr_pt(s.exit_pt), 'layer': _fr_L(s.layer)})
                     jf.append(not g['head'])
                 except Exception:
                     jf.append(False)
@@ -385,7 +401,7 @@ def braid_slots(st, board, names, seed, src_seed, D, S, log):
                     lk.append(float(c.launch_o.get(nm, 0.0)))
                     continue
                 try:
-                    g = c._alt_geo(nm, {'end': 'src', 'exit': list(s.exit_pt), 'layer': s.layer})
+                    g = c._alt_geo(nm, {'end': 'src', 'exit': _fr_pt(s.exit_pt), 'layer': _fr_L(s.layer)})
                     lk.append(float(c._alt_src_slot(nm, g)))
                 except Exception as e:
                     lk.append(None)
@@ -393,6 +409,18 @@ def braid_slots(st, board, names, seed, src_seed, D, S, log):
             lkeys[nm] = lk
     braid_slots.extra = (jkeys, joiner)
     braid_slots.errors = errs
+    # for the instance dump: the seed plan's corridors and each net's taut
+    # arrival at its destination (what cluster_corridors groups on)
+    try:
+        import corridor as _cr
+        braid_slots.geometry = {
+            'groups': [sorted(M) for M in groups],
+            'appr': {nm: list(_cr.point_before_end(ctx.paths[nm], 2.0)) for nm in names if nm in ctx.paths},
+            'path_n': {nm: len(ctx.paths[nm]) for nm in names if nm in ctx.paths},
+            'tooth': {nm: list(ctx.ends[nm][0]) for nm in names if nm in ctx.ends},
+            'stub': {nm: list(ctx.ends[nm][1]) for nm in names if nm in ctx.ends}}
+    except Exception as _e:                                       # noqa: BLE001
+        braid_slots.geometry = {'error': repr(_e)}
     if errs:
         log(f'  pages-first: {len(errs)} net(s) with candidates the braid could not key: '
             + '; '.join(f'{nm} {len(v)} ({v[0][0]} {v[0][1]}: {v[0][2][:80]})' for nm, v in sorted(errs.items())))
@@ -911,7 +939,20 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
                                         for n in names},
                         'tooth_terms': {n: [(mv.vias, round(sm._length(mv), 4) if mv.legs else 0.0, 0.0) for mv in S[n]]
                                         for n in names},
-                        'tooth0_vias': {n: st['tooth_vias'].get(n, 0) for n in names if not S[n]}}, _f, indent=1)
+                        'tooth0_vias': {n: st['tooth_vias'].get(n, 0) for n in names if not S[n]},
+                        # per candidate: kind/direction/layer/exit and the slot keys the
+                        # planarity pairs are built from -- so two articles that should
+                        # plan alike (a mirror, a turn) can be compared candidate by candidate
+                        'berth_cands': {n: [(mv.kind, mv.direction, mv.layer, list(mv.exit_pt), tkey[n][j],
+                                             (jkey[n][j] if n in jkey else None)) for j, mv in enumerate(D[n])]
+                                        for n in names},
+                        'tooth_cands': {n: [(mv.kind, mv.direction, mv.layer, list(mv.exit_pt), lkey[n][i],
+                                             (jflag[n][i] if n in jflag and i < len(jflag[n]) else None))
+                                            for i, mv in enumerate(S[n])] for n in names},
+                        'seed': {n: [mv.kind, mv.direction, mv.layer, list(mv.exit_pt)] for n, mv in (seed or {}).items()},
+                        'seed_geometry': getattr(braid_slots, 'geometry', None),
+                        'src_seed': {n: [mv.kind, mv.direction, mv.layer, list(mv.exit_pt)]
+                                     for n, mv in (src_seed or {}).items()}}, _f, indent=1)
         log(f'  pages-first: instance written to {_stem}.pb')
     solver = cp_model.CpSolver()
     solver.parameters.num_workers = PAGES_WORKERS
