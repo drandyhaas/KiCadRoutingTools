@@ -37,7 +37,9 @@ from typing import Optional
 # the engine moved into py_router/ (#522). Import it as a package rather than
 # flat: python puts THIS script's directory (the repo root) on sys.path, so this
 # resolves no matter what cwd install_plugin.py is invoked from.
-from py_router.startup_checks import get_cargo_version
+from py_router.startup_checks import (IMPORT_TESTS, VERSION_MODULES,
+                                      get_cargo_version, requirement_floors,
+                                      version_satisfies)
 
 # ...and put py_router itself on sys.path so the shared modules can be imported
 # FLAT, the way they import each other (kicad_exact_fill does `import
@@ -145,75 +147,48 @@ def get_source_dir() -> Path:
     return Path(__file__).parent.resolve()
 
 
-def _parse_requirement_floors(requirements_file: Path) -> list:
-    """Parse requirements.txt into [(pip_name, floor_or_None)].
-
-    Mirrors py_router/startup_checks.requirement_floors without importing
-    numpy/scipy -- this installer runs on a bare interpreter before any
-    dependency exists.
-    """
-    import re
-    out = []
-    try:
-        text = requirements_file.read_text(encoding="utf-8")
-    except OSError:
-        return out
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line or line.startswith("-") or "://" in line:
-            continue
-        m = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(.*)$", line)
-        if not m:
-            continue
-        name, spec = m.group(1), m.group(2).strip()
-        fm = re.search(r"(?:>=|==)\s*([0-9][0-9A-Za-z.\-+]*)", spec or "")
-        out.append((name, fm.group(1) if fm else None))
-    return out
-
-
-def _target_satisfies_requirements(python_exe: str, requirements: list) -> bool:
+def _target_satisfies_requirements(python_exe: str, floors: dict) -> bool:
     """True if `python_exe` already imports every requirement at its floor.
 
-    Probed out-of-process so a missing package (non-zero exit) reads as
-    "not satisfied" rather than raising here. Version comparison is
-    numeric-prefix based (1.22.4rc1 -> (1, 22, 4)), matching startup_checks.
+    Probed OUT-OF-PROCESS, because the target is KiCad's interpreter and this
+    process may be a different one. The probe is generated from
+    `startup_checks`'s own table (IMPORT_TESTS / VERSION_MODULES), so the
+    installer and the runtime gate cannot drift: those imports name a real
+    SUBMODULE (`from scipy.optimize import ...`, `from shapely.geometry import
+    ...`) precisely to catch partial installs a bare `import pkg` accepts, and
+    they map Pillow -> PIL.
+
+    The probe PRINTS the versions it finds; the comparison runs HERE through
+    `version_satisfies`, so an unparseable version satisfies on both fronts.
     """
-    if not requirements:
+    floors = {n: f for n, f in floors.items() if f}
+    if not floors:
         return True
     probe = (
-        "import re, sys\n"
-        "reqs = sys.argv[1].split(',')\n"
-        "ok = True\n"
-        "def parse(v):\n"
-        "    parts = []\n"
-        "    for chunk in str(v).split('.'):\n"
-        "        d = ''.join(c for c in chunk if c.isdigit() or False)\n"
-        "        dd = ''\n"
-        "        for ch in chunk:\n"
-        "            if not ch.isdigit(): break\n"
-        "            dd += ch\n"
-        "        if not dd: break\n"
-        "        parts.append(int(dd))\n"
-        "    return tuple(parts)\n"
-        "for item in reqs:\n"
-        "    name, floor = item.split(':', 1)\n"
-        "    mod = {'Pillow': 'PIL'}.get(name, name).lower()\n"
+        "import json, sys\n"
+        "IMPORTS = %r\n"
+        "MODS = %r\n"
+        "out = {}\n"
+        "for name in sys.argv[1].split(','):\n"
         "    try:\n"
-        "        m = __import__('PIL' if mod == 'pil' else name)\n"
-        "        ver = getattr(m, '__version__', None) or '0'\n"
-        "        if floor and parse(ver) < parse(floor):\n"
-        "            ok = False\n"
+        "        exec(IMPORTS.get(name, 'import ' + name), globals())\n"
+        "        m = __import__(MODS.get(name, name))\n"
+        "        out[name] = str(getattr(m, '__version__', '') or '')\n"
         "    except Exception:\n"
-        "        ok = False\n"
-        "sys.exit(0 if ok else 1)\n"
-    )
-    arg = ",".join(f"{n}:{f or ''}" for n, f in requirements)
+        "        out[name] = None\n"              # absent/partial -> not satisfied
+        "print(json.dumps(out))\n"
+    ) % (IMPORT_TESTS, VERSION_MODULES)
     try:
-        r = subprocess.run([python_exe, "-c", probe, arg],
-                           capture_output=True, timeout=120)
-        return r.returncode == 0
+        r = subprocess.run([python_exe, "-c", probe, ",".join(floors)],
+                           capture_output=True, text=True, timeout=120)
+        reported = json.loads((r.stdout or '').strip().splitlines()[-1])
     except Exception:
         return False
+    for name, floor in floors.items():
+        ver = reported.get(name)
+        if ver is None or not version_satisfies(ver, floor):
+            return False
+    return True
 
 
 def install_dependencies():
@@ -225,15 +200,16 @@ def install_dependencies():
         print("  No requirements.txt found, skipping dependency installation")
         return True
 
-    # Parse and display requirements
+    # Floors come from startup_checks.requirement_floors: requirements.txt is
+    # the source of truth there, and FALLBACK_FLOORS covers a file that lists a
+    # package with no floor. It resolves requirements.txt relative to its own
+    # module, so an installed plugin layout finds it too.
     print("Required packages:")
-    requirements = _parse_requirement_floors(requirements_file)
-    packages = []
+    floors = requirement_floors()
     with open(requirements_file, 'r') as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith('#'):
-                packages.append(line)
                 print(f"  - {line}")
     print()
 
@@ -260,21 +236,31 @@ def install_dependencies():
     # python, whose deps are often already satisfied via pacman/apt. Probing
     # first avoids a pip run that can only fail with
     # externally-managed-environment (PEP 668) when there is nothing to do.
-    if requirements and _target_satisfies_requirements(python_exe, requirements):
+    if _target_satisfies_requirements(python_exe, floors):
         print("  Dependencies already satisfied in KiCad's Python, skipping pip.")
         return True
 
     def _run_pip(extra_args: list) -> "subprocess.CompletedProcess":
+        # Output is CAPTURED so the PEP 668 sentinel can be recognised; that
+        # also means a live progress bar would be swallowed, so ask for none.
         cmd = [python_exe, "-m", "pip", "install",
-               "--progress-bar", "on", *extra_args,
+               "--progress-bar", "off", *extra_args,
                "-r", str(requirements_file)]
         return subprocess.run(cmd, capture_output=True, text=True)
 
+    def _print_pip_result(result) -> None:
+        """Show the tail of both streams: pip's warnings land on stderr."""
+        for stream in (result.stdout, result.stderr):
+            tail = (stream or "").strip()
+            if tail:
+                print("  " + tail[-1500:].replace("\n", "\n  "))
+
     try:
+        print("  Running pip install...")
         result = _run_pip([])
 
         if result.returncode == 0:
-            print(result.stdout[-2000:] if result.stdout else "")
+            _print_pip_result(result)
             print()
             print("  Dependencies installed successfully")
             return True
@@ -291,17 +277,25 @@ def install_dependencies():
                   "python-scipy python-shapely python-pillow)")
             retry = _run_pip(["--break-system-packages"])
             if retry.returncode == 0:
-                print(retry.stdout[-2000:] if retry.stdout else "")
+                _print_pip_result(retry)
                 print()
                 print("  Dependencies installed successfully "
                       "(--break-system-packages)")
                 return True
             output = (retry.stdout or "") + (retry.stderr or "")
             print()
-            print("  Warning: Failed to install some dependencies, even with "
-                  "--break-system-packages.")
-            print(f"    \"{python_exe}\" -m pip install --break-system-packages "
-                  f"-r \"{requirements_file}\"")
+            if "no such option" in output.lower() \
+                    and "break-system-packages" in output.lower():
+                # --break-system-packages landed in pip 23; an older pip
+                # rejects the flag outright, so the retry never got to try.
+                print("  This pip is too old for --break-system-packages "
+                      "(needs pip >= 23).")
+                print(f"    \"{python_exe}\" -m pip install --upgrade pip")
+            else:
+                print("  Warning: Failed to install some dependencies, even "
+                      "with --break-system-packages.")
+                print(f"    \"{python_exe}\" -m pip install "
+                      f"--break-system-packages -r \"{requirements_file}\"")
             print("  Or via your package manager, e.g.:")
             print("    sudo pacman -S python-numpy python-scipy "
                   "python-shapely python-pillow")
