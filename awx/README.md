@@ -687,7 +687,13 @@ deterministic time), never wall clock.
 
 **Grading** (`grade_k.py BOARD NETS`): connectivity scoped to the run's
 nets, whole-board DRC at the routed floor with `--clearance-margin 0.1`,
-the via census over the run's nets. `via_census.py`, `census_vs_human.py`
+the via census over the run's nets. The whole-board DRC includes
+`check_drc`'s `via-in-paste` rule (#962), so every write that can put a
+via in a pad -- the plan's fanout and its tie vias, the source realize,
+the bench's source comb -- declares Type VII on it (`ship_vias.stamp`,
+the route step's own `fab_notes.ship_via_protection_file`); without the
+declaration the fanout stage failed its own DRC gate and the pairs
+bench's realize step refused every move (2026-09-22, the merge of main). `via_census.py`, `census_vs_human.py`
 break a board down per net.
 
 ## One source for every routing number (`rules.py`)
@@ -830,6 +836,7 @@ is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 | `joint_floor.py` | the floor: the non-circular MILP over a board's own paths (`--cap N`) |
 | `synth_bus.py`, `synth_ladder.py` | the synthetic channel with a known optimum (below) |
 | `pack.py`, `pack_board.py` | the pack: every lane of a finished board a taut string, vias fixed (opt-in) |
+| `ship_vias.py` | a via the chain lays in a pad declares IPC-4761 Type VII, as the route step does (#962) |
 | `wall_probe.py`, `pinch_gate.py`, `judge_gate.py`, `floor_survey.py`, `ledger_cal.py`, `cut_ledger.py`, `rule_table.py`, `solve_curve.py`, `modal_curve.py` | probes and gates: a lane's walls, the braid's refusals, the plan judge, the floor per net, a corridor's cut, the length rule over arms, the CP-SAT's convergence |
 | `modal_k.py`, `arms.example.json`, `arms.rec51.json` | cloud arms, one container per (arm, K); `return_board`, `return_files` bring artifacts back |
 
