@@ -984,27 +984,34 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
    the stack) makes its wall the slowest operator, and width is free. The
    memo store wants a shared volume.
 
-4. **K51's last two vias.** The next move class past the single-net
+4. **A descent round that loses a net's end.** A net the braid ripped
+   and re-laid from the pad has no stub on the derived fanout board;
+   `salvage_missing_ends` recovers the SDQ2 case, but the zynq K44
+   descent still dies in round 1 on DDR3_CS (`'no free stub end'`), so
+   the run keeps round 0's 91 and the two rounds after it never run.
+   Reproduced identically before and after the audit (2026-09-22).
+
+5. **K51's last two vias.** The next move class past the single-net
    classes is a GROUP move: re-layer a lane together with its crossing
    partners in one probe (the coupled probe already routes such a set);
    or jumps that land nearer than two random nets.
 
-5. **The chain's seeds.** The evolution optimises past the plan's
+6. **The chain's seeds.** The evolution optimises past the plan's
    objective, but better seeds are a better start. The berth menu is
    one-per-face at `CANDS=4` (row pruning, not column generation), and a
    plan-time floor over the PLANNED LANES rather than the channel is the
    one untested ranker.
 
-6. **The planner's comb for a pair.** No third berth between a pair's
+7. **The planner's comb for a pair.** No third berth between a pair's
    two, layer or no layer; and the room a pair's converging approach
    needs at the comb, given at plan time rather than found at the last
    call.
 
-7. **Pairs and the evolution.** The descent moves single nets' ends, so
+8. **Pairs and the evolution.** The descent moves single nets' ends, so
    a pair must land at the chain stage; a move class that moves a pair's
    two ends together would let the population improve a pairs board.
 
-8. **Generality.** Tuned on one bench. What the zynq article shows: a
+9. **Generality.** Tuned on one bench. What the zynq article shows: a
    singleton corridor's source tooth may be planned on the FAR face of
    the source array (the count judge sees a via saved, the length judge
    prices the lane from the tooth's exit and the berth's run but not the
@@ -1012,21 +1019,21 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
    is the missing term), and the top rungs lose their in-band execution.
    Off-axis poses (R30, R45) still break the plan's compass faces.
 
-9. **The corpus A/B for the `py_router` changes, then the PR to main.**
-   `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
-   alone; the A/B decides whether it turns on, with a per-board
-   attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
-   are the suspect).
+10. **The corpus A/B for the `py_router` changes, then the PR to main.**
+    `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
+    alone; the A/B decides whether it turns on, with a per-board
+    attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
+    are the suspect).
 
-10. **The `.kicad_dru` is read with real layer names inside the turned
+11. **The `.kicad_dru` is read with real layer names inside the turned
     frame**; a per-layer rule lands on the opposite face for a back-side
     part. Shipped `py_router` code, so it blocks the merge.
 
-11. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
+12. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
 
-12. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
+13. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
     `pages-first:` line and reads like "never ran".
 
-13. **Unverified review findings**: `dedupe_boards` fingerprints copper
+14. **Unverified review findings**: `dedupe_boards` fingerprints copper
     but not the sidecar; `blockers_of` double-counts half a track;
     `flip_frame` does not mirror `pad.polygons`.
