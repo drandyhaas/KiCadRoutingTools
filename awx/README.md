@@ -32,7 +32,7 @@ with its fanout board and sidecars.
 
 | | K15 | K28 | K35 | K41 | K51 |
 |---|---|---|---|---|---|
-| the chain alone (the portfolio's best arm; 2026-09-22, on main's engine) | 16 | 36 | 58 | 76 | 98 |
+| the chain alone (the portfolio's best arm; 2026-09-22, on main's engine) | 18 | 36 | 58 | 76 | 99 |
 | **the evolution (2026-09-18/19)** | **14** | **34** | **56** | **64** | **83** |
 | human | 22 | 46 | 58 | 70 | **81** |
 | how the record was found | a jump world descended | the chain; nothing improved it | a jump world from the 58, descended | the 74 arm descended to 67, that to 64 | an open-net arm descended to 91, then 91 -> 87 -> 85 -> 83 with the climb menus |
@@ -63,7 +63,7 @@ identically at every rung, and the evolution runs on that.
 
 | | K9 | K18 | K26 | K32 | K38 | K42 | K44 |
 |---|---|---|---|---|---|---|---|
-| the chain alone (2026-09-22, on main's engine) | 14 | 16 | 39 | 52 | 68 | 89 | 92 |
+| the chain alone (2026-09-22, on main's engine) | **8** | 16 | 39 | 52 | 68 | 89 | 92 |
 | **the evolution** | **12** | 16 | **34** | **50** | **59** | **71** | 88 |
 | **the descent alone, from the chain (2026-09-22)** | | | | | | | **83** |
 | human | 25 | 45 | 57 | 74 | 86 | 97 | 103 |
