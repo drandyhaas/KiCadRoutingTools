@@ -2124,32 +2124,17 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
             still.append(nm)
             why[reason.split()[0]] = why.get(reason.split()[0], 0) + 1
             log(f'    pack {nm}: NOT KEPT on the retry ({reason})')
-    # A SECOND PASS (opt-in, BRAID_PACK_PASS2=1), every lane again in the
-    # same order against the board as it now stands: an early lane packed
-    # against neighbours still at their router positions -- it went taut
-    # round copper that then moved, and kept the spike, hook or zigzag
-    # that copper forced (K41's SA0, the tenth of 41, with a 0.6 mm spike
-    # nothing held once the lanes after it had packed, 2026-09-09). It
-    # takes those out and packs tighter (median 0.47 -> 0.32 mm), and
-    # measured WORSE on the emission (K41 1948 -> 2272 segments, 45 -> 49
-    # long any-angle pieces) at twice the time: every wrap it tightens
-    # is one more arc to emit. Off until the emission earns it.
-    n2 = 0
-    for nm in (order if os.environ.get('BRAID_PACK_PASS2', '0') == '1' else ()):
-        if nm in still:
-            continue
-        if pack_one(nm) is None:
-            n2 += 1
     # ...and, always, the lanes whose relaxed string still FOLDS (a turn
     # over 90 degrees away from an anchor): a hairpin an early lane kept
     # round a neighbour's router copper that has since moved (K41's SA4
     # above its via, packed one lane before SA6, 2026-09-09). Few lanes,
     # and a fold the topology forces just stays
+    n_fold = 0
     for nm in (order if os.environ.get('PK_FOLDS', '1') == '1' else ()):
         if nm in still or folds.get(nm, 0) == 0:
             continue
         if pack_one(nm) is None:
-            n2 += 1
+            n_fold += 1
     if still:
         log(f'  PACK{tag}: {len(still)} lane(s) keep the router\'s copper: {", ".join(still)}')
     tot1 = sum(seg_len(v[0]) for v in lanes.values())
@@ -2161,7 +2146,7 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     med0 = f'{np.median(stat0):.3f}' if stat0 else '-'
     med1 = f'{np.median(stat1):.3f}' if stat1 else '-'
     log(f'  PACK{tag}: {n_packed} of {n_lanes} lanes re-emitted from their string '
-        f'({n2} re-packed on the second pass; {n_taut} taut without a follow; '
+        f'({n_fold} folds re-packed; {n_taut} taut without a follow; '
         f'{n_oct}/{n_runs} runs octilinear, '
         f'{n_arc[0]} wraps as chamfers, {n_rep[0]} legs repaired any-angle; '
         f'pitch {pitch:.3f}, window {window:.1f}); '

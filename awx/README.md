@@ -141,85 +141,88 @@ each general:
   (via at the ball, track to the pad), not built. A bench rebuilt with it
   loses `SZQ` from the K51 ladder, which is right: it is not a bus net.
 
-**The pack, made to work on a finished board** (2026-09-19, Andy: "I
-see easy shorter paths", then "still slack in the outer lanes"). Six
-things were wrong, in the order they surfaced:
+## The pack (`pack_board.py`, opt-in)
 
-* An evolved board's `.pack.json` is the LAST PROBE braid's sidecar, and
-  a probe lays one lane and its coupled set -- on the K44 record the
-  packer saw one corridor with one lane of 44. The whole-board mode
-  (`pack_board.py BOARD --fanout BOARD_fo --nets ... --src U1 --passes 4`)
-  packs every lane of the run, one corridor per lane, the passes
-  repeated so each sees the room the last one left.
-* The FOLLOW force -- each lane snapped into the tube of the lane packed
-  before it -- copies that lane's jogs, and from the wall inward the outer
-  lanes copy the router's still-ragged inner ones: the K18 bundle read as
-  a wave. Four passes with the follow grew K18's lanes 392.6 -> 394.8 mm;
-  taut (`PK_FOLLOW=0`, the whole-board default) they went to 386 and bend
-  together at the cap pads.
-* A via moved by its lane was checked against copper only; the hole-to-
-  hole rule (net-agnostic, 0.25 mm here = 0.40 centre to centre for these
-  vias against copper's 0.355) is now a disc per drilled pad and per
-  other via in the via world, read off the board.
-* "Routed minus fanout" is not the lane on an evolved board: the derive
-  step keeps lane fragments as the berth's copper, so WE and A3 came out
-  in pieces with fanout-matched gaps and were skipped. The lane is now
-  everything outside the two STUB CHAINS -- the copper reachable from a
-  pad through fanout-matched segments only -- with the chains' tips as
-  its ends, taken at their exact coordinates (the packer chains on four
-  decimals; a rounded 80.070 never met its 80.0703).
-* A run that meets its via inside the annulus reads as a break: a tiny
-  gap (WE: 22 um) is snapped onto the centre, a larger one bridged with a
-  link -- not snapped, since moving one end of a 2.1 mm segment by 0.106
-  mm tilted it into a foreign via's clearance (K32 DQ8 vs DQ14). A 35 um
-  duplicate whose both ends lie on the chain (A0) is dropped as a loop;
-  112 lanes had come back "unchained" over it.
-* The grade is the gate: a scoped DRC before any edit and after the
-  passes, and every lane a new violation names goes back to the copper
-  it came with. The emitter's own piece validation had let a re-emitted
-  end into a via's clearance.
+A braided board's lanes are the router's staircases: legal, graded the
+same, and longer than the taut string between their ends. The pack
+pulls every lane of a FINISHED board taut against its neighbours, after
+the fact, without moving a via:
 
-* Two more, from the renders: a kink -- the any-angle repair replaces
-  an unclear grid leg by the string's chords between its ends, and an
-  elbow whose SECOND leg was unclear keeps its first, a 45-degree leg to
-  the corner and a jog back (K44 BA2, 2.5 mm out and 0.79 back where the
-  string ran straight). A vertex the path doubles back at now goes when
-  the chord past it is clear (`_unkink`; 23 -> 6 sharp turns at K44).
-  And the source trim runs again on the finished board before the pack
-  (its splice, its DRC), because a board the evolution assembled from
-  probes carries backtracks no braid saw whole: 34 mm at K44.
+    python3 pack_board.py BOARD.kicad_pcb --fanout BOARD_fo.kicad_pcb --nets NET,NET,... --src U1 --passes 4 [--out STEM]
+
+<img src="img/pack_zynq_k44.png" alt="The zynq K44 record before and after the pack" width="900">
+
+*The zynq K44 record (`tmp/records/zynq_k44_88_pop`) as the evolution
+left it and packed: 3854 -> 1286 segments, the lanes 1175 -> 1104 mm,
+88 vias both, 0 open, 0 DRC, 56 s.*
+
+What it does, per lane:
+
+* **The lane** is everything outside the net's two STUB CHAINS -- the
+  copper reachable from a pad through fanout-matched segments only --
+  with the chains' tips as its ends at their exact coordinates (the
+  packer chains on four decimals). A run that meets its via inside the
+  annulus is not a break: a tiny gap is snapped onto the centre
+  (`PK_VIA_SNAP`, 0.03 mm), a larger one bridged with a link, and a
+  duplicate whose both ends lie on the chain is dropped as a loop.
+* **Before the pack, the source trim and the coupled re-lay.** The
+  write-time source trim (`braid.note_source_joint`) runs again on the
+  finished board, in rounds, until a round splices nothing -- a board
+  the evolution assembled from probes carries backtracks no braid saw
+  whole (34 mm at K44). A splice the trim refused because another lane
+  of the run stands between the stub and the backtrack is tried again
+  with that lane LIFTED and routed anew between its own tips by the
+  production router (`--relay`, on); it is kept only when the pair's
+  copper is shorter, no lifted lane gained a via and the scoped DRC over
+  the nets involved names nothing new.
+* **The string.** Each lane is relaxed to a taut string against the
+  board as it stands -- pads, foreign copper, the lanes packed before it
+  -- and re-emitted where the string runs: octilinear legs, a wrap round
+  a via or a pad as a 45-degree chamfer, an unclear grid leg replaced by
+  the string's chords between its ends, and a vertex the path doubles
+  back at dropped when the chord past it is clear. Every pass does this
+  for every lane, so each sees the room the last pass left (`--passes`,
+  4 on the records).
+* **Taut, not following.** `PK_FOLLOW=0` is the whole-board default:
+  a lane snapped into the tube of the lane packed before it copies that
+  lane's jogs, and from the wall inward the outer lanes copy the
+  router's still-ragged inner ones (K18's bundle read as a wave, 392.6
+  -> 394.8 mm with the follow; taut, 386, bending together at the cap
+  pads).
+* **Vias never move.** A via its lane would move is checked against
+  copper and against the hole-to-hole rule, a disc per drilled pad and
+  per other via, read off the board.
+* **The grade is the gate.** A scoped DRC before any edit and after the
+  passes; every lane a new violation names goes back to the copper it
+  came with.
+
+Measured on the zynq evolution records (2026-09-19); vias unchanged on
+every rung, 0 open, 0 DRC with and without the margin, every lane packed:
 
 | K | 9 | 18 | 26 | 32 | 38 | 42 | 44 |
 |---|---|---|---|---|---|---|---|
 | lanes, mm (best -> trimmed + taut pack) | 185 -> 181 | 393 -> 383 | 662 -> 630 | 801 -> 769 | 954 -> 915 | 1054 -> 996 | 1203 -> 1104 |
 | run copper, mm | 221 -> 217 | 468 -> 458 | 774 -> 736 | 971 -> 940 | 1171 -> 1121 | 1300 -> 1235 | 1477 -> 1350 |
 
-Vias unchanged on every rung, 0 open, 0 DRC with and without the
-margin, every lane packed.
+Re-run after the audit (2026-09-22): the K44 record packs to the same
+1104 mm (3854 -> 1286 segments), and the H3 K51 record of 87
+(`tmp/rtev51/best_k51`) goes 1003 -> 939 mm, 1744 -> 1469 segments, at
+87 vias, 0 open, 0 DRC. What a lane keeps after all that is its wrap: a
+lane that goes the long way round its bundle at the same via count is
+invisible to the chain's judge, which prices vias and never copper.
 
-* **The coupled re-lay** (`--relay`, on; before the pack): a splice the
-  trim refused because another lane of the run stands between the stub
-  and the backtrack is tried again with that lane LIFTED, and the lifted
-  lane is then routed anew between its own two tips by the production
-  router (`connect`, the chain's config) on the board as it stands. It
-  is kept only when the pair's copper is shorter, no lifted lane gained
-  a via, and the scoped DRC over the nets involved names nothing new;
-  else every piece goes back. 1.2-1.4 s an attempt. On this article it
-  keeps nothing: A13's neighbour DQS1_N comes back from the router with
-  four vias where it had two, and is refused.
-* **Why the south tooth needed no re-lay.** DQ13's 11 mm backtrack at
-  K44 was walled by A10 -- but by A10's own HAIRPIN, one row over: its
-  far-face stub and its lane straight back, both crossing DQ13's splice
-  line. A10's own trim removes exactly that, and the pre-pass had asked
-  DQ13 first, in ladder order. The pre-pass now runs in ROUNDS, the stub
-  chains walked again on the board as it stands each round (a chain
-  walked once still describes the tail a splice cut, and the next round
-  books the saving twice), until a round splices nothing: DQ13 goes in
-  round two, 22.5 mm, and round three finds nothing. 56 s for the whole
-  K44 pack, the rounds' scoped DRC calls being most of it.
-* What a lane keeps after all that is its wrap: a lane that goes the long
-  way round its bundle at the same via count is invisible to the chain's
-  judge, which prices vias and never copper.
+`BRAID_PACK=1` is the same pack inside the chain, per corridor at the
+braid's write time. On the chain as it stands it is not a gain: the smoother, the source
+trim and the re-escape already take the slack a corridor's pack was
+for -- K28 36 vias either way, 622 -> 630 mm and 573 -> 604 segments;
+K41 76 either way, 1069 -> 1063 mm and 1063 -> 1621 segments
+(2026-09-22). The whole-board pass over a finished board is the form
+that pays.
+
+Instruments: `BRAID_PACK_DEBUG=1` (the per-lane log), `BRAID_PACK_TRACE`
+/ `BRAID_PACK_DUMP` (one lane's string, step by step, and its pieces to
+disk), `BRAID_PACK_PROFILE`, `PK_WHOLE_DUMP` (a whole-board lane's chains
+and tips).
 
 ## How it works, end to end
 
@@ -449,11 +452,12 @@ until the two can converge at 30 degrees without touching anything --
 DQS0's P ball is an outer-column ball with two tooth moves, both boxed).
 The SYNTHETIC bench (`synth_bus.py --pairs N`, `synth_ladder.py --batch
 pairs`: two pairs among sixteen, balls neighbouring at both ends; the
-interleave pattern has none and runs as the control): sorted 0 vias
-either way, the pairs coupled 0.80 at the pair pitch against 0.00 as
-singles; blocks 22 vias against 16, coupled 0.88 / 0.85 against 0.56 /
-0.29 (the census's pitch is now the mode among PAIR-LIKE distances, so
-two legs a ball pitch apart read as 0.00, not 0.92).
+interleave pattern has none and runs as the control): re-run 2026-09-22,
+every case exact against its optimum with the pairs on or off (sorted 0,
+blocks 16, interleave 14 vias), the pairs coupled 0.82 / 0.82 (sorted)
+and 0.74 / 0.71 (blocks) at the pair pitch against 0.00 as singles (the
+census's pitch is the mode among PAIR-LIKE distances, so two legs a ball
+pitch apart read as 0.00, not 0.92).
 
 **A pair's termination is a waypoint (2026-09-20, late).** A two-pad part
 with one pad on P and the other on N -- the zynq's R20 on CK, 4 mm from
@@ -678,8 +682,7 @@ the route-judged descent does the optimising.
 sidecar's marker, the B arm turns both off); `BRAID_ATTEMPTS` (6: the
 launch pitch widened) and `BRAID_BUDGET_X` (the rescue budget); `BRAID_LADDER`
 (`full` | `open`); `BRAID_SMOOTH` (the octolinear smoother at write time);
-`BRAID_PACK=1` (`pack_board.py`: every lane a taut string against its
-neighbour, far fewer segments, vias unchanged -- opt-in). Every budget is in work (judge calls, CP-SAT
+`BRAID_PACK=1` (the pack, above, at the braid's write time -- opt-in). Every budget is in work (judge calls, CP-SAT
 deterministic time), never wall clock.
 
 **Grading** (`grade_k.py BOARD NETS`): connectivity scoped to the run's
@@ -786,9 +789,12 @@ ribbon rounds the part in 45-degree legs (26 vias, far fewer segments).*
 <img src="img/gate_mirror_article.png" alt="The bench turned over" width="760">
 
 *The pose gate: the bench flipped through its plane, every part on the
-other face, every stub on the other layer. Every isometry grades as the
-control to the via and the segment; the selector and the braid each run
-a pair in the pair's own canonical frame.*
+other face, every stub on the other layer. The translation and the
+quarter turns grade as the control to the via and the segment (K15: 21
+vias, 203 segments, 2026-09-22); the selector and the braid each run a
+pair in the pair's own canonical frame. The MIRROR does not, since the
+pages-first plan (2026-09-14): the turned-over article routes 29 vias
+and 452 segments -- TODO 5.*
 
 <img src="img/zynq_k44.png" alt="The second array pair, all 44 nets" width="380"> <img src="img/zynq_k44_human.png" alt="The same 44 nets as the human routed them" width="380">
 
@@ -823,7 +829,7 @@ is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 | `human_at_k.py`, `census_vs_human.py`, `cmp_copper.py` | the human's count at a K, per-net comparisons, copper diffs |
 | `joint_floor.py` | the floor: the non-circular MILP over a board's own paths (`--cap N`) |
 | `synth_bus.py`, `synth_ladder.py` | the synthetic channel with a known optimum (below) |
-| `pack.py`, `pack_board.py` | the opt-in post-pass |
+| `pack.py`, `pack_board.py` | the pack: every lane of a finished board a taut string, vias fixed (opt-in) |
 | `wall_probe.py`, `pinch_gate.py`, `judge_gate.py`, `floor_survey.py`, `ledger_cal.py`, `cut_ledger.py`, `rule_table.py`, `solve_curve.py`, `modal_curve.py` | probes and gates: a lane's walls, the braid's refusals, the plan judge, the floor per net, a corridor's cut, the length rule over arms, the CP-SAT's convergence |
 | `modal_k.py`, `arms.example.json`, `arms.rec51.json` | cloud arms, one container per (arm, K); `return_board`, `return_files` bring artifacts back |
 
@@ -991,49 +997,58 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
    the run keeps round 0's 91 and the two rounds after it never run.
    Reproduced identically before and after the audit (2026-09-22).
 
-5. **K51's last two vias.** The next move class past the single-net
+5. **The pages-first plan is not mirror-invariant.** The pose gate's
+   MM article (the bench turned over through its plane) grades 29 vias
+   / 452 segments against the control's 21 / 203 at K15; the
+   translation and the quarter turns grade identically. Bisected to the
+   planner commit a3b57607 (2026-09-14): under `PLAN_PAGES=1` the chain
+   leans on the board's sign somewhere between the selector's chirality
+   frame and the CP-SAT's keys (`pages_first.py`, `select_moves.py`);
+   the flag-off chain of that day passed.
+
+6. **K51's last two vias.** The next move class past the single-net
    classes is a GROUP move: re-layer a lane together with its crossing
    partners in one probe (the coupled probe already routes such a set);
    or jumps that land nearer than two random nets.
 
-6. **The chain's seeds.** The evolution optimises past the plan's
+7. **The chain's seeds.** The evolution optimises past the plan's
    objective, but better seeds are a better start. The berth menu is
    one-per-face at `CANDS=4` (row pruning, not column generation), and a
    plan-time floor over the PLANNED LANES rather than the channel is the
    one untested ranker.
 
-7. **The planner's comb for a pair.** No third berth between a pair's
+8. **The planner's comb for a pair.** No third berth between a pair's
    two, layer or no layer; and the room a pair's converging approach
    needs at the comb, given at plan time rather than found at the last
    call.
 
-8. **Pairs and the evolution.** The descent moves single nets' ends, so
+9. **Pairs and the evolution.** The descent moves single nets' ends, so
    a pair must land at the chain stage; a move class that moves a pair's
    two ends together would let the population improve a pairs board.
 
-9. **Generality.** Tuned on one bench. What the zynq article shows: a
-   singleton corridor's source tooth may be planned on the FAR face of
-   the source array (the count judge sees a via saved, the length judge
-   prices the lane from the tooth's exit and the berth's run but not the
-   tooth's own escape through the array -- `_length` of the source move
-   is the missing term), and the top rungs lose their in-band execution.
-   Off-axis poses (R30, R45) still break the plan's compass faces.
+10. **Generality.** Tuned on one bench. What the zynq article shows: a
+    singleton corridor's source tooth may be planned on the FAR face of
+    the source array (the count judge sees a via saved, the length judge
+    prices the lane from the tooth's exit and the berth's run but not the
+    tooth's own escape through the array -- `_length` of the source move
+    is the missing term), and the top rungs lose their in-band execution.
+    Off-axis poses (R30, R45) still break the plan's compass faces.
 
-10. **The corpus A/B for the `py_router` changes, then the PR to main.**
+11. **The corpus A/B for the `py_router` changes, then the PR to main.**
     `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
     alone; the A/B decides whether it turns on, with a per-board
     attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
     are the suspect).
 
-11. **The `.kicad_dru` is read with real layer names inside the turned
+12. **The `.kicad_dru` is read with real layer names inside the turned
     frame**; a per-layer rule lands on the opposite face for a back-side
     part. Shipped `py_router` code, so it blocks the merge.
 
-12. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
+13. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
 
-13. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
+14. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
     `pages-first:` line and reads like "never ran".
 
-14. **Unverified review findings**: `dedupe_boards` fingerprints copper
+15. **Unverified review findings**: `dedupe_boards` fingerprints copper
     but not the sidecar; `blockers_of` double-counts half a track;
     `flip_frame` does not mirror `pad.polygons`.
