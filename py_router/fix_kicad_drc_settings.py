@@ -455,6 +455,38 @@ FAB_FLOOR_KEYS_MEASURABLE = frozenset({
 })
 
 
+def seed_fab_floor_origin(proj: dict, rules_before: dict):
+    """``(origin, seeded_now)`` for ``proj``'s ``fab_floor_origin`` record.
+
+    The floors the board declared BEFORE this chain touched anything, seeded
+    from ``rules_before`` when the project carries no origin yet and returned
+    unchanged when it does. The caller stores ``origin`` under
+    ``kicad_routing_tools.fab_floor_origin`` when ``seeded_now``.
+
+    EVERY writer that can lower a FAB_FLOOR_KEYS rule must call this BEFORE it
+    lowers anything -- not just :func:`fix_project_for_output`. It used to be
+    inline there and nowhere else, so :func:`apply_routed_floors` (the #650
+    mid-run copper writer, which runs FIRST) lowered ``min_hole_clearance``
+    with no origin recorded, and the writeback then seeded the origin from the
+    ALREADY-LOWERED value and compared it against itself. Measured on a 6-layer
+    board declaring 0.25: the mid-run pass took it straight to 0.127, the
+    origin recorded 0.127, and ``FAB FLOOR RELAXED`` said NOTHING about a real
+    0.25 -> 0.127 relaxation. On a second board the same path understated it as
+    "0.2 -> 0.127" because the mid-run pass had stopped at 0.2. A silent
+    disclosure is exactly the failure this record exists to prevent (see
+    :func:`_fab_floor_disclosure`'s run-14 note), so the seeding lives in one
+    function that both writers call.
+    """
+    origin = dict((proj.get("kicad_routing_tools") or {})
+                  .get("fab_floor_origin") or {})
+    if origin:
+        return origin, False
+    origin = {k: float(v) for k, v in (rules_before or {}).items()
+              if k in {key for key, _ in FAB_FLOOR_KEYS}
+              and isinstance(v, (int, float))}
+    return origin, bool(origin)
+
+
 def declared_fab_floor(pcb_path: str, key: str):
     """The floor the board declared for ``key`` BEFORE this chain touched it, mm.
 
@@ -1108,12 +1140,23 @@ def apply_routed_floors(board_pcb: str, clearance=None, hole_clearance=None,
             proj = json.load(f)
     except (OSError, ValueError):
         return []
+    # The floors the project declares BEFORE this pass lowers them. Captured
+    # here, not after, because this pass runs BEFORE the authoritative
+    # writeback and is therefore the first thing in the chain that can move a
+    # FAB_FLOOR_KEYS rule -- see seed_fab_floor_origin for what went silent
+    # while this was the writeback's private business.
+    _rules_before = dict(((proj.get("board") or {}).get("design_settings")
+                          or {}).get("rules") or {})
     targets = compute_targets(clearance=clearance, hole_clearance=hole_clearance)
     changes = apply_targets_to_project(
         proj, targets, {},
         clamp_nondefault_netclasses=clamp_nondefault_netclasses)
     if not changes:
         return []
+    _origin, _origin_seeded = seed_fab_floor_origin(proj, _rules_before)
+    if _origin_seeded:
+        proj.setdefault("kicad_routing_tools", {})["fab_floor_origin"] = _origin
+        changes = list(changes) + ["kicad_routing_tools.fab_floor_origin: recorded"]
     try:
         # Atomic replace, same discipline as the writeback (#513 item 12).
         tmp_pro = pro + ".tmp"
@@ -1223,14 +1266,7 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     # immediate input and goes silent for every step after the first -- which
     # is exactly how run 14 shipped 10 vias under its declared 0.5 mm with one
     # banner at R1 and none at R4 or R5.
-    _origin = dict((proj.get("kicad_routing_tools") or {})
-                   .get("fab_floor_origin") or {})
-    _origin_seeded = False
-    if not _origin:
-        _origin = {k: float(v) for k, v in _rules_before.items()
-                   if k in {key for key, _ in FAB_FLOOR_KEYS}
-                   and isinstance(v, (int, float))}
-        _origin_seeded = bool(_origin)
+    _origin, _origin_seeded = seed_fab_floor_origin(proj, _rules_before)
     # `minima` lets a caller that ALREADY has the board in memory supply these
     # instead of us re-parsing the file. The GUI does: scan_board_minima ->
     # parse_kicad_pcb allocates thousands of GC-tracked objects, and the GUI

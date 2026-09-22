@@ -168,5 +168,74 @@ class ChainCarryTest(unittest.TestCase):
         self.assertIn('ORIGINAL 0.5', out)
 
 
+class MidRunWriterSeedsOriginTest(unittest.TestCase):
+    """The #650 mid-run copper writer must seed the origin too.
+
+    `apply_routed_floors` runs BEFORE the authoritative writeback (route.py
+    calls it so the in-run plane/oracle audit grades what ships), and it can
+    lower `min_hole_clearance`. It did that without recording
+    `fab_floor_origin`, so the writeback then seeded the origin from the
+    ALREADY-LOWERED value and compared it against itself.
+
+    Measured on eurorack_pmod (6-layer, declares min_hole_clearance 0.25): the
+    mid-run pass took it straight to 0.127, the origin recorded 0.127, and
+    `FAB FLOOR RELAXED` said NOTHING about a real 0.25 -> 0.127 relaxation. On
+    rp2350_dev the mid-run pass stopped at 0.2, so the banner fired but
+    understated the relaxation as "0.2 -> 0.127".
+
+    MUTATION: drop the seed_fab_floor_origin call from `apply_routed_floors` --
+    both arms below die.
+    """
+
+    BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='ffo650_')
+        self.pcb = os.path.join(self.tmp, 'm.kicad_pcb')
+        shutil.copyfile(self.BOARD, self.pcb)
+        with open(os.path.join(self.tmp, 'm.kicad_pro'), 'w') as f:
+            json.dump(_proj({"min_hole_clearance": 0.25}), f)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _origin(self):
+        with open(os.path.join(self.tmp, 'm.kicad_pro')) as f:
+            pro = json.load(f)
+        return (pro.get('kicad_routing_tools') or {}).get(ORIGIN_KEY) or {}
+
+    def test_mid_run_pass_records_the_declared_floor_before_lowering_it(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            changes = F.apply_routed_floors(self.pcb, clearance=0.127,
+                                            verbose=True)
+        self.assertTrue(changes, 'the mid-run pass lowered nothing to test')
+        self.assertEqual(
+            self._origin().get('min_hole_clearance'), 0.25,
+            'the mid-run pass lowered a fab floor without recording the '
+            'board ORIGINAL, so the writeback will baseline on its own output')
+
+    def test_the_relaxation_is_still_disclosed_after_the_mid_run_pass(self):
+        """End to end: mid-run pass, then the writeback. The banner must name
+        the board's 0.25, which is the half that went silent."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            F.apply_routed_floors(self.pcb, clearance=0.127, verbose=False)
+            F.fix_project_for_output(self.pcb, clearance=0.127, verbose=True)
+        out = buf.getvalue()
+        self.assertIn('FAB FLOOR RELAXED', out,
+                      'a real 0.25 -> 0.127 relaxation shipped with no banner')
+        self.assertIn('ORIGINAL 0.25', out,
+                      'the banner must baseline on the board 0.25, not on the '
+                      'value the mid-run pass had already written')
+
+    def test_a_second_mid_run_pass_does_not_re_seed(self):
+        """Once recorded, the origin is the board's, not each pass's input."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            F.apply_routed_floors(self.pcb, clearance=0.127, verbose=False)
+            F.apply_routed_floors(self.pcb, clearance=0.1, verbose=False)
+        self.assertEqual(self._origin().get('min_hole_clearance'), 0.25)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

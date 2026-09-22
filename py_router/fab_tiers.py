@@ -651,6 +651,11 @@ def escalation_summary():
         'min_delivered': by_kind,
         'fab_tier_escalations': len(_LEDGER['fab_tier']),
         'fab_tier_contexts': list(_LEDGER['fab_tier']),
+        # WHERE those escalations landed: 'advanced', or 'board_floors' when
+        # --escalation board bounded them at the board's own declaration. A
+        # consumer counting fab_tier_escalations needs this to know whether the
+        # run left the board's declared envelope -- see escalation_target.
+        'fab_tier_target': escalation_target(),
     }
 
 
@@ -666,7 +671,9 @@ def escalation_report_line():
         parts.append(f"{s['count']} feature(s) on {len(s['nets'])} net(s) delivered below "
                      f"the requested size ({kinds})")
     if s['fab_tier_escalations']:
-        parts.append(f"{s['fab_tier_escalations']} fab-tier escalation(s) to advanced")
+        _where = ("the board's own declared floors"
+                  if s['fab_tier_target'] == 'board_floors' else 'advanced')
+        parts.append(f"{s['fab_tier_escalations']} fab-tier escalation(s) to {_where}")
     return (f"Design rules [--escalation {s['escalation_policy']}, --fab-tier "
             f"{s['fab_tier']}]: " + '; '.join(parts) +
             ". Details: JSON_SUMMARY design_rules.")
@@ -675,16 +682,46 @@ def escalation_report_line():
 _escalation_lever_said = []
 
 
+def escalation_target():
+    """Where a standard->advanced rung change actually LANDS under the active
+    policy: ``'advanced'``, or ``'board_floors'`` under ``--escalation board``.
+
+    Under ``board`` every rung is raised to the board's own declared minimums
+    (:func:`_apply_board_floors`), so a descent off rung 0 stops at what the
+    BOARD declared and never reaches the advanced floor for any key the board
+    declares. Reporting it as "escalated to advanced (0.25/0.15 via)" is then
+    simply false: measured on a 6-layer board declaring ``min_via_diameter``
+    0.4, a ``--escalation board`` run reported "645 fab-tier escalation(s) to
+    advanced" while the smallest via it delivered was 0.4 -- the board's own
+    number. The descent is real and still worth counting (0.4 is below the
+    standard tier's 0.45), but it is bounded by the declaration, which is the
+    whole point of the policy.
+    """
+    return 'board_floors' if _ESCALATION == 'board' else 'advanced'
+
+
 def warn_fab_escalation(context):
     """Emit a one-line warning (deduped per run, per context) that a routing step
-    dropped below the standard floor to the more-costly advanced floor, and
-    count it in the ledger (every call counts, deduped or not)."""
+    dropped below the standard floor -- to the more-costly advanced floor, or,
+    under ``--escalation board``, to the board's own declared minimums (see
+    :func:`escalation_target`) -- and count it in the ledger (every call counts,
+    deduped or not)."""
     if not context:
         return
     _LEDGER['fab_tier'].append(context)
     if context in _escalation_warned:
         return
     _escalation_warned.add(context)
+    if escalation_target() == 'board_floors':
+        # Bounded by the declaration: do NOT claim the advanced floor, and do
+        # not offer --fab-overrides as the lever -- the board already states
+        # the limit and the policy is already honouring it.
+        print(f"  WARNING: {context}: dropped below the standard fab floor to "
+              f"the BOARD's own declared minimums; --escalation board bounds it "
+              f"there (it never reaches the advanced 0.25/0.15 via). Pass "
+              f"--fab-tier standard for a hard floor, or --escalation off to "
+              f"forbid the descent entirely")
+        return
     print(f"  WARNING: {context}: escalated standard->advanced fab floor "
           f"(0.25/0.15 via etc., more costly to fab); --fab-tier auto permitted "
           f"it. Pass --fab-tier standard for a hard floor, or "
