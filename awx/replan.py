@@ -125,6 +125,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 import fanout_from_plan as fp  # noqa: E402
+import ship_vias  # noqa: E402
 import source_realize as sr  # noqa: E402
 import plan_ends as pe  # noqa: E402
 import braid as te  # noqa: E402
@@ -484,6 +485,7 @@ def write_board(txt, out, pro_from):
     with open(out, 'w', encoding='utf-8') as f:
         f.write(txt)
     fp.copy_pro(pro_from, out)
+    ship_vias.stamp(out, 'descent')              # a via in a pad declares Type VII (#962)
 
 
 # ------------------------------------------------------------- verdict

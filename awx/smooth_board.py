@@ -65,6 +65,7 @@ def main(argv):
     with open(out, 'w', encoding='utf-8') as f:
         f.write(txt)
     replan.fp.copy_pro(routed, out)
+    replan.ship_vias.stamp(out, 'smooth')
     print(f'smooth_board: {len(names)} nets, lane segments {before} -> {after} '
           f'({stt.get("spans", 0)} spans, -{stt.get("saved_mm", 0):.2f} mm) -> {os.path.basename(out)}')
     return 0

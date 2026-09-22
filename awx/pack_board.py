@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 
 from kicad_parser import parse_kicad_pcb, Segment  # noqa: E402
+from kicad_writer import generate_via_sexpr  # noqa: E402
+import ship_vias  # noqa: E402  a via in a pad declares Type VII (#962)
 import braid as br  # noqa: E402
 import pack as pk  # noqa: E402
 import rules as _rules  # noqa: E402  ONE source for every design rule
@@ -449,12 +451,15 @@ def pack_whole(a):
                    f'(width {s_.width}) (layer "{s_.layer}") (net {s_.net_id}))\n')
     for v in pcb.vias:
         if v.net_id in kids:
-            add.append(f'  (via (at {v.x:.4f} {v.y:.4f}) (size {v.size}) (drill {v.drill}) '
-                       f'(layers "F.Cu" "B.Cu") (net {v.net_id}))\n')
+            add.append(generate_via_sexpr(round(v.x, 4), round(v.y, 4), v.size, v.drill,
+                                          ['F.Cu', 'B.Cu'], v.net_id,
+                                          tenting_attrs=v.tenting_attrs,
+                                          inherit_when_unspecified=True) + '\n')
     i = txt.rstrip().rfind(')')
     txt = txt[:i] + ''.join(add) + txt[i:]
     with open(out + '.kicad_pcb', 'w', encoding='utf-8') as f:
         f.write(txt)
+    ship_vias.stamp(out + '.kicad_pcb', 'pack', print)
     pro = stem + '.kicad_pro'
     if os.path.exists(pro):
         shutil.copy(pro, out + '.kicad_pro')
@@ -596,11 +601,14 @@ def main():
         if v.net_id not in kids:
             continue
         layers = v.layers if getattr(v, 'layers', None) else ['F.Cu', 'B.Cu']
-        add.append(f'  (via (at {v.x:.4f} {v.y:.4f}) (size {v.size}) (drill {v.drill}) '
-                   f'(layers "{layers[0]}" "{layers[-1]}") (net {v.net_id}))\n')
+        add.append(generate_via_sexpr(round(v.x, 4), round(v.y, 4), v.size, v.drill,
+                                      [layers[0], layers[-1]], v.net_id,
+                                      tenting_attrs=v.tenting_attrs,
+                                      inherit_when_unspecified=True) + '\n')
     k = txt.rstrip().rfind(')')
     with open(out + '.kicad_pcb', 'w') as f:
         f.write(txt[:k] + ''.join(add) + txt[k:])
+    ship_vias.stamp(out + '.kicad_pcb', 'pack', print)
     pro = stem + '.kicad_pro'
     if os.path.exists(pro):
         shutil.copy(pro, out + '.kicad_pro')

@@ -66,6 +66,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 from kicad_parser import parse_kicad_pcb, Segment  # noqa: E402
+from kicad_writer import generate_via_sexpr  # noqa: E402
+import ship_vias  # noqa: E402  a via in a pad declares Type VII (#962)
 import topo_strings as ts  # noqa: E402
 import connect as cn  # noqa: E402
 import corridor as cr  # noqa: E402
@@ -6003,9 +6005,10 @@ def write_out(a, ctx, corridors, names, log):
                        f'(layer "{layer}") (net {nid}))\n')
         for v in out_vias[nm]:
             vx, vy = M(v.x, v.y)
-            add.append(f'  (via (at {vx:.4f} {vy:.4f}) (size {VIA_SIZE}) '
-                       f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
-                       f'(net {nid}))\n')
+            # through the writer's generator: a uuid, so the Type VII
+            # stamp below can name the via (#962)
+            add.append(generate_via_sexpr(round(vx, 4), round(vy, 4), VIA_SIZE, VIA_DRILL,
+                                          ['F.Cu', 'B.Cu'], nid) + '\n')
 
     # ---- Eco overlay: the PLAN, drawn where the copper is, so a render
     # (render_eco.py) shows plan against copper.
@@ -6056,6 +6059,7 @@ def write_out(a, ctx, corridors, names, log):
     out_board = a.out + '.kicad_pcb'
     with open(out_board, 'w') as f:
         f.write(txt[:k] + ''.join(add) + txt[k:])
+    ship_vias.stamp(out_board, 'braid', log)     # a via in a pad declares Type VII (#962)
     pro = os.path.splitext(a.board)[0] + '.kicad_pro'
     if os.path.exists(pro):
         shutil.copy(pro, a.out + '.kicad_pro')
