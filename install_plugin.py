@@ -145,6 +145,77 @@ def get_source_dir() -> Path:
     return Path(__file__).parent.resolve()
 
 
+def _parse_requirement_floors(requirements_file: Path) -> list:
+    """Parse requirements.txt into [(pip_name, floor_or_None)].
+
+    Mirrors py_router/startup_checks.requirement_floors without importing
+    numpy/scipy -- this installer runs on a bare interpreter before any
+    dependency exists.
+    """
+    import re
+    out = []
+    try:
+        text = requirements_file.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-") or "://" in line:
+            continue
+        m = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(.*)$", line)
+        if not m:
+            continue
+        name, spec = m.group(1), m.group(2).strip()
+        fm = re.search(r"(?:>=|==)\s*([0-9][0-9A-Za-z.\-+]*)", spec or "")
+        out.append((name, fm.group(1) if fm else None))
+    return out
+
+
+def _target_satisfies_requirements(python_exe: str, requirements: list) -> bool:
+    """True if `python_exe` already imports every requirement at its floor.
+
+    Probed out-of-process so a missing package (non-zero exit) reads as
+    "not satisfied" rather than raising here. Version comparison is
+    numeric-prefix based (1.22.4rc1 -> (1, 22, 4)), matching startup_checks.
+    """
+    if not requirements:
+        return True
+    probe = (
+        "import re, sys\n"
+        "reqs = sys.argv[1].split(',')\n"
+        "ok = True\n"
+        "def parse(v):\n"
+        "    parts = []\n"
+        "    for chunk in str(v).split('.'):\n"
+        "        d = ''.join(c for c in chunk if c.isdigit() or False)\n"
+        "        dd = ''\n"
+        "        for ch in chunk:\n"
+        "            if not ch.isdigit(): break\n"
+        "            dd += ch\n"
+        "        if not dd: break\n"
+        "        parts.append(int(dd))\n"
+        "    return tuple(parts)\n"
+        "for item in reqs:\n"
+        "    name, floor = item.split(':', 1)\n"
+        "    mod = {'Pillow': 'PIL'}.get(name, name).lower()\n"
+        "    try:\n"
+        "        m = __import__('PIL' if mod == 'pil' else name)\n"
+        "        ver = getattr(m, '__version__', None) or '0'\n"
+        "        if floor and parse(ver) < parse(floor):\n"
+        "            ok = False\n"
+        "    except Exception:\n"
+        "        ok = False\n"
+        "sys.exit(0 if ok else 1)\n"
+    )
+    arg = ",".join(f"{n}:{f or ''}" for n, f in requirements)
+    try:
+        r = subprocess.run([python_exe, "-c", probe, arg],
+                           capture_output=True, timeout=120)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def install_dependencies():
     """Install Python dependencies into KiCad's Python environment."""
     source_dir = get_source_dir()
@@ -156,6 +227,7 @@ def install_dependencies():
 
     # Parse and display requirements
     print("Required packages:")
+    requirements = _parse_requirement_floors(requirements_file)
     packages = []
     with open(requirements_file, 'r') as f:
         for line in f:
@@ -184,25 +256,71 @@ def install_dependencies():
 
     print()
 
-    try:
-        # Run pip with output visible to user (no capture)
-        result = subprocess.run(
-            [python_exe, "-m", "pip", "install", "--progress-bar", "on", "-r", str(requirements_file)],
-        )
+    # Fast path: on distro Linux (Arch/Debian/Fedora) KiCad uses the system
+    # python, whose deps are often already satisfied via pacman/apt. Probing
+    # first avoids a pip run that can only fail with
+    # externally-managed-environment (PEP 668) when there is nothing to do.
+    if requirements and _target_satisfies_requirements(python_exe, requirements):
+        print("  Dependencies already satisfied in KiCad's Python, skipping pip.")
+        return True
 
-        if result.returncode != 0:
-            print()
-            print("  Warning: Failed to install some dependencies.")
-            if kicad_python:
-                print("  You may need to run as Administrator:")
-                print(f"    \"{kicad_python}\" -m pip install -r \"{requirements_file}\"")
-            else:
-                print("  You may need to install them manually to KiCad's Python.")
-            return False
-        else:
+    def _run_pip(extra_args: list) -> "subprocess.CompletedProcess":
+        cmd = [python_exe, "-m", "pip", "install",
+               "--progress-bar", "on", *extra_args,
+               "-r", str(requirements_file)]
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    try:
+        result = _run_pip([])
+
+        if result.returncode == 0:
+            print(result.stdout[-2000:] if result.stdout else "")
             print()
             print("  Dependencies installed successfully")
             return True
+
+        output = (result.stdout or "") + (result.stderr or "")
+        if "externally-managed-environment" in output:
+            # PEP 668 (Debian/Arch/Fedora/...): the interpreter refuses
+            # system-wide installs. The deps are either distro packages or
+            # need --break-system-packages. Retry with the flag -- this is
+            # exactly what the hint in the pip error suggests.
+            print("  System Python is externally managed (PEP 668) -- "
+                  "retrying with --break-system-packages.")
+            print("  (Distro alternative: pacman -S python-numpy "
+                  "python-scipy python-shapely python-pillow)")
+            retry = _run_pip(["--break-system-packages"])
+            if retry.returncode == 0:
+                print(retry.stdout[-2000:] if retry.stdout else "")
+                print()
+                print("  Dependencies installed successfully "
+                      "(--break-system-packages)")
+                return True
+            output = (retry.stdout or "") + (retry.stderr or "")
+            print()
+            print("  Warning: Failed to install some dependencies, even with "
+                  "--break-system-packages.")
+            print(f"    \"{python_exe}\" -m pip install --break-system-packages "
+                  f"-r \"{requirements_file}\"")
+            print("  Or via your package manager, e.g.:")
+            print("    sudo pacman -S python-numpy python-scipy "
+                  "python-shapely python-pillow")
+            if output.strip():
+                print("  pip said:")
+                print("  " + output.strip()[-1500:].replace("\n", "\n  "))
+            return False
+
+        print()
+        print("  Warning: Failed to install some dependencies.")
+        if output.strip():
+            print("  pip said:")
+            print("  " + output.strip()[-1500:].replace("\n", "\n  "))
+        if kicad_python:
+            print("  You may need to run as Administrator:")
+            print(f"    \"{kicad_python}\" -m pip install -r \"{requirements_file}\"")
+        else:
+            print("  You may need to install them manually to KiCad's Python.")
+        return False
 
     except PermissionError:
         print()
