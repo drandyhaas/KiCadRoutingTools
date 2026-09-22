@@ -148,6 +148,17 @@ def main():
         out_board = os.path.join(args.out_dir, f'seed_{seed}.kicad_pcb')
         print(f"[seed {seed}] place_seed -> {os.path.basename(out_board)}")
         r, s = _run_place_seed(args, seed, out_board)
+        if r.returncode == 5:
+            # #959 (#998): the PLAN was refused before anything was written,
+            # and the plan is the same for every seed -- so every seed would
+            # print the same refusal. Say it once and stop.
+            print(f"[seed {seed}] the zone plan is refused before seeding "
+                  f"(place_seed exit 5): "
+                  + (r.stderr or r.stdout)[-400:].strip())
+            rows.append({'seed': seed, 'board': None, 'place_seed_rc': 5,
+                         'refused': 'plan_check', 'probe': None,
+                         'note': 'plan refused; no seed was written'})
+            break
         row = {'seed': seed, 'board': out_board,
                'place_seed_rc': r.returncode,
                'grade_errors': s.get('grade_errors'),
@@ -230,6 +241,14 @@ def main():
         'out_dir': args.out_dir}, sort_keys=True))
     if best is not None:
         return 0
+    if rows and any(r.get('refused') == 'plan_check' for r in rows):
+        # #959 (#998): no seed was written, so there is nothing to rank or
+        # probe -- say THAT, not "not probed".
+        print("compare_seeds: the zone plan was refused before any seed was "
+              "written (place_seed exit 5) -- fix the plan; `check_floorplan "
+              "--intent <plan> --plan-only` checks it without seeding.",
+              file=sys.stderr)
+        return 4
     if rows and all(r.get('gated') for r in rows):
         print("compare_seeds: every seed failed its intent gate -- nothing "
               "rankable. Fix the intent or the pile first.", file=sys.stderr)

@@ -3524,8 +3524,8 @@ def generate_underpad_escape(footprint: Footprint,
                   f" a smaller --via-drill, a fab tier whose floor this pitch"
                   f" can meet, or the board's own min_hole_to_hole")
     # The FAB requirement under-pad escape creates (#489 §8): via-in-pad needs
-    # IPC-4761 Type VII. Emitted from the shared engine so both fronts report it.
-    from fab_notes import print_via_in_pad_note
-    print_via_in_pad_note(vias_to_add, pcb_data.pads_by_net,
-                          context="BGA under-pad escape")
+    # IPC-4761 Type VII. #962: it is DECLARED once, on every via the BGA fanout
+    # returns, at the end of `generate_bga_fanout` -- the channel escape's
+    # in-pad vias, this escape's and the plane drops alike. Stamping here
+    # alone left the channel path's via-in-pad unstamped.
     return tracks, vias_to_add, failed

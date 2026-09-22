@@ -1,0 +1,169 @@
+{
+  "schema": 1,
+  "kind": "design-brief",
+  "units": "mm",
+  "board": "splitflap_driver.kicad_pcb",
+  "product": {
+    "form_factor": "chained driver board",
+    "primary_axis": "east-west",
+    "user_top_side": "F"
+  },
+  "interfaces": [
+    {
+      "ref": "J3",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "JST XH B5B-XH-A _Vertical (motor harness); internal wiring, not user-facing",
+      "role": "motor"
+    },
+    {
+      "ref": "J5",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "JST XH B5B-XH-A _Vertical (motor harness); internal wiring, not user-facing",
+      "role": "motor"
+    },
+    {
+      "ref": "J6",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "JST XH B5B-XH-A _Vertical (motor harness); internal wiring, not user-facing",
+      "role": "motor"
+    },
+    {
+      "ref": "J7",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "JST XH B5B-XH-A _Vertical (motor harness); internal wiring, not user-facing",
+      "role": "motor"
+    },
+    {
+      "ref": "J12",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "JST XH B5B-XH-A _Vertical (motor harness); internal wiring, not user-facing",
+      "role": "motor"
+    },
+    {
+      "ref": "J13",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "JST XH B5B-XH-A _Vertical (motor harness); internal wiring, not user-facing",
+      "role": "motor"
+    },
+    {
+      "ref": "J8",
+      "user_facing": false,
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x03 (sensor harness); 7.62mm from the south edge, so no edge claimed",
+      "role": "sensor"
+    },
+    {
+      "ref": "J9",
+      "user_facing": false,
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x03 (sensor harness); 7.62mm from the south edge, so no edge claimed",
+      "role": "sensor"
+    },
+    {
+      "ref": "J10",
+      "user_facing": false,
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x03 (sensor harness); 7.62mm from the south edge, so no edge claimed",
+      "role": "sensor"
+    },
+    {
+      "ref": "J11",
+      "user_facing": false,
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x03 (sensor harness); 7.62mm from the south edge, so no edge claimed",
+      "role": "sensor"
+    },
+    {
+      "ref": "J14",
+      "user_facing": false,
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x03 (sensor harness); 7.62mm from the south edge, so no edge claimed",
+      "role": "sensor"
+    },
+    {
+      "ref": "J15",
+      "user_facing": false,
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x03 (sensor harness); 7.62mm from the south edge, so no edge claimed",
+      "role": "sensor"
+    },
+    {
+      "ref": "J19",
+      "user_facing": false,
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole IDC box header 2x04 (board-to-board ribbon); 6.3mm from north/south, 6.98mm from its end edge, so no edge claimed",
+      "role": "chain_link"
+    },
+    {
+      "ref": "J20",
+      "user_facing": false,
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole IDC box header 2x04 (board-to-board ribbon); 6.3mm from north/south, 6.98mm from its end edge, so no edge claimed",
+      "role": "chain_link"
+    },
+    {
+      "ref": "J16",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "unknown",
+      "note": "ScrewTerminals:Generic-5.08-2P; the silk does not say which side the wire enters, so cable_entry is unknown",
+      "role": "power"
+    },
+    {
+      "ref": "J17",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "unknown",
+      "note": "ScrewTerminals:Generic-5.08-2P; the silk does not say which side the wire enters, so cable_entry is unknown",
+      "role": "power"
+    },
+    {
+      "ref": "J18",
+      "user_facing": false,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "unknown",
+      "note": "ScrewTerminals:Generic-5.08-2P; the silk does not say which side the wire enters, so cable_entry is unknown",
+      "role": "power"
+    }
+  ],
+  "keepouts": [],
+  "fixed": [],
+  "unknown": []
+}

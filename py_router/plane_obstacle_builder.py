@@ -535,6 +535,18 @@ def build_via_obstacle_map(
         for pad in pads:
             _add_pad_via_obstacle(obstacles, pad, coord, config, clearance_override=pad_clearance)
             pad_count += 1
+    # #962: the target net's solder-paste OPENINGS, at the same clearance its
+    # pads get. The pad loop above sees the declared pad; the opening can be
+    # larger (esp_prog U2's F.Paste tab around an F.Cu-only pad 2) and a tap
+    # or stitching via there sits in the paste. Only for a POSITIVE clearance,
+    # as on the routing path (`same_net_pad_via_keepout_cells`): 0 keeps its
+    # legacy meaning, the declared pad and nothing more.
+    if exclude_net_id is not None and same_net_pad_clearance > 0:
+        from obstacle_map import paste_aperture_keepout_cells
+        _ap_cells = paste_aperture_keepout_cells(pcb_data, exclude_net_id, config,
+                                                 same_net_pad_clearance)
+        if len(_ap_cells):
+            obstacles.add_blocked_vias_batch(np.ascontiguousarray(_ap_cells, dtype=np.int32))
     if verbose:
         print(f"  Pads: {pad_count} pads in {time.time() - t0:.2f}s")
 

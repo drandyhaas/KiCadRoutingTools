@@ -278,7 +278,10 @@ def test_a_final_row_of_any_kind_needs_its_files():
             run_utils.check(
                 [sys.executable, '-X', 'utf8', CV, 'record', '--ledger', led,
                  '--board', BOARD, '--kind', kind, '--final',
-                 '--stop-condition', 'STUCK', '--lever', 'x',
+                 '--stop-condition', 'STUCK', '--lever', 'x']
+                + (['--shape', 'parameter'] if kind == 'classification'
+                   else [])
+                + [
                  '--lens', 'VERDICT=PASS:lens=spec',
                  '--argv', sys.executable, '-c', 'pass'],
                 refuse='no file behind them', code=2)

@@ -93,11 +93,17 @@ def _board_clearance(board):
     return 0.25
 
 
-def _gates(board, clearance):
-    """(drc_violations, assembly_blocking) on the COPPER-FREE board."""
+def _gates(board, clearance, baseline=None):
+    """(drc_violations, assembly_blocking) on the COPPER-FREE board.
+
+    `baseline` is the unperturbed board. check_drc then grades a graze of
+    footprint graphic copper against the edge that the perturbation CREATED
+    (#962); without it every such graze is accepted as `unverified`.
+    """
     drc = subprocess.run(
         [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'check_drc.py'), board,
-         '--clearance', str(clearance), '--check-pad-edge'],
+         '--clearance', str(clearance), '--check-pad-edge']
+        + (['--baseline', baseline] if baseline else []),
         capture_output=True, text=True)
     # check_drc emits exactly two summary shapes -- `FOUND {n} DRC VIOLATIONS:`
     # and `NO DRC VIOLATIONS FOUND!`. It has never printed "Total violations",
@@ -186,7 +192,7 @@ def qualify(board, draws=5, seed=None):
             if rec.get('status') == 'ok' and \
                     a >= max(MIN_MATERIAL_MM, MATERIAL_FRAC * dose):
                 landed += 1
-                nv, blk = _gates(out, clearance)
+                nv, blk = _gates(out, clearance, baseline=board)
                 blocked.append((nv, blk))
                 # THREE states, not two. Both gates use -1 for "could not be
                 # measured", and `-1 > 0` is False -- so an unmeasurable

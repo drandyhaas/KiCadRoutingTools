@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "kind": "design-brief",
+  "units": "mm",
+  "board": "tigard.kicad_pcb",
+  "product": {
+    "form_factor": "debug_adapter",
+    "user_top_side": "F"
+  },
+  "interfaces": [
+    {
+      "ref": "J1",
+      "user_facing": true,
+      "edge": "west",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "HRO TYPE-C-31-M-12 USB-C receptacle; F.Fab body 0.65mm past the west edge",
+      "role": "host_uplink"
+    },
+    {
+      "ref": "J2",
+      "user_facing": true,
+      "edge": "east",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x09 (JTAG)",
+      "role": "jtag"
+    },
+    {
+      "ref": "J3",
+      "user_facing": true,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x09 (UART)",
+      "role": "uart"
+    },
+    {
+      "ref": "J4",
+      "user_facing": true,
+      "edge": "south",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 2x04 (SPI)",
+      "role": "spi"
+    },
+    {
+      "ref": "J5",
+      "user_facing": true,
+      "edge": "east",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: surface-mounted straight pin header 2x05 1.27mm (CORTEX)",
+      "role": "cortex_debug"
+    },
+    {
+      "ref": "J6",
+      "user_facing": true,
+      "edge": "south",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: surface-mounted straight pin header 2x07 1.27mm (LA)",
+      "role": "logic_analyzer"
+    },
+    {
+      "ref": "J7",
+      "user_facing": true,
+      "edge": "south",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "JST SH SM04B-SRSS-TB _Horizontal (right-angle, Qwiic/I2C); F.Fab body 0.60mm inside the south edge",
+      "role": "i2c"
+    }
+  ],
+  "keepouts": [],
+  "fixed": [],
+  "unknown": []
+}

@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "kind": "design-brief",
+  "units": "mm",
+  "board": "esp_prog.kicad_pcb",
+  "product": {
+    "form_factor": "usb_stick",
+    "primary_axis": "east-west",
+    "user_top_side": "F"
+  },
+  "interfaces": [
+    {
+      "ref": "USB1",
+      "user_facing": true,
+      "edge": "west",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "USB-MICRO_MISB-SWMM-5B_LF right-angle micro-B receptacle; F.Fab body flush with the west edge (signed 0.000)",
+      "role": "host_uplink"
+    },
+    {
+      "ref": "CON2",
+      "user_facing": true,
+      "edge": "east",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "HN1x7 = straight 1x7 2.54mm header (per-pin notched silk outline, 2.54mm deep); in the NE corner, body 0.69mm from east vs 0.73mm from north -- edge_seat_rect nearest is east",
+      "role": "target_debug_header"
+    },
+    {
+      "ref": "CON1",
+      "user_facing": "unknown",
+      "edge": "east",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "WU06SM: 6 THT pads at 1.25mm pitch, silk box 9.7 x 3.2mm = the envelope of a VERTICAL 1.25mm wafer header; body 0.25mm from east. user-facing role not known",
+      "role": "aux_io"
+    }
+  ],
+  "keepouts": [],
+  "fixed": [],
+  "unknown": []
+}

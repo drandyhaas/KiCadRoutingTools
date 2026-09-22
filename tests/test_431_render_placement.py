@@ -453,7 +453,11 @@ def test_json_out_writes_a_file_with_instrument_and_checklist():
             set(m) == {'reference', 'dist'} for m in doc['moved_refs'])
         # channels are labelled -- the run-3 confusion was an unlabelled
         # two-channel disagreement
-        assert set(cl['a_off_outline']) == {'pad_copper', 'courtyard'}
+        # #962 added the footprint GRAPHIC copper channel (and what it could
+        # not measure) beside the two #937 channels.
+        assert set(cl['a_off_outline']) == {'pad_copper', 'courtyard',
+                                            'graphic_copper',
+                                            'graphic_copper_unmeasured'}
         # and the stdout line still exists for back-compat
         assert any(l.startswith('JSON_SUMMARY:')
                    for l in r.stdout.splitlines())

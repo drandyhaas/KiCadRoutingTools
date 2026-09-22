@@ -76,6 +76,7 @@ class _Recorder:
 # there are byte-for-byte these, verified over net ids -2..399 and t in [0,1],
 # so docs/fanout-cap-placement.gif is unchanged. movie_camera imports no PIL and
 # no pygame at module scope precisely so this import stays cheap here.
+from render_theme import DARK as _TH
 from movie_camera import (lerp_rect as _lerp_rect, net_color as _net_color,
                           smoothstep as _smoothstep)
 
@@ -140,7 +141,8 @@ def render_gif(recorder, out_path, size=900, sub_frames=14,
                 return [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
 
             for bb in st['bga']:                       # BGA outline
-                d.rectangle(px(bb), outline=(70, 78, 96), width=2)
+                d.rectangle(px(bb), outline=_TH.rgb('fanout_field_edge'),
+                            width=2)
             for (x, y, net) in st['balls']:            # same-net balls
                 sx, sy = tf.pt(x, y)
                 c = _net_color(net)
@@ -156,14 +158,16 @@ def render_gif(recorder, out_path, size=900, sub_frames=14,
                 d.ellipse([sx - vr, sy - vr, sx + vr, sy + vr], fill=c)
             font = load_font(max(9, size // 90))
             for ref, cap in interp.items():
-                d.rectangle(px(cap['seed_court']), outline=(52, 52, 60), width=1)
-                d.rectangle(px(cap['court']), outline=(150, 150, 165), width=1)
+                d.rectangle(px(cap['seed_court']),
+                            outline=_TH.rgb('fanout_court_seed'), width=1)
+                d.rectangle(px(cap['court']),
+                            outline=_TH.rgb('fanout_court'), width=1)
                 cx = cy = 0.0
                 for (x0, y0, x1, y1, net) in cap['pads']:
                     c = _net_color(net)
                     d.rectangle(px((x0, y0, x1, y1)), fill=c, outline=c)
                     cx, cy = tf.pt((x0 + x1) / 2, (y0 + y1) / 2)
-                d.text((cx, cy), ref, fill=(235, 235, 245), font=font,
+                d.text((cx, cy), ref, fill=_TH.rgb('fanout_label'), font=font,
                        anchor='mm')
         return _draw
 
@@ -211,7 +215,7 @@ class _PlainCanvas:
         from route_render import Transform, load_font
         self.W = self.H = size
         self.ss = 1
-        self._bg = (18, 20, 26)
+        self._bg = _TH.rgb('fanout_ground')
         self.tf = Transform(view, size, size, 40)
         self._Image, self._Draw, self._font = Image, ImageDraw, load_font
 
@@ -222,8 +226,9 @@ class _PlainCanvas:
             fn(d, self)
         if label:
             f = self._font(max(12, self.H // 55))
-            d.rectangle([3, 3, 12 + 8 * len(label), 24], fill=(0, 0, 0))
-            d.text((6, 6), label, fill=(240, 240, 240), font=f)
+            d.rectangle([3, 3, 12 + 8 * len(label), 24],
+                        fill=_TH.rgb('chrome_band'))
+            d.text((6, 6), label, fill=_TH.rgb('chrome_text'), font=f)
         return img
 
 

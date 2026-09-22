@@ -215,7 +215,10 @@ def run():
     # whose fix is not on main.
     for rel in ('py_router/kicad_oracle.py', 'py_router/plane_io.py',
                 'py_router/repair_planes.py', 'py_router/output_writer.py',
-                'py_router/kicad_writer.py'):
+                'py_router/kicad_writer.py',
+                # #962: check_join stages join copper and now carries the
+                # Type VII stamp through tenting_attrs= like every other site
+                'py_tools/check_join.py'):
         path = os.path.join(ROOT_DIR, rel)
         tree = ast.parse(open(path, encoding='utf-8').read(), rel)
         calls = [n for n in ast.walk(tree)

@@ -174,12 +174,15 @@ class GridRouteConfig:
     # #581: edge-to-edge clearance between ANY placed via and SAME-NET pads.
     # > 0 forbids via-in-pad globally: routing/tap/rescue via placement blocks
     # same-net SMD pads at this clearance, and pad-centre swap vias are
-    # declined. -1 (default) AND 0 preserve the pre-#581 behavior exactly
-    # (0 keeps only its legacy meaning where route_planes passes it explicitly
-    # into its stitching via maps). Set from route_planes
-    # --same-net-pad-clearance or the persisted .kicad_pro record
-    # (kicad_routing_tools.same_net_pad_clearance); there is deliberately no
-    # route.py/route_diff.py CLI flag.
+    # declined. #962: > 0 also keeps vias out of the net's solder-paste
+    # OPENINGS at the same clearance (graphic and paste-only openings, and pad
+    # openings larger than their pad), since a declared pad rectangle can be
+    # smaller than the paste printed around it (esp_prog U2's F.Paste tab).
+    # -1 (default) AND 0 preserve the pre-#581 behavior exactly (0 keeps only
+    # its legacy meaning where route_planes passes it explicitly into its
+    # stitching via maps). Set from --same-net-pad-clearance (route.py,
+    # route_diff.py, route_planes.py, repair_planes.py, the fanouts) or the
+    # persisted .kicad_pro record (kicad_routing_tools.same_net_pad_clearance).
     same_net_pad_clearance: float = -1.0
     # mm - copper-to-HOLE floor (KiCad's `min_hole_clearance`). 0 = not set by
     # the caller, so the obstacle builder reads the board's own constraint and

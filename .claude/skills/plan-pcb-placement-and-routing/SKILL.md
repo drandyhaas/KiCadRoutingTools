@@ -224,9 +224,24 @@ by their process: write each one's brief to `<workdir>/watch/<name>_prompt.md`
 before the first tool runs — the mtime is the evidence that the brief was not
 tailored to the outcome — then spawn ONE agent with one section per brief at the
 end, on a smaller model, fed `REPORT.md`, `cmd_timing.jsonl` and `ledger.jsonl`
-first and the raw logs only when a section names one. `tests/stress/RUNBOOK.md`
-has the mechanics; `tests/stress/run_watch.py` is the part that costs nothing to
-leave running and should be started at the beginning.
+first and the raw logs only when a section names one, into ONE file with a
+section per brief — not one file per brief, and never over a `watch/<name>.md`
+that already exists. `tests/stress/RUNBOOK.md` has the mechanics;
+`tests/stress/run_watch.py` is the part that costs nothing to leave running and
+should be started at the beginning. Since #963 its `cheats` arm no longer
+exits at `DONE`: it audits, then waits for `REPORT_DONE` so the report is
+inside the audited set, bounded by `--report-wait` (default 5400 s). Replaying
+it over a FINISHED run dir that has no `REPORT_DONE` therefore blocks unless
+you pass `--report-done ''`, which restores the old exit.
+
+**This is the only specification of the watcher mechanism, and a run prompt
+defers to it.** A run prompt names the briefs, the work dir and the subject; a
+run prompt that re-specifies the spawn count, the trigger or the model is a
+second specification, and the two have already disagreed on all three. Measured
+(run 29): four watchers were dispatched twice over, and the
+brief whose findings changed the shipped board was written by TWO instances
+onto one path — it carries its own MERGE NOTE saying so, which is what a
+second specification buys you.
 
 ### The seven criteria, MEASURED and written down
 
@@ -342,15 +357,21 @@ written out of turn.
    verdict must be reproducible from the ledger as it stood the moment before.
 5. **The `DONE` marker** — written LAST of everything a machine waits on, and
    citing only files that already exist. DONE means the copper is frozen, not
-   that the run is over: `run_watch.py cheats --done` blocks on it, runs the
-   fence and provenance audits when it appears, and then exits, so a marker
-   written early declares a run finished while its own auditors have not
-   started.
+   that the run is over: `run_watch.py cheats --done` blocks on it and runs the
+   fence and provenance audits when it appears, so a marker written early
+   declares a run finished while its own auditors have not started. It does
+   NOT exit there — it waits for the second marker below. And do not rewrite
+   it: run 29 did, 29 minutes after those audits had read the board it then
+   superseded, so both verdicts in its watcher log are about the wrong board.
 6. **The report** — `REPORT.md`, written AFTER `DONE` so it can carry the two
    verdicts that only exist by then: the fence audit's and the provenance
-   audit's, each quoted with its exit code. That makes the report the one
-   artifact the cheat watcher cannot audit, which is exactly why it quotes
-   those two verbatim instead of summarising them. And it compares on TWO axes
+   audit's, each quoted with its exit code. Then `echo done > <workdir>/
+   REPORT_DONE`: the cheat watcher used to exit at `DONE`, which made the
+   report the one artifact it could not audit; it waits for this second marker
+   now, re-runs the board audits if `DONE` changed in between, and checks that
+   the sha the report names as shipped is the sha those audits examined. Run 29
+   fails that check — its "What ships" table names a board superseded 29
+   minutes before the report was written. And the report compares on TWO axes
    or it is not a report:
    - **against the human**, when a human-routed reference exists:
      `compare_to_original.py --ours <final> --orig <reference> --json` (vias,
@@ -366,6 +387,7 @@ written out of turn.
      `--accept-residue` (`buildable`, `verdict`, `locked_contacts`, `blocking`,
      `oob_pad_count`), `--accept-unclosed` (`instruments`, `fab_floors`,
      `ungraded`, `agreement`, `verifier`), `--accept-congestion <reason>`,
+     `--accept-unclassified <reason>`,
      `converge.py record --accept-incommensurable <reason>`, and the placement
      half's `--waive <name>:<reason>`. Write `none` when none were spent. Every
      one of those names a check that REFUSED and was overridden; an unlisted
@@ -777,7 +799,7 @@ seconds, so a hundred of them is an afternoon, not a week.
 | **completion** | changes the copper: routes a net, heals a separation, fixes a width | `route.py --nets QSPI_SD1 ... --rip-existing-nets ...` |
 | **placement** | moves footprints: a quench, a repair, a reconstruction — connects nothing, tunes no instrument | `place_seed --repair`, `place_reconstruct`, a 0c quench, a loop round |
 | **systemic** | changes how the chain routes, measures or grades — no net gets connected by it | pinning the fab floor, restoring net classes, filling zones, fixing a checker |
-| **classification** | the L3 lap that DECIDES the shape of the next re-entry. It changes no board, so like `systemic` it belongs to neither half — and it had to be filed AS `systemic` before this kind existed, which made a decision look like a tool change. This skill's L3 stage produces exactly this lap | `converge.py record --kind classification --shape floorplan` |
+| **classification** | the L3 lap that DECIDES the shape of the next re-entry. It changes no board, so like `systemic` it belongs to neither half — and it had to be filed AS `systemic` before this kind existed, which made a decision look like a tool change. **It is the EVIDENCE L5 asks for (#963)**, and it is bound to a row rather than to a stage: L3 produces exactly this lap, and a diagnosis made inline produces the same row with the same two required flags — `--shape` (which of the three the next re-entry changes) and `--lever` (the measurement that named it; repeating the shape word is refused). Recording it is in neither plateau window, so it moves no verdict -- with one exception worth knowing, since the gate's own remedy is to write one: it is a ROW, so at `budget - 1` it is the row that ends the run | `converge.py record --kind classification --shape floorplan --lever "the escape faces are saturated: 11 of 12 lanes used"` |
 
 (`placement` exists because two runs had to file placement repairs as
 `systemic` for want of a kind, and `status`'s systemic-share warning cried

@@ -78,9 +78,15 @@ def test_the_verifier_is_dispatched_before_the_row_it_decides():
         'record': text.index('--final --stop-condition'),
         'done': text.index('DONE marker'),
         'report': text.index('Report LAST'),
+        # #963: the SECOND marker, and it is last for the same reason the
+        # report is -- it is what says the report has stopped moving. Run 29's
+        # cheat watcher recorded REPORT.md growing 287 -> 393 lines while it
+        # read it, and the finished file is 686.
+        'report_done': text.index('REPORT_DONE'),
     }
     order = [k for k, _ in sorted(marks.items(), key=lambda kv: kv[1])]
-    assert order == ['verifier', 'record', 'done', 'report'], (order, marks)
+    assert order == ['verifier', 'record', 'done', 'report',
+                     'report_done'], (order, marks)
     # tee_cmd wraps the record, so the wrapper must come first on that line.
     assert text.index('tee_cmd.py') < text.index('py_placer/converge.py record')
     # ...and the old instruction must be gone: it told the executor to paste a
@@ -354,6 +360,399 @@ def test_the_waiver_vocabularies_in_the_text_are_the_real_ones():
         f'{L.L2_CHECKS}. A waivers line copied from the comment omits one.')
     print(f"  PASS: five waiver channels named, and L2_CHECKS is "
           f"{len(L.L2_CHECKS)} as its comment says")
+
+
+# --- #963: the verifier's files, FOUND rather than named --------------------
+#
+# `--verifier-verdict` was passed on 0 of run 29's 7 L5 calls while 17
+# `verdict_*.txt` sat on disk, so the gate that compares a verifier's own file
+# against the record could not fire. The paths were never a mystery; they had
+# to be typed, and were not.
+#
+# The trap these cases exist for: `live` -- the per-lens map of `--final` rows
+# -- is EMPTY at the first L5 of any close-out, BY CONSTRUCTION, because that
+# stage's own text is what tells the operator to write the `--final` row (run
+# 29's two final rows are iterations 44 and 46, both after its last L5 call).
+# So a discovered file fed through the explicit flag's "no final row mentions
+# this lens" arm would print three refusals on every honest close-out.
+
+
+def _discovered(rows, files, close_verdict='DONE', name='DONE-EXHAUSTED',
+                accept=(), cycle_suffix=''):
+    """Drive discovery + `_cross_check` with NOTHING named on the command line.
+
+    `files` is {basename: line}, written into the ledger's own directory --
+    which is where `_paths` looks, and the point of the whole change.
+    """
+    import json
+    import tempfile
+    td = tempfile.mkdtemp()
+    lp = os.path.join(td, 'l.jsonl')
+    with open(lp, 'w', encoding='utf-8') as fh:
+        for i, r in enumerate(rows):
+            fh.write(json.dumps(dict(r, iteration=i)) + '\n')
+    for base, line in files.items():
+        with open(os.path.join(td, base), 'w', encoding='utf-8') as fh:
+            fh.write(line + '\n')
+
+    class A:
+        ledger = lp
+        board = None
+        verifier_verdict = None
+        accept_unclosed = list(accept) or None
+    a = A()
+    a._discovered_verdicts, a._absent_verdicts = L._discover_verdicts(a)
+    a._td = td          # so a caller can hash the file AS WRITTEN
+    doc = {'verdict': close_verdict, 'reason': 'fixture'}
+    return a, L._cross_check(a, name, doc)
+
+
+def _final(lens, verdict='PASS', blocking=0, sources=None):
+    row = {'kind': 'completion', 'accepted': True, 'final': True,
+           'score': {'blocking': blocking, 'quality': {}},
+           'lenses': ['VERDICT=%s:lens=%s' % (verdict, lens)]}
+    if sources is not None:
+        row['lens_source'] = sources
+    return row
+
+
+def test_discovery_reads_the_cycle_map_not_a_glob():
+    """Run 29's own strays: 8 of its 17 verdict files are not routing lenses.
+
+    17 is the END state -- 13 of them existed before its last L5 call and
+    four landed afterwards. The stray COUNT is what this is about and it
+    does not depend on that, but "17 sat on disk while L5 ran" would.
+
+    `legality`, `provenance`, `not-run`, `closeout` are placement-half and
+    ad-hoc verdicts, every one a well-formed VERDICT= line that no ROUTING
+    close-out should mention. A glob would have turned eight honest files into
+    eight refusals -- and `verdict_record.txt`, which IS in `_ARTIFACTS`,
+    spells `check=<1-5>` and would fire the "not a lens verdict" arm on every
+    single close-out.
+    """
+    strays = {
+        'verdict_legality.txt': 'VERDICT=FAIL:lens=legality;finding=x;evidence=y',
+        'verdict_provenance.txt': 'VERDICT=FAIL:lens=provenance;finding=x;evidence=y',
+        'verdict_notrun.txt': 'VERDICT=FAIL:lens=not-run;finding=x;evidence=y',
+        'verdict_closeout.txt': 'VERDICT=FAIL:lens=closeout;finding=x;evidence=y',
+        'verdict_record.txt': 'VERDICT=FAIL:check=3;finding=x;evidence=y',
+    }
+    a, refusal = _discovered([_final('spec')], strays)
+    seen = sorted(os.path.basename(d['path']) for d in a._discovered_verdicts)
+    assert seen == [], (
+        'discovery picked up files outside the cycle map: %s' % seen)
+    assert refusal is None, refusal
+    print("  PASS: the strays on run 29's disk are not this cycle's lenses")
+
+
+def test_discovery_does_not_refuse_a_lens_the_record_has_not_reached():
+    """The shape run 29 was in at 13:52, and the likeliest regression.
+
+    Three verdict files on disk, no `--final` row yet -- which is every
+    close-out's first L5. Feeding these through the explicit flag's arm would
+    print three refusals about a record this very stage is about to ask for.
+    """
+    files = {'verdict_connectivity.txt': 'VERDICT=PASS:lens=connectivity',
+             'verdict_drc.txt': 'VERDICT=PASS:lens=drc',
+             'verdict_spec.txt': 'VERDICT=PASS:lens=spec'}
+    a, refusal = _discovered([], files)
+    assert len(a._discovered_verdicts) == 3, a._discovered_verdicts
+    assert refusal is None, (
+        'a discovered verdict with no ledger claim yet was refused:\n'
+        + str(refusal)[:400])
+    print("  PASS: a file the record has not reached yet is not a contradiction")
+
+
+def test_an_explicit_flag_still_refuses_a_verdict_the_record_never_carries():
+    """The row that proves the arm was NARROWED, not deleted.
+
+    Naming a file is the operator's claim that its verdict is already on the
+    record; finding one is evidence that the record is not written yet. Those
+    are different questions and they must not share a refusal.
+    """
+    out = _cross([_final('spec')],
+                 verdict_files=[('drc', 'VERDICT=PASS:lens=drc')])
+    assert out and 'never reached' in out, out
+    print("  PASS: an explicitly named verdict still needs a row behind it")
+
+
+def test_the_honest_fix_and_re_dispatch_path_is_not_refused():
+    """The regression a first cut of #963 shipped, and why it is a NOTE now.
+
+    L5's own refusal text says "fix what the close-out names and re-score,
+    re-dispatch the lens that disagrees". Walk that: the ledger holds a
+    `--final` row carrying the OLD verdict while the re-dispatched file on
+    disk carries the new one. Refusing that pair refuses the remedy, and the
+    refusal did not even carry the `record --final` command that would clear
+    it.
+
+    The premise it rested on -- "live is empty at the first L5" -- is true of
+    a run with ONE close-out and false of any run that corrected itself:
+    wk/run25/esp_prog/ledger.jsonl has three `final: True` rows.
+    """
+    files = {'verdict_spec.txt': 'VERDICT=PASS:lens=spec'}
+    rows = [_final('spec', verdict='FAIL')]
+    a, refusal = _discovered(rows, files, close_verdict='INCOMPLETE',
+                             name='STUCK')
+    assert refusal is None, (
+        'the fix-and-re-dispatch path was refused:\n' + str(refusal)[:400])
+    notes = '\n'.join(a._discovered_notes)
+    assert 'the record is behind the file' in notes, notes
+    print("  PASS: a re-dispatched lens is reported, not refused")
+
+
+def test_a_file_whose_bytes_changed_after_the_row_quoted_it_is_reported():
+    """Freshness by CONTENT, never by mtime.
+
+    `--deadline` was removed from this toolchain because no result may depend
+    on timing, and mtime is measurably unreliable on these very artifacts: run
+    29's DONE marker reports an mtime 29 minutes after it was first written.
+    The row already stores each lens file's sha256, so the honest question is
+    whether the bytes are the ones it quoted.
+    """
+    files = {'verdict_drc.txt': 'VERDICT=PASS:lens=drc'}
+    src = [{'path': 'verdict_drc.txt', 'sha256': 'f' * 64, 'line': 1}]
+    a, refusal = _discovered([_final('drc', sources=src)], files)
+    assert refusal is None, refusal
+    notes = '\n'.join(a._discovered_notes)
+    assert 'quoted it at sha' in notes and 'it is' in notes, notes
+    # ...and the SAME row with the real sha is not a finding. The digest is
+    # read off the file AS WRITTEN rather than computed from the string: the
+    # helper writes in text mode, so on Windows those bytes carry CRLF and a
+    # hand-computed sha is a different file's.
+    import hashlib
+    with open(os.path.join(a._td, 'verdict_drc.txt'), 'rb') as _fh:
+        real = hashlib.sha256(_fh.read()).hexdigest()
+    src_ok = [{'path': 'verdict_drc.txt', 'sha256': real, 'line': 1}]
+    _a2, ok = _discovered([_final('drc', sources=src_ok)], files)
+    assert ok is None, ok
+    assert not [n for n in _a2._discovered_notes if 'quoted it at sha' in n], \
+        _a2._discovered_notes
+
+    # ...and a row quoting a file of the SAME NAME in ANOTHER DIRECTORY is not
+    # this file. Matching on basename alone called it "this same file"; run
+    # 24's layout puts the lens files in a per-turn subdirectory, so that is
+    # not hypothetical. `lens_source.abspath` exists for exactly this and was
+    # unread.
+    _a3, other = _discovered(
+        [_final('drc', sources=[{'path': 'turn1/verdict_drc.txt',
+                                 'abspath': '/elsewhere/turn1/verdict_drc.txt',
+                                 'sha256': 'f' * 64, 'line': 1}])], files)
+    assert other is None, other
+    assert not [n for n in _a3._discovered_notes if 'quoted it at sha' in n], (
+        'a file in another directory was called "this same file": '
+        + str(_a3._discovered_notes))
+    print("  PASS: bytes that moved are named; another directory's are not")
+
+
+def test_a_discovered_fail_beside_two_finished_instruments_refuses():
+    """The one arm discovery gets that needs no --final row.
+
+    Without it, discovery reports and never binds, which is decoration.
+    Calibration: this would NOT have fired on run 29, whose stop was condition
+    4 and whose close-out was not DONE -- its defect was that nobody read the
+    files, not that the files lied.
+    """
+    files = {'verdict_drc.txt': 'VERDICT=FAIL:lens=drc;finding=short;evidence=x'}
+    _a, refusal = _discovered([], files, close_verdict='DONE',
+                              name='DONE-EXHAUSTED')
+    assert refusal and 'on disk beside them' in refusal, refusal
+    # and NOT on a run that is not claiming to be finished
+    _a2, ok = _discovered([], files, close_verdict='INCOMPLETE', name='STUCK')
+    assert ok is None, ok
+    print("  PASS: a FAIL on disk beside DONE + DONE binds; STUCK does not")
+
+
+def test_the_terminal_text_reports_found_and_absent():
+    """Both words, not either.
+
+    `tests/test_431_skill_commands.py:1152` records a pin written as an `or`
+    of two phrases, which passed with either one deleted. A report that names
+    only what it found reads as a clean bill when three files are missing.
+
+    Asserted on `--dump-all`, which RENDERS the arm, rather than on the source:
+    counting an f-string in the file proves the call site exists and says
+    nothing about whether a reader ever sees the line.
+    """
+    import subprocess
+    import sys as _sys
+    driver = os.path.join(SCRIPTS, 'loop_driver.py')
+    r = subprocess.run([_sys.executable, '-X', 'utf8', driver, '--dump-all'],
+                       capture_output=True, text=True, encoding='utf-8',
+                       errors='replace', cwd=ROOT, timeout=900)
+    assert r.returncode == 0, r.stderr[-400:]
+    assert 'VERDICT FILES' in r.stdout, 'the discovery report is not rendered'
+    # ON THE REPORT LINE, not anywhere in the dump. Asserting `'found' in
+    # r.stdout` passed with the found half DELETED, because "found" appears
+    # five more times in the surrounding prose -- the same or-shaped pin this
+    # docstring cites test_431 for, rebuilt one line lower.
+    line = [ln for ln in r.stdout.splitlines() if 'VERDICT FILES' in ln][0]
+    assert 'FOUND' in line, ('the report names no found half: ' + line)
+    assert 'ABSENT' in line, ('the report names no absent half: ' + line)
+    assert 'cycle' in line, (
+        'the cycle number is what makes a misnamed _c<n> file visible; '
+        '_paths takes the highest of the ledger index and what is on disk: '
+        + line)
+    print("  PASS: the report LINE names found, absent and the cycle")
+
+
+def test_l5_itself_discovers_the_files_with_nothing_named():
+    """Through the real stage, because `_cross_check` alone proves too little.
+
+    A mutation battery measured four rows SURVIVING every gate here --
+    including `_discover_verdicts` returning nothing at all, and discovery
+    writing into `a.verifier_verdict` -- because every test drove
+    `_cross_check` with a hand-built namespace. Nothing asserted that l5
+    CALLS discovery, which is the claim the whole change rests on.
+    """
+    import json as _json
+    import tempfile as _tf
+    td = _tf.mkdtemp()
+    board = os.path.join(td, 'b.kicad_pcb')
+    with open(board, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb)\n')
+    sys.path.insert(0, ROOT)
+    from board_store import sha256_file
+    sha = sha256_file(board)
+    led = os.path.join(td, 'l.jsonl')
+    row = {'kind': 'completion', 'accepted': True, 'result_sha': sha,
+           'score': {'blocking': 0, 'quality': {}}}
+    with open(led, 'w', encoding='utf-8') as fh:
+        for i, r in enumerate([dict(row, kind='placement')] * 6 + [row] * 6):
+            fh.write(_json.dumps(dict(r, iteration=i)) + '\n')
+    score = os.path.join(td, 's.json')
+    with open(score, 'w', encoding='utf-8') as fh:
+        _json.dump({'blocking': 0, 'quality': {}, 'ungraded': [],
+                    'board_sha': sha}, fh)
+    for lens in ('connectivity', 'drc'):
+        with open(os.path.join(td, f'verdict_{lens}.txt'), 'w',
+                  encoding='utf-8') as fh:
+            fh.write(f'VERDICT=PASS:lens={lens}\n')
+
+    close = os.path.join(td, 'c.json')
+    with open(close, 'w', encoding='utf-8') as fh:
+        _json.dump({'schema': 1, 'kind': 'board-complete', 'board': board,
+                    'score': {'blocking': 0},
+                    'components': {'orphan_stubs': {'ran': True}},
+                    'fab_floors': {'ran': True, 'relaxed': []},
+                    'verdict': 'DONE', 'reason': 'fixture', 'ungraded': []}, fh)
+    a = L._args(['--stage', 'L5', '--board', board, '--ledger', led,
+                 '--score', score, '--routing-close', close])
+    out = L.STAGES['L5'](a)
+    assert getattr(a, '_discovered_verdicts', None), (
+        'l5 did not call discovery at all -- every other test here drives '
+        '_cross_check with a hand-built namespace and cannot see that')
+    found = sorted(os.path.basename(d['path'])
+                   for d in a._discovered_verdicts)
+    assert found == ['verdict_connectivity.txt', 'verdict_drc.txt'], found
+    assert a.verifier_verdict is None, (
+        'discovery filled --verifier-verdict, so every refusal will name a '
+        'flag nobody passed')
+    assert 'VERDICT FILES' in out, out[:400]
+    assert 'spec' in out.split('VERDICT FILES', 1)[1][:200], (
+        'the absent lens is not named: ' + out.split('VERDICT FILES', 1)[1][:200])
+    print("  PASS: the real stage discovers, reports, and names the absent one")
+
+
+def test_the_verifier_waiver_covers_discovered_files_too():
+    """One vocabulary per gate, and the discovered files are that gate's."""
+    files = {'verdict_drc.txt': 'VERDICT=FAIL:lens=drc;finding=x;evidence=y'}
+    _a, refusal = _discovered([], files)
+    assert refusal, 'the fixture stopped refusing; this test now proves nothing'
+    _a2, waived = _discovered([], files, accept=('verifier',))
+    assert waived is None, waived
+    _a3, other = _discovered([], files, accept=('agreement',))
+    assert other, ('--accept-unclosed agreement cleared the verifier bucket, '
+                   'which is the compounding hazard the two tokens were split '
+                   'apart for')
+    print("  PASS: the verifier waiver covers them and the agreement one does not")
+
+
+def test_the_report_reaches_the_CONTINUE_branch_too():
+    """The branch the measured run actually took, on every call it made.
+
+    The first cut printed the verdict-file report on the terminal branch
+    alone, to keep prose off the hot path. Read off run 29's own
+    `cmd_timing.jsonl`, its seven L5 calls were: one exit-2 argparse error,
+    THREE `not done yet` (this branch), one `close out: STUCK`, one exit-4
+    refusal and one `close out: DONE-EXHAUSTED`. So the report would have
+    been absent from three of the seven and from every call before 12:56 --
+    not from all of them, as a first draft of this said. A round-2 verifier
+    measured the branch itself: three discovered files, three notes computed,
+    and `VERDICT FILES` nowhere in the text.
+
+    Asserted through the REAL stage, and on the NOTES as well as the header,
+    because the notes are what carries a disagreement -- a header with no
+    notes is a report that found nothing to say.
+    """
+    import json as _json
+    import tempfile as _tf
+    td = _tf.mkdtemp()
+    board = os.path.join(td, 'b.kicad_pcb')
+    with open(board, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb)\n')
+    sys.path.insert(0, ROOT)
+    from board_store import sha256_file
+    sha = sha256_file(board)
+    led = os.path.join(td, 'l.jsonl')
+    # ONE routing lap, so the unclassified-retry gate does not fire first --
+    # this test is about the report, and a refusal would hide it.
+    rows = [{'kind': 'placement', 'accepted': True, 'result_sha': sha,
+             'score': {'blocking': 2, 'quality': {}}},
+            {'kind': 'completion', 'accepted': True, 'result_sha': sha,
+             'score': {'blocking': 2, 'quality': {}}},
+            {'kind': 'completion', 'accepted': True, 'final': True,
+             'result_sha': sha, 'score': {'blocking': 2, 'quality': {}},
+             'lenses': ['VERDICT=PASS:lens=drc']}]
+    with open(led, 'w', encoding='utf-8') as fh:
+        for i, r in enumerate(rows):
+            fh.write(_json.dumps(dict(r, iteration=i)) + '\n')
+    score = os.path.join(td, 's.json')
+    with open(score, 'w', encoding='utf-8') as fh:
+        _json.dump({'blocking': 2, 'quality': {}, 'ungraded': [],
+                    'board_sha': sha}, fh)
+    # The file on disk says FAIL where iteration 2 recorded PASS: a NOTE, not
+    # a refusal, because "fix it and re-dispatch" is the honest path.
+    with open(os.path.join(td, 'verdict_drc.txt'), 'w', encoding='utf-8') as fh:
+        fh.write('VERDICT=FAIL:lens=drc;finding=x;evidence=y\n')
+    a = L._args(['--stage', 'L5', '--board', board, '--ledger', led,
+                 '--score', score])
+    out = L.STAGES['L5'](a)
+    assert not out.startswith('<error>'), (
+        'the fixture refused, so it proves nothing about the report:\n'
+        + out[:500])
+    assert 'not done yet' in out, out[:200]
+    assert 'VERDICT FILES' in out, (
+        'the CONTINUE branch printed no report -- which is every L5 call run '
+        '29 made:\n' + out[:800])
+    assert 'verdict_drc.txt' in out, out[:800]
+    assert 'NOTE' in out and 'the record is behind the file' in out, (
+        'the header reached CONTINUE and the notes did not, so a real '
+        'disagreement is still invisible on the hot branch:\n' + out[:900])
+    print("  PASS: the CONTINUE branch reports what was found and what it says")
+
+
+def test_a_file_named_for_one_lens_that_speaks_for_another_is_named():
+    """`expected` was stored by discovery and read by nobody.
+
+    `verdict_drc.txt` carrying `VERDICT=PASS:lens=spec` means the cycle map
+    went looking for `drc` and got a file that answers a different question --
+    so `drc` is covered by NOTHING, while a reader counting files sees three
+    of three. A verifier mutated the `expected` comparison away and every test
+    passed.
+    """
+    files = {'verdict_drc.txt': 'VERDICT=PASS:lens=spec'}
+    a, refusal = _discovered([], files, close_verdict='INCOMPLETE',
+                             name='STUCK')
+    notes = '\n'.join(a._discovered_notes)
+    assert 'names lens spec, not drc' in notes, notes or '(no notes at all)'
+    assert 'covered by no file' in notes, notes
+    # ...and the honest case stays quiet.
+    _a2, _ = _discovered([], {'verdict_drc.txt': 'VERDICT=PASS:lens=drc'},
+                         close_verdict='INCOMPLETE', name='STUCK')
+    assert not [n for n in _a2._discovered_notes if 'names lens' in n], \
+        _a2._discovered_notes
+    print("  PASS: a file answering a different lens is named as a gap")
 
 
 if __name__ == '__main__':

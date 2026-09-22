@@ -105,6 +105,35 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
         body_model=body_model)
 
 
+class PoseUnrankable(KeyError):
+    """A ref `rank_poses` cannot rank, with the reason and the exit code a CLI
+    should use (#959, #999).
+
+    It was a bare `KeyError`, and `converge poses` has no handler, so a
+    pad-less logo block exited 1 through a traceback -- the SAME code as the
+    verdict "no legal pose, including staying put". A crash and a verdict must
+    not share a code.
+
+    `code` follows `pose_ops.PoseRefusal`: 2 when the ref names nothing on this
+    board (a typo the caller fixes by rewriting the command), 4 when it names a
+    real block the placement state cannot move (a measurement the caller acts
+    on). Still a `KeyError` subclass, so a caller that caught the old error
+    keeps working; `__str__` is the plain reason rather than KeyError's quoted
+    repr.
+    """
+
+    def __init__(self, reason: str, code: int, why: str = ''):
+        super().__init__(reason)
+        self.reason = reason
+        self.code = code
+        #: The bare cause, without the advice `reason` appends -- a caller
+        #: that is itself `place_pose set` must not be told to run it.
+        self.why = why or reason
+
+    def __str__(self):
+        return self.reason
+
+
 def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
                step: float = 0.5, rotations: Sequence[float] = ROTATIONS,
                limit: int = 12, allow_rotations: bool = True,
@@ -129,7 +158,17 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     st = state if state is not None else make_state(pcb_data, board_path, **state_kw)
     part = st.parts.get(ref) if hasattr(st, 'parts') else None
     if part is None:
-        raise KeyError(f"{ref} is not a movable part on this board")
+        fp = (getattr(pcb_data, 'footprints', None) or {}).get(ref)
+        if fp is None:
+            raise PoseUnrankable(
+                f"{ref} is not a footprint block on this board", code=2,
+                why='it is not a footprint block on this board')
+        why = ('it has no pads and no courtyard, so the placement state '
+               'carries no geometry for it' if not fp.pads else
+               'the placement state does not carry it as a movable part')
+        raise PoseUnrankable(
+            f"{ref} cannot be ranked: {why}. Place it with `place_pose set` "
+            f"and lock it", code=4, why=why)
 
     x0, y0, rot0 = part.x, part.y, part.rot
     # total_cost() returns the objective AND its components (length, crossings,

@@ -84,6 +84,13 @@ _UNMATCHABLE = (
 #: memory and the gate rejected 7 of its 15 rows as invented qualnames and 2
 #: more as wrong counts, which is the table doing its job on its own author.
 _DECLARED = {
+    # -- #959 (#998): the plan check's EDGE bound reads the PAD extent of one
+    #    part in its own frame, the pad-bbox rung on purpose. It refuses a
+    #    plan, so it must read copper: a flange or courtyard may overhang an
+    #    edge's corners legitimately (sonde_u J1's DSUB).
+    (os.path.join('py_placer', 'placement', 'floorplan.py'),
+     'plan_check'): (1, 'the edge bound measures PADS in the part frame, '
+                     'not a body -- the refusal must read copper'),
     # -- goes through the model; the call here is not a ladder.
     (os.path.join('py_placer', 'placement', 'legality.py'),
      'part_local_bounds'): (1, 'the +/-0.5mm fiction for a part the model '

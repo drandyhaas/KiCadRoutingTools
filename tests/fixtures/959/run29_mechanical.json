@@ -1,0 +1,44 @@
+{
+ "kind": "mechanical-declaration",
+ "note": "the ONLY poses carried over from the source. Everything else is at the board centre at rotation 0. A run may read this; it is an input, not a leak, BECAUSE it is written down. `project` names the floors the run will be graded at, for the same reason.",
+ "project": {
+  "carried": false,
+  "dropped_prl": false,
+  "floors": {
+   "board_edge_clearance": {
+    "source": "fixed default",
+    "value": 0.55
+   },
+   "clearance": {
+    "source": "fixed default",
+    "value": 0.25
+   }
+  },
+  "kicad_dru": false,
+  "kicad_prl": false,
+  "sanitized_keys": []
+ },
+ "reasons": {
+  "Ref*": "fiducial (confidence medium): its position is a mechanical fact a real new board would already know",
+  "Ref*~2": "fiducial (confidence medium): its position is a mechanical fact a real new board would already know",
+  "USB1": "edge_receptacle (confidence medium): its position is a mechanical fact a real new board would already know"
+ },
+ "refs": {
+  "Ref*": [
+   141.2,
+   95.9,
+   0.0
+  ],
+  "Ref*~2": [
+   118.1,
+   99.9,
+   0.0
+  ],
+  "USB1": [
+   117.5,
+   100.0,
+   180.0
+  ]
+ },
+ "schema": 1
+}

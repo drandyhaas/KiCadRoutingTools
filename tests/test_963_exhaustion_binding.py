@@ -1,0 +1,351 @@
+"""An exhaustion is a claim about the board its own row names (#963).
+
+Run 29 recorded `--exhausted placement` against a board that existed for eight
+minutes: `ov-restore-frozen` overwrote `frozen.kicad_pcb` at 12:59:45, three
+minutes and 41 seconds after
+the row was written, and the claim then outlived its board and survived three
+L5 calls into the run's terminal record. Row 30 retracted rows 25-27 and not
+row 29.
+
+The contributor's follow-up reproduced it on two tracked fixtures -- declare on
+`tigard_placed`, re-record `tigard_damaged` as a systemic replacement, and the
+half stays `declared-exhausted` with the verdict STUCK. `_declaration` read row
+ORDER only, and `_is_lap` (correctly) says a `systemic` row is a lap of neither
+half, so nothing retracted it and nothing noticed the board had changed.
+
+WHAT IS NOT DONE HERE, and why, because the obvious fix is the wrong one:
+
+  * `flat` and `why` DO NOT CHANGE. "Any digest change invalidates" -- the
+    follow-up's own "safe initial implementation" -- is inert-making. Every
+    accepted lap of EITHER half writes a new sha, so a placement exhaustion
+    would die on the next routing lap although routing copper says nothing
+    about placement's remaining levers. Worse, the L2 freeze row changes the
+    sha BY CONSTRUCTION ("new file, new content hash") while
+    `test_904_not_a_lap::test_a_declaration_survives_a_freeze_and_a_close_out`
+    pins that a freeze must not retract. A sha cannot tell "rewrote the file,
+    same poses" from "replaced the placement", and `verdict` opens no board.
+  * So converge REPORTS: `declared_stale_board` is named on every verdict,
+    with the `step-back` command that recovers the board the claim was about.
+    It does NOT gate the ship. A first cut did, and a verifier measured that
+    refusal firing on the chain's own prescribed ordering -- see
+    `test_the_ship_is_not_gated_on_the_board_having_moved`, which exists so it
+    is not re-added as an obvious improvement.
+  * The REFUSALS are where the claim can be judged: `record` refuses a
+    declaration whose score grades another board, and a later lap of the half
+    retracts it with no flag at all.
+  * No new `exhausted.board_sha` field. Every row already carries `result_sha`
+    from `store.put(a.board)` and `--board` is required, so the binding is on
+    disk on every ledger ever written. A second number for one fact would be
+    absent on all of them.
+
+`tests/test_converge.py` keeps the exhaustion ROUND-TRIP (declare, plateau,
+retract by running the half again). This file is only about the board binding.
+The arithmetic over hand-built rows is in `tests/test_904_not_a_lap.py`, which
+owns that idiom; everything here goes through the real CLI.
+"""
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+RUN_ALL_TIMEOUT = 600
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
+import run_utils                                              # noqa: E402
+
+CV = os.path.join(ROOT, 'py_placer', 'converge.py')
+PLACED = os.path.join(ROOT, 'tests', 'fixtures', 'run23',
+                      'tigard_placed.kicad_pcb')
+DAMAGED = os.path.join(ROOT, 'tests', 'fixtures', 'run23',
+                       'tigard_damaged.kicad_pcb')
+
+
+def _cv(args):
+    return subprocess.run([sys.executable, '-X', 'utf8', CV] + args,
+                          capture_output=True, text=True, encoding='utf-8',
+                          errors='replace', cwd=ROOT)
+
+
+def _argv(args):
+    return [sys.executable, '-X', 'utf8', CV] + args
+
+
+def _sha_of(path):
+    from board_store import sha256_file
+    return sha256_file(path)
+
+
+def _score(td, name, **kw):
+    p = os.path.join(td, name)
+    doc = {'blocking': 0, 'quality': {}, 'ungraded': []}
+    doc.update(kw)
+    with io.open(p, 'w', encoding='utf-8') as fh:
+        json.dump(doc, fh)
+    return p
+
+
+def _rows(led):
+    return [json.loads(x) for x
+            in io.open(led, encoding='utf-8').read().splitlines() if x.strip()]
+
+
+def test_a_declaration_does_not_survive_the_board_it_was_made_about():
+    """#963's acceptance line 2, on the contributor's own two fixtures."""
+    run_utils.evidence(PLACED)
+    run_utils.evidence(DAMAGED)
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        r = _cv(['record', '--ledger', led, '--board', PLACED,
+                 '--kind', 'systemic', '--exhausted', 'placement',
+                 '--exhausted-reason',
+                 'AUDIT TEST: every lever spent on the placed fixture'])
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)['result_sha'] == _sha_of(PLACED), \
+            'the binding is result_sha, and it has always been on the row'
+
+        # The board is replaced, exactly as the follow-up did it.
+        assert _cv(['record', '--ledger', led, '--board', DAMAGED,
+                    '--kind', 'systemic',
+                    '--lever', 'AUDIT TEST: systemic board replacement']
+                   ).returncode == 0
+
+        sp = _score(td, 's.json', board_sha=_sha_of(DAMAGED))
+        doc = json.loads(_cv(['verdict', '--ledger', led,
+                              '--score', sp]).stdout)
+        st = doc['placement']
+        assert st['declared_board'] == _sha_of(PLACED), st
+        assert st['declared_stale_board'] == _sha_of(PLACED), (
+            'the declaration outlived its board and nothing said so: ' + str(st))
+        assert doc['board_sha'] == _sha_of(DAMAGED), doc['board_sha']
+        assert doc['board_sha_source'] == 'score', doc['board_sha_source']
+        assert 'DECLARED ABOUT ANOTHER BOARD' in doc['reason'], doc['reason']
+        assert st['why'] == 'declared-exhausted', (
+            'reporting must not retract: a sha cannot tell a rewritten file '
+            'from a replaced placement -- ' + str(st))
+    print("  PASS: a declaration about another board is named on the verdict")
+
+
+def test_board_comes_from_the_score_or_from_board_and_says_which():
+    """`--board` is the second channel, for a score with no board_sha.
+
+    #694: an aggregate verdict cannot say which of its inputs moved, so the
+    input is published beside the answer.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        assert _cv(['record', '--ledger', led, '--board', PLACED,
+                    '--kind', 'systemic', '--exhausted', 'placement',
+                    '--exhausted-reason', 'AUDIT TEST']).returncode == 0
+        sp = _score(td, 's.json')                       # no board_sha at all
+
+        doc = json.loads(_cv(['verdict', '--ledger', led,
+                              '--score', sp]).stdout)
+        assert doc['board_sha'] is None, doc['board_sha']
+        assert doc['board_sha_source'] is None, doc['board_sha_source']
+        assert 'declared_stale_board' not in doc['placement'], (
+            'unanswerable must invalidate nothing -- every hand-built score '
+            'in the suite lacks board_sha')
+
+        doc = json.loads(_cv(['verdict', '--ledger', led, '--score', sp,
+                              '--board', DAMAGED]).stdout)
+        assert doc['board_sha'] == _sha_of(DAMAGED), doc['board_sha']
+        assert doc['board_sha_source'] == '--board', doc['board_sha_source']
+        assert doc['placement']['declared_stale_board'] == _sha_of(PLACED)
+    print("  PASS: the binding names the input it came from, or says null")
+
+
+def test_verdict_refuses_a_board_its_score_does_not_grade():
+    """Both channels given and disagreeing is not a verdict to hand anyone."""
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        assert _cv(['record', '--ledger', led, '--board', PLACED,
+                    '--kind', 'placement', '--lever', 'a lap']).returncode == 0
+        sp = _score(td, 's.json', board_sha=_sha_of(PLACED))
+        run_utils.check(_argv(['verdict', '--ledger', led, '--score', sp,
+                               '--board', DAMAGED]),
+                        refuse='disagree about which board', code=2)
+    print("  PASS: --board and --score disagreeing is refused, not judged")
+
+
+def test_record_refuses_a_stale_score_on_a_declaration_and_warns_otherwise():
+    """The two strengths side by side, so neither drifts onto the other.
+
+    An ordinary row keeps the WARNING -- a baseline row legitimately attaches a
+    parent score to a rejected candidate, which `test_converge.py::
+    test_record_warns_on_unbound_or_mismatched_score` pins. A declaration has
+    no such case: its whole content is "this board's half has nothing left", so
+    numbers taken on another board are not weak evidence for it, they are
+    evidence about something else.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        stale = json.dumps({'blocking': 0, 'quality': {}, 'ungraded': [],
+                            'board_sha': _sha_of(DAMAGED)})
+
+        r = _cv(['record', '--ledger', led, '--board', PLACED,
+                 '--kind', 'completion', '--lever', 'a baseline attachment',
+                 '--rejected', '--score', stale])
+        assert r.returncode == 0, r.stderr
+        assert 'DIFFERENT board' in r.stderr, r.stderr
+        row = json.loads(r.stdout)
+        assert row['score_stale']['binding'] == 'other', row.get('score_stale')
+        assert row['score_stale']['payload_sha'] == _sha_of(DAMAGED)
+
+        run_utils.check(
+            _argv(['record', '--ledger', led, '--board', PLACED,
+                   '--kind', 'systemic', '--exhausted', 'placement',
+                   '--exhausted-reason', 'AUDIT TEST', '--score', stale]),
+            refuse='grades a DIFFERENT board', code=2)
+        assert len(_rows(led)) == 1, (
+            'the refused declaration was written anyway: ' + repr(_rows(led)))
+    print("  PASS: a declaration refuses a foreign score; a baseline row warns")
+
+
+def test_the_stale_attachment_is_on_the_row_not_only_on_stderr():
+    """Nothing reads `score_stale` yet, and that is deliberate.
+
+    Making `_score_key` or `_half_state` skip such a row would move plateau
+    windows on every ledger already written -- a large behaviour change to hide
+    inside a "just record it" line. What it fixes now is that a later reader
+    could not tell a warned row from a clean one at all.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        r = _cv(['record', '--ledger', led, '--board', PLACED,
+                 '--kind', 'placement', '--lever', 'no sha at all',
+                 '--score', json.dumps({'blocking': 0, 'quality': {}})])
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)['score_stale']['binding'] == 'unbound'
+
+        r = _cv(['record', '--ledger', led, '--board', PLACED,
+                 '--kind', 'placement', '--lever', 'bound correctly',
+                 '--score', json.dumps({'blocking': 0, 'quality': {},
+                                        'board_sha': _sha_of(PLACED)})])
+        assert r.returncode == 0, r.stderr
+        assert 'score_stale' not in json.loads(r.stdout), \
+            'a correctly bound row must not be labelled'
+    print("  PASS: an unbound or foreign score is labelled on its own row")
+
+
+def test_the_ship_is_not_gated_on_the_board_having_moved():
+    """The refusal this change deliberately does NOT make, and why.
+
+    A first cut refused the terminal close-out whenever a live declaration's
+    board was not the shipping board. An adversarial verifier measured it
+    firing on the chain's OWN prescribed ordering: declare placement, then run
+    the routing laps L2 prescribes, and the ship is refused -- because the L2
+    freeze writes "a new file, new content hash" by construction. It also
+    fired at BUDGET with one half not flat. That is "any digest change
+    invalidates" applied at the ship, which is the rule this very change
+    argues is inert-making everywhere else.
+
+    So the staleness is REPORTED, loudly, on every verdict, and the refusals
+    live where the claim can actually be judged: `record` refuses a declaration
+    whose score grades another board, and a later lap of the half retracts it.
+    This test exists so the refusal is not re-added as an obvious improvement.
+    """
+    scripts = os.path.join(ROOT, '.claude', 'skills',
+                           'plan-pcb-placement-and-routing', 'scripts')
+    sys.path.insert(0, scripts)
+    import loop_driver as L
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        rows = [
+            {'kind': 'systemic', 'accepted': True, 'result_sha': 'f' * 64,
+             'exhausted': {'half': 'placement', 'reason': 'levers spent'}},
+            {'kind': 'systemic', 'accepted': True, 'result_sha': 'f' * 64,
+             'exhausted': {'half': 'routing', 'reason': 'parity-fixed'}},
+        ]
+        with io.open(led, 'w', encoding='utf-8') as fh:
+            for i, r in enumerate(rows):
+                fh.write(json.dumps(dict(r, iteration=i)) + '\n')
+        sp = _score(td, 's.json', board_sha=_sha_of(PLACED))
+        doc = json.loads(_cv(['verdict', '--ledger', led, '--score', sp]).stdout)
+        assert doc['placement']['declared_stale_board'] == 'f' * 64, doc
+        assert 'DECLARED ABOUT ANOTHER BOARD' in doc['reason'], doc['reason']
+        out = L.STAGES['L5'](L._args(
+            ['--board', PLACED, '--ledger', led, '--score', sp]))
+        assert 'DECLARED EXHAUSTED about a different board' not in out, (
+            'the ship was gated on a digest change again:\n' + out[:500])
+    print("  PASS: the staleness is reported; the ship is not gated on it")
+
+
+def test_a_declaration_is_not_retracted_by_the_board_moving_on():
+    """The anti-"any digest change" case, through the real CLI.
+
+    Declare placement exhausted, then record five ROUTING laps -- each of which
+    writes a new board and a new sha, which is what a routing lap IS. Under
+    "any digest change invalidates", the placement declaration dies here.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        assert _cv(['record', '--ledger', led, '--board', PLACED,
+                    '--kind', 'systemic', '--exhausted', 'placement',
+                    '--exhausted-reason', 'AUDIT TEST: levers spent']
+                   ).returncode == 0
+        for i in range(5):
+            b = DAMAGED if i % 2 else PLACED       # the board keeps changing
+            assert _cv(['record', '--ledger', led, '--board', b,
+                        '--kind', 'completion', '--lever', 'routing lap ' + str(i),
+                        '--score', json.dumps({'blocking': 0, 'quality': {},
+                                               'ungraded': [],
+                                               'board_sha': _sha_of(b)})]
+                       ).returncode == 0, 'routing lap ' + str(i)
+        sp = _score(td, 's.json', board_sha=_sha_of(DAMAGED))
+        doc = json.loads(_cv(['verdict', '--ledger', led,
+                              '--score', sp]).stdout)
+        st = doc['placement']
+        assert st['why'] == 'declared-exhausted', (
+            'five routing laps retracted a PLACEMENT declaration -- routing '
+            'copper says nothing about placement levers: ' + str(st))
+        assert 'declared_superseded' not in st, st
+    print("  PASS: the board moving on does not retract the other half")
+
+
+
+def test_a_declaration_with_no_board_of_its_own_says_so():
+    """"Nobody could look" is not "it matched", and the verdict must say which.
+
+    A hand-built or pre-#963 declaration carries no `result_sha`, so the
+    stale-board finding cannot be computed for it. Failing OPEN is right --
+    nothing can be judged -- but failing open in SILENCE gives the reader the
+    same absent key as a declaration that was checked and matched. A verifier
+    mutated the reader away and every test still passed, because the write
+    site had one and the read site had none.
+    """
+    import converge as C
+    rows = [{'iteration': 0, 'kind': 'placement', 'accepted': True,
+             'score': {'blocking': 2, 'quality': {}},
+             'exhausted': {'half': 'placement', 'reason': 'no levers left'}}]
+    st = C._half_state(rows, 'placement', 5, board_sha='a' * 64)
+    assert st.get('why') == 'declared-exhausted', st
+    assert st.get('declared_board_unknown') is True, (
+        'a declaration carrying no result_sha reported nothing at all: '
+        + str(st))
+    assert 'declared_stale_board' not in st, st
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'unk.jsonl')
+        with io.open(led, 'w', encoding='utf-8') as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + '\n')
+        out = _cv(['verdict', '--ledger', led, '--score',
+                   _score(td, 'sc.json', blocking=2), '--board', PLACED])
+        both = out.stdout + out.stderr
+        assert 'carries NO board of its own' in both, (
+            'the verdict never says the binding could not be checked:\n'
+            + both[:900])
+    print("  PASS: an unbindable declaration is disclosed, not silently open")
+
+
+if __name__ == '__main__':
+    run_utils.evidence(PLACED)
+    run_utils.evidence(DAMAGED)
+    for k, v in sorted(globals().items()):
+        if k.startswith('test_'):
+            print("--- " + k)
+            v()
+    print("ALL PASS")

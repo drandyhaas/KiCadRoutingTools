@@ -56,21 +56,43 @@ from kicad_parser import parse_kicad_pcb
 # `startup_checks.check_render_dependencies()` at ITS module scope, and every
 # draw path here reaches Pillow through `route_render`.
 
-# --- palette (OmniLayout's categories: outline / THT / top SMD / back SMD) ----
-C_COURT_F = (150, 152, 168)     # front courtyard
-C_COURT_B = (108, 132, 160)     # back courtyard (cooler, like B.Cu)
-C_COURT_DIM = (58, 60, 70)      # context part in delta-first mode
-C_LOCKED = (92, 88, 74)         # locked: dimmed, and hatched
-C_GHOST = (76, 76, 92)          # seed position
-C_ARROW = (236, 214, 110)       # displacement
-C_AIR = (86, 96, 112)           # ordinary airwire
-C_AIR_FAIL = (232, 72, 72)      # failed net
-C_AIR_BLOCK = (236, 158, 60)    # blocker net
-C_AIR_PICK = (96, 214, 170)     # net named by --ratsnest-nets
-C_LABEL = (226, 228, 238)
-C_PAD_THT = (196, 150, 74)      # through-hole
-C_PAD_F = (198, 172, 96)        # front SMD
-C_PAD_B = (104, 150, 196)       # back SMD
+# --- palette: aliases onto the shared theme (#946, #1011) --------------------
+#
+# `render_theme` is pure data over stdlib and imports no PIL, which is what
+# lets it be imported HERE at module scope: this module must keep importing
+# with `sys.modules['PIL'] = None` (tests/test_943_optional_render_dependency),
+# because `board_context.py` and the stress predictors import it for
+# `PlacementModel` / `legality_findings` and draw nothing.
+#
+# Every name survives, because callers read them by name --
+# `tests/test_431_render_placement.py:293-294` reads `C_AIR_PICK` that way.
+# The second block that used to sit MID-FILE (C_CONFLICT / C_HOLE /
+# C_COURT_OVL, declared after `draw_courtyards`) is folded in here: there was
+# no reason for a palette to be in two places except that nobody owned it.
+from render_theme import DARK as _THEME_DARK
+
+C_COURT_F = _THEME_DARK.rgb('place_court_front')   # front courtyard
+C_COURT_B = _THEME_DARK.rgb('place_court_back')    # back courtyard
+C_COURT_DIM = _THEME_DARK.rgb('place_court_dim')   # context part, delta-first
+C_LOCKED = _THEME_DARK.rgb('place_locked')         # locked: dimmed and hatched
+C_GHOST = _THEME_DARK.rgb('place_ghost')           # seed position
+C_ARROW = _THEME_DARK.rgb('place_arrow')           # displacement
+C_AIR = _THEME_DARK.rgb('place_airwire')           # ordinary airwire
+C_AIR_FAIL = _THEME_DARK.rgb('defect_net_fail')    # failed net
+C_AIR_BLOCK = _THEME_DARK.rgb('defect_net_block')  # blocker net
+C_AIR_PICK = _THEME_DARK.rgb('place_net_pick')     # --ratsnest-nets pick
+C_LABEL = _THEME_DARK.rgb('place_label')
+C_PAD_THT = _THEME_DARK.rgb('pad_tht')             # through-hole
+C_PAD_F = _THEME_DARK.rgb('pad_front')             # front SMD
+C_PAD_B = _THEME_DARK.rgb('pad_back')              # back SMD
+C_CONFLICT = _THEME_DARK.rgb('defect_conflict')    # pad/hole legality
+C_HOLE = _THEME_DARK.rgb('defect_hole')            # NPTH keepout circles
+C_COURT_OVL = _THEME_DARK.rgb('defect_courtyard')  # courtyard interpenetration
+
+#: The "required gap" amber. It had NO CONSTANT NAME AT ALL and was typed as a
+#: literal in five places, one of them its own legend row -- a semantic colour
+#: with no name is the clearest single symptom of a palette nobody owns.
+C_REQUIRED_GAP = _THEME_DARK.rgb('defect_required_gap')
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +246,47 @@ class PlacementModel:
         return pts
 
 
+def _graphic_copper_findings(model, state) -> Dict[str, list]:
+    """#962: `[[ref, overrun_mm]]` for footprint graphic copper past the
+    outline at the model's proposed poses, and what is not measured.
+
+    Calls `check_drc.footprint_graphic_outline_census` on a shallow copy of the
+    board whose footprints carry the proposed poses. The census re-poses each
+    part's graphic copper from its parse pose, and reports a part that
+    changed SIDE as unmeasured rather than guessing its mirror.
+    """
+    import copy as _copy
+    import dataclasses as _dc
+    try:
+        from check_drc import footprint_graphic_outline_census, GRAPHIC_WAIVED_STATES
+        pcb = model.pcb
+        fps = {}
+        for k, fp in pcb.footprints.items():
+            p = state.parts.get(k) if state is not None else None
+            if p is None:
+                fps[k] = fp
+                continue
+            layer = fp.layer
+            side = getattr(p, 'side', None)
+            if side in ('F', 'B') and not str(fp.layer).startswith(side + '.'):
+                layer = side + '.Cu'
+            fps[k] = _dc.replace(fp, x=p.x, y=p.y, rotation=p.rot, layer=layer)
+        clone = _copy.copy(pcb)
+        clone.footprints = fps
+        census = footprint_graphic_outline_census(clone)
+    except Exception as e:                                   # noqa: BLE001
+        return {'refs': [], 'unmeasured': [['*', 'error', '%s: %s'
+                                            % (type(e).__name__, e)]]}
+    best = {}
+    for row in census['rows']:
+        if row['overrun_mm'] > 1e-6 and row['owner_state'] not in GRAPHIC_WAIVED_STATES:
+            k = row['owner_ref'] or '<board>'
+            best[k] = max(best.get(k, 0.0), row['overrun_mm'])
+    return {'refs': sorted([k, round(v, 4)] for k, v in best.items()),
+            'unmeasured': [[u.get('owner_ref', ''), u.get('kind', ''),
+                            u.get('reason', '')] for u in census['unmeasured']]}
+
+
 def legality_findings(model) -> Dict[str, object]:
     """Named legality findings, computed ONCE per model (run-4 G).
 
@@ -247,6 +310,7 @@ def legality_findings(model) -> Dict[str, object]:
     if cached is not None:
         return cached
     out = {'oob_refs_pad_copper': [], 'oob_refs_courtyard': [],
+           'oob_refs_graphic_copper': [], 'graphic_copper_unmeasured': [],
            'pad_conflict_pairs_refs': [], 'hole_conflict_pairs_refs': [],
            'body_overlap_pairs_refs': [],
            'courtyard_overlap_pairs_refs': [],
@@ -325,6 +389,14 @@ def legality_findings(model) -> Dict[str, object]:
                        + max(0.0, b[1] - ext[1]) + max(0.0, ext[3] - b[3]))
             if oob > 1e-6:
                 out['oob_refs_pad_copper'].append([ref, round(oob, 4)])
+        # #962: the second off-outline channel, footprint GRAPHIC copper,
+        # at the model's PROPOSED poses. It is check_drc's own census on a
+        # copy of the board whose footprints carry those poses; the census
+        # re-poses graphic copper from each part's parse pose, so this
+        # agrees with check_drc on the written board.
+        _gc = _graphic_copper_findings(model, state)
+        out['oob_refs_graphic_copper'] = _gc['refs']
+        out['graphic_copper_unmeasured'] = _gc['unmeasured']
         refs = sorted(ctx.parts)
         for i, a in enumerate(refs):
             pa = state.parts.get(a)
@@ -803,11 +875,6 @@ def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
             d.line([box[0], box[1], box[2], box[3]], fill=col, width=_w(r, 0.06))
 
 
-C_CONFLICT = (255, 64, 64)      # pad/hole legality conflicts
-C_HOLE = (255, 160, 64)         # NPTH keepout circles
-C_COURT_OVL = (255, 120, 40)    # run-23: courtyard-blocking interpenetration
-
-
 def draw_legality(d, r, model, *, side=None):
     """The mess, DRAWN (the run-2 imaging finding: off-board parts and pad
     conflicts were numbers in a caption, invisible in the picture the reads
@@ -1283,44 +1350,17 @@ def draw_legend(d, r, spec) -> None:
             rows.append((C_ARROW, 'arrow', 'moved since --before'))
         if spec.hot_nets:
             rows.append((C_AIR_FAIL, 'line', 'failed net'))
-    try:
-        # Overlays draw on the SUPERSAMPLED canvas, which is `ss` times the
-        # output size -- so `r.H` (the output height) put the legend at 1/ss of
-        # the way up the image, on top of the board, instead of at the bottom.
-        # The caption escapes this because _label draws on the final image.
-        ss = max(1, int(getattr(r, 'ss', 1)))
-        W, H = r.W * ss, r.H * ss
-        font = load_font(max(10, H // 78))
-        pad, sw = 6 * ss, max(10, H // 90)
-        lh = sw + 5
-        h = lh * len(rows) + 8
-        w = max(int(d.textlength(t, font=font)) for _, _, t in rows) + sw + 20
-        y0 = H - h - pad
-        d.rectangle([pad, y0, pad + w, y0 + h], fill=(0, 0, 0))
-        for i, (col, kind, text) in enumerate(rows):
-            yy = y0 + 4 + i * lh
-            box = [pad + 6, yy, pad + 6 + sw, yy + sw]
-            if kind == 'solid':
-                d.rectangle(box, fill=col)
-            elif kind == 'ring':
-                d.ellipse(box, outline=col, width=2)
-            elif kind == 'dashed':
-                for k in range(0, sw, 4):
-                    d.line([box[0] + k, box[1], box[0] + k + 2, box[1]], fill=col)
-                    d.line([box[0] + k, box[3], box[0] + k + 2, box[3]], fill=col)
-            elif kind == 'hatch':
-                d.rectangle(box, outline=col, width=1)
-                for k in range(0, sw, 3):
-                    d.line([box[0] + k, box[3], box[0] + sw, box[1] + k], fill=col)
-            elif kind == 'arrow':
-                d.line([box[0], box[3], box[2], box[1]], fill=col, width=2)
-            else:
-                d.line([box[0], (box[1] + box[3]) // 2,
-                        box[2], (box[1] + box[3]) // 2], fill=col, width=2)
-            d.text((pad + 6 + sw + 6, yy - 1), text, fill=(225, 225, 225),
-                   font=font)
-    except Exception:                                          # noqa: BLE001
-        pass          # a legend is never worth failing a render over
+    # #1014: the ROWS are still chosen here -- which keys this panel can show
+    # is a placement question -- but the DRAWING moved to
+    # `py_router/render_chrome.draw_key`, so `animate_route` can draw the
+    # movie's key with the same marks rather than a second implementation of
+    # them. `pad_scale=r.ss` because an overlay draws on the SUPERSAMPLED
+    # canvas: using the output height here once put the legend a fraction of
+    # the way up the image, on top of the board.
+    from render_chrome import draw_key
+    ss = max(1, int(getattr(r, 'ss', 1)))
+    draw_key(d, rows, width=r.W * ss, height=r.H * ss,
+             theme=getattr(r, 'theme', None), corner='bl', pad_scale=ss)
 
 
 def crop_findings(model, view) -> Dict[str, int]:
@@ -1645,12 +1685,22 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
 def render_panel(spec: PanelSpec, *, size=1600, supersample=2, extra=None):
     from route_render import BoardRenderer
     r = BoardRenderer(spec.model.pcb, size=size, supersample=supersample,
+                      theme=(extra or {}).get('theme') if isinstance(extra, dict) else None,
                       show_pads=False, view=spec.view,
                       layers=([spec.side + '.Cu']
                               if spec.side in ('F', 'B')
                               and (spec.side + '.Cu') in
                               spec.model.pcb.board_info.copper_layers else None))
-    return r.frame(overlays=[overlay_for(spec)], label=caption(spec, extra))
+    # #1017: the DECLARED plan goes UNDER the placement overlay, so the parts
+    # read on top of the intent rather than the other way round -- the plan is
+    # context for what was drawn, not a mark on it.
+    _plan = getattr(spec.model, 'intent_plan', None)
+    _ovs = []
+    if _plan is not None:
+        import render_plan as _rp
+        _ovs.append(_rp.plan_overlay(_plan, alpha=0.55))
+    _ovs.append(overlay_for(spec))
+    return r.frame(overlays=_ovs, label=caption(spec, extra))
 
 
 # ---------------------------------------------------------------------------
@@ -1813,6 +1863,7 @@ Examples:
                         "JSON checklist then carries d={moved, expected, "
                         "match} -- mandate 8's question (d), quotable instead "
                         'of recalled (run-4 G5)')
+    p.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     p.add_argument('--quiet', action='store_true',
                    help='suppress narration. With --json-out it now also '
                         'suppresses the stdout JSON_SUMMARY echo and the '
@@ -1986,7 +2037,25 @@ def main(argv=None):
         try:
             from placement.floorplan import load_intent
             from placement.legality import format_waiver_warnings
-            model.intent_waivers = load_intent(args.intent).waiver_pairs()
+            _it = load_intent(args.intent)
+            model.intent_waivers = _it.waiver_pairs()
+            # #946 item 5 / #1017. The intent is a fully GEOMETRIC document --
+            # blocks[].zone, keepouts[].rect/circle,
+            # edge_connectors[].along_edge_band -- and this reader used it for
+            # exactly ONE thing: overlap_waivers. The plan existed only as JSON
+            # and as pass/fail counts out of check_floorplan, so a still (and
+            # the film built from these panels) showed parts with no indication
+            # of where they were supposed to go. `render_plan` draws it,
+            # through the same `frame(overlays=...)` seam everything else here
+            # uses, so it costs no frame geometry.
+            model.intent_plan = _it
+            if not args.quiet:
+                import render_plan as _rp
+                # Printed even when it drew NOTHING: an intent with no blocks
+                # must SAY so rather than silently rendering a clean-looking
+                # empty overlay, because a picture of nothing is
+                # indistinguishable from a picture of a plan that was met.
+                print(_rp.plan_summary(_it), file=sys.stderr)
         except Exception as exc:                                # noqa: BLE001
             print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
             return 2
@@ -2373,7 +2442,10 @@ def main(argv=None):
         'checklist': {
             'a_off_outline': {
                 'pad_copper': fnd['oob_refs_pad_copper'],
-                'courtyard': fnd['oob_refs_courtyard']},
+                'courtyard': fnd['oob_refs_courtyard'],
+                # #962: footprint graphic copper past the outline
+                'graphic_copper': fnd.get('oob_refs_graphic_copper', []),
+                'graphic_copper_unmeasured': fnd.get('graphic_copper_unmeasured', [])},
             # run-6 key honesty: the old 'b_overlap_pairs' NAME carried
             # the PAD-CLEARANCE channel, and a reader auditing overlap
             # with b_overlap_pairs=[] concluded there was none while two
@@ -2481,10 +2553,17 @@ def main(argv=None):
     # sends the reader after the wrong thing. Exit 2 is this tool's existing
     # "you asked for something the arguments cannot give" code. The panels are
     # still written and the render still stands.
+    # DEFERRED UNTIL AFTER THE DOCUMENT IS WRITTEN (#963). This returned here,
+    # and once the drivers' own templates started asking for a sheet that made
+    # one unwritable sheet path cost five of them their render document
+    # entirely -- `--json-out` never reached its `json.dump` below, so the
+    # caller had a PNG, an exit 2, and nothing to read. The sheet is one
+    # artifact of the run; the document is how every downstream gate sees the
+    # run at all. Both the code and the exit are unchanged; only the order is.
+    _sheet_exit = 2 if _sheet_failed else 0
     if _sheet_failed:
         print(f"error: --review-sheet {args.review_sheet} was requested and no "
               f"sheet was written: {_sheet_failed}", file=sys.stderr)
-        return 2
     _quiet = bool(args.quiet and args.json_out)
     # #898: the NARRATIVE obeys --quiet on its own. `_quiet` above is the
     # run-24 rule for the stdout JSON ECHO -- "data is never silenced into
@@ -2528,6 +2607,8 @@ def main(argv=None):
                 len(doc['checklist']['a_off_outline']['pad_copper']),
             'a_off_outline.courtyard':
                 len(doc['checklist']['a_off_outline']['courtyard']),
+            'a_off_outline.graphic_copper':
+                len(doc['checklist']['a_off_outline']['graphic_copper']),
             'b_pad_clearance_pairs':
                 len(doc['checklist']['b_pad_clearance_pairs']),
             'b_body_overlap_pairs':
@@ -2601,7 +2682,11 @@ def main(argv=None):
                   + (f" [{_xs} front<->back stack(s) also present -- "
                      f"opposite faces, NOT conflicts]" if _xs else ""),
                   file=sys.stderr)
-            return 4
+            # #898 decided this precedence and pinned it: a sheet that could
+            # not be written is not hidden by a failing gate, because the
+            # caller asked for an artifact and did not get one. #963 only
+            # moved WHEN that 2 is returned, never which number wins.
+            return _sheet_exit or 4
         # The cross-side stacks ride on BOTH verdicts: they look like
         # collisions in the panels and are not, so the line that says
         # "clear" must say how many of them the reader is about to see.
@@ -2612,7 +2697,10 @@ def main(argv=None):
               + (f" ({_xs} front<->back stack(s), opposite faces, not "
                  f"conflicts)" if _xs else ""),
               file=sys.stderr)
-    return 0
+    # The sheet failure LAST, after the document exists (#963). Which NUMBER
+    # wins when both apply was decided by #898 and is pinned at the --gate
+    # branch above; this change moved only WHEN the 2 is returned.
+    return _sheet_exit or 0
 
 
 if __name__ == '__main__':

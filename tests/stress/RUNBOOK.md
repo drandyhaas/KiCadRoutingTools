@@ -1403,14 +1403,19 @@ per event so they can be armed once and left alone:
 ```bash
 python3 -X utf8 tests/stress/run_watch.py bugs   --workdir wk/run12/tigard
 python3 -X utf8 tests/stress/run_watch.py cheats --workdir wk/run12/tigard \
-    --truthdir wk/run12/_truth/tigard --done wk/run12/tigard/DONE
+    --truthdir wk/run12/_truth/tigard --done wk/run12/tigard/DONE \
+    --report-done wk/run12/tigard/REPORT_DONE --report-wait 5400
 ```
 
 `bugs` reports new problems as they appear and runs until you stop it.
 `cheats` reports the ways the run could report success without earning it (a
-scope narrowed to the failing nets, a grader floor overridden, a waiver spent)
-and ends when the `DONE` marker appears, running `fence_audit` and
-`provenance_audit` as it goes. Neither budgets on a clock.
+scope narrowed to the failing nets, a grader floor overridden, a waiver spent).
+At `DONE` it runs `fence_audit` and `provenance_audit` — the audits that read
+the BOARD — and then KEEPS GOING to `REPORT_DONE`, where it audits `REPORT.md`
+itself and re-runs those two if `DONE` changed in between. `--report-done ''`
+restores the old exit-at-DONE contract, which is what you want when replaying
+over a finished run. Neither watcher grades on a clock; `--report-wait` bounds
+how long the last marker is waited for and changes only what is printed.
 
 `RESTAGE` counts invocations of EITHER stager, from two sources: a teed `CMD:`
 line, and a pose-provenance row. The second is the one that works -- neither
@@ -1471,10 +1476,18 @@ Split what arming actually PROTECTS from what it costs:
    is a brief tailored to it. The boundary verification's contemporaneity check
    reads exactly this kind of timestamp, so the prompts are checkable by an
    instrument that already exists.
-2. **Spawn at the end, once, as ONE agent with one section per brief.** Three
-   agents re-reading the same logs derive the same numbers three times and bind
-   to nothing; one agent with three headed sections produces three verdicts from
-   one preamble and one read.
+2. **Spawn at the end, once, as ONE agent with one section per brief** — into
+   ONE file, never over a `watch/<name>.md` that already exists. Three agents
+   re-reading the same logs derive the same numbers three times and bind to
+   nothing; one agent with three headed sections produces three verdicts from
+   one preamble and one read. "At the end" means at the SECOND marker,
+   `REPORT_DONE`, not at `DONE`: `DONE` means the copper is frozen and
+   `REPORT.md` is written after it, carrying verdicts that do not exist until
+   then. Measured (run 29): dispatched from a run prompt that specified the
+   mechanism differently, four watchers ran twice, `cheats.md` was written
+   twice with the second overwriting the first, and `tool_usage.md` never
+   landed. The skill is the single specification; a run prompt names the briefs
+   and defers to it.
 3. **Override the model.** Reading a report and a JSONL and reporting
    discrepancies is not the task the largest model exists for; set the Agent
    tool's `model` field to a smaller one for that spawn. It is one field.

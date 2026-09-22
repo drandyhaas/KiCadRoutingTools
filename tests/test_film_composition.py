@@ -155,8 +155,23 @@ def test_the_film_shows_the_attempts_and_marks_them():
         frames = mf.build_film(shots, size=400, fps=6.0, camera='auto',
                                quiet=True)
         assert frames, "no frames"
+        # #946/#1012. Two changes, and the FIRST is the one that matters:
+        #
+        #  * the probe moved from (0, height//2) to (0, 0). `_badge` draws
+        #    nested rectangles around the WHOLE frame, so (0,0) is always badge
+        #    colour on a badged frame and never on an unbadged one -- and
+        #    unlike the mid-height pixel it is LAYOUT-INDEPENDENT.
+        #    `movie_panels.py:40-46` records that the old probe is exactly why
+        #    panels could never be wired into the film: stacking one moves
+        #    `height//2` into the panel and reddens this test for a reason that
+        #    has nothing to do with badging. It is moved here, once, for good.
+        #  * the literal became a theme role. #1012 moved the badge off red,
+        #    because a red badge on a frame whose copper also flashes red is
+        #    the same collision #946 is about.
+        import render_theme as _rt
+        want = _rt.default_theme().rgb('status_tried')
         red = sum(1 for f in frames
-                  if f.convert('RGB').getpixel((0, f.height // 2)) == (200, 60, 60))
+                  if f.convert('RGB').getpixel((0, 0)) == want)
         assert red > 0, "the attempt's frames must be badged"
         assert red < len(frames), "the kept beats must NOT be badged"
     print(f"  PASS: {red}/{len(frames)} frames badged as an attempt")
