@@ -4,7 +4,7 @@
 Until this module the chain's geometry was written out five times:
 ``topo_strings.TRACK = 0.127``, ``braid.CLEAR = 0.105`` /
 ``SPEC_CLEARANCE = 0.1`` / ``VIA_SIZE = 0.25`` / ``VIA_DRILL = 0.15``,
-``select_moves.BAND_TIP = 0.9`` / ``BAND_LPITCH = 0.35`` / ``NEST_IN =
+``NEST_IN =
 0.232``, ``source_realize.FAN_TRACK`` / ``FAN_CLEAR = 0.1``, plus
 ``track_width=0.1, clearance=0.1`` hardcoded at six production-engine call
 sites and a literal ``--clearance 0.1`` in `chain_k.sh` and `grade_k.py`.
@@ -44,37 +44,23 @@ THE QUANTITIES, and the formula that produced each literal
     fan_clear  = clearance. The fanout lays at the spec; there is no second
                        clearance.
     via_size / via_drill  0.25 / 0.15
-    lane_slice 0.232   = track + hug  (``select_moves.NEST_IN``) -- one
+    lane_slice 0.232   = track + hug -- one
                        lane's centre-to-centre slice: two parallel tracks of
                        width w at clearance c sit at pitch w + c.
-    lane_pitch 0.35    = max(0.35, lane_slice)  (``braid.LPITCH``,
-                       ``select_moves.BAND_LPITCH``). 0.35 is the chain's
+    lane_pitch 0.35    = max(0.35, lane_slice)  (``braid.LPITCH``). 0.35 is the chain's
                        pitch; the FLOOR is that a comb can never pack
                        tighter than one lane's slice. It binds above
                        clearance 0.218.
     exit_pitch 0.38    = max(0.38, lane_slice)  (``braid.MINP``), same
                        reading at the exits.
-    band_tip   0.9     = array pitch / 2 + the fanout engine's exit margin
-                       (DU1's pitch is 0.8 and the margin 0.5).  It is ARRAY
-                       geometry, not a design rule, and it is a DEAD
-                       default: its only readers (``select_moves.band_leg``
-                       / ``band_capacity``) are on the ``SPLIT_BLOCKS=1``
-                       path, whose caller (``fanout_from_plan.plan_state``)
-                       already overwrites it with a DIFFERENT formula --
-                       ``max(pitch_x, pitch_y) / 2 + 0.05``, half a pitch
-                       plus one occupancy cell, because the under-pad engine
-                       ends its stubs at the boundary cell and not at
-                       exit_margin (measured 0.425 at 0.8 mm pitch). The
-                       field exists so the 0.9 has a written source.
     hole_to_hole / edge_clearance   None by default. The braid reads these
                        two off the board itself (``list_nets.board_constraint``)
                        and applies them tighten-only; that is left exactly
                        where it was. They are fields here only so a supplied
                        router config can carry them.
 
-    and four expressions the modules already spelled, re-evaluated here so
-    the formula has one home: ``band_gap`` (= track + hug + 0.07),
-    ``half_sep`` (= (track + clearance) / 2), ``via_need`` (= via_size/2 +
+    and three expressions the modules already spelled, re-evaluated here so
+    the formula has one home: ``half_sep`` (= (track + clearance) / 2), ``via_need`` (= via_size/2 +
     hug + track/2 + 0.03), ``end_keep`` (= track + hug + 0.05),
     ``margin_out`` (= clearance + track/2).
 
@@ -115,16 +101,12 @@ instead, and one call moves the whole chain onto the router's geometry.
 Why install-into-constants rather than making each constant a function: the
 chain's consumers read these through module ATTRIBUTES at call time
 (``te.VIA_SIZE``, ``br.TRACK``, ``br.CLEAR``) in ~30 places, so one install
-reaches all of them, and no hot loop grows a function call. The two modules
-that bind them into locals at import time (`cut_ledger`, `collapse_dives`)
-re-read after installing.
+reaches all of them, and no hot loop grows a function call. The one module
+that binds them into locals at import time (`cut_ledger`) re-reads after
+installing.
 
 DEBT THIS FILE DOES NOT PAY (recorded, not fixed)
 -------------------------------------------------
-  * ``select_moves.BAND_BLOCK_GAP = 0.30`` calls itself "the braid's
-    BAND_GAP", and ``braid.BAND_GAP`` is ``TRACK + CLEAR + 0.07`` = 0.302.
-    It is a stale hand-copy. Making it follow the formula changes the
-    chain's output, so it is named here instead of changed.
   * ``braid.BLOCK_GAP`` 0.45, ``LEG_W``, ``LEG_REQ``, ``LEG_O``,
     ``CROSS_TUBE``, ``HEAD_RUN`` are constants with no formula behind them;
     only the lane-slice floors of the two pitches are modelled.
@@ -153,9 +135,6 @@ VIA_DRILL = 0.15
 FAN_TRACK = 0.1           # the production engine's fanout stub width
 LANE_PITCH = 0.35         # braid.LPITCH
 EXIT_PITCH = 0.38         # braid.MINP
-BAND_TIP = 0.9            # select_moves.BAND_TIP (a dead default; see above)
-EXIT_MARGIN = 0.5         # the fanout engine's exit margin -- the second
-                          # half of band_tip's formula
 
 _ROUND = 6                # decimals every derived quantity lands on
 
@@ -182,7 +161,6 @@ class Rules:
     fan_track: float = FAN_TRACK
     lane_pitch: float = LANE_PITCH
     exit_pitch: float = EXIT_PITCH
-    band_tip: float = BAND_TIP
     source: str = 'awx/rules.py constants'
     notes: tuple = ()
 
@@ -200,16 +178,12 @@ class Rules:
 
     @property
     def lane_slice(self):
-        """``select_moves.NEST_IN``: one lane's slice, track + hug. 0.232."""
+        """One lane's slice, track + hug. 0.232."""
         return _r(self.track + self.hug)
 
     # The five below are braid's / topo_strings' OWN expressions, in their
     # own order, unrounded -- see "FLOAT BITS". install() writes these back
     # over the module constants.
-    @property
-    def band_gap(self):
-        return self.track + self.hug + 0.07          # braid.BAND_GAP
-
     @property
     def half_sep(self):
         return (self.track + self.clearance) / 2     # braid.HALF_SEP
@@ -228,7 +202,7 @@ class Rules:
 
     # -- the handover ------------------------------------------------------
     @classmethod
-    def from_router_config(cls, cfg, fan_track=None, band_tip=None):
+    def from_router_config(cls, cfg, fan_track=None):
         """Build the chain's rules from a py_router routing config.
 
         THIS IS THE SEAM, and it is deliberately the only one. When the main
@@ -251,8 +225,6 @@ class Rules:
           has ONE ``track_width``. So the supplied width becomes BOTH unless
           the caller passes ``fan_track`` -- the split is a chain decision
           and stays an explicit argument rather than a silent ratio.
-        * **band_tip**, which is array geometry (pitch/2 + exit margin), not
-          routing geometry. It keeps the chain's default unless passed.
 
         The pitches keep their floor semantics: the chain's own 0.35 / 0.38,
         never below one lane's slice at the supplied geometry.
@@ -287,7 +259,6 @@ class Rules:
             fan_track=_r(fan_track) if fan_track is not None else track,
             lane_pitch=max(LANE_PITCH, slice_),
             exit_pitch=max(EXIT_PITCH, slice_),
-            band_tip=_r(band_tip) if band_tip is not None else BAND_TIP,
             source=f'router config ({type(cfg).__name__})',
             notes=(() if fan_track is not None else
                    ('fan_track = the supplied track_width (the caller did '
@@ -299,7 +270,7 @@ class Rules:
         out = [f'rules ({self.source}):']
         for k in ('clearance', 'track', 'via_size', 'via_drill',
                   'hole_to_hole', 'edge_clearance', 'fan_track',
-                  'lane_pitch', 'exit_pitch', 'band_tip'):
+                  'lane_pitch', 'exit_pitch'):
             v = getattr(self, k)
             out.append(f'  {k:16s} {"-" if v is None else v}')
         out.append(f'  {"hug (derived)":16s} {self.hug}   clearance + {HUG_OVER}')
@@ -385,25 +356,19 @@ def install(rules, verbose=False):
     put('braid', 'SPEC_CLEARANCE', rules.clearance)
     put('braid', 'VIA_SIZE', rules.via_size)
     put('braid', 'VIA_DRILL', rules.via_drill)
-    put('braid', 'BAND_GAP', rules.band_gap)
     put('braid', 'HALF_SEP', rules.half_sep)
     put('braid', 'VIA_NEED', rules.via_need)
     put('braid', 'END_KEEP', rules.end_keep)
     put('braid', 'LPITCH', rules.lane_pitch)
     put('braid', 'MINP', rules.exit_pitch)
 
-    # select_moves: the band geometry (SPLIT_BLOCKS path)
-    put('select_moves', 'BAND_TIP', rules.band_tip)
-    put('select_moves', 'BAND_LPITCH', rules.lane_pitch)
-    put('select_moves', 'NEST_IN', rules.lane_slice)
-
     # source_realize: the production engine's fanout geometry
     put('source_realize', 'FAN_TRACK', rules.fan_track)
     put('source_realize', 'FAN_CLEAR', rules.fan_clear)
 
-    # the two modules that bind braid's constants into their OWN locals at
-    # import time -- rebind them, in case they were imported before this call
-    for mod in ('cut_ledger', 'collapse_dives'):
+    # the module that binds braid's constants into its OWN locals at
+    # import time -- rebind it, in case it was imported before this call
+    for mod in ('cut_ledger',):
         for m in _modules(mod):
             for name, value in (('TRACK', rules.track), ('CLEAR', rules.hug),
                                 ('VIA_SIZE', rules.via_size),

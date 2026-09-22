@@ -772,7 +772,7 @@ def flow_dir(path: Sequence[Pt], end_dir: Pt, at_start: bool,
 
 def align_tail(sp_pts: Sequence[Pt], dest_box, margin: float = 0.5) -> List[Pt]:
     """The spine's TAIL aligned with the destination array's own axis
-    (SPLIT_BLOCKS, 2026-09-10). A corridor's spine is the chord (or
+    (2026-09-10). A corridor's spine is the chord (or
     medial line) from the teeth's centroid to the STUBS' centroid, and
     with berths on three faces of the destination that centroid pulls
     the chord across the array at an angle (the bench's K28: 13 degrees

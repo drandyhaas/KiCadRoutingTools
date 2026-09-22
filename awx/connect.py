@@ -105,83 +105,6 @@ def _band_cell_strips(coord: GridCoord, window: PCBData, band,
 
 VIRTUAL_NET = 10 ** 7      # foreign net id for virtual copper (no such net)
 
-# ---- the base map, built once per (copper, net, virtual copper), cloned per
-# connect (2026-09-18). A rescue ladder's rungs are the same net on the same
-# copper with the same virtual lines, only a wider window each; the base
-# map was rebuilt for every one (390 builds in a K41 braid, 24 in a probe
-# braid, a quarter of the braid). A whole-board build of this board costs
-# 97 ms and a clone under a millisecond (measured), so the base is built
-# over the WHOLE board and the window's fence goes on the clone: inside
-# the A* bounds the cells are the ones the window build stamped.
-# MEASURED AND LEFT OFF (2026-09-18): built for every connect, a K41 braid
-# went 42.7 -> 48.8 s; built only for a key asked twice (a ladder), 44.1 s
-# with 109 whole-board builds serving 62 clones -- the ladders are too
-# short (3-5 rungs, the first on its own window) for a 97 ms build to
-# repay 20-50 ms window builds. Copper identical either way. Kept as
-# CONNECT_MAP_CACHE=1 for a board or ladder shape where it would.
-MAP_CACHE = os.environ.get('CONNECT_MAP_CACHE', '0') == '1'
-_BASE = {}
-_BASE_MAX = 24
-_SEEN = {}          # key -> how many connects asked for it (the first builds its own window)
-_BASE_STATS = {'hit': 0, 'miss': 0, 'single': 0}
-
-
-def _copper_sig(pcb):
-    return hash((tuple((s.start_x, s.start_y, s.end_x, s.end_y, s.layer, s.net_id, s.width)
-                       for s in pcb.segments),
-                 tuple((v.x, v.y, v.size, v.drill, v.net_id, tuple(v.layers)) for v in pcb.vias)))
-
-
-def _cfg_sig(cfg):
-    return (cfg.grid_step, cfg.track_width, cfg.clearance, cfg.via_size, cfg.via_drill,
-            tuple(cfg.layers), getattr(cfg, 'board_edge_clearance', 0))
-
-
-def _base_key(pcb, net_id, cfg, virtual, virtual_vias, layer_map):
-    return (_copper_sig(pcb), net_id, _cfg_sig(cfg),
-            tuple((tuple(p), tuple(q), L) for (p, q, L) in (virtual or ()) if L in layer_map),
-            tuple(tuple(p) for p in (virtual_vias or ())))
-
-
-def _base_map(pcb, net_id, cfg, virtual, virtual_vias, layer_map, key=None):
-    """The whole-board map for `net_id` on this copper with this virtual
-    copper: static obstacles, the net's free vias and same-net clearances,
-    fenced at the board. Cached; the caller clones it. Built only when a
-    key is asked for a SECOND time (a rescue ladder's rungs): measured, a
-    whole-board build for every single connect made a K41 braid 14 percent
-    slower, its 41 first-attempt lanes each paying 97 ms for a map a 20 ms
-    window build would have served once."""
-    if key is None:
-        key = _base_key(pcb, net_id, cfg, virtual, virtual_vias, layer_map)
-    b = _BASE.get(key)
-    if b is not None:
-        _BASE_STATS['hit'] += 1
-        return b
-    _BASE_STATS['miss'] += 1
-    bb = pcb.board_info.board_bounds
-    full = make_local_window(pcb, (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2,
-                             max(bb[2] - bb[0], bb[3] - bb[1]))     # clamps to the board: the board as a window
-    if virtual:
-        w = cfg.track_width + VIRT_SLACK
-        full.segments = list(full.segments) + [
-            Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
-            for (p, q, layer) in virtual if layer in layer_map]
-    if virtual_vias:
-        full.vias = list(full.vias) + [
-            Via(p[0], p[1], cfg.via_size, cfg.via_drill, list(cfg.layers), VIRTUAL_NET) for p in virtual_vias]
-    obstacles = build_base_obstacle_map(full, cfg, [net_id], static_base=True)
-    _fence_window(obstacles, full, cfg)
-    _add_free_via_positions(obstacles, full, [net_id], cfg)
-    add_same_net_via_clearance(obstacles, full, net_id, cfg)
-    add_same_net_pad_drill_via_clearance(obstacles, full, net_id, cfg)
-    keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
-    if len(keep):
-        obstacles.add_blocked_vias_batch(keep)
-    if len(_BASE) >= _BASE_MAX:
-        _BASE.pop(next(iter(_BASE)))
-    _BASE[key] = obstacles
-    return obstacles
-VIRT_SLACK = float(os.environ.get('BRAID_VIRT_SLACK', '0') or 0)   # extra width of a virtual stamp (mm); 0 = as ever
 
 
 def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
@@ -252,13 +175,7 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     if not window.board_info.board_bounds:
         return None
     if virtual:
-        # BRAID_VIRT_SLACK (2026-09-15): a virtual line keeps a neighbour's
-        # centreline exactly a track plus a clearance away, and the lane
-        # the line stands for then needs exactly that from the neighbour
-        # -- zero slack, no cell on an unlucky grid (K35 SDQ0 between
-        # SDQM0's real copper and SDQ2's line: 0.000 mm free). The stamp
-        # is widened by this much, so the lane inherits half of it a side.
-        w = cfg.track_width + VIRT_SLACK
+        w = cfg.track_width
         window.segments = list(window.segments) + [
             Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
             for (p, q, layer) in virtual if layer in layer_map]
@@ -281,37 +198,22 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     _m(f'window {len(window.segments)} segs {len(window.vias)} vias '
        f'{(window.board_info.board_bounds[2] - window.board_info.board_bounds[0]) / cfg.grid_step:.0f}x'
        f'{(window.board_info.board_bounds[3] - window.board_info.board_bounds[1]) / cfg.grid_step:.0f} cells')
-    _key = _base_key(pcb, net_id, cfg, virtual, virtual_vias, layer_map) if MAP_CACHE else None
-    if MAP_CACHE:
-        n_seen = _SEEN.get(_key, 0) + 1
-        if len(_SEEN) > 4096:
-            _SEEN.clear()
-        _SEEN[_key] = n_seen
-    if MAP_CACHE and n_seen >= 2 and not own_ids:
-        # the whole-board base for this net and copper, cloned; the window's
-        # own fence on top (what the per-window build stamped at its edge)
-        obstacles = _base_map(pcb, net_id, cfg, virtual, virtual_vias, layer_map, key=_key).clone()
-        add_board_edge_obstacles(obstacles, window, cfg)
-        _m('base map (clone) + window fence')
-    else:
-        if MAP_CACHE:
-            _BASE_STATS['single'] += 1
-        own = list(own_ids) if own_ids else [net_id]
-        obstacles = build_base_obstacle_map(window, cfg, own,
-                                            static_base=True)
-        _m('base map')
-        _fence_window(obstacles, window, cfg)
-        # the net's own barrels are free layer changes, and its own
-        # via/drill spacing still applies (the rescue recipe, #470 and
-        # the h2h guard)
-        _add_free_via_positions(obstacles, window, own, cfg)
-        for _oid in own:
-            add_same_net_via_clearance(obstacles, window, _oid, cfg)
-            add_same_net_pad_drill_via_clearance(obstacles, window, _oid, cfg)
-            keep = same_net_pad_via_keepout_cells(pcb, _oid, cfg)
-            if len(keep):
-                obstacles.add_blocked_vias_batch(keep)
-        _m('fence, free vias, keepouts')
+    own = list(own_ids) if own_ids else [net_id]
+    obstacles = build_base_obstacle_map(window, cfg, own,
+                                        static_base=True)
+    _m('base map')
+    _fence_window(obstacles, window, cfg)
+    # the net's own barrels are free layer changes, and its own
+    # via/drill spacing still applies (the rescue recipe, #470 and
+    # the h2h guard)
+    _add_free_via_positions(obstacles, window, own, cfg)
+    for _oid in own:
+        add_same_net_via_clearance(obstacles, window, _oid, cfg)
+        add_same_net_pad_drill_via_clearance(obstacles, window, _oid, cfg)
+        keep = same_net_pad_via_keepout_cells(pcb, _oid, cfg)
+        if len(keep):
+            obstacles.add_blocked_vias_batch(keep)
+    _m('fence, free vias, keepouts')
     if band is not None and (isinstance(band, dict) or callable(band)
                              or band[0] is not None or band[1] is not None):
         # The band into the map's STATIC bitmap (#422's
@@ -394,164 +296,24 @@ def connect_pair(pcb: PCBData, p_id: int, n_id: int,
     `a_p` / `a_n` (both on `a_layer`) to its two ends at `b_p` / `b_n`
     (both on `b_layer`).
 
-    THE DEFAULT (BRAID_PAIR_ROUTER=prod, 2026-09-20, Andy: "use the pose
-    routing, constrained to a band") is the production pair router given
+    The production pair router (route_diff_pair_with_obstacles) given
     CLEAN ENDS -- see _connect_pair_prod: coupled approach pieces at both
     ends, the escape directions forced, the centreline's map at the pair's
-    extra clearance, the band stamped as for a single. BRAID_PAIR_ROUTER=
-    envelope keeps the corridor's own way:
-    ONE envelope lane -- a track as wide as both legs, vias as wide as two
-    barrels side by side -- is routed by `connect` between a point `lead`
-    mm in front of the two teeth (along `a_dir`) and one in front of the
-    two berths (along `b_dir`), inside the same band, against the same
-    virtual copper, with both legs' own copper exempt; then the envelope
-    is SPLIT (pairs.split_envelope): P and N at the pair pitch either
-    side of the centreline, mitred at the corners, each dive two barrels
-    a via pitch apart with the legs jogging out and back, and short
-    converge legs onto the real ends. P keeps the side its tooth is on;
-    if its berth is on the other side the pair would have to cross, and
-    the lane is refused (the joint plan owes consistent sides).
-
-    BRAID_PAIR_ROUTER=prod is the production pair router
-    (route_diff_pair_with_obstacles) on the same window and map -- kept
-    for comparison; measured on the K34 bench its terminal connectors
-    graze neighbouring stubs in this field and its setback search knows
-    nothing of the corridor.
+    extra clearance, the band stamped as for a single (Andy, 2026-09-20:
+    "use the pose routing, constrained to a band").
 
     `gap`: the P-to-N edge gap (default the config's diff_pair_gap,
     never below the clearance). Returns (segments, vias) of BOTH nets,
     not yet appended, or None."""
-    import copy as _copy
-    import pairs as _pairs
     layer_map = build_layer_map(cfg.layers)
     if a_layer not in layer_map or b_layer not in layer_map:
         raise ValueError(f'layer not routable: {a_layer} / {b_layer}')
     g = max(gap if gap is not None else cfg.diff_pair_gap, cfg.clearance)
     half = (cfg.track_width + g) / 2.0                 # a leg's offset from the centreline
-    # a barrel's offset from the centreline: the barrels a via pitch apart
-    # at least -- and far enough out that the OUTER leg's run past the
-    # INNER barrel keeps its clearance when the lane turns at the dive by
-    # up to 45 degrees (the distance is half + via_half * cos(turn); at
-    # the bare via pitch a 22-degree turn measured 0.02 mm short)
-    via_r = cfg.via_size / 2.0
-    via_half = max((cfg.via_size + cfg.clearance) / 2.0,
-                   (via_r + cfg.clearance + cfg.track_width / 2.0 - half) / 0.7071 + 0.005)
-    mid_a, mid_b = _pairs.mid(a_p, a_n), _pairs.mid(b_p, b_n)
-    if os.environ.get('BRAID_PAIR_ROUTER', 'prod') != 'envelope':
-        return _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
+    return _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                                   cfg, band, margin, band_slack, virtual, window_pts,
                                   virtual_vias, report, g, a_dir, b_dir, half,
                                   a_conn=a_conn, b_conn=b_conn)
-    if a_dir is None:
-        a_dir = _pairs._unit(mid_a, mid_b)
-    if b_dir is None:
-        b_dir = _pairs._unit(mid_b, mid_a)
-    # a crossing (P's berth on the other side of the lane from its tooth)
-    # is laid in the LEAD in front of the teeth: P's tooth lead is routed
-    # by the real router under N, two vias, so that lead is long enough
-    # for two barrels when the ends say a crossing is coming
-    # (judged on the ESCAPE directions: leaving along a_dir, arriving
-    # against b_dir. Judged on the chord between the two midpoints it
-    # called for a crossing that was not there, and the long lead it
-    # then took put the search's start under a neighbour's lane.)
-    _sp0 = _pairs._cross(a_dir, (a_p[0] - mid_a[0], a_p[1] - mid_a[1])) >= 0
-    _sp1 = _pairs._cross((-b_dir[0], -b_dir[1]), (b_p[0] - mid_b[0], b_p[1] - mid_b[1])) >= 0
-    need_cross = _sp0 != _sp1
-    long = max(lead, 4.0 * cfg.via_size)
-    # a crossing is laid at whichever end has the room: the source lead
-    # first, then the destination's (the long source lead ran into a
-    # neighbour's virtual line on SDQS1 and the pair was refused outright)
-    plans = [(long, lead, 'start'), (lead, long, 'end')] if need_cross else [(lead, lead, None)]
-    for lead_a, lead_b, cross_at in plans:
-        out = _envelope_pair(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer, cfg,
-                             band, margin, band_slack, virtual, window_pts, virtual_vias,
-                             report, g, half, via_half, mid_a, mid_b, a_dir, b_dir,
-                             lead_a, lead_b, cross_at, a_n_layer, b_n_layer)
-        if out is not None:
-            return out
-    return None
-
-
-def _envelope_pair(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer, cfg,
-                   band, margin, band_slack, virtual, window_pts, virtual_vias,
-                   report, g, half, via_half, mid_a, mid_b, a_dir, b_dir,
-                   lead_a, lead_b, cross_at, a_n_layer, b_n_layer):
-    """One envelope attempt of connect_pair (see there): leads `lead_a` /
-    `lead_b` in front of the teeth / berths, the crossing (if any) routed
-    at `cross_at` ('start' | 'end' | None)."""
-    import copy as _copy
-    import pairs as _pairs
-    a_pt = (mid_a[0] + a_dir[0] * lead_a, mid_a[1] + a_dir[1] * lead_a)
-    b_pt = (mid_b[0] + b_dir[0] * lead_b, mid_b[1] + b_dir[1] * lead_b)
-    # the APPROACH: the envelope is searched between two points a via
-    # pitch further out along the escape directions, and a straight piece
-    # joins each to its lead point -- so the lane leaves the teeth and
-    # arrives at the berths ALONG their escapes (the search alone arrived
-    # at the berths from the west, travelling east, and the converge legs
-    # then crossed each other), and a dive at the very start stands as two
-    # barrels side by side square in front of the teeth
-    appr = round(cfg.via_size + cfg.clearance, 6)
-    a_far = (a_pt[0] + a_dir[0] * appr, a_pt[1] + a_dir[1] * appr)
-    b_far = (b_pt[0] + b_dir[0] * appr, b_pt[1] + b_dir[1] * appr)
-    ecfg = _copy.copy(cfg)
-    ecfg.track_width = round(2 * half + cfg.track_width, 6)
-    ecfg.via_size = round(2 * via_half + cfg.via_size, 6)
-    ecfg.via_drill = round(ecfg.via_size - (cfg.via_size - cfg.via_drill), 6)
-    wp = list(window_pts or []) + [a_p, a_n, b_p, b_n, a_far, b_far]
-    res = connect(pcb, p_id, a_far, a_layer, b_far, b_layer, ecfg, band=band,
-                  margin=margin, band_slack=band_slack, virtual=virtual,
-                  window_pts=wp, virtual_vias=virtual_vias, report=report,
-                  own_ids=[p_id, n_id])
-    if res is None:
-        return None
-    segs, vias = res
-    segs = ([Segment(a_pt[0], a_pt[1], a_far[0], a_far[1], ecfg.track_width, a_layer, p_id)]
-            + list(segs)
-            + [Segment(b_far[0], b_far[1], b_pt[0], b_pt[1], ecfg.track_width, b_layer, p_id)])
-    # the split, VALIDATED against itself: a hard turn at a dive can put a
-    # leg inside the other's clearance (every intra-pair DRC the K36 chain
-    # shipped); a failed split is retried with the barrels standing wider
-    # and longer jogs, and a pair that cannot be split cleanly is refused
-    out = None
-    for widen, jog in ((1.0, 0.15), (1.25, 0.25), (1.5, 0.35)):
-        cand = _pairs.split_envelope(segs, vias, a_p, a_n, b_p, b_n, a_pt, b_pt,
-                                     half, via_half * widen, cfg.track_width, cfg.via_size,
-                                     cfg.via_drill, p_id, n_id, cfg.layers, jog=jog,
-                                     cross=(cross_at or True),
-                                     tip_layers=(a_layer, a_n_layer or a_layer,
-                                                 b_layer, b_n_layer or b_layer))
-        if cand is None:
-            return None
-        why = _pairs.intra_ok(cand[0], cand[1], p_id, n_id, cfg.track_width, cfg.via_size, cfg.clearance)
-        if why is None:
-            out = cand
-            break
-        if report is not None:
-            report['intra'] = why
-    if out is None:
-        return None
-    segs2, vias2, p_start = out
-    if p_start is not None:
-        # the crossing: P's lead at the chosen end, routed against N's
-        # laid copper (it dives under N: two vias)
-        pcb2 = _copy.copy(pcb)
-        pcb2.segments = list(pcb.segments) + segs2
-        pcb2.vias = list(pcb.vias) + vias2
-        if cross_at == 'end':
-            r2 = connect(pcb2, p_id, p_start, b_layer, b_p, b_layer, cfg, band=None,
-                         margin=1.0, virtual=virtual, virtual_vias=virtual_vias,
-                         own_ids=[p_id])
-        else:
-            r2 = connect(pcb2, p_id, a_p, a_layer, p_start, a_layer, cfg, band=None,
-                         margin=1.0, virtual=virtual, virtual_vias=virtual_vias,
-                         own_ids=[p_id])
-        if r2 is None:
-            if report is not None:
-                report['polarity'] = True
-            return None
-        segs2 = segs2 + list(r2[0])
-        vias2 = vias2 + list(r2[1])
-    return segs2, vias2
 
 
 def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None):
@@ -579,7 +341,7 @@ def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None
         for (p_, q_, vl) in (virtual or []):
             if vl != L:
                 continue
-            if dist(s, Segment(p_[0], p_[1], q_[0], q_[1], 0.0, L, 0)) < clr + (s.width + tw + VIRT_SLACK) / 2 - 1e-6:
+            if dist(s, Segment(p_[0], p_[1], q_[0], q_[1], 0.0, L, 0)) < clr + (s.width + tw) / 2 - 1e-6:
                 return f'leg on {L} grazes a virtual line near ({s.start_x:.2f},{s.start_y:.2f})'
         for v in window.vias:
             if v.net_id in own:
@@ -852,8 +614,7 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
             else:
                 b_p, b_n, b_dir, b_layer = end_p, end_n, end_dir, end_layer
             connected.add(end)
-    if a_dir is not None and b_dir is not None and half is not None \
-            and os.environ.get('BRAID_PAIR_APPROACH', '1') != '0':
+    if a_dir is not None and b_dir is not None and half is not None:
         def _appr(tip_p, tip_n, d, layer, lane=None):
             mid = _pairs.mid(tip_p, tip_n)
             n = _pairs._left(d)
@@ -959,7 +720,7 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     window.segments = list(window.segments) + connectors + approach
     window.vias = list(window.vias) + conn_vias
     if virtual:
-        w = cfg.track_width + VIRT_SLACK
+        w = cfg.track_width
         window.segments = list(window.segments) + [
             Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
             for (p, q, layer) in virtual if layer in layer_map]
@@ -1076,8 +837,7 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     src = (gp[0], gp[1], gn[0], gn[1], layer_map[a_layer], a_p[0], a_p[1], a_n[0], a_n[1])
     tgt = (hp[0], hp[1], hn[0], hn[1], layer_map[b_layer], b_p[0], b_p[1], b_n[0], b_n[1])
     # the ESCAPE DIRECTIONS forced at both ends (the router's own sweep
-    # picked setbacks among the neighbouring teeth); BRAID_PAIR_APPROACH=0
-    # drops the approach pieces (an experiment knob)
+    # picked setbacks among the neighbouring teeth)
     result = route_diff_pair_with_obstacles(window, dp, pcfg, obstacles,
                                             endpoints=(src, tgt),
                                             swap_allowed_ends=(),

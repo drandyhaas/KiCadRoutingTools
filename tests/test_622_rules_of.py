@@ -20,8 +20,8 @@ What this asserts:
 
 2. `Rules.from_router_config` derives the chain's quantities from a
    supplied routing geometry by the documented formulas, and does NOT
-   invent the two things a router config cannot say (the chain's two track
-   widths, and band_tip's array geometry).
+   invent the one thing a router config cannot say (the chain's two track
+   widths).
 
 3. The install model is safe: installing DEFAULT leaves every module
    constant bit-identical (so a formula that drifts from the literal it
@@ -71,13 +71,11 @@ LITERALS = {
     'fan_track': 0.1,
     'lane_pitch': 0.35,
     'exit_pitch': 0.38,
-    'band_tip': 0.9,
 }
 DERIVED = {
     'hug': 0.105,
     'lane_slice': 0.232,
     'fan_clear': 0.1,
-    'band_gap': 0.127 + 0.105 + 0.07,
     'half_sep': (0.127 + 0.1) / 2,
     'via_need': 0.25 / 2 + 0.105 + 0.127 / 2 + 0.03,
     'end_keep': 0.127 + 0.105 + 0.05,
@@ -135,7 +133,7 @@ class _Cfg:
 same = R.Rules.from_router_config(_Cfg(clearance=0.1, track_width=0.127,
                                        via_size=0.25, via_drill=0.15))
 for k, v in LITERALS.items():
-    if k in ('fan_track', 'band_tip'):
+    if k in ('fan_track',):
         continue                      # not derivable from a router config
     eq(f'from_router_config(identity).{k}', getattr(same, k), v)
 for k, v in DERIVED.items():
@@ -157,7 +155,6 @@ eq('wide.via_size', wide.via_size, 0.45)
 eq('wide.via_drill', wide.via_drill, 0.3)
 eq('wide.half_sep', wide.half_sep, (0.2 + 0.15) / 2)
 eq('wide.via_need', wide.via_need, 0.45 / 2 + 0.155 + 0.2 / 2 + 0.03)
-eq('wide.band_gap', wide.band_gap, 0.2 + 0.155 + 0.07)
 eq('wide.end_keep', wide.end_keep, 0.2 + 0.155 + 0.05)
 eq('wide.margin_out', wide.margin_out, 0.15 + 0.2 / 2)
 eq('wide.hole_to_hole', wide.hole_to_hole, 0.25)
@@ -172,11 +169,9 @@ eq('wide.exit_pitch (chain value still larger)', wide.exit_pitch, 0.38)
 eq('fan_track defaults to the supplied width', wide.fan_track, 0.2)
 truthy('...and says so in a note',
        any('fan_track' in n for n in wide.notes), f'notes={wide.notes}')
-eq('band_tip keeps the chain default', wide.band_tip, 0.9)
 split = R.Rules.from_router_config(
-    _Cfg(clearance=0.15, track_width=0.2), fan_track=0.1, band_tip=1.2)
+    _Cfg(clearance=0.15, track_width=0.2), fan_track=0.1)
 eq('an explicit fan_track is honoured', split.fan_track, 0.1)
-eq('an explicit band_tip is honoured', split.band_tip, 1.2)
 truthy('...and the note is gone when the caller split it',
        not any('fan_track' in n for n in split.notes), f'notes={split.notes}')
 
@@ -212,11 +207,8 @@ TARGETS = [
     ('braid.SPEC_CLEARANCE', lambda: br.SPEC_CLEARANCE),
     ('braid.VIA_SIZE', lambda: br.VIA_SIZE), ('braid.VIA_DRILL', lambda: br.VIA_DRILL),
     ('braid.MINP', lambda: br.MINP), ('braid.LPITCH', lambda: br.LPITCH),
-    ('braid.BAND_GAP', lambda: br.BAND_GAP), ('braid.HALF_SEP', lambda: br.HALF_SEP),
+    ('braid.HALF_SEP', lambda: br.HALF_SEP),
     ('braid.VIA_NEED', lambda: br.VIA_NEED), ('braid.END_KEEP', lambda: br.END_KEEP),
-    ('select_moves.BAND_TIP', lambda: sm.BAND_TIP),
-    ('select_moves.BAND_LPITCH', lambda: sm.BAND_LPITCH),
-    ('select_moves.NEST_IN', lambda: sm.NEST_IN),
     ('source_realize.FAN_TRACK', lambda: sr.FAN_TRACK),
     ('source_realize.FAN_CLEAR', lambda: sr.FAN_CLEAR),
 ]
@@ -228,10 +220,8 @@ BEFORE_LIT = {
     'braid.TRACK': 0.127, 'braid.CLEAR': 0.105, 'braid.SPEC_CLEARANCE': 0.1,
     'braid.VIA_SIZE': 0.25, 'braid.VIA_DRILL': 0.15,
     'braid.MINP': 0.38, 'braid.LPITCH': 0.35,
-    'braid.BAND_GAP': LIT['band_gap'], 'braid.HALF_SEP': LIT['half_sep'],
+    'braid.HALF_SEP': LIT['half_sep'],
     'braid.VIA_NEED': LIT['via_need'], 'braid.END_KEEP': LIT['end_keep'],
-    'select_moves.BAND_TIP': 0.9, 'select_moves.BAND_LPITCH': 0.35,
-    'select_moves.NEST_IN': 0.232,
     'source_realize.FAN_TRACK': 0.1, 'source_realize.FAN_CLEAR': 0.1,
 }
 for n, g in TARGETS:
@@ -250,8 +240,6 @@ truthy('install(wide) moves braid.CLEAR', br.CLEAR == 0.155, f'got {br.CLEAR}')
 truthy('install(wide) moves topo_strings.TRACK', ts.TRACK == 0.2, f'got {ts.TRACK}')
 truthy('install(wide) moves braid.VIA_NEED',
        br.VIA_NEED == 0.25 / 2 + 0.155 + 0.2 / 2 + 0.03, f'got {br.VIA_NEED}')
-truthy('install(wide) moves select_moves.NEST_IN', sm.NEST_IN == 0.355,
-       f'got {sm.NEST_IN}')
 R.install(R.DEFAULT)                       # leave the modules as we found them
 for n, g in TARGETS:
     eq(f'restored {n}', g(), BEFORE_LIT[n])
@@ -293,8 +281,8 @@ with tempfile.TemporaryDirectory() as tmp:
 # exactly one (braid.clip_round_ends' keep_r) and it was fixed; this stops
 # the next one.
 CONSTS = {'TRACK', 'CLEAR', 'SPEC_CLEARANCE', 'SPEC_CLEAR', 'VIA_SIZE',
-          'VIA_DRILL', 'END_KEEP', 'VIA_NEED', 'BAND_GAP', 'HALF_SEP', 'MINP',
-          'LPITCH', 'NEST_IN', 'BAND_TIP', 'BAND_LPITCH', 'MARGIN_OUT',
+          'VIA_DRILL', 'END_KEEP', 'VIA_NEED', 'HALF_SEP', 'MINP',
+          'LPITCH', 'MARGIN_OUT',
           'FAN_TRACK', 'FAN_CLEAR'}
 scanned = 0
 for fn in sorted(os.listdir(AWX)):
@@ -323,7 +311,7 @@ truthy('the AST scan actually scanned something', scanned > 10,
 
 # every stage's entry point installs (the threading is the deliverable)
 for fn in ('braid.py', 'fanout_from_plan.py', 'make_bench.py', 'pack_board.py',
-           'replan.py', 'cut_ledger.py', 'collapse_dives.py'):
+           'replan.py', 'cut_ledger.py',):
     body = open(os.path.join(AWX, fn), encoding='utf-8').read()
     truthy(f'{fn} installs the chain constants',
            'install_defaults()' in body,

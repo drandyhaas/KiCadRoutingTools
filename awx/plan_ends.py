@@ -50,14 +50,6 @@ Pt = Tuple[float, float]
 # hide them.
 import prices as _pr
 SWIM_VIAS = _pr.JUDGE          # ONE source: prices.py
-import os as _os
-# SWIM_CHANGES (2026-09-11, TODO 13 ii): a swimmer priced by the changes the
-# braid's hold-then-run line implies for it (plan_braid 'swim_changes',
-# passed to vias_from_pages as `swim_changes`) instead of the flat
-# SWIM_VIAS. Measured before it: the flat price ranked K51 plans at 0.2
-# rank correlation with the braid; the K41 chain plan shipped with 13
-# swimmers priced 2 each and routed 82-92 against 72 predicted. 0 = off.
-SWIM_CHANGES = int(_os.environ.get('SWIM_CHANGES', '0') or 0)
 
 
 def plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses, chi: int = 1):
@@ -137,11 +129,11 @@ def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
     berth: tooth/page mismatch + the arrival -- straight into the berth:
     page/berth mismatch; through a side-exit leg on `leg_layer`: page/leg
     + leg/berth mismatch. A swimmer: tooth vias + SWIM_VIAS + berth vias.
-    `swim_mode`: None = the SWIM_CHANGES env rule; 'changes' = the
-    swimmer's `swim_changes` where the planner gave one; 'flat' = the
-    flat SWIM_VIAS (fanout_from_plan.PLAN_JUDGE picks it)."""
+    `swim_mode`: 'changes' = the swimmer's `swim_changes` where the
+    planner gave one; None or 'flat' = the flat SWIM_VIAS
+    (fanout_from_plan.PLAN_JUDGE picks it)."""
     pred = {}
-    use_ch = SWIM_CHANGES if swim_mode is None else (swim_mode == 'changes')
+    use_ch = (swim_mode == 'changes')
     for n, m in dst_choice.items():
         pg = pages.get(n)
         tv = tooth_vias.get(n, 0) + (cross or {}).get(n, 0)

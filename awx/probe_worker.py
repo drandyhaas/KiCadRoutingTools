@@ -90,7 +90,6 @@ class Worker:
     def op_round(self, q):
         # the parent's options, module state here
         replan.COUPLED = q['coupled']
-        replan.WIDEN = int(q['widen'])
         replan.GRADE_MODE = q['grade']
         replan.APPLY_STRIP = bool(q['apply_strip'])
         replan.MEMO_K = None                    # the memo is the parent's

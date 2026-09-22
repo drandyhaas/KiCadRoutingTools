@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENABLED = os.environ.get('PROBE_MEMO', '1') != '0'
 MEMO_DIR = os.environ.get('PROBE_MEMO_DIR') or os.path.join(HERE, 'tmp', 'memo')
 KNOB_PREFIXES = ('BRAID_', 'PROBE_', 'PLAN_', 'TAUT_')
-KNOB_NAMES = ('DST_CLIMB', 'SRC_CLIMB', 'SRC_CLIMB_END')
+KNOB_NAMES = ('DST_CLIMB', 'SRC_CLIMB')
 
 _code_hash = None
 _stats = {'probe_hit': 0, 'probe_miss': 0, 'screen_hit': 0, 'screen_miss': 0,

@@ -11,7 +11,7 @@ so a generation runs its worlds side by side (--jobs; each is already the
 shape of a Modal arm):
 
   descend   one round of `replan.py` in --mode=incremental with the
-            coupled-set probes (--coupled=chord --widen=N): the worst nets'
+            coupled-set probes (--coupled=census): the worst nets'
             ends moved one at a time, only the coupled lanes re-routed,
             the rest of the copper kept; a standing probe IS the new
             board. Monotone by construction.
@@ -30,9 +30,8 @@ Selection is elitist over exact routed grades (open, drc, vias), worlds
 deduplicated by copper; the population's best is monotone.
 
 usage: evolve.py TAG K --seeds=STEM[,STEM...] [--pop=4] [--gens=3]
-                 [--jumps=2] [--cross=1] [--cross-mode=probe|chain] [--jobs=2]
-                 [--jump=near|chain] [--jump-nets=2] [--jump-bans=4]
-                 [--descend="--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --widen=0 --grade=inproc"]
+                 [--jumps=2] [--cross=1] [--jobs=2] [--jump-nets=2]
+                 [--descend="--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --grade=inproc"]
                  [--board=BENCH] [--dest=REF] [--seed=N]
                  [--descend-env="DST_CLIMB=2"] [--jump-env="DST_CLIMB=2 SRC_CLIMB=4"]
   --seeds   recorded worlds: a chain stem (STEM_fo_kK.kicad_pcb + STEM_kK.kicad_pcb)
@@ -115,7 +114,6 @@ def import_seed(spec, K, nets_csv, dst_stem):
 def child_env(extra=None, chain=False):
     env = dict(os.environ)
     env.pop('SRC_CLIMB', None)          # replan sets its own 14; the chain's default is 0
-    env.pop('PLAN_LOOP_FEEDBACK', None)
     env.update(extra or {})
     return env
 
@@ -166,39 +164,6 @@ def descend(world, K, out_dir, args, nets_csv, env_extra=None):
     return {'stem': stem, 'grade': g, 'origin': f'descend<{world["name"]}>'}, line, round(time.time() - t0)
 
 
-def plan_of(F, names, dref):
-    """The world's plan as the feedback channel spells it: per net its berth
-    signature and class, its tooth (standing) -- via replan.Board."""
-    B = replan.Board(F, names, dref)
-    plan = {}
-    for nm in names:
-        d = B.choice.get(nm)
-        plan[nm] = {'dst': sr.move_sig(d) if d is not None else None,
-                    'dst_cls': list(B.cls(nm, 'dst') or ()) or None,
-                    'src_cls': list(B.cls(nm, 'src') or ()) or None,
-                    'src_move': sr.move_sig(B.cur_src[nm]) if B.cur_src.get(nm) is not None else None,
-                    'src_end': B.ends[nm]['src']}
-    return B, plan
-
-
-def source_view(world, names, byname, dref, out):
-    replan.source_view(world['stem'] + '_fo.kicad_pcb', out, names, byname, dref)
-    return out
-
-
-def run_chain_world(tagpath, K, feedback, base, dest, env_extra=None):
-    fpath = os.path.join(HERE, tagpath + '.feedback.json')
-    os.makedirs(os.path.dirname(fpath), exist_ok=True)
-    with open(fpath, 'w', encoding='utf-8') as f:
-        json.dump(feedback, f, indent=1, sort_keys=True)
-    env = child_env(dict(env_extra or {}, BASE=base, DEST=dest, PLAN_LOOP_FEEDBACK=fpath), chain=True)
-    t0 = time.time()
-    with open(os.path.join(HERE, tagpath + '.out'), 'w', encoding='utf-8') as f:
-        p = subprocess.run(['bash', 'chain_k.sh', tagpath, str(K)], cwd=HERE, env=env,
-                           stdout=f, stderr=subprocess.STDOUT, text=True)
-    return p.returncode, round(time.time() - t0)
-
-
 def chain_world(tagpath, K, nets_csv, dst_stem, origin):
     stem = os.path.join(HERE, tagpath)
     pairs = pl.arm_boards(stem, K)
@@ -222,7 +187,7 @@ def jump_near(world, K, out_dir, n_nets, rng, nets_csv, env_extra=None, tries=3)
         p = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'replan.py'), world['stem'], str(K),
                             f'--from={world["stem"]}', f'--out={out}', '--mode=incremental', '--apply=strip',
                             f'--perturb={n_nets}', f'--perturb-tries={tries}', f'--seed={seed}',
-                            '--coupled=census', '--widen=0', '--grade=inproc'] + BENCH_ARGS,
+                            '--coupled=census', '--grade=inproc'] + BENCH_ARGS,
                            cwd=HERE, env=child_env(env_extra), stdout=f, stderr=subprocess.STDOUT, text=True)
     stem = f'{out}_rp_k{K}'
     if not os.path.exists(stem + '.kicad_pcb'):
@@ -240,30 +205,6 @@ def jump_near(world, K, out_dir, n_nets, rng, nets_csv, env_extra=None, tries=3)
             'origin': f'jump<{world["name"]}; near {moved}; seed {seed}>'}, round(time.time() - t0)
 
 
-def jump(world, K, out_dir, names, dref, nets_csv, n_bans, rng, dest, env_extra=None):
-    """A far jump from this world: random class bans at both ends, another
-    solver seed, the world's plan as hint, no holds."""
-    B, plan = plan_of(world['stem'] + '_fo.kicad_pcb', names, dref)
-    picks = rng.sample([nm for nm in names if plan[nm]['dst_cls']], min(n_bans, len(names)))
-    bans = {}
-    for nm in picks:
-        b = {}
-        if plan[nm]['dst_cls']:
-            b['dst'] = [plan[nm]['dst_cls'] + [None, None]]
-        if plan[nm]['src_cls']:
-            b['src'] = [plan[nm]['src_cls'] + [None, None]]
-        bans[nm] = b
-    hint = {nm: {'dst': plan[nm]['dst'], 'src': None} for nm in names if plan[nm]['dst'] is not None}
-    seed = rng.randint(1, 10 ** 6)
-    fb = {'bans': bans, 'hint': hint, 'seed': seed, 'accept_laid': True}
-    base = source_view(world, names, B.byname, dref, os.path.join(out_dir, 'j_base.kicad_pcb'))
-    tagpath = os.path.relpath(os.path.join(out_dir, 'j'), HERE)
-    rc, secs = run_chain_world(tagpath, K, fb, base, dest, env_extra)
-    w = chain_world(tagpath, K, nets_csv, os.path.join(out_dir, 'jw'),
-                    f'jump<{world["name"]}; bans {sorted(picks)}; seed {seed}>')
-    return w, secs
-
-
 def cross_probe(A, Bw, K, out_dir, rng, nets_csv, par, env_extra=None):
     """A crossover through the probes (replan --cross): B's ends asked for
     on A's routed board for a random half of the nets whose ends differ,
@@ -276,7 +217,7 @@ def cross_probe(A, Bw, K, out_dir, rng, nets_csv, par, env_extra=None):
     t0 = time.time()
     args = [sys.executable, '-u', os.path.join(HERE, 'replan.py'), A['stem'], str(K),
             f'--from={A["stem"]}', f'--out={out}', f'--cross={Bw["stem"]}', f'--seed={seed}',
-            '--mode=incremental', '--apply=strip', '--coupled=census', '--widen=0', '--grade=inproc'] + BENCH_ARGS
+            '--mode=incremental', '--apply=strip', '--coupled=census', '--grade=inproc'] + BENCH_ARGS
     if par:
         args.append(f'--par={par}')
     with open(out + '.out', 'w', encoding='utf-8') as f:
@@ -300,40 +241,6 @@ def cross_probe(A, Bw, K, out_dir, rng, nets_csv, par, env_extra=None):
         round(time.time() - t0)
 
 
-def cross(A, Bw, K, out_dir, names, dref, nets_csv, rng, dest):
-    """A crossover: half the nets held at A's ends, half at B's, on A's
-    source view (B's teeth named as moves there)."""
-    BA, pa = plan_of(A['stem'] + '_fo.kicad_pcb', names, dref)
-    BB, pb = plan_of(Bw['stem'] + '_fo.kicad_pcb', names, dref)
-    from_b = set(rng.sample(names, len(names) // 2))
-    hold = {}
-    for nm in names:
-        p = pb[nm] if nm in from_b else pa[nm]
-        h = {}
-        if p['dst'] is not None:
-            h['dst'] = p['dst']
-        if p['dst_cls']:
-            h['dst_cls'] = p['dst_cls']
-        if nm in from_b:
-            # B's tooth: the same as A's standing one -> standing; else named
-            ea, eb = pa[nm]['src_end'], pb[nm]['src_end']
-            same = (ea and eb and ea['layer'] == eb['layer']
-                    and abs(ea['tooth'][0] - eb['tooth'][0]) < 0.05 and abs(ea['tooth'][1] - eb['tooth'][1]) < 0.05)
-            h['src'] = None if same or pb[nm]['src_move'] is None else pb[nm]['src_move']
-        else:
-            h['src'] = None
-        if h:
-            hold[nm] = h
-    hint = {nm: {'dst': hold[nm].get('dst'), 'src': hold[nm].get('src')} for nm in hold if hold[nm].get('dst') is not None}
-    fb = {'hold': hold, 'hint': hint, 'accept_laid': True}
-    base = source_view(A, names, BA.byname, dref, os.path.join(out_dir, 'x_base.kicad_pcb'))
-    tagpath = os.path.relpath(os.path.join(out_dir, 'x'), HERE)
-    rc, secs = run_chain_world(tagpath, K, fb, base, dest)
-    w = chain_world(tagpath, K, nets_csv, os.path.join(out_dir, 'xw'),
-                    f'cross<{A["name"]} x {Bw["name"]}; {len(from_b)} from B>')
-    return w, secs
-
-
 def key(w):
     g = w['grade']
     return (len(g[0]), g[1] != 0, g[2]) if g else (99, True, 10 ** 6)
@@ -351,22 +258,17 @@ def main():
     JUMPS = int(OPTS.get('jumps', 2))
     CROSS = int(OPTS.get('cross', 1))
     JOBS = int(OPTS.get('jobs', 2))
-    JBANS = int(OPTS.get('jump-bans', 4))
     # --jump=near (default, 2026-09-18): a jump through the probes, a few
     # nets moved to random other classes -- one probe each; --jump=chain:
     # the plan-level re-solve with class bans (665 s at K51, landed 84..141)
-    JUMP = OPTS.get('jump', 'near')
     JNETS = int(OPTS.get('jump-nets', 2))
-    # --cross-mode=probe (default, 2026-09-19): B's ends asked for on A's
-    # board through the probes; --cross-mode=chain: the hold-channel re-solve
-    CROSS_MODE = OPTS.get('cross-mode', 'probe')
     _mpar = re.search(r'--par=(\d+)', OPTS.get('descend', ''))
     PAR = int(_mpar.group(1)) if _mpar else 0
     # min-vias 2 (2026-09-18): at the frontier (K41 67, K51 83) no net carries
     # three lane vias any more, and a descent with the threshold at three
     # returns in 7 s having probed nothing. The 2-via one-dive nets are the
     # hypotheses now (91 -> 85 came from them with the climb menus).
-    DESC = OPTS.get('descend', '--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --widen=0 --grade=inproc')
+    DESC = OPTS.get('descend', '--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --grade=inproc')
     # THE MENUS (2026-09-18, the human-ends TEST): the same descent that stalls
     # at 91 on our plan takes the human's ends 87 -> 79, and the human's ends
     # differ from our menus only in the CLIMB classes -- destination climbs
@@ -388,8 +290,8 @@ def main():
     dref = Counter(ends0[nm][2] for nm in nets_all if nm in ends0).most_common(1)[0][0]
     names = [nm for nm in nets_all if nm in ends0 and ends0[nm][2] == dref]
     log(f'evolve: K{K} tag {tag}; pop {POP}, {GENS} generation(s), {JUMPS} jump(s) + {CROSS} cross per '
-        f'generation, jobs {JOBS}; descend: {DESC} {DESC_ENV}; cross {CROSS_MODE}; jump {JUMP} '
-        f'({f"{JNETS} net(s)" if JUMP == "near" else f"{JBANS} bans"}) env {JUMP_ENV}; '
+        f'generation, jobs {JOBS}; descend: {DESC} {DESC_ENV}; cross probe; jump near '
+        f'({JNETS} net(s)) env {JUMP_ENV}; '
         f'memo {"on" if pm.ENABLED else "OFF"} ({pm.MEMO_DIR}, code {pm.code_hash()})')
     # ---- the initial population
     pop = []
@@ -440,15 +342,9 @@ def main():
                     nw, line, secs = descend(w, K, d, DESC, nets_csv, DESC_ENV)
                     return kind, w, nw, line, secs
                 if kind == 'jump':
-                    if JUMP == 'near':
-                        nw, secs = jump_near(w, K, d, JNETS, rng, nets_csv, JUMP_ENV)
-                    else:
-                        nw, secs = jump(w, K, d, names, dref, nets_csv, JBANS, rng, dest, JUMP_ENV)
+                    nw, secs = jump_near(w, K, d, JNETS, rng, nets_csv, JUMP_ENV)
                     return kind, w, nw, '', secs
-                if CROSS_MODE == 'probe':
-                    nw, secs = cross_probe(w[0], w[1], K, d, rng, nets_csv, PAR, JUMP_ENV)
-                else:
-                    nw, secs = cross(w[0], w[1], K, d, names, dref, nets_csv, rng, dest)
+                nw, secs = cross_probe(w[0], w[1], K, d, rng, nets_csv, PAR, JUMP_ENV)
                 return kind, w, nw, '', secs
             except Exception as e:
                 return kind, w, None, f'{type(e).__name__}: {str(e)[:120]}', 0

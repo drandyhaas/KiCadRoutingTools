@@ -11,7 +11,7 @@ came from that evolution.
 
     bash chain_k.sh TAG 28 41 51                      # the chain: -> tmp/TAG_k<K>.kicad_pcb, graded
     python3 evolve.py TAG 51 --seeds=STEM,... --pop=4 --gens=3 \
-            --descend="--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --widen=0 --grade=inproc --par=4"
+            --descend="--rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --grade=inproc --par=4"
     python3 replan.py STEM 51 --from=STEM --out=OUT --mode=incremental --apply=strip ...   # one descent
     python3 evolve_movie.py TAG 51 --gif                # the movie of a run
     python3 make_bench.py BOARD SRC DST OUT             # another array pair, from any board
@@ -101,19 +101,17 @@ reached 79, below the human's own 81 -- which is how it was learned that
 the gap at K51 is the ENDS, not the realization, and that the human's
 ends differ from our menus only in the climb classes. The descent's
 menus carry those classes now (`DST_CLIMB=2` in descents, `SRC_CLIMB=4`
-in jumps); the CP-SAT plan cannot use them (measured: they made its
-solve stop worse), the route-judged descent can.
+in jumps); the CP-SAT plan cannot use them, the route-judged descent can.
 
 **A number is meaningless without its arm, and cloud numbers are a
 different measurement from local ones.** CP-SAT stops the plan solve at
 platform-dependent feasible points, so a chain on Modal starts from a
 different plan than the same chain here. Compare cloud to cloud, local
-to local. `PLAN_PAGES_CANON=1` is the one canonicalised solve that agrees
-across machines; it is an instrument, not a production setting.
+to local.
 
-**The source stub trim, the served-under-the-part rule, the away-face
-ban** (2026-09-19, the second pass over the zynq article). Three things
-the article asked for, each general:
+**The source stub trim and the served-under-the-part rule** (2026-09-19,
+the second pass over the zynq article). Two things the article asked for,
+each general:
 
 * **The source stub trim** (`braid.note_source_joint`, on by default;
   `SRC_TRIM_REACH=0` turns it off) is the source-side mirror of the berth
@@ -142,15 +140,6 @@ the article asked for, each general:
   zone exemption. Opt-in: the always-on form is a fanout-laid pad drop
   (via at the ball, track to the pad), not built. A bench rebuilt with it
   loses `SZQ` from the K51 ladder, which is right: it is not a bus net.
-* **The away-face ban** (`SRC_AWAY_BAN=1`, `escape_moves.away_faces`: the
-  source faces whose outward direction runs against the source-to-
-  destination vector, in any frame) removes the far-face teeth at the
-  menu. It is what stops the hairpins rather than trimming them (zynq
-  K38: DQ12 58 -> 25 mm, the run 1172 -> 1139 mm) -- and it is not a
-  default, because the menu's deep-ball-met-on-the-far-side move is real:
-  with the ban zynq K38 68 = 68 but K44 105 -> 106, H3 K28 34 = 34 (copper
-  652 -> 643 mm) but K35 60 -> 61 (878 -> 919 mm), K41 74 -> 82. Worse on
-  three of five rungs is not a default; it stays a knob the evolution can try.
 
 **The pack, made to work on a finished board** (2026-09-19, Andy: "I
 see easy shorter paths", then "still slack in the outer lanes"). Six
@@ -232,85 +221,6 @@ margin, every lane packed.
   way round its bundle at the same via count is invisible to the chain's
   judge, which prices vias and never copper.
 
-**The source stub trim, the served-under-the-part rule, the away-face
-ban** (2026-09-19, the second pass over the zynq article). Three things
-the article asked for, each general:
-
-* **The source stub trim** (`braid.note_source_joint`, on by default;
-  `SRC_TRIM_REACH=0` turns it off) is the source-side mirror of the berth
-  trim: at write time every lane is walked from its tooth, every vertex
-  projected onto the net's own stub chain, and the deepest splice that
-  shortens the copper and grades no worse on the net's scoped DRC stands
-  -- the stub's dead tail and the lane's backtrack go, one cross segment
-  joins them. Vias never change. Measured, the trim on: zynq K38 68 = 68
-  vias with DQ12 58 -> 37 mm, K44 105 = 105 (six lanes, -20 mm); H3 K28
-  34 = 34 (SA1 -3.4 mm), K35 60 = 60 (SDQ10 + SDQ13 -28 mm), K41 74 = 74
-  (-13 mm), K51 98 = 98 (SBA1 + SDQ11 + SDQ13 -57 mm). A dead-copper
-  audit of every board finds no dangling tail at either end -- the berth
-  trim is complete on these boards; what it does not catch is a lane that
-  never touches its stub again (DQ13 at K44 climbs six millimetres up the
-  far face before turning back, and the 3.6 mm splice the trim found took
-  5 mm, not 20).
-* **The served-under-the-part rule** (`py_router`, `KICAD_FANOUT_SKIP_UNDER=1`,
-  `bga_fanout.escape.under_part_candidates`): a ball whose net's every
-  off-footprint pad lies inside the ball field -- a ZQ resistor or a
-  decoupling cap on the far side, straight under it -- gets no escape
-  stub; its connection is a via at the ball and a short far-side track.
-  The H3 bench's `SZQ` (ball V10 to R6.2, 0.09 mm away on B.Cu, drawn a
-  2.4 mm stub toward the edge) is the case; on the corpus H3 board the
-  switch drops exactly that stub and touches no bus net. It rides #472's
-  deferral plumbing, so the balls stay routable through the route steps'
-  zone exemption. Opt-in: the always-on form is a fanout-laid pad drop
-  (via at the ball, track to the pad), not built. A bench rebuilt with it
-  loses `SZQ` from the K51 ladder, which is right: it is not a bus net.
-* **The away-face ban** (`SRC_AWAY_BAN=1`, `escape_moves.away_faces`: the
-  source faces whose outward direction runs against the source-to-
-  destination vector, in any frame) removes the far-face teeth at the
-  menu. It is what stops the hairpins rather than trimming them (zynq
-  K38: DQ12 58 -> 25 mm, the run 1172 -> 1139 mm) -- and it is not a
-  default, because the menu's deep-ball-met-on-the-far-side move is real:
-  with the ban zynq K38 68 = 68 but K44 105 -> 106, H3 K28 34 = 34 (copper
-  652 -> 643 mm) but K35 60 -> 61 (878 -> 919 mm), K41 74 -> 82. Worse on
-  three of five rungs is not a default; it stays a knob the evolution can try.
-
-**The pack, made to work on a finished board** (2026-09-19, Andy: "I
-see easy shorter paths"). Three things were wrong, in order of size:
-
-* An evolved board's `.pack.json` is the LAST PROBE braid's sidecar, and
-  a probe lays one lane and its coupled set -- on the K44 record the
-  packer saw one corridor with one lane of 44 and packed that. The
-  whole-board mode (`pack_board.py BOARD --fanout BOARD_fo --nets ...
-  --src U1 --passes 4`) derives every lane from the routed/fanout pair
-  (`replan.lane_items`), takes each lane's two ends from its own copper
-  (the trims split stubs, so the fanout board's tips need not exist on
-  the routed one), packs one corridor per lane and repeats the passes so
-  each pass sees the room the last one left.
-* The FOLLOW force -- each lane snapped into the tube of the lane packed
-  before it -- copies that lane's jogs wherever they are, and from the
-  wall inward the outer lanes copy the router's still-ragged inner ones:
-  the K18 bundle read as a wave, every lane bending at a different
-  height. Four passes with the follow grew K18's lanes 392.6 -> 394.8
-  mm. Taut (`PK_FOLLOW=0`, the whole-board default) they went 392.6 ->
-  386 mm and bend together where the cap pads are.
-* A via moved by its lane was checked against copper clearance only;
-  KiCad's hole-to-hole rule is net-agnostic and 0.25 mm between drills
-  here (0.40 mm centre to centre for these vias, where the copper rule
-  allows 0.355). Two taut-packed vias settled at the copper distance and
-  `check_drc` named them (K26, K32). Every drilled pad and every other
-  via is now a disc in the via world at drill/2 + the board's rule +
-  this via's drill/2.
-
-| K | 9 | 18 | 26 | 32 | 38 | 42 | 44 |
-|---|---|---|---|---|---|---|---|
-| lanes, mm (best -> taut pack) | 185 -> 185 | 393 -> 386 | 662 -> 637 | 801 -> 776 | 954 -> 932 | 1054 -> 1010 | 1118 -> 1058 |
-| segments | 163 -> 142 | 1124 -> 309 | 1389 -> 640 | 3071 -> 875 | 3506 -> 995 | 3294 -> 1197 | 3854 -> 1378 |
-
-Vias unchanged on every rung, 0 open, 0 DRC with and without the
-margin. What is left is the ORDER: a lane that wraps the long way round
-its bundle at the same via count is invisible to the chain's judge,
-which prices vias and never copper, and no packer can move a lane
-across its neighbours.
-
 ## How it works, end to end
 
 **The chain** (`chain_k.sh`) makes the seeds. `coherent_nets.py K` picks
@@ -376,15 +286,14 @@ resident worker processes (`--par=N`).
 ## The descent, in detail (`replan.py`)
 
     python3 replan.py STEM K --from=STEM --out=OUT --mode=incremental --apply=strip \
-        --rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --widen=0 --grade=inproc --par=4
+        --rounds=2 --worst=6 --probes=2 --min-vias=2 --coupled=census --grade=inproc --par=4
 
 | | |
 |---|---|
 | `--from=STEM` | the world: `STEM_fo.kicad_pcb` (+ `.plan.json`) and `STEM.kicad_pcb` (+ `.log`, `.pack.json`, `.census.json`) |
 | `--worst=N`, `--min-vias=V` | the nets probed each round: refused first, then the N with the most lane vias (at least V; their vias off the board minus their ends' vias) |
 | `--probes=P` | candidates probed per end (the top P of the ranked, screened menu); joint tooth-and-berth pairs are probed too |
-| `--coupled=census` | the re-lay set: the end's conflicts + the braid's blocker census + co-moves (`chord` adds every lane crossing the chord between the ends -- measured too big at K51: 11-25 lanes re-laid, 110-144 vias) |
-| `--widen=N` | answer a local refusal with room, N times (off: widened probes cost 60-180 s and never stood) |
+| `--coupled=census` | the re-lay set: the end's conflicts + the braid's blocker census + co-moves |
 | `--mode=incremental --apply=strip` | a standing probe's board is the next board; the round's fanout board is DERIVED from the routed board by stripping the lanes (the re-fan apply was unfaithful) |
 | `--grade=inproc` | the checks in-process; a probe's grade is SCOPED to the nets it changed when the reference board is DRC-clean (same answer, less than half the time) |
 | `--par=N` | N resident probe workers (`probe_worker.py`): each holds the round's Board and applies the parent's advances; one net's candidates are probed N at a time, the engine screens too |
@@ -405,7 +314,7 @@ the run.
 ## The population (`evolve.py`)
 
     python3 evolve.py TAG K --seeds=STEM[,STEM...] [--pop=4] [--gens=3] [--jumps=2] [--cross=1]
-        [--jobs=1] [--jump=near|chain] [--jump-nets=2] [--cross-mode=probe|chain]
+        [--jobs=1] [--jump=near] [--jump-nets=2] [--cross-mode=probe]
         [--descend="..."] [--descend-env="DST_CLIMB=2"] [--jump-env="DST_CLIMB=2 SRC_CLIMB=4"] [--seed=N]
 
 Seeds are chain stems (`STEM_fo_k<K>` + `STEM_k<K>`, every portfolio arm
@@ -413,10 +322,6 @@ imported) or replan stems. Each generation: every population member
 descends; `--jumps` near jumps and `--cross` crossovers land; the new
 worlds descend; selection. Outputs `tmp/TAG/g<N>/...`, `tmp/TAG/best_k<K>`
 whenever the best changes, the ledger `tmp/TAG/evolve_k<K>.json`.
-`--jump=chain` and `--cross-mode=chain` are the retired operators (a
-plan-level re-solve with class bans, and the hold channel over two
-parents): 665 s and 214 s at K51, landing 84..141 and worse than either
-parent; kept for the record.
 
 `evolve_movie.py TAG K [--view X0,Y0,X1,Y1] [--gif] [--verify]` films a run
 from its ledger: one canvas per generation, the population row, each
@@ -438,8 +343,8 @@ two parents got a run killed for memory), so a laptop population runs
 | one probe, serial | 3.7 s | 7-9 s |
 | the K51 null descent, 31 probes | 50 s with four workers, 120 s in one process, 5 s warm from the memo | 216 s |
 | the K41 descent 67 -> 64, 55 probes | 77 s with four workers, 205 s in one process, 13 s warm | 440 s |
-| a jump | 20-60 s, landing a few vias away | 665 s (a chain), landing 84..141 |
-| a crossover | 14-36 s, landing near the parents | 214 s (a chain), landing 96 from 64 x 66 |
+| a jump | 20-60 s, landing a few vias away | -- |
+| a crossover | 14-36 s, landing near the parents | -- |
 | the chain, K41 / K51 | 124 s / ~345 s | 147 s / 372 s |
 | a two-generation K41 population | 1241 s | 5430 s |
 | a two-generation K51 population | 1028 s (550 + 475) | 7503 s for three |
@@ -482,12 +387,7 @@ obstacle stamps a third each of that, the corridor band strips and the
 Python map build the rest), the engine's re-fan and realize about 0.3 s
 (the fanout engine's cost is stamping its occupancy grid, not its
 under-pad search, which is 5 ms a call), the scoped grade 0.25 s, board
-parses and writes the remainder. Measured and left off: a whole-board
-obstacle map cloned per connect (`CONNECT_MAP_CACHE`; copper identical,
-a full braid 42.7 -> 44.1 s, the ladders too short to repay a 97 ms
-build), the descent without the engine screen (`--screen=0`; same moves,
-not faster), a Rust port of the under-pad search (1 percent of a
-descent), batching the post-route distance checks (2 percent of a braid).
+parses and writes the remainder.
 
 ## Differential pairs (2026-09-20)
 
@@ -502,24 +402,18 @@ grades against the wrong list. Off, everything is byte-identical (checked
 by copper comparison on the recorded K34 braid and by the ladder: K28 34,
 K41 74).
 
-**Pairs go first, free, and are protected** (`braid.route_pairs_free`,
-`BRAID_PAIRS_FIRST_FREE`, default on). Before any corridor is planned, each
-pair is routed by the production pair router (`connect_pair` ->
+**The pair router, and a pair's copper is protected** (`braid.route_pairs_free`,
+the last resort of the planned flow below). A pair is routed by the
+production pair router (`connect_pair` ->
 `route_diff_pair_with_obstacles`: one centreline, P and N generated either
-side of it) on the fanout board as it stands, no band, a 6 mm window, with
+side of it), free of any band in a 6 mm window when it comes to that, with
 only the singles' EXIT STUBS reserved (a millimetre in front of every tooth
 and berth, `BRAID_PAIR_EXIT_RESERVE`; without it a pair laid across a tooth
 row sealed SA4 into its tooth). Its copper joins the base copper, so the
 corridors plan and route the singles around it and no rescue, rip or re-lay
 touches it; the output project records the legs as protected nets (#521).
-Each pair lands in under a second. A pair the free pass refuses stays a
-corridor member and is tried again by the same router inside the corridor
-(`BRAID_PAIR_FREE`: as a free swimmer; `=0`: in its single-lane band, which
-refused every pair at K36 -- leg strips, dive zones and slope pitches sized
-for one track). **A pair is never routed as singles**: one it cannot couple
-is refused, both legs open and named. Measured at K36, braid alone on one
-fanout: legs as singles 66 vias coupled 0.2/0.3/0.1; pairs first 71 vias
-coupled 0.89/0.83/0.85, no refusal.
+Each pair lands in under a second. **A pair is never routed as singles**:
+one it cannot couple is refused, both legs open and named.
 
 **The plan knows a pair** (`pairs.py`, `pages_first.py`,
 `fanout_from_plan.py`): one member per pair with midpoint ends and the room
@@ -542,18 +436,9 @@ served by a TIE VIA at the ball on the shipped fanout board
 (`tie_vias_under`; inside the destination loop the audit read it as an
 unasked via-in-pad berth and re-planned eight passes).
 
-**Measured, the K36 chain on the pair bench:** pairs off 1 open / 0 DRC /
-81 vias, coupled 0.07/0.12/0.01, SDQS1 skewed 35 mm; pairs first 0 open /
-0 DRC / 86 vias, coupled 0.77/0.84/0.66 (SCK / SDQS0 / SDQS1), skews
-0.42/0.45/0.36 mm. The uncoupled length is the fanout's escape stubs (each
-leg escaped as a single net, 1-7 mm); the routed part is coupled. The
-human's pairs: 0.90/0.83/0.92.
-
 **Two more benches (2026-09-20 evening).** The ZYNQ article (`BASE=tmp/zynq/
 zynqF.kicad_pcb DEST=U2`, K44 carries both DQS pairs as legs; CK stays out,
-its R20 is 4 mm from the balls): pairs off 105 vias / 0 open, uncoupled;
-pairs first 116 vias / 0 open, DQS0 coupled 0.84 and DQS1 0.88 against the
-human's 0.84 / 0.87. Two rules came from it: a PAIR leg's move must have
+its R20 is 4 mm from the balls). Two rules came from it: a PAIR leg's move must have
 ROOM for the pair at its exit (`pair_exit_clear`: the ray past the exit for
 1.2 mm clear on the leg's own line and on ONE side, where the partner
 runs -- C105, a back-side cap 0.6 mm behind DQS0's tooth, refused every
@@ -570,19 +455,6 @@ singles; blocks 22 vias against 16, coupled 0.88 / 0.85 against 0.56 /
 0.29 (the census's pitch is now the mode among PAIR-LIKE distances, so
 two legs a ball pitch apart read as 0.00, not 0.92).
 
-**Along the corridor's grain, tried (2026-09-20, late).** `BRAID_PAIR_TUBE=W`
-routes each pair ALSO inside a tube W mm either side of its planned lane
-(the corridors planned once with the pairs as members, on a copy of the
-context, for their lanes only) and keeps the shorter of tube and free
-(`BRAID_PAIR_PICK=len`, or `cross` for the one crossing fewer planned
-lanes). Measured on the chain: H3 K36 free 87 / every pair in its tube 81
-(SCK 36 -> 24 mm) / picked per pair 87; zynq K44 free 116 / tubes 126 with
-2 open / picked 116-123. The pre-plan on the LIVE context changed the plan
-that followed it (116 -> 126 with identical pair copper), and keeping the
-pairs as protected members of that one plan was worse still (143): hence
-the copy. No local rule reproduced the H3 gain without the zynq loss, so
-the tube is off by default and stays an instrument.
-
 **A pair's termination is a waypoint (2026-09-20, late).** A two-pad part
 with one pad on P and the other on N -- the zynq's R20 on CK, 4 mm from
 U1's balls -- is a place the pair PASSES THROUGH, as the human takes it
@@ -597,9 +469,7 @@ not a waypoint: the tie via serves it. And the pairs' ORDER is retried: a
 pair refused because the pairs before it took its room (K47: DQS1 walled
 by DQS0's copper, the free window exhausted at 20000 cells) is tried first
 in a new order, and the order landing the most pairs, then the fewest
-vias, stands. K47 chain, pairs first: 0 open / 0 DRC / 133 vias, CK
-coupled 0.77 through R20, DQS0 0.83, DQS1 0.85; the human 109 with 0.87 /
-0.84 / 0.87; pairs off 105 with 3 open (R20 unreached, DQS0 refused).
+vias, stands.
 
 **THE PAIR IS PART OF THE PLAN (2026-09-20, latest; `BRAID_PAIRS_PLANNED`,
 default on).** Andy: "we need the diff pair to be part of the planning."
@@ -615,27 +485,22 @@ side of a planned change: two barrels side by side), a refusal with no
 frontier -- the router's own intra-pair check on the pose it chose --
 retried with straight approaches twice and three times as long, the
 converging approach bent onto the planned lane when the tips lie far apart
-along a comb, then free in a window, then free of the plan (the
-free-first call) as the last resort; a pair through a termination part by
+along a comb, then free in a window, then free of the plan
+(`route_pairs_free`) as the last resort; a pair through a termination part by
 its legs; the pairs' order retried. Its copper is protected and the same
 plan routes the singles round it (`route_pairs_planned`, the corridor
-skips protected members). Measured on the chain against the earlier flow
-(pairs routed free before any plan, `BRAID_PAIRS_PLANNED=0`):
+skips protected members). Measured on the chain:
 
-| chain | free first | in the plan | human |
-|---|---|---|---|
-| H3 K36 | 87 | **84**, 0 open | 62 |
-| zynq K44 | 116 | **100**, 0 open | 103 |
-| zynq K47 (CK) | 133, 0 open | 111, 1 open (WE) | 109 |
+| chain | in the plan | human |
+|---|---|---|
+| H3 K36 | **84**, 0 open | 62 |
+| zynq K44 | **100**, 0 open | 103 |
+| zynq K47 (CK) | 111, 1 open (WE) | 109 |
 
 Every pair coupled in every run (K36 0.54 / 0.89 / 0.64, K44 0.85 /
-0.84, K47 CK 0.76 through R20 / 0.83 / 0.85). What was tried and measured
-worse on the way: routing the pairs in their bands with the FULL planned
-lanes reserved (every pair refused at the fan-in), the segment-distance
-fan-in test (H3 84 -> 88), and the pre-plan/re-plan tube flow above. On
+0.84, K47 CK 0.76 through R20 / 0.83 / 0.85). On
 K47 both DQS pairs land only by the last resort, so their copper is not
-in the singles' plan and one single stays open; the free-first flow ships
-it at 133. Pairs off is byte-identical to the recorded K34 braid.
+in the singles' plan and one single stays open. Pairs off is byte-identical to the recorded K34 braid.
 
 **THE ECONOMY'S GUARD, THE JOINT RE-LAY AND THE COMB DISCIPLINE (2026-09-20,
 Andy's magenta route).** Andy drew the obvious route for K36's SBA1 over the
@@ -673,9 +538,7 @@ front of SBA1's berth, so the way in from above was taken. Three rules:
   member's berth approach -- a millimetre out from its berth along the
   arrival direction, on its arrival layer -- is virtual copper, so a lane
   searched free of its band cannot park in front of a neighbour's berth.
-  Neutral on K36 (SA0 then arrives at 45 degrees like a comb lane); inside
-  the econ pass it cost SA7 and SA8 their 0-via re-lays (79 -> 83), so
-  `BRAID_APPROACH_RESERVE_ECON` is 0.
+  Neutral on K36 (SA0 then arrives at 45 degrees like a comb lane).
 
 SBA1 itself ends at 2 vias and 20 mm: its 0-via path crosses three
 byte-lane lanes, not one neighbour.
@@ -702,15 +565,6 @@ free-of-plan call arriving along the berths' own direction landed at once.
   connector at either end is tried again with the plain approaches along
   the escape and arrival directions, inside the same band, before it is
   refused -- like the frontier-less retry.
-- A third tooth between a pair's teeth on the pair's layer: the planner's
-  nothing-between clauses in the RELAXED case were tried and REVERTED (a
-  one-move third menu made the model infeasible, the greedy fallback moved
-  DQS0_N to another face and split DQS1's berths across layers: K44 100 ->
-  116 with 2 open). `Corridor._straddled` names such teeth and the one-dive
-  levels (`BRAID_ONE_DIVE` >= 1, off by default) bound a straddled changer's
-  dive to its fan-in; in the default Schedule (schedule.py) the rule would
-  be a forced other-page exit, not done -- the two rules above landed the
-  pairs without it.
 
 | chain | before | after | human |
 |---|---|---|---|
@@ -733,16 +587,7 @@ field the lanes cannot cross, and the human loops them the same way (its
 SCAS/SA7/SRAS/SA13 run 38-39 mm and reach 4-5 mm below the array); on the
 zynq three of them are real away teeth -- BA0, WE and DQ15, balls on the
 EAST side of U1 (x 80-84, U2 east at 100+), teeth at the WEST edge
-(x 68). The two flags built for this were measured and both STAY OFF:
-`SRC_AWAY_BAN=1` (the single most-opposed face dropped from the source
-menu; it was already one face on every bench and `escape_moves.away_faces`
-now returns at most one by construction) gave K28 34 / K36 pairs 75 / K41
-80 / zynq K47 139 with 1 open against 36 / 71 / 74 / 97 -- those three out
-the east face run into the columns wall, and the human ALSO takes BA0 and
-WE round the west edge (2-3 vias, 40 mm, its matched length); `PLAN_RATE=1`
-(length at 7.5 mm a via everywhere, the source wrap included) gave K28
-**30** / K36 pairs **66** / K41 **89** -- the 0915 mixed picture again
-(stopped at Andy's word; it moved BA0, DQ15 and DM0 east at K47, WE stayed).
+(x 68).
 
 What does help is Andy's other reading: "the long west tooth can clearly
 be removed after the fact by a re-lay". `re_escape.py`
@@ -789,7 +634,7 @@ pairs-off 99 / 0 open), every portfolio arm 5-13 open, 20 lanes at the last
 call -- SCK refused in its band, widened and free, landed free of the plan,
 and the singles' plan was blind to its copper. Its refusal had two layers.
 The first was a launch pocket in front of its berths, the same 402 cells
-every attempt: the map rebuilt piecewise (a probe, not kept)
+every attempt: the map rebuilt piecewise (a probe)
 showed copper alone leaves those cells free and the virtual pieces block
 them, and the piece was the 1.5 mm end stamp of a lane from ANOTHER
 corridor -- SA10, a one-net corridor berthing 1.2 mm east of SCK's on the
@@ -801,22 +646,9 @@ layer stands: SCK's lane runs the length of the DDR's top edge, where four
 neighbouring berths' lanes converge at the fanout's 0.4 mm pitch round the
 pair's berths, SCKE0's berth, via and stub between the pair's two, and the
 pose clouds from the two ends never meet (a whole-window frontier in every
-band). Two things tried there and measured HARMFUL, neither kept: leaving a
-third end's exit stub unreserved when it lies between the pair's ends (then
-even the free-of-plan last resort fails) and dropping reserved dives within
-0.6 mm of the pair's planned lane (zynq K44 98 -> 112, K47 100 -> 106). The corridor's
+band). The corridor's
 slot for a pair member is already the pair's width (`lane_w`); the comb
-run is the fanout's pitch. The likely lever is the planner's comb: no
-third berth between a pair's two, layer or no layer. Not done.
-
-The population search (`evolve.py`) on the pairs bench, K36 and K41, one to
-three seeds, near and chain jumps: no gain. Descents gain nothing, the
-cross finds no differing ends (every K36 chain today landed the same plan),
-and a jump world's pairs come back open -- 56 and 60 vias with all six pair
-legs open at K36, the K41 world stuck at 80 with the SCK pair open -- which
-the descent cannot close, since it moves single nets' ends. A pair must
-land at the chain stage; a seed needs its `.pack.json` beside the routed
-board.
+run is the fanout's pitch.
 
 **Instruments:** `grade_k.py` prints one PAIR line per pair (routed or
 not, coupled fraction at the inferred pitch, skew, barrels);
@@ -824,8 +656,7 @@ not, coupled fraction at the inferred pitch, skew, barrels);
 end's connectors and a map probe (centre / P / N cells, via mark, the other
 layer, WHY blocked) and writes `tmp/pairdbg_<pair>_<n>.png` with the band,
 the pieces, the reserved vias and the poses. Knobs: `BRAID_PAIR_GAP`
-(default hug + 0.04), `BRAID_PAIR_SEP`, `BRAID_PAIR_ROUTER` (`prod` |
-`envelope`), `BRAID_PAIR_SLACK`, `PLAN_PAIR_SWIM`.
+(default hug + 0.04), `BRAID_PAIR_SEP`, `PLAN_PAIR_SWIM`.
 
 ## The chain's other pieces
 
@@ -848,9 +679,8 @@ sidecar's marker, the B arm turns both off); `BRAID_ATTEMPTS` (6: the
 launch pitch widened) and `BRAID_BUDGET_X` (the rescue budget); `BRAID_LADDER`
 (`full` | `open`); `BRAID_SMOOTH` (the octolinear smoother at write time);
 `BRAID_PACK=1` (`pack_board.py`: every lane a taut string against its
-neighbour, far fewer segments, vias unchanged -- opt-in, unmeasured what
-the segments buy). Every budget is in work (judge calls, HiGHS nodes,
-CP-SAT deterministic time), never wall clock.
+neighbour, far fewer segments, vias unchanged -- opt-in). Every budget is in work (judge calls, CP-SAT
+deterministic time), never wall clock.
 
 **Grading** (`grade_k.py BOARD NETS`): connectivity scoped to the run's
 nets, whole-board DRC at the routed floor with `--clearance-margin 0.1`,
@@ -874,7 +704,6 @@ geometry supplied (`Rules.from_router_config(cfg)` is the seam).
 | lane track / fanout track | `rules.TRACK` / `Rules.fan_track` | 0.127 / 0.1 -- the board carries two widths on purpose |
 | via size / drill | `rules.VIA_SIZE` / `VIA_DRILL` | 0.25 / 0.15 |
 | lane slice, lane pitch, exit pitch | `Rules.lane_slice` / `.lane_pitch` / `.exit_pitch` | 0.232, 0.35, 0.38 |
-| band tip | `Rules.band_tip` | 0.9 = array pitch / 2 + the engine's exit margin |
 | hole-to-hole / edge | `Rules.hole_to_hole` / `.edge_clearance` | read off the board, tighten-only |
 
 `braid.CLEAR` (0.105) and `topo_strings.SPEC_CLEAR` (0.1) are different
@@ -991,12 +820,12 @@ is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 | `smooth_board.py` | the octolinear smoother once over an assembled board's lanes |
 | `dedupe_boards.py` | boards identical by copper (the portfolio, the population) |
 | `flow_frame.py`, `pose_gate.sh`, `make_bench.py`, `rotate_board.py`, `mirror_board.py` | the canonical frame, the poses, articles from any board |
-| `human_at_k.py`, `census_vs_human.py`, `cmp_copper.py`, `wall_probe.py` | the human's count at a K, per-net comparisons, copper diffs |
-| `joint_floor.py`, `ledger_cal.py`, `cut_ledger.py` | floors: the non-circular MILP over a board's own paths (`--cap N`), the per-net DP floor vs slack, the Maley cut capacity of a plan |
+| `human_at_k.py`, `census_vs_human.py`, `cmp_copper.py` | the human's count at a K, per-net comparisons, copper diffs |
+| `joint_floor.py` | the floor: the non-circular MILP over a board's own paths (`--cap N`) |
 | `synth_bus.py`, `synth_ladder.py` | the synthetic channel with a known optimum (below) |
-| `pack.py`, `pack_board.py`, `collapse_dives.py` | opt-in post-passes |
-| `modal_k.py`, `arms.*.json` | cloud arms, one container per (arm, K); `return_board`, `return_files` bring artifacts back |
-| `plan_loop.py`, `plan_feedback.py` | the retired plan-level loop (below); byte-identical unset |
+| `pack.py`, `pack_board.py` | the opt-in post-pass |
+| `wall_probe.py`, `pinch_gate.py`, `judge_gate.py`, `floor_survey.py`, `ledger_cal.py`, `cut_ledger.py`, `rule_table.py`, `solve_curve.py`, `modal_curve.py` | probes and gates: a lane's walls, the braid's refusals, the plan judge, the floor per net, a corridor's cut, the length rule over arms, the CP-SAT's convergence |
+| `modal_k.py`, `arms.example.json`, `arms.rec51.json` | cloud arms, one container per (arm, K); `return_board`, `return_files` bring artifacts back |
 
 ## What this adds to `py_router`
 
@@ -1060,9 +889,7 @@ Every rung 0 open, 0 DRC at 0.1 mm; the five rungs took 14 min on this
 laptop. In a bare environment at K28 the pre-rebase tip and the rebased
 tree route the same 42 vias and 725.6 mm of copper, and main's `#958`
 equal-length collapse halves the segment count (1832 -> 935) at the same
-length. The evolution's records were not re-run. Main's suite is not
-untouched by the delta, though: item 13 of the TODO names the two boards
-whose copper it moves.
+length. The evolution's records were not re-run.
 
 ## The synthetic harness
 
@@ -1086,195 +913,6 @@ an array, so K28 routes ten below its own floor, and the bound is a
 diagnosis, not a scorecard). It is what showed the planner's objective
 DEGENERATE (constant across plans that route 12 vias apart) and the
 escape move worth 42 percent of the floor on the bench.
-
-## Measured dead ends (do not rebuild)
-
-* **The plan-level loop** (`plan_loop.py`: the route's verdict fed back
-  into a pages-first re-solve as class bans, prices and a hint, one full
-  chain per candidate, the best kept). No arm beat the incumbent 98 at
-  K51 (125 / 113 / 114 / 138 / 100+1 open): a free re-solve moves 33 of 48
-  ends, holds leak the loss onto lanes whose ends never moved (a whole-
-  board re-braid re-realises all 47 lanes and its spread of 20 vias
-  swamps a 2-4 via hypothesis), and windowing the moved ends starved the
-  hypothesis. The CP-SAT re-solve is the wrong chooser and the full
-  re-braid the wrong instrument for local information.
-* **The chord coupled set and widened probes**: 11-25 lanes re-laid in a
-  frozen field of 30 is a far worse router than the full braid.
-* **Climb classes in the CP-SAT solve** (`DST_CLIMB` at plan time): the
-  solve stops somewhere worse (K28 42 against 34; K51 123 with 3 open
-  against 116). The route-judged descent can afford them.
-* **Plan-time floors as rankers** (the channel floor, inversions, LIS,
-  the free-rider ceiling): |rho| <= 0.13 over the K51 fanouts; the
-  channel model carries a third of the real crossing system.
-* **The two-via cap**, above.
-* **Chain jumps and chain crossovers**, replaced by the probe forms.
-* **The whole-board obstacle map cache, the screen-less descent, a Rust
-  under-pad search**, above.
-
-## TODO
-
-Ordered, highest value first. An item leaves this list when it is done or
-abandoned with a measurement.
-
-1. **Speculation inside a descent.** Rank and dispatch the next net's
-   probes while the current wave runs, discard them when a net stands.
-   Four workers are 52-60 percent busy; ideal wall is 38-40 s where 63-77
-   is measured. No verdict changes.
-
-2. **Stop the evolution when it stalls, and braid the chain's arms side
-   by side.** A stalled K51 generation still costs its jumps, crossover
-   and their descents, about 300 s; the chain's four braids are 245 of
-   its 345 s and independent. Both are small.
-
-3. **The evolution on the cloud.** A generation is seven independent
-   operators; one container each (`modal_k.py` ships the tree and pins
-   the stack) makes its wall the slowest operator, 3-4x on a population
-   run, and width is free. The memo store wants a shared volume.
-
-4. **K51's last two vias.** 83 is the local optimum of every single-net
-   move class with climbs. The next move class is a GROUP move: re-layer
-   a lane together with its crossing partners in one probe (the coupled
-   probe already routes such a set); or jumps that land nearer than two
-   random nets.
-
-5. **The chain's seeds.** The plan's objective is anti-correlated with
-   the route; the evolution optimises past it, but better seeds are a
-   better start. The berth menu is one-per-face at `CANDS=4` (row
-   pruning, not column generation), and a plan-time floor over the
-   PLANNED LANES rather than the channel is the one untested ranker.
-
-6. **Generality.** Tuned on one bench. The zynq article now runs
-   through the chain and the evolution (the table above); what it shows:
-   a singleton corridor's source tooth may be planned on the FAR face of
-   the source array (the count judge sees a via saved, the length judge
-   prices the lane from the tooth's exit and the berth's run but not the
-   tooth's own escape through the array -- `_length` of the source move
-   is the missing term), and the top rungs lose their in-band execution
-   (58 refusals at K44). Off-axis poses (R30, R45) still break the
-   plan's compass faces.
-
-7. **The corpus A/B for the `py_router` changes, then the PR to main.**
-   `KICAD_SEG_DIST_EXACT` ships OFF (2026-09-19) so the merge leaves
-   main's copper alone; the A/B decides whether it turns on. **Measured
-   2026-09-19**, sets 1-10 on Modal, the branch at `587980fe` against the
-   v0.22.1 validation arm (`heads110-kc_96912901`; main's routing code
-   moved by one non-routing commit since), 149 boards with the same
-   completed chain in both, paired by `tests/stress/pair_arms.py`:
-   real DRC 40 -> 42, incomplete nets 175 -> 174, KiCad's own DRC
-   57 -> 51, direction 7 better / 11 worse / 131 tied, CPU +14%. A wash
-   on the headline, leaning worse by count; the moves are cparti_fpga
-   nets 6 -> 11, scalenode_cm4 and ulx5m_gatemate +3 each, smartknob_base
-   DRC 2 -> 4 against orbiter_kb 12 -> 8, ulx3s 9 -> 6, zynq_ad9364
-   23 -> 19 (at +39% CPU) and orangecrab 14 -> 8 (inside its own noise).
-   Nothing here clears the two-board bar in either direction, so the
-   knob stays off and the first-bucket changes owe a per-board
-   attribution (cparti_fpga is a BGA board: the fanout tie-breaks are the
-   suspect). Two caveats on the arm itself: the volume's sets 6-10
-   replayed manifests from before the 09-03 `--clearance-ceiling` rewrite
-   (both arms alike), and butterstick ran for the first time on its
-   repaired manifest (11 DRC, 1 of 317 nets open; no baseline).
-
-8. **The `.kicad_dru` is read with real layer names inside the turned
-   frame**; a per-layer rule lands on the opposite face for a back-side
-   part. Shipped `py_router` code, so it blocks the merge.
-
-9. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
-
-10. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
-    `pages-first:` line and reads like "never ran".
-
-11. **Built, default off, never finished**: `DST_ASK_BAN`, `BRAID_PACK=1`,
-    `SRC_EXCHANGE=1`, `CONNECT_MAP_CACHE=1`, `--screen=0`.
-
-12. **Unverified review findings**: `dedupe_boards` fingerprints copper
-    but not the sidecar; `braid_tier`'s budget exhaustion is silent;
-    `_realize_group_first` bans nothing on a pure DRC rejection;
-    `blockers_of` double-counts half a track; `collapse_dives` calls
-    `os.chdir` at import; `flip_frame` does not mirror `pad.polygons`.
-
-13. **The suite on the branch: green after four re-recordings and fixes
-    (2026-09-20).** `run_all` on Modal at `8e395ed0` was 647 passed / 4
-    failed (50/50 shards, 25 min; 4 self-skipped for want of KiCad in the
-    cloud). Two were the `py_router` delta's own copper moves, attributed
-    and then RE-RECORDED as baselines: `test_703_predictor_regen`
-    (splitflap_driver's authored row 168/2913.82/1155 -> 168/2913.88/1154,
-    the nanometre rounding of the pad keep-out's sub-cell offset in
-    `routing_utils`, by single-file revert) and `test_fanout_cancel`
-    (interf_u U9 requests and escapes 77 balls where main's fanout dropped
-    two in the channel pass and counted 75 from the under-pad fallback;
-    0 failed either way). Two were main's structural gates the branch
-    had walked into, fixed: `test_878` (`flip_frame.is_back_side` now
-    calls `placement.legality.footprint_side`, the side rule's one home)
-    and `test_937` (14 runnable awx scripts declare `KRT_TOOL` into no
-    door; and its `--help` probe RUNS every script, so `fanout_from_plan`
-    and `mem_watch` now refuse a first argument beginning with `-` --
-    the probe had written `--help_src1.kicad_pcb` into the repo root).
-    `test_782_nondefault_netclass_clamp` fails only in a checkout carrying
-    a `venv/` its walker does not skip -- a test fix for main.
-    `test_459_group_routing` at its own 1200 s budget is unrun.
-
-    **MERGED TO MAIN AND RE-RUN THERE: ALL GREEN (2026-09-20).** The branch
-    merged into `main` as `5bad89f4` (`--no-ff` of `e1e09d4f` onto
-    `ad243b74`, a clean fast-forward relationship; merge tree `745fe72c`
-    byte-identical to the branch tip's). `run_all` on Modal AT THAT MERGE
-    COMMIT: **651 passed, 0 failed, 0 timed out, 50/50 shards reported,
-    every shard rc=0**, 1130 s wall. 651 is the earlier 647 plus the four
-    fixed above, so all four hold on the merged tree; each was also run
-    locally here first and exits 0. The 4 self-skips are unchanged and
-    assert nothing -- `test_887_iso_render`, `test_887_run24_regression`,
-    `test_910_fill_for_delivery`, `test_run8_starved_face_gate`, all for
-    want of KiCad in the cloud image. `test_459_group_routing` remains
-    unrun at its own budget. Not re-verified by this run, and still owed:
-    the gates needing a local KiCad-python session, and TODO 7's per-board
-    attribution, which gates a RELEASE rather than this merge.
-
-    **THE LOCAL KiCad-PYTHON GATES: RUN, ALL GREEN (2026-09-20).** All
-    **34** files in `tests/gui_parity/` -- which `run_all` does NOT collect,
-    so the cloud suite covered none of them -- run on this machine under
-    KiCad 10.0.0-103 / wx 4.2.2a1: **34 PASS, 0 fail, none unrun**,
-    including `test_714_mirror_pcbnew_parity` (18 s, the zero-tolerance flip
-    gate that must never self-skip), the branch's new
-    `test_fanout_backside_gui` (82 s), `test_gui_engine_parity` (73 s) and
-    `test_gui_livechain_rp2350` (631 s). Tree clean afterwards.
-
-    **AND A CORRECTION TO THE LINE ABOVE, which this run disproved.** The
-    four cloud self-skips are NOT "all for want of KiCad". Run HERE, with
-    KiCad present, they split two and two:
-
-      * `test_887_iso_render` (PASS, 161 s; wants the `kicad-cli` BINARY,
-        no display) and `test_910_fill_for_delivery` (PASS, 59 s; wants
-        KiCad's bundled python for arms 3-5) are genuinely KiCad-gated --
-        an image carrying KiCad would recover exactly these two.
-      * `test_887_run24_regression` and `test_run8_starved_face_gate`
-        **SELF-SKIP LOCALLY TOO.** They want `wk/run24/esp_prog/
-        cmd_timing.jsonl` and the recorded run-7 boards, and `wk/` is
-        gitignored (0 files tracked), so they skip on ANY clean clone --
-        cloud or laptop, with or without KiCad. Installing KiCad in the
-        image would not move them; only shipping the recorded artifacts
-        would.
-
-    Worth keeping straight because the two halves cost different things: a
-    `kicad-cli` binary needs no display, while the 34 `gui_parity` gates
-    need pcbnew AND wx, which on Linux needs Xvfb as well.
-
-    **CORRECTION (same day): the cloud ALREADY HAS KiCad -- just not in the
-    SUITE image.** An earlier draft of this entry said no cloud script in
-    the repo installs it. That is false, and the counter-example is
-    default-on: `cloud_replay_sets.py --with-kicad` has been the DEFAULT
-    since 2026-08-23 (`--no-kicad` opts out), building
-    `modal_sweep/modal_app.py` on `kicad/kicad:10.0.0` and PROVING both
-    front-ends in the image build (`import pcbnew` + `kicad-cli version`);
-    such a wave suffixes its label `-kc`. Only
-    `modal_suite/run_all_modal.py` -- a DIFFERENT app -- is `debian_slim`
-    with no switch, which is why `run_all` self-skipped the two. So giving
-    the suite KiCad is not new work: it is the proven recipe next door
-    (`from_registry` + `USER root` + `python-is-python3` +
-    `--break-system-packages`). Name the entry point, because the two
-    defaults differ: `modal_app.py` read alone defaults the env var OFF,
-    while `cloud_replay_sets.py` -- the CLI actually launched -- defaults it
-    ON. The env-level default is OFF because a new base image is a NEW
-    BASELINE ERA voiding cross-wave numeric comparisons -- which does not
-    apply to a pass/fail suite that compares no numbers across runs. The `wk/` pair above is unaffected either way.
 
 **ONE PAIR AT A TIME AT K51, AND THE HUMAN'S COMB (2026-09-21 evening, Andy:
 "rethink how pairs are incorporated; add one pair at a time; compare to the
@@ -1322,18 +960,73 @@ the east face (three pairs 131 / 8; legs as singles 156 / 6).
 Where the loss is, from the planner's own log: the CP-SAT's page model counts
 8 swimmers with SCK on page B and the byte lanes crossing it on F; the braid's
 schedule seeds pages by born layer and counts 17; the re-solve meant to move a
-swimmer's berth is INFEASIBLE with 34 nets held at one move, and with
-`PLAN_PAGES_WIDEN=0` the greedy plan ships, under a via-count berth price that
+swimmer's berth is INFEASIBLE with 34 nets held at one move, and the greedy
+plan ships, under a via-count berth price that
 prefers a surface berth two faces away to a dogbone into the band.
 
-Tried at K51 on top of the day's rules and NOT kept (reverted 2026-09-22,
-Andy: keep a fix that fundamentally does something better and was shown to
-improve across the board; the re-escape stays, it improves a real thing --
-copper length -- and is correct): the comb's rules for a pair and the pair's
-page (K36 71 -> 71, K41 91 -> 91, zynq K47 100 -> 94, K44 98 -> 100, K51
-144/5 -> 156/4); a pair-comb repair realized as its own group (SCK alone 141/7 -> 188/4); the
-held berth keyed by the braid's real target offset (156/4 -> 153/3, one
-bench); the CP-SAT's pages as the braid's seeds (138/4, one bench); the
-excluders freed on an infeasible re-solve (inert); SPLIT_BLOCKS at K51 (pairs
-130/5, singles 137/9). The instruments stay: `BRAID_PAIR_ONLY`, the pair-aware
-bench builder and `refan_pairs.py`, `fb_t2q_pairs2`.
+## TODO
+
+Ordered, highest value first. An item leaves this list when it is done or
+abandoned with a measurement. Untried ideas live here and nowhere else.
+
+1. **Speculation inside a descent.** Rank and dispatch the next net's
+   probes while the current wave runs, discard them when a net stands.
+   Four workers sit idle for close to half of a descent. No verdict
+   changes.
+
+2. **Stop the evolution when it stalls, and braid the chain's arms side
+   by side.** A stalled generation still costs its jumps, crossover and
+   their descents; the chain's four braids are most of its wall and
+   independent. Both are small.
+
+3. **The evolution on the cloud.** A generation is seven independent
+   operators; one container each (`modal_k.py` ships the tree and pins
+   the stack) makes its wall the slowest operator, and width is free. The
+   memo store wants a shared volume.
+
+4. **K51's last two vias.** The next move class past the single-net
+   classes is a GROUP move: re-layer a lane together with its crossing
+   partners in one probe (the coupled probe already routes such a set);
+   or jumps that land nearer than two random nets.
+
+5. **The chain's seeds.** The evolution optimises past the plan's
+   objective, but better seeds are a better start. The berth menu is
+   one-per-face at `CANDS=4` (row pruning, not column generation), and a
+   plan-time floor over the PLANNED LANES rather than the channel is the
+   one untested ranker.
+
+6. **The planner's comb for a pair.** No third berth between a pair's
+   two, layer or no layer; and the room a pair's converging approach
+   needs at the comb, given at plan time rather than found at the last
+   call.
+
+7. **Pairs and the evolution.** The descent moves single nets' ends, so
+   a pair must land at the chain stage; a move class that moves a pair's
+   two ends together would let the population improve a pairs board.
+
+8. **Generality.** Tuned on one bench. What the zynq article shows: a
+   singleton corridor's source tooth may be planned on the FAR face of
+   the source array (the count judge sees a via saved, the length judge
+   prices the lane from the tooth's exit and the berth's run but not the
+   tooth's own escape through the array -- `_length` of the source move
+   is the missing term), and the top rungs lose their in-band execution.
+   Off-axis poses (R30, R45) still break the plan's compass faces.
+
+9. **The corpus A/B for the `py_router` changes, then the PR to main.**
+   `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
+   alone; the A/B decides whether it turns on, with a per-board
+   attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
+   are the suspect).
+
+10. **The `.kicad_dru` is read with real layer names inside the turned
+    frame**; a per-layer rule lands on the opposite face for a back-side
+    part. Shipped `py_router` code, so it blocks the merge.
+
+11. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
+
+12. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
+    `pages-first:` line and reads like "never ran".
+
+13. **Unverified review findings**: `dedupe_boards` fingerprints copper
+    but not the sidecar; `blockers_of` double-counts half a track;
+    `flip_frame` does not mirror `pad.polygons`.

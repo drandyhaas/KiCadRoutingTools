@@ -25,7 +25,6 @@ from typing import (Callable, Dict, List, Optional, Sequence,
                     Tuple)
 
 from escape_moves import Move
-import escape_moves as em
 from schedule import lis_keep, lis_keep_weighted
 import rules as _rules            # ONE source for every design rule
 
@@ -69,27 +68,12 @@ def _lane_spans_compute(m: Move) -> List[Tuple[Tuple, float, float]]:
         # a move synthesized from copper the engine laid (replan.synth_move)
         # carries no legs: it occupies no lane the selector can price
         return []
-    if not getattr(m, 'climb', 0) and not getattr(m, 'walk', 0):
+    if not getattr(m, 'climb', 0):
         return [_lane_span(m)]
     out = []
-    if getattr(m, 'walk', 0):
-        # the walked SURFACE leg (elbow -> site) takes its lane on the home
-        # layer, and the run from the site takes its own
-        out.append(_lane_span(m))
-        # the ELBOW stands at the crossing of a column gap and a row gap on
-        # the home layer: a neighbour's stub running either gap through
-        # that crossing cannot be laid (K28 dv2: SDQ15/SWE/SDQ7 surface
-        # stubs asked next to walked berths, via-in-pad laid, 13 bans)
-        if len(m.legs) >= 2:
-            (_b, elbow, home) = m.legs[0]
-            e = 0.05
-            out.append((('col', round(elbow[0], 3), home), elbow[1] - e, elbow[1] + e))
-            out.append((('row', round(elbow[1], 3), home), elbow[0] - e, elbow[0] + e))
     for (p, q, L) in m.legs:
-        if L != m.layer and not getattr(m, 'walk', 0):
+        if L != m.layer:
             continue
-        if getattr(m, 'walk', 0) and (p, q, L) == m.legs[0]:
-            continue                    # the ball -> elbow diagonal: no lane
         if abs(p[0] - q[0]) < 1e-6 and abs(p[1] - q[1]) > 1e-6:
             out.append((('col', round(p[0], 3), L), min(p[1], q[1]), max(p[1], q[1])))
         elif abs(p[1] - q[1]) < 1e-6 and abs(p[0] - q[0]) > 1e-6:
@@ -128,219 +112,21 @@ def _seg_hits_box(a: Pt, b: Pt, box) -> bool:
     return t0 < t1
 
 
-def _boxes(box):
-    """A keep-out is ONE box (x0, y0, x1, y1) or a list of boxes -- the
-    blocks of a banded array (escape_moves.blocks_of), between which the
-    band is open. One box, or a list of one, takes the single-box code
-    unchanged."""
-    if box and isinstance(box[0], (tuple, list)):
-        return list(box)
-    return [box]
-
-
-def bands_of_boxes(boxes) -> List[Tuple[float, float, float, float]]:
-    """The open streets between a banded array's blocks (escape_moves.
-    bands_of, from the boxes alone): two boxes whose x extents overlap
-    with a gap in y bound a band (x0, y0, x1, y1) on their ball lines;
-    likewise in x. Empty for one box."""
-    out = []
-    bs = _boxes(boxes)
-    for i, a in enumerate(bs):
-        for b in bs[i + 1:]:
-            lo, hi = (a, b) if a[1] <= b[1] else (b, a)
-            if lo[3] < hi[1] and min(a[2], b[2]) > max(a[0], b[0]):
-                out.append((max(a[0], b[0]), lo[3], min(a[2], b[2]), hi[1]))
-                continue
-            lo, hi = (a, b) if a[0] <= b[0] else (b, a)
-            if lo[2] < hi[0] and min(a[3], b[3]) > max(a[1], b[1]):
-                out.append((lo[2], max(a[1], b[1]), hi[0], min(a[3], b[3])))
-    return out
-
-
-def band_of(pt: Pt, bands, tol: float = 0.5) -> Optional[int]:
-    """Index of the band `pt` lies in -- strictly between its two ball
-    lines, within its length by `tol` -- or None."""
-    for i, (x0, y0, x1, y1) in enumerate(bands):
-        if x1 - x0 >= y1 - y0:
-            if y0 < pt[1] < y1 and x0 - tol <= pt[0] <= x1 + tol:
-                return i
-        elif x0 < pt[0] < x1 and y0 - tol <= pt[1] <= y1 + tol:
-            return i
-    return None
-
-
-# The band's lane model (SPLIT_BLOCKS). A stub in a band is reached
-# ALONG the band from the mouth nearer the launch, and the lanes in a
-# band NEST: a lane turning off to the north line at column c crosses
-# every lane north of it that continues past c, so the north-line
-# exiters run north-to-south in exit order and the south-line exiters
-# south-to-north. The leg drawn for the crossing tests follows that:
-# launch -> the mouth at the lane's nested offset -> along the band ->
-# the stub; two band legs then cross exactly when their launches are
-# inverted against their nesting, and a band leg crosses a west-face
-# leg where the copper would. BAND_TIP is how far a band stub's tip
-# stands off its ball line (half a pitch + the engine's exit margin);
-# the band's capacity per layer is what fits between the tip lines at
-# the block pitch. The caller sets BAND_TIP from the array it plans.
-#
-# The default below is a DEAD one, and worth knowing as such: the only
-# readers (band_leg, band_capacity) are on the SPLIT_BLOCKS=1 path, and
-# that path's caller -- fanout_from_plan.plan_state -- already overwrites
-# this with max(pitch_x, pitch_y) / 2 + 0.05 (half a pitch plus one
-# occupancy cell, because the under-pad engine ends its stubs at the
-# boundary cell and not at exit_margin). rules.DEFAULT.band_tip reproduces
-# the 0.9 exactly from the formula in the line above -- half the array
-# pitch plus the engine's exit margin, 0.8 / 2 + 0.5 on the bench -- so
-# the number has a written source; it is not what runs.
-BAND_TIP = _rules.DEFAULT.band_tip
-# BAND_CHAN=0: a band exit's run along the band is NOT priced as a channel
-# (an A/B knob for the selector's cost; 1 = priced)
-BAND_CHAN = int(os.environ.get('BAND_CHAN', '1'))
-# SEL_EXT (2026-09-10, default ON): a menu SUPERSET must never select
-# worse, and the greedy does -- K28: the walked menu's greedy plan judged
-# 103.5 against 97.9 for the plain menu and routed 39 against 36 vias.
-# The first walked pick undercuts a surface berth by dodging one
-# plan-model crossing (priced 6 > a via 3 + its channel), and every
-# later pick then sees a different world; ordering the greedy by other
-# keys did not help (48 routed). So the greedy is SEEDED on the plain
-# menu (no walked moves) and the walked moves are left to the judged
-# passes -- and the judge that pays is the ROUTE (replan.py --walk
-# --length), not the planner: judged searches over the walked menu
-# routed 42-46. SEL_EXT=0 restores the greedy over the whole menu.
-SEL_EXT = int(os.environ.get('SEL_EXT', '1'))
 # SEL_XING (2026-09-10): a row-gap run and a column-gap run on one layer
 # that cross are a conflict (see _conflict). 1 (default) = for pairs with
-# a walked or climbing move, whose long legs cross the plain stubs' gaps
+# a climbing move, whose long legs cross the plain stubs' gaps
 # (K28: 13 bans -> 0 with it); 2 = every pair, which reaches the plain
 # menu and changed the flag-off K28 chain for the worse (37 vias / 692 mm
 # on the frozen source against 36 / 670: the seed dodges the two bans the
 # passes used to repair, and picks worse); 0 = off.
 SEL_XING = int(os.environ.get('SEL_XING', '1'))
-SEL_FORCE = int(os.environ.get('SEL_FORCE', '0'))
-# SEL_XLAYER (2026-09-11, TODO 13 i): the greedy's crossing price by
-# LAYER. Two legs that cross cost the braid only when both lanes must
-# share one layer -- both nets born on that layer AND berthed on it, with
-# no via owed that a page change could ride; every other crossing pair
-# can be put on different pages and routed free (the two-page braid).
-# Priced alike (cross_weight for every geometric crossing) the greedy
-# dodged free crossings and accepted the costly ones: the K41 chain plan
-# carried 121 inversions among front-born front-stub lanes (the human's
-# 0) and 13 swimmers. 1: a must-share pair costs cross_weight, any other
-# crossing XLAYER_FREE of it (the page it consumes). 0 = as recorded.
-SEL_XLAYER = int(os.environ.get('SEL_XLAYER', '0'))
-XLAYER_FREE = float(os.environ.get('XLAYER_FREE', '0.15'))
-SEL_RETRY = int(os.environ.get('SEL_RETRY', '0'))
-
-
-# NEST_IN / NEST_STEP / BAND_LPITCH were USED here and DEFINED NOWHERE --
-# not in this file, not in the tree, not in any commit in git history. So
-# every path through band_leg / band_capacity raised NameError, i.e. the
-# first net whose exit lands in a band crashed the planner. That is only
-# reachable with SPLIT_BLOCKS=1 (it is what makes `keep_out` a list of
-# block boxes and `Corridor.bands` non-empty), which is why it never fired
-# on the default chain -- and it means the README's recorded verdict for
-# SPLIT_BLOCKS, "complete, general, LOST", was never measured. It is a
-# crash, not a loss. Values below are the braid's own band geometry
-# (Corridor.offsets' comb): the nested rider sits a track+clearance inside
-# the tip line and each deeper rider steps by the same, and a band packs
-# at the braid's lane pitch.
-NEST_IN = _rules.DEFAULT.lane_slice  # TRACK 0.127 + CLEAR 0.105: one lane's slice
-NEST_STEP = 0.0                     # no per-depth ramp: the comb is parallel
-BAND_LPITCH = _rules.DEFAULT.lane_pitch  # braid.LPITCH -- the comb's lane pitch
-
-
-def band_leg(launch: Pt, pt: Pt, band) -> List[Pt]:
-    x0, y0, x1, y1 = band
-    if x1 - x0 >= y1 - y0:
-        mx = x0 if abs(launch[0] - x0) <= abs(launch[0] - x1) else x1
-        depth = abs(pt[0] - mx)
-        if pt[1] < (y0 + y1) / 2:
-            yn = y0 + BAND_TIP + NEST_IN + NEST_STEP * depth
-        else:
-            yn = y1 - BAND_TIP - NEST_IN - NEST_STEP * depth
-        return [launch, (mx, yn), (pt[0], yn), pt]
-    my = y0 if abs(launch[1] - y0) <= abs(launch[1] - y1) else y1
-    depth = abs(pt[1] - my)
-    if pt[0] < (x0 + x1) / 2:
-        xn = x0 + BAND_TIP + NEST_IN + NEST_STEP * depth
-    else:
-        xn = x1 - BAND_TIP - NEST_IN - NEST_STEP * depth
-    return [launch, (xn, my), (xn, pt[1]), pt]
-
-
-BAND_BLOCK_GAP = 0.30   # the braid's BAND_GAP: the comb starts this far inside a tip line
-
-
-def band_capacity(band) -> int:
-    """Lanes a band takes PER LAYER, as the braid packs them (its band
-    comb, Corridor.offsets): a comb of side exits between the stub-tip
-    lines starting a block gap inside each, at the block pitch, per
-    page. The berth's layer is the selector's proxy for the page the
-    schedule will give the lane."""
-    x0, y0, x1, y1 = band
-    w = (y1 - y0) if x1 - x0 >= y1 - y0 else (x1 - x0)
-    room = w - 2 * BAND_TIP - 2 * BAND_BLOCK_GAP
-    if room < 0:
-        return 1
-    return int(room / BAND_LPITCH + 1e-9) + 1
-
-
-def around_boxes_path(a: Pt, b: Pt, boxes, pad: float = 0.3):
-    """`around_box_path` over several boxes: the shortest polyline from
-    a to b through the padded corners that crosses none of them (a
-    visibility graph over the corners, Dijkstra). The straight line when
-    it misses every box; a to b straight when nothing at all connects
-    them (both ends walled in)."""
-    padded = [(x0 - pad, y0 - pad, x1 + pad, y1 + pad) for x0, y0, x1, y1 in boxes]
-    e = 0.05
-    inner = [(bx[0] + e, bx[1] + e, bx[2] - e, bx[3] - e) for bx in padded]
-
-    def free(p, q):
-        return not any(_seg_hits_box(p, q, ib) for ib in inner)
-    if free(a, b):
-        return [a, b]
-    nodes = [a, b]
-    for x0, y0, x1, y1 in padded:
-        nodes += [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
-    n = len(nodes)
-    dist = [float('inf')] * n
-    prev = [-1] * n
-    dist[0] = 0.0
-    done = [False] * n
-    for _ in range(n):
-        u = min((i for i in range(n) if not done[i]), key=lambda i: dist[i], default=None)
-        if u is None or dist[u] == float('inf'):
-            break
-        done[u] = True
-        if u == 1:
-            break
-        for v in range(n):
-            if done[v] or v == u:
-                continue
-            if not free(nodes[u], nodes[v]):
-                continue
-            d = dist[u] + math.hypot(nodes[v][0] - nodes[u][0], nodes[v][1] - nodes[u][1])
-            if d < dist[v]:
-                dist[v] = d
-                prev[v] = u
-    if dist[1] == float('inf'):
-        return [a, b]
-    path = []
-    v = 1
-    while v != -1:
-        path.append(nodes[v])
-        v = prev[v]
-    return path[::-1]
 
 
 def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
     """The polyline `around_box` measures: the straight line when it
     misses the box, otherwise the shorter way round its padded corners.
     Returned so the corridor leg can be DRAWN, not just priced."""
-    bs = _boxes(box)
-    if len(bs) > 1:
-        return around_boxes_path(a, b, bs, pad)
-    x0, y0, x1, y1 = bs[0]
+    x0, y0, x1, y1 = box
     bx = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
     # hit tests against a box shrunk by a hair (see around_box): a leg
     # from a tooth to a corner runs along the face and only touches
@@ -373,31 +159,6 @@ def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
 # open unit question is that plan_floor counts CROSSINGS (a dive is
 # ~2 vias), so the honest rate for the floor+ride sum may be 2x.
 VIA_MM = 7.5
-# PLAN_RATE=1 (2026-09-15, Andy: "length should be priced at 7.5 mm per via
-# equivalent everywhere"): the greedy seed's ranking prices its channel and
-# reach at VIA_MM too (via_weight per VIA_MM mm) instead of the greedy's own
-# 2 / 1 per mm. pages_first and the judge read the same variable.
-SEL_RATE = int(os.environ.get('PLAN_RATE', '0') or 0)
-# SEL_SITE_ANY (2026-09-14): `_site_in_lane` tests ANY via, not only a
-# dog-bone's -- a via-in-pad's barrel stands on the ball's row line, where
-# another net's run along that line on the back layer passes (K41 pages-first
-# pass 0: 9 such pairs laid as asked, every one a DRC short). It is a real
-# conflict, and the pages-first planner turns it on (fanout_from_plan sets it
-# under PLAN_PAGES) -- but on the STANDARD planner it is an opt-in, because
-# measured on the ladder it moved the greedy choice and the chain lost:
-# K35 62 -> 82 vias, K41 91 -> 103 (2026-09-14, bs0 vs pf0). The standard
-# planner's engine loop catches those pairs itself (the DRC gate bans them).
-SEL_SITE_ANY = int(os.environ.get('SEL_SITE_ANY', '0') or 0)
-
-# SEL_CONTEND (2026-09-11): vias charged for the ROOM THEY TAKE, in vias per
-# contending net (escape_moves.site_contention). 0 = off, the cost unchanged.
-# Calibrated, not guessed: over K41's DU1 menu, comparing each net's cheapest
-# via-bearing in-array move with its cheapest off-array one, the off-array
-# move costs a median of +0.035 vias more and is wanted by 4.07 fewer nets,
-# so the weight that flips the median net is 0.035/4.07 = 0.016 vias per
-# contender (p25 0.000, p75 0.237).
-SEL_CONTEND = float(os.environ.get('SEL_CONTEND', '0') or 0)
-VIA_NEED_SITE = 0.36     # two barrels plus clearance: the room one site denies
 
 
 def ride_mm(sel: Dict[str, 'Move'], launch: Dict[str, Pt],
@@ -430,13 +191,8 @@ def around_box(a: Pt, b: Pt, box, pad: float = 0.3) -> float:
     line when it misses; otherwise the shorter of the two ways round,
     bending at the padded corners. The corridor cannot cross the array,
     so a straight-line reach through it is not a distance the router
-    could ever realise. Several boxes (a banded array's blocks): the
-    length of `around_boxes_path`."""
-    bs = _boxes(box)
-    if len(bs) > 1:
-        pth = around_boxes_path(a, b, bs, pad)
-        return sum(math.hypot(q[0] - p[0], q[1] - p[1]) for p, q in zip(pth, pth[1:]))
-    x0, y0, x1, y1 = bs[0]
+    could ever realise."""
+    x0, y0, x1, y1 = box
     box = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
     # the hit tests run against a box shrunk by a hair: a tooth sits a
     # few tens of microns outside the padded box, and the leg from it to
@@ -618,7 +374,6 @@ class Corridor:
         self.box = box
         self.pad = pad
         self.launch = launch
-        self.bands = bands_of_boxes(box) if box else []
         # the caches key on the LAUNCH point as well as the exit, so a
         # caller that rebuilds the frame with one net moved -- which is
         # every step of a source-side search -- keeps the other nets'
@@ -637,11 +392,7 @@ class Corridor:
                round(pt[0], 4), round(pt[1], 4), self.pad)
         hit = self._legs.get(key)
         if hit is None:
-            bi = band_of(pt, self.bands) if self.bands else None
-            if bi is not None:
-                hit = band_leg(self.launch[n], pt, self.bands[bi])
-            else:
-                hit = around_box_path(self.launch[n], pt, self.box, self.pad)
+            hit = around_box_path(self.launch[n], pt, self.box, self.pad)
             self._legs[key] = hit
         return hit
 
@@ -660,14 +411,6 @@ class Corridor:
 
     def exit_key(self, n: str, m, t: Pt) -> float:
         pt = m if isinstance(m, tuple) else m.exit_pt
-        if self.bands:
-            # a band exit's place in the target order is its NESTED offset
-            # at the band's mouth (band_leg), not its stub's: every stub on
-            # one line projects alike, and an order by launch among them
-            # hid the nesting the copper must keep
-            bi = band_of(pt, self.bands)
-            if bi is not None:
-                pt = band_leg(self.launch[n], pt, self.bands[bi])[1]
         return pt[0] * t[0] + pt[1] * t[1]
 
     def order(self, grp: Sequence[str], sel: Dict[str, Move],
@@ -847,13 +590,10 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
             if same_lane and a < ob + _TOUCH and oa < b + _TOUCH:
                 return True
             # a row-gap run and a column-gap run on ONE layer that cross:
-            # two stubs through one point (K28 dv3: SWE's walked leg west
-            # along row 66.56 and SCKE0's through-run down column 140.73,
-            # the second refused by the engine, the plan blind to it)
+            # two stubs through one point
             if ok[0] != key[0] and ok[2] == key[2] and (
                     SEL_XING >= 2 or (SEL_XING and (
-                        getattr(m, 'walk', 0) or getattr(om, 'walk', 0)
-                        or getattr(m, 'climb', 0) or getattr(om, 'climb', 0)))):
+                        getattr(m, 'climb', 0) or getattr(om, 'climb', 0)))):
                 (rk, ra, rb), (ck, ca, cb) = ((key, a, b), (ok, oa, ob)) if key[0] == 'row' \
                     else ((ok, oa, ob), (key, a, b))
                 if ra - tol < ck[1] < rb + tol and ca - tol < rk[1] < cb + tol:
@@ -891,7 +631,7 @@ def _site_in_lane(dm: Move, key, a, b) -> bool:
     (2026-09-14, K41 pages-first pass 0: SDQ14's via-in-pad at (135.53,
     66.16) on SA0's row run, 9 such pairs, every one laid as asked and then
     a DRC short). Only dog-bone sites were tested before."""
-    if dm.site is None or (dm.kind != 'dogbone' and not SEL_SITE_ANY):
+    if dm.site is None:
         return False
     sx, sy = dm.site
     if key[0] == 'row':
@@ -899,32 +639,14 @@ def _site_in_lane(dm: Move, key, a, b) -> bool:
     return abs(sx - key[1]) < _VIA_REACH and a - _VIA_REACH < sy < b + _VIA_REACH
 
 
-def band_room(m: Move, others, bands) -> bool:
-    """Is there room in the band for this move's lane on its layer? A
-    band's capacity per layer is what fits between its stub-tip lines at
-    the block pitch (band_capacity); a move whose exit is not in a band
-    always has room."""
-    if not bands:
-        return True
-    bi = band_of(m.exit_pt, bands)
-    if bi is None:
-        return True
-    n = sum(1 for om in others
-            if om.layer == m.layer and band_of(om.exit_pt, bands) == bi)
-    return n < band_capacity(bands[bi])
-
-
 def lanes_free(m: Move, sel: Dict[str, Move], me: str,
-               strict: bool = True, bands=()) -> bool:
+               strict: bool = True) -> bool:
     """Is this move's channel and via site free, ignoring the net's own
     current claim? The same check select() applies inside its greedy
     pass (non-strict there), exposed so a later refinement cannot
-    quietly propose a move that two nets would have to share. `bands`:
-    the destination's bands, whose capacity the move must also fit."""
-    if any(_conflict(m, om, strict=strict) for other, om in sel.items()
-           if other != me):
-        return False
-    return band_room(m, [om for other, om in sel.items() if other != me], bands)
+    quietly propose a move that two nets would have to share."""
+    return not any(_conflict(m, om, strict=strict) for other, om in sel.items()
+                   if other != me)
 
 
 def plan_floor(sel: Dict[str, Move], geo: 'Corridor') -> int:
@@ -1148,8 +870,7 @@ def frame_line(launch, keep_out, pads=None) -> float:
     mirrored geometry off the front's decimal grid flipped a few of
     those roundings (4 of 28 choices)."""
     ys = [p[1] for p in launch.values()]
-    for bx in _boxes(keep_out):
-        ys += [bx[1], bx[3]]
+    ys += [keep_out[1], keep_out[3]]
     if pads:
         ys += [p[1] for p in pads.values()]
     c = (min(ys) + max(ys)) / 2
@@ -1198,18 +919,11 @@ class PairFrame:
                       layer=self.layer(m.layer), exit_pt=self.pt(m.exit_pt), vias=m.vias,
                       legs=[(self.pt(a), self.pt(b), self.layer(L)) for (a, b, L) in m.legs],
                       site=None if m.site is None else self.pt(m.site),
-                      # walk and off_array travel with the move too. Losing
-                      # them made a mirrored board a DIFFERENT PROBLEM:
-                      # _lane_spans took the single-span path (the walk leg
-                      # and the elbow's crossing spans vanished from the
-                      # conflict test), _conflict's SEL_XING gate never
-                      # fired, and _select's SEL_EXT seeding -- which
-                      # detects a walked menu with any(m.walk) -- silently
-                      # switched off. A board and its mirror ran different
+                      # the climb travels with the move too: without it the
+                      # mirrored board's conflict test took the single-span
+                      # path and a board and its mirror ran different
                       # selection algorithms, against a class whose whole
-                      # purpose is that they must not.
-                      walk=getattr(m, 'walk', 0),
-                      off_array=getattr(m, 'off_array', False),
+                      # purpose is that they must not
                       climb=getattr(m, 'climb', 0))
             self._fwd[id(m)] = mm
             self._back[id(mm)] = m
@@ -1291,17 +1005,10 @@ def _select(menu: Dict[str, List[Move]],
     the LIS refinement and the layer alignment (the retired plan_order.BraidOrder,
     the braid's own rules) instead of this module's projection.
     Returns (choice, unplaced)."""
-    if SEL_EXT and any(getattr(m, 'walk', 0) for ms in menu.values() for m in ms):
-        menu = {n: ([m for m in ms if not getattr(m, 'walk', 0)] or list(ms))
-                for n, ms in menu.items()}
     cand = {n: list(ms) for n, ms in menu.items()}
     geo = Corridor(keep_out, launch) if keep_out else None
 
-    contend_all = (em.site_contention(menu, VIA_NEED_SITE)
-                   if SEL_CONTEND else {})
-
     def cost(n: str, m: Move) -> float:
-        contend = contend_all.get(n)
         lx, ly = launch[n]
         if keep_out is None:
             reach = math.hypot(m.exit_pt[0] - lx, m.exit_pt[1] - ly)
@@ -1311,32 +1018,8 @@ def _select(menu: Dict[str, List[Move]],
             reach = around_box((lx, ly), m.exit_pt, keep_out)
         # the move's own run occupies a channel INSIDE the array, which
         # is scarcer than corridor length -- weight it above `reach`.
-        # A BAND exit's lane runs the band from its mouth to the exit's
-        # column: that run is a channel inside the array too (the band
-        # holds a few lanes a layer), priced the same way -- unpriced,
-        # the band read as the cheapest move on the menu for every ball
-        # that faces it, and the greedy filled it to capacity with the
-        # deepest balls (K28: 7 band berths, 9 in-band refusals, 50 vias)
         chan = _length(m)
-        if BAND_CHAN and geo is not None and geo.bands:
-            bi = band_of(m.exit_pt, geo.bands)
-            if bi is not None:
-                leg = band_leg((lx, ly), m.exit_pt, geo.bands[bi])
-                chan += math.hypot(leg[2][0] - leg[1][0], leg[2][1] - leg[1][1])
-        if SEL_RATE:
-            c_ = via_weight * (m.vias + (chan + reach) / VIA_MM)
-        else:
-            c_ = via_weight * m.vias + channel_weight * chan + reach
-        # ...and the room the BARREL takes (SEL_CONTEND). The run above is
-        # charged for the channel it occupies; the via was free wherever it
-        # sat, so a dog-bone deep in the ball field -- whose site 6 other
-        # escapes wanted -- cost the same as one outside the array that 2
-        # wanted. Priced in VIAS per contender and converted at via_weight,
-        # so it is on the same scale as the rest of this sum.
-        if SEL_CONTEND and contend and m.site:
-            c_ += via_weight * SEL_CONTEND * contend.get(
-                (round(m.site[0], 3), round(m.site[1], 3)), 0)
-        return c_
+        return via_weight * m.vias + channel_weight * chan + reach
 
     # a bus enters the destination on ONE side, certified for capacity
     # before it is committed there; deviating from it means crossing
@@ -1355,13 +1038,6 @@ def _select(menu: Dict[str, List[Move]],
     # pass -- each deviation cheap on its own, 38 inter-corridor
     # crossings between them.
     placed_legs: List[List[Pt]] = []
-    placed_nets: List[Tuple[str, Move]] = []      # in step with placed_legs
-
-    def must_share(n: str, m: Move, o: str, om: Move) -> bool:
-        """Do these two lanes have to share one layer end to end?"""
-        tl = (tooth_layer or {})
-        return (tl.get(n, 'F.Cu') == m.layer and tl.get(o, 'F.Cu') == om.layer
-                and m.layer == om.layer)
 
     def total(n: str, m: Move) -> float:
         c = cost(n, m)
@@ -1373,62 +1049,27 @@ def _select(menu: Dict[str, List[Move]],
             c += mismatch_weight
         if geo is not None and placed_legs and cross_weight:
             leg = geo.leg(n, m)
-            if SEL_XLAYER:
-                for (o, om), ol in zip(placed_nets, placed_legs):
-                    if geo.paths_cross(leg, ol):
-                        c += cross_weight * (1.0 if must_share(n, m, o, om) else XLAYER_FREE)
-            else:
-                c += cross_weight * sum(1 for o in placed_legs
-                                        if geo.paths_cross(leg, o))
+            c += cross_weight * sum(1 for o in placed_legs
+                                    if geo.paths_cross(leg, o))
         return c
 
     taken: List[Move] = []          # the moves laid so far this pass
-    bands = geo.bands if geo is not None else []
 
     def lane_free(m: Move) -> bool:
-        if any(_conflict(m, om, strict=False) for om in taken):
-            return False
-        return band_room(m, taken, bands)
+        return not any(_conflict(m, om, strict=False) for om in taken)
 
     choice: Dict[str, Move] = {}
     unplaced: List[str] = []
     # most constrained first: a net with few options must choose before
     # a net with many takes its only lane
     order = sorted(cand, key=lambda n: len(cand[n]))
-    for _retry in range(SEL_RETRY + 1):
-      if _retry:
-        # SEL_RETRY (2026-09-10): the nets left without a free lane go
-        # FIRST and the greedy runs again -- the count of candidates is a
-        # poor proxy for how constrained a net is, and a net the pass
-        # left unplanned reaches the engine with no ask (K35: SA0 and
-        # SA9 unplaced in every pass, each pass's first refusals)
-        if not unplaced:
-            break
-        if log:
-            log(f'  retry {_retry}: {unplaced} first')
-        order = list(unplaced) + [n for n in order if n not in unplaced]
-        choice, unplaced, taken[:], placed_legs[:], placed_nets[:] = {}, [], [], [], []
-      for n in order:
+    for n in order:
         best = None
         for m in sorted(cand[n], key=lambda m: total(n, m)):
             if not lane_free(m):
                 continue
             best = m
             break
-        if best is None and SEL_FORCE and cand[n]:
-            # SEL_FORCE (2026-09-10): a net with no free lane is PLANNED all
-            # the same, on the candidate that conflicts with the fewest
-            # moves taken (then the cheapest), and marked. Left unplanned
-            # it reached the engine with no ask, which escaped it in its
-            # generic phase BEFORE the planned balls and took a planned gap
-            # (K35: SA0's engine-chosen stub down 143.13, SBA1's asked lane,
-            # 'infeasible even alone' -- the first refusal of every pass)
-            best = min(cand[n], key=lambda m: (sum(1 for om in taken if _conflict(m, om, strict=False)),
-                                               total(n, m)))
-            best.forced = True
-            if log:
-                log(f'  {n}: no free lane -- forced onto {best} '
-                    f'({sum(1 for om in taken if _conflict(best, om, strict=False))} conflict(s))')
         if best is None:
             unplaced.append(n)
             continue
@@ -1438,7 +1079,6 @@ def _select(menu: Dict[str, List[Move]],
         choice[n] = best
         if geo is not None:
             placed_legs.append(geo.leg(n, best))
-            placed_nets.append((n, best))
         taken.append(best)
         if log:
             log(f'  {n}: {best}  (of {len(cand[n])} candidates)')
@@ -1448,7 +1088,7 @@ def _select(menu: Dict[str, List[Move]],
         claim? The LIS pass swaps one net at a time -- without
         excluding `me`, a net is blocked from changing gap by the gap
         it is already sitting in."""
-        return lanes_free(m, sel, me, strict=False, bands=bands)
+        return lanes_free(m, sel, me, strict=False)
 
     # From here on the grouping is the CORRIDOR -- every net leaving on
     # one side -- not the taut-path cluster. The cluster chose the side
@@ -1472,16 +1112,7 @@ def _select(menu: Dict[str, List[Move]],
             want_layer.update(delivered_layers(choice, corridor_groups(choice),
                                                geo, tooth_layer))
             taken.clear()
-            # placed_nets is declared "in step with placed_legs" and the
-            # align round cleared and rebuilt only ONE of them, so
-            # total()'s SEL_XLAYER branch zipped this round's legs against
-            # the GREEDY pass's (net, move) pairs -- a stale net name and a
-            # stale om.layer for every pair, and an outright index desync
-            # once the trial placed a different set of nets. It is why the
-            # recorded SEL_XLAYER verdict ("crossings worse, K41 196->301")
-            # is not evidence about the idea.
             placed_legs.clear()
-            placed_nets.clear()
             trial: Dict[str, Move] = {}
             for n in order:
                 pick = None
@@ -1495,7 +1126,6 @@ def _select(menu: Dict[str, List[Move]],
                 trial[n] = pick
                 if geo is not None:
                     placed_legs.append(geo.leg(n, pick))
-                    placed_nets.append((n, pick))
                 taken.append(pick)
             if len(trial) < len(choice):
                 break                      # lost a net: reject the round

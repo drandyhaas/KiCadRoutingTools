@@ -50,12 +50,6 @@ def move_sig(m):
     the bench's U1, 3216 of 11602 enumerated moves (28%) collapsed that
     way, always in groups of three.
 
-    That is not cosmetic: `_realize_group_first` bans a refused member as
-    `(net, move_sig(move))` and `group_end_climbs` drops candidates whose
-    signature is banned, so ONE engine refusal of ONE lane removed all
-    three lanes at that row from the net's menu for the rest of the run
-    -- deleting exactly the alternatives the climb was given to try.
-
     Legs are rounded to the same 2 dp as `exit_pt` and `site`, and are
     derived from grid positions, so the identity is stable across
     re-enumeration.
@@ -182,17 +176,13 @@ def full_move(m):
     coordinate along the face is the gap), layer, kind, dog-bone site."""
     d = {'face': m.direction, 'exit': tuple(m.exit_pt), 'layer': m.layer,
          'kind': m.kind, 'site': (tuple(m.site) if m.site else None)}
-    if getattr(m, 'walk', 0) and m.site is not None:
-        # a WALKED dog-bone: the surface stub's polyline, ball -> elbow ->
-        # site (underpad._dogbone_path_valid lays exactly it)
-        d['path'] = [tuple(m.legs[0][0]), tuple(m.legs[0][1]), tuple(m.site)]
-    if (os.environ.get('EXACT_LANE') or os.environ.get('PLAN_PAGES', '0') not in ('', '0')) and m.legs:
-        # (PLAN_PAGES: the pages-first plan's berths are laid verbatim -- measured
-        # K41 122 -> 96 with the planner's own conflict test made complete)
-        # EXACT_LANE (2026-09-10): the move's own legs, laid verbatim by
-        # underpad.attempt before its search -- the engine's "exact" was
-        # the exact EXIT, and a stub audited exact ran four rows down the
-        # neighbouring gap (K35 SA6), taking the lane two other asks held
+    if os.environ.get('PLAN_PAGES', '0') not in ('', '0') and m.legs:
+        # the pages-first plan's berths are laid verbatim: the move's own
+        # legs, laid by underpad.attempt before its search -- the engine's
+        # "exact" is only the exact EXIT, and a stub audited exact once ran
+        # four rows down the neighbouring gap, taking the lane two other
+        # asks held (measured K41 122 -> 96 with the planner's own
+        # conflict test made complete)
         d['legs'] = [(tuple(a), tuple(b), L) for (a, b, L) in m.legs]
     return d
 
@@ -241,10 +231,6 @@ def measure_tooth(pcb, nm, pad, byname, dest_ref=None, which=None):
     # corner tie
     fp = pcb.footprints[pad.component_ref]
     g = em.grid_of(fp)
-    if os.environ.get('SPLIT_BLOCKS', '0') not in ('', '0'):
-        # a banded array's BLOCK bounds the face (a stub in the band is
-        # beyond its block's inner face, inside the array)
-        g = em.block_of(pad, em.blocks_of(fp))
     x0, y0, x1, y1 = g.bbox
     hx, hy = g.pitch_x / 2, g.pitch_y / 2
     beyond = [f for f, ok in (('right', tooth[0] > x1 + hx * 0.5),

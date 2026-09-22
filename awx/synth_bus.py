@@ -1587,14 +1587,10 @@ def main(argv=None):
                          'facing column, above and below the bus (the array '
                          'grows to fit). The bus otherwise fills the facing '
                          'column from the first non-corner row to the last, '
-                         'so a launch has nowhere along the face to move TO '
-                         'and an end-of-face climb (fanout_from_plan '
-                         'SRC_CLIMB_END, the group move) has no room to exist '
-                         '-- the harness is inert for it. With free rows the '
-                         'move is available and the planted optimum is '
-                         'unchanged, which is what makes the pair a '
-                         'measurement: the same case at offset 0 is the '
-                         'negative control.')
+                         'so a launch has nowhere along the face to move TO. '
+                         'With free rows a move along the face is available '
+                         'and the planted optimum is unchanged, so the same '
+                         'case at offset 0 is the negative control.')
     ap.add_argument('--cols', type=int, default=4)
     ap.add_argument('--depth', type=int, default=1,
                     help='how many columns deep the bus balls are drawn from '

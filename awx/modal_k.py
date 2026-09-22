@@ -80,32 +80,10 @@ DETERMINISM_ENV = {
     "NUMEXPR_NUM_THREADS": "1",
 }
 
-# THE JOINT-SOLVE ARM -- seventeen chain flags, and **OPT-IN since
-# 2026-09-16**. It used to be applied to every arm unconditionally, under
-# the name BASE_ENV, ON TOP of whatever the arms file set. Nothing in an
-# arms file said so, and a caller writing {"env": {"PLAN_JUDGE": "count"}}
-# reasonably believed that was the whole configuration -- so every cloud
-# number this repo has recorded is the joint-solve arm, and NO cloud run
-# had ever executed the arm the laptop runs.
-#
-# It cost a whole 36-container sweep: cloud K28 came back 38 vias where the
-# laptop's jcl is 34, and that was read as a PLATFORM difference. It is
-# not. Running the chain LOCALLY under these flags gives 38 vias exactly
-# (2026-09-16, `baseenv28`), so the flags are the entire via difference.
-#
-# `--base joint-solve` (or MODAL_K_BASE=joint-solve) brings it back for a
-# deliberate comparison with the older recorded numbers; the DEFAULT is
-# now "nothing", i.e. the cloud runs what the laptop runs.
-JOINT_SOLVE_ARM = {
-    "SRC_ROUNDS": "0", "SEL_RETRY": "6", "EXACT_LANE": "1", "DST_FACE_ASK": "1",
-    "DST_WALK": "3", "SF_SWIM": "30", "BRAID_EXIT_GUARD": "1",
-    "BRAID_SWIM_HOLD": "1", "SEL_XING": "2", "SF_EQUIV": "2",
-    "SF_JUDGE": "braid", "BRAID_ONE_DIVE": "5", "DST_RESIDUE": "3",
-    "DST_RESIDUE_POOL": "displaced", "DST_RESIDUE_CANDS": "4",
-    "BRAID_ALT_SOLVER": "cpsat", "BRAID_CPSAT_DET": "40",
-}
-BASES = {"none": {}, "joint-solve": JOINT_SOLVE_ARM}
-BASE_NAME = os.environ.get("MODAL_K_BASE", "none")
+# The cloud runs what the laptop runs: the chain's own environment
+# (PLAN_PAGES=1 PLAN_JUDGE=count PLAN_JUDGE_LEN=lane) plus each arm's env.
+BASES = {"none": {}}
+BASE_NAME = "none"
 # Nothing here raises a time budget any more: there are none. Every loop
 # is capped in JUDGE CALLS and every solve in nodes or deterministic
 # time, so a container answers exactly what the laptop answers, however
@@ -161,12 +139,7 @@ KEEP = re.compile(
     # the SMOOTHER's own stats (#536). Two runs agreeing on vias and
     # completion can still differ in SEGMENT COUNT by a third, and the
     # only line that says why is this one.
-    r"smooth_octolinear_chains|"
-    # THE BRAID-TIER JUDGE's own verdicts (PLAN_PAGES_TIER). Without these
-    # a tier arm is a black box: the boards move and nothing says whether
-    # the judge fired, how often, or which way it decided -- and an absent
-    # line reads as "it never ran", which is a FILTER artifact, not a fact.
-    r"braid tier|tier round|tier: ")
+    r"smooth_octolinear_chains")
 
 
 # memory: REQUEST 1 GB, LIMIT 3 GB (2026-09-12, cut 4x on request).
@@ -174,22 +147,10 @@ KEEP = re.compile(
 # actually peaks at. The limit still covers a ~1.3 GB cap-8 build with
 # room over. WHAT THIS PUTS AT RISK, stated so it is not a surprise: an
 # arm needing more than 3 GB is KILLED, not throttled. The only member
-# measured near that is the WHOLE-MENU arm (DST_RESIDUE_CANDS=99) at K51,
-# which already hung a container on a 900 s heartbeat timeout and has been
-# dropped from the sweeps. A killed arm surfaces as NO GRADE and costs
+# measured near that was a whole-menu arm at K51 (since removed), which
+# hung a container on a 900 s heartbeat timeout. A killed arm surfaces as NO GRADE and costs
 # only itself -- per-arm writes plus --resume mean a re-run at higher
 # memory picks up exactly where it stopped.
-# The history below is why the old number was what it was.
-# PREVIOUSLY: REQUEST 4 GB, LIMIT 12 GB. The flat 12 GB was a
-# guess standing in for a diagnosis -- a cap-8 arm died on SIGABRT with no
-# output in a 4 GB container and nothing ever confirmed that as an OOM.
-# Measured since, in situ: the production K35 joint arm peaks at 640 MB
-# for the WHOLE fanout stage, and the climb is one `_alts5` call (303 ->
-# 640 MB across five CP-SAT solves of the same model, because CP-SAT never
-# returns its arena; HiGHS on the same harness is flat). A cap-8 build is
-# ~1.3 GB single-threaded. So the request is the bill and the limit is the
-# safety net: an arm that really needs more still gets it, and 27 arms stop
-# reserving 324 GB for a workload whose worst measured member is ~2.5 GB.
 # cpu: REQUEST 0.125 core, LIMIT 4 (2026-09-12, on request). 0.1 was asked
 # for and REFUSED by Modal -- "Function CPU request out of bounds. Must be
 # between 0.125 and 64 cores" -- so 0.125 is the floor, not a choice.
@@ -324,8 +285,8 @@ def run_arm(arm: dict) -> dict:
     # ...and ANY other artifact the arm names, as tmp/-relative globs, so a
     # DIAGNOSIS on the cloud is possible at all: the filtered `logs` above
     # cannot carry a plan sidecar or a judge dump, and the cloud is the only
-    # place some phenomena exist (K44's SF_KEY_COST regression is inert
-    # locally -- both arms bit-identical -- so it can only be debugged here).
+    # place some phenomena exist (a cloud-only regression is inert locally,
+    # both arms bit-identical, so it can only be debugged here).
     files_b64 = {}
     for pat in (arm.get("return_files") or []):
         import base64

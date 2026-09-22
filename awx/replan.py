@@ -58,13 +58,9 @@ from collections import Counter
 
 ARGV = [a for a in sys.argv[1:] if not a.startswith('--')]
 OPTS = dict((a[2:].split('=', 1) + ['1'])[:2] for a in sys.argv[1:] if a.startswith('--'))
-# --walk=1 (2026-09-10): destination candidates are the WALKED dog-bones
-# only (escape_moves walk=; DST_WALK must be set), any face including
-# the net's current one, banned per SITE rather than per class.
 # --length=1: a probe that ties the board's vias and shortens the run's
 # copper stands (the K28 question: every diver costs exactly 2 vias
 # whatever its berth, so a walked berth can only pay in copper).
-WALK_ONLY = OPTS.get('walk', '0') == '1'
 LENGTH_TIE = OPTS.get('length', '0') == '1'
 # --apply=strip (2026-09-10): the round's fanout board is DERIVED from the
 # probes' routed board -- every net stripped to the fanout copper of the
@@ -91,14 +87,8 @@ LENGTH_TIE = OPTS.get('length', '0') == '1'
 # in the README came from a strip run; meanwhile all 22 replan runs on
 # disk used the refan default. `--apply=refan` remains the opt-out.
 APPLY_STRIP = OPTS.get('apply', 'strip') == 'strip'
-# --coupled=chord (2026-09-18, the plan-level loop's finding): the probe's
-# re-lay set also takes every frozen lane whose copper CROSSES the chord
-# from the moved end to the net's other end -- the lanes the new lane must
-# thread through, and the ones that pay when it is squeezed past them
-# (measured on a whole-board re-braid: three freed nets improved by 8 and
-# ten lanes whose ends never moved paid 23 in rips and last calls).
-# 'census' = the recorded behaviour (the end's own conflicts + the braid's
-# blocker census).
+# --coupled=census: the probe's re-lay set is the end's own conflicts plus
+# the braid's blocker census (the recorded behaviour; the only value).
 COUPLED = OPTS.get('coupled', 'census')
 # --perturb=N (2026-09-18): a NEAR JUMP. N random nets moved to a random
 # other class each, through the same probes a descent uses, the probe
@@ -122,20 +112,10 @@ PERTURB_SEED = int(OPTS.get('seed', 1))
 CROSS = OPTS.get('cross')
 CROSS_FRAC = float(OPTS.get('cross-frac', 0.5))
 CROSS_TOL = 0.3     # mm: an end within this of the other parent's, same class, is the same end
-# --widen=N: a local braid that REFUSES a lane is answered with ROOM, not
-# with the full re-braid: the frozen lanes crossing the refused lane's own
-# chord are stripped and re-laid with it, up to N times. The 0918 wide run
-# ended at round 2 with '3 unjudged moves would need the full braid'; the
-# full braid then re-realizes all 47 lanes and the gain drowns in the
-# realization spread (20 vias between two braids of the same ends).
-WIDEN = int(OPTS.get('widen', 0))
 
 
 def _dban(m):
-    """The destination ban key of a move: its class, or under --walk
-    its class and site."""
-    if WALK_ONLY and getattr(m, 'site', None):
-        return (m.direction, m.layer, round(m.site[0], 2), round(m.site[1], 2))
+    """The destination ban key of a move: its class."""
     return (m.direction, m.layer)
 # the source menu offers climbs (fanout_from_plan reads this at import)
 os.environ.setdefault('SRC_CLIMB', OPTS.get('climb', '14'))
@@ -699,8 +679,7 @@ def rank_dest(B, nm, bans, buses, cache, top):
         p = st['dgrid'].pitch_y if ax else st['dgrid'].pitch_x
         return abs(m.exit_pt[ax] - (pad.global_y if ax else pad.global_x)) / p
     menu = [m for m in dmenu_full(st)[nm]
-            if _dban(m) not in bans and (WALK_ONLY or (m.direction, m.layer) != cur)
-            and (not WALK_ONLY or getattr(m, 'walk', 0) > 0)
+            if _dban(m) not in bans and (m.direction, m.layer) != cur
             and not legs_cross(m, others)
             and not (m.kind == 'surface' and depth(m) > MAX_DEPTH + 0.6)]
     out = []
@@ -1157,19 +1136,6 @@ def braid_run(board, out_stem, nets, dref, log_to, probe=False):
 FAN_PCB = None
 
 
-def chord_walls(lanes, me, a, b, exclude=()):
-    """The nets whose lane copper (any layer) crosses or grazes the chord
-    a -> b: what a lane laid between those two ends must thread through."""
-    out = set()
-    for nm, (segs, vias) in lanes.items():
-        if nm == me or nm in exclude:
-            continue
-        if any(_seg_seg_d(a, b, (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)) < TRACK_CLEAR for s_ in segs) \
-                or any(_pt_seg_d((v.x, v.y), a, b) < VIA_CLEAR for v in vias):
-            out.add(nm)
-    return out
-
-
 def coupled_set(B, nm, src_move, dst_move, extra_relay=None):
     """The lanes a probe of this move re-lays with the net: those in the
     way of the new end, the co-moved berths' lanes, the braid's census of
@@ -1179,11 +1145,6 @@ def coupled_set(B, nm, src_move, dst_move, extra_relay=None):
     C |= set(N)           # a re-fanned neighbour's lane is re-laid too
     C |= set((getattr(B, 'blockers', {}) or {}).get(nm, []))   # the braid's census: what walled it
     C |= set(extra_relay or [])
-    if COUPLED == 'chord':
-        a_ = src_move.exit_pt if src_move is not None else tuple((B.ends[nm]['src'] or {}).get('tooth') or ())
-        b_ = dst_move.exit_pt if dst_move is not None else tuple((B.ends[nm]['dst'] or {}).get('tooth') or ())
-        if len(a_) == 2 and len(b_) == 2:
-            C |= chord_walls(B.lanes, nm, a_, b_)
     C.discard(nm)
     return C, N
 
@@ -1230,7 +1191,7 @@ def probe_key(B, R, nm, src_move, dst_move, K, base, nets_csv, extra_relay=None)
              'net': nm, 'src': sr.move_sig(src_move) if src_move is not None else None,
              'dst': sr.move_sig(dst_move) if dst_move is not None else None,
              'comove': N, 'asks': asks, 'set': sorted(C), 'others': others, 'kept': kept,
-             'coupled': COUPLED, 'widen': WIDEN, 'grade': GRADE_MODE}
+             'coupled': COUPLED, 'grade': GRADE_MODE}
     return pm.key_of(parts)
 
 
@@ -1588,39 +1549,6 @@ def _probe_run(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_
         return res
     rj = tag + '_rb_refusals.json'
     rf = json.load(open(rj)) if os.path.exists(rj) else {}
-    # --widen: a refusal answered with ROOM. The refusal record names the
-    # refused lane's own ends; the frozen lanes crossing that chord are
-    # stripped and re-laid with it, and the local braid runs again.
-    widened = []
-    for w_ in range(WIDEN):
-        if not rf:
-            break
-        walls = set()
-        for r_, info in rf.items():
-            t_, b_ = info.get('tooth'), info.get('berth')
-            if t_ and b_:
-                walls |= chord_walls(B.lanes, r_, tuple(t_), tuple(b_), exclude=set([nm]) | C)
-        walls -= set(rf)
-        if not walls:
-            break
-        txt3 = open(b2, encoding='utf-8').read()
-        for c in sorted(walls):
-            cid, cnet = byname[c]
-            txt3 = strip_to_fanout_copper(txt3, c, cid, cnet.name, pcb_for(c), whole)
-        write_board(txt3, b2, cur)
-        C |= walls
-        res['relaid'] = sorted(C)
-        widened.append(f'{sorted(rf)} <- {sorted(walls)}')
-        okb, tb2 = braid_run(b2, tag + '_rb', ','.join([nm] + sorted(C)), st['dref'], tag + '_rb.log',
-                             probe=True)
-        res['braid_s'] += tb2
-        if not okb:
-            res['fail'] = 'braid: no board (widened)'
-            res['seconds'] = time.time() - t0
-            return res
-        rf = json.load(open(rj)) if os.path.exists(rj) else {}
-    if widened:
-        res['widened'] = widened
     if rf:
         # a refusal with everything else frozen -- the moved net's or a
         # re-laid neighbour's -- is NOT a verdict on the move: the full
@@ -1906,7 +1834,7 @@ def main():
                             'banned': [list(x) for x in bans_s], 'blockers': blockers,
                             'swimmers': sorted(B.swimmers), 'resid': resid, 'fan_src': dict(fan_src),
                             'K': K, 'base': base, 'nets_csv': nets_csv, 'apply_strip': APPLY_STRIP,
-                            'coupled': COUPLED, 'widen': WIDEN, 'grade': GRADE_MODE})
+                            'coupled': COUPLED, 'grade': GRADE_MODE})
             buses = B.buses()
             cache = {}
             stand = {}          # net -> (src_move, dst_move, probe)
@@ -1921,8 +1849,6 @@ def main():
                     ends_try = ['src'] if w == 'tooth' else ['dst'] if w == 'berth' else ['dst', 'src']
                 else:
                     ends_try = ['dst', 'src']
-                if WALK_ONLY:
-                    ends_try = ['dst']
                 ref_g = best_g
                 cands = []
                 if len(stand) >= WORST + 2:
@@ -2074,7 +2000,6 @@ def main():
                         + (f'; REFUSED (walled at the {pr.get("walled_at")})' if pr.get('refused') else
                            f'; routed: net {pr["vias_net"]} v (was {real[nm]})')
                         + (f' with {pr["relaid"]} re-laid' if pr.get('relaid') else ' alone')
-                        + (f', widened {pr["widened"]}' if pr.get('widened') else '')
                         + (f', co-moved {pr["comove"]}' if pr.get('comove') else '')
                         + (f', refused {pr["refused_nets"]}' if pr.get('refused_nets') else '')
                         + f'; board open {g[0]} drc {g[1]} vias {g[2]} (ref {len(ref_g[0])}/{ref_g[2]})'
