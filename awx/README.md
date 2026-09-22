@@ -926,19 +926,21 @@ human's SE and pair routing, fanout, berths").** `BRAID_PAIR_ONLY=SCK,SDQS0`
 (pairs.py) couples only the named pairs -- every other pair's legs are singles
 in the plan's clauses, harmonise, the judge and the braid alike -- and the
 ladder's admission ignores it (`coherent_nets.admissible` passes `admit_all`),
-so every arm routes the same 51 nets. Measured on the pairs bench (chain):
+so every arm routes the same 51 nets. Measured on the pairs bench (chain;
+re-run 2026-09-22 on the tree as it stands):
 
 | arm | vias | open | pairs |
 |---|---|---|---|
 | the six pair legs as plain singles (BRAID_PAIRS=0) | **143** | 4 | -- |
-| SCK the only pair | 141 | 7 | SCK open |
+| SCK the only pair | 121 | 5 | SCK open |
 | SDQS0 the only pair | 146 | 2 | 0.85 |
-| SDQS1 the only pair | 148 | 3 | 0.82 |
-| all three (the recorded chain of the day) | 156 | 4 | 0.86 / 0.86 / 0.65 |
+| SDQS1 the only pair | 132 | 3 | 0.82 |
+| all three (the pairs record) | 144 | 5 | 0.87 / 0.82 / 0.65 |
 | the human, the same 51 nets | 88 | 0 | 0.90 / 0.83 / 0.92 |
 
-So coupling the three pairs costs 13 vias and no open over the SAME nets as
-singles. The "98 / 0" this was measured against is the pair-less bench's K51
+So coupling the three pairs costs one via and one open over the SAME nets
+as singles, and a pair alone can take the count DOWN (SDQS1: 132) or leave
+its own legs open (SCK). The "98 / 0" this was measured against is the pair-less bench's K51
 -- 48 DIFFERENT nets (minus SA14, SDQ1, SZQ; without the six legs): the six
 pair NETS, as singles, take the chain from 99 / 0 to 143 / 4 where the human
 pays two vias each. Their balls all stand on the rows FACING THE DEPOPULATED
@@ -961,7 +963,8 @@ OUT SRC` re-fans every pair leg and every tooth between a pair's teeth that
 way: with the under-pad engine the comb is the human's (SCKP@125.58
 SCKN@125.85, SDQS1 adjacent on B, SDQS0 on F, no DRC, the same ladder) --
 `fb_t2q_pairs2.kicad_pcb`. On that bench the plan still moved SCK's teeth to
-the east face (three pairs 131 / 8; legs as singles 156 / 6).
+the east face (three pairs 141 / 5, coupled 0.91 / 0.85 / 0.67; legs as
+singles 156 / 6; 2026-09-22).
 
 Where the loss is, from the planner's own log: the CP-SAT's page model counts
 8 swimmers with SCK on page B and the byte lanes crossing it on F; the braid's
