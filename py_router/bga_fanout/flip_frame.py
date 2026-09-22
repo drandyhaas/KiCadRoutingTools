@@ -199,6 +199,14 @@ def flip_hints(hints: Dict, footprint: Footprint, turned: PCBData,
                 mv['path'] = [m(*q) for q in mv['path']]
             if isinstance(mv.get('layer'), str):
                 mv['layer'] = other_layer(mv['layer'])
+            if mv.get('legs'):
+                # a plan's berth laid VERBATIM (awx, pages-first): its legs
+                # carry their own points and layers, turned like the rest
+                # -- unturned, every such berth landed on the other layer
+                # of a back-side part (the pose gate's mirror pose,
+                # 2026-09-22)
+                mv['legs'] = [(m(*a), m(*b), other_layer(L) if isinstance(L, str) else L)
+                              for (a, b, L) in mv['legs']]
             d = mv
         elif d in _FLIP_FACE:
             d = _FLIP_FACE[d]

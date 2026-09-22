@@ -366,6 +366,18 @@ def drc_pairs(board, nets=None, pcb_data=None):
         import io
         sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
         import check_drc as _cd
+        if pcb_data is not None:
+            # THE GATE SEES WHAT SHIP TIME DECLARES (#962, 2026-09-22): a via
+            # the run put in a pad or a paste opening is stamped Type VII when
+            # the board is written (ship_vias), so the in-memory check must
+            # count it as protected too -- or a re-escape from the pad reads
+            # as one `via-in-paste` on one pose of the gate and none on its
+            # mirror (the turned frame's apertures), and the two route apart.
+            try:
+                import fab_notes as _fn
+                _fn.apply_stamps_in_memory(_fn.via_protection_stamps(pcb_data.vias, [], pcb_data)[0])
+            except Exception:                                    # noqa: BLE001
+                pass
         pats = [f'*/{n}' for n in nets] + list(nets)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
@@ -380,7 +392,7 @@ def drc_pairs(board, nets=None, pcb_data=None):
                                + ((out.strip().splitlines() or ['(no output)'])[-1])[:200])
         if 'NO DRC VIOLATIONS' in out:
             return []
-        return [ln.strip() for ln in out.splitlines() if '<->' in ln]
+        return _violation_lines(out)
     r = subprocess.run([sys.executable,
                         os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
                         board, '--clearance', '0.1', '--clearance-margin', '0.1'],
@@ -397,7 +409,16 @@ def drc_pairs(board, nets=None, pcb_data=None):
             + ((out.strip().splitlines() or ['(no output)'])[-1])[:200])
     if 'NO DRC VIOLATIONS' in out:
         return []
-    return [ln.strip() for ln in out.splitlines() if '<->' in ln]
+    return _violation_lines(out)
+
+
+def _violation_lines(out):
+    """The checker's violation lines: a pair line (`A <-> B`), never its
+    progress text (main's "Checking copper-to-hole (track <-> NPTH drill)"
+    carries the arrow), and a via-in-paste line, which names no pair."""
+    return [ln.strip() for ln in out.splitlines()
+            if (('<->' in ln and not ln.lstrip().startswith('Checking'))
+                or ' in paste opening ' in ln)]
 
 
 def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,

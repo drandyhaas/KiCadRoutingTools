@@ -695,6 +695,18 @@ def endpoints(pcb, names, byname, dest_ref=None):
         free = [pt for pt, c in cnt.items() if c == 1 and
                 all(math.hypot(pt[0] - ax, pt[1] - ay) > max(0.02, ar)
                     for (ax, ay, ar) in anchors)]
+        if not free:
+            # A STUB THAT ENDS IN A VIA (2026-09-22): a net re-laid from its
+            # pad -- the re-escape, a tie via -- has a pad, a leg and a via,
+            # and nothing else once its lane is stripped; every endpoint
+            # sits in a pad or a barrel and the rule above sees no end
+            # (the zynq K44 descent died in round 1 on DDR3_CS). The via IS
+            # the stub's end: the lane leaves it on the other layer.
+            pads_only = [(p.global_x, p.global_y, max(p.size_x, p.size_y) / 2)
+                         for p in net.pads]
+            free = [pt for pt, c in cnt.items() if c == 1 and
+                    all(math.hypot(pt[0] - ax, pt[1] - ay) > max(0.02, ar)
+                        for (ax, ay, ar) in pads_only)]
         assert free, (nm, 'no free stub end')
         if dest_ref is not None:
             at_dest = [pt for pt in free

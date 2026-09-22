@@ -32,7 +32,7 @@ with its fanout board and sidecars.
 
 | | K15 | K28 | K35 | K41 | K51 |
 |---|---|---|---|---|---|
-| the chain alone (the portfolio's best arm; 2026-09-22, on main's engine) | 16 | 36 | 58 | 76 | 98 |
+| the chain alone (the portfolio's best arm; 2026-09-22, on main's engine) | 18 | 36 | 58 | 76 | 99 |
 | **the evolution (2026-09-18/19)** | **14** | **34** | **56** | **64** | **83** |
 | human | 22 | 46 | 58 | 70 | **81** |
 | how the record was found | a jump world descended | the chain; nothing improved it | a jump world from the 58, descended | the 74 arm descended to 67, that to 64 | an open-net arm descended to 91, then 91 -> 87 -> 85 -> 83 with the climb menus |
@@ -63,8 +63,9 @@ identically at every rung, and the evolution runs on that.
 
 | | K9 | K18 | K26 | K32 | K38 | K42 | K44 |
 |---|---|---|---|---|---|---|---|
-| the chain alone (2026-09-22, on main's engine) | 14 | 16 | 39 | 52 | 68 | 89 | 92 |
-| **the evolution** | **12** | 16 | **34** | **50** | **59** | **71** | **88** |
+| the chain alone (2026-09-22, on main's engine) | **8** | 16 | 39 | 52 | 68 | 89 | 92 |
+| **the evolution** | **12** | 16 | **34** | **50** | **59** | **71** | 88 |
+| **the descent alone, from the chain (2026-09-22)** | | | | | | | **83** |
 | human | 25 | 45 | 57 | 74 | 86 | 97 | 103 |
 | chain wall, this laptop | 33 s | 1 min | 2 min | 3 min | 5 min | 6 min | 8 min |
 
@@ -74,7 +75,9 @@ evolution row: K9/K18/K26/K32 by the population as the H3 ladder runs
 it (pop 3, two generations, K9 one; K18 gained nothing), K38 by both the
 population (a near-jump world descended) and the descent alone,
 K42/K44 by the descent alone carrying `--length=1 --worst=8` (three
-rounds: 90 -> 77 -> 71, 105 -> 97 -> 95), then a K44 population seeded
+rounds: 90 -> 77 -> 71, 105 -> 97 -> 95; on main's engine, 2026-09-22, the
+same three rounds take the chain's 92 to 91 -> 87 -> 83, `tmp/records/
+zynq_k44_83_desc`, below the evolution's 88), then a K44 population seeded
 from the 95 (pop 4, two generations, length rule on, 53 min): every
 descent of the 95 null, the CROSSOVER of the 95 with the chain's 105
 (seven of their fourteen differing ends) descended 108 -> 93, that 93
@@ -795,12 +798,12 @@ ribbon rounds the part in 45-degree legs (26 vias, far fewer segments).*
 <img src="img/gate_mirror_article.png" alt="The bench turned over" width="760">
 
 *The pose gate: the bench flipped through its plane, every part on the
-other face, every stub on the other layer. The translation and the
-quarter turns grade as the control to the via and the segment (K15: 21
-vias, 203 segments, 2026-09-22); the selector and the braid each run a
-pair in the pair's own canonical frame. The MIRROR does not, since the
-pages-first plan (2026-09-14): the turned-over article routes 29 vias
-and 452 segments -- TODO 5.*
+other face, every stub on the other layer. Every isometry grades as the
+control to the via and the segment (K15: 21 vias, 203 segments, the
+translation, the quarter turns and the mirror alike, 2026-09-22); the
+selector and the braid each run a pair in the pair's own canonical
+frame, and the plan's candidates, the engine's per-pad asks and the
+in-memory DRC gate are turned into that frame with it.*
 
 <img src="img/zynq_k44.png" alt="The second array pair, all 44 nets" width="380"> <img src="img/zynq_k44_human.png" alt="The same 44 nets as the human routed them" width="380">
 
@@ -1000,65 +1003,49 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
    the stack) makes its wall the slowest operator, and width is free. The
    memo store wants a shared volume.
 
-4. **A descent round that loses a net's end.** A net the braid ripped
-   and re-laid from the pad has no stub on the derived fanout board;
-   `salvage_missing_ends` recovers the SDQ2 case, but the zynq K44
-   descent still dies in round 1 on DDR3_CS (`'no free stub end'`), so
-   the run keeps round 0's 91 and the two rounds after it never run.
-   Reproduced identically before and after the audit (2026-09-22).
-
-5. **The pages-first plan is not mirror-invariant.** The pose gate's
-   MM article (the bench turned over through its plane) grades 29 vias
-   / 452 segments against the control's 21 / 203 at K15; the
-   translation and the quarter turns grade identically. Bisected to the
-   planner commit a3b57607 (2026-09-14): under `PLAN_PAGES=1` the chain
-   leans on the board's sign somewhere between the selector's chirality
-   frame and the CP-SAT's keys (`pages_first.py`, `select_moves.py`);
-   the flag-off chain of that day passed.
-
-6. **K51's last two vias.** The next move class past the single-net
+4. **K51's last two vias.** The next move class past the single-net
    classes is a GROUP move: re-layer a lane together with its crossing
    partners in one probe (the coupled probe already routes such a set);
    or jumps that land nearer than two random nets.
 
-7. **The chain's seeds.** The evolution optimises past the plan's
+5. **The chain's seeds.** The evolution optimises past the plan's
    objective, but better seeds are a better start. The berth menu is
    one-per-face at `CANDS=4` (row pruning, not column generation), and a
    plan-time floor over the PLANNED LANES rather than the channel is the
    one untested ranker.
 
-8. **The planner's comb for a pair.** No third berth between a pair's
+6. **The planner's comb for a pair.** No third berth between a pair's
    two, layer or no layer; and the room a pair's converging approach
    needs at the comb, given at plan time rather than found at the last
    call.
 
-9. **Pairs and the evolution.** The descent moves single nets' ends, so
+7. **Pairs and the evolution.** The descent moves single nets' ends, so
    a pair must land at the chain stage; a move class that moves a pair's
    two ends together would let the population improve a pairs board.
 
-10. **Generality.** Tuned on one bench. What the zynq article shows: a
-    singleton corridor's source tooth may be planned on the FAR face of
-    the source array (the count judge sees a via saved, the length judge
-    prices the lane from the tooth's exit and the berth's run but not the
-    tooth's own escape through the array -- `_length` of the source move
-    is the missing term), and the top rungs lose their in-band execution.
-    Off-axis poses (R30, R45) still break the plan's compass faces.
+8. **Generality.** Tuned on one bench. What the zynq article shows: a
+   singleton corridor's source tooth may be planned on the FAR face of
+   the source array (the count judge sees a via saved, the length judge
+   prices the lane from the tooth's exit and the berth's run but not the
+   tooth's own escape through the array -- `_length` of the source move
+   is the missing term), and the top rungs lose their in-band execution.
+   Off-axis poses (R30, R45) still break the plan's compass faces.
 
-11. **The corpus A/B for the `py_router` changes, then the PR to main.**
-    `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
-    alone; the A/B decides whether it turns on, with a per-board
-    attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
-    are the suspect).
+9. **The corpus A/B for the `py_router` changes, then the PR to main.**
+   `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
+   alone; the A/B decides whether it turns on, with a per-board
+   attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
+   are the suspect).
 
-12. **The `.kicad_dru` is read with real layer names inside the turned
+10. **The `.kicad_dru` is read with real layer names inside the turned
     frame**; a per-layer rule lands on the opposite face for a back-side
     part. Shipped `py_router` code, so it blocks the merge.
 
-13. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
+11. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
 
-14. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
+12. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
     `pages-first:` line and reads like "never ran".
 
-15. **Unverified review findings**: `dedupe_boards` fingerprints copper
+13. **Unverified review findings**: `dedupe_boards` fingerprints copper
     but not the sidecar; `blockers_of` double-counts half a track;
     `flip_frame` does not mirror `pad.polygons`.

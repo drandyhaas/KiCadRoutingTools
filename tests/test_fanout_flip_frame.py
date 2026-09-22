@@ -211,12 +211,51 @@ def test_symmetry_on_synthetic_bga(results):
         'the engine is face-symmetric on this fixture -- retire the detector')
 
 
+def test_flip_hints_turns_a_full_move(results):
+    """A planner's FULL hint (awx, pages-first) names a face, an exit, a
+    layer, a dog-bone site and the berth's verbatim LEGS; on a back-side
+    part every one of them must be turned with the board (2026-09-22: the
+    legs were not, and every verbatim berth landed on the other layer)."""
+    pcb = _fixture('B')
+    fp = pcb.footprints['U1']
+    turned, back = ff.to_front_frame(pcb, 'U1')
+    pad = next(p for p in fp.pads if p.net_id)
+    key = (round(pad.global_x, 3), round(pad.global_y, 3))
+    hint = {'face': 'up', 'exit': (pad.global_x, pad.global_y + 0.9), 'layer': 'B.Cu',
+            'kind': 'dogbone', 'site': (pad.global_x + 0.4, pad.global_y + 0.4),
+            'legs': [((pad.global_x, pad.global_y), (pad.global_x, pad.global_y + 0.5), 'B.Cu'),
+                     ((pad.global_x, pad.global_y + 0.5), (pad.global_x, pad.global_y + 0.9), 'F.Cu')]}
+    out = ff.flip_hints({key: hint}, fp, turned, back)
+    q = {p.pad_number: p for p in turned.footprints['U1'].pads}[pad.pad_number]
+    got = out.get((round(q.global_x, 3), round(q.global_y, 3)))
+    _ok(results, 'the hint is re-keyed to the turned pad', got is not None)
+    if got is None:
+        return
+    _ok(results, 'face up -> down', got['face'] == 'down', got['face'])
+    _ok(results, 'layer B -> F', got['layer'] == 'F.Cu', got['layer'])
+    ex = back(*hint['exit'])
+    _ok(results, 'the exit is mirrored', math.hypot(got['exit'][0] - ex[0], got['exit'][1] - ex[1]) < 1e-9)
+    want = [(back(*a), back(*b), ff.other_layer(L)) for (a, b, L) in hint['legs']]
+    close = all(math.hypot(ga[0] - wa[0], ga[1] - wa[1]) < 1e-9 and math.hypot(gb[0] - wb[0], gb[1] - wb[1]) < 1e-9
+                and gL == wL for (ga, gb, gL), (wa, wb, wL) in zip(got['legs'], want))
+    _ok(results, 'the legs are mirrored and their layers swapped', len(got['legs']) == 2 and close,
+        str(got['legs'])[:120])
+    # and turned twice they come home: the hint the engine would hand back
+    twice = ff.flip_hints(out, turned.footprints['U1'], pcb, back)
+    home = twice[key]
+    _ok(results, 'turned twice, the legs are the legs', all(
+        math.hypot(ha[0] - a[0], ha[1] - a[1]) < 1e-9 and hL == L
+        for (ha, hb, hL), (a, b, L) in zip(home['legs'], hint['legs'])))
+
+
 def main():
     results = []
     print('to_front_frame on real boards')
     test_transform_on_real_boards(results)
     print('the symmetry on a synthetic BGA')
     test_symmetry_on_synthetic_bga(results)
+    print('a full hint turned over, legs included')
+    test_flip_hints_turns_a_full_move(results)
     n_ok = sum(1 for _, ok in results if ok)
     print('=' * 60)
     print(f'{n_ok}/{len(results)} flip-frame tests passed')

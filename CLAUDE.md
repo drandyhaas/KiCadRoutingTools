@@ -19,6 +19,19 @@ render reported 1315 crossings where the truth was 357. It hits `--nets`,
 so `~/Documents/...` then arrives as an unusable `/c/Users/...`. Pass
 Windows-style paths (`C:/Users/...`) in the same command.
 
+## Commit only what worked
+
+**Do not commit unsuccessful knobs or code, and do not document unsuccessful
+experiments in the repo, unless specifically asked.** A lever that measured
+neutral or worse, an opt-in that never earned its default, a test of an idea
+that did not pan out -- none of it goes into a commit, a README, a docstring
+or a TODO. Record it in memory (the auto-memory directory) so the lesson is
+kept, and leave the repo carrying only the code that works and its
+description. The one place an UNTRIED idea may live in the repo is a
+README's TODO list, as a future thing to try, never as a measurement of
+something that failed. (Andy, 2026-09-22, after an audit removed 13,600
+lines of such code from awx.)
+
 ## Building the Rust Router
 
 Use `build_router.py` to build the Rust router:
