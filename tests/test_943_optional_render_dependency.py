@@ -187,13 +187,17 @@ def test_pep668_probe_and_message():
     Reading only the real interpreter would make this vacuous on every machine
     that is not a PEP 668 distro -- which is every machine this repo is
     developed on, and the one arm that matters would never run.
+
+    The probe and the distro tables live in `startup_checks` since #1026,
+    shared with install_plugin.py; the dialog below is still deps_check's.
     """
     import sysconfig as _sysconfig
     import tempfile
+    import startup_checks
 
-    real = deps_check._externally_managed()
+    real = startup_checks.externally_managed_marker()
     check(real is None or os.path.isfile(real),
-          f"_externally_managed returned {real!r}, which is not a file")
+          f"externally_managed_marker returned {real!r}, which is not a file")
 
     with tempfile.TemporaryDirectory() as tmp:
         planted = os.path.join(tmp, "EXTERNALLY-MANAGED")
@@ -202,35 +206,72 @@ def test_pep668_probe_and_message():
         saved_get_path = _sysconfig.get_path
         saved_prefix, saved_base = sys.prefix, sys.base_prefix
         try:
-            deps_check.sysconfig.get_path = (
+            _sysconfig.get_path = (
                 lambda key, *a, **k: tmp if key in ("stdlib", "platstdlib")
                 else saved_get_path(key, *a, **k))
 
             sys.prefix = sys.base_prefix = "/usr"      # a system interpreter
-            check(deps_check._externally_managed() == planted,
-                  "_externally_managed did not find a planted PEP 668 marker, "
-                  "so the #944 branch can never fire")
+            check(startup_checks.externally_managed_marker() == planted,
+                  "externally_managed_marker did not find a planted PEP 668 "
+                  "marker, so the #944 branch can never fire")
 
             sys.prefix = "/usr/venv-943"              # prefix != base_prefix
-            check(deps_check._externally_managed() is None,
-                  "_externally_managed claims a venv is externally managed; "
-                  "PEP 668 exempts venvs and pip installs into them fine, so "
-                  "this would withhold a working one-click install (#944)")
+            check(startup_checks.externally_managed_marker() is None,
+                  "externally_managed_marker claims a venv is externally "
+                  "managed; PEP 668 exempts venvs and pip installs into them "
+                  "fine, so this would withhold a working one-click install "
+                  "(#944)")
         finally:
-            deps_check.sysconfig.get_path = saved_get_path
+            _sysconfig.get_path = saved_get_path
             sys.prefix, sys.base_prefix = saved_prefix, saved_base
 
     names = ['scipy', 'shapely', 'Pillow']
-    apt = deps_check._distro_command(names, deps_check.DISTRO_PACKAGES)
-    dnf = deps_check._distro_command(names, deps_check.FEDORA_PACKAGES)
+    apt = startup_checks.distro_command(names, startup_checks.DISTRO_PACKAGES)
+    dnf = startup_checks.distro_command(names, startup_checks.FEDORA_PACKAGES)
+    arch = startup_checks.distro_command(names, startup_checks.ARCH_PACKAGES)
     check('python3-pil ' not in dnf + ' ' and dnf.endswith('python3-pillow'),
           f"the Fedora spelling of Pillow is python3-pillow, got: {dnf}")
     check(apt.endswith('python3-pil'),
           f"the Debian spelling of Pillow is python3-pil, got: {apt}")
+    check(arch == 'python-scipy python-shapely python-pillow',
+          f"the Arch spelling is python-<name>, got: {arch}")
     for n in names:
-        check(n in deps_check.DISTRO_PACKAGES,
-              f"{n} has no distro package name, so the #944 message would "
-              f"offer `sudo apt install {n.lower()}`")
+        for label, table in (('Debian', startup_checks.DISTRO_PACKAGES),
+                             ('Arch', startup_checks.ARCH_PACKAGES)):
+            check(n in table,
+                  f"{n} has no {label} package name, so the #944 message "
+                  f"would offer `{n.lower()}`")
+
+    # The dialog itself, through the wx stub: every distro line, and an
+    # override command that survives being pasted into a shell. It used to
+    # join the requirements UNQUOTED, and `numpy>=1.22.0` is a redirect there.
+    shown = []
+    wx_stub = deps_check.wx
+    saved = {k: getattr(wx_stub, k, None)
+             for k in ('MessageBox', 'OK', 'ICON_INFORMATION')}
+    try:
+        wx_stub.MessageBox = lambda text, *a, **k: shown.append(text)
+        wx_stub.OK = wx_stub.ICON_INFORMATION = 0
+        deps_check._report_externally_managed(
+            None,
+            [startup_checks.Problem('numpy', 'outdated', '1.21.5', '1.22.0')],
+            [startup_checks.Problem('Pillow', 'absent', floor='9.2.0')],
+            '/usr/lib/python3.12/EXTERNALLY-MANAGED')
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                if hasattr(wx_stub, k):
+                    delattr(wx_stub, k)
+            else:
+                setattr(wx_stub, k, v)
+    text = shown[0] if shown else ''
+    for want in ('sudo apt install python3-numpy python3-pil',
+                 'sudo dnf install python3-numpy python3-pillow',
+                 'sudo pacman -S --needed python-numpy python-pillow',
+                 '--break-system-packages "numpy>=1.22.0" "Pillow>=9.2.0"',
+                 '/usr/lib/python3.12/EXTERNALLY-MANAGED'):
+        check(want in text,
+              f"the PEP 668 dialog does not say {want!r}; it said:\n{text}")
 
 
 def run():

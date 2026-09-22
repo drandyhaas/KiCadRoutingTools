@@ -35,13 +35,12 @@ and the progress dialog stays responsive (otherwise KiCad freezes for the
 full duration of the install, which can be minutes on a slow network).
 
 It is not offered at all on a PEP 668 interpreter (#944) -- see
-`_externally_managed`.
+`startup_checks.externally_managed_marker`, shared with install_plugin.py.
 """
 
 import os
 import subprocess
 import sys
-import sysconfig
 import threading
 
 import wx
@@ -65,6 +64,9 @@ from startup_checks import (                                   # noqa: E402
     IMPORT_TESTS,
     Problem,
     dependency_problems,
+    externally_managed_advice,
+    externally_managed_marker,
+    quoted_requirements,
     requirement_floors,
 )
 
@@ -92,51 +94,6 @@ def _optional_effect(names):
         f"Everything else works."
         for n in names
     )
-
-
-# Distro package names for the PEP 668 path (#944), Debian/Ubuntu spelling.
-# Fedora agrees on all but Pillow (python3-pillow), which the message SAYS
-# rather than guesses from a distro sniff that would be wrong on the next one.
-DISTRO_PACKAGES = {
-    "numpy": "python3-numpy",
-    "scipy": "python3-scipy",
-    "shapely": "python3-shapely",
-    "Pillow": "python3-pil",
-}
-FEDORA_PACKAGES = dict(DISTRO_PACKAGES, Pillow="python3-pillow")
-
-
-def _distro_command(names, table):
-    return " ".join(table.get(n, n.lower()) for n in names)
-
-
-def _externally_managed():
-    """Path of this interpreter's PEP 668 EXTERNALLY-MANAGED marker, or None.
-
-    #944: KiCad's Linux packages run the SYSTEM interpreter, and on Ubuntu
-    23.04+, Debian 12+ and Fedora 38+ that prefix is marked externally managed
-    -- pip refuses every install into it, `--user` included. The one-click
-    install offered below therefore cannot succeed there, and offering it
-    anyway spends a progress dialog to arrive at `error:
-    externally-managed-environment` in a log tail.
-
-    A venv is exempt even when its base prefix carries the marker (that is what
-    PEP 668 is FOR, and `sysconfig.get_path('stdlib')` inside a venv still
-    resolves to the base stdlib, so the file would be found), hence the prefix
-    test first.
-    """
-    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
-        return None
-    for key in ("stdlib", "platstdlib"):
-        try:
-            directory = sysconfig.get_path(key)
-        except Exception:
-            continue
-        if directory:
-            marker = os.path.join(directory, "EXTERNALLY-MANAGED")
-            if os.path.isfile(marker):
-                return marker
-    return None
 
 
 def _requirements_path():
@@ -293,11 +250,8 @@ def _report_externally_managed(parent, blocking, optional, marker):
     manager owns, which is the user's call to make and not a plugin's to make
     silently. The command is spelled out so making it is one paste.
     """
-    python_exe = _find_python_executable()
-    names = [p.name for p in blocking + optional]
-    requirements = [p.requirement for p in blocking + optional]
-    debian = _distro_command(names, DISTRO_PACKAGES)
-    fedora = _distro_command(names, FEDORA_PACKAGES)
+    advice = externally_managed_advice(blocking + optional,
+                                       _find_python_executable())
     wx.MessageBox(
         "KiCad Routing Tools needs the following Python packages that are not "
         "bundled with KiCad:\n\n"
@@ -306,12 +260,7 @@ def _report_externally_managed(parent, blocking, optional, marker):
         f"  {marker}\n\n"
         "pip cannot install into it, so no one-click install is offered. "
         "Install the distribution's own packages instead:\n\n"
-        f"  sudo apt install {debian}\n"
-        f"  (Fedora: sudo dnf install {fedora})\n\n"
-        "If your distribution has no package for one of them, the deliberate "
-        "override is:\n"
-        f"  \"{python_exe}\" -m pip install --break-system-packages "
-        f"{' '.join(requirements)}",
+        + "\n".join(advice),
         "Install with your package manager", wx.OK | wx.ICON_INFORMATION,
         parent=parent,
     )
@@ -339,7 +288,7 @@ def ensure_dependencies(parent=None):
     if not blocking:
         return True
 
-    marker = _externally_managed()
+    marker = externally_managed_marker()
     if marker is not None:
         _report_externally_managed(parent, blocking, optional, marker)
         return False
@@ -394,7 +343,7 @@ def ensure_dependencies(parent=None):
             f"{_optional_effect(names)}\n\n"
             f"To install later:\n"
             f"  \"{python_exe}\" -m pip install --upgrade "
-            f"{' '.join(p.requirement for p in still_optional)}",
+            f"{quoted_requirements(still_optional)}",
             "Some optional packages missing", wx.OK | wx.ICON_INFORMATION,
             parent=parent,
         )

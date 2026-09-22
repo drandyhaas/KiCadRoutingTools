@@ -244,6 +244,8 @@ The installer automatically detects your KiCad installation directory (supports 
 - **Linux**: `~/.local/share/kicad/<version>/3rdparty/plugins/`
 - **Windows**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
 
+The installer also installs `requirements.txt` into KiCad's Python with pip, and skips pip when that Python already has everything. On Linux, KiCad runs the system Python, which Debian 12+, Ubuntu 23.04+, Fedora 38+ and Arch mark as externally managed (PEP 668) so pip refuses to install into it; there the installer runs no pip and prints the `apt` / `dnf` / `pacman` command for whatever is missing, plus the explicit `--break-system-packages` override for a package your distribution does not carry.
+
 If you previously installed this plugin through the Plugin & Content Manager, that copy sits next to the local install and would shadow it on `sys.path` (causing stale-code errors). The installer detects any such PCM copy and moves it aside to `<kicad-base>/disabled_pcm_plugins/<version>/`, leaving it recoverable. Pass `--keep-pcm` to skip this.
 
 ### Releasing a new version (maintainers)
