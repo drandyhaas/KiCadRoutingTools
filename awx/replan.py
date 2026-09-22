@@ -1237,7 +1237,6 @@ def move_to_json(m):
     if m is None:
         return None
     d = {f.name: getattr(m, f.name) for f in dataclasses.fields(m)}
-    d['replaces'] = move_to_json(d.get('replaces'))
     d['comove'] = list(getattr(m, 'comove', []) or [])
     return d
 
@@ -1250,7 +1249,6 @@ def move_from_json(d):
     d['exit_pt'] = tuple(d['exit_pt'])
     d['legs'] = [(tuple(p), tuple(q), L) for p, q, L in (d.get('legs') or [])]
     d['site'] = tuple(d['site']) if d.get('site') else None
-    d['replaces'] = move_from_json(d.get('replaces'))
     m = em.Move(**d)
     m.comove = list(comove)
     return m
