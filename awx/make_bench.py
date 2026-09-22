@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 from kicad_writer import add_tracks_and_vias_to_pcb  # noqa: E402
+import ship_vias  # noqa: E402  a via in a pad declares Type VII (#962)
 from bga_fanout import generate_bga_fanout  # noqa: E402
 from fix_kicad_drc_settings import fix_project_for_output  # noqa: E402
 import braid as te  # noqa: E402
@@ -153,6 +154,7 @@ def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_m
         add_tracks_and_vias_to_pcb(
             board, out, tracks, vias_add, vias_rm,
             net_id_to_name={i: n.name for i, n in pcb.nets.items()})
+        ship_vias.stamp(out, 'bench comb', print)
     else:
         shutil.copy(board, out)
     fp.copy_pro(board, out)

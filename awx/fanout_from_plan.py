@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 from kicad_writer import add_tracks_and_vias_to_pcb  # noqa: E402
+import ship_vias  # noqa: E402  a via in a pad declares Type VII (#962)
 from bga_fanout import generate_bga_fanout  # noqa: E402
 import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
@@ -1150,6 +1151,7 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
             add_tracks_and_vias_to_pcb(out_path, tmp, [], ties, [],
                                        net_id_to_name={i: n.name for i, n in pcb_f.nets.items()})
             os.replace(tmp, out_path)
+            ship_vias.stamp(out_path, 'fanout ties', print)
     except Exception as e:      # a tie must not lose the board
         print(f'  tie vias NOT added: {e}')
     return 0 if ok_l else 1
@@ -1241,6 +1243,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
         add_tracks_and_vias_to_pcb(
             src_file, out_path, tracks, vias_add, vias_rm,
             net_id_to_name={i: n.name for i, n in pcb.nets.items()})
+        ship_vias.stamp(out_path, 'fanout', print)
     else:
         shutil.copy(src_file, out_path)
     if relay is not None:

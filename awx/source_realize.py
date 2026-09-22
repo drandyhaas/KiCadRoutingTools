@@ -30,6 +30,7 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 from kicad_writer import (add_tracks_and_vias_to_pcb,  # noqa: E402
                           remove_segments_from_content,
                           remove_vias_from_content)
+import ship_vias  # noqa: E402  a via in a pad declares Type VII (#962)
 from pcb_modification import remove_net_from_pcb_data  # noqa: E402
 from bga_fanout import generate_bga_fanout  # noqa: E402
 import braid as te  # noqa: E402
@@ -478,6 +479,7 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     add_tracks_and_vias_to_pcb(stripped, out_path, tracks, vias_add, vias_rm,
                                net_id_to_name=n2n)
     os.remove(stripped)
+    ship_vias.stamp(out_path, 'source realize', log)
     pro = os.path.splitext(board)[0] + '.kicad_pro'
     if os.path.exists(pro):
         shutil.copy(pro, os.path.splitext(out_path)[0] + '.kicad_pro')
