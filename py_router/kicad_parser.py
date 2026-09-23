@@ -3005,13 +3005,20 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
 
     Returns:
         Tuple of (nets dict keyed by net_id, name_to_id mapping).
-        For KiCad 9, net_id comes from the file. For KiCad 10, synthetic IDs are assigned.
+        With a numeric net table, net_id comes from the file. Without one
+        (KiCad 10 name nets), synthetic IDs are assigned.
+
+    The encoding is decided from the CONTENT, not ``kicad_version`` (kept for
+    caller compatibility): a KiCad-10 stamp can sit over a numeric
+    ``(net N "name")`` table (KiCad 10.0.x writes version 20250513 with one;
+    converters/other emitters do too), and a pre-10 stamp can sit over name-only
+    refs. Keying on the stamp returned ZERO nets for both.
     """
     nets = {}
     name_to_id: Dict[str, int] = {}
 
-    if kicad_version >= KICAD_10_MIN_VERSION:
-        # KiCad 10 removes the top-level net table entirely.
+    if not re.search(r'\(net\s+\d+\s+"', content):
+        # No numeric table: KiCad 10 name nets.
         # Discover all net names from their usage in pads, segments, vias, and zones.
         # Match (net "name") anywhere in the file — deduplicate to build the net list.
         # `(?:[^"\\]|\\.)*` -- not `[^"]*`, which ENDS at the first escaped
@@ -3034,7 +3041,7 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
             name_to_id[net_name] = synthetic_id
             synthetic_id += 1
     else:
-        # KiCad 9: nets are (net <id> "name")
+        # Numeric table (KiCad 9, and KiCad 10.0.x): (net <id> "name")
         net_pattern = r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR
         for m in re.finditer(net_pattern, content):
             net_id = int(m.group(1))
