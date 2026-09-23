@@ -387,6 +387,24 @@ def hand(direction, p_pt, n_pt, arriving: bool = False) -> int:
     return 0 if abs(c) < 1e-6 else (1 if c > 0 else -1)
 
 
+def wired(pcb, pad, tol: float = 0.005) -> bool:
+    """Does copper of the pad's own net already touch this pad -- a track end
+    or a via barrel overlapping its copper on a layer it has?"""
+    layers = {'F.Cu', 'B.Cu'} if (pad.drill and pad.drill > 0) or any('*' in L for L in pad.layers) \
+        else {L for L in pad.layers if L.endswith('.Cu')}
+    reach = max(pad.size_x, pad.size_y) / 2
+    for s in pcb.segments:
+        if s.net_id != pad.net_id or s.layer not in layers:
+            continue
+        for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            if math.hypot(x - pad.global_x, y - pad.global_y) <= reach + s.width / 2 + tol:
+                return True
+    for v in pcb.vias:
+        if v.net_id == pad.net_id and math.hypot(v.x - pad.global_x, v.y - pad.global_y) <= reach + v.size / 2 + tol:
+            return True
+    return False
+
+
 def pair_waypoints(pcb, p_id: int, n_id: int, src_ref: str, dst_ref: str):
     """The two-pad parts a pair PASSES THROUGH between its arrays: a part
     with one pad on P and the other on N (a differential termination
@@ -405,6 +423,11 @@ def pair_waypoints(pcb, p_id: int, n_id: int, src_ref: str, dst_ref: str):
             # a part UNDER the array's balls is served by a tie via at the
             # ball (fanout_from_plan.tie_vias_under), not passed through
             if any(under_pad(b, q, 0.25) for q in (pp, pn) for b in array_pads):
+                continue
+            # a termination the board ALREADY WIRES is not a stop between the
+            # arrays: it is part of the end whose copper reaches it (the human's
+            # R1 in the DDR's band, inside the berth stub; 2026-09-22)
+            if any(wired(pcb, q) for q in (pp, pn)):
                 continue
             out.append((pp, pn))
     src = pcb.footprints.get(src_ref)

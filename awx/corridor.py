@@ -452,10 +452,21 @@ class Spine:
                 n2 = self.nrm[j]
                 V = self.P[j]
                 if abs(o) > 1e-9:
-                    # the mitre of the two offset lines, either side
+                    # the mitre of the two offset lines, either side --
+                    # unless it lies BEHIND the piece's start along the
+                    # incoming leg or past its end along the outgoing one:
+                    # an inner offset near a vertex put it there and the
+                    # line stepped back (HHa's north wrap, SDQ10: 0.05 mm
+                    # back at the corner, two 170-degree turns)
                     den = 1.0 + float(n1 @ n2)
                     m = (n1 + n2) / max(den, 1e-6)
-                    push((float(V[0] + o * m[0]), float(V[1] + o * m[1])))
+                    mp = (float(V[0] + o * m[0]), float(V[1] + o * m[1]))
+                    a_ = out[-1] if out else self.xy(sa, oa)
+                    b_ = self.xy(sb, ob)
+                    d1_, d2_ = self.d[j - 1], self.d[j]
+                    if ((mp[0] - a_[0]) * d1_[0] + (mp[1] - a_[1]) * d1_[1] > 0
+                            and (b_[0] - mp[0]) * d2_[0] + (b_[1] - mp[1]) * d2_[1] > 0):
+                        push(mp)
                 else:
                     push((float(V[0]), float(V[1])))
             push(self.xy(sb, ob))
@@ -968,6 +979,86 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
             f'corners {[round(t_) for _i, _s, t_ in Spine(sp).corners()]}'
             + (f'  {[(round(x, 2), round(y, 2)) for x, y in sp]}' if len(sp) <= 8 else ''))
     return Spine(align_tail(sp, dest_box))
+
+
+def octo_hull(pts: Sequence[Pt], margin: float) -> List[Pt]:
+    """The octilinear hull of `pts` (the intersection of the half-planes of
+    its eight support lines, at 0, 45, .. 315 degrees) pushed out by
+    `margin`: eight vertices in increasing-angle order."""
+    dirs = [(math.cos(k * math.pi / 4), math.sin(k * math.pi / 4)) for k in range(8)]
+    h = [max(p[0] * d[0] + p[1] * d[1] for p in pts) + margin for d in dirs]
+    V = []
+    for k in range(8):
+        (a1, b1), c1 = dirs[k], h[k]
+        (a2, b2), c2 = dirs[(k + 1) % 8], h[(k + 1) % 8]
+        det = a1 * b2 - a2 * b1
+        V.append(((c1 * b2 - c2 * b1) / det, (a1 * c2 - a2 * c1) / det))
+    return V
+
+
+def build_wrap_spine(dest_pts: Sequence[Pt], stubs: Sequence[Pt],
+                     teeth: Sequence[Pt], ccw: bool, arrive: Pt,
+                     margin: float, reach_deg: float = 8.0,
+                     per_edge: int = 40) -> Spine:
+    """A WRAP corridor's spine: the bundle comes in from its teeth, meets
+    the destination array at the corner where the face the incoming
+    bundle meets ends (the straight corridor's face), and runs round the
+    array -- along the octilinear hull of its pads and this group's stubs,
+    `margin` outside -- in the group's wrap direction (`ccw`: the angle
+    round the array's centre increasing) to just past the farthest stub,
+    so every stub lies on the spine's inner side and the lanes peel off
+    in arc order, innermost first, as a human's ring does. `arrive` is
+    the incoming bundle's direction at the array."""
+    V = octo_hull(list(dest_pts) + list(stubs), margin)
+    cen = (sum(p[0] for p in dest_pts) / len(dest_pts),
+           sum(p[1] for p in dest_pts) / len(dest_pts))
+    Ct = (sum(p[0] for p in teeth) / len(teeth), sum(p[1] for p in teeth) / len(teeth))
+    ring = []
+    for k in range(8):
+        a, b = V[k], V[(k + 1) % 8]
+        for t in np.linspace(0, 1, per_edge, endpoint=False):
+            ring.append((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])))
+    ang = lambda p: math.atan2(p[1] - cen[1], p[0] - cen[0])
+
+    def outward_dot(k):
+        a, b = V[k], V[(k + 1) % 8]
+        n_ = (b[1] - a[1], -(b[0] - a[0]))
+        L_ = math.hypot(*n_) or 1.0
+        return (n_[0] * arrive[0] + n_[1] * arrive[1]) / L_
+    k_front = min(range(8), key=outward_dot)       # the face the bundle meets
+    step = 1 if ccw else -1
+    # angles are measured from the corner where that face ends in the wrap
+    # direction: every stub of the group lies ahead of it
+    i_f = (((k_front + 1) % 8) * per_edge) if ccw else (k_front * per_edge)
+    a0 = ang(ring[i_f])
+
+    def swept(p):
+        d = ang(p) - a0
+        return d % (2 * math.pi) if ccw else (-d) % (2 * math.pi)
+    for _ in range(len(ring)):
+        if all(swept(s) < 1.5 * math.pi for s in stubs):
+            break
+        i_f = (i_f - step) % len(ring)
+        a0 = ang(ring[i_f])
+    a_end = max(swept(s) for s in stubs) + math.radians(reach_deg)
+    # the lead-in is pulled TAUT: straight from the teeth to where it grazes
+    # the hull on the wrap side (the tangent point), never along the face the
+    # bundle meets; stubs short of the tangent point are peeled off the lead-in
+    ahead = [i % len(ring) for i in range(i_f, i_f + step * len(ring), step)
+             if swept(ring[i % len(ring)]) <= a_end]
+    cx_, cy_ = cen[0] - Ct[0], cen[1] - Ct[1]
+
+    def bearing(q):
+        # signed angle at the teeth between the array's centre and q
+        qx, qy = q[0] - Ct[0], q[1] - Ct[1]
+        return math.atan2(cx_ * qy - cy_ * qx, cx_ * qx + cy_ * qy)
+    side = sum(bearing(s) for s in stubs)
+    i_t = (max(ahead, key=lambda i: bearing(ring[i])) if side > 0
+           else min(ahead, key=lambda i: bearing(ring[i])))
+    path = [Ct]
+    for i in ahead[ahead.index(i_t):]:
+        path.append(ring[i])
+    return Spine(simplify(path, 0.02))
 
 
 # ---------------------------------------------------------------- distances

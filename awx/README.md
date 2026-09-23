@@ -434,7 +434,13 @@ mismatch cannot be resolved"); a held berth standing between a pair is
 freed before a re-solve, or the re-solve is infeasible and the greedy
 choice, which knows no pairs, stands. The braid judge prices a bad pair end
 at `PLAN_PAIR_BAD_W` (50 vias): without it the source residue round judged
-the pair's moved teeth worse by count and reverted them. `pairs.harmonise`
+the pair's moved teeth worse by count and reverted them. That round also
+keeps a pair's teeth ONE UNIT (`split_pairs`): a realized board with fewer
+pairs whose teeth stand on different faces or layers wins before any
+count, one that splits a pair never does, and a move set that unites a
+pair but judges worse is laid again with the pair legs' moves alone (zynq
+K44: DQS0_N's move rode in a set of six judged 353 -> 399 and reverted;
+alone 353 -> 354, kept). `pairs.harmonise`
 is the post-fix on a plan chosen one leg at a time. A ball with a pad of
 its OWN net under it on the other layer (a back-side termination the
 placement step moved under a clock ball) takes no via-in-pad escape and is
@@ -665,6 +671,91 @@ layer, WHY blocked) and writes `tmp/pairdbg_<pair>_<n>.png` with the band,
 the pieces, the reserved vias and the poses. Knobs: `BRAID_PAIR_GAP`
 (default hug + 0.04), `BRAID_PAIR_SEP`, `PLAN_PAIR_SWIM`.
 
+## On the human's ends (`human_ends_bench.py`)
+
+The braid alone, on the ends a human fanned out: `human_ends_bench.py`
+clips the human's board to each net's stubs at both arrays (teeth and
+berths exactly as the human laid them, the bench's other nets' teeth kept
+as obstacles) and writes the plan sidecar the braid reads.
+
+    NETS=$(python3 coherent_nets.py 51 --board=fb_t2q_pairs.kicad_pcb)
+    python3 human_ends_bench.py HUMAN.kicad_pcb tmp/hp/HHa_k51.kicad_pcb "$NETS" \
+        --others bench:fb_t2q_pairs.kicad_pcb --ladder fb_t2q_pairs.ladder.txt --sidecar --marker
+    PLAN_PAGES=1 PLAN_JUDGE=count PLAN_JUDGE_LEN=lane BRAID_PAIRS=1 PLAN_PAIRS=1 \
+    BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2 \
+        python3 braid.py --board tmp/hp/HHa_k51.kicad_pcb --dest DU1 --nets "$NETS" --out OUT
+
+K51 with the pairs (48 lanes, three of them pairs): **101 vias, 0 open,
+0 DRC** in 1:46; the human's own copper on the same nets is 88. What makes
+it route, each rule general:
+
+- **The trunk and its branches** (the default; `BRAID_BRANCH=0` turns it off). A corridor's
+  side exits leave it at HANDOFF points just past its ribbon (`HAND_DS`)
+  and ride a BRANCH per side round the destination, on a spine along the
+  octilinear hull of its pads and stubs (`corridor.build_wrap_spine`), as a
+  human's ring does. A branch keeps the order its lanes arrive in -- a
+  peel-off leg crosses the lanes still inside by layer -- and tightens as
+  they peel: each lane moves in by the gap of the one that left, on
+  45-degree ramps staggered tan(22.5) x the distance per lane so
+  neighbouring ramps stay a pitch apart, and `_order_ring` lifts every ring
+  lane clear of the lane inside it (a disc, not an offset at one s; a via's
+  room where that lane changes layer at its corner; any passive on a layer
+  it must take). A peel-off leg may cross a lane only where the plan has
+  room for it: the branches are planned in the order the lanes arrive, and
+  any pair whose leg's planned copper COLLIDES with a lane still inside on
+  one layer is handed off with the first to peel inside, the trunk's braid
+  doing that reordering (`_uncross_colliding_legs`, `_order_handoffs`; on
+  zynq K44 the DQ branch's berths stand 0.4 mm apart a millimetre inside
+  the ring and ten tails ran over lanes still riding round; handing every
+  crossing to the trunk instead cost HHa 16 vias and a net). The trunk
+  still routes each lane end to end: its band is the trunk's before the
+  handoff line and its branch's past it. Without branches: 109 vias,
+  2 open.
+- **Reservations where the plan puts the lane.** A lane not routed yet is
+  reserved only on the layer its profile has there -- on both only inside
+  the run allowed both layers that holds one of its planned changes, where
+  its via may go -- and a join leg on its tooth's layer
+  (`_planned_layers`). Reserved on every allowed layer instead: 123 vias,
+  1 open. In the branch frame a neighbour also narrows a band only on the
+  layer it will be on (`planned_vec`; without it 111 vias).
+- **Via sites that can exist.** In the branch frame a corner is a reserved
+  via only where the plan changes layer there; a swimmer's reserved diamonds keep a via pitch
+  from every other planned site and a via's room from every other net's
+  static copper, this corridor's teeth and berths included
+  (`_via_static_ok`); a lane's own tooth and berth are cleared of the
+  others' reservations for its own search (`clip_round_ends`).
+- **Lines that are where the plan says.** An exit block laid past the
+  outline is squeezed onto the board toward the pair floor (`_fit_block`);
+  a lane holds its offset through a spine corner (drawn as a chord to the
+  mitre it ran shallower than every (s, o) check assumed); an offset line's
+  mitre never lies behind its piece's start (`corridor.Spine.lane_xy`); a
+  fan-in goes round a tooth standing a pitch or more ahead of its own on its
+  layer, on the side the tooth faces (`_round_teeth_ahead`: zynq K44's DQ2
+  ran 0.047 mm over DQS0_N's tooth on the BGA's south row).
+- **Pairs.** In the branch frame a pair owns only its APPROACH BOXES --
+  its connectors' reach (`BRAID_PAIR_APPROACH`, 1.2 mm) out along each
+  end's escape, the tips' spread plus a track and a clearance across --
+  where the others' planned lanes are cut and their exit stubs clipped
+  (the fan-in rule dropped whole pieces 26-32 mm long), and its legs are
+  placed as its two conductors (without the clipped stubs: 2 open); a pair
+  refused in its band under the boxes tries the band again under the
+  fan-in rule before it goes free (zynq's DQS1, teeth 0.80 mm apart, landed
+  in band only so); the
+  envelope search stamps the
+  reservations at the size of the single tracks and barrels they stand for
+  (at the envelope's width each stood 0.136 mm a side too wide: 113 vias,
+  1 open) and counts its partner leg's copper as its own; a pair whose two
+  ends have OPPOSITE HANDS crosses its legs at a dive, as the human's SCK
+  does (`connect._connect_pair_cross`; `BRAID_PAIR_CROSS=0` turns it off,
+  and HHa then leaves 3 open); a termination the board already wires is
+  part of its end, not a stop on the way (`pairs.wired`: the human's R1
+  sits inside SCK's berth stub).
+
+`plan_audit.py` checks a plan against these rules before anything is
+routed (reservation pitch, via sites, bands), and `one_net.py` routes
+chosen lanes one at a time in their bands, with renders and the router's
+frontiers on a refusal.
+
 ## The chain's other pieces
 
 **The pages-first planner** (`pages_first.py`, `PLAN_PAGES=1`). One CP-SAT
@@ -840,6 +931,8 @@ is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 | `synth_bus.py`, `synth_ladder.py` | the synthetic channel with a known optimum (below) |
 | `pack.py`, `pack_board.py` | the pack: every lane of a finished board a taut string, vias fixed (opt-in) |
 | `ship_vias.py` | a via the chain lays in a pad declares IPC-4761 Type VII, as the route step does (#962) |
+| `human_ends_bench.py` | a bench on a human's ends: their teeth and berths clipped from their board, with the plan sidecar |
+| `plan_audit.py`, `one_net.py` | a plan checked before routing (reservation pitch, via sites, bands, what is reserved near a point); chosen lanes routed one at a time in band, with renders and a refused search's frontiers |
 | `wall_probe.py`, `pinch_gate.py`, `judge_gate.py`, `floor_survey.py`, `ledger_cal.py`, `cut_ledger.py`, `rule_table.py`, `solve_curve.py`, `modal_curve.py` | probes and gates: a lane's walls, the braid's refusals, the plan judge, the floor per net, a corridor's cut, the length rule over arms, the CP-SAT's convergence |
 | `modal_k.py`, `arms.example.json`, `arms.rec51.json` | cloud arms, one container per (arm, K); `return_board`, `return_files` bring artifacts back |
 
@@ -988,42 +1081,54 @@ prefers a surface berth two faces away to a dogbone into the band.
 Ordered, highest value first. An item leaves this list when it is done or
 abandoned with a measurement. Untried ideas live here and nowhere else.
 
-1. **Speculation inside a descent.** Rank and dispatch the next net's
+1. **One placement of every layer change** (`place_dives`). A lane's
+   layer changes are placed by separate rules one after another -- the
+   exit corner, the split leg, a swimmer's diamonds -- each against what
+   the others placed before it, and `plan_audit.py dives` still finds
+   sites on the human's ends that cannot exist (a corner inside a
+   passive's clearance, a pair's via on a neighbour's planned line). All
+   corridors' changes placed together, in board coordinates, once the
+   lines are final: hard rules (static copper, a via's room from every
+   line, the via pitch, a pair's two barrels), soft ones (a millimetre or
+   two from other nets' ends, as the human's are; staggered), and the
+   bands and reservations derived from the sites.
+
+2. **Speculation inside a descent.** Rank and dispatch the next net's
    probes while the current wave runs, discard them when a net stands.
    Four workers sit idle for close to half of a descent. No verdict
    changes.
 
-2. **Stop the evolution when it stalls, and braid the chain's arms side
+3. **Stop the evolution when it stalls, and braid the chain's arms side
    by side.** A stalled generation still costs its jumps, crossover and
    their descents; the chain's four braids are most of its wall and
    independent. Both are small.
 
-3. **The evolution on the cloud.** A generation is seven independent
+4. **The evolution on the cloud.** A generation is seven independent
    operators; one container each (`modal_k.py` ships the tree and pins
    the stack) makes its wall the slowest operator, and width is free. The
    memo store wants a shared volume.
 
-4. **K51's last two vias.** The next move class past the single-net
+5. **K51's last two vias.** The next move class past the single-net
    classes is a GROUP move: re-layer a lane together with its crossing
    partners in one probe (the coupled probe already routes such a set);
    or jumps that land nearer than two random nets.
 
-5. **The chain's seeds.** The evolution optimises past the plan's
+6. **The chain's seeds.** The evolution optimises past the plan's
    objective, but better seeds are a better start. The berth menu is
    one-per-face at `CANDS=4` (row pruning, not column generation), and a
    plan-time floor over the PLANNED LANES rather than the channel is the
    one untested ranker.
 
-6. **The planner's comb for a pair.** No third berth between a pair's
+7. **The planner's comb for a pair.** No third berth between a pair's
    two, layer or no layer; and the room a pair's converging approach
    needs at the comb, given at plan time rather than found at the last
    call.
 
-7. **Pairs and the evolution.** The descent moves single nets' ends, so
+8. **Pairs and the evolution.** The descent moves single nets' ends, so
    a pair must land at the chain stage; a move class that moves a pair's
    two ends together would let the population improve a pairs board.
 
-8. **Generality.** Tuned on one bench. What the zynq article shows: a
+9. **Generality.** Tuned on one bench. What the zynq article shows: a
    singleton corridor's source tooth may be planned on the FAR face of
    the source array (the count judge sees a via saved, the length judge
    prices the lane from the tooth's exit and the berth's run but not the
@@ -1031,21 +1136,21 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
    is the missing term), and the top rungs lose their in-band execution.
    Off-axis poses (R30, R45) still break the plan's compass faces.
 
-9. **The corpus A/B for the `py_router` changes, then the PR to main.**
+10. **The corpus A/B for the `py_router` changes, then the PR to main.**
    `KICAD_SEG_DIST_EXACT` ships OFF so the merge leaves main's copper
    alone; the A/B decides whether it turns on, with a per-board
    attribution first (cparti_fpga is a BGA board: the fanout tie-breaks
    are the suspect).
 
-10. **The `.kicad_dru` is read with real layer names inside the turned
+11. **The `.kicad_dru` is read with real layer names inside the turned
     frame**; a per-layer rule lands on the opposite face for a back-side
     part. Shipped `py_router` code, so it blocks the merge.
 
-11. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
+12. **`pick_braid` ignores DRC** -- it judges (open, vias) only.
 
-12. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
+13. **Audit `modal_k`'s `KEEP`**: an INFEASIBLE solve prints no
     `pages-first:` line and reads like "never ran".
 
-13. **Unverified review findings**: `dedupe_boards` fingerprints copper
+14. **Unverified review findings**: `dedupe_boards` fingerprints copper
     but not the sidecar; `blockers_of` double-counts half a track;
     `flip_frame` does not mirror `pad.polygons`.

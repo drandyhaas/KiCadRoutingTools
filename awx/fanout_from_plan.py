@@ -560,6 +560,27 @@ def judge_by_braid(st, choice, board, achieved=None, bp=None):
     return sum(pred.values()) + ride + pp, pred, bp, plan
 
 
+def _pair_legs_of(base, names):
+    """The two nets of pair `base` among `names`."""
+    import pairs as _pairs
+    return _pairs.pair_names(list(names)).get(base, ())
+
+
+def split_pairs(st):
+    """(count, [pair]) of the differential pairs whose TEETH, as laid, stand on
+    different faces or layers of the source array -- a pair that cannot be
+    launched coupled. Zero without PLAN_PAIRS / BRAID_PAIRS."""
+    if not int(os.environ.get('PLAN_PAIRS', os.environ.get('BRAID_PAIRS', '0')) or 0):
+        return 0, []
+    import pairs as _pairs
+    import pages_first
+    out = []
+    for base, (pn, nn) in _pairs.pair_names(list(st['launch'])).items():
+        a, b = pages_first.current_tooth(st, pn), pages_first.current_tooth(st, nn)
+        if a is not None and b is not None and (a.direction, a.layer) != (b.direction, b.layer):
+            out.append(base)
+    return len(out), sorted(out)
+
 def pf_key(choice, bp, cost, model_vias=None):
     """The KEY a realize-and-confirm site compares plans on: (residue,
     cost) as recorded -- under PLAN_PAGES the cost is the CP-SAT's own
@@ -736,35 +757,30 @@ def plan(base, names, work):
                     mv = getattr(pages_first.choose, 'last', {}).get('vias', f_)
                 return pf_key(ch, bp_, f_, mv)
             best_key = _key(dst_choice)
-            for _k in range(SRC_RESIDUE_ROUNDS):
-                new_board = f'{work}_srcres{r}_{_k}.kicad_pcb'
-                # the moves IN THE PLAN'S ORDER: it is the order
-                # `_blockers_for` walks (and its `free` list is capped) and
-                # the order the engine receives its hints in, so a rebuilt
-                # dict gives the engine a different call and different
-                # copper (measured at K35: 69 segments different, judged 198
-                # against 181)
-                rest = dict(src_out)
+            best_split = split_pairs(st)
+
+            def _trial(moves, new_board):
+                """Lay `moves` on `board` with the engine, choose the destination
+                again on the new board, judge it. (result, line) -- result None
+                when it was not laid as asked or has no destination choice."""
                 _free = []
                 if SRC_REFAN_JOINT:
-                    _free = _blockers_for(parse_kicad_pcb(board), rest, st,
-                                          set(names) - set(rest), log=print)
-                res_r = sr.realize(board, rest, st['src_pad'], st['byname'],
+                    _free = _blockers_for(parse_kicad_pcb(board), moves, st,
+                                          set(names) - set(moves), log=print)
+                res_r = sr.realize(board, moves, st['src_pad'], st['byname'],
                                    st['sref'], new_board, guard_names=names,
                                    free=_free)
                 realized.append(res_r)
                 misses = [nm for nm, e in res_r['audit'].items() if not e['exact']]
                 for nm in misses:
-                    banned.add((nm, sr.move_sig(rest[nm])))
-                src_out = dict(rest)
-                line = (f'  round {r}: source residue move(s) realized: {sorted(src_out)}'
+                    banned.add((nm, sr.move_sig(moves[nm])))
+                line = (f'  round {r}: source residue move(s) realized: {sorted(moves)}'
                         + (f'; not laid as asked (banned): {misses}' if misses else '')
                         + (f'; REJECTED ({res_r["rejected"]})' if res_r['rejected'] else ''))
                 if res_r['rejected']:
-                    print(line)
-                    for nm in src_out:
-                        banned.add((nm, sr.move_sig(src_out[nm])))
-                    break
+                    for nm in moves:
+                        banned.add((nm, sr.move_sig(moves[nm])))
+                    return None, line
                 st2 = plan_state(parse_kicad_pcb(new_board), names, banned)
                 src2 = {}
                 # the destination re-chosen FROM THE PREVIOUS CHOICE: every
@@ -777,25 +793,60 @@ def plan(base, names, work):
                 # the plain judge, graded 14 -> 16 residue against a
                 # from-scratch re-plan)
                 keep_sig = {nm: sr.move_sig(m) for nm, m in dst_choice.items()
-                            if nm not in src_out and nm in st2['dmenu']
+                            if nm not in moves and nm in st2['dmenu']
                             and any(sr.move_sig(mm) == sr.move_sig(m) for mm in st2['dmenu'][nm])}
                 ch2, un2 = dest_choice(st2, new_board, src_out=src2, fixed=keep_sig)
                 if not ch2:
-                    print(line + '; no destination choice on the new board -- reverted'); break
+                    return None, line + '; no destination choice on the new board -- reverted'
                 f2, _p2, bp2, _pl2 = judge_by_braid(st2, ch2, new_board)
                 mv2 = None
                 if PLAN_PAGES and not PLAN_JUDGE:
                     import pages_first
                     mv2 = getattr(pages_first.choose, 'last', {}).get('vias', f2)
-                key2 = pf_key(ch2, bp2, f2, mv2)
-                if pf_better(key2, best_key):
-                    print(line + f'; {pf_fmt(best_key, key2)}: KEPT')
-                    board, st, dst_choice, un, best_key, src_out = new_board, st2, ch2, un2, key2, src2
+                return (new_board, st2, ch2, un2, pf_key(ch2, bp2, f2, mv2), src2, split_pairs(st2)), line
+            for _k in range(SRC_RESIDUE_ROUNDS):
+                # the moves IN THE PLAN'S ORDER: it is the order
+                # `_blockers_for` walks (and its `free` list is capped) and
+                # the order the engine receives its hints in, so a rebuilt
+                # dict gives the engine a different call and different
+                # copper (measured at K35: 69 segments different, judged 198
+                # against 181)
+                rest = dict(src_out)
+                res, line = _trial(rest, f'{work}_srcres{r}_{_k}.kicad_pcb')
+                if res is None:
+                    print(line)
+                    break
+                sp2 = res[6]
+                # A PAIR'S TEETH ARE ONE UNIT: a board with fewer pairs split
+                # across faces or layers wins before any count, and one that
+                # splits a pair never does. The moves are judged as a SET, so
+                # the move uniting a pair was reverted and banned with the
+                # others (zynq K44, branch judge: DQS0_N's tooth left on the
+                # BGA's south face, DQS0_P's on the east -- the pair refused
+                # at its source in every braid); a set that unites a pair but
+                # judges worse is tried again with the pair legs' moves alone.
+                if sp2[0] < best_split[0] and not pf_better(res[4], best_key):
+                    legs = {nm for b_ in best_split[1] for nm in _pair_legs_of(b_, names)}
+                    sub = {nm: m for nm, m in rest.items() if nm in legs}
+                    if sub and len(sub) < len(rest):
+                        res_s, line_s = _trial(sub, f'{work}_srcres{r}_{_k}p.kicad_pcb')
+                        if res_s is not None and res_s[6][0] < best_split[0] \
+                                and (res_s[6][0] < sp2[0] or pf_better(res_s[4], res[4])):
+                            print(line + f'; {pf_fmt(best_key, res[4])}, pairs split {best_split[0]} -> {sp2[0]}'
+                                  f' -- the pair legs\' moves alone instead')
+                            res, line, sp2 = res_s, line_s, res_s[6]
+                if sp2[0] < best_split[0] or (sp2[0] == best_split[0] and pf_better(res[4], best_key)):
+                    print(line + f'; {pf_fmt(best_key, res[4])}'
+                          + (f', pairs split {best_split[0]} -> {sp2[0]}' if sp2[0] != best_split[0] else '')
+                          + ': KEPT')
+                    board, st, dst_choice, un, best_key, src_out = res[0], res[1], res[2], res[3], res[4], res[5]
+                    best_split = sp2
                 else:
-                    print(line + f'; {pf_fmt(best_key, key2)}: '
-                          f'not better -- reverted, moves banned')
-                    for nm in src_out:
-                        banned.add((nm, sr.move_sig(src_out[nm])))
+                    print(line + f'; {pf_fmt(best_key, res[4])}'
+                          + (f', pairs split {best_split[0]} -> {sp2[0]}' if sp2[0] != best_split[0] else '')
+                          + ': not better -- reverted, moves banned')
+                    for nm in rest:
+                        banned.add((nm, sr.move_sig(rest[nm])))
                     break
                 if not src_out:
                     break

@@ -19,6 +19,7 @@ and an optional BAND -- two functions of x giving the y interval the
 connection may use, stamped as blocked cells, so a connection routed
 early can never wander into the corridor a later neighbour needs.
 """
+import copy
 import math
 import os
 import sys
@@ -107,6 +108,7 @@ VIRTUAL_NET = 10 ** 7      # foreign net id for virtual copper (no such net)
 
 
 
+
 def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             b: Point, b_layer: str, cfg: GridRouteConfig,
             band=None, margin: float = 1.0,
@@ -120,11 +122,15 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             soft_vias: Optional[List[Tuple[float, float, float]]] = None,
             soft_cost: float = 5.0,
             own_ids: Optional[List[int]] = None,
+            virtual_size: Optional[Tuple[float, float]] = None,
             ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """Route `net_id` from the copper end at `a` (on `a_layer`) to the
     copper end at `b` (on `b_layer`). `own_ids`: the nets whose copper is
     the searcher's OWN (exempt, free layer changes at their barrels) --
     default `[net_id]`; a pair's envelope lane names both legs.
+    `virtual_size`: (track width, via size) of the copper the virtual
+    lines and vias stand for -- default cfg's; an envelope's cfg is as
+    wide as a pair, the lanes it reserves around are single tracks.
 
     `pcb` must carry every piece of copper placed so far -- the trunk of
     every net, the stubs, the connections already made -- because that is
@@ -174,8 +180,9 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     window = make_local_window(pcb, cx, cy, half)
     if not window.board_info.board_bounds:
         return None
+    v_track, v_via = virtual_size or (cfg.track_width, cfg.via_size)
     if virtual:
-        w = cfg.track_width
+        w = v_track
         window.segments = list(window.segments) + [
             Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
             for (p, q, layer) in virtual if layer in layer_map]
@@ -188,7 +195,7 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
         # centreline, so a lane hugging its band edge there left
         # the neighbour's corner no legal via site (K19 SCAS)
         window.vias = list(window.vias) + [
-            Via(p[0], p[1], cfg.via_size, cfg.via_drill,
+            Via(p[0], p[1], v_via, cfg.via_drill,
                 list(cfg.layers), VIRTUAL_NET) for p in virtual_vias]
 
     # static_base: the #422 static-bitmap stamp path -- engine-
@@ -256,6 +263,21 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             continue
         gg = coord.to_grid(xx, yy)
         targets.append((gg[0], gg[1], layer_map[ll], xx, yy))
+    if len(own) > 1:
+        # an ENVELOPE lane owns every leg's copper, but the router's
+        # terminal-short gate measures foreign copper against `net_id`
+        # alone: the partner leg's own tooth stub read as a short at the
+        # envelope's start (the map above already treats it as own)
+        others = set(own) - {net_id}
+
+        def _mine(o):
+            if o.net_id not in others:
+                return o
+            o = copy.copy(o)
+            o.net_id = net_id
+            return o
+        window.segments = [_mine(s) for s in window.segments]
+        window.vias = [_mine(v) for v in window.vias]
     result = route_net_with_obstacles(window, net_id, cfg, obstacles,
                                       bounds=bounds,
                                       sources_override=sources,
@@ -310,13 +332,422 @@ def connect_pair(pcb: PCBData, p_id: int, n_id: int,
         raise ValueError(f'layer not routable: {a_layer} / {b_layer}')
     g = max(gap if gap is not None else cfg.diff_pair_gap, cfg.clearance)
     half = (cfg.track_width + g) / 2.0                 # a leg's offset from the centreline
+    if a_dir is not None and b_dir is not None:
+        import pairs as _pairs
+        ha = _pairs.hand(a_dir, a_p, a_n)
+        hb = _pairs.hand(b_dir, b_p, b_n, arriving=True)
+        if ha and hb and ha != hb and os.environ.get('BRAID_PAIR_CROSS', '1') != '0':
+            # OPPOSITE HANDS (2026-09-22): the production router refuses a
+            # polarity mismatch outright (a pad swap is never allowed on real
+            # nets, a flipped connector only where a direction was not forced),
+            # and the human routes such a pair by swapping the legs at a layer
+            # change. The envelope form with the crossover at a dive does that;
+            # refused, the production router gets its turn and says why.
+            # the approach ladder of the production router: an envelope
+            # starting a via pitch out of a ball row is still inside the
+            # row's clearance, where only the source exemption lets it pass
+            for sc in (1.0, 2.0, 3.0):
+                res = _connect_pair_cross(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
+                                          cfg, band, margin, band_slack, virtual, window_pts,
+                                          virtual_vias, report, a_dir, b_dir, half, appr_scale=sc)
+                if res is not None:
+                    return res
     return _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                                   cfg, band, margin, band_slack, virtual, window_pts,
                                   virtual_vias, report, g, a_dir, b_dir, half,
                                   a_conn=a_conn, b_conn=b_conn)
 
 
-def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None):
+STRAIGHTEN_STEPS = 1.2   # a staircase's chord may stand this many grid steps off it
+VIRT_TOL_FRAC = 0.1      # a leg may come this fraction of the clearance inside a
+                         # RESERVATION's (the grid router's own quantization,
+                         # check_drc's noise band); real copper is held exactly
+JOIN_PITCHES = 3.0       # the crossover's reach either side of its dive, in via pitches
+MAX_SLIDES = 12          # dive positions tried along the envelope's own path
+
+
+def _straighten(pts, tol):
+    """Douglas-Peucker: the polyline's vertices that stand more than `tol`
+    off the chord of their stretch, the ends kept."""
+    if len(pts) < 3:
+        return list(pts)
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        (ax, ay), (bx, by) = pts[i], pts[j]
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        k_best, d_best = None, tol
+        for k in range(i + 1, j):
+            px, py = pts[k]
+            d = abs(dy * (px - ax) - dx * (py - ay)) / L if L > 1e-12 else math.hypot(px - ax, py - ay)
+            if d > d_best:
+                k_best, d_best = k, d
+        if k_best is not None:
+            keep[k_best] = True
+            stack += [(i, k_best), (k_best, j)]
+    return [p for p, k in zip(pts, keep) if k]
+
+
+def _trim_leg(segs, net_id, layer, at, L, tol=1e-3):
+    """The segments with `L` mm of `net_id`'s chain on `layer` removed,
+    walking back from its end at `at`; (segments, the new end) or
+    (None, at) when the chain is shorter than that."""
+    segs = list(segs)
+    at = (at[0], at[1])
+    while L > 1e-9:
+        hit = None
+        for i, s in enumerate(segs):
+            if s.net_id != net_id or s.layer != layer:
+                continue
+            if math.hypot(s.end_x - at[0], s.end_y - at[1]) <= tol:
+                hit = (i, (s.start_x, s.start_y), True)
+                break
+            if math.hypot(s.start_x - at[0], s.start_y - at[1]) <= tol:
+                hit = (i, (s.end_x, s.end_y), False)
+                break
+        if hit is None:
+            return None, at
+        i, far, at_end = hit
+        ln = math.hypot(far[0] - at[0], far[1] - at[1])
+        if ln <= L + 1e-9:
+            segs.pop(i)
+            L -= ln
+            at = far
+        else:
+            t = L / ln
+            nw = (at[0] + (far[0] - at[0]) * t, at[1] + (far[1] - at[1]) * t)
+            s2 = copy.copy(segs[i])
+            if at_end:
+                s2.end_x, s2.end_y = nw
+            else:
+                s2.start_x, s2.start_y = nw
+            segs[i] = s2
+            at = nw
+            L = 0.0
+    return segs, at
+
+
+def _connect_pair_cross(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
+                        cfg, band, margin, band_slack, virtual, window_pts,
+                        virtual_vias, report, a_dir, b_dir, half, appr_scale=1.0):
+    """The pair whose two ends have opposite hands, crossed the way a
+    designer crosses one: at a DIVE, the leg that is to change sides
+    dives first, the other passes over its new-layer leg on the old layer
+    and dives just beyond, so each leg keeps its one via and the swap costs
+    no copper of its own (the human's SCK on the DDR bench does it at the
+    bend onto the berths, both barrels within 0.6 mm).
+
+    An ENVELOPE lane (one track as wide as both legs, vias as wide as two
+    barrels, routed by `connect` with both legs' copper its own) runs from
+    the tips' midpoint, `appr_scale` via pitches out along each end's
+    direction, to the other end. At a dive the envelope is cut in two;
+    each half has ONE hand (the teeth's before, the berths' after) and is
+    split into legs as any envelope is (pairs.split_envelope); the halves
+    are joined at the dive with the crossover (join_at). The router puts a
+    dive wherever its costs tie, so when no dive of the routed envelope
+    gives clean legs the dive is SLID along the envelope's own path
+    (_cross_slides), latest first. The legs are checked against the
+    foreign copper and the reservations, and against each other, before
+    anything is returned: the envelope's start is obstacle-exempt in the
+    router, a slid stretch was never routed on its new layer, and the
+    joins are geometry. None when nothing is clean."""
+    import copy as _copy
+    import pairs as _pairs
+    from kicad_parser import Segment
+    pitch = cfg.via_size + cfg.clearance
+    appr = pitch * appr_scale
+    reach = JOIN_PITCHES * pitch
+    via_r = cfg.via_size / 2.0
+    via_half = max((cfg.via_size + cfg.clearance) / 2.0,
+                   (via_r + cfg.clearance + cfg.track_width / 2.0 - half) / 0.7071 + 0.005)
+    dbg = bool(os.environ.get('BRAID_PAIR_DEBUG'))
+
+    def approach(tip_p, tip_n, d, layer):
+        # the envelope's path starts at the tips' MIDPOINT and runs `appr`
+        # along the end's direction before the routed part: the legs then
+        # leave the tips on the end's own heading, P's side is read off
+        # that heading (a sideways first turn left it undecidable), and the
+        # corner onto the route is mitred like any other; the tips converge
+        # onto the legs' offsets at the midpoint's level
+        m = _pairs.mid(tip_p, tip_n)
+        n = _pairs._left(d)
+        sgn = 1.0 if _pairs._cross(d, (tip_p[0] - m[0], tip_p[1] - m[1])) >= 0 else -1.0
+        e = (m[0] + d[0] * appr, m[1] + d[1] * appr)
+        mp = (m[0] + sgn * n[0] * half, m[1] + sgn * n[1] * half)
+        mn = (m[0] - sgn * n[0] * half, m[1] - sgn * n[1] * half)
+        segs = [Segment(t[0], t[1], o[0], o[1], cfg.track_width, layer, nid)
+                for t, o, nid in ((tip_p, mp, p_id), (tip_n, mn, n_id))
+                if math.hypot(o[0] - t[0], o[1] - t[1]) > 1e-4]
+        return m, e, mp, mn, segs
+    a_m, a_e, a_ep, a_en, segs_a = approach(a_p, a_n, a_dir, a_layer)
+    b_m, b_e, b_ep, b_en, segs_b = approach(b_p, b_n, b_dir, b_layer)
+    env = _copy.copy(cfg)
+    # as wide as the legs at an octolinear (45 degree) corner too: the outer
+    # leg's mitre stands half/cos(22.5) off the centreline, 0.011 mm outside
+    # an envelope of 2*half on the bench, which grazed the reservation the
+    # envelope hugged there
+    env.track_width = round(2 * half / math.cos(math.pi / 8) + cfg.track_width, 6)
+    env.via_size = round(2 * via_half + cfg.via_size, 6)
+    env.via_drill = round(env.via_size - (cfg.via_size - cfg.via_drill), 6)
+    rep = report if report is not None else {}
+    # the envelope's own band, on top of the caller's: (1) the berth's
+    # layer is closed near the source and the tooth's near the berth, so a
+    # dive leaves the crossover its reach either side (the router dives at
+    # its first chance otherwise -- 0.04 mm after the source on the
+    # human's SCK); (2) a half-disc BEHIND each end is closed on every
+    # layer, so the envelope leaves its approach forward or sideways: a
+    # hairpin back toward the tips turns the offset legs inside out (the
+    # two legs crossed at the start)
+    R = appr + reach + cfg.clearance
+    R_BACK = 2 * env.track_width + cfg.clearance
+    closed = {b_layer: a_e, a_layer: b_e} if a_layer != b_layer else {}
+    backs = ((a_e, a_dir), (b_e, b_dir))
+    caller_band = band
+    if caller_band is not None and not callable(caller_band):
+        return None                      # only the mask form composes
+
+    def band(xs, ys, layer):
+        xs = np.asarray(xs, dtype=float)
+        ys = np.asarray(ys, dtype=float)
+        ok = np.ones((len(xs), len(ys)), dtype=bool) if caller_band is None \
+            else np.asarray(caller_band(xs, ys, layer), dtype=bool).copy()
+        c = closed.get(layer)
+        if c is not None:
+            dx = xs[:, None] - c[0]
+            dy = ys[None, :] - c[1]
+            ok &= (dx * dx + dy * dy) >= R * R
+        for e, d in backs:
+            dx = xs[:, None] - e[0]
+            dy = ys[None, :] - e[1]
+            ok &= ~(((dx * dx + dy * dy) < R_BACK * R_BACK)
+                    & ((dx * d[0] + dy * d[1]) < -cfg.grid_step))
+        return ok
+    res = connect(pcb, p_id, a_e, a_layer, b_e, b_layer, env, band=band, margin=margin,
+                  band_slack=band_slack, virtual=virtual, window_pts=window_pts,
+                  virtual_vias=virtual_vias, report=rep, own_ids=[p_id, n_id],
+                  virtual_size=(cfg.track_width, cfg.via_size))
+    if res is None:
+        if dbg:
+            print(f'    crossover x{appr_scale:g}: the envelope did not route')
+        return None
+    segs, vias = res
+    # the route starts on the grid: its own first point is the chain's start
+    ends = [(s.start_x, s.start_y) for s in segs] + [(s.end_x, s.end_y) for s in segs]
+    a0 = min(ends, key=lambda q: math.hypot(q[0] - a_e[0], q[1] - a_e[1]))
+    b0 = min(ends, key=lambda q: math.hypot(q[0] - b_e[0], q[1] - b_e[1]))
+    # the approach runs are part of the envelope's path (see approach())
+    segs = [Segment(a_m[0], a_m[1], a0[0], a0[1], 0.0, a_layer, p_id)] + list(segs) + \
+        [Segment(b0[0], b0[1], b_m[0], b_m[1], 0.0, b_layer, p_id)]
+    runs, left = _pairs._chain(segs, a_m)
+    if left or not runs:
+        return None
+    # the grid router draws a line that is not octolinear as a STAIRCASE
+    # (0.375 mm runs and 0.035 mm steps where the envelope follows a
+    # slanted reservation): each run is straightened to the chords it
+    # approximates, a little more than a grid step off at most, so the
+    # legs carry no jogs (the leg check below reads the straightened legs,
+    # so nothing is assumed)
+    runs = [(L, _straighten(_pairs._simplify(pts), STRAIGHTEN_STEPS * cfg.grid_step))
+            for L, pts in runs]
+    runs = [(L, pts) for L, pts in runs if len(pts) >= 2]
+    poly = []
+    for L, pts in runs:
+        for p in pts:
+            if not poly or math.hypot(p[0] - poly[-1][0], p[1] - poly[-1][1]) > 1e-6:
+                poly.append(p)
+    xs = [p[0] for p in poly] + [a_p[0], a_n[0], b_p[0], b_n[0]]
+    ys = [p[1] for p in poly] + [a_p[1], a_n[1], b_p[1], b_n[1]]
+    window = make_local_window(pcb, (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2,
+                               max(max(xs) - min(xs), max(ys) - min(ys)) / 2 + 2.0)
+    if virtual_vias:
+        # the via sites a later lane will take: a slid dive was never
+        # routed past them
+        window.vias = list(window.vias) + [Via(p[0], p[1], cfg.via_size, cfg.via_drill,
+                                               list(cfg.layers), VIRTUAL_NET) for p in virtual_vias]
+    layer_map = build_layer_map(cfg.layers)
+    approach_legs = segs_a + segs_b
+    virt_tol = VIRT_TOL_FRAC * cfg.clearance
+
+    def foreign(legs, vias_):
+        discs = [Segment(v.x, v.y, v.x, v.y, v.size, L, v.net_id)
+                 for v in vias_ for L in cfg.layers]
+        return _legs_clear(window, list(legs) + discs, [p_id, n_id], cfg, virtual, layer_map,
+                           virt_tol=virt_tol)
+
+    def side(d, tip, m):
+        return 1.0 if _pairs._cross(d, (tip[0] - m[0], tip[1] - m[1])) >= 0 else -1.0
+
+    def seg_of(rr):
+        return [Segment(p[0], p[1], q[0], q[1], 0.0, L, p_id)
+                for L, pts in rr for p, q in zip(pts, pts[1:])]
+
+    # the join's trial distances, in via pitches: the first diver's via
+    # set back u from the dive and its new-layer jog rejoining its line e
+    # past it; the second leaving its old line u2 short of the dive and
+    # diving w past it (the order of the pair's legs is tried both ways)
+    U = [f * pitch for f in (0.0, 0.5, 1.0)]
+    U2 = [f * pitch for f in (0.0, 0.5)]
+    W = [f * pitch for f in (1.0, 1.5, 2.0, 3.0)]
+
+    def join_at(rr, k):
+        """The envelope `rr` crossed at its dive k: (legs, vias) or (None, why)."""
+        L1, pin = rr[k]
+        L2, pout = rr[k + 1]
+        V = pin[-1]
+        d_in = _pairs._unit(pin[-2], V)
+        d_out = _pairs._unit(V, pout[1])
+        s_p = side(_pairs._unit(rr[0][1][0], rr[0][1][1]), a_ep, a_m)
+        s_b = side(_pairs._unit(rr[-1][1][-2], rr[-1][1][-1]), b_ep, b_m)
+        if s_p == s_b:
+            return None, 'the path needs no crossing'
+        ni, no = _pairs._left(d_in), _pairs._left(d_out)
+        e_in = {p_id: (V[0] + s_p * half * ni[0], V[1] + s_p * half * ni[1]),
+                n_id: (V[0] - s_p * half * ni[0], V[1] - s_p * half * ni[1])}
+        e_out = {p_id: (V[0] + s_b * half * no[0], V[1] + s_b * half * no[1]),
+                 n_id: (V[0] - s_b * half * no[0], V[1] - s_b * half * no[1])}
+        common = (half, via_half, cfg.track_width, cfg.via_size, cfg.via_drill, p_id, n_id, cfg.layers)
+        sp_in = _pairs.split_envelope(seg_of(rr[:k + 1]), [], a_ep, a_en, e_in[p_id], e_in[n_id],
+                                      a_m, V, *common, tip_layers=(a_layer, a_layer, L1, L1))
+        sp_out = _pairs.split_envelope(seg_of(rr[k + 1:]), [], e_out[p_id], e_out[n_id], b_ep, b_en,
+                                       V, b_m, *common, tip_layers=(L2, L2, b_layer, b_layer))
+        if sp_in is None or sp_out is None:
+            return None, 'a half would not split'
+        legs0 = approach_legs + sp_in[0] + sp_out[0]
+        vias0 = sp_in[1] + sp_out[1]
+        why = foreign(legs0, vias0)
+        if why:
+            return None, f'the halves: {why}'
+        # each barrel stands OUT from its line, away from the other leg, by
+        # what an ordinary dive gives it (via_half - half): on its line it
+        # sits one leg pitch from the other leg, inside the barrel's
+        # clearance (the human's P steps 0.15 mm out before its via)
+        push = max(0.0, via_half - half)
+        sgn_in = {p_id: s_p, n_id: -s_p}
+        sgn_out = {p_id: s_b, n_id: -s_b}
+        own = {nid: [s for s in legs0 if s.net_id == nid] for nid in (p_id, n_id)}
+
+        def out_pt(q, d, sg):
+            n_ = _pairs._left(d)
+            return (q[0] + sg * n_[0] * push, q[1] + sg * n_[1] * push)
+
+        def first_opts(nid):
+            # the first diver: its old line cut u short, a stub out to its
+            # barrel Va, then a new-layer jog to its new line e past the dive
+            opts = []
+            for u in U:
+                t1, T = _trim_leg(own[nid], nid, L1, e_in[nid], u)
+                if t1 is None:
+                    continue
+                Va = out_pt(T, d_in, sgn_in[nid])
+                for e_ in W:
+                    t2, Sa = _trim_leg(t1, nid, L2, e_out[nid], e_)
+                    if t2 is None:
+                        continue
+                    add = [Segment(T[0], T[1], Va[0], Va[1], cfg.track_width, L1, nid),
+                           Segment(Va[0], Va[1], Sa[0], Sa[1], cfg.track_width, L2, nid)]
+                    via = Via(Va[0], Va[1], cfg.via_size, cfg.via_drill, list(cfg.layers), nid)
+                    why = foreign(add, [via])
+                    if why is None:
+                        opts.append((u + e_, f'u {u:.2f} e {e_:.2f}', t2 + add, via))
+            return opts
+
+        def second_opts(nid):
+            # the second: its old line cut u2 short, an old-layer jog over
+            # the first's new-layer leg to its barrel Vb, out from its new
+            # line w past the dive, a stub back onto that line
+            opts = []
+            for u2 in U2:
+                t1, Q = _trim_leg(own[nid], nid, L1, e_in[nid], u2)
+                if t1 is None:
+                    continue
+                for w in W:
+                    t2, T = _trim_leg(t1, nid, L2, e_out[nid], w)
+                    if t2 is None:
+                        continue
+                    Vb = out_pt(T, d_out, sgn_out[nid])
+                    add = [Segment(Q[0], Q[1], Vb[0], Vb[1], cfg.track_width, L1, nid),
+                           Segment(Vb[0], Vb[1], T[0], T[1], cfg.track_width, L2, nid)]
+                    via = Via(Vb[0], Vb[1], cfg.via_size, cfg.via_drill, list(cfg.layers), nid)
+                    why = foreign(add, [via])
+                    if why is None:
+                        opts.append((u2 + w, f'u2 {u2:.2f} w {w:.2f}', t2 + add, via))
+            return opts
+
+        why_last = 'no join candidate'
+        for first, second in ((p_id, n_id), (n_id, p_id)):
+            fo = sorted(first_opts(first), key=lambda o: o[0])
+            so = sorted(second_opts(second), key=lambda o: o[0])
+            if not fo or not so:
+                why_last = f'{"P" if first == p_id else "N"} first: ' + \
+                    ('no clean first-diver piece' if not fo else 'no clean second-diver piece')
+                continue
+            combos = sorted(((a[0] + b[0], a, b) for a in fo for b in so), key=lambda c: c[0])
+            for _c, a, b in combos:
+                if math.hypot(a[3].x - b[3].x, a[3].y - b[3].y) < pitch - 1e-6:
+                    continue
+                legs = a[2] + b[2]              # each carries its approach piece
+                vias_ = vias0 + [a[3], b[3]]
+                why = _pairs.intra_ok(legs, vias_, p_id, n_id, cfg.track_width,
+                                      cfg.via_size, cfg.clearance)
+                if why is None:
+                    return (legs, vias_), f'{"P" if first == p_id else "N"} first, {a[1]}, {b[1]}'
+                why_last = why
+        return None, f'no clean join ({why_last})'
+
+    tried = []
+    paths = [('as routed', runs)]
+    if a_layer != b_layer:
+        paths += list(_cross_slides(poly, a_layer, b_layer, reach + pitch))
+    for how, rr in paths:
+        for k in reversed(range(len(rr) - 1)):
+            got, note = join_at(rr, k)
+            if got is not None:
+                legs, vias_ = got
+                if dbg:
+                    V = rr[k][1][-1]
+                    print(f'    crossover x{appr_scale:g} {how}, at the dive ({V[0]:.2f},{V[1]:.2f}): '
+                          f'{note}; {len(legs)} seg(s) {len(vias_)} via(s)')
+                return legs, vias_
+            tried.append(f'{how} dive {k}: {note}')
+    if dbg:
+        print(f'    crossover x{appr_scale:g}: no dive gives clean legs; envelope '
+              f'{[(round(p[0], 2), round(p[1], 2)) for p in poly][:12]}')
+        for t in tried[:8]:
+            print(f'      {t}')
+    return None
+
+
+def _cross_slides(poly, a_layer, b_layer, keep):
+    """The envelope's path with its ONE dive moved to a vertex or a
+    segment's midpoint at least `keep` from either end, the latest first
+    (the human dives late), at most MAX_SLIDES of them: (label, runs --
+    the tooth's layer before the dive, the berth's after)."""
+    total = sum(math.hypot(q[0] - p[0], q[1] - p[1]) for p, q in zip(poly, poly[1:]))
+    cands = []
+    s = 0.0
+    for i, (p, q) in enumerate(zip(poly, poly[1:])):
+        ln = math.hypot(q[0] - p[0], q[1] - p[1])
+        for t, D in ((ln / 2.0, ((p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0)), (ln, q)):
+            at = s + t
+            if keep <= at <= total - keep:
+                cands.append((total - at, i, t >= ln, D))
+        s += ln
+    cands.sort()
+    for dist, i, is_vertex, D in cands[:MAX_SLIDES]:
+        before = poly[:i + 1] + ([] if is_vertex else [D])
+        after = ([D] if not is_vertex else []) + poly[i + 1:]
+        if is_vertex:
+            before = poly[:i + 2]
+            after = poly[i + 1:]
+        if len(before) >= 2 and len(after) >= 2:
+            yield f'slid to ({D[0]:.2f},{D[1]:.2f}), {dist:.2f} mm before the berth', \
+                [(a_layer, before), (b_layer, after)]
+
+
+def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None, virt_tol=0.0):
     """Why a connector's legs (Segments) are NOT clean against the
     window's foreign copper and the virtual lines -- a string -- or None.
     Segment-to-segment distances on a shared layer, foreign vias on
@@ -341,12 +772,15 @@ def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None
         for (p_, q_, vl) in (virtual or []):
             if vl != L:
                 continue
-            if dist(s, Segment(p_[0], p_[1], q_[0], q_[1], 0.0, L, 0)) < clr + (s.width + tw) / 2 - 1e-6:
-                return f'leg on {L} grazes a virtual line near ({s.start_x:.2f},{s.start_y:.2f})'
+            d_ = dist(s, Segment(p_[0], p_[1], q_[0], q_[1], 0.0, L, 0))
+            if d_ < clr + (s.width + tw) / 2 - 1e-6 - virt_tol:
+                return (f'leg on {L} grazes a virtual line near ({s.start_x:.2f},{s.start_y:.2f}) '
+                        f'by {clr + (s.width + tw) / 2 - d_:.3f} mm')
         for v in window.vias:
             if v.net_id in own:
                 continue
-            if dist(s, pt(v.x, v.y, L)) < clr + (s.width + v.size) / 2 - 1e-6:
+            tol_ = virt_tol if v.net_id == VIRTUAL_NET else 0.0
+            if dist(s, pt(v.x, v.y, L)) < clr + (s.width + v.size) / 2 - 1e-6 - tol_:
                 return f'leg on {L} grazes net {v.net_id} via at ({v.x:.2f},{v.y:.2f})'
         for fp in window.footprints.values():
             for pad in fp.pads:
@@ -466,9 +900,13 @@ def _routed_connector(pcb, p_id, n_id, tip_p, tip_n, d, layer, far, cfg, half, v
                 return True
         order = [L for L in order if _open(L)] + [L for L in order if not _open(L)]
     for far_layer in order:
+        # the reservations at the size of the copper they stand for (single
+        # tracks, single barrels), not the envelope's: stamped at ecfg's
+        # width each stood 0.136 mm a side too wide on the bench
         res = connect(pcb, p_id, a_pt, layer, far, far_layer, ecfg, band=band, margin=margin,
                       band_slack=band_slack, virtual=virtual, window_pts=[tip_p, tip_n, far],
-                      virtual_vias=virtual_vias, own_ids=[p_id, n_id])
+                      virtual_vias=virtual_vias, own_ids=[p_id, n_id],
+                      virtual_size=(cfg.track_width, cfg.via_size))
         if dbg:
             print(f"    connector envelope {a_pt[0]:.2f},{a_pt[1]:.2f} {layer} -> {far[0]:.2f},{far[1]:.2f} "
                   f"{far_layer} w={ecfg.track_width} via={ecfg.via_size}: "
