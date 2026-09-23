@@ -26,6 +26,7 @@ import importlib
 import os
 import re
 import sys
+import sysconfig
 
 
 class StartupCheckError(RuntimeError):
@@ -290,8 +291,106 @@ def format_problems(problems, header):
     lines += ["", f"Python: {sys.executable or '(embedded)'}",
               "", "Install with:",
               "  \"" + (sys.executable or 'python3') + "\" -m pip install "
-              "--upgrade " + " ".join(f'"{p.requirement}"' for p in problems)]
+              "--upgrade " + quoted_requirements(problems)]
     return "\n".join(lines)
+
+
+def quoted_requirements(problems):
+    """The pip arguments for `problems`, each one double-quoted.
+
+    A floor carries `>=`, and a shell reads that as a redirect: pasted
+    unquoted, `pip install numpy>=1.22.0` installs a BARE `numpy` -- which a
+    too-old copy already satisfies -- and writes pip's output to a file named
+    `=1.22.0` (bash); zsh refuses the line outright. Double quotes read the
+    same in sh, zsh, cmd and PowerShell.
+    """
+    return " ".join(f'"{p.requirement}"' for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# PEP 668: an interpreter pip will not install into (#944)
+# ---------------------------------------------------------------------------
+#
+# Here rather than in `kicad_routing_plugin/deps_check.py` because two fronts
+# need it and one of them cannot import deps_check: install_plugin.py runs on a
+# bare interpreter, before any dependency exists, and deps_check imports wx.
+# The installer had no PEP 668 handling at all until #1026, so on a distro
+# python it reported pip's refusal as a failed install even when every package
+# was already there.
+
+# Distro package names, Debian/Ubuntu spelling. Fedora agrees on all but Pillow
+# (python3-pillow) and Arch spells every one `python-`; the message SAYS all
+# three rather than guessing one from a distro sniff that would be wrong on the
+# next distro.
+DISTRO_PACKAGES = {
+    "numpy": "python3-numpy",
+    "scipy": "python3-scipy",
+    "shapely": "python3-shapely",
+    "Pillow": "python3-pil",
+}
+FEDORA_PACKAGES = dict(DISTRO_PACKAGES, Pillow="python3-pillow")
+ARCH_PACKAGES = {
+    "numpy": "python-numpy",
+    "scipy": "python-scipy",
+    "shapely": "python-shapely",
+    "Pillow": "python-pillow",
+}
+
+
+def distro_command(names, table):
+    """The distro package names for pip `names`, space-joined."""
+    return " ".join(table.get(n, n.lower()) for n in names)
+
+
+def externally_managed_marker():
+    """Path of this interpreter's PEP 668 EXTERNALLY-MANAGED marker, or None.
+
+    #944: KiCad's Linux packages run the SYSTEM interpreter, and on Ubuntu
+    23.04+, Debian 12+, Fedora 38+ and Arch that prefix is marked externally
+    managed -- pip refuses every install into it, `--user` included, and
+    refuses before it looks at what is already installed, so even a
+    requirements file that is fully satisfied fails.
+
+    A venv is exempt even when its base prefix carries the marker (that is what
+    PEP 668 is FOR, and `sysconfig.get_path('stdlib')` inside a venv still
+    resolves to the base stdlib, so the file would be found), hence the prefix
+    test first.
+    """
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        return None
+    for key in ("stdlib", "platstdlib"):
+        try:
+            directory = sysconfig.get_path(key)
+        except Exception:                                      # noqa: BLE001
+            continue
+        if directory:
+            marker = os.path.join(directory, "EXTERNALLY-MANAGED")
+            if os.path.isfile(marker):
+                return marker
+    return None
+
+
+def externally_managed_advice(problems, python_exe):
+    """What to run on a PEP 668 interpreter to install `problems`, as lines.
+
+    The distro's own packages, then the explicit pip override for a package
+    the distro does not carry. Neither front RUNS the override: it writes into
+    a prefix the distro's package manager owns, which is the user's call to
+    make and not a plugin's to make silently (#944 considered that direction
+    and declined it). Spelled out so that making the call is one paste.
+    """
+    names = [p.name for p in problems]
+    return [
+        f"  sudo apt install {distro_command(names, DISTRO_PACKAGES)}",
+        f"  (Fedora: sudo dnf install {distro_command(names, FEDORA_PACKAGES)})",
+        f"  (Arch: sudo pacman -S --needed "
+        f"{distro_command(names, ARCH_PACKAGES)})",
+        "",
+        "If your distribution has no package for one of them, the deliberate "
+        "override is:",
+        f"  \"{python_exe}\" -m pip install --break-system-packages "
+        f"{quoted_requirements(problems)}",
+    ]
 
 
 def check_python_dependencies():

@@ -37,7 +37,8 @@ from typing import Optional
 # the engine moved into py_router/ (#522). Import it as a package rather than
 # flat: python puts THIS script's directory (the repo root) on sys.path, so this
 # resolves no matter what cwd install_plugin.py is invoked from.
-from py_router.startup_checks import (IMPORT_TESTS, VERSION_MODULES,
+from py_router.startup_checks import (IMPORT_TESTS, VERSION_MODULES, Problem,
+                                      externally_managed_advice,
                                       get_cargo_version, requirement_floors,
                                       version_satisfies)
 
@@ -147,18 +148,21 @@ def get_source_dir() -> Path:
     return Path(__file__).parent.resolve()
 
 
-def _target_satisfies_requirements(python_exe: str, floors: dict) -> bool:
-    """True if `python_exe` already imports every requirement at its floor.
+def _target_dependency_problems(python_exe: str, floors: dict):
+    """[Problem] for each requirement `python_exe` cannot import at its floor.
+
+    [] when it already imports every one, None when the probe itself could not
+    run (the caller then falls through to pip, as it always did).
 
     Probed out-of-process because the target is KiCad's interpreter, which need
     not be the one running this installer. The probe is built from
     startup_checks' own IMPORT_TESTS / VERSION_MODULES tables, so it cannot
     drift from the runtime gate (those imports name a real submodule, which
-    catches a partial install a bare `import pkg` accepts).
+    catches a partial install a bare `import pkg` accepts). Every requirement
+    is probed, floored or not: a package with no floor must still import.
     """
-    floors = {name: floor for name, floor in floors.items() if floor}
     if not floors:
-        return True
+        return []
     probe = """\
 import json, sys
 imports = %r
@@ -178,12 +182,71 @@ print(json.dumps(out))
                            capture_output=True, text=True, timeout=120)
         reported = json.loads((r.stdout or "").strip().splitlines()[-1])
     except Exception:
-        return False
+        return None
+    problems = []
     for name, floor in floors.items():
         ver = reported.get(name)
-        if ver is None or not version_satisfies(ver, floor):
-            return False
-    return True
+        if ver is None:
+            problems.append(Problem(name, 'absent', floor=floor))
+        elif not version_satisfies(ver, floor):
+            problems.append(Problem(name, 'outdated', installed=ver,
+                                    floor=floor))
+    return problems
+
+
+def _target_externally_managed(python_exe: str) -> Optional[str]:
+    """The target's PEP 668 marker path, or None -- answered BY the target.
+
+    Runs the shared `startup_checks.externally_managed_marker` inside
+    `python_exe`, because the answer depends on that interpreter's stdlib and
+    prefix, not this installer's. A probe that cannot run answers None, which
+    falls through to pip exactly as before -- pip then refuses on its own.
+    """
+    code = ("import sys; sys.path.append(sys.argv[1]); "
+            "from startup_checks import externally_managed_marker; "
+            "print(externally_managed_marker() or '')")
+    py_router = str(Path(__file__).resolve().parent / "py_router")
+    try:
+        r = subprocess.run([python_exe, "-c", code, py_router],
+                           capture_output=True, text=True, timeout=60)
+    except Exception:
+        return None
+    lines = (r.stdout or "").strip().splitlines()
+    if r.returncode != 0 or not lines:
+        return None
+    return lines[-1].strip() or None
+
+
+def _report_externally_managed(python_exe: str, problems, floors: dict,
+                               marker: str):
+    """Name the distro packages instead of running a pip that cannot succeed.
+
+    #1026: on a PEP 668 interpreter pip refuses before it resolves anything,
+    so this installer used to print pip's refusal and "run as Administrator"
+    even when every package was already installed. The satisfied case never
+    reaches here (install_dependencies probes first); this is the case where
+    something really is missing, and the answer is the one the GUI gives
+    (#944) -- from the same `externally_managed_advice`.
+    """
+    print("  KiCad's Python is managed by your distribution (PEP 668):")
+    print(f"    {marker}")
+    print("  pip cannot install into it, so this installer does not try.")
+    print()
+    if problems is None:
+        # The dependency probe could not run, so what is present is unknown:
+        # name every requirement rather than claim any one is missing.
+        print("  Could not probe which packages it already has; "
+              "naming all of them.")
+        problems = [Problem(name, 'absent', floor=floor)
+                    for name, floor in floors.items()]
+    else:
+        for problem in problems:
+            print(problem.describe())
+    print()
+    print("  Install the distribution's own packages instead:")
+    print()
+    for line in externally_managed_advice(problems, python_exe):
+        print(f"  {line}" if line else "")
 
 
 def install_dependencies():
@@ -225,67 +288,39 @@ def install_dependencies():
 
     print()
 
-    # On distro Linux (Arch/Debian/Fedora) KiCad uses the system python, whose
-    # deps may already be present via pacman/apt. Probing first avoids a pip
-    # run that could only fail with externally-managed-environment (PEP 668).
-    if _target_satisfies_requirements(python_exe, floors):
+    # Probe first. On distro Linux (Arch/Debian/Fedora) KiCad runs the system
+    # python, whose packages may already be there via pacman/apt/dnf -- and a
+    # pip run there could only fail with externally-managed-environment
+    # (PEP 668), satisfied or not.
+    problems = _target_dependency_problems(python_exe, floors)
+    if problems == []:
         print("  Dependencies already satisfied in KiCad's Python, skipping pip.")
         return True
 
-    def _run_pip(*extra):
-        # capture_output so the PEP 668 sentinel can be read; a live progress
-        # bar would only be swallowed, so ask for none.
-        return subprocess.run(
-            [python_exe, "-m", "pip", "install", "--progress-bar", "off",
-             *extra, "-r", str(requirements_file)],
-            capture_output=True, text=True)
-
-    def _print_pip_tail(result):
-        """The tail of both streams: pip's warnings land on stderr."""
-        for stream in (result.stdout, result.stderr):
-            tail = (stream or "").strip()
-            if tail:
-                print("  " + tail[-1500:].replace("\n", "\n  "))
+    marker = _target_externally_managed(python_exe)
+    if marker:
+        _report_externally_managed(python_exe, problems, floors, marker)
+        return False
 
     try:
-        result = _run_pip()
-        output = (result.stdout or "") + (result.stderr or "")
-        externally_managed = "externally-managed-environment" in output
-        if result.returncode != 0 and externally_managed:
-            # PEP 668: the interpreter refuses system-wide installs. Retry
-            # with the escape hatch pip's own error suggests.
-            print("  System Python is externally managed (PEP 668) -- "
-                  "retrying with --break-system-packages.")
-            result = _run_pip("--break-system-packages")
+        # Run pip with output visible to user (no capture)
+        result = subprocess.run(
+            [python_exe, "-m", "pip", "install", "--progress-bar", "on", "-r", str(requirements_file)],
+        )
 
-        if result.returncode == 0:
-            _print_pip_tail(result)
+        if result.returncode != 0:
+            print()
+            print("  Warning: Failed to install some dependencies.")
+            if kicad_python:
+                print("  You may need to run as Administrator:")
+                print(f"    \"{kicad_python}\" -m pip install -r \"{requirements_file}\"")
+            else:
+                print("  You may need to install them manually to KiCad's Python.")
+            return False
+        else:
             print()
             print("  Dependencies installed successfully")
             return True
-
-        output = (result.stdout or "") + (result.stderr or "")
-        print()
-        if "no such option" in output.lower() \
-                and "break-system-packages" in output.lower():
-            # pip < 23 rejects the flag rather than ignoring it.
-            print("  This pip is too old for --break-system-packages "
-                  "(needs pip >= 23):")
-            print(f"    \"{python_exe}\" -m pip install --upgrade pip")
-        else:
-            print("  Warning: Failed to install some dependencies.")
-            if externally_managed:
-                print("  This interpreter is externally managed; install the "
-                      "packages with your package manager, e.g.:")
-                print("    sudo pacman -S python-numpy python-scipy "
-                      "python-shapely python-pillow")
-        _print_pip_tail(result)
-        if kicad_python:
-            print("  You may need to run as Administrator:")
-            print(f"    \"{kicad_python}\" -m pip install -r \"{requirements_file}\"")
-        else:
-            print("  You may need to install them manually to KiCad's Python.")
-        return False
 
     except PermissionError:
         print()
