@@ -466,5 +466,57 @@
    "referrer": "chatgpt.com",
    "uniques": 23
   }
+ ],
+ "2026-09-24": [
+  {
+   "count": 822,
+   "referrer": "Google",
+   "uniques": 475
+  },
+  {
+   "count": 253,
+   "referrer": "forum.kicad.info",
+   "uniques": 146
+  },
+  {
+   "count": 219,
+   "referrer": "linkedin.com",
+   "uniques": 124
+  },
+  {
+   "count": 216,
+   "referrer": "github.com",
+   "uniques": 100
+  },
+  {
+   "count": 87,
+   "referrer": "com.linkedin.android",
+   "uniques": 60
+  },
+  {
+   "count": 71,
+   "referrer": "Bing",
+   "uniques": 39
+  },
+  {
+   "count": 63,
+   "referrer": "DuckDuckGo",
+   "uniques": 45
+  },
+  {
+   "count": 59,
+   "referrer": "search.brave.com",
+   "uniques": 20
+  },
+  {
+   "count": 58,
+   "referrer": "news.ycombinator.com",
+   "uniques": 51
+  },
+  {
+   "count": 38,
+   "referrer": "github-com.btglss.net",
+   "uniques": 28
+  }
  ]
 }
