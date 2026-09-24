@@ -782,6 +782,18 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                     if mm})
     m.rail_left = board_title(final, steps, title)
     m.split_caption = bool(_geom is not None and _geom.rail.h > 0)
+    # #1036: the SUBSTRATE is each step's own board. The renderer is built
+    # from the FINAL board (it fixes the canvas and the scale), and until this
+    # change only a Stage re-pointed `r.pcb` per step -- so without one, the
+    # opening frame of a chain that starts from an unplaced pile showed the
+    # FINAL placement's pads under the first board's copper. `frame()` draws
+    # pads and zones per frame from `r.pcb` (dynamic_zones), so re-pointing it
+    # is the whole fix; it changes no frame geometry and builds no renderer.
+    if steps and os.path.abspath(steps[0][1]) != os.path.abspath(final):
+        try:
+            r.pcb = parse_kicad_pcb(steps[0][1])
+        except Exception:                                      # noqa: BLE001
+            pass
     if stage is not None:
         stage.attach(m, r, layers)
     m.snapshot("input")
@@ -804,9 +816,9 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         # #1020: this step's OWN board answers the box, so the inventory
         # empties as the board fills and a seeding beat is a seeding beat.
         m.refresh_placement(pcb, board)
+        # Every step draws its OWN board's pads (#1036), stage or not.
+        r.pcb = pcb
         if mode == 'revert':
-            if stage is not None:
-                r.pcb = pcb
             m.reconcile_to(seg_rows, via_rows, label)
             if len(m.frames) == _first:
                 # An attempt that only MOVED parts changes no copper, so the
@@ -817,8 +829,6 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                 marks.append((label, board, _first, len(m.frames)))
             continue
         if stage is not None:
-            # The renderer draws footprints from THIS board from here on.
-            r.pcb = pcb
             if stage.enter_step(label, board, pcb, seg_rows, via_rows):
                 if marks is not None:
                     marks.append((label, board, _first, len(m.frames)))
@@ -866,8 +876,7 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # final trueup (in case the graded final differs from the last step board)
     fpcb = parse_kicad_pcb(final)
     m.refresh_placement(fpcb, final)
-    if stage is not None:
-        r.pcb = fpcb
+    r.pcb = fpcb
     for _z in (getattr(fpcb, 'zones', None) or []):   # ensure every pour shows
         m.reveal_zone(_z.net_id)
     _before = len(m.frames)

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 Rect = Tuple[float, float, float, float]
 
@@ -400,6 +400,16 @@ class Stage:
         self.r = renderer
         self.layers = layers
         self._overview = renderer.bounds
+        # #1036: a chain that opens on an unplaced PILE has parts outside the
+        # outline (run 32's glasgow pile reaches 13 mm below the board). The
+        # overview must hold where the parts come FROM, or the glide starts
+        # off-frame; `synth_rounds` records that as each round's `extent`.
+        for rd in self.rounds:
+            ext = rd.get('extent')
+            if ext and len(ext) == 4:
+                b = self._overview
+                self._overview = (min(b[0], ext[0]), min(b[1], ext[1]),
+                                  max(b[2], ext[2]), max(b[3], ext[3]))
         for rd in self.rounds:
             if rd.get('board'):
                 self._by_board[os.path.basename(rd['board'])] = rd
@@ -495,9 +505,15 @@ class Stage:
                 continue
             pcb = None
             moved = rd.get('moved') or []
-            if moved and self.work_dir:
+            # A SYNTHESISED round (`synth_rounds`) records an ABSOLUTE board
+            # path and there is no work dir: `make_movie` on a board list
+            # passes ''. Requiring a work dir here meant every hand-driven
+            # chain planned its placement shots with no box, so the camera
+            # never zoomed on the parts that moved (#1036).
+            if moved and (self.work_dir or os.path.isabs(rd['board'])):
                 try:
-                    pcb = parse_kicad_pcb(os.path.join(self.work_dir, rd['board']))
+                    pcb = parse_kicad_pcb(os.path.join(self.work_dir or '',
+                                                       rd['board']))
                 except Exception:
                     pcb = None
             acts.append(Action('place', f"round {rd['round']}",
@@ -736,6 +752,14 @@ def _moved_bbox(pcb, moved):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def _union_box(a, b):
+    if not a:
+        return b
+    if not b:
+        return a
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
 def _moved_side(pcb, moved):
     """Majority side of the parts that MOVED -- a block can straddle both
     (ulx3s sheet:58d686d9 is 9 back / 11 front), so the side is a property of
@@ -800,9 +824,17 @@ def synth_rounds(boards):
             # ONLY a board whose parts moved is a placement beat. Emitting a
             # record for every board would make `enter_step` intercept the
             # routing steps too -- and it clears the copper on the way in.
+            refs = {m['reference'] for m in moved}
+            # Where the moved parts START and END (#1036): the camera's
+            # overview has to hold both, or a glide out of an off-board pile
+            # begins off-frame.
+            ext = _union_box(_moved_bbox(prev, moved),
+                             _moved_bbox(pcb, moved))
             out.append({'schema': 1, 'round': i, 'board': os.path.abspath(b),
                         'accepted': True, 'screened': False, 'synth': True,
-                        'moved': sorted(moved, key=lambda m: m['reference'])})
+                        'moved': sorted(moved, key=lambda m: m['reference']),
+                        'extent': list(ext) if ext else None,
+                        'n_moved': len(refs)})
         prev = pcb
     return out
 

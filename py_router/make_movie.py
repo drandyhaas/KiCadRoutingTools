@@ -100,6 +100,28 @@ def placement_chain(work_dir):
     return steps, steps[-1][1]
 
 
+def leading_copper_free(steps):
+    """How many boards at the head of the chain carry no copper at all.
+
+    Read off the file TEXT (a `(segment`, `(arc` or `(via` token), not a
+    parse: it is asked on every film without a camera, and a parse of a large
+    board costs seconds to answer a yes/no question.
+    """
+    import re
+    copper = re.compile(r'\((?:segment|arc|via)[\s)]')
+    n = 0
+    for st in steps:
+        try:
+            with open(st[1], encoding='utf-8', errors='replace') as f:
+                txt = f.read()
+        except OSError:
+            break
+        if copper.search(txt):
+            break
+        n += 1
+    return n
+
+
 def default_output(inputs):
     """Where the movie lands when no -o is given: inside a run dir, else next to
     the last board."""
@@ -205,12 +227,38 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
     # every GUI movie is a routing movie and changing those is pure regression
     # risk for no user-visible win.
     stage = None
+    # #1036: whether anyone SAID 'off'. The default is still off for a chain
+    # whose boards only differ in copper -- every GUI movie -- but a chain
+    # whose parts MOVE between boards is a placement film, and rendering it
+    # without the camera silently dropped every copper-free placement board
+    # (run 32: boards 01-07 of 22 contributed no frames). So an UNSTATED
+    # camera switches to 'auto' exactly when the boards themselves show a pose
+    # change; an explicit `--camera off` or $KICAD_MOVIE_CAMERA is obeyed.
+    camera_explicit = (camera is not None
+                       or bool(os.environ.get('KICAD_MOVIE_CAMERA')))
     if camera is None:
         try:
             import env_knobs
             camera = getattr(env_knobs, 'MOVIE_CAMERA', 'off')
         except Exception:
             camera = 'off'
+    _synth = None
+    _is_dir = len(inputs) == 1 and os.path.isdir(inputs[0])
+    if (str(camera).lower() in ('off', '', 'none', '0')
+            and not camera_explicit and len(steps) > 1):
+        try:
+            from movie_camera import synth_rounds
+            _synth = synth_rounds([s[1] for s in steps])
+        except Exception:                                       # noqa: BLE001
+            _synth = None
+        if _synth and any(rd['moved'] for rd in _synth):
+            camera = 'auto'
+            # PRINTED EVEN WHEN QUIET: the film changed shape because of what
+            # was on disk, and the only way to learn that is this line.
+            print('make_movie: %d of %d boards move parts -- camera auto, so '
+                  'the placement glides in before the routing (#1036); pass '
+                  '--camera off for a copper-only film'
+                  % (len(_synth), len(steps)), file=sys.stderr)
     if str(camera).lower() not in ('off', '', 'none', '0'):
         rounds = []
         if len(inputs) == 1 and os.path.isdir(inputs[0]):
@@ -229,7 +277,8 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
             # diff them and the camera has everything it needs.
             try:
                 from movie_camera import synth_rounds
-                rounds = synth_rounds([s[1] for s in steps])
+                rounds = (_synth if _synth is not None
+                          else synth_rounds([s[1] for s in steps]))
                 if not any(rd['moved'] for rd in rounds):
                     rounds = []      # pure routing chain: nothing to tween
                 elif not quiet:
@@ -246,6 +295,16 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
             from movie_camera import Stage
             stage = Stage(rounds, work_dir, fps=fps,
                           budget=camera_budget, tween=tween, quiet=quiet)
+    if stage is None and not _is_dir:
+        # #1036, the other half: without a stage a board that carries no copper
+        # draws nothing, so a chain that OPENS with placement boards opens on
+        # the first routed one and never says why. Say so, and name the lever.
+        _lead = leading_copper_free(steps)
+        if _lead and _lead < len(steps):
+            print('make_movie: %d leading copper-free board(s) skipped -- they '
+                  'change no copper, so a film without the camera shows '
+                  'nothing for them; use --camera auto (or make_film) to film '
+                  'the placement' % _lead, file=sys.stderr)
     # #887: the second panel is OPT-IN, exactly like the camera above, and for
     # the same reason -- one variable turns it on for the GUI recorder,
     # run_plan.py --movie and the stress renderer at once. `marks` is asked for
