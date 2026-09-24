@@ -265,15 +265,8 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
     # #1018: resolved once inside build_boards; collected here so the status
     # line can say which layout ran and why, the way iso_status_line does.
     geom_out = []
-    if layout is None or aspect is None:
-        try:
-            import env_knobs as _ek
-        except Exception:                                       # noqa: BLE001
-            _ek = None
-        if layout is None:
-            layout = getattr(_ek, 'MOVIE_LAYOUT', 'legacy')
-        if aspect is None:
-            aspect = getattr(_ek, 'MOVIE_ASPECT', '') or None
+    import frame_layout
+    layout, aspect = frame_layout.resolve_layout_aspect(layout, aspect)
     # The run directory's own name is the closest thing a multi-step chain has
     # to a board name, and it is what the rail's stable left should carry.
     _title = (os.path.basename(os.path.abspath(inputs[0]))

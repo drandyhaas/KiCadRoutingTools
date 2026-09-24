@@ -367,6 +367,11 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
     # no rail and no box was the one place the design system could not be
     # seen doing its job.
     _geom = []
+    # $KICAD_MOVIE_LAYOUT / $KICAD_MOVIE_ASPECT apply here too, through the
+    # same resolver make_movie uses -- this passed None straight through, and
+    # build_boards reads None as 'legacy', so both knobs were no-ops on films.
+    import frame_layout
+    layout, aspect = frame_layout.resolve_layout_aspect(layout, aspect)
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
                             theme=_th, layout=layout, aspect=aspect,
@@ -508,13 +513,14 @@ def main(argv=None):
     ap.add_argument('--shots-json', help="write the resolved shot list here")
     ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--layout', default=None,
-                    help="frame layout: 'legacy' (default, today's frame), "
+                    help="frame layout: 'legacy' (default, or "
+                         "$KICAD_MOVIE_LAYOUT; today's frame), "
                          "'stacked', 'sidebar', 'inset', 'split' or 'auto'. "
                          "Anything but legacy reserves a rail and a lower "
                          "box, which is where the placement content lives")
     ap.add_argument('--aspect', default=None, metavar='W:H',
-                    help="target frame aspect; 'board' (default) keeps the "
-                         "board's own bounding box")
+                    help="target frame aspect, or $KICAD_MOVIE_ASPECT; "
+                         "'board' (default) keeps the board's own bounding box")
     ap.add_argument('--no-attempts', action='store_true',
                     help="drop the attempts band -- the boards alone")
     ap.add_argument('--quiet', action='store_true')
