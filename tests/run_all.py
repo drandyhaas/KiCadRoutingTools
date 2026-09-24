@@ -357,13 +357,20 @@ def main():
     return 1 if (failed or timed_out) else 0
 
 
-def _rmtree_scratch(path):
+def _rmtree_scratch(path, waits=(0.25, 0.5, 1.0, 2.0)):
     """Remove a test's scratch dir, read-only files included.
 
     Git writes its object files read-only, and on Windows rmtree cannot unlink
     one, so a plain rmtree(ignore_errors=True) silently keeps any test's git
-    fixture. Clear the bit and retry. Anything still held (a child a timeout
-    orphaned keeps its files open on Windows) is NAMED, never hidden.
+    fixture. Clear the bit and retry.
+
+    A file still OPEN cannot be removed on Windows either, and a test's child
+    can hold one for a moment after the test itself has exited -- measured: a
+    run left two scratch dirs behind, one holding KiCad's single-instance lock
+    (org.kicad.kicad/instances) from a kicad-cli it spawned, and a rerun of the
+    same tests left none. So a dir that survives the first pass is retried
+    after short waits (3.75 s in all, and only then). Anything still held after
+    that (a child a timeout orphaned) is NAMED, never hidden.
     """
     def _writable_retry(func, p, _exc):
         try:
@@ -374,6 +381,11 @@ def _rmtree_scratch(path):
     handler = ({'onexc': _writable_retry} if sys.version_info >= (3, 12)
                else {'onerror': _writable_retry})
     shutil.rmtree(path, **handler)
+    for wait in waits:
+        if not os.path.exists(path):
+            return
+        time.sleep(wait)
+        shutil.rmtree(path, **handler)
     if os.path.exists(path):
         print(f'WARN  could not fully remove scratch dir {path}')
 

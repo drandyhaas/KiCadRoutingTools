@@ -177,5 +177,76 @@ sys.exit(77)
             self.assertNotIn('Failed: test_skips.py', out)
 
 
+class TestScratchDir(unittest.TestCase):
+    """Every test runs with TMPDIR/TEMP/TMP pointed at a scratch dir of its own,
+    and run_all removes it afterwards -- a full local run used to leave ~525
+    fixture copies (~220 MB) in the system temp dir."""
+
+    LEAKY_SRC = (
+        "import os, sys, tempfile\n"
+        "fd, p = tempfile.mkstemp(suffix='.kicad_pcb')\n"
+        "os.close(fd)\n"
+        "open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])),\n"
+        "                  'where.txt'), 'w').write(p)\n")
+
+    def test_a_tests_temp_files_live_and_die_in_its_own_scratch_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, out = _run_runner([_write(d, 'test_leaky.py', self.LEAKY_SRC)])
+            self.assertEqual(code, 0, out[-400:])
+            with open(os.path.join(d, 'where.txt')) as f:
+                made = f.read()
+            self.assertIn(os.sep + 'krt_', made,
+                          f'the test did not see its scratch TEMP: {made}')
+            self.assertFalse(os.path.exists(made),
+                             'the file the test left behind survived its run')
+            self.assertNotIn('WARN', out)
+
+    def _held(self, seconds):
+        """A scratch dir whose one file a child process holds open."""
+        import subprocess
+        d = tempfile.mkdtemp(prefix='krt_held_')
+        f = os.path.join(d, 'held.bin')
+        ready = os.path.join(tempfile.gettempdir(), os.path.basename(d) + '.ready')
+        child = subprocess.Popen(
+            [sys.executable, '-c',
+             'import sys, time\n'
+             'fh = open(sys.argv[1], "wb")\n'
+             'open(sys.argv[2], "w").close()\n'
+             'time.sleep(float(sys.argv[3]))\n',
+             f, ready, str(seconds)])
+        for _ in range(200):
+            if os.path.exists(ready):
+                break
+            import time
+            time.sleep(0.02)
+        os.remove(ready)
+        return d, child
+
+    def test_a_file_a_child_still_holds_is_retried_not_leaked(self):
+        """Measured: a run left two scratch dirs behind, one holding KiCad's
+        single-instance lock from a kicad-cli the test spawned; a rerun left
+        none. The child lets go a moment later, so the removal retries."""
+        d, child = self._held(0.8)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_all._rmtree_scratch(d)
+        child.wait()
+        self.assertFalse(os.path.exists(d), 'the held scratch dir was left behind')
+        self.assertNotIn('WARN', buf.getvalue())
+
+    @unittest.skipUnless(os.name == 'nt', 'only Windows refuses to remove an open file')
+    def test_negative_control_without_the_retry_it_leaks_and_says_so(self):
+        d, child = self._held(0.8)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                run_all._rmtree_scratch(d, waits=())
+            self.assertTrue(os.path.exists(d), 'the control did not hold the file')
+            self.assertIn('WARN  could not fully remove scratch dir', buf.getvalue())
+        finally:
+            child.wait()
+            run_all._rmtree_scratch(d)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=1)
