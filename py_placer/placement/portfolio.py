@@ -669,6 +669,9 @@ def _quench_metrics(m: Dict) -> Dict:
             'pad_conflict_pairs': leg.get('pad_conflict_pairs', 0),
             'pad_shortfall': leg.get('pad_shortfall', 0.0),
             'hole_shortfall': leg.get('hole_shortfall', 0.0),
+            # #1031: parts with an ILLEGAL pad in a rule-area keep-out band.
+            'keepout_pad_parts': leg.get('keepout_pad_parts', 0),
+            'keepout_pad_amount': leg.get('keepout_pad_amount', 0.0),
             # #826: which lattice THIS candidate's quench actually USED, in
             # the three-scalar vocabulary check_pockets' census already uses.
             # Read off the board the quench PARSES -- the candidate's jittered
@@ -704,6 +707,7 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
                     baseline_overlap: float, baseline_oob: int = 0,
                     baseline_pad_pairs: int = 0,
                     baseline_hole_shortfall: float = 0.0,
+                    baseline_keepout_parts: int = 0,
                     clearance: float, board_edge_clearance: float,
                     grid_step: float, ignore_nets: Optional[Sequence[str]],
                     intent=None, group_sources: Sequence[str] = ()) -> None:
@@ -759,6 +763,12 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
     if hole_sf > baseline_hole_shortfall + EPS:
         reasons.append(f"pad-copper-in-hole-keepout {hole_sf:.4f}mm vs the "
                        f"baseline's {baseline_hole_shortfall:.4f}mm")
+    # #1031: pads seated where the router's rule-area keep-out band leaves
+    # no landing -- baseline-relative like every gate above.
+    ko_parts = cand.metrics.get('keepout_pad_parts', 0) or 0
+    if ko_parts > baseline_keepout_parts:
+        reasons.append(f"{ko_parts} part(s) with pads in a rule-area keep-out "
+                       f"band vs the baseline's {baseline_keepout_parts}")
 
     health_penalty = 0
     if intent is not None:

@@ -464,6 +464,7 @@ def main():
     baseline_oob = baseline.metrics.get('oob_count', 0)
     baseline_pad_pairs = baseline.metrics.get('pad_conflict_pairs', 0) or 0
     baseline_hole = baseline.metrics.get('hole_shortfall', 0.0) or 0.0
+    baseline_keepout = baseline.metrics.get('keepout_pad_parts', 0) or 0
     try:
         for c in cands:
             portfolio.score_candidate(
@@ -471,6 +472,7 @@ def main():
                 baseline_oob=baseline_oob,
                 baseline_pad_pairs=baseline_pad_pairs,
                 baseline_hole_shortfall=baseline_hole,
+                baseline_keepout_parts=baseline_keepout,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 grid_step=args.grid_step, ignore_nets=args.ignore_nets,
@@ -480,6 +482,7 @@ def main():
             baseline_oob=baseline_oob,
             baseline_pad_pairs=baseline_pad_pairs,
             baseline_hole_shortfall=baseline_hole,
+            baseline_keepout_parts=baseline_keepout,
             clearance=args.clearance,
             board_edge_clearance=args.board_edge_clearance,
             grid_step=args.grid_step, ignore_nets=args.ignore_nets,

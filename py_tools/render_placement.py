@@ -311,6 +311,8 @@ def legality_findings(model) -> Dict[str, object]:
         return cached
     out = {'oob_refs_pad_copper': [], 'oob_refs_courtyard': [],
            'oob_refs_graphic_copper': [], 'graphic_copper_unmeasured': [],
+           'keepout_copper_refs': [], 'keepout_copper_pads': [],
+           'keepout_copper_unmeasured': [],
            'pad_conflict_pairs_refs': [], 'hole_conflict_pairs_refs': [],
            'body_overlap_pairs_refs': [],
            'courtyard_overlap_pairs_refs': [],
@@ -397,6 +399,22 @@ def legality_findings(model) -> Dict[str, object]:
         _gc = _graphic_copper_findings(model, state)
         out['oob_refs_graphic_copper'] = _gc['refs']
         out['graphic_copper_unmeasured'] = _gc['unmeasured']
+        # #1031: pads in a board rule-area keep-out band, at the model's
+        # PROPOSED poses -- the one measurement grade_pad_legality makes at
+        # the file's poses (legality.keepout_pad_findings).
+        try:
+            from placement.legality import keepout_pad_findings
+            _ko = keepout_pad_findings(
+                getattr(ctx, 'keepouts', None), ctx.parts,
+                lambda r: ((state.parts[r].x, state.parts[r].y,
+                            state.parts[r].rot)
+                           if r in state.parts else None))
+            out['keepout_copper_refs'] = _ko['oob_keepout_copper_refs']
+            out['keepout_copper_pads'] = _ko['keepout_copper_pads']
+            out['keepout_copper_unmeasured'] = _ko['keepout_copper_unmeasured']
+        except Exception as e:                               # noqa: BLE001
+            out['keepout_copper_unmeasured'] = [['*', 'error', '%s: %s'
+                                                 % (type(e).__name__, e)]]
         refs = sorted(ctx.parts)
         for i, a in enumerate(refs):
             pa = state.parts.get(a)
@@ -2445,7 +2463,12 @@ def main(argv=None):
                 'courtyard': fnd['oob_refs_courtyard'],
                 # #962: footprint graphic copper past the outline
                 'graphic_copper': fnd.get('oob_refs_graphic_copper', []),
-                'graphic_copper_unmeasured': fnd.get('graphic_copper_unmeasured', [])},
+                'graphic_copper_unmeasured': fnd.get('graphic_copper_unmeasured', []),
+                # #1031: parts with a pad in a board rule-area keep-out band
+                # (no track can land). ALWAYS emitted, [] when clean.
+                'keepout_copper': fnd.get('keepout_copper_refs', []),
+                'keepout_copper_pads': fnd.get('keepout_copper_pads', []),
+                'keepout_copper_unmeasured': fnd.get('keepout_copper_unmeasured', [])},
             # run-6 key honesty: the old 'b_overlap_pairs' NAME carried
             # the PAD-CLEARANCE channel, and a reader auditing overlap
             # with b_overlap_pairs=[] concluded there was none while two
@@ -2609,6 +2632,8 @@ def main(argv=None):
                 len(doc['checklist']['a_off_outline']['courtyard']),
             'a_off_outline.graphic_copper':
                 len(doc['checklist']['a_off_outline']['graphic_copper']),
+            'a_off_outline.keepout_copper':
+                len(doc['checklist']['a_off_outline']['keepout_copper']),
             'b_pad_clearance_pairs':
                 len(doc['checklist']['b_pad_clearance_pairs']),
             'b_body_overlap_pairs':

@@ -48,6 +48,14 @@ the same defect and is read beside it, from
 `graphic_copper_unmeasured` (#962). check_drc reports it as
 `graphic-off-board`, and a lock does not waive it.
 
+A pad seated in a board RULE-AREA keep-out band (`(keepout (tracks
+not_allowed))`, e.g. an edge band) is the same defect by another route: the
+router can land no track on it, so its net fails "boxed in by static
+obstacles" even on an empty board (#1031). Read it from
+`checklist.a_off_outline.keepout_copper` (per-pad detail in
+`keepout_copper_pads`); `place_pose` refuses a move that worsens it and
+`check_assembly` prints it, without making it a `not_buildable` conjunct.
+
 ### Scope the search to the refs the gate names
 
 When a gate names specific parts, free exactly those and lock everything else.

@@ -2997,10 +2997,16 @@ class LegalityContext:
 
     def __init__(self, part_pads: Dict[str, PartPads],
                  gate: Optional[BoardOutlineGate], clearance: float,
-                 pose_of, seed_of, model=None):
+                 pose_of, seed_of, model=None, keepouts=None):
         self.parts = part_pads
         self.gate = gate
         self.clearance = clearance
+        # #1031: board rule-area keep-outs (RuleAreaKeepouts), or None. The
+        # search may not deepen any part's pads into a band beyond its SEED
+        # reach -- see keepout_ok.
+        self.keepouts = (keepouts if (keepouts is not None
+                                      and keepouts.active) else None)
+        self._keepout_seed: Dict[str, float] = {}
         # #697: the per-pair required clearance, when the board declares one
         # above the flat scalar (pad override / netclass / .kicad_dru rule).
         # None -- the common case, and every board that declares nothing -- is
@@ -3227,6 +3233,34 @@ class LegalityContext:
             if cur.hole > base.hole + EPS:
                 return False
         return True
+
+    def keepout_amount(self, ref: str, x: float, y: float,
+                       rot: float) -> float:
+        """This part's ILLEGAL keep-out reach at a pose (#1031), in mm."""
+        pp = self.parts.get(ref)
+        if pp is None or self.keepouts is None:
+            return 0.0
+        return self.keepouts.part_amount(ref, pp.pad_rects(x, y, rot))
+
+    def keepout_ok(self, ref: str, x: float, y: float, rot: float) -> bool:
+        """No worse than the SEED on the rule-area keep-out term (#1031).
+
+        Seed-relative like every pads_ok conjunct: a part the input already
+        seats in a band may move within it or out of it, and a part that was
+        clear may not move in. Absolute would freeze a damaged part in place.
+        """
+        if self.keepouts is None or ref not in self.parts:
+            return True
+        cur = self.keepout_amount(ref, x, y, rot)
+        if cur <= EPS:
+            return True
+        base = self._keepout_seed.get(ref)
+        if base is None:
+            # a pile seed is not a license (run-19), same as seed_baseline
+            base = (0.0 if ref in self._degenerate_refs
+                    else self.keepout_amount(ref, *self.seed_of(ref)))
+            self._keepout_seed[ref] = base
+        return cur <= base + EPS
 
     def pad_oob_amount(self, ref: str, x: float, y: float, rot: float,
                        exact: bool = True, edges=None) -> float:
@@ -4049,6 +4083,11 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                 oob_copper_refs.append([ref, round(amt, 4)])
     # the resolved per-pad edge requirement (#986 moved it onto the context)
     graphic = _graphic_copper_channel(pcb_data, edge_ctx.required)
+    # #1031: board-level rule-area keep-outs, the third pad-copper channel.
+    keepout = keepout_pad_findings(
+        RuleAreaKeepouts.for_board(pcb_data, clearance, pcb_file), parts,
+        lambda r: ((fps[r].x, fps[r].y, fps[r].rotation or 0.0)
+                   if r in fps else None))
     worst.sort(key=lambda t: -t[2])
     return {'pad_conflicts': pad_conflicts,
             'pad_edge_conflicts': len(edge_grade['findings']),
@@ -4114,7 +4153,10 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             # #962: FOOTPRINT GRAPHIC copper (an SOT-89 tab, an antenna)
             # against the outline -- the second off-outline channel. See
             # _graphic_copper_channel.
-            **graphic}
+            **graphic,
+            # #1031: pad copper in a rule-area keep-out band. See
+            # keepout_pad_findings.
+            **keepout}
 
 
 def _graphic_copper_channel(pcb_data, edge_required: float) -> Dict[str, object]:
@@ -4165,6 +4207,294 @@ def _graphic_copper_channel(pcb_data, edge_required: float) -> Dict[str, object]
                                           for u in census['unmeasured']],
         'oob_graphic_copper_basis': census['basis'],
         'graphic_edge_shortfall_refs': sorted([k, round(v, 4)] for k, v in short.items()),
+    }
+
+
+#: What the keep-out channel measures, carried in every report (#1031).
+KEEPOUT_COPPER_BASIS = (
+    "per-PAD copper rect (axis-aligned box at the pose) against each "
+    "board-level rule-area keep-out with tracks not allowed, minus its holes, "
+    "at a band of clearance + track_width/2 (the router's own track reach, "
+    "obstacle_map.add_rule_area_keepout_obstacles). A pad is ILLEGAL when "
+    "every copper layer it occupies is covered by the keep-out and its net "
+    "needs a connection (net with 2+ pads, not served by a same-net pour on "
+    "those layers where pour is allowed); a through-hole pad reachable on an "
+    "uncovered layer is reported in keepout_copper_tht_refs, not failed")
+
+
+class RuleAreaKeepouts:
+    """A board's rule-area keep-outs as a pad-copper legality term (#1031).
+
+    The router blocks every track cell inside a `(keepout (tracks
+    not_allowed))` rule area and within `clearance + track_width/2` of it
+    (`obstacle_map.add_rule_area_keepout_obstacles`); placement modelled none
+    of it, so a part could be seated with signal pads in the band and every
+    placement gate stayed green (glasgow_revC, run 32: 17 SMD signal pads,
+    route.py "boxed in by static obstacles").
+
+    Scope: BOARD-level rule areas whose tracks are not allowed. A rule area a
+    footprint owns moves with its part and is not re-posed here, so it is
+    listed in `unmeasured` rather than graded at a stale position. Intent
+    keep-outs (floorplan.py, #701) are a different, declared thing.
+
+    One instance per board; `pad_amount` is pose-free, so the search context
+    and the file-pose grade share it.
+    """
+
+    def __init__(self, pcb_data, clearance: float, track_width: float,
+                 track_source: str = ''):
+        from check_drc import _point_on_board, _point_to_rings_distance, \
+            pad_copper_layers
+        from net_queries import expand_pad_layers
+        self._pad_layers = pad_copper_layers
+        self._on_region = _point_on_board
+        self._pt_dist = _point_to_rings_distance
+        self._expand = expand_pad_layers
+        self.clearance = float(clearance)
+        self.track_width = float(track_width)
+        self.track_source = track_source
+        self.band = self.clearance + self.track_width / 2.0
+        board_info = getattr(pcb_data, 'board_info', None)
+        self.board_copper = list(getattr(board_info, 'copper_layers', None)
+                                 or ['F.Cu', 'B.Cu'])
+        self.areas: List[dict] = []
+        self.unmeasured: List[list] = []
+        for i, ko in enumerate(getattr(board_info, 'keepouts', None) or ()):
+            if ko.get('tracks_allowed', True):
+                continue
+            poly = [tuple(p) for p in (ko.get('polygon') or ())]
+            if len(poly) < 3:
+                continue
+            tokens = sorted(str(t) for t in (ko.get('layers') or ()))
+            covered = (set(self._expand(tokens, self.board_copper)) if tokens
+                       else set(self.board_copper))
+            covered &= set(self.board_copper)
+            if ko.get('in_footprint'):
+                self.unmeasured.append(
+                    ['<footprint>', i, tokens,
+                     'footprint-owned rule area: moves with its part and is '
+                     'not re-posed by placement, so it is not graded'])
+                continue
+            if not covered:
+                continue
+            holes = [[tuple(p) for p in h] for h in (ko.get('holes') or ())
+                     if len(h) >= 3]
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            self.areas.append({
+                'index': i, 'outer': poly, 'holes': holes,
+                'rings': [poly] + holes, 'covered': frozenset(covered),
+                'layers': tokens,
+                'pour_allowed': bool(ko.get('copper_pour_allowed', True)),
+                'bbox': (min(xs), min(ys), max(xs), max(ys))})
+        self.active = bool(self.areas)
+        # net_id -> number of copper pads on the board: a single-pad or
+        # net-less pad needs no connection, so the band cannot strand it.
+        self._net_pads: Dict[int, int] = {}
+        self._fps = getattr(pcb_data, 'footprints', {}) or {}
+        for fp in self._fps.values():
+            for p in fp.pads:
+                if _pad_carries_copper(p) and (p.net_id or 0) > 0:
+                    self._net_pads[p.net_id] = self._net_pads.get(p.net_id, 0) + 1
+        # (net_id, layer) pairs a same-net zone fills: such a pad is served by
+        # fill contact where the keep-out allows pour, not by a track.
+        self._poured = set()
+        for z in getattr(pcb_data, 'zones', None) or ():
+            nid = getattr(z, 'net_id', 0) or 0
+            if nid <= 0:
+                continue
+            zl = getattr(z, 'layers', None) or [getattr(z, 'layer', None)]
+            for l in zl:
+                if l:
+                    self._poured.add((nid, str(l)))
+        self._meta: Dict[str, list] = {}
+
+    @classmethod
+    def for_board(cls, pcb_data, clearance: float, pcb_file: str = None):
+        """Resolve the track width the router would use, board-first
+        (`list_nets.board_floor`, as check_reachability does)."""
+        path = pcb_file or getattr(pcb_data, 'source_path', None)
+        tw, src = 0.15, 'fixed default'
+        if path:
+            try:
+                import list_nets
+                tw, src = list_nets.board_floor(path, 'track_width',
+                                                fallback=0.15)
+            except Exception:                              # noqa: BLE001
+                tw, src = 0.15, 'fixed default'
+        return cls(pcb_data, clearance, float(tw or 0.15), src)
+
+    # -- per-pad metadata (pose-free) ----------------------------------------
+    def pad_meta(self, ref: str) -> list:
+        """Per COPPER pad (the `PartPads.pad_rects` index): (pad, governed,
+        partial, needs_connection). `governed` are the area indices covering
+        EVERY copper layer of the pad; `partial` those covering only some."""
+        m = self._meta.get(ref)
+        if m is not None:
+            return m
+        m = []
+        fp = self._fps.get(ref)
+        for p in (fp.pads if fp is not None else ()):
+            if not _pad_carries_copper(p):
+                continue
+            layers = self._pad_layers(p, self.board_copper)
+            governed, partial = [], []
+            for ai, a in enumerate(self.areas):
+                hit = layers & a['covered']
+                if not hit:
+                    continue
+                (governed if layers <= a['covered'] else partial).append(ai)
+            nid = p.net_id or 0
+            needs = nid > 0 and self._net_pads.get(nid, 0) >= 2
+            pour = [ai for ai in governed if self.areas[ai]['pour_allowed']
+                    and all((nid, l) in self._poured for l in layers)]
+            m.append((p, tuple(governed), tuple(partial), needs, tuple(pour),
+                      sorted(layers)))
+        self._meta[ref] = m
+        return m
+
+    # -- geometry ------------------------------------------------------------
+    def _clear(self, a: dict, x: float, y: float) -> float:
+        """Signed distance from a point to area `a`'s keep-out region
+        (polygon minus holes): positive outside, negative inside."""
+        d = self._pt_dist(x, y, a['rings'])
+        return -d if self._on_region(x, y, a['outer'], a['holes']) else d
+
+    def rect_amount(self, ai: int, rect) -> float:
+        """How far pad copper `rect` falls short of a track landing, in mm.
+
+        The router lands a track on ANY free cell of a pad's copper whose
+        track cross-section stays inside the copper (#479,
+        `single_ended_routing._free_on_pad_cells`: half-dims minus
+        track_width/2), and a track cell is free only `band` or more from the
+        keep-out region. So the pad is reachable exactly when some landing
+        point clears the region by `band`, and the amount is `band -` the best
+        landing's clearance (0 when one clears it). Reading "any copper within
+        the band" instead flags human references whose pad reaches the band
+        with its far edge only (glasgow_revC R4.1, rp2350 C6.2) -- landings
+        on the near half stay open there.
+
+        The landing points are the shrunk rect's corners, edge midpoints and
+        centre: exact against a straight band edge (a half-plane's farthest
+        point on a rect is a corner), conservative elsewhere. A landing inside
+        the region counts its depth, so the number keeps falling as a part
+        walks out and the search can compare it with the seed's. A landing
+        OFF the board (outside an edge band's outer ring) reads as clear here:
+        that pose is the outline channels' refusal, not this one's.
+        """
+        a = self.areas[ai]
+        x0, y0, x1, y1 = rect[:4]
+        band = self.band
+        bx = a['bbox']
+        if (x1 < bx[0] - band or x0 > bx[2] + band
+                or y1 < bx[1] - band or y0 > bx[3] + band):
+            return 0.0
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        best = self._clear(a, cx, cy)
+        if best >= band:
+            return 0.0
+        hx = max(0.0, (x1 - x0) / 2.0 - self.track_width / 2.0)
+        hy = max(0.0, (y1 - y0) / 2.0 - self.track_width / 2.0)
+        if hx > 0.0 or hy > 0.0:
+            for sx in (-1.0, 0.0, 1.0):
+                for sy in (-1.0, 0.0, 1.0):
+                    if sx == 0.0 and sy == 0.0:
+                        continue
+                    c = self._clear(a, cx + sx * hx, cy + sy * hy)
+                    if c > best:
+                        best = c
+                        if best >= band:
+                            return 0.0
+        return band - best
+
+    def part_rows(self, ref: str, rects) -> list:
+        """[(pad, area_index, amount, kind)] for this part's pads at `rects`
+        (`PartPads.pad_rects` at the pose). kind: 'illegal' | 'tht' |
+        'pour_served' | 'no_connection'."""
+        if not self.active:
+            return []
+        meta = self.pad_meta(ref)
+        out = []
+        for i, rect in enumerate(rects):
+            if i >= len(meta):
+                break
+            p, governed, partial, needs, pour, _l = meta[i]
+            for ai in governed:
+                amt = self.rect_amount(ai, rect)
+                if amt <= EPS:
+                    continue
+                kind = ('no_connection' if not needs else
+                        'pour_served' if ai in pour else 'illegal')
+                out.append((p, ai, amt, kind))
+            for ai in partial:
+                amt = self.rect_amount(ai, rect)
+                if amt > EPS:
+                    out.append((p, ai, amt, 'tht'))
+        return out
+
+    def part_amount(self, ref: str, rects) -> float:
+        """Sum of the ILLEGAL amounts -- the search's currency."""
+        if not self.active:
+            return 0.0
+        return sum(r[2] for r in self.part_rows(ref, rects)
+                   if r[3] == 'illegal')
+
+
+def keepout_pad_findings(keepouts: 'RuleAreaKeepouts',
+                         parts: Dict[str, 'PartPads'],
+                         pose_of) -> Dict[str, object]:
+    """The rule-area keep-out channel as placement keys (#1031).
+
+    ONE measurement for every consumer: `grade_pad_legality` calls it at the
+    file's poses, render_placement at the model's, the search reads the same
+    `RuleAreaKeepouts.part_amount`. `pose_of(ref) -> (x, y, rot)` or None.
+
+    - `oob_keepout_copper_count/_amount/_refs`: parts with an ILLEGAL pad;
+      `_amount` sums each part's worst pad reach (mm), like
+      `oob_graphic_copper_amount`.
+    - `keepout_copper_pads`: `[ref, pad, net, amount, area]` per illegal pad.
+    - `keepout_copper_tht_refs`: through-hole pads in the band that stay
+      reachable on an uncovered layer -- reported, not failed.
+    - `keepout_copper_exempt`: pads in the band that need no track (net-less,
+      single-pad net, or pour-served), with the reason.
+    - `keepout_copper_unmeasured`: footprint-owned rule areas.
+    """
+    illegal: Dict[str, float] = {}
+    pads_rows, tht, exempt = [], [], []
+    if keepouts is not None and keepouts.active:
+        for ref in sorted(parts):
+            pose = pose_of(ref)
+            if pose is None:
+                continue
+            try:
+                rects = parts[ref].pad_rects(*pose)
+            except Exception:                              # noqa: BLE001
+                continue
+            for p, ai, amt, kind in keepouts.part_rows(ref, rects):
+                row = [ref, str(p.pad_number), p.net_name or '',
+                       round(amt, 4), keepouts.areas[ai]['index']]
+                if kind == 'illegal':
+                    illegal[ref] = max(illegal.get(ref, 0.0), amt)
+                    pads_rows.append(row)
+                elif kind == 'tht':
+                    tht.append(row)
+                else:
+                    exempt.append(row + [kind])
+    ko = keepouts
+    return {
+        'oob_keepout_copper_count': len(illegal),
+        'oob_keepout_copper_amount': round(float(sum(illegal.values())), 4),
+        'oob_keepout_copper_refs': sorted([k, round(v, 4)]
+                                          for k, v in illegal.items()),
+        'keepout_copper_pads': sorted(pads_rows),
+        'keepout_copper_tht_refs': sorted(tht),
+        'keepout_copper_exempt': sorted(exempt),
+        'keepout_copper_unmeasured': list(ko.unmeasured) if ko is not None else [],
+        'keepout_copper_band_mm': round(ko.band, 4) if ko is not None else None,
+        'keepout_copper_track_width': ({'value': ko.track_width,
+                                        'source': ko.track_source}
+                                       if ko is not None else None),
+        'keepout_copper_basis': KEEPOUT_COPPER_BASIS,
     }
 
 

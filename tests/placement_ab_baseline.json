@@ -293,37 +293,39 @@
   "board": "glasgow_revC.kicad_pcb",
   "mark": "regress",
   "off": {
-   "body_advisory": 4,
-   "body_blocking": 0,
-   "crossings": 3491,
-   "edge_facing_pads": 10,
-   "health_block_displacement_max_mm": 25.8874,
-   "health_bus_foreign_crossings": null,
-   "hpwl": 4966.33,
-   "intent_errors": 1,
-   "intent_errors_by_rule": {
-    "decap_distance": 1
-   },
-   "intent_errors_enforced": 0,
-   "intent_errors_other": 1,
-   "inversions": 1675,
-   "unseated": 0
-  },
-  "on": {
    "body_advisory": 3,
    "body_blocking": 0,
-   "crossings": 3848,
-   "edge_facing_pads": 11,
-   "health_block_displacement_max_mm": 18.5883,
+   "crossings": 3546,
+   "edge_facing_pads": 8,
+   "health_block_displacement_max_mm": 24.4481,
    "health_bus_foreign_crossings": null,
-   "hpwl": 5354.23,
+   "hpwl": 5007.5,
    "intent_errors": 2,
    "intent_errors_by_rule": {
-    "decap_distance": 2
+    "decap_distance": 1,
+    "edge_connector": 1
    },
    "intent_errors_enforced": 0,
    "intent_errors_other": 2,
-   "inversions": 1745,
+   "inversions": 1643,
+   "unseated": 0
+  },
+  "on": {
+   "body_advisory": 5,
+   "body_blocking": 0,
+   "crossings": 3810,
+   "edge_facing_pads": 10,
+   "health_block_displacement_max_mm": 20.3971,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 5289.7,
+   "intent_errors": 2,
+   "intent_errors_by_rule": {
+    "decap_distance": 1,
+    "edge_connector": 1
+   },
+   "intent_errors_enforced": 0,
+   "intent_errors_other": 2,
+   "inversions": 1750,
    "unseated": 0
   }
  },

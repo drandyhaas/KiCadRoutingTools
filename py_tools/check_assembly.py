@@ -357,6 +357,24 @@ def main():
     if _g_un:
         print("    footprint copper NOT measured against the outline: "
               + ', '.join(f'{u[0]} ({u[1]})' for u in _g_un[:6]))
+    # #1031: pads in a board rule-area keep-out band, where the router can
+    # land no track. Printed and in JSON; like the two channels above it is
+    # NOT a `not_buildable` conjunct (#937) -- place_pose and
+    # render_placement --gate are what gate on it.
+    _k_pads = leg.get('keepout_copper_pads') or []
+    if _k_pads:
+        print(f"    pads in a rule-area keep-out band "
+              f"({leg.get('keepout_copper_band_mm')}mm band, no track can "
+              f"land): "
+              + ', '.join(f'{r[0]}.{r[1]} {r[2]} ({r[3]}mm)'
+                          for r in _k_pads[:12])
+              + (f" ... +{len(_k_pads) - 12} more" if len(_k_pads) > 12
+                 else ''))
+    _k_tht = leg.get('keepout_copper_tht_refs') or []
+    if _k_tht:
+        print("    through-hole pads in a keep-out band, reachable on an "
+              "uncovered layer (reported, not failed): "
+              + ', '.join(sorted({f'{r[0]}.{r[1]}' for r in _k_tht})[:12]))
     # ONE predicate, used verbatim at all three sites (verdict, JSON
     # `buildable`, exit code). Three re-derivations of `blocking or
     # locked_contact` is how the coincident-origin channel would have reached
@@ -652,6 +670,16 @@ def main():
             'oob_graphic_copper_unmeasured': leg.get('oob_graphic_copper_unmeasured') or [],
             'oob_graphic_copper_basis': leg.get('oob_graphic_copper_basis'),
             'graphic_edge_shortfall_refs': leg.get('graphic_edge_shortfall_refs') or [],
+            # #1031: pads in a board rule-area keep-out band -- the same
+            # non-gating contract as the two off-outline channels.
+            'oob_keepout_copper_count': leg.get('oob_keepout_copper_count', 0),
+            'oob_keepout_copper_amount': leg.get('oob_keepout_copper_amount', 0.0),
+            'oob_keepout_copper_refs': leg.get('oob_keepout_copper_refs') or [],
+            'keepout_copper_pads': leg.get('keepout_copper_pads') or [],
+            'keepout_copper_tht_refs': leg.get('keepout_copper_tht_refs') or [],
+            'keepout_copper_exempt': leg.get('keepout_copper_exempt') or [],
+            'keepout_copper_unmeasured': leg.get('keepout_copper_unmeasured') or [],
+            'keepout_copper_basis': leg.get('keepout_copper_basis'),
             'locked_contact_pairs': [q._asdict() for q in locked_contact],
             # run-19: parts stacked at one origin, marker classes exonerated.
             # Groups, not fake N*(N-1)/2 pair entries -- a stack is one
