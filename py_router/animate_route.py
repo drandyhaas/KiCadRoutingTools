@@ -77,6 +77,105 @@ def _board_rows(pcb, layers) -> Tuple[List[List], List[List]]:
     return seg_rows, via_rows
 
 
+class _OpLog(object):
+    """An append-only log of edits to one live-copper dict (#1036).
+
+    The lower box's layer strip needs the copper AS IT STOOD on each frame.
+    Keeping `tuple(live_s.values())` per frame cost O(frames x segments):
+    measured on run 32's 9:16 full-trace film, a 523 MB Python heap at 5797
+    frames. The log costs O(edits) instead, and a frame keeps only its
+    position in it (`_LiveRef`).
+    """
+    __slots__ = ('ops', '_state', '_at')
+
+    def __init__(self):
+        self.ops = []           # (key, value) = set;  (key, _GONE) = removed
+        self._state = {}
+        self._at = 0
+
+    def state_at(self, n):
+        """The dict's values after the first `n` edits, in insertion order.
+
+        Fast forward when frames are asked in order (the encoder streams them
+        that way); a backwards ask replays from the start, which is slower
+        but never wrong.
+        """
+        if n < self._at:
+            self._state, self._at = {}, 0
+        st = self._state
+        for k, v in self.ops[self._at:n]:
+            if v is _GONE:
+                st.pop(k, None)
+            else:
+                st[k] = v
+        self._at = n
+        return tuple(st.values())
+
+
+_GONE = object()
+
+
+class _LoggedDict(dict):
+    """A dict whose every edit is recorded into an `_OpLog`."""
+
+    def __init__(self, log):
+        super().__init__()
+        self._log = log
+
+    def __setitem__(self, k, v):
+        super().__setitem__(k, v)
+        self._log.ops.append((k, v))
+
+    def __delitem__(self, k):
+        super().__delitem__(k)
+        self._log.ops.append((k, _GONE))
+
+    def pop(self, k, *default):
+        had = k in self
+        out = super().pop(k, *default)
+        if had:
+            self._log.ops.append((k, _GONE))
+        return out
+
+    def clear(self):
+        for k in list(self):
+            self._log.ops.append((k, _GONE))
+        super().clear()
+
+    def update(self, *a, **kw):
+        for k, v in dict(*a, **kw).items():
+            self[k] = v
+
+    def setdefault(self, k, v=None):
+        if k not in self:
+            self[k] = v
+        return self[k]
+
+    def popitem(self):
+        k, v = super().popitem()
+        self._log.ops.append((k, _GONE))
+        return k, v
+
+
+class _LiveRef(object):
+    """A frame's copper: a position in an `_OpLog`, resolved at draw time."""
+    __slots__ = ('log', 'n')
+
+    def __init__(self, log, n):
+        self.log, self.n = log, n
+
+    def resolve(self):
+        return self.log.state_at(self.n)
+
+
+def _live(value):
+    """A chrome record's copper as a tuple, whether stored as a `_LiveRef`
+    or (from an older caller) as the tuple itself."""
+    if isinstance(value, _LiveRef):
+        return value.resolve()
+    return tuple(value or ())
+
+
 class Movie:
     """Accumulates animation frames over a shared, growing copper state.
 
@@ -146,8 +245,10 @@ class Movie:
         #: `{class: (seated, total)}` for the box's inventory content,
         #: computed ONCE over the board rather than per frame.
         self.inventory = {}
-        self.live_s: Dict[Tuple, _Seg] = {}
-        self.live_v: Dict[Tuple, _Via] = {}
+        #: Edit logs behind the live copper (#1036): see `_OpLog`.
+        self._log_s, self._log_v = _OpLog(), _OpLog()
+        self.live_s: Dict[Tuple, _Seg] = _LoggedDict(self._log_s)
+        self.live_v: Dict[Tuple, _Via] = _LoggedDict(self._log_v)
         self.frames: List = []
         # Plane fills revealed so far (dynamic_zones): a plane pours in on the
         # frame its taps first land, rather than being an always-on backdrop.
@@ -194,9 +295,13 @@ class Movie:
                             # of showing the finished board from frame one.
                             # ONLY when a box exists to draw it in -- see
                             # `want_panel`.
-                            'live': (tuple(self.live_s.values())
+                            # Stored as a POSITION in the edit log (#1036),
+                            # not a copy: `_live()` resolves it at draw time.
+                            'live': (_LiveRef(self._log_s,
+                                              len(self._log_s.ops))
                                      if self.want_panel else ()),
-                            'live_v': (tuple(self.live_v.values())
+                            'live_v': (_LiveRef(self._log_v,
+                                                len(self._log_v.ops))
                                        if self.want_panel else ()),
                             'unplaced': self.unplaced,
                             'inventory': self.inventory,
@@ -265,6 +370,20 @@ class Movie:
             st = assess_placement(pcb, path)
             self.unplaced = bool(st.unplaced)
             unseated = st.stacked_suspect_refs
+        except Exception:                                      # noqa: BLE001
+            pass
+        # A part whose origin is OFF the board is not placed either (#1036).
+        # `assess_placement` finds STACKED parts, and run 32's pile is laid out
+        # in rows beside the outline, not stacked: 247 of its 272 parts sit
+        # outside it, and the box read "272 of 272 placed" over the pile.
+        try:
+            bb = pcb.board_info.board_bounds
+            if bb:
+                x0, y0, x1, y1 = bb
+                off = {ref for ref, fp in pcb.footprints.items()
+                       if not (x0 <= fp.x <= x1 and y0 <= fp.y <= y1)}
+                if off:
+                    unseated = set(unseated or ()) | off
         except Exception:                                      # noqa: BLE001
             pass
         try:
@@ -827,6 +946,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     if stage is not None:
         stage.attach(m, r, layers)
     m.snapshot("input")
+    #: The board the previous step left, for a glide's source inventory.
+    _prev_board = steps[0][1] if steps else None
     for _step in steps:
         _lbl = str(_step[0])
         _mm = re.match(r'round (\d+)', _lbl)
@@ -845,7 +966,20 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         seg_rows, via_rows = _board_rows(pcb, layers)
         # #1020: this step's OWN board answers the box, so the inventory
         # empties as the board fills and a seeding beat is a seeding beat.
-        m.refresh_placement(pcb, board)
+        _gliding = (stage is not None and mode != 'revert'
+                    and stage.handles(board))
+        if _gliding and _prev_board:
+            # #1036: a glide is drawn from the board it LEAVES. The box's
+            # inventory follows the parts, so it reads the source board until
+            # the glide lands -- it read "272 of 272 placed" mid-glide, the
+            # destination's count, over parts still in the pile. The stage
+            # calls `on_arrive` right before its landing frame.
+            m.refresh_placement(r.pcb, _prev_board)
+            stage.on_arrive = (lambda _p=pcb, _b=board:
+                               m.refresh_placement(_p, _b))
+        else:
+            m.refresh_placement(pcb, board)
+        _prev_board = board
         # Every step draws its OWN board's pads (#1036), stage or not. The
         # board it REPLACES is handed to the stage, whose camera shots before
         # a placement beat must show the parts where they WERE -- otherwise
@@ -1047,14 +1181,14 @@ def _draw_panel(d, geom, r, c, iso_in_panel=False):
             box = geom.panel_split[1]
         if phase == 'routing':
             render_panels.draw_layer_strip(
-                d, box, bounds=r.bounds, segments=c.get('live', ()),
+                d, box, bounds=r.bounds, segments=_live(c.get('live')),
                 layers=list(r.copper_layers), palette=r.palette, theme=th,
                 active=c.get('active'))
         elif phase == 'bookend':
             render_panels.draw_summary(
                 d, box, theme=th,
                 lines=render_panels.board_summary(
-                    r.pcb, c.get('live', ()), c.get('live_v', ())))
+                    r.pcb, _live(c.get('live')), _live(c.get('live_v'))))
         else:
             inv = c.get('inventory') or {}
             done = sum(a for a, _b in inv.values())

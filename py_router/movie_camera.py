@@ -605,6 +605,26 @@ class Stage:
         self._mark = len(self.movie.frames)
 
     # -- the build_boards hooks -----------------------------------------
+    def handles(self, board):
+        """True when `enter_step` will intercept this board's step."""
+        return (self.moving_parts
+                and os.path.basename(board) in self._by_board)
+
+    def _arrive(self):
+        """Call `on_arrive` once, right before the frame the parts LAND on.
+
+        `build_boards` sets it so the lower box's inventory reads the SOURCE
+        board through the glide and the destination only from the landing
+        frame (#1036) -- it read the destination's "272 of 272 placed" over
+        parts still in the pile.
+        """
+        fn, self.on_arrive = getattr(self, 'on_arrive', None), None
+        if fn is not None:
+            try:
+                fn()
+            except Exception:                                  # noqa: BLE001
+                pass
+
     def enter_step(self, label, board, pcb, seg_rows, via_rows):
         """True = this stage handled the step itself.
 
@@ -643,7 +663,9 @@ class Stage:
         if moved:
             self._tween(pcb, moved, label)
         else:
+            self._arrive()
             self._snap(label)
+        self._arrive()          # no-op unless the tween never reached one
         self._mark = len(self.movie.frames)
         return True
 
@@ -696,6 +718,7 @@ class Stage:
             deltas.append((ref, fp, m['from'][0] - m['to'][0],
                            m['from'][1] - m['to'][1]))
         if not deltas:
+            self._arrive()
             self._snap(label)
             return
         n = self.tween_frames
@@ -710,6 +733,7 @@ class Stage:
             self._snap(f"{label}  before ({len(deltas)} part(s))")
             for ref, fp, _dx, _dy in deltas:
                 _offset_to(fp, home[ref], 0.0, 0.0)
+            self._arrive()
             self._snap(f"{label}  moved {len(deltas)} part(s)")
         else:
             # #1020: the GHOST and the ARROW, through the overlay seam, so
@@ -729,6 +753,8 @@ class Stage:
                         getattr(self.r, 'theme', None), t=t)
                 except Exception:                              # noqa: BLE001
                     self.movie.overlay = None
+                if i == n - 1:
+                    self._arrive()      # t = 1: the parts are where they land
                 self._snap(f"{label}  moving {len(deltas)} part(s)")
             self.movie.overlay = None
             for ref, fp, _dx, _dy in deltas:      # exact restore

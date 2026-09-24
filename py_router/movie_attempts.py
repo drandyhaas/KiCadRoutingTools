@@ -629,7 +629,8 @@ def best_so_far(rows: Sequence[Attempt], *, require_accepted=True,
     return out
 
 
-def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
+def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
+               debug=None):
     """The ribbon: x is when an attempt was born, y is the accept rule's
     leading term with LOWER HIGHER on screen.
 
@@ -710,12 +711,26 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
                 return '%.1fk' % (v / 1000.0)
             return '%g' % round(v, 0 if symlog else 2)
 
+        # EVERY label drawn in the band is registered here, ticks and caption
+        # included, so a record label is placed against all of them -- not
+        # only against other record labels (#1036 review: '12703' still sat
+        # on the axis tick beside it).
+        taken = []
+
+        def _bbox(xy, txt, font, anchor=None):
+            try:
+                return d.textbbox(xy, txt, font=font, anchor=anchor)
+            except Exception:                                  # noqa: BLE001
+                w = d.textlength(txt, font=font)
+                return (xy[0], xy[1], xy[0] + w, xy[1] + font.size)
+
         for frac in (0.0, 0.5, 1.0):
             yy = py0 + frac * (py1 - py0)
             d.line([px0, yy, px1, yy], fill=th.rgb('chrome_rule'))
-            d.text((box.x + 8, yy - 6),
-                   _tick(_inv(fmin + frac * (fmax - fmin))),
+            _t = _tick(_inv(fmin + frac * (fmax - fmin)))
+            d.text((box.x + 8, yy - 6), _t,
                    fill=th.rgb('chrome_text_faint'), font=fs)
+            taken.append(_bbox((box.x + 8, yy - 6), _t, fs))
         # The caption is the axis's meaning plus the disclosure, and it is
         # DROPPED rather than ellipsised or overprinted when the band is too
         # narrow to hold it beside the plot -- same rule as the layer strip's
@@ -726,9 +741,11 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
         if d.textlength(cap, font=f) <= (px1 - px0) * 0.92:
             d.text((px1, box.y + 3), cap, fill=th.rgb('chrome_text_dim'),
                    font=f, anchor='ra')
+            taken.append(_bbox((px1, box.y + 3), cap, f, 'ra'))
         elif d.textlength(metric, font=f) <= (px1 - px0) * 0.92:
             d.text((px1, box.y + 3), metric,
                    fill=th.rgb('chrome_text_dim'), font=f, anchor='ra')
+            taken.append(_bbox((px1, box.y + 3), metric, f, 'ra'))
 
         vis = [a for a in rows if a.index <= horizon]
         pos = {a.index: (X(a.index), Y(a.score) if a.score is not None else py1)
@@ -757,20 +774,6 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
                 labels.append((X(i) - 6, Y(r) - fs.size - 4,
                                '%g' % round(r, 2)))
             last = r
-        # Every drop is labelled that has ROOM. Drawn newest-first, and a
-        # label that would overprint one already drawn is skipped: run 32's
-        # first minute of drops (12703, 267, 251, 239 ...) printed on top of
-        # each other as an unreadable smear. The newest record -- the one the
-        # film is currently about -- always wins.
-        taken = []
-        for lx, ly, txt in reversed(labels):
-            tw = d.textlength(txt, font=fs)
-            rect = (lx, ly, lx + tw, ly + fs.size + 2)
-            if any(not (rect[2] < o[0] or o[2] < rect[0] or rect[3] < o[1]
-                        or o[3] < rect[1]) for o in taken):
-                continue
-            taken.append(rect)
-            d.text((lx, ly), txt, fill=th.rgb('status_best'), font=fs)
         if len(pts) > 1:
             d.line([p for xy in pts for p in xy], fill=th.rgb('status_best'),
                    width=2)
@@ -794,6 +797,51 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
             if a.accepted:
                 d.ellipse([cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3],
                           outline=th.rgb('status_kept'), width=1)
+
+        # THE RECORD LABELS, LAST, placed against EVERYTHING already in the
+        # band: the ticks and the caption (registered as they were drawn),
+        # every visible node with its kept ring, and every ungraded tick on
+        # the rail. Run 32's '12703' sat on the rejected-attempt ticks beside
+        # it and its first drops (267, 251, 239 ...) printed over their own
+        # nodes -- the old rule avoided other record labels only. Newest
+        # first, so the record the film is currently about always wins; each
+        # label tries above, right and below its step; one with no free spot
+        # is not drawn. A backing plate keeps the gold line from striking
+        # through the digits.
+        obstacles = list(taken)
+        for a in vis:
+            cx, cy = pos[a.index]
+            if a.score is None:
+                obstacles.append((cx - 2, py1 - 6, cx + 2, py1 + 4))
+            else:
+                obstacles.append((cx - 8, cy - 8, cx + 8, cy + 8))
+
+        def _hits(rect):
+            return any(not (rect[2] < o[0] or o[2] < rect[0]
+                            or rect[3] < o[1] or o[3] < rect[1])
+                       for o in obstacles)
+
+        placed = []
+        plate = th.rgb('chrome_panel')
+        for lx, ly, txt in reversed(labels):
+            h = fs.size + 4
+            for cx, cy in ((lx, ly - 6), (lx + 14, ly - 6),
+                           (lx + 14, ly + h + 10), (lx, ly + h + 10)):
+                rect = _bbox((cx, cy), txt, fs)
+                inside = (rect[0] >= box.x and rect[2] <= box.x + box.w
+                          and rect[1] >= box.y and rect[3] <= box.y + box.h)
+                if inside and not _hits(rect):
+                    obstacles.append(rect)
+                    placed.append((txt, rect))
+                    d.rectangle([rect[0] - 1, rect[1] - 1, rect[2] + 1,
+                                 rect[3] + 1], fill=plate)
+                    d.text((cx, cy), txt, fill=th.rgb('status_best'),
+                           font=fs)
+                    break
+        if debug is not None:
+            debug['labels'] = placed
+            debug['obstacles'] = obstacles[:len(obstacles) - len(placed)]
+            debug['wanted'] = [t for _x, _y, t in labels]
         return True
     except Exception:                                          # noqa: BLE001
         return False  # a band is never worth failing a render over

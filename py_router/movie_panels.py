@@ -177,6 +177,11 @@ IsoShot = collections.namedtuple('IsoShot', 'board rotate first last')
 #: the per-frame cadence this module was written to avoid.
 MIN_SHOT_FRAMES = 3
 
+#: The narrowest canvas a render is REQUESTED at (width / height), see the
+#: comment at the request in `compose_two_panel`. 640x431 (1.49) kept a
+#: 74 px margin each side on run 32's glasgow at yaw 48; 363x431 clipped it.
+ISO_MIN_REQUEST_ASPECT = 1.6
+
 
 # --------------------------------------------------------------------------
 # planning -- pure
@@ -668,7 +673,15 @@ def compose_two_panel(frames, marks, final_board, opts=None, box=None):
         box = None
         W, _H_top, H_iso, _total = panel_geometry(frames[0].size,
                                                   opts.height_frac)
-    req_w = int(round(W * kir.REQUEST_OVERSCAN))
+    # The REQUEST is never narrower than ISO_MIN_REQUEST_ASPECT, whatever the
+    # box. kicad-cli frames the board by the canvas HEIGHT and clips what does
+    # not fit across: a portrait request for the 9:16 stacked layout's
+    # 330x392 iso half came back with the board cut at both sides (measured
+    # on run 32's placed_v3: alpha bbox 0..336 of a 336-wide canvas, against
+    # a 74 px margin each side at 640x431). A wide render, alpha-cropped and
+    # then CONTAINED by `iso_panel`, always fits its box.
+    req_w = int(round(max(W, H_iso * ISO_MIN_REQUEST_ASPECT)
+                      * kir.REQUEST_OVERSCAN))
     req_h = int(round(H_iso * kir.REQUEST_OVERSCAN))
 
     # INSIDE the guard, not above it. These two lines used to sit outside the

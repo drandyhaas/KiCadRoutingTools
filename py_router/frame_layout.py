@@ -81,6 +81,17 @@ SPLIT_ISO_FRAC = 0.42               # of the split box's WIDTH  (D)
 #: left/right: it is a tall column, and a left/right split of a column gives
 #: two slivers.
 SIDEBAR_ISO_FRAC = 0.50             # of the sidebar box's HEIGHT (B)
+#: A LANDSCAPE frame with the iso view on puts the lower box in a side
+#: column instead (#1036 review): below the board, a 16:9 split film left the
+#: board a 1400x342 strip -- 43% of the height for the thing the film is
+#: about, beside a 3D view that shows no routing. At or above this frame
+#: aspect the panel is a right-hand column of this share of the width, iso on
+#: top and the layer strip under it.
+ISO_SIDE_ASPECT = 1.25
+ISO_SIDE_FRAC = 0.30                # of frame WIDTH
+#: The board box plus the attempts band never get less than this share of
+#: the frame height: a lower box is capped so the board keeps it.
+BOARD_MIN_SHARE = 0.55
 
 
 class Box(NamedTuple):
@@ -313,8 +324,16 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     split = None
     if not panel or spec.panel is None:
         board = Box(0, inner_y, W, inner_h)
+    elif (spec.panel in ('below', 'split') and iso
+          and W >= ISO_SIDE_ASPECT * H):
+        cw = even(W * ISO_SIDE_FRAC)
+        board = Box(0, inner_y, W - cw, inner_h)
+        panel_box = Box(W - cw, inner_y, cw, inner_h)
+        ih = even(inner_h * SIDEBAR_ISO_FRAC)
+        split = (Box(W - cw, inner_y, cw, ih),
+                 Box(W - cw, inner_y + ih, cw, inner_h - ih))
     elif spec.panel == 'below':
-        ph = even(H * STACKED_PANEL_FRAC)
+        ph = _cap_panel(even(H * STACKED_PANEL_FRAC), H, inner_h, track_h)
         board = Box(0, inner_y, W, max(2, inner_h - ph))
         panel_box = Box(0, inner_y + board.h, W, ph)
         if iso:
@@ -335,7 +354,7 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
         ph = even(inner_h * INSET_PANEL_FRAC[1])
         panel_box = Box(W - pw - 6, inner_y + inner_h - ph - 6, pw, ph)
     elif spec.panel == 'split':
-        ph = even(H * SPLIT_PANEL_FRAC)
+        ph = _cap_panel(even(H * SPLIT_PANEL_FRAC), H, inner_h, track_h)
         board = Box(0, inner_y, W, max(2, inner_h - ph))
         panel_box = Box(0, inner_y + board.h, W, ph)
         iw = even(W * SPLIT_ISO_FRAC)
@@ -356,6 +375,15 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
         track=track_box, overlays_board=spec.overlays_board)
     _self_check(geom)
     return geom
+
+
+def _cap_panel(ph, H, inner_h, track_h):
+    """A lower box's height, capped so the board plus the attempts band
+    keep `BOARD_MIN_SHARE` of the frame height."""
+    board_min = int(math.ceil(max(0.0, BOARD_MIN_SHARE * H - track_h)))
+    board_min += board_min % 2
+    return max(0, min(ph, even(max(0, inner_h - board_min))
+                       if inner_h - board_min >= 2 else 0))
 
 
 def _self_check(g: FrameGeometry) -> None:
