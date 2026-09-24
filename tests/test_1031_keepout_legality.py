@@ -497,6 +497,169 @@ def main():
               rc4 == 4 and 'keepout_copper_unmeasured(error)=1'
               in buf.getvalue(), 'rc=%s %s' % (rc4, buf.getvalue()[-300:]))
 
+        # 15 -- the landing set is the ROUTER's: a round pad lands only inside
+        # its inscribed ellipse, a tilted pad only at its centre. Against a
+        # 45-degree band edge the old 9-point box accepted both (0.0).
+        import math
+        from types import SimpleNamespace as NS
+        tri = [(-50.0, 50.0), (50.0, -50.0), (50.0, 50.0)]      # x + y > 0
+        ko45 = {'polygon': tri, 'holes': [], 'layers': {'F.Cu'},
+                'tracks_allowed': False, 'vias_allowed': True,
+                'copper_pour_allowed': True, 'in_footprint': False}
+
+        def _npad(num, x, y, net, shape, rr=0.0, sx=2.0, sy=2.0,
+                  layers=('F.Cu',), drill=0, ptype='smd'):
+            return NS(pad_number=num, global_x=x, global_y=y, local_x=x,
+                      local_y=y, size_x=sx, size_y=sy, shape=shape,
+                      layers=list(layers), drill=drill, net_id=net,
+                      net_name='/N', pad_type=ptype, rect_rotation=rr,
+                      local_clearance=0.0, hole_x=None, hole_y=None)
+
+        def _amount45(shape, rr, sx, depth):
+            c = depth / math.sqrt(2)
+            fp_ = NS(reference='U1', pads=[_npad('1', c, c, 1, shape, rr,
+                                                 sx, sx)],
+                     x=0.0, y=0.0, rotation=0.0, layer='F.Cu')
+            fq_ = NS(reference='U2', pads=[_npad('1', 30, -40, 1, 'rect')],
+                     x=30, y=-40, rotation=0.0, layer='F.Cu')
+            pcb_ = NS(board_info=NS(copper_layers=['F.Cu', 'B.Cu'],
+                                    keepouts=[ko45]),
+                      footprints={'U1': fp_, 'U2': fq_}, zones=[])
+            k_ = legality.RuleAreaKeepouts(pcb_, 0.2, 0.15)
+            return k_.part_amount('U1', legality.PartPads(fp_, 0.2)
+                                  .pad_rects(0.0, 0.0, 0.0))
+        a_round = _amount45('circle', 0.0, 2.0, 0.9)
+        a_tilt = _amount45('rect', 45.0, 1.4, 0.3)
+        check('15. a 2 mm round pad across a 45-degree edge: 0.25 (the '
+              'router\'s ellipse), not 0', abs(a_round - 0.25) < 1e-3,
+              str(a_round))
+        check('15. a 1.4 mm square tilted 45 degrees: 0.575 (centre only)',
+              abs(a_tilt - 0.575) < 1e-3, str(a_tilt))
+
+        # 16 -- parity with the router's own landing cells
+        # (single_ended_routing._free_on_pad_cells) on sample pads: every
+        # landing we sample is a cell the router could use, and the router's
+        # cells span the same extent -- so the sampled set is the router's
+        # region, not a guess at it.
+        from single_ended_routing import _free_on_pad_cells
+        from routing_config import GridCoord
+        cfg = NS(track_width=0.15)
+        free_obs = NS(is_blocked=lambda gx, gy, li: False)
+        step = 0.01
+        coord = GridCoord(step)
+        kpar = legality.RuleAreaKeepouts.for_board(pcb, 0.2, bd)
+        for shape, sx, sy, rr in (('circle', 2.0, 2.0, 0.0),
+                                  ('oval', 2.0, 1.0, 0.0),
+                                  ('rect', 1.2, 0.8, 0.0),
+                                  ('roundrect', 1.0, 0.6, 0.0),
+                                  ('rect', 1.4, 1.4, 30.0)):
+            P = _npad('1', 10.0, 10.0, 1, shape, rr, sx, sy)
+            cells = _free_on_pad_cells(P, 0, cfg, free_obs, coord)
+            lands = kpar.landings((10 - sx / 2, 10 - sy / 2, 10 + sx / 2,
+                                   10 + sy / 2), P, 0.0)
+            if rr:
+                ok = cells == [] and lands == [(10.0, 10.0)]
+            else:
+                xs = [g[0] * step for g in cells]
+                ys = [g[1] * step for g in cells]
+                hx = sx / 2 - 0.075
+                hy = sy / 2 - 0.075
+                rnd = shape in ('circle', 'oval')
+                inside = all(
+                    (((qx - 10) / hx) ** 2 + ((qy - 10) / hy) ** 2
+                     <= 1 + 1e-9) if rnd else
+                    (abs(qx - 10) <= hx + 1e-9 and abs(qy - 10) <= hy + 1e-9)
+                    for qx, qy in lands)
+                span = (abs(min(xs) - min(q[0] for q in lands)) <= step
+                        and abs(max(xs) - max(q[0] for q in lands)) <= step
+                        and abs(min(ys) - min(q[1] for q in lands)) <= step
+                        and abs(max(ys) - max(q[1] for q in lands)) <= step)
+                ok = bool(cells) and inside and span
+            check('16. landings match the router\'s cells: %s %sx%s rot %s'
+                  % (shape, sx, sy, rr), ok)
+
+        # 17 -- two keep-out areas 0.2 mm apart act TOGETHER: each alone
+        # leaves the pad a landing, the gap between them does not
+        def _two(kos):
+            fp_ = NS(reference='U1', pads=[_npad('1', 0, 0, 1, 'rect', 0.0,
+                                                 2.0, 0.5)],
+                     x=0.0, y=0.0, rotation=0.0, layer='F.Cu')
+            fq_ = NS(reference='U2', pads=[_npad('1', 0, 30, 1, 'rect')],
+                     x=0, y=30, rotation=0.0, layer='F.Cu')
+            pcb_ = NS(board_info=NS(copper_layers=['F.Cu', 'B.Cu'],
+                                    keepouts=kos),
+                      footprints={'U1': fp_, 'U2': fq_}, zones=[])
+            k_ = legality.RuleAreaKeepouts(pcb_, 0.2, 0.15)
+            return k_.part_amount('U1', legality.PartPads(fp_, 0.2)
+                                  .pad_rects(0, 0, 0))
+
+        def _half(poly):
+            return {'polygon': poly, 'holes': [], 'layers': {'F.Cu'},
+                    'tracks_allowed': False, 'vias_allowed': True,
+                    'copper_pour_allowed': True, 'in_footprint': False}
+        A_ = _half([(-10, -10), (-0.1, -10), (-0.1, 10), (-10, 10)])
+        B_ = _half([(0.1, -10), (10, -10), (10, 10), (0.1, 10)])
+        check('17. two adjacent areas: each alone 0, together illegal',
+              _two([A_]) == 0 and _two([B_]) == 0 and _two([A_, B_]) > 0.1,
+              str((_two([A_]), _two([B_]), _two([A_, B_]))))
+
+        # 18 -- a through-hole pad escapes only on a layer a track can USE:
+        # an uncovered OUTER layer, or an inner one no foreign-net zone
+        # covers. J1 (/E) sits in the F&B band; foreign /A planes on In1
+        # and In2 over it leave no escape, one plane leaves In2.
+        def _tht_kind(extra, name):
+            p_ = os.path.join(work, name + '.kicad_pcb')
+            with open(p_, 'w', encoding='utf-8') as fh:
+                fh.write(board_text(default_parts() + extra))
+            gg = grade_pad_legality(parse_kicad_pcb(p_), 0.2, pcb_file=p_)
+            return ('illegal' if any(r[0] == 'J1'
+                                     for r in gg['keepout_copper_pads'])
+                    else 'tht' if any(r[0] == 'J1'
+                                      for r in gg['keepout_copper_tht_refs'])
+                    else 'none')
+        both = [zone(1, 0, 3, 3, 9, 'In1.Cu', 'zi1'),
+                zone(1, 0, 3, 3, 9, 'In2.Cu', 'zi2')]
+        check('18. J1 with foreign planes on BOTH inner layers fails like SMD',
+              _tht_kind(both, 'tht_planes') == 'illegal')
+        check('18. ...with one inner layer free it is reported, not failed',
+              _tht_kind(both[:1], 'tht_one_plane') == 'tht')
+
+        # 19 -- inherited band pads: render_placement --before carries the
+        # before board's own census, and the driver judges NEW copper
+        # against it (a human reference board is not refused for its own
+        # pads), absolute without it
+        rj5 = os.path.join(work, 'rp_before.json')
+        run_check([sys.executable, '-X', 'utf8',
+                   os.path.join(ROOT, 'py_tools', 'render_placement.py'),
+                   bd, '--before', bd, '--clearance', '0.2', '--json-out',
+                   rj5, '-o', os.path.join(work, 'rp_before.png')],
+                  accept=True)
+        c5 = json.load(open(evidence(rj5), encoding='utf-8'))['checklist'][
+            'a_off_outline']
+        check('19. --before carries the before board\'s keep-out census',
+              _pairs(c5.get('keepout_copper_before') or [])
+              == _pairs(c5['keepout_copper']) and c5['keepout_copper'],
+              str(c5.get('keepout_copper_before')))
+        rdoc6 = json.load(open(da.render_json, encoding='utf-8'))
+        for label, before, refused in (
+                ('inherited, no deeper', [['R1', 0.5]], False),
+                ('inherited but DEEPER now', [['R1', 0.1]], True),
+                ('no --before census (absolute)', None, True)):
+            rdoc6['checklist']['a_off_outline'] = {
+                'pad_copper': [], 'courtyard': [],
+                'keepout_copper': [['R1', 0.3]],
+                'keepout_copper_before': before}
+            rj6 = os.path.join(ftmp, 'r_before_%d.json' % int(refused))
+            with open(rj6, 'w', encoding='utf-8') as fh:
+                json.dump(rdoc6, fh)
+            a6 = pdrv._args(dargv + ['--waive', 'X:checked'])
+            a6.render_json = rj6
+            o6 = pdrv.STAGES['P-close'](a6)
+            got = 'seat pads inside a rule-area KEEP-OUT band' in o6
+            check('19. P-close keep-out arm: %s -> %s'
+                  % (label, 'refused' if refused else 'passes'),
+                  got == refused, o6[:200])
+
         # 7 -- inert without a keep-out
         pcb0 = parse_kicad_pcb(clean)
         g0 = grade_pad_legality(pcb0, 0.2, pcb_file=clean)

@@ -2999,7 +2999,13 @@ def build_parser():
     r.add_argument('--argv', nargs=argparse.REMAINDER, default=None,
                    help='the command that produced it -- what makes replay '
                         'possible. Refused (exit 2) when its first token is '
-                        'neither an existing file nor on PATH.')
+                        'neither an existing file nor on PATH, and when a '
+                        'net-list value set LOOKS shell-expanded (two or more '
+                        'values are existing files, or one has a path '
+                        'separator or a file extension). KNOWN FALSE REFUSAL: '
+                        'two real rooted net names that are BOTH root '
+                        'directories on this machine (e.g. /BOOT /Recovery on '
+                        'Windows) read as a glob; there is no override.')
     r.set_defaults(fn=cmd_record)
 
     s = sub.add_parser('step-back', help='check out an earlier board, exactly')

@@ -3247,7 +3247,8 @@ class LegalityContext:
         pp = self.parts.get(ref)
         if pp is None or self.keepouts is None:
             return 0.0
-        return self.keepouts.part_amount(ref, pp.pad_rects(x, y, rot))
+        return self.keepouts.part_amount(ref, pp.pad_rects(x, y, rot),
+                                         pp._delta_key(rot))
 
     def keepout_ok(self, ref: str, x: float, y: float, rot: float) -> bool:
         """No worse than the SEED on the rule-area keep-out term (#1031).
@@ -4223,11 +4224,18 @@ KEEPOUT_COPPER_BASIS = (
     "board-level rule-area keep-out with tracks not allowed, minus its holes, "
     "at a band of clearance + track_width/2 (the router's own track reach, "
     "obstacle_map.add_rule_area_keepout_obstacles). A pad is ILLEGAL when "
-    "every copper layer it occupies is covered by the keep-out and its net "
+    "every copper layer it occupies is covered and no LANDING clears every "
+    "covering area together by the band -- landings are the router's own "
+    "(net_queries.pad_landing_extent: the shrunk rect, the inscribed ellipse "
+    "for circle/oval pads, the centre only for a tilted pad) -- and its net "
     "needs a connection (net with 2+ pads, not served by a same-net pour on "
     "those layers where pour is allowed AND a same-net zone outline reaches "
-    "the pad copper at the pose); a through-hole pad reachable on an "
-    "uncovered layer is reported in keepout_copper_tht_refs, not failed. "
+    "the pad copper at the pose). A through-hole pad is reported in "
+    "keepout_copper_tht_refs, not failed, only when it keeps an ESCAPE "
+    "layer: an uncovered outer layer, or an uncovered inner layer no zone of "
+    "a different net covers at the pad (placement does not know the routing "
+    "layer set, and a foreign plane is no escape); otherwise it fails like "
+    "an SMD pad. "
     "The pour test reads the zone OUTLINE, not its fill: fill cut-outs, "
     "zone priority, zone holes and thermal-relief necks are ignored, so a "
     "pad the fill does not actually reach can read pour_served")
@@ -4346,6 +4354,13 @@ class RuleAreaKeepouts:
         (`list_nets.board_floor`, as check_reachability does)."""
         path = pcb_file or getattr(pcb_data, 'source_path', None)
         tw, src = 0.15, 'fixed default'
+        # the project read is only worth paying for when there is a band to
+        # measure: no tracks-forbidden rule area, no track width needed
+        _kos = getattr(getattr(pcb_data, 'board_info', None), 'keepouts',
+                       None) or ()
+        if not any(not k.get('tracks_allowed', True) for k in _kos):
+            path = None
+            src = 'not resolved (no tracks-forbidden rule area)'
         if path:
             try:
                 import list_nets
@@ -4358,8 +4373,9 @@ class RuleAreaKeepouts:
     # -- per-pad metadata (pose-free) ----------------------------------------
     def pad_meta(self, ref: str) -> list:
         """Per COPPER pad (the `PartPads.pad_rects` index): (pad, governed,
-        partial, needs_connection). `governed` are the area indices covering
-        EVERY copper layer of the pad; `partial` those covering only some."""
+        partial, needs_connection, same-net zones, layers). `governed` are the
+        area indices covering EVERY copper layer of the pad; `partial` those
+        covering only some (a through-hole pad under an outer-layer band)."""
         m = self._meta.get(ref)
         if m is not None:
             return m
@@ -4393,52 +4409,87 @@ class RuleAreaKeepouts:
         d = self._pt_dist(x, y, a['rings'])
         return -d if self._on_region(x, y, a['outer'], a['holes']) else d
 
-    def rect_amount(self, ai: int, rect) -> float:
-        """How far pad copper `rect` falls short of a track landing, in mm.
-
-        The router lands a track on ANY free cell of a pad's copper whose
-        track cross-section stays inside the copper (#479,
-        `single_ended_routing._free_on_pad_cells`: half-dims minus
-        track_width/2), and a track cell is free only `band` or more from the
-        keep-out region. So the pad is reachable exactly when some landing
-        point clears the region by `band`, and the amount is `band -` the best
-        landing's clearance (0 when one clears it). Reading "any copper within
-        the band" instead flags human references whose pad reaches the band
-        with its far edge only (glasgow_revC R4.1, rp2350 C6.2) -- landings
-        on the near half stay open there.
-
-        The landing points are the shrunk rect's corners, edge midpoints and
-        centre: exact against a straight band edge (a half-plane's farthest
-        point on a rect is a corner), conservative elsewhere. A landing inside
-        the region counts its depth, so the number keeps falling as a part
-        walks out and the search can compare it with the seed's. A landing
-        OFF the board (outside an edge band's outer ring) reads as clear here:
-        that pose is the outline channels' refusal, not this one's.
-        """
-        a = self.areas[ai]
-        x0, y0, x1, y1 = rect[:4]
+    def _near(self, ai: int, rect) -> bool:
+        """Can area `ai` reach this rect at all (bbox + band)?"""
+        bx = self.areas[ai]['bbox']
         band = self.band
-        bx = a['bbox']
-        if (x1 < bx[0] - band or x0 > bx[2] + band
-                or y1 < bx[1] - band or y0 > bx[3] + band):
-            return 0.0
+        x0, y0, x1, y1 = rect[:4]
+        return not (x1 < bx[0] - band or x0 > bx[2] + band
+                    or y1 < bx[1] - band or y0 > bx[3] + band)
+
+    def landings(self, rect, pad=None, delta: float = 0.0) -> list:
+        """The points on pad copper `rect` where the router may land a track.
+
+        The router's own rule, `net_queries.pad_landing_extent` (shared with
+        `single_ended_routing._free_on_pad_cells`): the centre ONLY for a pad
+        tilted off-axis -- its file tilt plus the pose's rotation delta -- or
+        too small to hold the track; else the shrunk rect, clipped to the
+        inscribed ellipse for circle and oval pads. Sampled on a 5x5 lattice
+        (rect) or two rings of 16 plus the centre (ellipse): every sample lies
+        inside the router's region, so a missed landing can only REJECT a pose
+        the router would accept, never accept one it would not.
+        """
+        from net_queries import pad_landing_extent
+        x0, y0, x1, y1 = rect[:4]
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        best = self._clear(a, cx, cy)
-        if best >= band:
+        tilt = ((getattr(pad, 'rect_rotation', 0.0) or 0.0) + (delta or 0.0)) % 90.0
+        tilt = min(tilt, 90.0 - tilt)
+        ext = pad_landing_extent(x1 - x0, y1 - y0,
+                                 getattr(pad, 'shape', 'rect') or 'rect',
+                                 tilt if tilt > 1e-6 else 0.0,
+                                 self.track_width)
+        if ext is None:
+            return [(cx, cy)]
+        hx, hy, rnd = ext
+        if rnd:
+            pts = [(cx, cy)]
+            for s in (0.5, 1.0):
+                for k in range(16):
+                    t = 2.0 * math.pi * k / 16.0
+                    pts.append((cx + s * hx * math.cos(t),
+                                cy + s * hy * math.sin(t)))
+            return pts
+        return [(cx + i * hx / 2.0, cy + j * hy / 2.0)
+                for i in (-2, -1, 0, 1, 2) for j in (-2, -1, 0, 1, 2)]
+
+    def _amount(self, area_idxs, pts) -> float:
+        """`band -` the best landing's clearance, where a landing's clearance
+        is its MINIMUM over every area in `area_idxs` (overlapping or adjacent
+        areas act together: a 0.2 mm gap between two bands is no landing).
+        0 when some landing clears them all by `band`. A landing inside a
+        region counts its depth, so the number keeps falling as a part walks
+        out and the search can compare it with the seed's."""
+        band = self.band
+        if not area_idxs:
             return 0.0
-        hx = max(0.0, (x1 - x0) / 2.0 - self.track_width / 2.0)
-        hy = max(0.0, (y1 - y0) / 2.0 - self.track_width / 2.0)
-        if hx > 0.0 or hy > 0.0:
-            for sx in (-1.0, 0.0, 1.0):
-                for sy in (-1.0, 0.0, 1.0):
-                    if sx == 0.0 and sy == 0.0:
-                        continue
-                    c = self._clear(a, cx + sx * hx, cy + sy * hy)
-                    if c > best:
-                        best = c
-                        if best >= band:
-                            return 0.0
+        best = -math.inf
+        for qx, qy in pts:
+            c = min(self._clear(self.areas[ai], qx, qy) for ai in area_idxs)
+            if c > best:
+                best = c
+                if best >= band:
+                    return 0.0
         return band - best
+
+    def rect_amount(self, ai: int, rect, pad=None, delta: float = 0.0) -> float:
+        """How far pad copper `rect` falls short of a track landing against
+        area `ai` alone, in mm (see `landings` and `_amount`).
+
+        The router lands a track on any free cell of `landings`, and a track
+        cell is free only `band` or more from the keep-out region, so the pad
+        is reachable exactly when some landing clears it. Reading "any copper
+        within the band" instead flags a human reference whose pad reaches
+        the band with its far edge only (glasgow_revC R4.1). rp2350's C6.2 IS
+        still named (0.1028 mm at clearance 0.2, fixed-default track): a
+        designer's 0.2 x 0.07 mm F.Cu sliver overlaps that GND pad and no
+        landing on it clears the sliver by the band.
+
+        A landing OFF the board (outside an edge band's outer ring) reads as
+        clear here: that pose is the outline channels' refusal, not this one's.
+        """
+        if not self._near(ai, rect):
+            return 0.0
+        return self._amount([ai], self.landings(rect, pad, delta))
 
     def _pour_reaches(self, zones, rect) -> bool:
         """Does one of these same-net zones reach the pad copper `rect`?
@@ -4458,10 +4509,34 @@ class RuleAreaKeepouts:
                     return True
         return False
 
-    def part_rows(self, ref: str, rects) -> list:
+    def _escape_layer(self, p, layers, reach, rect) -> bool:
+        """Does a through-hole pad under partial areas `reach` keep a layer a
+        track can actually escape on? An uncovered OUTER layer always counts.
+        An uncovered INNER layer counts only when no zone of a DIFFERENT net
+        covers the pad there: placement does not know the routing layer set,
+        and an inner layer that is a foreign plane is no escape."""
+        covered = set()
+        for ai in reach:
+            covered |= self.areas[ai]['covered']
+        esc = set(layers) - covered
+        outer = {self.board_copper[0], self.board_copper[-1]}
+        if esc & outer:
+            return True
+        cx, cy = (rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0
+        nid = p.net_id or 0
+        for l in esc:
+            if not any(zn != nid and zl == l and self._in_poly(cx, cy, zp)
+                       for zn, zl, zp in self._zones):
+                return True
+        return False
+
+    def part_rows(self, ref: str, rects, delta: float = 0.0) -> list:
         """[(pad, area_index, amount, kind)] for this part's pads at `rects`
-        (`PartPads.pad_rects` at the pose). kind: 'illegal' | 'tht' |
-        'pour_served' | 'no_connection'."""
+        (`PartPads.pad_rects` at the pose; `delta` is the pose's rotation
+        relative to the parse pose, which tilts a pad). One row per pad at
+        most: every area that governs it is judged TOGETHER (`_amount`), and
+        the row names the one binding at the best landing. kind: 'illegal' |
+        'tht' | 'pour_served' | 'no_connection'."""
         if not self.active:
             return []
         meta = self.pad_meta(ref)
@@ -4469,29 +4544,57 @@ class RuleAreaKeepouts:
         for i, rect in enumerate(rects):
             if i >= len(meta):
                 break
-            p, governed, partial, needs, zones, _l = meta[i]
-            for ai in governed:
-                amt = self.rect_amount(ai, rect)
-                if amt <= EPS:
-                    continue
-                kind = ('no_connection' if not needs else
-                        'pour_served' if (zones
-                                          and self.areas[ai]['pour_allowed']
-                                          and self._pour_reaches(zones, rect))
-                        else 'illegal')
-                out.append((p, ai, amt, kind))
-            for ai in partial:
-                amt = self.rect_amount(ai, rect)
+            p, governed, partial, needs, zones, layers = meta[i]
+            g = [ai for ai in governed if self._near(ai, rect)]
+            pa = [ai for ai in partial if self._near(ai, rect)]
+            if not g and not pa:
+                continue
+            pts = self.landings(rect, p, delta)
+            reach = [ai for ai in pa if self._amount([ai], pts) > EPS]
+            tht = []
+            if reach:
+                if g or not self._escape_layer(p, layers, reach, rect):
+                    g = g + reach       # no real escape: judged like SMD
+                else:
+                    tht = reach
+            if g:
+                amt = self._amount(g, pts)
                 if amt > EPS:
-                    out.append((p, ai, amt, 'tht'))
+                    who = max(g, key=lambda ai: self._amount([ai], pts))
+                    kind = ('no_connection' if not needs else
+                            'pour_served' if (
+                                zones
+                                and all(self.areas[ai]['pour_allowed']
+                                        for ai in g)
+                                and self._pour_reaches(zones, rect))
+                            else 'illegal')
+                    out.append((p, who, amt, kind))
+            if tht:
+                amt = self._amount(tht, pts)
+                if amt > EPS:
+                    out.append((p, tht[0], amt, 'tht'))
         return out
 
-    def part_amount(self, ref: str, rects) -> float:
+    def part_amount(self, ref: str, rects, delta: float = 0.0) -> float:
         """Sum of the ILLEGAL amounts -- the search's currency."""
         if not self.active:
             return 0.0
-        return sum(r[2] for r in self.part_rows(ref, rects)
+        return sum(r[2] for r in self.part_rows(ref, rects, delta)
                    if r[3] == 'illegal')
+
+
+def board_keepout_findings(pcb_data, clearance: float,
+                           pcb_file: str = None) -> Dict[str, object]:
+    """`keepout_pad_findings` at the FILE's own poses, without the rest of
+    `grade_pad_legality`'s census -- what a caller holding a second board
+    (render_placement's --before, the input a placement started from) asks
+    to tell an INHERITED band pad from one the placement put there."""
+    fps = pcb_data.footprints
+    return keepout_pad_findings(
+        RuleAreaKeepouts.for_board(pcb_data, clearance, pcb_file),
+        build_part_pads(fps, clearance, tolerant=True),
+        lambda r: ((fps[r].x, fps[r].y, fps[r].rotation or 0.0)
+                   if r in fps else None))
 
 
 def keepout_pad_findings(keepouts: 'RuleAreaKeepouts',
@@ -4531,7 +4634,8 @@ def keepout_pad_findings(keepouts: 'RuleAreaKeepouts',
                 rects = parts[ref].pad_rects(*pose)
             except Exception:                              # noqa: BLE001
                 continue
-            for p, ai, amt, kind in keepouts.part_rows(ref, rects):
+            for p, ai, amt, kind in keepouts.part_rows(
+                    ref, rects, parts[ref]._delta_key(pose[2])):
                 row = [ref, str(p.pad_number), p.net_name or '',
                        round(amt, 4), keepouts.areas[ai]['index']]
                 key = (row[0], row[1], row[4])

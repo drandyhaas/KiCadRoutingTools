@@ -1997,6 +1997,24 @@ def _guard_render(a):
     _ko = (chk.get('a_off_outline') or {}).get('keepout_copper')
     if _kow:
         _ko = None
+    # NEW keep-out copper only, when the render graded the --before board
+    # too (`keepout_copper_before`, the #962 --baseline idea): a part the
+    # input already seated in the band -- a human reference board -- at no
+    # greater depth is inherited, not this placement's doing. Without that
+    # key the judgement is ABSOLUTE.
+    _kob = (chk.get('a_off_outline') or {}).get('keepout_copper_before')
+    _kbasis = 'absolute (the render carries no --before census)'
+    if isinstance(_ko, list) and isinstance(_kob, list):
+        _was = {}
+        for _it in _kob:
+            if isinstance(_it, (list, tuple)) and len(_it) > 1:
+                _was[str(_it[0])] = float(_it[1])
+        _ko = [_it for _it in _ko
+               if not (isinstance(_it, (list, tuple)) and len(_it) > 1
+                       and str(_it[0]) in _was
+                       and float(_it[1]) <= _was[str(_it[0])] + 1e-6)]
+        _kbasis = ('NEW against the --before board (parts it already seated '
+                   'there, no deeper, are inherited)')
     if isinstance(_ko, list) and _ko:
         _krefs = []
         for _it in _ko:
@@ -2008,6 +2026,7 @@ def _guard_render(a):
             f'{len(_ko)} part(s) seat pads inside a rule-area KEEP-OUT band, '
             f'where no track can land: '
             f'{", ".join(_krefs) or "see checklist.a_off_outline.keepout_copper"}.'
+            f'\nJudged: {_kbasis}.'
             f'\n\nThe per-pad detail is in '
             f'checklist.a_off_outline.keepout_copper_pads. Those nets fail '
             f'"boxed in by static obstacles" even routed first on an empty '
@@ -3302,6 +3321,13 @@ def _refusal_scenarios(tmp):
                                'keepout_copper': [['R12', 0.284],
                                                   ['U14', 0.187]]},
              'd_moved': {'moved': 2, 'expected': None, 'match': None}})]),
+        ('a render with NEW keep-out band pads against its --before board',
+         with_before + ['--render-json', render(name='r_ko_new.json', checklist={
+             'a_off_outline': {'pad_copper': [], 'courtyard': [],
+                               'keepout_copper': [['C6', 0.1028],
+                                                  ['U14', 0.187]],
+                               'keepout_copper_before': [['C6', 0.1028]]},
+             'd_moved': {'moved': 1, 'expected': None, 'match': None}})]),
         ('a render with keep-out band pads it cannot attribute', with_before
          + ['--render-json', render(name='r_ko_anon.json', checklist={
              'a_off_outline': {'pad_copper': [], 'courtyard': [],

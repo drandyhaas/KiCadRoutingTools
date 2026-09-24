@@ -2383,6 +2383,22 @@ def main(argv=None):
     # I/O, so building both unconditionally costs nothing; the JSON EMISSIONS
     # below stay gated on the flags that asked for them.
     fnd = legality_findings(model)
+    # #1031: the same keep-out census on the --before board, at the same
+    # clearance, so a consumer can tell a band pad the INPUT already had (a
+    # human reference: rp2350 C6.2) from one this placement put there -- the
+    # #962 --baseline idea. None without --before, or when the census on the
+    # before board could not be built: a consumer then judges ABSOLUTELY.
+    _ko_before = None
+    if args.before:
+        try:
+            from placement.legality import board_keepout_findings
+            _ko_before = board_keepout_findings(
+                parse_kicad_pcb(args.before),
+                model.floor_knobs.get('clearance', {}).get('value')
+                or args.clearance or 0.25,
+                args.before)['oob_keepout_copper_refs']
+        except Exception:                                  # noqa: BLE001
+            _ko_before = None
     doc = {
         'panels': [{'label': s.label, 'side': s.side, 'view': s.view,
                     'path': w} for s, w in zip(panels, written)],
@@ -2468,7 +2484,9 @@ def main(argv=None):
                 # (no track can land). ALWAYS emitted, [] when clean.
                 'keepout_copper': fnd.get('keepout_copper_refs', []),
                 'keepout_copper_pads': fnd.get('keepout_copper_pads', []),
-                'keepout_copper_unmeasured': fnd.get('keepout_copper_unmeasured', [])},
+                'keepout_copper_unmeasured': fnd.get('keepout_copper_unmeasured', []),
+                # the --before board's own [[ref, amount]], or None
+                'keepout_copper_before': _ko_before},
             # run-6 key honesty: the old 'b_overlap_pairs' NAME carried
             # the PAD-CLEARANCE channel, and a reader auditing overlap
             # with b_overlap_pairs=[] concluded there was none while two
