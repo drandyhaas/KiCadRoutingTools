@@ -5529,8 +5529,19 @@ def _assign_wide_route_widths(segments, config: GridRouteConfig, net_id: int,
                                           neck_start=neck_start)
         site = 'power neck-down (long trunk)'
     elif uniform_width is not None:
+        # #1033: the stepped-down width is the width the WHOLE edge could be
+        # routed at, not the width every piece of it needs. Lay it at the
+        # net's own width and let the neck pass narrow only where the full
+        # width does not fit -- the same rule as a long trunk, with the neck
+        # at `uniform_width` instead of the layer width. Every piece it keeps
+        # wide has passed the same swept-capsule check against the obstacle
+        # map that the long-trunk widen-back uses.
         for _s in segments:
-            _s.width = uniform_width
+            _s.width = config.get_net_track_width(net_id, _s.layer)
+        segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
+                                          coord, layer_names, track_margin,
+                                          neck_start=neck_start,
+                                          neck_w=uniform_width)
         site = 'power short edge'
     else:
         return segments
@@ -5559,13 +5570,62 @@ def _neck_width_for_net(config: GridRouteConfig, net_id: int, layer: str) -> flo
     return min(lw, config.track_width)
 
 
+# #1033: granularity of the piecewise widen-back. A segment that does not fit
+# at full width along its whole length is cut into pieces of about this
+# length and each piece is tested on its own; consecutive pieces with the
+# same verdict are merged back, so a straight run costs at most one extra
+# segment per pinch it crosses.
+_WIDEN_PIECE_MM = 0.5
+
+
+def _widen_fitting_pieces(seg, fits, narrow_w):
+    """`seg` (at its wide width) as a list of collinear pieces: wide where the
+    wide body fits, `narrow_w` where it does not, in start->end order.
+
+    Before #1033 the verdict was per SEGMENT, so one pinch anywhere along a
+    long straight segment narrowed all of it: a 22 mm pad-to-pad run through
+    a single 0.4 mm gap shipped entirely at the 0.127 neck width, and run 32's
+    +3V3 carried pad-to-pad runs up to 59 mm at the signal width."""
+    if fits(seg):
+        return [seg]
+    L = _seg_length(seg)
+    n = int(math.ceil(L / _WIDEN_PIECE_MM)) if L > 0 else 1
+    if n <= 1:
+        seg.width = narrow_w
+        return [seg]
+    wide_w = seg.width
+    dx = (seg.end_x - seg.start_x) / n
+    dy = (seg.end_y - seg.start_y) / n
+    pts = [(seg.start_x + dx * i, seg.start_y + dy * i) for i in range(n)]
+    pts.append((seg.end_x, seg.end_y))
+    flags = [fits(Segment(start_x=pts[i][0], start_y=pts[i][1],
+                          end_x=pts[i + 1][0], end_y=pts[i + 1][1],
+                          width=wide_w, layer=seg.layer, net_id=seg.net_id))
+             for i in range(n)]
+    out = []
+    i = 0
+    while i < n:
+        j = i
+        while j < n and flags[j] == flags[i]:
+            j += 1
+        out.append(Segment(start_x=pts[i][0], start_y=pts[i][1],
+                           end_x=pts[j][0], end_y=pts[j][1],
+                           width=wide_w if flags[i] else narrow_w,
+                           layer=seg.layer, net_id=seg.net_id))
+        i = j
+    return out
+
+
 def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
-               layer_map: Dict[str, int], track_margin, net_id: int):
+               layer_map: Dict[str, int], track_margin, net_id: int,
+               neck_w=None):
     """Narrow the last neckdown_length mm of the run (the pad is at the list
     END); beyond that, keep the wide width only where the wide clearance
-    fits. Never re-widens an already-narrow segment (so a second pass from
-    the other end preserves the first pass's neck). track_margin may be a
-    scalar or a per-layer list (#156)."""
+    fits -- piece by piece (#1033), not all-or-nothing per segment. Never
+    re-widens an already-narrow segment (so a second pass from the other end
+    preserves the first pass's neck). track_margin may be a scalar or a
+    per-layer list (#156). `neck_w` overrides the neck width (the short-edge
+    path necks to the width its edge routed at, #1033)."""
     def fits(s):
         li = layer_map.get(s.layer, 0)
         return _segment_fits_wide(s, obstacles, coord, li, _margin_at(track_margin, li))
@@ -5573,23 +5633,20 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
     out = []  # built in reverse (pad-first)
     cum = 0.0
     for seg in reversed(segments):
-        narrow_w = _neck_width_for_net(config, net_id, seg.layer)
+        narrow_w = (neck_w if neck_w is not None
+                    else _neck_width_for_net(config, net_id, seg.layer))
         length = _seg_length(seg)
         if seg.width <= narrow_w:
             out.append(seg)
         elif cum >= config.neckdown_length:
-            if not fits(seg):
-                seg.width = narrow_w
-            out.append(seg)
+            out.extend(reversed(_widen_fitting_pieces(seg, fits, narrow_w)))
         elif cum + length > config.neckdown_length:
             # Straddles the neck boundary: split there (the far piece,
             # touching the pad side, is neckdown_length - cum long)
             near, far = _split_segment_at(seg, config.neckdown_length - cum)
             far.width = narrow_w
             out.append(far)
-            if not fits(near):
-                near.width = narrow_w
-            out.append(near)
+            out.extend(reversed(_widen_fitting_pieces(near, fits, narrow_w)))
         else:
             seg.width = narrow_w
             out.append(seg)
@@ -5600,7 +5657,8 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
 
 def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
                            obstacles, coord: GridCoord, layer_names: List[str],
-                           track_margin, neck_start: bool = False):
+                           track_margin, neck_start: bool = False,
+                           neck_w=None):
     """Assign widths to a neck-down route (issue #72).
 
     The path was routed at the layer's default width because the power width
@@ -5613,11 +5671,18 @@ def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
     Returns a new segment list (segments may be split for the taper).
     """
     layer_map = {name: i for i, name in enumerate(layer_names)}
-    out = _neck_pass(segments, config, obstacles, coord, layer_map, track_margin, net_id)
+
+    def _nw(layer):
+        return (neck_w if neck_w is not None
+                else _neck_width_for_net(config, net_id, layer))
+
+    out = _neck_pass(segments, config, obstacles, coord, layer_map, track_margin,
+                     net_id, neck_w=neck_w)
     if neck_start:
         out = _flip_segments(_neck_pass(_flip_segments(out), config, obstacles,
-                                        coord, layer_map, track_margin, net_id))
-    wide_flags = [s.width > _neck_width_for_net(config, net_id, s.layer) for s in out]
+                                        coord, layer_map, track_margin, net_id,
+                                        neck_w=neck_w))
+    wide_flags = [s.width > _nw(s.layer) for s in out]
 
     # Suppress short wide islands (a wide run between narrow pinches that is
     # barely longer than its tapers just adds notch noise)
@@ -5635,7 +5700,7 @@ def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
         is_island = i > 0 and j < len(out)  # narrow (or pad) on both sides
         if is_island and run_len <= min_island:
             for k in range(i, j):
-                out[k].width = _neck_width_for_net(config, net_id, out[k].layer)
+                out[k].width = _nw(out[k].layer)
                 wide_flags[k] = False
         i = j
 
@@ -5648,7 +5713,7 @@ def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
 
     def _taper_pieces(seg, narrow_end: str):
         """Split seg into [body + taper steps]; narrow_end is 'start' or 'end'."""
-        narrow_w = _neck_width_for_net(config, net_id, seg.layer)
+        narrow_w = _nw(seg.layer)
         wide_w = seg.width
         taper_len = min(config.neckdown_taper_length, _seg_length(seg) / 3)
         if taper_len <= 0:

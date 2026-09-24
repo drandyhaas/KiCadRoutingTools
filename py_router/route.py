@@ -5193,6 +5193,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # (power_layer_config in oracle_reconnect) can fire.
                     power_net_widths=dict(
                         getattr(config, 'power_net_widths', None) or {}),
+                    # #1033: per-net widths ride along too, so the weld's
+                    # width ladder (and its narrowing record) reads the
+                    # net's own width -- a netclass or stored-impedance
+                    # width, not only a --power-nets one.
+                    net_track_widths=dict(
+                        getattr(config, 'net_track_widths', None) or {}),
+                    net_layer_widths=dict(
+                        getattr(config, 'net_layer_widths', None) or {}),
                     board_edge_clearance=_oedge)
                 from kicad_dru import install_layer_clearances
                 install_layer_clearances(_ocfg, None, input_file, None)

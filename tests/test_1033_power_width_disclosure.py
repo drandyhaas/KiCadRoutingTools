@@ -90,23 +90,53 @@ def t_assign():
         return [r for r in fab_tiers.escalation_summary()['narrowed']
                 if r['net'] == 1]
 
+    from obstacle_map import GridObstacleMap
+
+    def length_at(out, pred):
+        return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                   for s in out if pred(s.width))
+
+    # A 9 mm short edge whose route only fit at 0.15 overall, in FREE space
+    # away from its pads: the pad necks (neckdown_length each end) stay at
+    # the edge's width, the middle goes back to the requested 0.3 (#1033
+    # honour), and the ledger records the narrowing that remains.
     n0 = len(ledger())
-    segs = [make_seg(0, 0, 3, 0, width=0.3, net_id=1),
-            make_seg(3, 0, 6, 0, width=0.3, net_id=1)]
-    out = _assign_wide_route_widths(segs, cfg, 1, None, coord, ['F.Cu'], 0,
-                                    False, 0.15, neck_start=True)
+    segs = [make_seg(0, 0, 4.5, 0, width=0.3, net_id=1),
+            make_seg(4.5, 0, 9, 0, width=0.3, net_id=1)]
+    out = _assign_wide_route_widths(segs, cfg, 1, GridObstacleMap(1), coord,
+                                    ['F.Cu'], 0, False, 0.15, neck_start=True)
     new = ledger()[n0:]
-    check('short edge: every segment carries the uniform width',
-          all(abs(s.width - 0.15) < 1e-9 for s in out))
-    check('short edge: ONE narrowing row, site, requested, delivered, count',
+    check('short edge: the pad ends keep the edge width',
+          abs(out[0].width - 0.15) < 1e-9 and abs(out[-1].width - 0.15) < 1e-9,
+          [round(s.width, 4) for s in out])
+    check('short edge: the middle is widened back to the requested 0.3',
+          length_at(out, lambda w: abs(w - 0.3) < 1e-9) > 2.0,
+          [round(s.width, 4) for s in out])
+    check('short edge: no copper below the edge width, length conserved',
+          min(s.width for s in out) >= 0.15 - 1e-9
+          and abs(length_at(out, lambda w: True) - 9.0) < 1e-6)
+    check('short edge: ONE narrowing row, site, requested, delivered',
           len(new) == 1 and new[0]['site'] == 'power short edge'
-          and new[0]['requested'] == 0.3 and new[0]['delivered'] == 0.15
-          and new[0]['count'] == 2, new)
+          and new[0]['requested'] == 0.3 and new[0]['delivered'] == 0.15, new)
+
+    # The same edge with its whole length blocked at the wide margin: the
+    # widen-back must refuse every piece.
+    blocked = GridObstacleMap(1)
+    for gx in range(-5, 100):
+        for gy in (-2, -1, 0, 1, 2):
+            blocked.add_blocked_cell(gx, gy, 0)
+    segs = [make_seg(0, 0, 4.5, 0, width=0.3, net_id=1),
+            make_seg(4.5, 0, 9, 0, width=0.3, net_id=1)]
+    out = _assign_wide_route_widths(segs, cfg, 1, blocked, coord, ['F.Cu'],
+                                    1.0, False, 0.15, neck_start=True)
+    check('short edge, blocked everywhere: every piece stays at the edge width',
+          all(abs(s.width - 0.15) < 1e-9 for s in out),
+          [round(s.width, 4) for s in out])
 
     n1 = len(ledger())
     segs = [make_seg(0, 0, 3, 0, width=0.3, net_id=1)]
-    _assign_wide_route_widths(segs, cfg, 1, None, coord, ['F.Cu'], 0,
-                              False, None, neck_start=True)
+    _assign_wide_route_widths(segs, cfg, 1, GridObstacleMap(1), coord,
+                              ['F.Cu'], 0, False, None, neck_start=True)
     check('full width: nothing recorded', len(ledger()) == n1)
 
 
@@ -204,6 +234,31 @@ def t_end_to_end():
         check('end to end: the net routed', tot > 20.0, tot)
         check('end to end: it had to neck (the gap does not pass 0.3)',
               und > 0.0, und)
+        # #1033 honour: the neck is the pad ends and the pinch, not the run.
+        # Before the piecewise widen-back the whole 22 mm shipped at 0.127
+        # (one straight segment crossing the gap failed the fit as a whole).
+        check('end to end: no 0.127 run where 0.3 fits (under <= 10 of 22 mm)',
+              und <= 10.0, (und, tot))
+        # ...and the widened copper is legal: DRC-clean at the routed
+        # clearance, and still connected (connectivity is orthogonal to DRC).
+        drc = subprocess.run(
+            [sys.executable, '-X', 'utf8',
+             os.path.join(ROOT, 'py_router', 'check_drc.py'), out,
+             '--clearance', '0.1'],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', env=env, timeout=600)
+        check('end to end: the written board is DRC-clean at 0.1',
+              drc.returncode == 0 and 'Traceback' not in drc.stdout,
+              (drc.stdout or '')[-600:])
+        con = subprocess.run(
+            [sys.executable, '-X', 'utf8',
+             os.path.join(ROOT, 'py_router', 'check_connected.py'), out,
+             '--nets', '+3V3'],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', env=env, timeout=600)
+        check('end to end: +3V3 is connected',
+              con.returncode == 0 and 'Traceback' not in con.stdout,
+              (con.stdout or '')[-600:])
         check('end to end: power_widths agrees with the written board',
               abs(pw['length_mm'] - tot) < 0.02
               and abs(pw['under_mm'] - und) < 0.02, (pw, tot, und))
