@@ -907,6 +907,72 @@ def _load_defects(paths):
     return out
 
 
+#: The net-list flags whose values `record` checks for a shell-expanded glob
+#: (#1039 item 5).
+_NET_LIST_FLAGS = ('--nets', '--ignore-nets', '--rip-existing-nets',
+                   '--power-nets')
+
+
+def _globbed_net_tokens(argv):
+    """Values of a net-list flag in `argv` that are existing paths, until the
+    next `-`-prefixed token. A KiCad net name is never a file in the cwd, so
+    such a value is what an unquoted `*` became."""
+    out, on = [], False
+    for t in argv or ():
+        t = str(t)
+        if t.startswith('-'):
+            on = t.split('=', 1)[0] in _NET_LIST_FLAGS
+            if on and '=' in t:
+                v = t.split('=', 1)[1]
+                if v and os.path.exists(v):
+                    out.append(v)
+            continue
+        if on and os.path.exists(t):
+            out.append(t)
+    return out
+
+
+def _resolve_parent(a, store, lg, out_sha):
+    """(parent_sha, parent_source, error) for a `record` row (#1034).
+
+    `--parent` (a board path, or a sha / unique sha prefix the store or the
+    ledger knows) wins; else the first existing `.kicad_pcb` in `--argv` whose
+    sha is already stored, the output board excluded; else the last accepted
+    row -- which is whichever lineage accepted last, so the caller prints a
+    NOTE. A bad `--parent` is an error, and nothing may be written.
+    """
+    from board_store import sha256_file
+    rows = lg.entries()
+    if a.parent:
+        p = a.parent
+        if os.path.isfile(p):
+            return sha256_file(p), 'parent', None
+        key = p.strip().lower()
+        known = {r.get('result_sha') for r in rows} | {
+            d for d in (os.listdir(store.root) if os.path.isdir(store.root)
+                        else ()) if not d.endswith('.partial')}
+        known.discard(None)
+        if re.fullmatch(r'[0-9a-f]{6,64}', key):
+            hits = sorted(s for s in known if s.startswith(key))
+            if len(hits) == 1:
+                return hits[0], 'parent', None
+            if len(hits) > 1:
+                return None, None, (f"--parent {p!r} matches {len(hits)} "
+                                    f"stored boards; give more of the sha")
+        return None, None, (f"--parent {p!r} is neither an existing board "
+                            f"file nor a sha this store or ledger knows")
+    for t in a.argv or ():
+        t = str(t)
+        if t.lower().endswith('.kicad_pcb') and os.path.isfile(t):
+            s = sha256_file(t)
+            if s != out_sha and store.has(s):
+                return s, 'argv', None
+    prev = lg.last_accepted()
+    if prev and prev.get('result_sha'):
+        return prev.get('result_sha'), 'last_accepted', None
+    return None, None, None
+
+
 def cmd_record(a):
     from board_store import BoardStore, Ledger
     # --score-file: the payload as a PATH, not as argv.
@@ -1012,6 +1078,21 @@ def cmd_record(a):
                   f"KiCad net name is '/'-prefixed, so this row records nets "
                   f"that do not exist and would REPLAY as a vacuous pass. "
                   f"Re-run the command with {_MSYS_REMEDY}, then record it. "
+                  f"Nothing was written.", file=sys.stderr)
+            return 2
+        # #1039 item 5: a --nets value that is an EXISTING PATH is a glob the
+        # shell expanded (`--argv ... --nets *` unquoted became repo file
+        # names in run 32's --final row). The ledger is append-only, so the
+        # unreplayable argv could never be fixed afterwards.
+        _globbed = _globbed_net_tokens(a.argv)
+        if _globbed:
+            print(f"record: --argv's net list carries {len(_globbed)} "
+                  f"value(s) that are existing files -- "
+                  f"{', '.join(repr(t) for t in _globbed[:3])}"
+                  f"{' ...' if len(_globbed) > 3 else ''}. That is a glob "
+                  f"the shell expanded, not a net name, so the row would "
+                  f"replay a different command. Build the argv as an array "
+                  f"(or `set -f`), quote the glob, and read lever_argv back. "
                   f"Nothing was written.", file=sys.stderr)
             return 2
     # The same shape in --lever is a WARNING, not a refusal: the lever is prose
@@ -1365,6 +1446,26 @@ def cmd_record(a):
             return 2
 
     store = BoardStore(a.store or os.path.join(os.path.dirname(a.ledger), 'boards'))
+    # #1034: the parent is the board this lap was MADE FROM, resolved BEFORE
+    # anything is stored so a bad --parent writes nothing. It used to be the
+    # last ACCEPTED row unconditionally, so two lineages run side by side
+    # chained across each other (run 32: A1, made from A0, parented on B0).
+    from board_store import sha256_file as _sha256
+    _parent_sha, _parent_source, _parent_err = _resolve_parent(
+        a, store, Ledger(a.ledger), _sha256(a.board))
+    if _parent_err:
+        print(f"record: {_parent_err}. Pass the board this lap was made "
+              f"from (its path, or a recorded result_sha). Nothing was "
+              f"written.", file=sys.stderr)
+        return 2
+    if _parent_source == 'last_accepted':
+        print(f"record NOTE: parent_sha is the last ACCEPTED row "
+              f"({_parent_sha[:12]}), because neither --parent nor a stored "
+              f"board in --argv named one. When lineages run in parallel "
+              f"that is whichever lineage accepted last -- pass --parent "
+              f"<the board this lap was made from>.", file=sys.stderr)
+    if _parent_source == 'parent' and a.parent and os.path.isfile(a.parent):
+        store.put(a.parent)         # so step-back can reach the parent too
     sha = store.put(a.board)
     # Run-3 B4: three ledger entries shipped carrying a PRIOR board's score
     # because --score is free JSON with no binding to --board. board_score
@@ -1514,9 +1615,11 @@ def cmd_record(a):
                   f"({_hint}). `blocking` is a total, so the difference "
                   f"between these two rows is partly a difference in what was "
                   f"MEASURED, not in the board.", file=sys.stderr)
-    prev = lg.last_accepted()
     entry = {'iteration': len(lg.entries()), 'kind': a.kind,
-             'parent_sha': (prev or {}).get('result_sha'),
+             # #1034: resolved above -- --parent, else the recorded argv,
+             # else the last accepted row (NOTE printed); the source says which.
+             'parent_sha': _parent_sha,
+             'parent_source': _parent_source,
              'result_sha': sha, 'lever': a.lever,
              'lever_argv': list(a.argv) if a.argv else None,
              # _score_doc, not a THIRD json.loads: the payload was parsed and
@@ -2862,6 +2965,17 @@ def build_parser():
                         'text may instead ride after the token in '
                         '--stop-condition; giving it twice, differently, is '
                         'refused. Stored as entry["stop_reason"].')
+    r.add_argument('--parent', default=None, metavar='BOARD_OR_SHA',
+                   help='the board this lap was MADE FROM: a board path, or '
+                        'a recorded result_sha (a unique prefix will do). '
+                        'Stored as entry["parent_sha"], with '
+                        'entry["parent_source"]="parent". Omitted: the first '
+                        'existing .kicad_pcb in --argv whose sha is already '
+                        'stored (source "argv"), else the last ACCEPTED row '
+                        'with a NOTE (source "last_accepted"). Parallel '
+                        'lineages MUST pass it (#1034). A value that is '
+                        'neither is refused (exit 2), nothing written. Must '
+                        'come before --argv, which takes the rest of the line.')
     r.add_argument('--argv', nargs=argparse.REMAINDER, default=None,
                    help='the command that produced it -- what makes replay '
                         'possible. Refused (exit 2) when its first token is '

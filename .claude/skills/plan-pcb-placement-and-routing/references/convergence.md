@@ -133,9 +133,10 @@ says that out loud, and nothing else in the loop does.
 
 The shape below is the SUBSET of `record`'s line that carries weight — one
 JSONL line per iteration (there is no wrapper object, no `convergence.json`;
-the ledger IS the `.jsonl` file). A real row has **15** keys, not these 8:
+the ledger IS the `.jsonl` file). A real row has **16** keys, not these 8:
 `accepted, defects, iteration, kind, lens_source, lenses, lever, lever_argv,
-parent_sha, renders, result_sha, scope_refs, score, shape, t` — measured by
+parent_sha, parent_source, renders, result_sha, scope_refs, score, shape, t` —
+measured by
 reading one back, which is the only way to know. `stop_condition` and
 `stop_reason` (#901, below) join them on a row that carries one. Read a row,
 do not trust a block:
@@ -147,7 +148,8 @@ do not trust a block:
  //   second unclassified routing retry, and `--final --stop-condition 4`
  //   refuses without a live one. A lever that only repeats the shape word
  //   is refused too -- the lever is the MEASUREMENT that named the shape.
- "parent_sha": "9c41f0...",            // result_sha of the last ACCEPTED entry
+ "parent_sha": "9c41f0...",            // the board this lap was MADE FROM (#1034)
+ "parent_source": "parent",            // parent | argv | last_accepted -- how it was resolved
  "result_sha": "2ab77e...",            // content hash; step-back checks it out byte-exact
  "lever": "rip lever: --rip-existing-nets GPIO7, width pinned",
  "lever_argv": ["python3", "-X", "utf8", "route.py", "..."],  // what makes replay possible
@@ -162,9 +164,15 @@ Fields that carry weight:
   wk/stepback.kicad_pcb` checks one out byte-exact (`--ledger` and `--out`
   are BOTH required; without them argparse exits 2 before anything runs).
   The
-  parent is the last *accepted* board, **not** iteration N−1 — it is what
-  `render_placement --before` takes; using N−1 renders a delta that never
-  existed.
+  parent is the board this lap was **made from**, **not** iteration N−1 — it
+  is what `render_placement --before` takes; using N−1 renders a delta that
+  never existed. `record` resolves it in this order (#1034): `--parent <board
+  path or sha>` when given (a bad value exits 2, nothing written); else the
+  first existing `.kicad_pcb` in `--argv` whose sha is already in the store
+  (the output board excluded); else the last *accepted* row, with a printed
+  NOTE. `parent_source` says which. **Parallel lineages MUST pass
+  `--parent`**: the last accepted row is whichever lineage accepted last, so
+  lineage A's lap would chain onto lineage B's board (run 32).
 - **`lever` + `lever_argv`** — `lever` is the one-line intent; `lever_argv` is
   the reproducible command (`replay` refuses prose-only entries, exit 4).
   Anything the schema has no field for — the verdict list, say — goes **into

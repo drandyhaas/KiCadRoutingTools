@@ -1166,7 +1166,11 @@ for the candidate AND the baseline row it beat. `record` now nags exactly
 this: a score carrying `failures` without `failed_nets` draws a NOTE.
 
 **`parent_sha` is the board this iteration actually came from** — `record`
-derives it from the last accepted entry, not from iteration N−1. When you need a
+takes it from `--parent <board path or sha>`, else from the first stored
+`.kicad_pcb` in the recorded `--argv`, and only then from the last accepted
+entry (with a NOTE; `parent_source` says which) — never from iteration N−1.
+**When lineages run in parallel, pass `--parent`**: the last accepted entry
+is whichever lineage accepted last (#1034). When you need a
 path for `render_placement --before`, resolve it out of the store by that sha
 rather than guessing; using N−1 renders a delta that never existed. **Never
 reuse an output path across iterations**: a ledger that says

@@ -273,7 +273,7 @@ only when you know better than the board.
 
 | key | decision |
 |---|---|
-| `parent_sha` | the last **accepted** board (content hash; `step-back --to` checks it out). Resolve it for `render_placement --before`; using N−1 renders a delta that never existed |
+| `parent_sha` + `parent_source` | the board this lap was **made from** (content hash; `step-back --to` checks it out): `--parent`, else the first stored `.kicad_pcb` in `--argv`, else the last **accepted** board with a NOTE (#1034) — parallel lineages must pass `--parent`. Resolve it for `render_placement --before`; using N−1 renders a delta that never existed |
 | `lever` + `lever_argv` | `lever` is the one-line intent, `lever_argv` the reproducible command — `replay` refuses prose-only entries, and `record` refuses an argv carrying an MSYS2-rewritten net name (`C:/Program Files/Git/…`), which would replay as a vacuous pass. "tuned parameters" is not a lever. A verdict list has no field of its own: name it **in the `--lever` text** |
 | `stop_condition` + `stop_reason` | #901. The condition is a TOKEN — `1 \| 2 \| 3 \| 4 \| DONE-EXHAUSTED \| STUCK \| BUDGET` — checked on EVERY record, not only beside a failing lens. The prose goes in `stop_reason`, written either as `--stop-reason` or after the token (`"3: five laps, no new copper"`) |
 | `accepted` (`--rejected` at record time) | a rejected iteration is data — keeping it is what makes "five unchanged iterations" (stop-3) detectable |
