@@ -55,6 +55,9 @@ obstacles" even on an empty board (#1031). Read it from
 `checklist.a_off_outline.keepout_copper` (per-pad detail in
 `keepout_copper_pads`); `place_pose` refuses a move that worsens it and
 `check_assembly` prints it, without making it a `not_buildable` conjunct.
+The P4/P6/P-close gate refuses only band pads the placement ADDED when the
+render was made with `--before` (it then carries the before board's own
+census as `keepout_copper_before`); without it the judgement is absolute.
 
 ### Scope the search to the refs the gate names
 
