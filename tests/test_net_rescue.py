@@ -209,14 +209,22 @@ def test_rescued_power_net_is_widened_where_it_fits():
     assert summary is not None and summary['recovered'] == ['VICTIM'], summary
     segs = [s for s in pcb.segments if s.net_id == VICTIM]
 
-    def length(pred):
-        return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
-                   for s in segs if pred(s))
-    outside = length(lambda s: max(s.start_x, s.end_x) < 0.85
-                     or min(s.start_x, s.end_x) > 2.15)
-    outside_wide = length(lambda s: (max(s.start_x, s.end_x) < 0.85
-                                     or min(s.start_x, s.end_x) > 2.15)
-                          and s.width > 0.2)
+    def length(pred_x, pred_w):
+        # sampled along each segment, so a long unsplit segment spanning the
+        # pinch still counts its free-space part
+        tot = 0.0
+        for s in segs:
+            L = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+            for k in range(40):
+                x = s.start_x + (s.end_x - s.start_x) * (k + 0.5) / 40
+                if pred_x(x) and pred_w(s.width):
+                    tot += L / 40
+        return tot
+
+    def _free(x):
+        return (-0.4 < x < 0.85) or (2.15 < x < 3.4)
+    outside = length(_free, lambda w: True)
+    outside_wide = length(_free, lambda w: w > 0.2)
     pinch = [s.width for s in segs
              if min(s.start_x, s.end_x) < 1.9 and max(s.start_x, s.end_x) > 1.1]
     assert outside > 0.5 and outside_wide >= 0.5 * outside, \
