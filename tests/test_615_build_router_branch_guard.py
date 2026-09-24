@@ -161,8 +161,24 @@ if __name__ == '__main__':
     import inspect
     import pathlib
     import shutil
+    import stat
     import tempfile
     import traceback
+
+    def _rmtree(path):
+        """Remove a fixture dir that holds a git repo. Git writes its object
+        files read-only, and on Windows rmtree cannot unlink a read-only file
+        -- ignore_errors=True left every repo behind in TEMP, one per test per
+        run. Clear the bit and retry; say so if anything still survives."""
+        def _writable_retry(func, p, _exc):
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        handler = ({'onexc': _writable_retry} if sys.version_info >= (3, 12)
+                   else {'onerror': _writable_retry})
+        try:
+            shutil.rmtree(path, **handler)
+        except OSError as exc:
+            print(f'  (could not remove {path}: {exc})')
 
     class _MonkeyPatch:
         """The one fixture method these tests use: setattr, undone after."""
@@ -198,6 +214,6 @@ if __name__ == '__main__':
             traceback.print_exc()
         finally:
             mp.undo()
-            shutil.rmtree(tmp, ignore_errors=True)
+            _rmtree(tmp)
     print(f'{len(tests) - len(failed)}/{len(tests)} passed')
     sys.exit(1 if failed or not tests else 0)
