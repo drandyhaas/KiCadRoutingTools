@@ -50,7 +50,7 @@ ROWS = [
      (T1042,), 'KILLED'),
     ('the-future-shown-before-the-first-beat', 'mp',
      "    if visible is None:",
-     "    if visible is None and False:",
+     "    if visible is None:\n        visible = 10 ** 6\n    if False:",
      (T1042,), 'KILLED'),
     ('screen-note-dropped', 'mp',
      "                        [INSTRUMENT, SCREEN_NOTE]),",

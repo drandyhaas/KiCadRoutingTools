@@ -397,6 +397,14 @@ def test_no_subprocess_and_cheap_gates_first():
         if not os.path.isfile(intent):
             fail('BROKEN: could not emit an intent for the fixture')
             return
+        # a ledger that ALSO scores the placed board, with a number no
+        # instrument would give: with an intent, the line must not read it
+        led = os.path.join(d, 'ledger.jsonl')
+        with open(led, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'iteration': 0, 'kind': 'placement',
+                                't': 1.0, 'result_sha': _sha(PLACED),
+                                'score': {'blocking_by':
+                                          {'floorplan': 777}}}) + '\n')
         saved = {n: getattr(subprocess, n) for n in
                  ('run', 'Popen', 'call', 'check_call', 'check_output')}
         saved_os = (os.system, os.popen)
@@ -406,7 +414,7 @@ def test_no_subprocess_and_cheap_gates_first():
         try:
             t, why = MP.build_track([('seed', SEED, None),
                                      ('placed', PLACED, None)], [],
-                                    intent=intent, cache={})
+                                    intent=intent, ledger=led, cache={})
         except AssertionError as exc:
             t, why = None, str(exc)
         finally:
@@ -420,6 +428,9 @@ def test_no_subprocess_and_cheap_gates_first():
             if bt.crossings is None or bt.floorplan is None or \
                     bt.floorplan_source != MP.FP_INSTRUMENT:
                 fail('in-process measurement incomplete: %r' % (bt,))
+            elif bt.floorplan == 777:
+                fail('with an intent the line read the LEDGER\'s floorplan '
+                     '(two instruments on one line)')
             else:
                 print('    in process: placed crossings %s, floorplan %s'
                       % (bt.crossings, bt.floorplan))
@@ -639,7 +650,9 @@ def test_readable_or_not_drawn_across_layouts_ratios_sizes():
                         fail('%s: the board box is %d px of %d'
                              % (tag, g2.board.h, g2.frame.h))
                     for name, p in dbg['plots'].items():
-                        if p[3] - p[1] < MP.PLOT_MIN_PX or p[2] <= p[0]:
+                        # 48 is the SPEC (#1042 verification), not the
+                        # module's constant: a lowered constant must fail
+                        if p[3] - p[1] < 48 or p[2] <= p[0]:
                             fail('%s: %s plot %r' % (tag, name, p))
                     subs = dict(zip(dbg['names'], dbg['panels']))
                     txt = dbg['texts']
