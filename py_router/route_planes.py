@@ -4625,7 +4625,11 @@ Examples:
             board_edge_clearance=effective_board_edge_clearance(args.input_file, 0.0),
         )
         from kicad_dru import install_layer_clearances
-        install_layer_clearances(gnd_config, None, None, pcb_data)  # #498
+        # #498: the INPUT's .kicad_dru. pcb_data is the parsed OUTPUT, whose
+        # sibling rules file fix_project_for_output only copies after this
+        # block -- so discovering it via pcb_data.source_path found nothing on
+        # a fresh output path, and return vias ignored every layer rule.
+        install_layer_clearances(gnd_config, None, args.input_file, pcb_data)
         coord = GridCoord(gnd_config.grid_step)
 
         # Cross-class clearance (#434/#439), resolved exactly as create_plane
