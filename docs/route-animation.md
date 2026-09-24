@@ -197,7 +197,28 @@ The **output extension picks the format**:
   (bundles a static ffmpeg binary — no system install). If unavailable, the
   animator falls back to writing a sibling `.gif`.
 - **`.gif`** (default) — native Pillow, **no dependency**, autoplays inline in
-  chat / Markdown / GitHub issue bodies. Larger and 256-color.
+  chat / Markdown / GitHub issue bodies. Larger and 256-color. Pillow's GIF
+  writer holds every frame it is given, so a film over 260 frames is
+  **strided** to fit (one frame in N kept, each lasting N frame-times, the way
+  `awx/evolve_movie.py` does it), and the animator says so. The `.mp4` is never
+  strided.
+
+### Memory and the frame budget (#1036)
+
+`make_movie` spools every frame to a temp directory as it is drawn
+(`py_router/frame_spool.py`) and applies the post-passes (the planned frame,
+the attempts band, the run clock, the iso panel) per frame while the encoder
+streams, so memory does not grow with the frame count. Run 32's 22-board chain
+reached 29.5 GB before this change. `tests/test_1036_streaming.py` measures it:
+with 6x the frames, peak RSS stays flat, while the same frames held in a list
+grow by about 300 MB.
+
+A per-segment route trace plays one frame per event, and a long one makes a
+film nobody watches to the end. `--max-frames N` (default
+`$KICAD_MOVIE_MAX_FRAMES`, else 2400; `0` = no budget) is the film's frame
+budget. Each traced step gets a fair share of what is left, and a trace that
+does not fit its share is revealed in `--chunks` batches instead. The movie
+prints `TRACE OVER BUDGET` naming the step.
 
 ---
 
