@@ -283,7 +283,7 @@ ROWS = [
      (T_PANEL,), 'KILLED'),
     ('the-failure-reason-is-not-drawn-into-the-panel', 'p',
      "            _wrapped_text(d, font, drawn_error,\n"
-     "                          10, max(8, H // 3), W - 20, (196, 128, 128))",
+     "                          10, max(8, H // 3), W - 20, error_fg)",
      "            pass",
      (T_PANEL,), 'KILLED'),
     ('the-temp-dir-failure-escapes-as-a-traceback', 'p',

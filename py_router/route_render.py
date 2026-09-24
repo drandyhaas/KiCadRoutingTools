@@ -849,9 +849,10 @@ def main() -> int:
                     help='anti-alias factor; 1 = fastest, 2 = crisp (default 2)')
     ap.add_argument('--layers', default=None,
                     help='comma-separated copper layers to draw (default: all)')
-    ap.add_argument('--layer-alpha', type=int, default=150,
+    ap.add_argument('--layer-alpha', type=int, default=None,
                     help='per-layer copper opacity 1-255; <255 blends overlapping '
-                         'layers at crossings, 255 = opaque (default 150)')
+                         'layers at crossings, 255 = opaque (default: the '
+                         'theme\'s own measured alpha, dark 150, light 205)')
     ap.add_argument('--no-pads', action='store_true')
     ap.add_argument('--no-zones', action='store_true')
     ap.add_argument('--view', default=None, metavar='X0,Y0,X1,Y1',
@@ -862,7 +863,7 @@ def main() -> int:
                     help='draw reference designators at footprint origins (a '
                          'cross marks the exact JSON coordinate). Default: on '
                          'for a --view crop, off whole-board')
-    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--theme', default=None, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--ruler', default=None, action=argparse.BooleanOptionalAction,
                     help='mm coordinate ticks along the top/left edges, so the '
                          'picture is matchable to JSON coordinates. Default: '

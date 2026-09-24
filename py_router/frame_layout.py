@@ -77,6 +77,10 @@ SIDEBAR_BOARD_FRAC = 0.73           # of frame WIDTH            (B)
 INSET_PANEL_FRAC = (0.30, 0.26)     # of frame W, H             (C)
 SPLIT_PANEL_FRAC = 0.32             # of frame HEIGHT           (D)
 SPLIT_ISO_FRAC = 0.42               # of the split box's WIDTH  (D)
+#: With the iso view on, the SIDEBAR's panel is split top/bottom rather than
+#: left/right: it is a tall column, and a left/right split of a column gives
+#: two slivers.
+SIDEBAR_ISO_FRAC = 0.50             # of the sidebar box's HEIGHT (B)
 
 
 class Box(NamedTuple):
@@ -233,7 +237,7 @@ def resolve_layout(name, board_bounds, *, quiet=False) -> Tuple[str, str]:
 
 
 def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
-               panel=False, foot_px=0, track_px=0,
+               panel=False, foot_px=0, track_px=0, iso=False,
                rail_frac=RAIL_FRAC, foot_frac=FOOT_FRAC,
                legacy_size=None, quiet=False) -> FrameGeometry:
     """The whole frame, decided ONCE.
@@ -243,6 +247,20 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     clock's band) passed IN, so this module never needs PIL to measure text.
     `legacy_size` is the `(W, H)` the board-aspect path already produced, so
     `'legacy'` can reproduce it exactly rather than recompute it.
+
+    **A DECLARED SIZE IS KEPT (#946/C4).** When the frame's aspect is
+    declared -- an explicit `ratio`, or a layout with an aspect of its own
+    (A, B, D) -- `foot_px` and `track_px` are reserved INSIDE that frame, out
+    of the board's share. They used to be ADDED to it, so `--aspect 16:9`
+    with an attempts band came out 1600x1036 rather than 1600x900. Only a
+    frame whose aspect is the BOARD's (legacy with no ratio, inset) still
+    grows to hold them, because there is no declared size to keep.
+
+    `iso=True` asks for the panel to be SPLIT so the 3D view has a region of
+    its own: `panel_split = (iso box, layer-strip box)` for the stacked (A),
+    sidebar (B) and split (D) layouts. D always splits, as it always has.
+    Inset (C) and legacy have no panel to split; there the iso view stacks
+    under the frame, as it always has, and the frame grows.
     """
     key, why = resolve_layout(layout, board_bounds, quiet=quiet)
     spec = LAYOUTS[key]
@@ -250,6 +268,7 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     # An explicit ratio always wins: `legacy_size` is a shortcut for
     # reproducing today's frame EXACTLY, and asking for a ratio is asking
     # for something other than today's frame.
+    declared = bool(ratio) or spec.aspect is not None
     if key == 'legacy' and legacy_size and not ratio:
         W, H = int(legacy_size[0]), int(legacy_size[1])
         aspect = (W / float(H)) if H else 1.0
@@ -267,7 +286,8 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
         else:
             W, H = max(1, int(round(size * aspect))), size
 
-    H += int(foot_px) + int(track_px)
+    if not declared:
+        H += int(foot_px) + int(track_px)
     # BOTH dimensions, see the module docstring.
     W, H = even(W), even(H)
     aspect = W / float(H)
@@ -297,10 +317,18 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
         ph = even(H * STACKED_PANEL_FRAC)
         board = Box(0, inner_y, W, max(2, inner_h - ph))
         panel_box = Box(0, inner_y + board.h, W, ph)
+        if iso:
+            iw = even(W * SPLIT_ISO_FRAC)
+            split = (Box(0, panel_box.y, iw, ph),
+                     Box(iw, panel_box.y, W - iw, ph))
     elif spec.panel == 'right':
         bw = even(W * SIDEBAR_BOARD_FRAC)
         board = Box(0, inner_y, bw, inner_h)
         panel_box = Box(bw, inner_y, W - bw, inner_h)
+        if iso:
+            ih = even(inner_h * SIDEBAR_ISO_FRAC)
+            split = (Box(bw, inner_y, W - bw, ih),
+                     Box(bw, inner_y + ih, W - bw, inner_h - ih))
     elif spec.panel == 'inset':
         board = Box(0, inner_y, W, inner_h)
         pw = even(W * INSET_PANEL_FRAC[0])
@@ -341,6 +369,12 @@ def _self_check(g: FrameGeometry) -> None:
         if not g.frame.contains(b):
             raise FrameSizeError('layout %r: %s %s is outside the frame %s'
                                  % (g.layout, name, tuple(b), tuple(g.frame)))
+    if g.panel_split and g.panel is not None:
+        for b in g.panel_split:
+            if not g.panel.contains(b):
+                raise FrameSizeError('layout %r: split box %s is outside the '
+                                     'panel %s' % (g.layout, tuple(b),
+                                                   tuple(g.panel)))
     if g.panel is not None and not g.overlays_board:
         if g.board.overlaps(g.panel):
             raise FrameSizeError('layout %r: the panel %s overlaps the board '
@@ -390,6 +424,8 @@ def frame_status_line(geom: FrameGeometry) -> str:
     line = ('movie: layout %s%s  %dx%d at %.2f:1, board %dx%d'
             % (title, letter, geom.frame.w, geom.frame.h, geom.aspect,
                geom.board.w, geom.board.h))
+    if geom.track is not None:
+        line += ', attempts band %dpx inside' % geom.track.h
     if geom.requested_layout != geom.layout:
         line += '  |  %s -> %s' % (geom.requested_layout, geom.chosen_by)
     return line

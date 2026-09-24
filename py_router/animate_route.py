@@ -663,7 +663,8 @@ class _OverBudget(Exception):
 def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                  marks=None, theme=None, layout=None, aspect=None,
                  geom_out=None, title=None, frames_sink=None,
-                 max_frames=None, notes=None):
+                 max_frames=None, notes=None, attempts_band=False,
+                 iso_panel=False):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
     final board. ``build_run`` is this with the chain discovered from a run dir.
 
@@ -689,6 +690,13 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     board-to-board `reveal_delta(..., chunks)` reveal, and the fallback is
     printed LOUDLY and appended to ``notes`` when a list is passed. ``None``
     or 0 = no budget, today's behaviour.
+
+    ``attempts_band`` (#946/C4) reserves the attempts band INSIDE the planned
+    frame (`plan_frame(track_px=)`), so a declared ratio keeps its size; the
+    band's box is `geom_out[0].track` and `movie_attempts.attach(box=)` draws
+    into it. ``iso_panel`` asks the layout to split its panel so the 3D view
+    has a region of its own (`geom.panel_split[0]`); the layer strip then
+    draws into the other half.
     """
     from kicad_parser import parse_kicad_pcb
     if not final:
@@ -721,14 +729,28 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     _geom = None
     if True:
         import frame_layout
-        _g = frame_layout.plan_frame(
-            r.pcb.board_info.board_bounds, layout=layout or 'legacy',
+        _plan_kw = dict(
+            layout=layout or 'legacy',
             ratio=frame_layout.parse_ratio(aspect), size=size,
             # A panel is reserved for every layout that declares one, EXCEPT
             # 'legacy' -- which has no chrome at all, because legacy means
             # today's frame and today's frame has no lower box.
             panel=(str(layout or 'legacy').lower() != 'legacy'),
-            legacy_size=(r.W, r.H))
+            legacy_size=(r.W, r.H), iso=bool(iso_panel))
+        _g = frame_layout.plan_frame(r.pcb.board_info.board_bounds,
+                                     **_plan_kw)
+        if attempts_band:
+            # The band's height is a fraction of the FRAME it sits in, so the
+            # frame is planned once to learn its size and once more with the
+            # band reserved. Two calls of pure arithmetic, no pixels.
+            try:
+                import movie_attempts
+                _bh = movie_attempts.band_height(_g.frame.w, _g.frame.h)
+            except Exception:                                  # noqa: BLE001
+                _bh = 0
+            if _bh:
+                _g = frame_layout.plan_frame(r.pcb.board_info.board_bounds,
+                                             track_px=_bh, **_plan_kw)
         # Only when the layout genuinely MOVES the board box. On 'legacy' the
         # box is the renderer's own size evened, and the evening is applied by
         # cropping the composed frame instead -- because
@@ -737,7 +759,10 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         # own falsifier: if the layout work needs a second aim, the layout work
         # is wrong.
         moved = (_g.board.w, _g.board.h) != (r.W, r.H)
-        if _g.layout != 'legacy' and moved:
+        # A legacy frame with a DECLARED ratio or a reserved band is not
+        # today's frame any more, so its board box is honoured too; the plain
+        # legacy frame keeps the one-set_view path the test pins.
+        if moved and (_g.layout != 'legacy' or aspect or _g.track):
             r.set_canvas(_g.board.w, _g.board.h)
         # `geom_out` is an OUTPUT collector, never the switch. It was both
         # until a full film was rendered twice: `build_boards(layout='split')`
@@ -762,6 +787,11 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # no box -- retains nothing.
     m.want_panel = bool(_geom is not None and _geom.panel is not None
                         and _geom.panel.h > 0)
+    #: #946/C4: the iso view takes `panel_split[0]`; the strip draws into
+    #: `panel_split[1]`, and the iso half is left as panel ground for
+    #: `movie_panels.compose_two_panel(box=)` to fill.
+    m.iso_in_panel = bool(iso_panel and _geom is not None
+                          and _geom.panel_split)
     if m.want_panel:
         # Seeded from the chain's FIRST board, not its last: the opening
         # snapshot is of the board as it arrived, and a film of a seeding run
@@ -900,7 +930,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # In place, so peak memory stays about two frames rather than twice the
     # movie: the same reason `movie_panels.compose_two_panel` does it that way.
     if _geom is not None:
-        _compose_into_frame(m.frames, _geom, r, m.chrome)
+        _compose_into_frame(m.frames, _geom, r, m.chrome,
+                            iso_in_panel=getattr(m, 'iso_in_panel', False))
     return m.frames
 
 
@@ -947,7 +978,7 @@ def _png_info(meta):
     return info
 
 
-def _compose_into_frame(frames, geom, r, chrome=None):
+def _compose_into_frame(frames, geom, r, chrome=None, iso_in_panel=False):
     """Fit each board-box frame into its planned frame, IN PLACE.
 
     Two cases, and the first is the common one:
@@ -967,7 +998,8 @@ def _compose_into_frame(frames, geom, r, chrome=None):
     W, H = geom.frame.w, geom.frame.h
     # #1036: one per-frame transform. On a spool it is applied lazily while
     # the encoder streams; on a list it rewrites in place, as it always did.
-    chrome_fn = (_chrome_drawer(len(frames), geom, r, chrome)
+    chrome_fn = (_chrome_drawer(len(frames), geom, r, chrome,
+                                iso_in_panel=iso_in_panel)
                  if chrome and geom.rail.h > 0 else None)
 
     def _one(i, f):
@@ -985,7 +1017,7 @@ def _compose_into_frame(frames, geom, r, chrome=None):
     frame_spool.transform(frames, _one, out_size=(W, H))
 
 
-def _draw_panel(d, geom, r, c):
+def _draw_panel(d, geom, r, c, iso_in_panel=False):
     """The lower box, whichever of its four contents this phase asks for.
 
     Four REAL contents, not one content and three captions: the phase-1
@@ -1004,6 +1036,9 @@ def _draw_panel(d, geom, r, c):
         box = geom.panel
         d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
                     fill=th.rgb('chrome_panel') if th else (14, 14, 18))
+        if iso_in_panel and geom.panel_split:
+            # the iso half is filled later by compose_two_panel(box=)
+            box = geom.panel_split[1]
         if phase == 'routing':
             render_panels.draw_layer_strip(
                 d, box, bounds=r.bounds, segments=c.get('live', ()),
@@ -1030,7 +1065,7 @@ def _draw_chrome(frames, geom, r, chrome):
     frame_spool.transform(frames, _chrome_drawer(len(frames), geom, r, chrome))
 
 
-def _chrome_drawer(n_frames, geom, r, chrome):
+def _chrome_drawer(n_frames, geom, r, chrome, iso_in_panel=False):
     """``fn(i, frame) -> frame`` drawing the rail and foot for frame ``i``.
 
     Each region is sized for ITS OWN content and ellipsises inside itself, so a
@@ -1044,17 +1079,18 @@ def _chrome_drawer(n_frames, geom, r, chrome):
                           if c.get('lap_at') is not None}))
 
     def _fn(i, f):
-        _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks)
+        _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks, iso_in_panel)
         return f
     return _fn
 
 
-def _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks):
+def _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks,
+                     iso_in_panel=False):
     from PIL import ImageDraw
     import render_chrome
     c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
     d = ImageDraw.Draw(f)
-    _draw_panel(d, geom, r, c)
+    _draw_panel(d, geom, r, c, iso_in_panel=iso_in_panel)
     render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
                             c.get('rail_right', ''), theme=th,
                             progress=i / float(n), ticks=ticks)
@@ -1258,7 +1294,9 @@ def main() -> int:
                          '.gif (native, autoplays inline). Default: .gif')
     ap.add_argument('--size', type=int, default=1000)
     ap.add_argument('--supersample', type=int, default=1)
-    ap.add_argument('--layer-alpha', type=int, default=150)
+    ap.add_argument('--layer-alpha', type=int, default=None,
+                    help="per-layer copper opacity 1-255. Default: the "
+                         "theme's own measured alpha (dark 150, light 205)")
     ap.add_argument('--fps', type=float, default=6.0)
     ap.add_argument('--rip-hold', type=int, default=2)
     ap.add_argument('--end-hold', type=float, default=1.5)

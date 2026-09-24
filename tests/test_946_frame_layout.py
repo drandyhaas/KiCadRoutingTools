@@ -301,7 +301,125 @@ def test_set_canvas_leaves_the_margin_rule_alone():
         print('  PASS: canvas moves, margin rule does not')
 
 
+def _declared(size, ratio):
+    if ratio >= 1.0:
+        w, h = size, max(1, int(round(size / ratio)))
+    else:
+        w, h = max(1, int(round(size * ratio))), size
+    return FL.even(w), FL.even(h)
+
+
+def test_a_declared_ratio_is_the_size_asked_for_with_the_band_inside():
+    """#946/C4, as PLAN data over the whole cross product. With a declared
+    ratio the frame is EXACTLY that ratio's size whatever chrome is reserved:
+    the attempts band (`track_px`) and the clock (`foot_px`) come out of the
+    board's share instead of growing the frame -- they used to be ADDED, so a
+    16:9 film with a band was 1600x1036. The band sits inside the frame and
+    off the board, and with `iso=True` the split boxes sit inside the panel.
+    """
+    _mark = len(_FAIL)
+    n = 0
+    for lk in FL.LAYOUTS:
+        for rk, ratio in FL.RATIOS.items():
+            if not ratio:
+                continue
+            for sn, bb in SHAPES.items():
+                for iso in (False, True):
+                    n += 1
+                    g = FL.plan_frame(bb, layout=lk, ratio=ratio, size=900,
+                                      panel=True, track_px=120, foot_px=0,
+                                      iso=iso)
+                    want = _declared(900, ratio)
+                    if (g.frame.w, g.frame.h) != want:
+                        fail('%s/%s/%s iso=%s: frame %dx%d, declared %dx%d'
+                             % (lk, rk, sn, iso, g.frame.w, g.frame.h,
+                                want[0], want[1]))
+                        continue
+                    t = g.track
+                    if t is None or not g.frame.contains(t):
+                        fail('%s/%s/%s: band %r is not inside the frame'
+                             % (lk, rk, sn, t))
+                    elif t.overlaps(g.board):
+                        fail('%s/%s/%s: band %r overlaps the board %r'
+                             % (lk, rk, sn, tuple(t), tuple(g.board)))
+                    if iso and g.panel_split:
+                        for b in g.panel_split:
+                            if not g.panel.contains(b):
+                                fail('%s/%s/%s: split box %r outside the '
+                                     'panel' % (lk, rk, sn, tuple(b)))
+                    if iso and g.layout in ('stacked', 'sidebar', 'split') \
+                            and not g.panel_split:
+                        fail('%s/%s/%s: iso asked, but no split box for the '
+                             '3D view' % (lk, rk, sn))
+    if len(_FAIL) == _mark:
+        print('  PASS: %d declared plans hold their size, band inside, off '
+              'the board' % n)
+
+
+def test_the_encoded_film_is_the_declared_size_in_both_themes():
+    """The same claim read back from real FILES: layout x ratio x theme, each
+    with an attempts band, encoded and measured. The render path is where
+    the band used to grow the frame (`movie_attempts.attach` after the
+    fact), so a plan that is right and a film that is not is the failure
+    this exists to see."""
+    _mark = len(_FAIL)
+    import make_movie
+    import movie_attempts as MA
+    rows = tuple(MA.Attempt(i, 'lap %d' % i, 'completion',
+                            i - 1 if i else None, i % 3 != 1, False,
+                            float(20 - i), False, None) for i in range(8))
+    track = MA.Track(rows, 'blocking (lower better)', 'converge', 'fixture')
+    d = tempfile.mkdtemp()
+    n = 0
+    for lk in ('stacked', 'sidebar', 'inset', 'split', 'legacy'):
+        for rk in ('16:9', '9:16', '1:1'):
+            for th in ('dark', 'light'):
+                n += 1
+                out = os.path.join(d, '%s_%s_%s.gif'
+                                   % (lk, rk.replace(':', 'x'), th))
+                import contextlib
+                import io
+                err = io.StringIO()
+                # 400 px, so even the 16:9 frame (400x224) can carry the
+                # 64 px band under its 34% ceiling: a film where the band
+                # DECLINED would pass the size check without testing it.
+                with contextlib.redirect_stderr(err):
+                    got = make_movie.make_movie(
+                        [BOARD], out=out, size=400, quiet=True, layout=lk,
+                        aspect=rk, theme=th, attempts=track)
+                if not got:
+                    fail('%s/%s/%s: no film' % (lk, rk, th))
+                    continue
+                if 'layout-reserved band' not in err.getvalue():
+                    fail('%s/%s/%s: the band was not drawn into a reserved '
+                         'box, so this film does not test the claim: %s'
+                         % (lk, rk, th, err.getvalue()[-200:]))
+                with Image.open(got) as im:
+                    sz = im.size
+                    corner = im.convert('RGB').getpixel((sz[0] - 1, 0))
+                want = _declared(400, FL.parse_ratio(rk))
+                if sz != want:
+                    fail('%s/%s/%s: encoded %s, declared %s'
+                         % (lk, rk, th, sz, want))
+                # the theme reached the frame: its top-right corner is the
+                # theme's ground or chrome, never the OTHER theme's ground
+                other = ('light' if th == 'dark' else 'dark')
+                if corner == RT_theme(other).rgb('ground'):
+                    fail('%s/%s/%s: the frame corner is the %s ground'
+                         % (lk, rk, th, other))
+    if len(_FAIL) == _mark:
+        print('  PASS: %d films (5 layouts x 3 ratios x 2 themes) encoded at '
+              'the declared size, band inside' % n)
+
+
+def RT_theme(name):
+    import render_theme
+    return render_theme.theme(name)
+
+
 TESTS = (
+    test_a_declared_ratio_is_the_size_asked_for_with_the_band_inside,
+    test_the_encoded_film_is_the_declared_size_in_both_themes,
     test_every_plan_is_even_on_both_axes,
     test_every_named_box_is_inside_the_frame,
     test_a_vs_b_is_inferred_and_c_vs_d_is_never,

@@ -76,6 +76,19 @@ _STRIP_BG = _THEME_DARK.rgb('chrome_strip')
 _STRIP_FG = _THEME_DARK.rgb('chrome_strip_text')
 
 
+def _colours(theme=None):
+    """`(panel_bg, strip_bg, strip_fg, error_fg)` for the ACTIVE theme.
+
+    The module constants above are DARK's values, kept as names only because
+    tests read them; every draw path goes through here, so `--theme light`
+    reaches the iso panel as it reaches every other region of the frame.
+    """
+    import render_theme
+    th = render_theme.theme(theme, strict=False)
+    return (th.rgb('chrome_panel'), th.rgb('chrome_strip'),
+            th.rgb('chrome_strip_text'), th.rgb('chrome_error'))
+
+
 def _finite(value, default, name):
     """float(value) when it is finite, else `default` with a warning.
 
@@ -108,13 +121,18 @@ class IsoOpts(object):
 
     __slots__ = ('max_renders', 'height_frac', 'yaw0_deg', 'sweep_deg',
                  'tilt_deg', 'quality', 'floor', 'perspective', 'zoom', 'jobs',
-                 'timeout', 'cli', 'keep_dir', 'require_models')
+                 'timeout', 'cli', 'keep_dir', 'require_models', 'theme')
 
     def __init__(self, max_renders=24, height_frac=0.62, yaw0_deg=45.0,
                  sweep_deg=60.0, tilt_deg=-45.0, quality='basic', floor=False,
                  perspective=False, zoom=None, jobs=None, timeout=120.0,
-                 cli=None, keep_dir=None, require_models=True):
+                 cli=None, keep_dir=None, require_models=True, theme=None):
         self.max_renders = int(max_renders)
+        #: #946/C4: the ACTIVE theme, a name or a `render_theme.Theme`. The
+        #: panel's ground, caption strip and error text used to be the DARK
+        #: module constants below whatever `--theme` said, so a light film
+        #: carried a dark iso slab under it. None = `default_theme()`.
+        self.theme = theme
         #: #1016. Draw the panel only when the board has bodies to show. ON by
         #: default: a panel that shows a bare rectangle rotating for 38% of
         #: every frame is worse than no panel, and the fraction that decides it
@@ -374,7 +392,7 @@ def panel_scale(png_paths, box_wh, strip):
     return best
 
 
-def iso_panel(box_wh, png_path, caption, error='', scale=None):
+def iso_panel(box_wh, png_path, caption, error='', scale=None, theme=None):
     """``(panel, error)``: a foreign PNG letterboxed into an EXACT box, captioned.
 
     The second return value is what the caller must fold into its failure count.
@@ -395,7 +413,8 @@ def iso_panel(box_wh, png_path, caption, error='', scale=None):
     from route_render import load_font
 
     W, H = box_wh
-    canvas = Image.new('RGB', (W, H), _PANEL_BG)
+    panel_bg, strip_bg, strip_fg, error_fg = _colours(theme)
+    canvas = Image.new('RGB', (W, H), panel_bg)
     strip = max(18, H // 10)
     d = ImageDraw.Draw(canvas)
     drawn_error = error or ''
@@ -403,7 +422,7 @@ def iso_panel(box_wh, png_path, caption, error='', scale=None):
     if error:
         font = load_font(max(11, strip // 2))
         msg = 'no 3D view: %s' % error
-        _wrapped_text(d, font, msg, 10, max(8, H // 3), W - 20, (196, 128, 128))
+        _wrapped_text(d, font, msg, 10, max(8, H // 3), W - 20, error_fg)
     elif png_path and os.path.isfile(png_path):
         try:
             im = _alpha_crop(Image.open(png_path))
@@ -432,12 +451,12 @@ def iso_panel(box_wh, png_path, caption, error='', scale=None):
             drawn_error = 'could not read the render (%s)' % exc
             font = load_font(max(11, strip // 2))
             _wrapped_text(d, font, drawn_error,
-                          10, max(8, H // 3), W - 20, (196, 128, 128))
+                          10, max(8, H // 3), W - 20, error_fg)
 
-    d.rectangle([0, H - strip, W, H], fill=_STRIP_BG)
+    d.rectangle([0, H - strip, W, H], fill=strip_bg)
     font = load_font(max(11, strip // 2))
     _clipped_text(d, font, caption or '', 8, H - strip + max(1, strip // 6),
-                  W - 16, _STRIP_FG)
+                  W - 16, strip_fg)
     return canvas, drawn_error
 
 
@@ -480,13 +499,14 @@ def _text_w(d, s, font):
         return 8 * len(s)
 
 
-def stack(top, bottom):
+def stack(top, bottom, theme=None):
     """One image, ``top`` above ``bottom``. Widths must match."""
     from PIL import Image
     if top.width != bottom.width:
         raise ValueError('stack: widths differ (%d vs %d)'
                          % (top.width, bottom.width))
-    out = Image.new('RGB', (top.width, top.height + bottom.height), _PANEL_BG)
+    out = Image.new('RGB', (top.width, top.height + bottom.height),
+                    _colours(theme)[0])
     out.paste(top.convert('RGB') if top.mode != 'RGB' else top, (0, 0))
     out.paste(bottom, (0, top.height))
     return out
@@ -503,7 +523,57 @@ def _report(state, detail='', **kw):
     return r
 
 
-def compose_two_panel(frames, marks, final_board, opts=None):
+def _gate(gate_board, opts):
+    """``(off_report_or_None, cli)``: whether the panel may run on this chain.
+
+    The models gate, then kicad-cli -- in that order, for the reason the
+    comment above `compose_two_panel`'s call explains. Shared by
+    `compose_two_panel` and `preflight`, so a caller that asks BEFORE it
+    plans its frame gets the same answer the composer will.
+    """
+    import kicad_iso_render as kir
+    cli, why = kir.resolve_cli(opts.cli)
+    if opts.require_models:
+        _models = (kir.resolve_models(gate_board,
+                                      kir.model_dirs(cli, gate_board))
+                   if gate_board else None)
+        _tot = (_models or {}).get('total') or 0
+        _found = (_models or {}).get('found') or 0
+        _how = ('' if cli else
+                ' [env-only: no kicad-cli, so the install\'s 3dmodels tree '
+                'was not searched]')
+        if _tot and _found < _tot * kir.MOSTLY_BARE_FRACTION:
+            return _report(
+                'mostly_bare',
+                '%d of %d 3D models resolve (< %.0f%%)%s'
+                % (_found, _tot, kir.MOSTLY_BARE_FRACTION * 100, _how),
+                models=_models), cli
+        if not _tot:
+            return _report('mostly_bare',
+                           'the board references no 3D models',
+                           models=_models), cli
+    if not cli:
+        return _report('did_not_run', why), None
+    return None, cli
+
+
+def preflight(gate_board, opts=None):
+    """None when the iso panel WOULD run on a chain opening with
+    ``gate_board``, else the OFF report `compose_two_panel` would return.
+
+    #946/C4: a layout that reserves a region for the 3D view has to decide
+    before the first frame whether to reserve it -- a region reserved for a
+    panel that is then gated off would be a blank box in every frame. Renders
+    nothing; the probe render still happens in `compose_two_panel`.
+    """
+    opts = opts or IsoOpts()
+    if opts.max_renders <= 0:
+        return _report('disabled', '--iso-max-renders %d' % opts.max_renders)
+    off, _cli = _gate(gate_board, opts)
+    return off
+
+
+def compose_two_panel(frames, marks, final_board, opts=None, box=None):
     # No `quiet` parameter. It was declared here and read by NOTHING,
     # while make_movie dutifully passed `quiet=quiet` -- so the call site
     # looked like it was doing something. In a change whose own commit is
@@ -517,6 +587,12 @@ def compose_two_panel(frames, marks, final_board, opts=None):
     peak memory is about two frames rather than twice the movie -- a composed
     1000x1620 RGB frame is 4.9 MB, and a 300-frame movie held twice would be
     3 GB.
+
+    ``box`` (#946/C4), a `frame_layout.Box`, is the iso half of a layout's
+    `panel_split`: the panel is PASTED INTO that reserved region instead of
+    stacked under the frame, so the frame keeps exactly the size the layout
+    planned -- which is what makes a `--aspect 16:9` film 16:9 with the iso
+    view in it. Without a box the panel stacks under, as it always has.
 
     When the panel cannot run, ``frames`` is returned COMPLETELY UNTOUCHED --
     same list, same Image objects -- and ``report['state']`` says why. That is
@@ -580,34 +656,18 @@ def compose_two_panel(frames, marks, final_board, opts=None):
     # With no CLI the gate falls back to environment-only resolution and says
     # so in its detail, because that count can undercount an install tree it
     # could not locate.
-    cli, why = kir.resolve_cli(opts.cli)
-    if opts.require_models:
-        _gate_board = next((b for b in owner if b), None)
-        _models = (kir.resolve_models(_gate_board,
-                                      kir.model_dirs(cli, _gate_board))
-                   if _gate_board else None)
-        _tot = (_models or {}).get('total') or 0
-        _found = (_models or {}).get('found') or 0
-        _how = ('' if cli else
-                ' [env-only: no kicad-cli, so the install\'s 3dmodels tree '
-                'was not searched]')
-        if _tot and _found < _tot * kir.MOSTLY_BARE_FRACTION:
-            return frames, _report(
-                'mostly_bare',
-                '%d of %d 3D models resolve (< %.0f%%)%s'
-                % (_found, _tot, kir.MOSTLY_BARE_FRACTION * 100, _how),
-                models=_models)
-        if not _tot:
-            return frames, _report('mostly_bare',
-                                   'the board references no 3D models',
-                                   models=_models)
-
-    if not cli:
-        return frames, _report('did_not_run', why)
+    _off, cli = _gate(next((b for b in owner if b), None), opts)
+    if _off is not None:
+        return frames, _off
 
 
     shots, frame_to_shot = plan_iso_shots(owner, opts)
-    W, _H_top, H_iso, _total = panel_geometry(frames[0].size, opts.height_frac)
+    if box is not None and box.w > 0 and box.h > 0:
+        W, H_iso = int(box.w), int(box.h)
+    else:
+        box = None
+        W, _H_top, H_iso, _total = panel_geometry(frames[0].size,
+                                                  opts.height_frac)
     req_w = int(round(W * kir.REQUEST_OVERSCAN))
     req_h = int(round(H_iso * kir.REQUEST_OVERSCAN))
 
@@ -677,7 +737,7 @@ def compose_two_panel(frames, marks, final_board, opts=None):
             # The panel reports back: a PNG that rendered but would not DECODE
             # is a failure the count must see, and it is only discoverable here.
             panels[k], drawn = iso_panel((W, H_iso), png, cap, error=err,
-                                         scale=shared)
+                                         scale=shared, theme=opts.theme)
             errors[k] = err or drawn or ''
         failed = sum(1 for e in errors.values() if e)
         # The report's single models figure is the FILM'S OPENING board, and the
@@ -689,15 +749,25 @@ def compose_two_panel(frames, marks, final_board, opts=None):
         # held beyond the one being written; on a list it rewrites in place.
         import frame_spool
         _W0, _H0 = frames[0].size
-        frames = frame_spool.transform(
-            frames, lambda i, f: stack(f, panels[frame_to_shot[i]]),
-            out_size=(_W0, _H0 + H_iso))
+        if box is not None:
+            def _into(i, f):
+                f.paste(panels[frame_to_shot[i]], (int(box.x), int(box.y)))
+                return f
+            frames = frame_spool.transform(frames, _into, out_size=(_W0, _H0))
+        else:
+            frames = frame_spool.transform(
+                frames,
+                lambda i, f: stack(f, panels[frame_to_shot[i]],
+                                   theme=opts.theme),
+                out_size=(_W0, _H0 + H_iso))
 
         rep = _report('ran', '', shots=[{'board': s.board, 'yaw': s.rotate[2],
                                          'first': s.first, 'last': s.last,
                                          'error': errors.get(k, '')}
                                         for k, s in enumerate(shots)],
                       failed=failed, models=models, panel_wh=(W, H_iso),
+                      placement=('in the layout\'s panel' if box is not None
+                                 else 'stacked under the frame'),
                       boards=len({s.board for s in shots}))
         return frames, rep
     finally:
@@ -721,6 +791,8 @@ def iso_status_line(report):
         wh = report.get('panel_wh') or (0, 0)
         line = ('movie: iso panel ON  -- %d render(s) over %d board(s), panel '
                 '%dx%d' % (n, report.get('boards') or 0, wh[0], wh[1]))
+        if report.get('placement'):
+            line += ' ' + report['placement']
         if report.get('failed'):
             line += ', %d FAILED (kept the box)' % report['failed']
         import kicad_iso_render as kir

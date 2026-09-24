@@ -302,21 +302,40 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
         if e.get('result_sha'):
             by_sha.setdefault(e['result_sha'], e.get('iteration', i))
     rows = []
+    # LINEAGE. A row's parent is the row that produced its `parent_sha`. A row
+    # that names none (or names a board no row produced) is drawn from the
+    # LAST ACCEPTED row before it -- the loop's own rule for what a lap starts
+    # from -- and COUNTED, because under parallel lineages that guess can be
+    # wrong: `record` does not yet take a parent explicitly (#1034). The first
+    # row is the root either way.
+    fallback = 0
+    last_acc = None
     for i, e in enumerate(rows_in):
         sc = e.get('score') if isinstance(e.get('score'), dict) else None
         b = sc.get('blocking') if sc else None
+        idx = int(e.get('iteration', i))
+        parent = by_sha.get(e.get('parent_sha'))
+        if parent is None and i > 0 and last_acc is not None:
+            parent = last_acc
+            fallback += 1
         rows.append(Attempt(
-            index=int(e.get('iteration', i)),
+            index=idx,
             label=str(e.get('lever') or e.get('kind') or 'lap')[:40],
             kind=str(e.get('kind') or 'completion'),
-            parent=by_sha.get(e.get('parent_sha')),
+            parent=parent,
             accepted=bool(e.get('accepted')),
             screened=False,
             score=None if b is None else float(b),
             admissible=(b == 0),
             board=e.get('result_sha')))
+        if e.get('accepted'):
+            last_acc = idx
+    note = _note(rows)
+    if fallback:
+        note += ('; %d parent(s) by last-accepted (no parent_sha; until '
+                 'record takes a parent explicitly, #1034)' % fallback)
     return Track(tuple(rows), 'blocking (lower better)', 'converge',
-                 _note(rows), gate_record=False)
+                 note, gate_record=False)
 
 
 def attempts_from_evolve_ledger(path: str) -> Optional[Track]:
@@ -428,16 +447,91 @@ def discover(hint: str) -> Optional[Track]:
     d = hint if os.path.isdir(hint) else os.path.dirname(os.path.abspath(hint))
     if not d:
         return None
-    t = attempts_from_loop_dir(d)
-    if t:
-        return t
+    loop = attempts_from_loop_dir(d)
+    led, led_path = None, None
     for name in ('ledger.jsonl', 'converge.jsonl'):
         p = os.path.join(d, name)
         if os.path.isfile(p):
-            t = attempts_from_converge_ledger(p)
-            if t:
-                return t
-    return None
+            led = attempts_from_converge_ledger(p)
+            if led:
+                led_path = p
+                break
+    if loop and led:
+        return join_tracks(led, loop, first=_which_first(d, led_path))
+    return loop or led
+
+
+def _which_first(d, ledger_path):
+    """'ledger' or 'loop': which half of a place-and-route run STARTED
+    first, read off the ledger's own `t` and the sidecars' write times."""
+    t_led = None
+    try:
+        with open(ledger_path, encoding='utf-8') as f:
+            for line in f:
+                try:
+                    doc = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(doc, dict) and doc.get('t') is not None:
+                    t_led = float(doc['t'])
+                    break
+    except (OSError, ValueError, TypeError):
+        t_led = None
+    side = glob.glob(os.path.join(d, 'loop_round*.json'))
+    t_loop = min((os.path.getmtime(p) for p in side), default=None)
+    if t_led is None or t_loop is None:
+        return 'ledger'
+    return 'ledger' if t_led <= t_loop else 'loop'
+
+
+def join_tracks(a: Track, b: Track, first='ledger') -> Track:
+    """ONE attempts graph for a place-and-route run (#946/C4).
+
+    A combined run leaves two records of its search: the converge ledger
+    (placement laps and routing laps, `kind` telling them apart) and, when
+    `place_route_loop` ran, its `loop_round*.json` sidecars. Drawn apart they
+    are two films; joined, the x-axis is LAPS ACROSS BOTH HALVES -- the
+    first half keeps its indices, the second is shifted past it -- every
+    attempt is a point (accepted, rejected or ungraded), and the gold record
+    runs through both, the way `evolve_movie.Ribbon` draws a search.
+
+    The two axes are both a run's BLOCKING term (the ledger's
+    `score.blocking`, the loop's `failures`), which is why they may share one
+    y-axis; the label says it is both. A loop ranked on an `--accept-cmd`
+    scalar is a QUALITY axis and is not joined -- the ledger half is drawn
+    alone, and the note says the loop half was left out.
+    """
+    led, loop = (a, b) if a.source == 'converge' else (b, a)
+    if loop.gate_record:
+        return led._replace(note=led.note + '; loop rounds not joined '
+                            '(ranked on --accept-cmd, not a blocking term)')
+    halves = (led, loop) if first == 'ledger' else (loop, led)
+    rows, base = [], 0
+    for h in halves:
+        if not h.attempts:
+            continue
+        lo = min(x.index for x in h.attempts)
+        shift = base - lo
+        for x in h.attempts:
+            rows.append(x._replace(
+                index=x.index + shift,
+                parent=None if x.parent is None else x.parent + shift))
+        base = max(r.index for r in rows) + 1
+    # Where the halves MEET, the second half's root descends from the first
+    # half's last accepted attempt: the loop starts from the board the
+    # ledger's laps kept, or the other way round.
+    first_n = len(halves[0].attempts)
+    if first_n and len(rows) > first_n and rows[first_n].parent is None:
+        acc = [r.index for r in rows[:first_n] if r.accepted]
+        if acc:
+            rows[first_n] = rows[first_n]._replace(parent=acc[-1])
+    note = '%s + %s: %s' % (halves[0].source, halves[1].source, _note(rows))
+    extra = [h.note.split('; ', 1)[1] for h in halves if '; ' in h.note
+             and 'last-accepted' in h.note]
+    if extra:
+        note += '; ' + '; '.join(extra)
+    return Track(tuple(rows), 'blocking / failures (lower better)',
+                 'converge+loop', note, gate_record=False)
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +674,20 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
         vmax = max(graded) if graded else 1.0
         if vmax - vmin < 1e-9:
             vmax = vmin + 1.0
+        # A SYMLOG axis when one attempt dwarfs the rest. Run 32's ledger
+        # opens at blocking 12703 (the unplaced pile) and spends ~200 laps
+        # between 19 and 31: on a linear axis every one of those laps is the
+        # same pixel row and the record's drops are invisible. log10(1+v)
+        # keeps 0 (admissible) on the axis, which a plain log cannot.
+        import math
+        symlog = vmin >= 0 and vmax > 50.0 * (vmin + 1.0)
+
+        def _fy(v):
+            return math.log10(1.0 + max(0.0, v)) if symlog else v
+
+        def _inv(u):
+            return (10.0 ** u - 1.0) if symlog else u
+        fmin, fmax = _fy(vmin), _fy(vmax)
         xs = [a.index for a in rows]
         x0v, x1v = min(xs), max(xs)
         span = max(1, x1v - x0v)
@@ -589,26 +697,28 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
             return px0 + (px1 - px0) * ((i - x0v) / float(span))
 
         def Y(v):
-            return py0 + (py1 - py0) * ((v - vmin) / (vmax - vmin))
+            return py0 + (py1 - py0) * ((_fy(v) - fmin) / (fmax - fmin))
 
         # the axis, and the one thing it means
         for frac in (0.0, 0.5, 1.0):
             yy = py0 + frac * (py1 - py0)
             d.line([px0, yy, px1, yy], fill=th.rgb('chrome_rule'))
             d.text((box.x + 8, yy - 6),
-                   '%g' % round(vmin + frac * (vmax - vmin), 2),
+                   '%g' % round(_inv(fmin + frac * (fmax - fmin)),
+                                0 if symlog else 2),
                    fill=th.rgb('chrome_text_faint'), font=fs)
         # The caption is the axis's meaning plus the disclosure, and it is
         # DROPPED rather than ellipsised or overprinted when the band is too
         # narrow to hold it beside the plot -- same rule as the layer strip's
         # count. A half-sentence about what the axis means is worse than none:
         # 'failures (lower bet...' invites the reader to guess the rest.
-        cap = '%s  -  %s' % (track.metric, track.note)
+        metric = track.metric + ('  [log scale]' if symlog else '')
+        cap = '%s  -  %s' % (metric, track.note)
         if d.textlength(cap, font=f) <= (px1 - px0) * 0.92:
             d.text((px1, box.y + 3), cap, fill=th.rgb('chrome_text_dim'),
                    font=f, anchor='ra')
-        elif d.textlength(track.metric, font=f) <= (px1 - px0) * 0.92:
-            d.text((px1, box.y + 3), track.metric,
+        elif d.textlength(metric, font=f) <= (px1 - px0) * 0.92:
+            d.text((px1, box.y + 3), metric,
                    fill=th.rgb('chrome_text_dim'), font=f, anchor='ra')
 
         vis = [a for a in rows if a.index <= horizon]
@@ -666,8 +776,15 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
         return False  # a band is never worth failing a render over
 
 
-def attach(frames, track: Optional[Track], *, theme=None, marks=None):
-    """Grow every frame by a constant band and draw the graph into it.
+def attach(frames, track: Optional[Track], *, theme=None, marks=None,
+           box=None):
+    """Draw the graph into a band on every frame.
+
+    ``box`` (#946/C4), a `frame_layout.Box`, is the band the LAYOUT reserved
+    (`FrameGeometry.track`): the graph is drawn INTO it and the frame keeps
+    the size the layout planned, so every ratio preset stays the size it
+    declares. Without a box every frame GROWS by a constant band, as it
+    always did -- the path for a caller that planned no band.
 
     Returns `(frames, report)`. **When there is nothing to draw the frame list
     comes back COMPLETELY UNTOUCHED** -- the same list object holding the same
@@ -710,7 +827,11 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
                          'rather than cropping them' % sorted(sizes)[:3])
         return frames, report
     W, H = frames[0].size
-    bh = band_height(W, H)
+    if box is not None and box.w > 0 and box.h > 0:
+        bh = int(box.h)
+    else:
+        box = None
+        bh = band_height(W, H)
     if not bh:
         report['why'] = ('the frame is %dx%d; a legible band would be over '
                          '%.0f%% of it, so there is no room for one'
@@ -737,7 +858,9 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
     except Exception:                                          # noqa: BLE001
         th = None
     bg = th.rgb('ground') if th is not None else (14, 16, 18)
-    box = frame_layout.Box(0, H, W, bh)
+    into = box is not None
+    if not into:
+        box = frame_layout.Box(0, H, W, bh)
     # `draw_track` RETURNS whether it drew: a band shorter than its own plot
     # rectangle declines, and reporting `drawn=True` over a blank strip is an
     # OFF state reading like success -- which is the one thing this module's
@@ -745,11 +868,20 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
     # size, so it is asked ONCE, on a scratch band, before any frame is
     # touched -- which is also what lets a spool apply the band lazily while
     # the encoder streams (#1036).
-    _probe = Image.new('RGB', (W, bh), bg)
+    _probe = Image.new('RGB', (box.w, bh), bg)
     drew = bool(draw_track(ImageDraw.Draw(_probe),
-                           frame_layout.Box(0, 0, W, bh), track, upto=hi,
+                           frame_layout.Box(0, 0, box.w, bh), track, upto=hi,
                            theme=th))
-    if drew:
+    if drew and into:
+        def _into(i, f):
+            up = horizons[i] if horizons else (lo + (hi - lo) * (i / float(n)))
+            d = ImageDraw.Draw(f)
+            d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
+                        fill=bg)
+            draw_track(d, box, track, upto=up, theme=th)
+            return f
+        frames = frame_spool.transform(frames, _into, out_size=(W, H))
+    elif drew:
         def _band(i, f):
             canvas = Image.new('RGB', (W, H + bh), bg)
             canvas.paste(f, (0, 0))
@@ -762,9 +894,10 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
                       why='the band is %d px, too short for its own plot; '
                           'nothing was drawn in it' % bh)
         return frames, report
-    report.update(drawn=True, band_px=bh,
-                  why='%d attempts from %s (%s)'
-                      % (len(track.attempts), track.source, track.note))
+    report.update(drawn=True, band_px=bh, reserved=into,
+                  why='%d attempts from %s (%s)%s'
+                      % (len(track.attempts), track.source, track.note,
+                         ', in the layout-reserved band' if into else ''))
     return frames, report
 
 

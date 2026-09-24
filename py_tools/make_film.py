@@ -244,7 +244,7 @@ def parse_positional(items, reject_globs):
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
-def _card_frame(size_wh, image_path, caption):
+def _card_frame(size_wh, image_path, caption, theme=None):
     """A diagnostic held at frame size: letterboxed, captioned, not cropped.
 
     Cropping to fill would cut the legend off a delta render, and the legend is
@@ -253,7 +253,10 @@ def _card_frame(size_wh, image_path, caption):
     from PIL import Image, ImageDraw
     from route_render import load_font
     W, H = size_wh
-    from render_theme import DARK as _TH
+    # The ACTIVE theme (#946/C4): a card on a light film used to be a dark
+    # slab, the one frame in the film that ignored `--theme`.
+    import render_theme
+    _TH = render_theme.theme(theme, strict=False)
     canvas = Image.new('RGB', (W, H), _TH.rgb('chrome_panel'))
     strip = max(22, H // 9)
     if image_path and os.path.exists(image_path):
@@ -279,7 +282,7 @@ def _card_frame(size_wh, image_path, caption):
     return canvas
 
 
-def _badge(frame, text, rgb=None):
+def _badge(frame, text, rgb=None, theme=None):
     """Mark a frame as an attempt: a border and a tag, drawn in place.
 
     Without it a rejected beat is indistinguishable from a kept one, and a film
@@ -289,7 +292,8 @@ def _badge(frame, text, rgb=None):
     # `rgb=None` -> the theme's `status_tried`. #1012 moves it off red: a red
     # badge on a frame whose copper also flashes red is the same collision
     # #946 is about. #1011 keeps the value.
-    from render_theme import DARK as _TH
+    import render_theme
+    _TH = render_theme.theme(theme, strict=False)
     rgb = _TH.rgb('status_tried') if rgb is None else rgb
     from PIL import ImageDraw
     from route_render import load_font
@@ -311,9 +315,10 @@ def _badge(frame, text, rgb=None):
 
 
 def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
-               layer_alpha=150, rip_hold=2, chunks=6, camera='auto',
+               layer_alpha=None, rip_hold=2, chunks=6, camera='auto',
                camera_budget=0.0, tween=10, quiet=False, theme=None,
-               attempts=None, attempts_from=None, layout=None, aspect=None):
+               attempts=None, attempts_from=None, layout=None, aspect=None,
+               panels=None, iso_opts=None):
     """Frames for the whole shot list. One render pass, one scale.
 
     `attempts` is a `movie_attempts.Track` -- the search behind this film. Left
@@ -321,6 +326,10 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
     directory, because the sidecars that record the search sit next to the
     boards a film is made from. `None` after that is a real answer: a chain
     with no search behind it gets no band.
+
+    `panels` is make_movie's (#946/C4): 'xray' or 'xray+iso'. With the iso
+    view on, a layout that has a panel to split gives the 3D view a region of
+    its own; legacy and inset stack it under the frame.
     """
     import animate_route as a
     import render_theme
@@ -367,12 +376,37 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
     # no rail and no box was the one place the design system could not be
     # seen doing its job.
     _geom = []
+    # #946/C4: the attempts are found BEFORE the frame is planned, so the band
+    # is reserved inside a declared ratio rather than grown under it.
+    try:
+        import movie_attempts
+        if attempts is None and attempts_from != '':
+            attempts = movie_attempts.discover(
+                attempts_from or os.path.dirname(os.path.abspath(final)))
+    except Exception as exc:                                    # noqa: BLE001
+        if not quiet:
+            print(f"make_film: no attempts ({exc})", file=sys.stderr)
+        attempts = None
+    import make_movie as _mm
+    want_iso = _mm._panels_wanted(panels, quiet)
+    iso_box = False
+    if want_iso:
+        import movie_panels
+        iso_opts = iso_opts or movie_panels.IsoOpts()
+        if iso_opts.theme is None:
+            iso_opts.theme = _th
+        if str(layout or 'legacy').lower() not in ('legacy', 'inset'):
+            iso_box = movie_panels.preflight(steps[0][1], iso_opts) is None
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
                             theme=_th, layout=layout, aspect=aspect,
-                            geom_out=_geom)
+                            geom_out=_geom,
+                            attempts_band=bool(attempts is not None
+                                               and len(attempts.attempts) >= 2),
+                            iso_panel=iso_box)
     if not frames:
         return []
+    _g0 = _geom[0] if _geom else None
 
     # #1021. THE ATTEMPTS BAND, AND IT GOES HERE -- BEFORE THE BADGE LOOP.
     # `_badge` draws a border on the frame it is given; attach the band
@@ -387,17 +421,28 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
     # the boards themselves -- no sidecars means no band.
     try:
         import movie_attempts
-        if attempts is None and attempts_from != '':
-            attempts = movie_attempts.discover(
-                attempts_from or os.path.dirname(os.path.abspath(final)))
-        frames, _rep = movie_attempts.attach(frames, attempts, theme=_th,
-                                             marks=marks)
+        frames, _rep = movie_attempts.attach(
+            frames, attempts, theme=_th, marks=marks,
+            box=(_g0.track if _g0 is not None else None))
         if not quiet:
             print('make_film: ' + movie_attempts.status_line(_rep),
                   file=sys.stderr)
     except Exception as exc:                                    # noqa: BLE001
         if not quiet:
             print(f"make_film: no attempts band ({exc})", file=sys.stderr)
+
+    # The iso view, after the band and BEFORE the badges and cards, for the
+    # band's reason: a badge's border must enclose the whole composed frame,
+    # and the cards are cut at the composed size.
+    if want_iso:
+        import movie_panels
+        _box = (_g0.panel_split[0] if (iso_box and _g0 is not None
+                                      and _g0.panel_split) else None)
+        frames, _irep = movie_panels.compose_two_panel(
+            frames, marks, final, iso_opts,
+            **({'box': _box} if _box is not None else {}))
+        print('make_film: ' + movie_panels.iso_status_line(_irep),
+              file=sys.stderr)
 
     # Badge every frame that belongs to an attempt.
     by_step = {}
@@ -410,7 +455,7 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
             continue
         n_att += 1
         for f in frames[first:last]:
-            _badge(f, 'TRIED')
+            _badge(f, 'TRIED', theme=_th)
 
     # Splice the cards in where they sit in the shot order. Walk the shot list
     # and the marks together: the Nth board shot is the Nth mark, and a card
@@ -430,7 +475,8 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                                     else len(frames))
         for c in pending:
             inserts.setdefault(at, []).extend(
-                [_card_frame(size_wh, c['path'], c['caption'])] * hold_frames(c['hold']))
+                [_card_frame(size_wh, c['path'], c['caption'], theme=_th)]
+                * hold_frames(c['hold']))
         pending = []
         # skip the auto-inserted revert step so the pairing stays aligned
         mark_i += 1
@@ -438,7 +484,8 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
             mark_i += 1
     for c in pending:
         inserts.setdefault(len(frames), []).extend(
-            [_card_frame(size_wh, c['path'], c['caption'])] * hold_frames(c['hold']))
+            [_card_frame(size_wh, c['path'], c['caption'], theme=_th)]
+            * hold_frames(c['hold']))
 
     out = []
     for i, f in enumerate(frames):
@@ -460,6 +507,12 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
               f"(the writer reports what the file actually holds)",
               file=sys.stderr)
     return out
+
+
+def _iso_opts(a):
+    import movie_panels
+    return movie_panels.IsoOpts(require_models=not a.iso_allow_bare,
+                                theme=a.theme)
 
 
 def main(argv=None):
@@ -493,7 +546,9 @@ def main(argv=None):
     ap.add_argument('--size', type=int, default=DEFAULT_SIZE)
     ap.add_argument('--fps', type=float, default=DEFAULT_FPS)
     ap.add_argument('--supersample', type=int, default=1)
-    ap.add_argument('--layer-alpha', type=int, default=150)
+    ap.add_argument('--layer-alpha', type=int, default=None,
+                    help="per-layer copper opacity 1-255. Default: the "
+                         "theme's own measured alpha (dark 150, light 205)")
     ap.add_argument('--rip-hold', type=int, default=2)
     ap.add_argument('--chunks', type=int, default=6)
     ap.add_argument('--end-hold', type=float, default=1.5)
@@ -506,7 +561,7 @@ def main(argv=None):
                     help="frames per part move (0 snaps)")
     ap.add_argument('--png-dir', help="also dump every frame as a PNG")
     ap.add_argument('--shots-json', help="write the resolved shot list here")
-    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--theme', default=None, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--layout', default=None,
                     help="frame layout: 'legacy' (default, today's frame), "
                          "'stacked', 'sidebar', 'inset', 'split' or 'auto'. "
@@ -515,6 +570,15 @@ def main(argv=None):
     ap.add_argument('--aspect', default=None, metavar='W:H',
                     help="target frame aspect; 'board' (default) keeps the "
                          "board's own bounding box")
+    ap.add_argument('--panels', default=None, choices=('xray', 'xray+iso'),
+                    help="'xray' (default, or $KICAD_MOVIE_PANELS) or "
+                         "'xray+iso': a kicad-cli 3D view, in the layout's "
+                         "own panel when it has one to split (stacked, "
+                         "sidebar, split), else under the frame. Same gate "
+                         "as make_movie: a mostly-bare board gets none")
+    ap.add_argument('--iso-allow-bare', action='store_true',
+                    help='draw the 3D view even when its models do not '
+                         'resolve (#1016)')
     ap.add_argument('--no-attempts', action='store_true',
                     help="drop the attempts band -- the boards alone")
     ap.add_argument('--quiet', action='store_true')
@@ -564,6 +628,8 @@ def main(argv=None):
                         chunks=a.chunks, camera=a.camera,
                         camera_budget=a.camera_budget, tween=a.tween,
                         quiet=a.quiet, layout=a.layout, aspect=a.aspect,
+                        panels=a.panels,
+                        iso_opts=_iso_opts(a),
                         attempts=attempts,
                         attempts_from=('' if a.no_attempts else
                                        (a.from_loop_dir or
@@ -574,7 +640,10 @@ def main(argv=None):
         print("make_film: nothing to animate", file=sys.stderr)
         return 1
     import animate_route as ar
-    ar.save_movie(frames, a.out, a.fps, a.end_hold, png_dir=a.png_dir)
+    # theme=: the pad a mixed-size film is letterboxed with is the theme's
+    # ground. Without it a light film's letterbox was the DARK ground.
+    ar.save_movie(frames, a.out, a.fps, a.end_hold, png_dir=a.png_dir,
+                  theme=a.theme)
     return 0
 
 

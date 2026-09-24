@@ -108,7 +108,7 @@ with per-layer transparency so overlaps blend at crossings.
 
 ```bash
 python3 py_router/route_render.py BOARD.kicad_pcb [-o OUT.png] [--size 1600]
-    [--supersample 2] [--layer-alpha 150] [--no-pads] [--no-zones]
+    [--supersample 2] [--layer-alpha N] [--no-pads] [--no-zones]
     [--layers F.Cu,B.Cu]
 ```
 
@@ -518,6 +518,31 @@ existing movie bit-for-bit"*): making `auto` the default would change the shape
 of every existing artifact — the GUI recorder's, `place_route_loop`'s
 `placement.mp4`, `render_run`'s.
 
+**A declared size is kept.** With `--aspect` given, or a layout with an aspect
+of its own (`stacked`, `sidebar`, `split`), the frame is exactly that size.
+The attempts band is reserved inside it (`plan_frame(track_px=)`), out of the
+board's share. It used to be grown under every frame afterwards, so a 16:9 film
+with a band came out taller than 16:9. `tests/test_946_frame_layout.py` checks
+the whole layout × ratio cross product as plan data, and encodes 30 real films
+(5 layouts × 3 ratios × 2 themes) and reads their size back. Two things still
+grow the frame, and the status lines say so: the run clock (its height is
+measured from the finished text) and the iso view on `legacy`/`inset`, which
+have no panel to put it in.
+
+**The 3D view goes into the layout's own panel** with `--panels xray+iso` on
+`make_movie.py` or `make_film.py`. On `stacked` and `split` the lower box is
+split left/right (the iso view gets 42% of the width). On `sidebar` the column
+is split top/bottom. The per-layer strip draws into the other half. The panel's
+gate is asked before the frame is planned (`movie_panels.preflight`), so a
+board that would be gated as mostly bare gets no empty box reserved for it.
+
+**Themes reach every region.** The cards and badges in `make_film`, the iso
+panel's ground, caption strip and error text, and the run clock's band draw in
+the active theme. `--theme` takes `dark` or `light` and refuses anything else.
+`--layer-alpha` defaults to the theme's own measured alpha (dark 150, light
+205). The CLIs used to pass 150 explicitly, so LIGHT's measured 205 was never
+used.
+
 | layout | arrangement | frame aspect | px/mm on copper | px per layer cell |
 |---|---|---|---|---|
 | `stacked` | board full width, panel below | 0.62:1 | 10.00 | 113 000 |
@@ -693,6 +718,29 @@ staircase collapses to a single point.
 `metrics: {}` on purpose, and a converge row's `blocking: null` means a
 component that was asked for could not answer. Neither is dropped and neither is
 plotted at the axis floor: they are a tick on the rail, counted in the caption.
+
+**A place-and-route run is ONE graph.** A combined run leaves two records of
+its search: the converge ledger (placement laps and routing laps, told apart by
+`kind`), and `loop_round*.json` sidecars when `place_route_loop` ran. When both
+sit next to the boards, `movie_attempts.discover` joins them
+(`join_tracks`). The x-axis counts laps across both halves: the half that
+started first keeps its indices and the other is shifted past it. The second
+half's root descends from the first half's last kept attempt. Both axes are a
+blocking term (`score.blocking`, `failures`), and the label names both. A loop
+ranked on an `--accept-cmd` scalar is not joined, and the note says it was left
+out.
+
+**Lineage follows `parent_sha`.** A ledger row with no `parent_sha`, or one
+naming a board no row produced, is drawn from the last accepted row before it,
+which is the loop's own rule. The caption counts those guesses, because under
+parallel lineages the guess can be wrong. They stay guesses until `record`
+takes a parent explicitly (#1034).
+
+**The axis goes symlog when one attempt dwarfs the rest.** Run 32's ledger
+opens at blocking 12 703 (the unplaced pile) and spends about 200 laps between
+19 and 31. On a linear axis those laps share one pixel row. Above a 50× spread
+the axis is `log10(1 + v)`, which keeps 0 on the axis, and the caption says
+`[log scale]`.
 
 **Nothing is synthesised.** No sidecars and no ledger means no band, and the
 status line says so in words. One attempt is also an OFF arm — `attach` then

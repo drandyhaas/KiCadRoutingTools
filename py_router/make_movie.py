@@ -42,7 +42,10 @@ if _HERE not in sys.path:
 DEFAULT_SIZE = 1000
 DEFAULT_FPS = 6.0
 DEFAULT_SUPERSAMPLE = 1
-DEFAULT_LAYER_ALPHA = 150
+#: None = the THEME's measured alpha (dark 150, light 205). A number here
+#: overrode it for every film, so LIGHT's 205 -- measured by
+#: `palette_audit` for a light ground -- was never used (#946/C4).
+DEFAULT_LAYER_ALPHA = None
 DEFAULT_RIP_HOLD = 2
 DEFAULT_CHUNKS = 6
 DEFAULT_END_HOLD = 1.5
@@ -370,21 +373,11 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
             max_frames = int(getattr(_ek2, 'MOVIE_MAX_FRAMES', 0) or 0)
         except Exception:                                       # noqa: BLE001
             max_frames = 0
-    frames = a.build_boards(steps, final, size, supersample, layer_alpha,
-                            rip_hold, chunks, stage=stage, marks=marks,
-                            theme=theme, layout=layout, aspect=aspect,
-                            geom_out=geom_out, title=_title,
-                            frames_sink=spool, max_frames=max_frames)
-    if not frames:
-        if not quiet:
-            print("make_movie: no frames (nothing routed?)", file=sys.stderr)
-        return None
-    # #1021. THE ATTEMPTS BAND, before the clock and before the iso panel:
-    # composition order is board -> attempts -> clock -> iso, so the band sits
-    # adjacent to the board it annotates and the iso panel still stacks last.
-    #
-    # Imported HERE, like movie_panels below, so the GUI recorder and the
-    # in-process callers do not pay for a feature they did not ask for.
+    # #946/C4: THE ATTEMPTS ARE FOUND BEFORE THE FRAME IS PLANNED, so the
+    # band is RESERVED in the layout (`plan_frame(track_px=)`) instead of
+    # grown under every frame afterwards -- which is what made a declared
+    # `--aspect 16:9` film come out taller than 16:9.
+    _track = None
     try:
         import movie_attempts
         # `False` is the OFF arm (`--no-attempts`); `None` means "look", which
@@ -398,8 +391,51 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
         else:
             _track = movie_attempts.discover(
                 os.path.dirname(os.path.abspath(final)))
-        frames, _arep = movie_attempts.attach(frames, _track, theme=theme,
-                                              marks=marks)
+    except Exception as exc:                                    # noqa: BLE001
+        if not quiet:
+            print('make_movie: no attempts band (%s)' % exc, file=sys.stderr)
+        _track = None
+    # The band is reserved only when there is a graph to draw in it: one
+    # attempt is a single point under a flat staircase, which `attach`
+    # declines -- and a reserved band left empty is a stripe of nothing.
+    _band = bool(_track is not None and len(_track.attempts) >= 2)
+    # The 3D view gets a region of the layout's own panel (#946/C4) when the
+    # layout has one to split and the panel WOULD run -- asked now, before
+    # the frame is planned, because a region reserved for a panel that is
+    # then gated off would be a blank box in every frame.
+    _iso_box = False
+    if want_iso and str(layout or 'legacy').lower() not in ('legacy',
+                                                            'inset'):
+        try:
+            import movie_panels
+            if iso_opts is None:
+                iso_opts = movie_panels.IsoOpts()
+            _iso_box = movie_panels.preflight(
+                steps[0][1] if steps else final, iso_opts) is None
+        except Exception:                                      # noqa: BLE001
+            _iso_box = False
+    frames = a.build_boards(steps, final, size, supersample, layer_alpha,
+                            rip_hold, chunks, stage=stage, marks=marks,
+                            theme=theme, layout=layout, aspect=aspect,
+                            geom_out=geom_out, title=_title,
+                            frames_sink=spool, max_frames=max_frames,
+                            attempts_band=_band, iso_panel=_iso_box)
+    if not frames:
+        if not quiet:
+            print("make_movie: no frames (nothing routed?)", file=sys.stderr)
+        return None
+    _geom0 = geom_out[0] if geom_out else None
+    # #1021. THE ATTEMPTS BAND, before the clock and before the iso panel:
+    # composition order is board -> attempts -> clock -> iso, so the band sits
+    # adjacent to the board it annotates and the iso panel still stacks last.
+    #
+    # Imported HERE, like movie_panels below, so the GUI recorder and the
+    # in-process callers do not pay for a feature they did not ask for.
+    try:
+        import movie_attempts
+        frames, _arep = movie_attempts.attach(
+            frames, _track, theme=theme, marks=marks,
+            box=(_geom0.track if _geom0 is not None else None))
         # PRINTED EVEN WHEN QUIET, for the reason iso_status_line is: this is
         # the only channel that says whether the band ran, and the front end
         # the discovery exists for (place_route_loop's film, the GUI recorder)
@@ -436,8 +472,8 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
                 import frame_spool
                 frames = frame_spool.transform(
                     frames,
-                    lambda i, f: cmd_timing.add_clock_band(f, all_lines[i],
-                                                           band),
+                    lambda i, f: cmd_timing.add_clock_band(
+                        f, all_lines[i], band, theme=theme),
                     out_size=None)
                 frame_meta = [clock.meta(i) for i in range(len(frames))]
                 if not quiet:
@@ -460,8 +496,18 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
         # ask for. Bound through the module rather than `from ... import`, so a
         # test that monkeypatches movie_panels.compose_two_panel still bites.
         import movie_panels
+        if iso_opts is None:
+            iso_opts = movie_panels.IsoOpts()
+        if iso_opts.theme is None:
+            iso_opts.theme = theme
+        _box = None
+        if _iso_box and _geom0 is not None and _geom0.panel_split:
+            _box = _geom0.panel_split[0]
+        # `box=` only when there IS one: an in-process caller (and the tests)
+        # may stand in for compose_two_panel with the four-argument shape.
         frames, report = movie_panels.compose_two_panel(
-            frames, marks, final, iso_opts)
+            frames, marks, final, iso_opts,
+            **({'box': _box} if _box is not None else {}))
         # PRINTED EVEN WHEN QUIET. `quiet` silences the ordinary progress
         # chatter, but this line is the only channel that says whether the
         # panel ran, was skipped, or failed -- and the one front end the env
@@ -511,7 +557,9 @@ def main():
     ap.add_argument('--supersample', type=int, default=DEFAULT_SUPERSAMPLE,
                     help='anti-aliasing factor (1 = fastest, 2 = crisp)')
     ap.add_argument('--layer-alpha', type=int, default=DEFAULT_LAYER_ALPHA,
-                    help='per-layer copper opacity 1-255 (<255 blends crossings)')
+                    help='per-layer copper opacity 1-255 (<255 blends '
+                         'crossings). Default: the theme\'s own measured '
+                         'alpha (dark 150, light 205)')
     ap.add_argument('--rip-hold', type=int, default=DEFAULT_RIP_HOLD,
                     help='frames to hold ripped copper red before it vanishes')
     ap.add_argument('--chunks', type=int, default=DEFAULT_CHUNKS,
@@ -543,7 +591,7 @@ def main():
                          "when loop_round*.json sidecars or a converge ledger "
                          "sit next to the boards; a chain with no search "
                          "behind it has none and says so.")
-    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--theme', default=None, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--camera', default=None,
                     choices=('off', 'auto'),
