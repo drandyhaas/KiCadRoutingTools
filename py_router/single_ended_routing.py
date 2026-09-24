@@ -5545,17 +5545,11 @@ def _assign_wide_route_widths(segments, config: GridRouteConfig, net_id: int,
         site = 'power short edge'
     else:
         return segments
-    try:
-        from fab_tiers import note_narrowing
-        narrow = [s for s in segments
-                  if s.width < config.get_net_track_width(net_id, s.layer) - 1e-6]
-        if narrow:
-            req = max(config.get_net_track_width(net_id, s.layer) for s in narrow)
-            note_narrowing(net_id, 'track_width', req,
-                           min(s.width for s in narrow), site,
-                           count=len(narrow))
-    except Exception:                                           # noqa: BLE001
-        pass
+    # #1033: no ledger row here any more. This runs per routing ATTEMPT
+    # (retries, rescues) and before the post-route widen pass, so it counted
+    # attempts, not shipped copper; route.py records one row per power net
+    # from the shipped board instead (fab_tiers.replace_power_track_rows).
+    del site
     return segments
 
 

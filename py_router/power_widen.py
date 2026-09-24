@@ -38,6 +38,15 @@ from kicad_parser import Segment
 ERRORS = {'check_errors': 0, 'ctor_errors': 0, 'last': ''}
 
 
+def reset_errors():
+    """Start of a run (batch_route, outermost call): the counters are
+    process-wide, so a GUI session or an in-process caller would otherwise
+    carry one run's failures into the next run's summary."""
+    ERRORS['check_errors'] = 0
+    ERRORS['ctor_errors'] = 0
+    ERRORS['last'] = ''
+
+
 def note_ctor_error(exc):
     """Loud, one line: a raised constructor must not silently turn 3a off."""
     ERRORS['ctor_errors'] += 1
@@ -151,6 +160,12 @@ class ExactWideCheck:
                 self.keepouts.append(([poly] + [h for h in (ko.get('holes') or [])
                                                 if len(h) >= 3],
                                       res or None))
+        # #27 user keep-outs (--keepout), active when config.keepout_enabled,
+        # on every layer -- the same block the #536 smoother honours.
+        if getattr(config, 'keepout_enabled', False):
+            for kz in (getattr(pcb_data, 'keepout_zones', None) or []):
+                if len(kz.points) >= 3:
+                    self.keepouts.append(([list(kz.points)], None))
 
     def _base(self, layer):
         if hasattr(self.cfg, 'layer_clearance'):
@@ -367,11 +382,20 @@ def widen_power_copper(results, pcb_data, config, scope_net_ids=None):
     stats = {'nets': 0, 'widened_mm': 0.0}
     if not pw or not results:
         return stats
+    # Same skip set as the #536 smoother: protected nets (matched groups,
+    # coupled pairs, locked copper) and impedance-declared nets -- their
+    # geometry is the spec, so no width change either.
+    try:
+        from cleanup_pipeline import _smooth_skip_net_ids
+        skip = _smooth_skip_net_ids(pcb_data)
+    except Exception:                                           # noqa: BLE001
+        skip = set()
     by_net = {}
     for r in results:
         for sg in (r.get('new_segments') or []):
             nid = getattr(sg, 'net_id', None)
-            if nid in pw and not getattr(sg, 'graphic', False):
+            if (nid in pw and nid not in skip
+                    and not getattr(sg, 'graphic', False)):
                 if scope_net_ids is not None and nid not in scope_net_ids:
                     continue
                 by_net.setdefault(nid, []).append(sg)

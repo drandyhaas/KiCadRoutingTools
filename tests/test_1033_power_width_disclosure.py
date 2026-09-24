@@ -115,9 +115,8 @@ def t_assign():
     check('short edge: no copper below the edge width, length conserved',
           min(s.width for s in out) >= 0.15 - 1e-9
           and abs(length_at(out, lambda w: True) - 9.0) < 1e-6)
-    check('short edge: ONE narrowing row, site, requested, delivered',
-          len(new) == 1 and new[0]['site'] == 'power short edge'
-          and new[0]['requested'] == 0.3 and new[0]['delivered'] == 0.15, new)
+    check('short edge: NO per-attempt ledger row (the ledger records the '
+          'SHIPPED copper after the post-route pass)', new == [], new)
 
     # The same edge with its whole length blocked at the wide margin: the
     # widen-back must refuse every piece.
@@ -317,9 +316,15 @@ def t_merge():
 # +3V3 from U1 (x=4) to U2 (x=26) on ONE layer, through a fence of foreign
 # pads at x=15 whose only gap (y=10) is 0.4 mm wide: a 0.3 track at 0.1
 # clearance needs 0.5, a 0.127 needs 0.327. The long trunk must neck down.
-def _board(path):
+_FLANK = ''' (footprint "t:K" (layer "F.Cu") (at 24.5 10)
+  (property "Reference" "J2" (at 0 -2) (layer "F.SilkS"))
+  (pad "1" smd rect (at 0 -0.3) (size 0.2 0.2) (layers "F.Cu") (net 2 "SIG"))
+  (pad "2" smd rect (at 0 0.3) (size 0.2 0.2) (layers "F.Cu") (net 2 "SIG")))
+'''
+
+
+def _board(path, gap=0.4, flank=True):
     fence = []
-    gap = 0.4
     pad_h = 0.8
     y = 10.0 + gap / 2 + pad_h / 2
     k = 0
@@ -332,6 +337,7 @@ def _board(path):
         f'  (pad "{i + 1}" smd rect (at {fx - 15.0:.4f} {fy - 10.0:.4f}) '
         f'(size 0.8 {pad_h}) (layers "F.Cu") (net 2 "SIG"))\n'
         for i, (fx, fy) in enumerate(fence))
+    flank_txt = _FLANK if flank else ''
     txt = f'''(kicad_pcb
  (version 20221018)
  (generator "test_1033")
@@ -350,11 +356,7 @@ def _board(path):
  (footprint "t:F" (layer "F.Cu") (at 15 10)
   (property "Reference" "J1" (at 0 -12) (layer "F.SilkS"))
 {pads} )
- (footprint "t:K" (layer "F.Cu") (at 24.5 10)
-  (property "Reference" "J2" (at 0 -2) (layer "F.SilkS"))
-  (pad "1" smd rect (at 0 -0.3) (size 0.2 0.2) (layers "F.Cu") (net 2 "SIG"))
-  (pad "2" smd rect (at 0 0.3) (size 0.2 0.2) (layers "F.Cu") (net 2 "SIG")))
-)
+{flank_txt})
 '''
     with open(path, 'w', encoding='utf-8') as f:
         f.write(txt)
@@ -463,8 +465,12 @@ def t_end_to_end():
               and abs(pw['under_mm'] - und) < 0.02, (pw, tot, und))
         rows = [x for x in (doc.get('design_rules') or {}).get('narrowed', [])
                 if x.get('net') == nid and x.get('kind') == 'track_width']
-        check('end to end: the narrowing is in design_rules too',
-              any(x['site'].startswith('power ') for x in rows), rows)
+        check('end to end: design_rules carries ONE shipped row for the net, '
+              'its length the power_widths under_mm',
+              len(rows) == 1
+              and rows[0]['site'] == 'power copper shipped under width'
+              and abs(rows[0].get('length_mm', -1) - pw['under_mm']) < 0.02
+              and rows[0]['delivered'] == pw['min_mm'], rows)
         check('end to end: the console names it',
               'Power widths: +3V3' in log, log[-800:])
         check('end to end: the summary says which copper it measured',
@@ -528,6 +534,64 @@ def t_gui_oracle_payload():
               k in params and f"{k}=_pfo.get('{k}')" in gui_src)
 
 
+# ------------------------------------------- --strict-sizes, both ways
+def t_strict_sizes():
+    """--strict-sizes exits 3 only when SHIPPED copper is under width.
+    A 0.5 mm gap: the router necks (its grid map refuses 0.3), the post-route
+    pass widens it all back on exact geometry -> no row, exit 0. The 0.4 mm
+    gap plus the flanking pads: a real neck ships -> one row, exit 3."""
+    from kicad_parser import parse_kicad_pcb
+    for gap, flank, want in ((0.5, False, 0), (0.4, True, 3)):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, 'in.kicad_pcb')
+            out = os.path.join(tmp, 'out.kicad_pcb')
+            js = os.path.join(tmp, 'out.json')
+            _board(src, gap=gap, flank=flank)
+            env = dict(os.environ, MSYS2_ARG_CONV_EXCL='*')
+            r = subprocess.run(
+                [sys.executable, '-X', 'utf8',
+                 os.path.join(ROOT, 'py_router', 'route.py'), src, out,
+                 '--nets', '+3V3', '--layers', 'F.Cu', '--track-width', '0.127',
+                 '--clearance', '0.1', '--grid-step', '0.05',
+                 '--power-nets', '+3V3', '--power-nets-widths', '0.3',
+                 '--json-out', js, '--strict-sizes'],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', env=env, timeout=900)
+            log = (r.stdout or '') + (r.stderr or '')
+            if 'Traceback' in log or not os.path.isfile(js):
+                check(f'strict-sizes gap {gap}: route.py ran', False, log[-800:])
+                continue
+            with open(js, encoding='utf-8') as f:
+                doc = json.load(f)
+            pw = doc['power_widths']['+3V3']
+            rows = [x for x in doc['design_rules']['narrowed']
+                    if x['kind'] == 'track_width']
+            necked = 'neck-down' in log or 'short edge at' in log
+            if want == 0:
+                check('strict-sizes: the router DID neck this net (the case '
+                      'is real)', necked)
+                check('strict-sizes: fully widened back -> 0 under, no row, '
+                      'exit 0', pw['under_mm'] == 0 and rows == []
+                      and r.returncode == 0, (pw['under_mm'], rows, r.returncode))
+                drc = subprocess.run(
+                    [sys.executable, '-X', 'utf8',
+                     os.path.join(ROOT, 'py_router', 'check_drc.py'), out,
+                     '--clearance', '0.1'], capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', env=env, timeout=600)
+                check('strict-sizes: the widened board is DRC-clean at 0.1',
+                      drc.returncode == 0, (drc.stdout or '')[-400:])
+                p = parse_kicad_pcb(out)
+                nid = next(n for n, v in p.nets.items() if v.name == '+3V3')
+                check('strict-sizes: every +3V3 segment ships at 0.3',
+                      all(abs(sg.width - 0.3) < 1e-6 for sg in p.segments
+                          if sg.net_id == nid))
+            else:
+                check('strict-sizes: a real neck ships -> one row, exit 3',
+                      pw['under_mm'] > 0 and len(rows) == 1
+                      and r.returncode == 3,
+                      (pw['under_mm'], rows, r.returncode))
+
+
 if __name__ == '__main__':
     t_gui_oracle_payload()
     t_report()
@@ -535,6 +599,7 @@ if __name__ == '__main__':
     t_assign()
     t_merge()
     t_end_to_end()
+    t_strict_sizes()
     if fails:
         print(f'{len(fails)} FAILURE(S): {fails}')
         sys.exit(1)

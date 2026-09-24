@@ -991,6 +991,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # batch_route repeatedly in one process). main() reads it to skip the
     # post-passes that would otherwise mutate a reverted board.
     batch_route._improvement_gate_reverted = False
+    if final_reconcile:
+        # #1033: the widen pass's failure counters are process-wide; a GUI
+        # session / in-process caller must not inherit the last run's.
+        try:
+            from power_widen import reset_errors as _pw_reset
+            _pw_reset()
+        except Exception:                                       # noqa: BLE001
+            pass
 
     # Issue #8: snapshot the input board's copper per net BEFORE any routing.
     # The final connectivity reconciliation reports against the copper that will
@@ -6237,6 +6245,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 else:
                     _stage1033 = 'written board'
                 summary['power_widths_measured_on'] = _stage1033
+                # #1033: the design_rules ledger describes SHIPPED power
+                # copper: every per-attempt power-net track_width row is
+                # replaced by one row per power net that still ships under
+                # its width (same measurement as power_widths), and every
+                # summary this run printed or will write is re-stamped, so
+                # --json-out, the MIN line and --strict-sizes agree.
+                try:
+                    from fab_tiers import (replace_power_track_rows,
+                                           escalation_summary as _es1033)
+                    # ledger rows key on THIS run's net ids (pcb_data), not
+                    # the re-parsed output's
+                    _pid1033 = {_nn.name: _ni
+                                for _ni, _nn in pcb_data.nets.items()}
+                    replace_power_track_rows(
+                        set(config.power_net_widths),
+                        [(_pid1033.get(_nm), _nm, _r['requested_mm'],
+                          _r['min_mm'], _r['under_mm'])
+                         for _nm, _r in _pw1033.items()
+                         if _pid1033.get(_nm) is not None])
+                    _dr1033 = _es1033()
+                    for _sm in list(_SUMMARY_SINK) + [summary]:
+                        if isinstance(_sm.get('design_rules'), dict):
+                            _keep = {k: v for k, v in _sm['design_rules'].items()
+                                     if k == 'unsupported_rules'}
+                            _sm['design_rules'] = dict(_dr1033, **_keep)
+                except Exception as _dre1033:                   # noqa: BLE001
+                    print(f"  (design_rules power reconcile skipped: "
+                          f"{_dre1033})")
                 # #1033 part 3: failures of the widen check itself -- a
                 # constructor that raised (widening OFF for that route, also
                 # printed) or a clears() that raised (piece refused, fail

@@ -631,6 +631,34 @@ def note_narrowing(net_id, kind, requested, delivered, site, count=1, net_name=N
     })
 
 
+def replace_power_track_rows(power_net_ids, shipped):
+    """#1033: make the ledger describe the power-net copper that SHIPS.
+
+    Width rows for power nets are recorded per routing ATTEMPT (neck-downs,
+    short-edge ladders, rescue rungs, terminal necks) -- retries and rescues
+    included, and before the post-route widen pass takes most of them back
+    (esp_prog: 246 "power short edge" rows on a net that ships 6.9 of 38.8 mm
+    under width). Drop every ``track_width`` row of a power net and add ONE
+    row per power net that still ships copper under its requested width,
+    from the same measurement as JSON_SUMMARY power_widths. ``shipped`` is
+    [(net_id, net_name, requested, min_delivered, under_mm), ...]. Other
+    kinds (vias, clearance) and other nets are untouched."""
+    ids = set(power_net_ids or ())
+    _LEDGER['narrowed'] = [r for r in _LEDGER['narrowed']
+                           if not (r.get('kind') == 'track_width'
+                                   and r.get('net') in ids)]
+    for nid, name, req, dlv, under in shipped or ():
+        if dlv is None or under <= 0 or dlv >= req - 1e-9:
+            continue
+        _LEDGER['narrowed'].append({
+            'net': int(nid), 'net_name': name, 'kind': 'track_width',
+            'requested': round(float(req), 4),
+            'delivered': round(float(dlv), 4),
+            'site': 'power copper shipped under width',
+            'count': 1, 'length_mm': round(float(under), 2),
+        })
+
+
 def escalation_summary():
     """The per-run ledger as JSON-ready data (the JSON_SUMMARY ``design_rules``
     block). ``count`` is the number of recorded narrowings; ``fab_tier_escalations``

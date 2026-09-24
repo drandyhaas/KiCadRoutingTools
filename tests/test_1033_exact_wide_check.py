@@ -257,6 +257,51 @@ def main():
           '(edge gap stays >= the 0.1 clearance)', gap >= 0.1 - 1e-6,
           (wa, wb, round(gap, 4)))
 
+    # 16. #27 user keep-outs (--keepout): pcb_data.keepout_zones, active only
+    #     with config.keepout_enabled (the smoother's rule)
+    kz = SimpleNamespace(points=[(0.0, 0.2), (2.0, 0.2), (2.0, 1.5), (0.0, 1.5)])
+    p16 = board()
+    p16.keepout_zones = [kz]
+    c16 = cfg()
+    c16.keepout_enabled = True
+    wide_vs_narrow('user --keepout zone', p16, c16)
+    c16b = cfg()
+    c16b.keepout_enabled = False
+    check('user --keepout zone: inert when keepout_enabled is off',
+          ExactWideCheck(p16, c16b, NET).clears(*PIECE, 0.3) is True)
+
+    # 17. nets the smoother skips (protected / matched / impedance) are not
+    #     widened either
+    import cleanup_pipeline
+    c17 = cfg()
+    c17.power_net_widths = {NET: 0.3}
+    s17 = make_seg(0.0, -1.0, 2.0, -1.0, width=0.127, net_id=NET)
+    p17 = board(segs=[s17])
+    orig_skip = cleanup_pipeline._smooth_skip_net_ids
+    cleanup_pipeline._smooth_skip_net_ids = lambda _pcb: {NET}
+    try:
+        st17 = widen_power_copper([{'new_segments': [s17]}], p17, c17)
+    finally:
+        cleanup_pipeline._smooth_skip_net_ids = orig_skip
+    check('a protected / impedance net is not widened', st17['nets'] == 0
+          and s17.width == 0.127, st17)
+    st17b = widen_power_copper([{'new_segments': [s17]}], p17, c17)
+    check('control: the same net unprotected is widened', st17b['nets'] == 1,
+          st17b)
+
+    # 18. the failure counters reset at the start of each (outermost) run --
+    #     a GUI session must not inherit the last run's
+    import route as _route
+    power_widen.ERRORS['check_errors'] = 5
+    power_widen.ERRORS['ctor_errors'] = 2
+    brd = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk_gnd.kicad_pcb')
+    with contextlib.redirect_stdout(io.StringIO()):
+        _route.batch_route(brd, '', ['/CLK'], return_results=True,
+                           track_width=0.2, clearance=0.2, grid_step=0.1)
+    check('ERRORS reset by batch_route (return_results, in-process)',
+          power_widen.ERRORS['check_errors'] == 0
+          and power_widen.ERRORS['ctor_errors'] == 0, dict(power_widen.ERRORS))
+
     if fails:
         print(f'{len(fails)} FAILURE(S): {fails}')
         return 1
