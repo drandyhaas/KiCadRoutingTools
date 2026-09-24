@@ -6315,7 +6315,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _name_of = (lambda nid: (_after_pcb.nets[nid].name
                                          if nid in _after_pcb.nets
                                          else f"Net {nid}"))
-            _cmp = compare_connectivity(_before_map, _after_map, _name_of)
+            # #1032: judge like with like. A poured net outside this call's
+            # --nets is excluded from the in-run finalize BY PLAN, so pads a
+            # signal lap cuts from its pour are pads this run was forbidden
+            # to heal -- they are reported, not voted. Read the finalize's own
+            # list when it ran; otherwise (KICAD_PLANE_FINALIZE=0, checkpoint
+            # stop) derive it by the same rule. Both fronts.
+            _board600 = pcb_data if return_results else _after_pcb
+            _excl_names600 = summary.get('finalize_excluded_nets')
+            if _excl_names600 is None:
+                from improvement_gate import plan_excluded_net_names
+                _excl_names600 = plan_excluded_net_names(
+                    {(_board600.nets[_z6.net_id].name
+                      if _z6.net_id in _board600.nets
+                      else getattr(_z6, 'net_name', None))
+                     for _z6 in (getattr(_board600, 'zones', None) or [])},
+                    net_names)
+            _excl_set600 = set(_excl_names600 or ())
+            _excl_ids600 = {nid for nid, _n in _board600.nets.items()
+                            if _n.name in _excl_set600}
+            _cmp = compare_connectivity(_before_map, _after_map, _name_of,
+                                        excluded_ids=_excl_ids600)
             _verdict = gate_verdict(_cmp)
             _why = ("This run did not fail to execute -- it ran and was "
                     "REJECTED, so re-running it with MORE rip authority "
@@ -6362,7 +6382,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _action = ("shipped (the run connected at least as many nets "
                            "as it broke)")
             _gate_report = dict(_cmp, verdict=_verdict)
-            if _cmp['lost'] or _verdict == 'reject':
+            if (_cmp['lost'] or _verdict == 'reject'
+                    or any(_a > _b for _n, _b, _a
+                           in _cmp.get('excluded_by_plan') or ())):
                 print("\n" + RED + format_report(_cmp, _verdict, _action)
                       + RESET)
             print(f"JSON_IMPROVEMENT_GATE: {json.dumps(_gate_report)}")

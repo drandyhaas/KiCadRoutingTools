@@ -127,15 +127,29 @@ passed `--rip-existing-nets` authorised that; what they could not do before was
 see it.
 
 ```
-IMPROVEMENT GATE: this run broke 3 previously-connected net(s) and connected 3 -- ACCEPTED
+IMPROVEMENT GATE: this run broke 3 previously-connected net(s) and connected 3 [/BMS.Can_L, /BMS.Enable_Out, V_+5V] -- ACCEPTED
   broken by this run: /BMS.Can_L, /BMS.Enable_Out, V_+5V
   connected by this run: /CAN.Interrupt, /SPI.Clock, /SPI.Miso
   disconnected pads: 3 -> 3 over 43 multi-pad net(s)
 ```
 
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
-(`lost`, `gained`, `disconnected_pads_before/after`, `nets_compared`,
-`verdict`), so a chain can assert on it instead of grepping prose.
+(`lost`, `gained`, `worsened`, `excluded_by_plan`,
+`disconnected_pads_before/after`, `nets_compared`, `verdict`), so a chain can
+assert on it instead of grepping prose.
+
+**The head line names every net it judged on (#1032)** -- the `lost` nets and
+the `worsened` ones (pad count rose on a net that was already broken, which is
+not `lost`), capped at six. A pad-count-only rejection used to name nothing.
+
+**A poured net outside a scoped call's `--nets` is not judged (#1032).** The
+in-run finalize excludes such a net BY PLAN (`finalize_excluded_nets`), so a
+signal lap that cuts its pour was forbidden to heal the cut; judging the lap on
+those pads compares unlike with unlike. The gate drops them from both readings
+and reports them on an `excluded (plane nets outside --nets ...)` line and in
+`excluded_by_plan` as `[name, before, after]`. Put the poured nets in `--nets`
+when the lap should repair them. With the finalize off (`KICAD_PLANE_FINALIZE=0`)
+the gate derives the same list by the same rule.
 
 **If you see `REVERTED`, the retry did not fail to run — it ran and was
 rejected.** Re-running it with *more* rip authority is the one response
