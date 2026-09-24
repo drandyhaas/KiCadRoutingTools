@@ -1,3 +1,35 @@
+48eb5d62 2026-09-24 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 5f881142..48eb5d62: the three findings the previous entry left open, all
+FIXED, each with a test that fails on the code before it. No other engine/GUI
+change in range (af9e1e73 is a test-only cleanup).
+
+  * 606682a8 -- a GUI placement run now stages mechanical.json. It is a
+    DIRECTORY file (<board dir>/mechanical.json, read by
+    reconcile.discover_mechanical beside the run's board), and
+    placement_run.stage_inputs copied only stem siblings, so every declared
+    mechanical fact was invisible to a run launched from the Placement tab.
+    test_placement_run: staged, and found by discover_mechanical from the
+    staged board.
+  * 48eb5d62 -- the GUI's live writers (apply_targets_to_board, then
+    update_live_drc_floors) now seed kicad_routing_tools.fab_floor_origin
+    before lowering, as the file writers do (ad7f24de), and print FAB FLOOR
+    RELAXED against it with a live-copper census. Engine-side helpers
+    (seed_live_fab_floor_origin, live_fab_floor_disclosure) back both fronts.
+    New gate tests/gui_parity/test_live_fab_floor_origin.py (real board):
+    9/9 PASS; fails 6 on the previous code.
+  * b2b23e9e -- build_film honours $KICAD_MOVIE_LAYOUT/ASPECT through
+    frame_layout.resolve_layout_aspect, the resolver make_movie now shares.
+    CLI/agent only (the GUI never calls build_film); test_film_composition
+    pins env -> film, explicit args win, defaults.
+
+GATES RUN (Windows, KiCad 10.0.3): test_live_fab_floor_origin,
+test_900_live_class_clearance, test_782_fanout_netclass_clamp,
+test_768_cap_ceiling_real_dialog, test_772_cap_params_reach_engine,
+test_gnd_vias_gui, test_movie_recorder, test_cli_postpass_coverage all PASS;
+test_gui_engine_parity PARITY, copper sets IDENTICAL, kicad unconnected 0/0.
+Suites: fab-floor/DRC-settings families 41 passed; movie/film/layout 20 passed;
+placement_run + sibling lists pass.
+
 5f881142 2026-09-24 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of 5363397f..5f881142 (126 commits: #1026, the #1027-#1030 PR merges and
 their follow-ups, bus622-take5, #946/#959/#962/#963 tails, awx, and this
