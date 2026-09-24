@@ -414,6 +414,12 @@ class Stage:
             if rd.get('board'):
                 self._by_board[os.path.basename(rd['board'])] = rd
         self._plan()
+        # THE OPENING FRAME holds the pile (#1036 verifier): `build_boards`
+        # snapshots "input" right after this, and at the board's own bounds
+        # an off-board pile was clipped -- then the establishing shot jumped
+        # out to the overview three frames later.
+        if tuple(self._overview) != tuple(renderer.bounds):
+            self._aim(self._overview)
 
     def _aim(self, view):
         """Point the renderer at `view`, accounting for the flip.
@@ -846,7 +852,15 @@ def _moved_side(pcb, moved):
     return 'B' if b > f else 'F'
 
 
-def synth_rounds(boards):
+def _move_floor_mm():
+    try:
+        import env_knobs
+        return float(getattr(env_knobs, 'MOVIE_MOVE_MIN_MM', 0.5))
+    except Exception:                                          # noqa: BLE001
+        return 0.5
+
+
+def synth_rounds(boards, min_mm=None):
     """Round records for a chain that has NO loop_round*.json sidecars.
 
     Footprint motion is already animated -- but only through a Stage, and a
@@ -881,7 +895,13 @@ def synth_rounds(boards):
                     continue
                 a_ = (round(old.x, 4), round(old.y, 4), round(old.rotation or 0.0, 3))
                 b_ = (round(fp.x, 4), round(fp.y, 4), round(fp.rotation or 0.0, 3))
-                if a_ != b_:
+                # THE DISPLACEMENT FLOOR (#1036 review): a 0.05 mm nudge used
+                # to switch a whole film to the placement camera. Below
+                # `min_mm` a translation is drift, not a move; a rotation is
+                # always a move.
+                _floor = _move_floor_mm() if min_mm is None else min_mm
+                _dist = ((a_[0] - b_[0]) ** 2 + (a_[1] - b_[1]) ** 2) ** 0.5
+                if a_ != b_ and (a_[2] != b_[2] or _dist >= _floor):
                     # ROTATION is part of the pose. A part that turns 180 in
                     # place moves no origin at all, and a position-only diff
                     # shows nothing -- which is exactly how a rotation that

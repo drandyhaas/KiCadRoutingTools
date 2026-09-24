@@ -30,7 +30,8 @@ RUN_ALL_FAST_OK = False
 
 _TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_TESTS)
-for _p in (ROOT, _TESTS, os.path.join(ROOT, 'py_router')):
+for _p in (ROOT, _TESTS, os.path.join(ROOT, 'py_router'),
+           os.path.join(ROOT, 'py_tools'), os.path.join(ROOT, 'py_placer')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -281,12 +282,75 @@ def test_a_trace_over_budget_falls_back_loudly():
               'with no budget' % (n, len(fr), notes[0][:60], len(full)))
 
 
+def test_the_spool_says_when_the_disk_cannot_hold_it():
+    """The spool trades RAM for DISK (~1.27 MB per 1400 px frame). When the
+    temp dir cannot hold the estimate the movie says so LOUDLY, and an
+    UNBUDGETED film falls back to the default budget."""
+    _mark = len(_FAIL)
+    import contextlib
+    import io
+    import make_movie
+    saved = frame_spool.disk_check
+    frame_spool.disk_check = lambda d, n, px: (False, 10 ** 12, 10 ** 9)
+    err = io.StringIO()
+    tmp = tempfile.mkdtemp(prefix='t1036d_')
+    try:
+        with contextlib.redirect_stderr(err):
+            make_movie.make_movie([BOARD], out=os.path.join(tmp, 'm.gif'),
+                                  size=200, quiet=True, attempts=False,
+                                  max_frames=0)
+    finally:
+        frame_spool.disk_check = saved
+    e = err.getvalue()
+    if 'SPOOL DISK' not in e or 'falling back' not in e:
+        fail('a spool the disk cannot hold was not reported: %r' % e[-300:])
+    ok, need, free = frame_spool.disk_check(None, 6000, 1400 * 788)
+    print('    6000 frames at 1400x788 would spool ~%.1f GB (free here: %s)'
+          % (need / 1e9, '%.0f GB' % (free / 1e9) if free else 'unknown'))
+    if not 6.5e9 < need < 9e9:
+        fail('the 6000-frame estimate is %.1f GB, not ~7.6' % (need / 1e9))
+    if len(_FAIL) == _mark:
+        print('  PASS: reported, and the unbudgeted film fell back to the '
+              'budget')
+
+
+def test_make_film_streams_through_a_spool():
+    """make_film's CLI hands save_movie a FrameSpool too (#1036 verifier: it
+    still collected every frame in a list)."""
+    _mark = len(_FAIL)
+    import animate_route as a
+    import make_film
+    seen = {}
+    saved = a.save_movie
+
+    def _spy(frames, out, *args, **kw):
+        seen['type'] = type(frames).__name__
+        seen['n'] = len(frames)
+        return saved(frames, out, *args, **kw)
+    a.save_movie = _spy
+    tmp = tempfile.mkdtemp(prefix='t1036f_')
+    try:
+        rc = make_film.main([BOARD, BOARD, '-o', os.path.join(tmp, 'f.gif'),
+                             '--camera', 'off', '--quiet', '--size', '200',
+                             '--no-attempts'])
+    finally:
+        a.save_movie = saved
+    if rc != 0 or seen.get('type') != 'FrameSpool':
+        fail('make_film handed save_movie a %r (rc %r)' % (seen.get('type'),
+                                                          rc))
+    if len(_FAIL) == _mark:
+        print('  PASS: make_film streams %d frames through a spool'
+              % seen.get('n', 0))
+
+
 TESTS = (
     test_spool_is_a_list,
     test_make_movie_hands_save_movie_a_spool_and_a_list_still_saves,
     test_gif_strides_over_its_cap,
     test_a_trace_over_budget_falls_back_loudly,
     test_memory_is_bounded_in_the_frame_count,
+    test_the_spool_says_when_the_disk_cannot_hold_it,
+    test_make_film_streams_through_a_spool,
 )
 
 

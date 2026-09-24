@@ -176,6 +176,110 @@ def test_leading_copper_free_boards_are_counted():
     assert MM.leading_copper_free(steps[2:]) == 0
 
 
+def test_a_middle_step_draws_its_own_boards_pads():
+    """#1036 verifier: replacing build_boards' per-step `r.pcb = pcb` with
+    `pass` SURVIVED this file, because the only check looked at frame 0 (set
+    before the loop). Here a chain A -> B -> A whose MIDDLE board has moved
+    parts and a trace of its own: every frame drawn during B's step must be
+    drawn from B's board."""
+    import json as _json
+    sys.path.insert(0, os.path.join(ROOT, 'tests'))
+    from test_film_composition import _variant
+    routed = os.path.join(KF, 'routed_output.kicad_pcb')
+    d = tempfile.mkdtemp()
+    try:
+        a = os.path.join(d, 'a.kicad_pcb')
+        b = os.path.join(d, 'b.kicad_pcb')
+        shutil.copy(routed, a)
+        _variant(routed, b, dx=6.0, dy=0.0, n=12)
+        pcb = parse_kicad_pcb(b)
+        layers = list(pcb.board_info.copper_layers)
+        s0 = A._board_rows(pcb, layers)[0][0]
+        row = [s0[0] + 0.5, s0[1] + 0.5, s0[2] + 0.5, s0[3] + 0.5, s0[4],
+               s0[5]]
+        tr = os.path.join(d, 'b_trace.json')
+        with open(tr, 'w') as f:
+            _json.dump({'layers': layers, 'events': [
+                {'event': 'route', 'net_name': 'x', 'add_s': [row]}]}, f)
+        drawn = []
+        orig = RR.BoardRenderer.frame
+
+        def _spy(self, *aa, **kk):
+            drawn.append(os.path.basename(
+                getattr(self.pcb, 'source_path', '') or ''))
+            return orig(self, *aa, **kk)
+        RR.BoardRenderer.frame = _spy
+        marks = []
+        try:
+            A.build_boards([('a', a, None), ('b', b, tr), ('a2', a, None)],
+                           a, 200, 1, None, 2, 6, marks=marks)
+        finally:
+            RR.BoardRenderer.frame = orig
+        _lb, _bd, first, last = marks[1]
+        during = drawn[first:last]
+        assert during, ('BROKEN: the middle step drew no frame', marks)
+        assert all(x == 'b.kicad_pcb' for x in during), \
+            ('a frame of the MIDDLE step was drawn from another board',
+             during)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_auto_camera_ignores_drift_but_not_placement():
+    """#1036 verifier's r5 repro: a 0.05 mm nudge of one part switched a whole
+    routing film to the placement camera. Below MOVIE_MOVE_MIN_MM a
+    translation is drift -- no camera, no glide -- while a real placement
+    still turns the camera on."""
+    sys.path.insert(0, os.path.join(ROOT, 'tests'))
+    from test_film_composition import _variant
+    from fixture_boards import ensure_many
+    b1, _b2 = ensure_many('fanout_output1.kicad_pcb',
+                          'fanout_output2.kicad_pcb')
+    d = tempfile.mkdtemp()
+    try:
+        drift = os.path.join(d, 'drift.kicad_pcb')
+        _variant(b1, drift, dx=0.05, dy=0.0, n=1)
+        _m, err = _count_renderers([b1, drift])
+        assert 'camera auto' not in err, ('0.05 mm drift turned the camera '
+                                          'on', err)
+        import movie_camera as MC
+        assert not any(rd['moved'] for rd in MC.synth_rounds([b1, drift]))
+        real = os.path.join(d, 'real.kicad_pcb')
+        _variant(b1, real, dx=3.0, dy=0.0, n=3)
+        _m, err2 = _count_renderers([b1, real])
+        assert 'camera auto' in err2, ('a 3 mm placement did not turn the '
+                                       'camera on', err2)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_opening_frame_holds_an_off_board_pile():
+    """#1036 verifier: frame 0 ("input") was drawn at the board's bounds, so
+    an off-board pile was clipped, and the camera then jumped out to the
+    overview three frames later. With a pile beyond the outline, frame 0 is
+    drawn at the pile-inclusive overview."""
+    import movie_camera as MC
+    rounds = MC.synth_rounds([SEED, PLACED])
+    b = parse_kicad_pcb(SEED).board_info.board_bounds
+    # a pile 40 mm below the board, the way run 32's pile sits
+    rounds[0]['extent'] = [b[0], b[1], b[2], b[3] + 40.0]
+    st = MC.Stage(rounds, '', tween=3)
+    views = []
+    orig = RR.BoardRenderer.frame
+
+    def _spy(self, *aa, **kk):
+        views.append(getattr(self, '_view', None))
+        return orig(self, *aa, **kk)
+    RR.BoardRenderer.frame = _spy
+    try:
+        A.build_boards([('a', SEED, None), ('b', PLACED, None)], PLACED, 200,
+                       1, None, 2, 6, stage=st)
+    finally:
+        RR.BoardRenderer.frame = orig
+    assert views and views[0] is not None, views[:3]
+    assert tuple(views[0]) == tuple(st._overview), (views[0], st._overview)
+
+
 def test_each_step_draws_its_own_boards_pads():
     """#1036: the renderer is built from the FINAL board, and without a stage
     every frame used to draw the final board's pads -- so a film opening on an
@@ -242,6 +346,9 @@ def test_synthesised_rounds_zoom_and_frame_the_pile():
 
     class _R:
         bounds = (0.0, 0.0, 1.0, 1.0)     # deliberately smaller than the pile
+
+        def set_view(self, view=None):    # the opening frame aims the pile
+            self._view = view
     MC.plan_shots = _spy
     try:
         st = MC.Stage(rounds, '', tween=4)
@@ -577,6 +684,9 @@ TESTS = [
     test_a_placement_chain_turns_the_camera_on_by_itself,
     test_leading_copper_free_boards_are_counted,
     test_each_step_draws_its_own_boards_pads,
+    test_a_middle_step_draws_its_own_boards_pads,
+    test_the_opening_frame_holds_an_off_board_pile,
+    test_auto_camera_ignores_drift_but_not_placement,
     test_synthesised_rounds_zoom_and_frame_the_pile,
     test_the_shots_before_a_glide_show_the_board_as_it_was,
     test_build_boards_signature_keeps_stage_optional,

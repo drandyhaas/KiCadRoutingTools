@@ -320,6 +320,13 @@ def refresh() -> None:
     # MOVIE_CAMERA: one variable reaches every front end at once.
     g['MOVIE_MAX_FRAMES'] = _i('KICAD_MOVIE_MAX_FRAMES', 2400)
 
+    # #1036 review: the least footprint displacement (mm) that counts as a
+    # PLACEMENT move for the movie. Below it a pose change is drift -- a
+    # 0.05 mm nudge a router or a writer left behind -- and it turns no
+    # camera on and glides nothing; the per-step substrate still draws it. A
+    # rotation always counts. Same shape and reason as MOVIE_CAMERA.
+    g['MOVIE_MOVE_MIN_MM'] = _f('KICAD_MOVIE_MOVE_MIN_MM', 0.5)
+
     # --- truthy diagnostics / overrides -------------------------------------
     g['UNBLOCK_DEBUG'] = _truthy('KICAD_UNBLOCK_DEBUG')
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')

@@ -318,7 +318,7 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                layer_alpha=None, rip_hold=2, chunks=6, camera='auto',
                camera_budget=0.0, tween=10, quiet=False, theme=None,
                attempts=None, attempts_from=None, layout=None, aspect=None,
-               panels=None, iso_opts=None):
+               panels=None, iso_opts=None, spool=False):
     """Frames for the whole shot list. One render pass, one scale.
 
     `attempts` is a `movie_attempts.Track` -- the search behind this film. Left
@@ -330,6 +330,13 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
     `panels` is make_movie's (#946/C4): 'xray' or 'xray+iso'. With the iso
     view on, a layout that has a panel to split gives the 3D view a region of
     its own; legacy and inset stack it under the frame.
+
+    `spool=True` (#1036; `main()` passes it) streams the film through
+    `frame_spool.FrameSpool`s -- the board frames, then the assembled film
+    with its cards -- so memory does not grow with the frame count, and a
+    spool comes back instead of a list (it indexes, iterates and has a
+    `len`; the caller closes it). The default stays a list for in-process
+    callers that edit frames in place.
     """
     import animate_route as a
     import render_theme
@@ -397,8 +404,11 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
             iso_opts.theme = _th
         if str(layout or 'legacy').lower() not in ('legacy', 'inset'):
             iso_box = movie_panels.preflight(steps[0][1], iso_opts) is None
+    import frame_spool
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
+                            frames_sink=(frame_spool.FrameSpool() if spool
+                                         else None),
                             theme=_th, layout=layout, aspect=aspect,
                             geom_out=_geom,
                             attempts_band=bool(attempts is not None
@@ -450,12 +460,18 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
         if i < len(owner):
             by_step[i] = (owner[i], first, last)
     n_att = 0
+    badged = set()
     for i, (s, first, last) in by_step.items():
         if s.get('accepted'):
             continue
         n_att += 1
-        for f in frames[first:last]:
+        badged.update(range(first, last))
+
+    def _badge_fn(i, f):
+        if i in badged:
             _badge(f, 'TRIED', theme=_th)
+        return f
+    frame_spool.transform(frames, _badge_fn)
 
     # Splice the cards in where they sit in the shot order. Walk the shot list
     # and the marks together: the Nth board shot is the Nth mark, and a card
@@ -487,11 +503,21 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
             [_card_frame(size_wh, c['path'], c['caption'], theme=_th)]
             * hold_frames(c['hold']))
 
-    out = []
-    for i, f in enumerate(frames):
-        out.extend(inserts.get(i, []))
-        out.append(f)
-    out.extend(inserts.get(len(frames), []))
+    if frame_spool.is_spool(frames):
+        out = frame_spool.FrameSpool()
+        for i in range(len(frames)):
+            for c in inserts.get(i, []):
+                out.append(c)
+            out.append(frames[i])
+        for c in inserts.get(len(frames), []):
+            out.append(c)
+        frames.close()
+    else:
+        out = []
+        for i, f in enumerate(frames):
+            out.extend(inserts.get(i, []))
+            out.append(f)
+        out.extend(inserts.get(len(frames), []))
 
     if not quiet:
         n_cards = sum(1 for s in shots if s['kind'] == 'card')
@@ -628,7 +654,7 @@ def main(argv=None):
                         chunks=a.chunks, camera=a.camera,
                         camera_budget=a.camera_budget, tween=a.tween,
                         quiet=a.quiet, layout=a.layout, aspect=a.aspect,
-                        panels=a.panels,
+                        panels=a.panels, spool=True,
                         iso_opts=_iso_opts(a),
                         attempts=attempts,
                         attempts_from=('' if a.no_attempts else
@@ -642,8 +668,12 @@ def main(argv=None):
     import animate_route as ar
     # theme=: the pad a mixed-size film is letterboxed with is the theme's
     # ground. Without it a light film's letterbox was the DARK ground.
-    ar.save_movie(frames, a.out, a.fps, a.end_hold, png_dir=a.png_dir,
-                  theme=a.theme)
+    try:
+        ar.save_movie(frames, a.out, a.fps, a.end_hold, png_dir=a.png_dir,
+                      theme=a.theme)
+    finally:
+        if hasattr(frames, 'close'):
+            frames.close()
     return 0
 
 

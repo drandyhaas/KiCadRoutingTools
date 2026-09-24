@@ -63,6 +63,12 @@ _WK_DEPENDENT = {
     # those literals support -- runs on a clean clone and is what keeps
     # this file from being green-while-covering-nothing when wk/ is absent.
     'test_788_marginal_literals.py': ['wk/703/study'],
+    # #1036 CORROBORATION only: the run-32 value checks (glide inventory,
+    # band labels on the real ledger) run when a machine has run 32; every
+    # claim in the file is also pinned on tracked kicad_files/ boards, and the
+    # absent case is SAID in the summary line, not passed silently.
+    'test_1036_review_fixes.py': ['wk/run32'],
+    'test_1036_attempts_axis.py': ['wk/run32'],
     # #887 CORROBORATION only. The regression lives in
     # test_887_cmd_timing_reader.py, against two small tracked fixtures, and
     # passes in full on a clean clone. This arm re-derives run 24's published

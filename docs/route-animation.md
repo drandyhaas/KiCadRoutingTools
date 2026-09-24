@@ -213,6 +213,14 @@ reached 29.5 GB before this change. `tests/test_1036_streaming.py` measures it:
 with 6x the frames, peak RSS stays flat, while the same frames held in a list
 grow by about 300 MB.
 
+**The spool uses disk instead.** A spooled 1400 px frame is about 1.27 MB,
+so a 6000-frame film spools about 7.6 GB into the temp directory. Before
+drawing, `make_movie` estimates the film and checks the free space
+(`frame_spool.disk_check`, with a 20% margin). When the spool will not fit it
+prints `SPOOL DISK` with the numbers, and an unbudgeted (`--max-frames 0`)
+film falls back to the default budget. `make_film.py` streams through the same
+spool: its board frames first, then the assembled film with its cards.
+
 A per-segment route trace plays one frame per event, and a long one makes a
 film nobody watches to the end. `--max-frames N` (default
 `$KICAD_MOVIE_MAX_FRAMES`, else 2400; `0` = no budget) is the film's frame
@@ -237,6 +245,8 @@ per board:
 reveal). See the [stress-test runbook](../tests/stress/RUNBOOK.md#run-artifacts-final-snapshot--routing-movie-482).
 
 ## Placement movies: the camera (#431)
+
+**The camera turns itself on for a placement chain (#1036).** When `--camera` is not given and consecutive boards differ in part POSES, `make_movie` uses `auto` and says so. A move counts only at `$KICAD_MOVIE_MOVE_MIN_MM` (0.5 mm) or more, or with any rotation. Below that it is drift, which the per-step substrate draws without a camera. A 0.05 mm nudge used to switch a whole routing film to the placement camera.
 
 `make_movie.py` animates a `place_route_loop` work dir as well as a routing
 chain. It detects one by the `loop_round{N}.json` sidecars the loop writes --
@@ -551,6 +561,8 @@ used.
 | `split` | board on top, lower box split | 1.60:1 | 11.06 | **128 800** |
 | `auto` | `sidebar` on a wide board, `stacked` otherwise, **`legacy` on an extreme one** | — | — | — |
 
+`inset` covers part of the board with its corner panel **by design**. It is the layout that trades the panel for copper pixels, and the pads under the inset are hidden for the whole film. Use `split` or `stacked` when every pad must stay visible.
+
 *(one pixel budget — 1.62 Mpx — on a 1.85:1 board, four cells across the
 panel.)* **Re-derive it rather than trusting it:**
 
@@ -736,11 +748,18 @@ which is the loop's own rule. The caption counts those guesses, because under
 parallel lineages the guess can be wrong. They stay guesses until `record`
 takes a parent explicitly (#1034).
 
-**The axis goes symlog when one attempt dwarfs the rest.** Run 32's ledger
+**The axis breaks when a few attempts dwarf the rest.** Run 32's ledger
 opens at blocking 12 703 (the unplaced pile) and spends about 200 laps between
-19 and 31. On a linear axis those laps share one pixel row. Above a 50× spread
-the axis is `log10(1 + v)`, which keeps 0 on the axis, and the caption says
-`[log scale]`.
+19 and 43. On a linear axis those laps share one pixel row. A symlog axis,
+tried first, still left them the top ~7% of the band, and the record's drops
+41 → 38 → 33 → 32 → 30 could not be seen. So the working range (every graded
+attempt up to the 90th percentile, `WORK_PCTL`, padded) gets the main plot.
+The attempts above it are compressed on a log scale into a thin strip at the
+bottom (`STRIP_FRAC` 0.18) under a break mark, and the caption says
+`[axis broken above N]`. It breaks only when the worst attempt is at least
+`BREAK_RATIO` (2×) the working range's top. `tests/test_1036_attempts_axis.py`
+checks that the working laps span at least half the plot on the run-32 ledger
+and on a synthetic track, and that symlog and linear both fail that check.
 
 **Nothing is synthesised.** No sidecars and no ledger means no band, and the
 status line says so in words. One attempt is also an OFF arm — `attach` then

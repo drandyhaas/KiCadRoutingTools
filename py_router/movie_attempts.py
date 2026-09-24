@@ -133,6 +133,18 @@ BAND_MIN_PX = 64
 #: a smaller band, it is a different picture.
 BAND_MAX_FRAC = 0.34
 
+#: The band's Y axis (#946 review): 'broken' (the working range gets the plot,
+#: outliers a thin log strip under a break mark), or the two it replaced,
+#: 'symlog' and 'linear', kept so a test can show it tells them apart.
+AXIS_MODE = 'broken'
+#: The working range is every graded attempt up to this percentile.
+WORK_PCTL = 0.90
+#: The axis breaks only when the worst attempt is this many times the working
+#: range's top; otherwise the whole range is one linear scale.
+BREAK_RATIO = 2.0
+#: The outlier strip's share of the plot height.
+STRIP_FRAC = 0.18
+
 #: An attempt whose `kind` is not one of these draws in `op_seed`'s grey. The
 #: names are the vocabulary the two producers already use: `place_route_loop`
 #: rounds are descents, `converge` rows carry a `kind`, and `evolve` carries an
@@ -332,7 +344,9 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
             last_acc = idx
     note = _note(rows)
     if fallback:
-        note += ('; %d parent(s) by last-accepted (no parent_sha; until '
+        # No ';' inside the clause: the note is a '; '-separated list, and
+        # `join_tracks` carries clauses over by splitting on it.
+        note += ('; %d parent(s) by last-accepted (no parent_sha, until '
                  'record takes a parent explicitly, #1034)' % fallback)
     return Track(tuple(rows), 'blocking (lower better)', 'converge',
                  note, gate_record=False)
@@ -526,8 +540,11 @@ def join_tracks(a: Track, b: Track, first='ledger') -> Track:
         if acc:
             rows[first_n] = rows[first_n]._replace(parent=acc[-1])
     note = '%s + %s: %s' % (halves[0].source, halves[1].source, _note(rows))
-    extra = [h.note.split('; ', 1)[1] for h in halves if '; ' in h.note
-             and 'last-accepted' in h.note]
+    # ONLY the lineage clause is carried over. Taking everything after the
+    # first '; ' also copied the half's own "N ungraded" clause, which the
+    # joined `_note(rows)` above already states for both halves together.
+    extra = [c for h in halves for c in h.note.split('; ')
+             if 'last-accepted' in c]
     if extra:
         note += '; ' + '; '.join(extra)
     return Track(tuple(rows), 'blocking / failures (lower better)',
@@ -675,20 +692,48 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
         vmax = max(graded) if graded else 1.0
         if vmax - vmin < 1e-9:
             vmax = vmin + 1.0
-        # A SYMLOG axis when one attempt dwarfs the rest. Run 32's ledger
-        # opens at blocking 12703 (the unplaced pile) and spends ~200 laps
-        # between 19 and 31: on a linear axis every one of those laps is the
-        # same pixel row and the record's drops are invisible. log10(1+v)
-        # keeps 0 (admissible) on the axis, which a plain log cannot.
+        # THE Y AXIS (#946 review). A search spends most of its laps in a
+        # narrow WORKING RANGE and a few attempts far outside it: run 32 opens
+        # at blocking 12703 (the unplaced pile) and spends ~200 laps between
+        # 19 and 43. A linear axis puts all of those laps on one pixel row; the
+        # symlog axis this used first still gave them the top ~7% of the band,
+        # so the record's drops 41 -> 38 -> 33 -> 32 -> 30 were invisible.
+        #
+        # So the axis is BROKEN, the way the owner's evolve_movie Ribbon makes
+        # progress readable: the working range -- every graded attempt up to
+        # the WORK_PCTL percentile, padded -- gets the main plot, and the
+        # outliers above it are compressed (log) into a thin strip at the
+        # bottom, under a visible break mark. `AXIS_MODE` keeps the two
+        # rejected axes callable, because the test proves it can tell them
+        # apart.
         import math
-        symlog = vmin >= 0 and vmax > 50.0 * (vmin + 1.0)
+        srt = sorted(graded)
+        hi_w = (srt[max(0, int(math.ceil(WORK_PCTL * len(srt))) - 1)]
+                if srt else vmax)
+        broken = (AXIS_MODE == 'broken' and hi_w > vmin
+                  and vmax > BREAK_RATIO * max(hi_w, 1e-9))
+        symlog = (AXIS_MODE == 'symlog' and vmin >= 0
+                  and vmax > 50.0 * (vmin + 1.0))
+        ph = py1 - py0
+        if broken:
+            _r = max(hi_w - vmin, 1.0)
+            w_lo, w_hi = vmin - 0.06 * _r, hi_w + 0.10 * _r
+            main_h = ph * (1.0 - STRIP_FRAC)
+            s0 = py0 + main_h + max(4.0, ph * 0.05)
+            _la, _lb = math.log10(1.0 + w_hi), math.log10(1.0 + vmax)
 
-        def _fy(v):
-            return math.log10(1.0 + max(0.0, v)) if symlog else v
+            def Y(v):
+                if v <= w_hi:
+                    return py0 + main_h * ((v - w_lo) / (w_hi - w_lo))
+                t = (math.log10(1.0 + v) - _la) / max(1e-9, _lb - _la)
+                return s0 + (py1 - s0) * t
+        else:
+            def _fy(v):
+                return math.log10(1.0 + max(0.0, v)) if symlog else v
+            fmin, fmax = _fy(vmin), _fy(vmax)
 
-        def _inv(u):
-            return (10.0 ** u - 1.0) if symlog else u
-        fmin, fmax = _fy(vmin), _fy(vmax)
+            def Y(v):
+                return py0 + ph * ((_fy(v) - fmin) / (fmax - fmin))
         xs = [a.index for a in rows]
         x0v, x1v = min(xs), max(xs)
         span = max(1, x1v - x0v)
@@ -696,9 +741,6 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
 
         def X(i):
             return px0 + (px1 - px0) * ((i - x0v) / float(span))
-
-        def Y(v):
-            return py0 + (py1 - py0) * ((_fy(v) - fmin) / (fmax - fmin))
 
         # the axis, and the one thing it means
         def _tick(v):
@@ -709,7 +751,7 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
                 return '%.0fk' % (v / 1000.0)
             if av >= 1000:
                 return '%.1fk' % (v / 1000.0)
-            return '%g' % round(v, 0 if symlog else 2)
+            return '%g' % round(v, 0 if (symlog or broken) else 2)
 
         # EVERY label drawn in the band is registered here, ticks and caption
         # included, so a record label is placed against all of them -- not
@@ -724,19 +766,46 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
                 w = d.textlength(txt, font=font)
                 return (xy[0], xy[1], xy[0] + w, xy[1] + font.size)
 
-        for frac in (0.0, 0.5, 1.0):
-            yy = py0 + frac * (py1 - py0)
+        if broken:
+            ticks = [vmin, (vmin + hi_w) / 2.0, hi_w, vmax]
+        else:
+            ticks = [vmin, (vmin + vmax) / 2.0, vmax]
+            if symlog:
+                ticks = [10.0 ** (fmin + k * (fmax - fmin)) - 1.0
+                         for k in (0.0, 0.5, 1.0)]
+        last_y = None
+        for v in ticks:
+            yy = Y(v)
             d.line([px0, yy, px1, yy], fill=th.rgb('chrome_rule'))
-            _t = _tick(_inv(fmin + frac * (fmax - fmin)))
+            if last_y is not None and abs(yy - last_y) < fs.size + 2:
+                continue
+            _t = _tick(v)
             d.text((box.x + 8, yy - 6), _t,
                    fill=th.rgb('chrome_text_faint'), font=fs)
             taken.append(_bbox((box.x + 8, yy - 6), _t, fs))
+            last_y = yy
+        if broken:
+            # THE BREAK MARK: two short slashes across the axis in the gap,
+            # so nobody reads the strip as a continuation of the scale.
+            gy = (py0 + main_h + s0) / 2.0
+            for gx in (px0, px1):
+                for dy in (-3, 3):
+                    d.line([gx - 5, gy + dy + 3, gx + 5, gy + dy - 3],
+                           fill=th.rgb('chrome_text_dim'), width=2)
+        if debug is not None:
+            debug['plot'] = (px0, py0, px1, py1)
+            debug['mode'] = ('broken' if broken else
+                             'symlog' if symlog else 'linear')
+            debug['work_hi'] = hi_w
+            debug['ys'] = [(v, Y(v)) for v in graded]
         # The caption is the axis's meaning plus the disclosure, and it is
         # DROPPED rather than ellipsised or overprinted when the band is too
         # narrow to hold it beside the plot -- same rule as the layer strip's
         # count. A half-sentence about what the axis means is worse than none:
         # 'failures (lower bet...' invites the reader to guess the rest.
-        metric = track.metric + ('  [log scale]' if symlog else '')
+        metric = track.metric + (
+            '  [axis broken above %s]' % _tick(hi_w) if broken
+            else '  [log scale]' if symlog else '')
         cap = '%s  -  %s' % (metric, track.note)
         if d.textlength(cap, font=f) <= (px1 - px0) * 0.92:
             d.text((px1, box.y + 3), cap, fill=th.rgb('chrome_text_dim'),

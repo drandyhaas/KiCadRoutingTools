@@ -151,6 +151,28 @@ class FrameSpool:
         self.close()
 
 
+#: Spooled PNG bytes per frame PIXEL, measured by PR C's verifier: ~1.27 MB
+#: for a 1400x788 frame at SPOOL_COMPRESS_LEVEL 1 (~1.15 B/px). A 6000-frame
+#: film at that size spools ~7.6 GB -- disk traded for the RAM it saved.
+SPOOL_BYTES_PER_PX = 1.15
+
+
+def disk_check(directory, n_frames, frame_px):
+    """`(fits, need_bytes, free_bytes)` for spooling `n_frames` frames of
+    `frame_px` pixels each into `directory` (the temp dir when None).
+
+    `fits` keeps a 20% margin. `free_bytes` is None when the free space
+    cannot be read, and then `fits` is True -- an unanswerable question
+    refuses nothing, but the caller can say it was not asked.
+    """
+    need = int(n_frames * frame_px * SPOOL_BYTES_PER_PX)
+    try:
+        free = shutil.disk_usage(directory or tempfile.gettempdir()).free
+    except OSError:
+        return True, need, None
+    return free >= need * 1.2, need, free
+
+
 def is_spool(frames):
     return isinstance(frames, FrameSpool)
 

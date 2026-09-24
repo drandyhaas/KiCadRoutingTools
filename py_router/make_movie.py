@@ -378,6 +378,30 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
             max_frames = int(getattr(_ek2, 'MOVIE_MAX_FRAMES', 0) or 0)
         except Exception:                                       # noqa: BLE001
             max_frames = 0
+    # #1036: the spool trades RAM for DISK (~1.27 MB per 1400 px frame, so
+    # ~7.6 GB for 6000 frames). Estimate the film before drawing it and say so
+    # LOUDLY when the spool's disk cannot hold it; an UNBUDGETED film then
+    # falls back to the default budget rather than filling the disk.
+    try:
+        import frame_spool as _fsp
+        _est = (max_frames if max_frames else
+                sum(a.trace_frame_estimate(a.load_trace(s[2]), rip_hold)
+                    for s in steps if len(s) > 2 and s[2]
+                    and os.path.isfile(s[2])) + 50 * len(steps))
+        _px = int(size) * int(size) * 0.6        # ~a 16:10 frame at `size`
+        _fits, _need, _free = _fsp.disk_check(spool.dir, _est, _px)
+        if not _fits:
+            print('make_movie: SPOOL DISK -- ~%d frames need ~%.1f GB, %s has '
+                  '%.1f GB free' % (_est, _need / 1e9, spool.dir,
+                                    (_free or 0) / 1e9), file=sys.stderr)
+            if not max_frames:
+                import env_knobs as _ek3
+                max_frames = int(getattr(_ek3, 'MOVIE_MAX_FRAMES', 2400)
+                                 or 2400)
+                print('make_movie: falling back to a %d-frame budget so the '
+                      'spool fits' % max_frames, file=sys.stderr)
+    except Exception:                                           # noqa: BLE001
+        pass
     # #946/C4: THE ATTEMPTS ARE FOUND BEFORE THE FRAME IS PLANNED, so the
     # band is RESERVED in the layout (`plan_frame(track_px=)`) instead of
     # grown under every frame afterwards -- which is what made a declared
