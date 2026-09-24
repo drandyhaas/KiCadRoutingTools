@@ -25,13 +25,12 @@ import os
 import random
 import sys
 import tempfile
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
-
-import pytest
 
 from kicad_parser import parse_kicad_pcb
 from placement.quench import ROTATIONS, QuenchState, quench
@@ -104,7 +103,7 @@ def test_neighbor_list_parity():
         < len(built.parts) - 1, "neighbour lists pruned nothing"
 
 
-def test_quench_output_unchanged_by_pruning(monkeypatch):
+def test_quench_output_unchanged_by_pruning():
     """Same-process A/B: a full quench run with the neighbour lists vs one
     with build_neighbor_lists no-opped (leaving _neighbors None, i.e. the
     brute-force fallback) must return the exact same placements. Each run
@@ -112,10 +111,11 @@ def test_quench_output_unchanged_by_pruning(monkeypatch):
     pcb1 = parse_kicad_pcb(INTERF_U)
     pruned = quench(pcb1, INTERF_U, max_displacement=2, step=1.0, max_passes=2)
 
-    monkeypatch.setattr(QuenchState, 'build_neighbor_lists',
-                        lambda self, budget: None)
-    pcb2 = parse_kicad_pcb(INTERF_U)
-    brute = quench(pcb2, INTERF_U, max_displacement=2, step=1.0, max_passes=2)
+    with mock.patch.object(QuenchState, 'build_neighbor_lists',
+                           lambda self, budget: None):
+        pcb2 = parse_kicad_pcb(INTERF_U)
+        brute = quench(pcb2, INTERF_U, max_displacement=2, step=1.0,
+                       max_passes=2)
 
     assert pruned, "fixture should produce at least one improving move"
     assert pruned == brute, (
@@ -447,11 +447,7 @@ def test_neighbor_lists_cover_swap_inherited_rotations():
 
 if __name__ == '__main__':
     test_neighbor_list_parity()
-    mp = pytest.MonkeyPatch()
-    try:
-        test_quench_output_unchanged_by_pruning(mp)
-    finally:
-        mp.undo()
+    test_quench_output_unchanged_by_pruning()
     test_neighbor_lists_cover_rotation_fallback()
     test_neighbor_lists_cover_swap_inherited_rotations()
     print("ALL PASS")

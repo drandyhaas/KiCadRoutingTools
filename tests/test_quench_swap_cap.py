@@ -25,8 +25,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
-import pytest
-
 from kicad_parser import parse_kicad_pcb
 from placement.quench import quench
 
@@ -171,12 +169,14 @@ def test_locked_parts_never_swap():
 def test_swap_cap_validation():
     """swap_max_displacement must be within [0, max_displacement]."""
     pcb, path = _swap_board(3)
-    with pytest.raises(ValueError):
-        quench(pcb, path, max_displacement=5.0, swap_max_displacement=6.0,
-               **SWAP_ONLY)
-    with pytest.raises(ValueError):
-        quench(pcb, path, max_displacement=5.0, swap_max_displacement=-1.0,
-               **SWAP_ONLY)
+    for bad in (6.0, -1.0):
+        try:
+            quench(pcb, path, max_displacement=5.0, swap_max_displacement=bad,
+                   **SWAP_ONLY)
+        except ValueError:
+            continue
+        raise AssertionError(f"swap_max_displacement={bad} with "
+                             f"max_displacement=5.0 was accepted")
     os.unlink(path)
 
 
