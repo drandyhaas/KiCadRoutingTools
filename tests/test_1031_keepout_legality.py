@@ -321,8 +321,8 @@ def main():
               not st.swap_pads_ok('R1', 'R2'))
         units = RL.rigid_units(st, None)
         why = RL.exact_refusal(st, units, {units.of_ref['R2']: (17.6, 0.0)})
-        check('8. relocate refuses a block shift into the band, by the pad '
-              'gate', why.startswith('pad_gate_refused_a_shift:R2'), why)
+        check('8. relocate refuses a block shift into the band, naming the '
+              'keep-out', why.startswith('rule_area_keepout_refused_a_shift:R2'), why)
         check('8. ...and accepts the same shift that stays clear',
               RL.exact_refusal(st, units,
                                {units.of_ref['R2']: (10.0, 0.0)}) == '')
@@ -380,6 +380,24 @@ def main():
                                           '(copperpour not_allowed)'))
         check('10. ...but not where the rule area forbids pour',
               ('R1', '1') in ill, str((sorted(ill), sorted(ex))))
+        # ...nor where a SECOND rule area -- tracks allowed, pour forbidden --
+        # covers the contact point while the band itself allows pour. This is
+        # the `_pour_reaches` ban loop; the arm above never reaches it,
+        # because the band's own pour flag short-circuits first.
+        nopour = ('  (zone (net 0) (net_name "") (layer "F.Cu") (uuid "ko2")\n'
+                  '    (hatch edge 0.5) (connect_pads (clearance 0))\n'
+                  '    (min_thickness 0.25)\n'
+                  '    (keepout (tracks allowed) (vias allowed) '
+                  '(pads allowed) (copperpour not_allowed) '
+                  '(footprints allowed))\n'
+                  '    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))\n'
+                  '    (polygon (pts (xy 0.2 12.5) (xy 3.5 12.5) (xy 3.5 17.5)'
+                  ' (xy 0.2 17.5))))\n')
+        ill, ex = ko_rows(over + [nopour], 'over_zone_second_nopour')
+        check('10. ...nor where a second pour-forbidding rule area covers '
+              'the contact point',
+              ('R1', '1') in ill and ('R1', '1', 'pour_served') not in ex,
+              str((sorted(ill), sorted(ex))))
 
         # 11 -- the landing is ANY free point of the pad, not its centre:
         # R6.1's centre sits 0.2 from the region (band 0.275) and its
@@ -399,6 +417,85 @@ def main():
         check('12. no duplicate (ref, pad, area) rows in any list',
               all(len({(r[0], r[1], r[4]) for r in g[k]}) == len(g[k])
                   for k in ('keepout_copper_pads', 'keepout_copper_tht_refs')))
+
+        # 13 -- P-close ECHOES and PERSISTS a keepout-band waiver, merged into
+        # the waivers.json beside the render so P3's own keys survive
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            'pdrv_1031', os.path.join(ROOT, '.claude', 'skills',
+                                      'plan-pcb-placement', 'scripts',
+                                      'placement_driver.py'))
+        pdrv = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(pdrv)
+        ftmp = os.path.join(work, 'drv')
+        os.makedirs(ftmp)
+        dargv = pdrv._fixture_argv(pdrv._next_line_fixture(ftmp))
+        da = pdrv._args(dargv + ['--waive', 'X:checked', '--waive',
+                                 'keepout-band:R9 reached on In1 by design'])
+        wpath = os.path.join(os.path.dirname(os.path.abspath(da.render_json)),
+                             'waivers.json')
+        with open(wpath, 'w', encoding='utf-8') as fh:
+            json.dump({'unlocked_high': 1, 'waivers': {'U1': 'p3'}}, fh)
+        out = pdrv.STAGES['P-close'](da)
+        wdoc = json.load(open(wpath, encoding='utf-8'))
+        check('13. P-close echoes the keepout-band waiver with its reason',
+              'GATE WAIVERS: --waive keepout-band: R9 reached on In1 by '
+              'design' in out and not out.startswith('<error>'), out[:300])
+        check('13. ...and persists it, keeping P3\'s keys',
+              wdoc.get('closeout', {}).get('waivers')
+              == {'keepout-band': 'R9 reached on In1 by design'}
+              and wdoc.get('waivers') == {'U1': 'p3'}, str(wdoc))
+        out0 = pdrv.STAGES['P-close'](pdrv._args(dargv + ['--waive',
+                                                          'X:checked']))
+        check('13. with no gate waiver it says none',
+              'GATE WAIVERS: none' in out0, out0[:300])
+
+        # 14 -- a census that could not be BUILT is not a clean one: the
+        # driver refuses it, and render_placement --gate fails on it
+        rj3 = os.path.join(ftmp, 'r_ko_err.json')
+        rdoc = json.load(open(da.render_json, encoding='utf-8'))
+        rdoc['checklist']['a_off_outline'] = {
+            'pad_copper': [], 'courtyard': [], 'keepout_copper': [],
+            'keepout_copper_unmeasured': [['*', 'error', 'ValueError: x']]}
+        with open(rj3, 'w', encoding='utf-8') as fh:
+            json.dump(rdoc, fh)
+        a3 = pdrv._args(dargv + ['--waive', 'X:checked'])
+        a3.render_json = rj3
+        out3 = pdrv.STAGES['P-close'](a3)
+        check('14. P-close refuses a render whose keep-out census errored',
+              out3.startswith('<error>')
+              and 'could not build its rule-area keep-out census' in out3,
+              out3[:300])
+
+        import render_placement
+        from placement import legality as _leg
+
+        def _boom(*_a, **_k):
+            raise ValueError('census exploded (test)')
+        _orig = _leg.keepout_pad_findings
+        _leg.keepout_pad_findings = _boom
+        rj4 = os.path.join(work, 'rp_err.json')
+        import contextlib
+        import io
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                try:
+                    rc4 = render_placement.main(
+                        [bd, '--clearance', '0.2', '--json-out', rj4, '-o',
+                         os.path.join(work, 'rp_err.png'), '--gate'])
+                except SystemExit as e:
+                    rc4 = e.code
+        finally:
+            _leg.keepout_pad_findings = _orig
+        chk4 = json.load(open(rj4, encoding='utf-8'))['checklist'][
+            'a_off_outline']
+        check('14. render_placement records the failure as an error row',
+              any(u[1] == 'error' for u in chk4['keepout_copper_unmeasured'])
+              and chk4['keepout_copper'] == [], str(chk4))
+        check('14. ...and --gate FAILS on it rather than passing an empty list',
+              rc4 == 4 and 'keepout_copper_unmeasured(error)=1'
+              in buf.getvalue(), 'rc=%s %s' % (rc4, buf.getvalue()[-300:]))
 
         # 7 -- inert without a keep-out
         pcb0 = parse_kicad_pcb(clean)

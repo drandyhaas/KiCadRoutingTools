@@ -2634,6 +2634,12 @@ def main(argv=None):
                 len(doc['checklist']['a_off_outline']['graphic_copper']),
             'a_off_outline.keepout_copper':
                 len(doc['checklist']['a_off_outline']['keepout_copper']),
+            # a keep-out census that could not be BUILT is not a clean one
+            # (#1031 review): its error row fails the gate like a finding
+            'a_off_outline.keepout_copper_unmeasured(error)':
+                sum(1 for _u in doc['checklist']['a_off_outline'].get(
+                    'keepout_copper_unmeasured') or ()
+                    if len(_u) > 1 and _u[1] == 'error'),
             'b_pad_clearance_pairs':
                 len(doc['checklist']['b_pad_clearance_pairs']),
             'b_body_overlap_pairs':

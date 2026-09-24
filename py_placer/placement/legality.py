@@ -4227,7 +4227,10 @@ KEEPOUT_COPPER_BASIS = (
     "needs a connection (net with 2+ pads, not served by a same-net pour on "
     "those layers where pour is allowed AND a same-net zone outline reaches "
     "the pad copper at the pose); a through-hole pad reachable on an "
-    "uncovered layer is reported in keepout_copper_tht_refs, not failed")
+    "uncovered layer is reported in keepout_copper_tht_refs, not failed. "
+    "The pour test reads the zone OUTLINE, not its fill: fill cut-outs, "
+    "zone priority, zone holes and thermal-relief necks are ignored, so a "
+    "pad the fill does not actually reach can read pour_served")
 
 
 class RuleAreaKeepouts:

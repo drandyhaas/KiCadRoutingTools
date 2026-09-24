@@ -958,10 +958,39 @@ def p_close(a):
     _cok, _cwhy = _guard_congestion(a)
     if not _cok:
         return err(_cwhy)
+    # The two off-board gate waivers this stage honours, ECHOED and PERSISTED
+    # (#1031 review) the way P3 records its lock waivers: a waiver that
+    # clears a gate and leaves no trace is a flag that made a finding vanish.
+    # Written into the waivers.json beside the render, merged under
+    # `closeout` so P3's own keys survive.
+    _gw = {n: _waiver_for(a, n) for n in ('keepout-band', 'off-outline')}
+    _gw = {n: r for n, r in _gw.items() if r}
+    _gw_file = None
+    if _gw:
+        _gw_file = os.path.join(
+            os.path.dirname(os.path.abspath(a.render_json)), 'waivers.json')
+        try:
+            _prev = {}
+            if os.path.isfile(_gw_file):
+                with open(_gw_file, encoding='utf-8') as _gf:
+                    _prev = json.load(_gf)
+            if not isinstance(_prev, dict):
+                _prev = {}
+            _prev['closeout'] = {'board': os.path.abspath(a.board),
+                                 'waivers': _gw}
+            with open(_gw_file, 'w', encoding='utf-8') as _gf:
+                json.dump(_prev, _gf, indent=1, sort_keys=True)
+        except (OSError, ValueError):
+            _gw_file = None
+    _gw_read = ('; '.join(f'--waive {n}: {r}' for n, r in sorted(_gw.items()))
+                + (f'  (recorded in {_gw_file})' if _gw_file
+                   else '  (NOT recorded: waivers.json could not be written)')
+                ) if _gw else 'none'
     return f'''<stage_instructions stage="P-close" name="close out" of="{len(STAGES)}">
 Prove the placement, then hand it on.
 
   DECLARED SPEC: {_cov_read}
+  GATE WAIVERS: {_gw_read}
 
 {_cwhy}
 
@@ -1948,6 +1977,23 @@ def _guard_render(a):
                        'which pads sit in the band by design and how their '
                        'nets are reached. A waiver with no reason is a flag '
                        'that makes the gate disappear.')
+    # A census that could not be BUILT leaves `keepout_copper` at [] and
+    # names the failure in `keepout_copper_unmeasured` -- unmeasured is not
+    # clean, so that error row refuses exactly like a finding.
+    _kerr = [u for u in ((chk.get('a_off_outline') or {})
+                         .get('keepout_copper_unmeasured') or ())
+             if isinstance(u, (list, tuple)) and len(u) > 2
+             and u[1] == 'error']
+    if _kerr and not _kow:
+        return False, (
+            f'The render could not build its rule-area keep-out census: '
+            f'{_kerr[0][2]}.\n\nIts keepout_copper list is therefore EMPTY '
+            f'BY FAILURE, not by measurement, and an empty list here would '
+            f'read as "no pad in any keep-out band". Re-render; if the '
+            f'census still fails, check the board with\n'
+            f'  python3 -X utf8 py_tools/check_assembly.py <board> '
+            f'--clearance <the floor>\n'
+            f'which prints the same channel from the file\'s own poses.')
     _ko = (chk.get('a_off_outline') or {}).get('keepout_copper')
     if _kow:
         _ko = None
@@ -3261,6 +3307,13 @@ def _refusal_scenarios(tmp):
              'a_off_outline': {'pad_copper': [], 'courtyard': [],
                                'keepout_copper': [{'amount_mm': 0.3}]},
              'd_moved': {'moved': 2, 'expected': None, 'match': None}})]),
+        ('a render whose keep-out census could not be built', with_before
+         + ['--render-json', render(name='r_ko_err.json', checklist={
+             'a_off_outline': {'pad_copper': [], 'courtyard': [],
+                               'keepout_copper': [],
+                               'keepout_copper_unmeasured': [
+                                   ['*', 'error', 'ValueError: fixture']]},
+             'd_moved': {'moved': 1, 'expected': None, 'match': None}})]),
         ('a keepout-band waiver with no reason', with_before
          + ['--waive', 'keepout-band:',
             '--render-json', render(name='r_kow.json', checklist={
