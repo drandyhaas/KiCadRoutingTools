@@ -700,12 +700,21 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
             return py0 + (py1 - py0) * ((_fy(v) - fmin) / (fmax - fmin))
 
         # the axis, and the one thing it means
+        def _tick(v):
+            # COMPACT, because the tick column is ~38 px wide: run 32's
+            # 12703 was drawn as '1270' with its last digit under the plot.
+            av = abs(v)
+            if av >= 10000:
+                return '%.0fk' % (v / 1000.0)
+            if av >= 1000:
+                return '%.1fk' % (v / 1000.0)
+            return '%g' % round(v, 0 if symlog else 2)
+
         for frac in (0.0, 0.5, 1.0):
             yy = py0 + frac * (py1 - py0)
             d.line([px0, yy, px1, yy], fill=th.rgb('chrome_rule'))
             d.text((box.x + 8, yy - 6),
-                   '%g' % round(_inv(fmin + frac * (fmax - fmin)),
-                                0 if symlog else 2),
+                   _tick(_inv(fmin + frac * (fmax - fmin))),
                    fill=th.rgb('chrome_text_faint'), font=fs)
         # The caption is the axis's meaning plus the disclosure, and it is
         # DROPPED rather than ellipsised or overprinted when the band is too
@@ -735,7 +744,7 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
             d.line([ax, ay, bx, by],
                    fill=th.rgb(KIND_ROLE.get(a.kind, 'op_seed')), width=1)
         # the record staircase, over the edges and under the nodes
-        pts, last, shown = [], None, set()
+        pts, last, shown, labels = [], None, set(), []
         for i, r in best_so_far(rows,
                                 require_admissible=track.gate_record):
             if i > horizon:
@@ -745,9 +754,23 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None):
             pts += [(X(i), Y(r))]
             if r not in shown:
                 shown.add(r)
-                d.text((X(i) - 6, Y(r) - fs.size - 4), '%g' % round(r, 2),
-                       fill=th.rgb('status_best'), font=fs)
+                labels.append((X(i) - 6, Y(r) - fs.size - 4,
+                               '%g' % round(r, 2)))
             last = r
+        # Every drop is labelled that has ROOM. Drawn newest-first, and a
+        # label that would overprint one already drawn is skipped: run 32's
+        # first minute of drops (12703, 267, 251, 239 ...) printed on top of
+        # each other as an unreadable smear. The newest record -- the one the
+        # film is currently about -- always wins.
+        taken = []
+        for lx, ly, txt in reversed(labels):
+            tw = d.textlength(txt, font=fs)
+            rect = (lx, ly, lx + tw, ly + fs.size + 2)
+            if any(not (rect[2] < o[0] or o[2] < rect[0] or rect[3] < o[1]
+                        or o[3] < rect[1]) for o in taken):
+                continue
+            taken.append(rect)
+            d.text((lx, ly), txt, fill=th.rgb('status_best'), font=fs)
         if len(pts) > 1:
             d.line([p for xy in pts for p in xy], fill=th.rgb('status_best'),
                    width=2)
