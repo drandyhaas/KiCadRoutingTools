@@ -19,11 +19,12 @@ reuses it, and these tests pin four things about how:
     stated degradation contract -- "not crash, not silently drop a panel, and
     not change the frame size";
   * the OFF state cannot read like success, the rule its four siblings follow;
-  * the gate runs BEFORE resolving kicad-cli, because "should this panel be
-    drawn" is cheaper and more fundamental than "can it be" -- and putting it
-    after meant a machine without kicad-cli reported `did_not_run` for a board
-    that would have been gated anyway, a true statement that hides the useful
-    one;
+  * the gate runs WITHOUT kicad-cli (env-only, and says so), because "should
+    this panel be drawn" is more fundamental than "can it be" -- a machine
+    without kicad-cli reporting `did_not_run` for a board that would have been
+    gated anyway is a true statement that hides the useful one -- and WITH
+    kicad-cli it counts models with the render's own `model_dirs(cli, board)`
+    (#1035: without them Windows read 0/224 while the render found 213/224);
   * and there is an opt-out, because on a populated board the panel is the
     point.
 
@@ -174,22 +175,85 @@ def test_the_off_state_cannot_read_as_success():
         print('  PASS: %s' % line)
 
 
-def test_the_gate_runs_before_resolving_kicad_cli():
-    """Source order, asserted. 'Should this be drawn' needs no binary."""
-    _mark = len(_FAIL)
-    src = open(MP.__file__, encoding='utf-8').read()
+def _run_with_cli(cli, models):
+    """compose_two_panel with kicad-cli resolved to `cli` (None = absent) and
+    `resolve_models` recording the dirs it was handed."""
+    seen = []
+    saved_models, saved_cli = kir.resolve_models, kir.resolve_cli
+    kir.resolve_models = lambda board, dirs=None: (seen.append(dirs), models)[1]
+    kir.resolve_cli = lambda _explicit=None: (
+        (cli, '') if cli else (None, 'kicad-cli not found (test)'))
     try:
-        gate = src.index('#1016')
-        probe = src.index('resolve_cli(opts.cli)')
-    except ValueError as exc:
-        fail('BROKEN: cannot find both anchors (%s)' % exc)
-        return
-    if gate > probe:
-        fail('the models gate runs AFTER resolve_cli, so a machine without '
-             'kicad-cli reports did_not_run for a board that would have been '
-             'gated anyway')
+        fr = _frames()
+        _out, rep = MP.compose_two_panel(
+            fr, _marks(BOARD, len(fr)), BOARD, MP.IsoOpts())
+        return rep, seen
+    finally:
+        kir.resolve_models, kir.resolve_cli = saved_models, saved_cli
+
+
+def test_the_gate_runs_without_kicad_cli_env_only_and_says_so():
+    """Behaviour, not source order (#1035). With no kicad-cli the gate still
+    runs -- 'should this be drawn' needs no binary -- on environment-only
+    resolution, and its detail SAYS env-only, because that count can
+    undercount an install tree it could not locate."""
+    _mark = len(_FAIL)
+    rep, seen = _run_with_cli(None, dict(total=58, found=3))
+    if rep.get('state') != 'mostly_bare':
+        fail('with no kicad-cli the gate did not run: state %r (a machine '
+             'without kicad-cli must still hear mostly_bare, not did_not_run)'
+             % rep.get('state'))
+    elif 'env-only' not in (rep.get('detail') or ''):
+        fail('the no-cli gate did not say it was env-only: %r'
+             % rep.get('detail'))
+    if not seen:
+        fail('resolve_models was never called by the gate')
+    elif seen[0] != kir.model_dirs(None, BOARD):
+        fail('the no-cli gate resolved with %r, expected the env-only '
+             'model_dirs(None, board) %r'
+             % (seen[0], kir.model_dirs(None, BOARD)))
+    # and a board that passes the gate with no cli then reports did_not_run
+    rep2, _ = _run_with_cli(None, dict(total=75, found=62))
+    if rep2.get('state') != 'did_not_run':
+        fail('a populated board with no kicad-cli reported %r, expected '
+             'did_not_run AFTER the gate' % rep2.get('state'))
     if len(_FAIL) == _mark:
-        print('  PASS: the gate is reached without kicad-cli')
+        print('  PASS: no kicad-cli -> gate ran env-only (%s); a populated '
+              'board then reports did_not_run' % rep.get('detail'))
+
+
+def test_the_gate_counts_with_the_install_model_dirs():
+    """#1035: the gate must see the same dirs the RENDER uses,
+    `kir.model_dirs(cli, board)`. It used to pass none, so on Windows (no
+    KICAD10_3DMODEL_DIR env var) it read 0/224 while the render found 213/224.
+    A fake cli path is enough: the claim is about WHICH dirs are passed.
+    """
+    _mark = len(_FAIL)
+    cli, _why = kir.resolve_cli(None)
+    probe_cli = cli or os.path.join(ROOT, 'no_such_dir', 'bin', 'kicad-cli')
+    rep, seen = _run_with_cli(probe_cli, dict(total=224, found=213))
+    want = kir.model_dirs(probe_cli, BOARD)
+    if not seen:
+        fail('resolve_models was never called by the gate')
+    elif seen[0] != want:
+        fail('the gate resolved with %r, not model_dirs(cli, board) %r'
+             % (seen[0], want))
+    if rep.get('state') == 'mostly_bare':
+        fail('213/224 was gated as mostly bare')
+    if 'env-only' in (rep.get('detail') or ''):
+        fail('a resolved cli still reported env-only')
+    # With a REAL kicad-cli, the dirs map the versioned variables to the
+    # install tree -- exactly what the old gate was missing.
+    if cli and kir.kicad_share_dirs(cli):
+        tree = kir.kicad_share_dirs(cli)[0]
+        if not any(v == tree for k, v in want.items() if k != 'KIPRJMOD'):
+            fail('model_dirs(%s) maps no variable to the install tree %s'
+                 % (cli, tree))
+        else:
+            print('    real kicad-cli: the gate searches %s' % tree)
+    if len(_FAIL) == _mark:
+        print('  PASS: the gate resolves with model_dirs(cli, board), the '
+              'render\'s own dirs')
 
 
 TESTS = (
@@ -198,7 +262,8 @@ TESTS = (
     test_the_threshold_is_the_one_that_already_existed,
     test_there_is_an_opt_out_and_it_is_off_by_default,
     test_the_off_state_cannot_read_as_success,
-    test_the_gate_runs_before_resolving_kicad_cli,
+    test_the_gate_runs_without_kicad_cli_env_only_and_says_so,
+    test_the_gate_counts_with_the_install_model_dirs,
 )
 
 

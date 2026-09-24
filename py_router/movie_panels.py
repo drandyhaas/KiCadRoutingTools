@@ -565,28 +565,43 @@ def compose_two_panel(frames, marks, final_board, opts=None):
     # first composed frame the height is fixed and cannot change, which is the
     # same reason the probe render happens where it does.
     #
-    # And BEFORE resolving kicad-cli, deliberately: 'should this panel be
-    # drawn' is a cheaper and more fundamental question than 'can it be', it
-    # needs no binary, and putting it after meant a machine without kicad-cli
-    # reported `did_not_run` for a board that would have been gated anyway --
-    # a true statement that hides the more useful one.
+    # The gate must count models the way the RENDER will (#1035). The render
+    # resolves them with `kir.model_dirs(cli, board)`, which maps every
+    # `${KICADn_3DMODEL_DIR}` to the install's own 3dmodels tree; without
+    # those dirs `resolve_models` expands environment variables only, and a
+    # Windows install sets none -- so the gate read 0/224 on run 32's
+    # glasgow while the render found 213/224, and switched a populated
+    # board's panel off.
+    #
+    # So kicad-cli is RESOLVED first, but not yet REQUIRED: 'should this panel
+    # be drawn' is still answered before 'can it be', and a machine without
+    # kicad-cli still hears `mostly_bare` for a board that would be gated
+    # anyway rather than a `did_not_run` that hides the more useful reason.
+    # With no CLI the gate falls back to environment-only resolution and says
+    # so in its detail, because that count can undercount an install tree it
+    # could not locate.
+    cli, why = kir.resolve_cli(opts.cli)
     if opts.require_models:
         _gate_board = next((b for b in owner if b), None)
-        _models = kir.resolve_models(_gate_board) if _gate_board else None
+        _models = (kir.resolve_models(_gate_board,
+                                      kir.model_dirs(cli, _gate_board))
+                   if _gate_board else None)
         _tot = (_models or {}).get('total') or 0
         _found = (_models or {}).get('found') or 0
+        _how = ('' if cli else
+                ' [env-only: no kicad-cli, so the install\'s 3dmodels tree '
+                'was not searched]')
         if _tot and _found < _tot * kir.MOSTLY_BARE_FRACTION:
             return frames, _report(
                 'mostly_bare',
-                '%d of %d 3D models resolve (< %.0f%%)'
-                % (_found, _tot, kir.MOSTLY_BARE_FRACTION * 100),
+                '%d of %d 3D models resolve (< %.0f%%)%s'
+                % (_found, _tot, kir.MOSTLY_BARE_FRACTION * 100, _how),
                 models=_models)
         if not _tot:
             return frames, _report('mostly_bare',
                                    'the board references no 3D models',
                                    models=_models)
 
-    cli, why = kir.resolve_cli(opts.cli)
     if not cli:
         return frames, _report('did_not_run', why)
 
