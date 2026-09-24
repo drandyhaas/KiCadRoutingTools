@@ -109,7 +109,10 @@ def main():
         fresh_remote = {("runs_set9", "scratch_board"): bad.stat().st_size}
         check(crs.stale_manifests({key: bad}, fresh_remote) == ([], []),
               "the control is fresh before the edit")
-        bad.write_text(bad.read_text() + "\n")
+        # Bytes, not text: on Windows write_text turns "\n" into "\r\n", so a
+        # text-mode append is TWO bytes and the "one apart" check read 239 vs
+        # 237 there while passing everywhere else.
+        bad.write_bytes(bad.read_bytes() + b"\n")
         stale4, _ = crs.stale_manifests({key: bad}, fresh_remote)
         check(len(stale4) == 1 and stale4[0][2] == stale4[0][3] + 1,
               f"a one-byte local edit is reported as stale (got {stale4})")
