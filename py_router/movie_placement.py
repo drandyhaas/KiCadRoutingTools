@@ -313,7 +313,11 @@ def draw_panels(d, box, track, *, cur=None, theme=None, frame_h=720,
         from route_render import load_font
         th = render_theme.theme(theme, strict=False)
         g = render_chrome.gutter_px(box.w * 3)
-        fs = load_font(render_chrome.type_px('small', frame_h))
+        # the TYPE SCALE's small size, but never larger than a narrow panel
+        # can hold: three panels across a 9:16 frame are ~250 px each
+        _pw = (box.w - 4 * g) // 3
+        fs = load_font(min(render_chrome.type_px('small', frame_h),
+                           max(9, _pw // 24)))
         d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
                     fill=th.rgb('chrome_panel'),
                     outline=th.rgb('chrome_panel_edge'))
@@ -328,8 +332,8 @@ def draw_panels(d, box, track, *, cur=None, theme=None, frame_h=720,
         _arrangement(d, subs[1], track, cur, th, fs, debug)
         _intent(d, subs[2], track, cur, th, fs, debug)
         if routing and track.beats:
-            d.text((box.x + box.w - g, box.y + box.h - g), 'placement settled',
-                   fill=th.rgb('chrome_text_faint'), font=fs, anchor='rd')
+            d.text((box.x + box.w - g, box.y + 2), 'placement settled',
+                   fill=th.rgb('chrome_text_faint'), font=fs, anchor='ra')
         return True
     except Exception:                                          # noqa: BLE001
         return False
@@ -398,12 +402,22 @@ def _marker(d, x, y0, y1, th):
 
 
 def _legality(d, sub, track, cur, th, fs, debug):
-    x0, y0, x1, y1 = _frame(
-        d, sub, 'LEGALITY  (log y)',
-        [(th.rgb('defect_conflict'), 'off-outline parts', False),
-         (th.rgb('op_jump'), 'conflict pairs', False),
-         (th.rgb('op_cross'), 'overlap mm2', False)],
-        INSTRUMENT, th, fs, debug)
+    # THE FLOOR the KiCad-locked parts set: when the last beat's conflict
+    # pairs are all locked-part contacts, no placement lap can go lower. It
+    # is named in the LEGEND, where no series line can cross it.
+    lb = track.beats[-1]
+    floor = (lb.conflict_pairs if (lb.conflict_pairs is not None
+                                   and lb.locked_pairs
+                                   and lb.conflict_pairs <= lb.locked_pairs)
+             else None)
+    leg = [(th.rgb('defect_conflict'), 'off-outline parts', False),
+           (th.rgb('op_jump'), 'conflict pairs', False),
+           (th.rgb('op_cross'), 'overlap mm2', False)]
+    if floor is not None:
+        leg.append((th.rgb('chrome_text_dim'),
+                    'floor %s = locked parts' % _fmt(floor), True))
+    x0, y0, x1, y1 = _frame(d, sub, 'LEGALITY  (log y)', leg, INSTRUMENT,
+                            th, fs, debug)
     series = [('off-outline parts', [b.off_outline for b in track.beats],
                'defect_conflict'),
               ('conflict pairs', [b.conflict_pairs for b in track.beats],
@@ -425,19 +439,12 @@ def _legality(d, sub, track, cur, th, fs, debug):
         'chrome_text_faint'), font=fs)
     d.text((sub.x + 2, y1 - fs.size), '0', fill=th.rgb('chrome_text_faint'),
            font=fs)
-    # THE FLOOR the KiCad-locked parts set: when the last beat's conflict
-    # pairs are all locked-part contacts, no placement lap can go lower.
-    lb = track.beats[-1]
-    if (lb.conflict_pairs is not None and lb.locked_pairs
-            and lb.conflict_pairs <= lb.locked_pairs):
-        fy = Y(lb.conflict_pairs)
+    if floor is not None:
+        fy = Y(floor)
         for xx in range(int(x0), int(x1), 8):
             d.line([xx, fy, xx + 4, fy], fill=th.rgb('chrome_text_dim'))
-        d.text((x1, fy - fs.size - 2), 'floor %s = locked parts' % _fmt(
-            lb.conflict_pairs), fill=th.rgb('chrome_text_dim'), font=fs,
-            anchor='ra')
         if debug is not None:
-            debug['floor'] = lb.conflict_pairs
+            debug['floor'] = floor
     if cur is not None:
         _marker(d, xs[cur], y0, y1, th)
 
@@ -477,8 +484,8 @@ def _arrangement(d, sub, track, cur, th, fs, debug):
             by = Y(bench[key])
             for xx in range(int(x0), int(x1), 9):
                 d.line([xx, by, xx + 5, by], fill=rgb, width=1)
-            lab = '%s %s' % (track.benchmark_name or 'benchmark',
-                             _fmt(bench[key]))
+            # the VALUE on the line; the benchmark's name is in the legend
+            lab = _fmt(bench[key])
             d.text((x0 + 2 if side == 'l' else x1 - 2, by + 2), lab,
                    fill=rgb, font=fs, anchor='la' if side == 'l' else 'ra')
         if debug is not None:

@@ -76,8 +76,8 @@ ROWS = [
      "    for key in ():",
      (T1042,), 'KILLED'),
     ('locked-floor-unlabelled', 'mp',
-     "        d.text((x1, fy - fs.size - 2), 'floor %s = locked parts' % _fmt(",
-     "        d.text((x1, fy - fs.size - 2), 'floor %s' % _fmt(",
+     "                    'floor %s = locked parts' % _fmt(floor), True))",
+     "                    'floor %s' % _fmt(floor), True))",
      (T1042,), 'KILLED'),
 ]
 

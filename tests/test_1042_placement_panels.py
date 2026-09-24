@@ -182,7 +182,7 @@ def test_panels_name_their_instruments_and_the_screen():
     elif 'floor 6 = locked parts' not in rec.texts:
         fail('the floor label is not drawn')
     legs = dbg.get('legends') or []
-    if legs[0] != ['off-outline parts', 'conflict pairs', 'overlap mm2']:
+    if legs[0][:3] != ['off-outline parts', 'conflict pairs', 'overlap mm2']:
         fail('the legality legend does not name each series and unit: %r'
              % legs[0])
     drawn = ' '.join(rec.texts)
