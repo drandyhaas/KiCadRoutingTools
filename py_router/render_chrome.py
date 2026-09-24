@@ -155,6 +155,106 @@ def event_rows(theme, *, seen: Optional[Sequence[str]] = None) -> list:
 # `step 2 - route` cannot say whether this is the first attempt or the fourth.
 
 
+#: THE TYPE SCALE (#946 review). Font heights as a share of the FRAME height,
+#: one row per role, so a caption in any region of any layout is the same size
+#: as every other caption in that film. The rail's own text is ~1.9% of the
+#: frame (`draw_rail`: 0.42 of a 4.5% rail); a caption sits a step below it.
+TYPE_SCALE = {'title': 0.019, 'caption': 0.0135, 'small': 0.011}
+TYPE_MIN_PX = {'title': 11, 'caption': 10, 'small': 9}
+
+#: The inner margin every panel's content keeps from its box, as a share of
+#: the frame width, floored. Content drawn flush to a box edge reads as cut
+#: off -- the 4:3 inventory's counts touched the frame's right edge.
+GUTTER_FRAC = 0.008
+GUTTER_MIN_PX = 6
+
+
+def type_px(role, frame_h):
+    """The font height for `role` in a frame `frame_h` pixels tall."""
+    return max(TYPE_MIN_PX.get(role, 9),
+               int(round(frame_h * TYPE_SCALE.get(role, 0.0135))))
+
+
+def gutter_px(frame_w):
+    """The design system's panel gutter for a frame `frame_w` pixels wide."""
+    return max(GUTTER_MIN_PX, int(round(frame_w * GUTTER_FRAC)))
+
+
+def fit_words(d, text, font, width):
+    """`text` shortened to `width` at a WORD boundary, with an ellipsis.
+
+    Never cuts mid-word: whole words are dropped from the end. Returns ''
+    when not even the first word fits.
+    """
+    if not text:
+        return ''
+    if d.textlength(text, font=font) <= width:
+        return text
+    words = text.split(' ')
+    ell = '…'
+    for k in range(len(words) - 1, 0, -1):
+        cand = ' '.join(words[:k]).rstrip(' |-,;:') + ell
+        if d.textlength(cand, font=font) <= width:
+            return cand
+    return ''
+
+
+def fit_parts(d, parts, font, width, sep='  |  '):
+    """The longest caption that fits, dropping PARTS before cutting words.
+
+    `parts` is `[(text, drop_rank[, short]), ...]` in display order; rank 0
+    is never dropped, higher ranks go first. A rank-0 part may carry a SHORT
+    form ("213/224" for "3D models 213/224"), tried before any word is cut,
+    so the number a panel exists to show survives. Past that the result is
+    `fit_words` -- never a string cut mid-word.
+    """
+    keep = [(p[0], p[1], p[2] if len(p) > 2 else None)
+            for p in parts if p[0]]
+    ranks = sorted({r for _t, r, _s in keep if r > 0}, reverse=True)
+    for n_drop in range(len(ranks) + 1):
+        gone = set(ranks[:n_drop])
+        txt = sep.join(t for t, r, _s in keep if r not in gone)
+        if txt and d.textlength(txt, font=font) <= width:
+            return txt
+    short = sep.join((s or t) for t, r, s in keep if r == 0)
+    if short and d.textlength(short, font=font) <= width:
+        return short
+    return fit_words(d, short, font, width)
+
+
+def draw_key_inline(d, box, rows, *, theme=None, font=None):
+    """A key laid out on ONE line, right-aligned inside `box` (a
+    `frame_layout.Box`). Returns True when it fit; a key that does not fit is
+    not drawn, never overprinted."""
+    if not rows or box is None or box.w <= 0 or box.h <= 0:
+        return False
+    try:
+        import render_theme
+        from route_render import load_font
+        th = theme or render_theme.DARK
+        font = font or load_font(max(9, int(box.h * 0.36)))
+        sw = max(8, int(box.h * 0.36))
+        items = [(rgb, mark, t, d.textlength(t, font=font))
+                 for rgb, mark, t in rows]
+        need = sum(sw + 5 + tw + 14 for _r, _m, _t, tw in items)
+        if need > box.w:
+            return False
+        x = box.x + box.w - need
+        cy = box.y + box.h // 2
+        for rgb, mark, t, tw in items:
+            # INTEGER corners: `draw_mark`'s dashed and hatched swatches
+            # `range()` over the width, and a float width raised -- into the
+            # except below, which dropped every key item after the first.
+            xi = int(round(x))
+            draw_mark(d, [xi, cy - sw // 2, xi + sw, cy + sw // 2], rgb, mark)
+            d.text((x + sw + 5, cy), t, fill=th.rgb('chrome_text_dim'),
+                   font=font, anchor='lm')
+            x += sw + 5 + tw + 14
+        return True
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 def _fit(d, text, font, width):
     """`text`, ellipsised to `width`. Returns '' when nothing fits."""
     if not text:
@@ -173,9 +273,13 @@ def _fit(d, text, font, width):
 
 
 def draw_rail(d, box, left, right, *, theme, pad_scale=1, progress=None,
-              ticks=()):
+              ticks=(), key_rows=None):
     """The stable strip: `left` at the left, `right` right-aligned, and an
-    optional progress bar with tick marks where each lap began."""
+    optional progress bar with tick marks where each lap began.
+
+    `key_rows` (#946 review) is the event key, drawn on one line in the
+    rail's free middle, left of `right`: the rail is chrome, so a key there
+    can never cover the board -- which the corner overlay did."""
     if box is None or box.h <= 0:
         return
     try:
@@ -199,6 +303,14 @@ def draw_rail(d, box, left, right, *, theme, pad_scale=1, progress=None,
         if right:
             d.text((box.x + box.w - pad, box.y + pad // 2), right, font=font,
                    fill=th.rgb('chrome_text_dim'), anchor='ra')
+        if key_rows:
+            lw = int(d.textlength(_fit(d, left, font, box.w - rw - 4 * pad),
+                                  font=font))
+            kx0 = box.x + pad + lw + 3 * pad
+            kx1 = box.x + box.w - pad - rw - 3 * pad
+            draw_key_inline(d, box._replace(x=kx0, w=max(0, kx1 - kx0),
+                                            h=max(8, box.h - 4 * ss)),
+                            key_rows, theme=th)
         if progress is not None:
             bar_y = box.y + box.h - max(2, ss * 2)
             d.rectangle([box.x + pad, bar_y, box.x + box.w - pad,

@@ -397,7 +397,16 @@ def panel_scale(png_paths, box_wh, strip):
     return best
 
 
-def iso_panel(box_wh, png_path, caption, error='', scale=None, theme=None):
+def _count_of(note):
+    """The `N/M` model count out of a `models_note` line, as the caption's
+    short form (e.g. "213/224 3D"), or None when it carries no count."""
+    import re
+    m = re.search(r'(\d+)\s*/\s*(\d+)', note or '')
+    return ('%s/%s 3D' % m.groups()) if m else None
+
+
+def iso_panel(box_wh, png_path, caption, error='', scale=None, theme=None,
+              caption_px=None):
     """``(panel, error)``: a foreign PNG letterboxed into an EXACT box, captioned.
 
     The second return value is what the caller must fold into its failure count.
@@ -420,7 +429,11 @@ def iso_panel(box_wh, png_path, caption, error='', scale=None, theme=None):
     W, H = box_wh
     panel_bg, strip_bg, strip_fg, error_fg = _colours(theme)
     canvas = Image.new('RGB', (W, H), panel_bg)
-    strip = max(18, H // 10)
+    # #946 review: the caption's font comes from the TYPE SCALE (the film's
+    # caption size), not from the box -- H // 10 made a 3D caption larger
+    # than every other caption in the frame, and then truncated it.
+    cap_px = int(caption_px) if caption_px else max(11, max(18, H // 10) // 2)
+    strip = max(18, cap_px + 2 * max(4, cap_px // 3))
     d = ImageDraw.Draw(canvas)
     drawn_error = error or ''
 
@@ -459,9 +472,17 @@ def iso_panel(box_wh, png_path, caption, error='', scale=None, theme=None):
                           10, max(8, H // 3), W - 20, error_fg)
 
     d.rectangle([0, H - strip, W, H], fill=strip_bg)
-    font = load_font(max(11, strip // 2))
-    _clipped_text(d, font, caption or '', 8, H - strip + max(1, strip // 6),
-                  W - 16, strip_fg)
+    font = load_font(cap_px)
+    # A caption given as PARTS is shortened by dropping parts, never by
+    # cutting a word: `[(text, drop_rank), ...]`, rank 0 kept to the end.
+    if isinstance(caption, (list, tuple)):
+        import render_chrome
+        txt = render_chrome.fit_parts(d, caption, font, W - 16)
+        d.text((8, H - strip // 2), txt, fill=strip_fg, font=font,
+               anchor='lm')
+    else:
+        _clipped_text(d, font, caption or '', 8,
+                      H - strip + max(1, strip // 6), W - 16, strip_fg)
     return canvas, drawn_error
 
 
@@ -736,7 +757,9 @@ def compose_two_panel(frames, marks, final_board, opts=None, box=None):
         # ONE scale for the whole film, decided before any panel is drawn, so
         # the board keeps a constant apparent size as it turns instead of
         # growing and shrinking with each yaw's projected width.
-        strip = max(18, H_iso // 10)
+        import render_chrome
+        _cap_px = render_chrome.type_px('caption', frames[0].size[1])
+        strip = max(18, _cap_px + 2 * max(4, _cap_px // 3))
         shared = panel_scale([results.get(k, (None, ''))[0]
                               for k in range(len(shots))], (W, H_iso), strip)
 
@@ -744,13 +767,17 @@ def compose_two_panel(frames, marks, final_board, opts=None, box=None):
         for k, shot in enumerate(shots):
             png, err = results.get(k, (None, 'not rendered'))
             _m, note = _note_for(shot.board)
-            cap = '%s  |  yaw %.0f deg  |  %s' % (
-                os.path.splitext(os.path.basename(shot.board))[0],
-                shot.rotate[2], note)
+            # PARTS, in drop order (#946 review): the yaw goes first, then
+            # the board name; "3D models 213/224" is what the panel is for
+            # and is kept.
+            cap = [(os.path.splitext(os.path.basename(shot.board))[0], 1),
+                   ('yaw %.0f deg' % shot.rotate[2], 2),
+                   (note, 0, _count_of(note))]
             # The panel reports back: a PNG that rendered but would not DECODE
             # is a failure the count must see, and it is only discoverable here.
             panels[k], drawn = iso_panel((W, H_iso), png, cap, error=err,
-                                         scale=shared, theme=opts.theme)
+                                         scale=shared, theme=opts.theme,
+                                         caption_px=_cap_px)
             errors[k] = err or drawn or ''
         failed = sum(1 for e in errors.values() if e)
         # The report's single models figure is the FILM'S OPENING board, and the

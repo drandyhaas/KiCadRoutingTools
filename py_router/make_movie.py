@@ -180,7 +180,8 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
                camera=None, camera_budget=60.0, tween=10,
                panels=None, iso_opts=None, timing=None, theme=None,
-               layout=None, aspect=None, attempts=None, max_frames=None):
+               layout=None, aspect=None, attempts=None, max_frames=None,
+               title=None):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -205,6 +206,7 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             camera_budget=camera_budget, tween=tween, panels=panels,
             iso_opts=iso_opts, timing=timing, theme=theme, layout=layout,
             aspect=aspect, attempts=attempts, max_frames=max_frames,
+            title=title,
             spool=spool)
     finally:
         spool.close()
@@ -213,7 +215,7 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
 def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
                 chunks, end_hold, png_dir, quiet, camera, camera_budget, tween,
                 panels, iso_opts, timing, theme, layout, aspect, attempts,
-                max_frames, spool):
+                max_frames, spool, title=None):
     import animate_route as a
     if isinstance(inputs, str):
         inputs = [inputs]
@@ -365,8 +367,11 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
             aspect = getattr(_ek, 'MOVIE_ASPECT', '') or None
     # The run directory's own name is the closest thing a multi-step chain has
     # to a board name, and it is what the rail's stable left should carry.
-    _title = (os.path.basename(os.path.abspath(inputs[0]))
-              if len(inputs) == 1 and os.path.isdir(inputs[0]) else None)
+    # `title` (--title) wins; else the run directory; else `board_title`
+    # derives one that is never a LATER board's name (#1036 review).
+    _title = title or (os.path.basename(os.path.abspath(inputs[0]))
+                       if len(inputs) == 1 and os.path.isdir(inputs[0])
+                       else None)
     if max_frames is None:
         try:
             import env_knobs as _ek2
@@ -591,6 +596,10 @@ def main():
                          "when loop_round*.json sidecars or a converge ledger "
                          "sit next to the boards; a chain with no search "
                          "behind it has none and says so.")
+    ap.add_argument('--title', default=None,
+                    help="the film's name on the rail's left (default: the "
+                         "run directory, or the directory the chain's boards "
+                         "share; never a later board's name)")
     ap.add_argument('--theme', default=None, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--camera', default=None,
@@ -709,7 +718,7 @@ def main():
                          supersample=args.supersample, layer_alpha=args.layer_alpha,
                          rip_hold=args.rip_hold, chunks=args.chunks,
                          end_hold=args.end_hold, png_dir=args.png_dir,
-                         max_frames=args.max_frames,
+                         max_frames=args.max_frames, title=args.title,
                          quiet=args.quiet,
                        camera=args.camera,
                        camera_budget=args.camera_budget,

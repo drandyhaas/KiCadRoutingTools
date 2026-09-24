@@ -277,6 +277,10 @@ class Movie:
         """
         if not self.seen_events:
             return None
+        if self.split_caption:
+            # A layout with a RAIL carries the key there (#946 review): as
+            # a corner overlay it floated over the board's bottom-left.
+            return None
         from render_chrome import event_rows, draw_key
         rows = event_rows(self.theme, seen=self.seen_events)
 
@@ -305,7 +309,9 @@ class Movie:
                                        if self.want_panel else ()),
                             'unplaced': self.unplaced,
                             'inventory': self.inventory,
-                            'active': self.active_layer})
+                            'active': self.active_layer,
+                            # the key's rows as of THIS frame, for the rail
+                            'seen': tuple(self.seen_events)})
 
     def _frame(self, hl_s, hl_v, color, label, mark='solid', base_s=None):
         """One frame. `base_s` overrides the live copper drawn under the
@@ -741,7 +747,24 @@ def board_title(final, steps=(), hint=None):
     # only name there is.
     pre = re.compile(r'^(?:step|loop_round|round|iter)\d*[_-]?')
     if not pre.match(stem):
-        return stem
+        # NEVER A LATER BOARD'S NAME (#1036 review). A hand-named chain --
+        # glasgow_unplaced -> placed_v2 -> ... -> K3C_route -- used to title
+        # every frame with the FINAL stem, so the placement beats read
+        # "K3C_route" on the left beside "placed_v2" on the right. The film's
+        # name is the directory the chain lives in; boards spread over
+        # several directories fall back to the FIRST board, which is at worst
+        # a name from the past, never from the future.
+        stems = [os.path.splitext(os.path.basename(str(st[1])))[0]
+                 for st in steps if len(st) > 1]
+        if len(set(stems)) <= 1:
+            return stem
+        dirs = {os.path.dirname(os.path.abspath(str(st[1])))
+                for st in steps if len(st) > 1}
+        if len(dirs) == 1:
+            name = os.path.basename(dirs.pop())
+            if name:
+                return name
+        return stems[0] if stems else stem
     stems = [os.path.splitext(os.path.basename(str(st[1])))[0]
              for st in steps if len(st) > 1]
     tails = {pre.sub('', x) for x in stems}
@@ -1157,6 +1180,11 @@ def _compose_into_frame(frames, geom, r, chrome=None, iso_in_panel=False):
     frame_spool.transform(frames, _one, out_size=(W, H))
 
 
+#: The least spare height under the layer grid worth filling with the board's
+#: numbers; below it the grid is centred instead.
+STRIP_SUMMARY_MIN_PX = 90
+
+
 def _draw_panel(d, geom, r, c, iso_in_panel=False):
     """The lower box, whichever of its four contents this phase asks for.
 
@@ -1179,11 +1207,35 @@ def _draw_panel(d, geom, r, c, iso_in_panel=False):
         if iso_in_panel and geom.panel_split:
             # the iso half is filled later by compose_two_panel(box=)
             box = geom.panel_split[1]
+        # THE GUTTER (#946 review): every content keeps the design system's
+        # inner margin from its box -- the 4:3 inventory's counts touched
+        # the frame's right edge.
+        import render_chrome
+        g = render_chrome.gutter_px(geom.frame.w)
+        box = box._replace(x=box.x + g, y=box.y + g,
+                           w=max(2, box.w - 2 * g), h=max(2, box.h - 2 * g))
         if phase == 'routing':
+            # Cells shaped like the BOARD, in a grid when the box is tall
+            # (the 1:1 sidebar gave 85x500 cells). The grid is centred; when
+            # there is room under it, the board's numbers go there.
+            _x0, _y0, _x1, _y1 = r.bounds
+            _asp = max(_x1 - _x0, 1e-6) / max(_y1 - _y0, 1e-6)
+            _b, _n, gh = render_panels.grid_boxes(
+                box, len(r.copper_layers), _asp)
+            spare = box.h - gh
+            if _n and spare >= STRIP_SUMMARY_MIN_PX:
+                strip = box._replace(h=gh)
+                render_panels.draw_summary(
+                    d, box._replace(y=box.y + gh, h=spare), theme=th,
+                    lines=render_panels.board_summary(
+                        r.pcb, _live(c.get('live')), _live(c.get('live_v'))))
+            else:
+                strip = box._replace(y=box.y + max(0, spare) // 2,
+                                     h=min(box.h, gh) if _n else box.h)
             render_panels.draw_layer_strip(
-                d, box, bounds=r.bounds, segments=_live(c.get('live')),
+                d, strip, bounds=r.bounds, segments=_live(c.get('live')),
                 layers=list(r.copper_layers), palette=r.palette, theme=th,
-                active=c.get('active'))
+                active=c.get('active'), grid=True)
         elif phase == 'bookend':
             render_panels.draw_summary(
                 d, box, theme=th,
@@ -1231,9 +1283,12 @@ def _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks,
     c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
     d = ImageDraw.Draw(f)
     _draw_panel(d, geom, r, c, iso_in_panel=iso_in_panel)
+    _seen = c.get('seen') or ()
     render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
                             c.get('rail_right', ''), theme=th,
-                            progress=i / float(n), ticks=ticks)
+                            progress=i / float(n), ticks=ticks,
+                            key_rows=(render_chrome.event_rows(th, seen=_seen)
+                                      if _seen and th is not None else None))
     if geom.foot.h > 0:
         d.rectangle([geom.foot.x, geom.foot.y,
                      geom.foot.x + geom.foot.w - 1,

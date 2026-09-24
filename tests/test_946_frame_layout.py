@@ -285,20 +285,29 @@ def test_the_guard_reports_and_pads_rather_than_squashing():
         print('  PASS: detected, reported, padded -- not squashed, not lost')
 
 
-def test_set_canvas_leaves_the_margin_rule_alone():
+def test_set_canvas_keys_the_margin_to_the_box():
+    """UPDATED DELIBERATELY (#946 review). This pinned that `set_canvas` left
+    the size-keyed margin alone, so a layout box inherited a margin sized for
+    the whole frame: the r2 stills' 16:9 board filled ~600x370 of a 980x594
+    box, and a 124 px box at size 400 kept 12 px of it each side. The default
+    canvas keeps the pinned arithmetic (`test_431_render_seams`); a canvas the
+    LAYOUT chose keys its margin to the box's short side."""
     _mark = len(_FAIL)
+    import route_render as RRm
     pcb = parse_kicad_pcb(BOARD)
     r = BoardRenderer(pcb, size=600, supersample=2)
-    before = r._margin_px
+    if abs(r._margin_px - 0.03 * 600 * 2) > 1e-9:
+        fail('the DEFAULT canvas margin moved: %r' % r._margin_px)
     r.set_canvas(321, 222)
     if r.frame(segments=[], vias=[]).size != (321, 222):
         fail('set_canvas did not take: %s' % (r.frame(segments=[], vias=[]).size,))
-    if r._margin_px != before:
-        fail('set_canvas moved _margin_px %r -> %r; '
-             'tests/test_431_render_seams.py:42-53 pins that arithmetic to 1e-12'
-             % (before, r._margin_px))
+    want = RRm.CANVAS_MARGIN_FRAC * 222 * 2
+    if abs(r._margin_px - want) > 1e-9:
+        fail('set_canvas margin %r, expected %r (the box short side)'
+             % (r._margin_px, want))
     if len(_FAIL) == _mark:
-        print('  PASS: canvas moves, margin rule does not')
+        print('  PASS: default canvas keeps its margin; a layout canvas keys '
+              'it to the box')
 
 
 def _declared(size, ratio):
@@ -426,7 +435,7 @@ TESTS = (
     test_legacy_reproduces_todays_frame,
     test_a_real_gif_encodes_at_one_size_per_layout,
     test_the_guard_reports_and_pads_rather_than_squashing,
-    test_set_canvas_leaves_the_margin_rule_alone,
+    test_set_canvas_keys_the_margin_to_the_box,
 )
 
 

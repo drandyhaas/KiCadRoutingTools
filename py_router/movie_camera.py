@@ -635,6 +635,7 @@ class Stage:
         """
         rd = self._by_board.get(os.path.basename(board))
         if rd is None or not self.moving_parts:
+            self._settle(label)
             return False
         moved = rd.get('moved') or []
         # The camera shots queued before this action are shot on the board
@@ -675,14 +676,43 @@ class Stage:
         # the tracks landing on it were not.
         self._mirror_new_frames(label)
 
-    def outro(self):
+    def _settle(self, label, n=None):
+        """Bring the camera home to the BOARD before a copper step (#1036).
+
+        The placement shots aim at the pile-inclusive overview (`extent`), which
+        is right while parts are off the board and wrong once they have
+        landed: every routing frame after a glide was drawn at that overview,
+        so on run 32 the board filled ~600x370 of its 980x594 box. A short
+        glide to the board's own bounds, then the renderer's default view --
+        so a routing frame fills its box exactly as a film without a camera
+        does. A no-op when the camera is already home.
+        """
         from movie_camera import lerp_rect, smoothstep
-        cur = getattr(self.r, '_view', None) or self._overview
+        cur = getattr(self.r, '_view', None)
+        home = self.r.bounds
+        if cur is None or tuple(cur) == tuple(home):
+            return
+        n = n if n is not None else max(2, (self.opts.outro if self.opts
+                                            else 10) // 2)
+        start = len(self.movie.frames)
+        for k in range(n):
+            t = smoothstep((k + 1) / n)
+            self._aim(lerp_rect(cur, home, t))
+            self._snap(label)
+        self.r.set_view(None)
+        self._log.append(('settle', start, len(self.movie.frames)))
+
+    def outro(self):
+        """The closing move, onto the BOARD -- the parts have landed, so the
+        pile-inclusive overview would only shrink the finished board."""
+        from movie_camera import lerp_rect, smoothstep
+        home = self.r.bounds
+        cur = getattr(self.r, '_view', None) or home
         n = (self.opts.outro if self.opts else 10)
         start = len(self.movie.frames)
         for k in range(n):
             t = smoothstep((k + 1) / n)
-            self._aim(lerp_rect(cur, self._overview, t))
+            self._aim(lerp_rect(cur, home, t))
             self._snap("overview")
         self._log.append(('outro', start, len(self.movie.frames)))
         self.r.set_view(None)

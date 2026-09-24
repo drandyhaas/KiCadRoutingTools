@@ -177,6 +177,11 @@ def _rot(cx: float, cy: float, dx: float, dy: float, ang_deg: float) -> Tuple[fl
     return (cx + dx * ca - dy * sa, cy + dx * sa + dy * ca)
 
 
+#: The margin a LAYOUT-chosen canvas keeps around the board, as a share of the
+#: canvas's short side (`BoardRenderer.set_canvas`, #946 review).
+CANVAS_MARGIN_FRAC = 0.035
+
+
 class BoardRenderer:
     """Render a parsed board to PIL images, geometry-first.
 
@@ -260,12 +265,19 @@ class BoardRenderer:
         of a board-shaped renderer. Naming it makes the seam supported and
         removes the duplicate substrate build that poke caused.
 
-        **`_margin_px` is deliberately NOT recomputed.** It is
-        `margin_frac * size * ss`, keyed off `size` rather than off W/H, and
-        `tests/test_431_render_seams.py:42-53` pins that arithmetic to 1e-12.
-        A canvas override is about the BOX, not about the margin rule.
+        **The margin follows the BOX here** (#946 review). `__init__`'s margin
+        is `margin_frac * size * ss`, keyed off the longest frame dimension,
+        and `tests/test_431_render_seams.py:42-53` pins that arithmetic to
+        1e-12 for the default canvas -- which is untouched. But a layout box
+        is a fraction of the frame, so a size-keyed margin became a large
+        share of it: a 16:9 film's 980x594 box kept 42 px each side, and at
+        size 400 a 124 px tall box kept 12 px of its 124. On a canvas the
+        LAYOUT chose, the margin is `CANVAS_MARGIN_FRAC` of the box's short
+        side instead.
         """
         self.W, self.H = max(2, int(width)), max(2, int(height))
+        self._margin_px = (CANVAS_MARGIN_FRAC * min(self.W, self.H)
+                           * self.ss)
         self.set_view(getattr(self, '_view', None))
 
     def set_layers(self, layers: Optional[Sequence[str]] = None) -> None:
