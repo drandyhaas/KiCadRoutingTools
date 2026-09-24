@@ -151,3 +151,53 @@ def test_explicit_tag_overrides_the_guard(monkeypatch):
     downloads, builds = _run_main(monkeypatch, ['--tag', 'v0.20.1'],
                                   crate_matches=False)
     assert (downloads, builds) == (1, 0)
+
+
+if __name__ == '__main__':
+    # run_all.py runs each test file as a script. Without this block the file
+    # defined its tests and ran none of them, and run_all reported a pass. The
+    # two pytest fixtures are supplied from the stdlib so pytest stays
+    # optional; under pytest the functions still receive pytest's own.
+    import inspect
+    import pathlib
+    import shutil
+    import tempfile
+    import traceback
+
+    class _MonkeyPatch:
+        """The one fixture method these tests use: setattr, undone after."""
+
+        def __init__(self):
+            self._undo = []
+
+        def setattr(self, target, name, value):
+            self._undo.append((target, name, getattr(target, name)))
+            setattr(target, name, value)
+
+        def undo(self):
+            for target, name, value in reversed(self._undo):
+                setattr(target, name, value)
+
+    tests = [(n, f) for n, f in sorted(globals().items())
+             if n.startswith('test_') and inspect.isfunction(f)]
+    failed = []
+    for name, fn in tests:
+        params = inspect.signature(fn).parameters
+        tmp, mp = tempfile.mkdtemp(prefix='t615_'), _MonkeyPatch()
+        kwargs = {}
+        if 'tmp_path' in params:
+            kwargs['tmp_path'] = pathlib.Path(tmp)
+        if 'monkeypatch' in params:
+            kwargs['monkeypatch'] = mp
+        try:
+            fn(**kwargs)
+            print(f'  PASS  {name}')
+        except Exception:                                  # noqa: BLE001
+            failed.append(name)
+            print(f'  FAIL  {name}')
+            traceback.print_exc()
+        finally:
+            mp.undo()
+            shutil.rmtree(tmp, ignore_errors=True)
+    print(f'{len(tests) - len(failed)}/{len(tests)} passed')
+    sys.exit(1 if failed or not tests else 0)
