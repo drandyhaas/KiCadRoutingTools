@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "kind": "design-brief",
+  "units": "mm",
+  "board": "glasgow_unplaced.kicad_pcb",
+  "product": {
+    "form_factor": "interface_explorer",
+    "user_top_side": "F"
+  },
+  "interfaces": [
+    {
+      "ref": "J1",
+      "user_facing": true,
+      "edge": "west",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "HRO TYPE-C-31-M-12 USB-C receptacle; F.Fab body 1.00mm past the west edge",
+      "role": "host_uplink"
+    },
+    {
+      "ref": "J2",
+      "user_facing": true,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole IDC box header 2x10 (I/O bank)",
+      "role": "io_bank_a"
+    },
+    {
+      "ref": "J3",
+      "user_facing": true,
+      "edge": "south",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole IDC box header 2x10 (I/O bank)",
+      "role": "io_bank_b"
+    },
+    {
+      "ref": "J4",
+      "user_facing": true,
+      "edge": "south",
+      "mount_mode": "edge_mount",
+      "cable_entry": "in_plane",
+      "note": "Molex KK-254 1x02 _Horizontal (right-angle); F.Fab body 0.043mm inside the south edge",
+      "role": "aux_power"
+    },
+    {
+      "ref": "J5",
+      "user_facing": true,
+      "edge": "north",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: surface-mounted straight pin header 2x22 1.27mm (expansion)",
+      "role": "expansion"
+    },
+    {
+      "ref": "J10",
+      "user_facing": "unknown",
+      "edge": "unknown",
+      "mount_mode": "top_mount",
+      "cable_entry": "perpendicular_top",
+      "note": "descr: Through hole straight pin header 1x03 (AUX); 20.7mm from every edge, so no edge claimed",
+      "role": "aux"
+    }
+  ],
+  "keepouts": [],
+  "fixed": [],
+  "unknown": []
+}
