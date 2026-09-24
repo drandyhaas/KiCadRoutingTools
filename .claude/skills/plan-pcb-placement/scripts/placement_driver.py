@@ -1936,6 +1936,44 @@ def _guard_render(a):
             f'`oob_pad_count`, which is a part-level AABB inflated by the '
             f'clearance and reads non-zero on human boards whose pads are '
             f'fine.')
+    # #1031: pads in a board RULE-AREA keep-out band -- the same defect by
+    # another route. The router lands no track there, so the net fails
+    # "boxed in by static obstacles" even on an empty board (run 32: 7 of
+    # 18 open joins). render_placement emits the key on every render, so an
+    # absent key is an older render, not a clean one, and is not refused
+    # here (the pad_copper arm above has the same reading).
+    _kow = _waiver_for(a, 'keepout-band')
+    if _kow == '':
+        return False, ('--waive keepout-band needs a REASON after the colon: '
+                       'which pads sit in the band by design and how their '
+                       'nets are reached. A waiver with no reason is a flag '
+                       'that makes the gate disappear.')
+    _ko = (chk.get('a_off_outline') or {}).get('keepout_copper')
+    if _kow:
+        _ko = None
+    if isinstance(_ko, list) and _ko:
+        _krefs = []
+        for _it in _ko:
+            _r = (_it[0] if isinstance(_it, (list, tuple)) and _it
+                  else _it.get('reference') if isinstance(_it, dict) else _it)
+            if _r and str(_r) not in _krefs:
+                _krefs.append(str(_r))
+        return False, (
+            f'{len(_ko)} part(s) seat pads inside a rule-area KEEP-OUT band, '
+            f'where no track can land: '
+            f'{", ".join(_krefs) or "see checklist.a_off_outline.keepout_copper"}.'
+            f'\n\nThe per-pad detail is in '
+            f'checklist.a_off_outline.keepout_copper_pads. Those nets fail '
+            f'"boxed in by static obstacles" even routed first on an empty '
+            f'board, so this converts into `unrouted` exactly like pad copper '
+            f'off the outline.\n\nMove each named part inward until its pads '
+            f'clear the band -- place_pose grades the keep-out and refuses a '
+            f'pose that deepens it:\n  python3 -X utf8 py_placer/place_pose.py '
+            f'<board> <out> set <REF> <x> <y> --snap --clearance <the floor>\n'
+            f'The rule area is the board\'s own declaration; it is never '
+            f'yours to delete. If a pad sits there by design and its net is '
+            f'served some other way, re-run this stage with --waive '
+            f'keepout-band:<the pads and how they are reached>.')
     d = chk.get('d_moved') or {}
     if d.get('match') is False:
         return False, (
@@ -3210,6 +3248,25 @@ def _refusal_scenarios(tmp):
              'a_off_outline': {'pad_copper': [{'amount_mm': 1.2}],
                                'courtyard': []},
              'd_moved': {'moved': 3, 'expected': None, 'match': None}})]),
+        # #1031: pads in a rule-area keep-out band, named, unattributable,
+        # and the keepout-band waiver without its reason
+        ('a render naming parts with pads in a keep-out band', with_before
+         + ['--render-json', render(name='r_ko.json', checklist={
+             'a_off_outline': {'pad_copper': [], 'courtyard': [],
+                               'keepout_copper': [['R12', 0.284],
+                                                  ['U14', 0.187]]},
+             'd_moved': {'moved': 2, 'expected': None, 'match': None}})]),
+        ('a render with keep-out band pads it cannot attribute', with_before
+         + ['--render-json', render(name='r_ko_anon.json', checklist={
+             'a_off_outline': {'pad_copper': [], 'courtyard': [],
+                               'keepout_copper': [{'amount_mm': 0.3}]},
+             'd_moved': {'moved': 2, 'expected': None, 'match': None}})]),
+        ('a keepout-band waiver with no reason', with_before
+         + ['--waive', 'keepout-band:',
+            '--render-json', render(name='r_kow.json', checklist={
+                'a_off_outline': {'pad_copper': [], 'courtyard': [],
+                                  'keepout_copper': [['R12', 0.284]]},
+                'd_moved': {'moved': 1, 'expected': None, 'match': None}})]),
         ('a render that disagrees on the move count', with_before
          + ['--render-json', render(name='r_moved.json', checklist={
              'd_moved': {'moved': 9, 'expected': 3, 'match': False}})]),

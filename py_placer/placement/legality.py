@@ -3210,9 +3210,16 @@ class LegalityContext:
     def pads_ok(self, ref: str, x: float, y: float, rot: float,
                 neighbors: Iterable[str], exclude=None) -> bool:
         """May `ref` take this pose? Per neighbor: no worse than the SEED
-        baseline, and a NEW different-net pad intersection is never admitted."""
+        baseline, and a NEW different-net pad intersection is never admitted.
+
+        #1031: and no deeper into a rule-area keep-out band than the seed
+        (`keepout_ok`). Folded in HERE, the one choke point, so every search
+        move is covered -- candidate_valid (both branches), the swap phase
+        (`swap_pads_ok`) and relocate's block shift all call this."""
         if ref not in self.parts:
             return True
+        if not self.keepout_ok(ref, x, y, rot):
+            return False
         pose = (x, y, rot)
         for nb in neighbors:
             if nb == ref or (exclude is not None and nb in exclude):
@@ -4218,7 +4225,8 @@ KEEPOUT_COPPER_BASIS = (
     "obstacle_map.add_rule_area_keepout_obstacles). A pad is ILLEGAL when "
     "every copper layer it occupies is covered by the keep-out and its net "
     "needs a connection (net with 2+ pads, not served by a same-net pour on "
-    "those layers where pour is allowed); a through-hole pad reachable on an "
+    "those layers where pour is allowed AND a same-net zone outline reaches "
+    "the pad copper at the pose); a through-hole pad reachable on an "
     "uncovered layer is reported in keepout_copper_tht_refs, not failed")
 
 
@@ -4244,8 +4252,9 @@ class RuleAreaKeepouts:
     def __init__(self, pcb_data, clearance: float, track_width: float,
                  track_source: str = ''):
         from check_drc import _point_on_board, _point_to_rings_distance, \
-            pad_copper_layers
+            pad_copper_layers, _point_in_poly
         from net_queries import expand_pad_layers
+        self._in_poly = _point_in_poly
         self._pad_layers = pad_copper_layers
         self._on_region = _point_on_board
         self._pt_dist = _point_to_rings_distance
@@ -4296,17 +4305,36 @@ class RuleAreaKeepouts:
             for p in fp.pads:
                 if _pad_carries_copper(p) and (p.net_id or 0) > 0:
                     self._net_pads[p.net_id] = self._net_pads.get(p.net_id, 0) + 1
-        # (net_id, layer) pairs a same-net zone fills: such a pad is served by
-        # fill contact where the keep-out allows pour, not by a track.
-        self._poured = set()
+        # Same-net zones: a pad is served by FILL CONTACT, not a track, only
+        # where its own net's zone outline on the pad's layer actually reaches
+        # the pad copper at the pose, and no rule area forbidding pour covers
+        # that point (`_pour_reaches`). A (net, layer) key alone let a 4x4 mm
+        # zone 30 mm away exempt a pad in the band.
+        self._zones: List[tuple] = []
         for z in getattr(pcb_data, 'zones', None) or ():
             nid = getattr(z, 'net_id', 0) or 0
-            if nid <= 0:
+            poly = [tuple(q) for q in (getattr(z, 'polygon', None) or ())]
+            if nid <= 0 or len(poly) < 3:
                 continue
             zl = getattr(z, 'layers', None) or [getattr(z, 'layer', None)]
             for l in zl:
                 if l:
-                    self._poured.add((nid, str(l)))
+                    self._zones.append((nid, str(l), poly))
+        # every board-level rule area forbidding POUR, whatever it says
+        # about tracks: (outer, holes, covered layers)
+        self._no_pour: List[tuple] = []
+        for ko in getattr(board_info, 'keepouts', None) or ():
+            if ko.get('copper_pour_allowed', True) or ko.get('in_footprint'):
+                continue
+            poly = [tuple(q) for q in (ko.get('polygon') or ())]
+            if len(poly) < 3:
+                continue
+            toks = sorted(str(t) for t in (ko.get('layers') or ()))
+            cov = (set(self._expand(toks, self.board_copper)) if toks
+                   else set(self.board_copper))
+            self._no_pour.append((poly, [[tuple(q) for q in h] for h in
+                                         (ko.get('holes') or ())
+                                         if len(h) >= 3], cov))
         self._meta: Dict[str, list] = {}
 
     @classmethod
@@ -4346,9 +4374,11 @@ class RuleAreaKeepouts:
                 (governed if layers <= a['covered'] else partial).append(ai)
             nid = p.net_id or 0
             needs = nid > 0 and self._net_pads.get(nid, 0) >= 2
-            pour = [ai for ai in governed if self.areas[ai]['pour_allowed']
-                    and all((nid, l) in self._poured for l in layers)]
-            m.append((p, tuple(governed), tuple(partial), needs, tuple(pour),
+            # candidate zones only; whether one REACHES the pad is a pose
+            # question, answered in part_rows
+            zones = tuple(zi for zi, (zn, zl, _zp) in enumerate(self._zones)
+                          if zn == nid and zl in layers) if nid > 0 else ()
+            m.append((p, tuple(governed), tuple(partial), needs, zones,
                       sorted(layers)))
         self._meta[ref] = m
         return m
@@ -4407,6 +4437,24 @@ class RuleAreaKeepouts:
                             return 0.0
         return band - best
 
+    def _pour_reaches(self, zones, rect) -> bool:
+        """Does one of these same-net zones reach the pad copper `rect`?
+        A sample point of the rect (centre, corners) inside the zone outline
+        and outside every pour-forbidding rule area on the zone's layer, or a
+        zone vertex inside the rect."""
+        x0, y0, x1, y1 = rect[:4]
+        pts = (((x0 + x1) / 2.0, (y0 + y1) / 2.0), (x0, y0), (x1, y0),
+               (x1, y1), (x0, y1))
+        for zi in zones:
+            _n, layer, poly = self._zones[zi]
+            bans = [(o, h) for o, h, cov in self._no_pour if layer in cov]
+            hits = [q for q in pts if self._in_poly(q[0], q[1], poly)]
+            hits += [q for q in poly if x0 <= q[0] <= x1 and y0 <= q[1] <= y1]
+            for qx, qy in hits:
+                if not any(self._on_region(qx, qy, o, h) for o, h in bans):
+                    return True
+        return False
+
     def part_rows(self, ref: str, rects) -> list:
         """[(pad, area_index, amount, kind)] for this part's pads at `rects`
         (`PartPads.pad_rects` at the pose). kind: 'illegal' | 'tht' |
@@ -4418,13 +4466,16 @@ class RuleAreaKeepouts:
         for i, rect in enumerate(rects):
             if i >= len(meta):
                 break
-            p, governed, partial, needs, pour, _l = meta[i]
+            p, governed, partial, needs, zones, _l = meta[i]
             for ai in governed:
                 amt = self.rect_amount(ai, rect)
                 if amt <= EPS:
                     continue
                 kind = ('no_connection' if not needs else
-                        'pour_served' if ai in pour else 'illegal')
+                        'pour_served' if (zones
+                                          and self.areas[ai]['pour_allowed']
+                                          and self._pour_reaches(zones, rect))
+                        else 'illegal')
                 out.append((p, ai, amt, kind))
             for ai in partial:
                 amt = self.rect_amount(ai, rect)
@@ -4460,7 +4511,14 @@ def keepout_pad_findings(keepouts: 'RuleAreaKeepouts',
     - `keepout_copper_unmeasured`: footprint-owned rule areas.
     """
     illegal: Dict[str, float] = {}
-    pads_rows, tht, exempt = [], [], []
+    # keyed (ref, pad number, area[, kind]) keeping the deepest reach: a part
+    # may carry several copper pads under ONE number (a mounting hole's ring
+    # of vias, a shield's two tabs), and one row per number is the finding
+    pads_rows, tht, exempt = {}, {}, {}
+
+    def _keep(d, key, row):
+        if key not in d or row[3] > d[key][3]:
+            d[key] = row
     if keepouts is not None and keepouts.active:
         for ref in sorted(parts):
             pose = pose_of(ref)
@@ -4473,22 +4531,23 @@ def keepout_pad_findings(keepouts: 'RuleAreaKeepouts',
             for p, ai, amt, kind in keepouts.part_rows(ref, rects):
                 row = [ref, str(p.pad_number), p.net_name or '',
                        round(amt, 4), keepouts.areas[ai]['index']]
+                key = (row[0], row[1], row[4])
                 if kind == 'illegal':
                     illegal[ref] = max(illegal.get(ref, 0.0), amt)
-                    pads_rows.append(row)
+                    _keep(pads_rows, key, row)
                 elif kind == 'tht':
-                    tht.append(row)
+                    _keep(tht, key, row)
                 else:
-                    exempt.append(row + [kind])
+                    _keep(exempt, key + (kind,), row + [kind])
     ko = keepouts
     return {
         'oob_keepout_copper_count': len(illegal),
         'oob_keepout_copper_amount': round(float(sum(illegal.values())), 4),
         'oob_keepout_copper_refs': sorted([k, round(v, 4)]
                                           for k, v in illegal.items()),
-        'keepout_copper_pads': sorted(pads_rows),
-        'keepout_copper_tht_refs': sorted(tht),
-        'keepout_copper_exempt': sorted(exempt),
+        'keepout_copper_pads': sorted(pads_rows.values()),
+        'keepout_copper_tht_refs': sorted(tht.values()),
+        'keepout_copper_exempt': sorted(exempt.values()),
         'keepout_copper_unmeasured': list(ko.unmeasured) if ko is not None else [],
         'keepout_copper_band_mm': round(ko.band, 4) if ko is not None else None,
         'keepout_copper_track_width': ({'value': ko.track_width,

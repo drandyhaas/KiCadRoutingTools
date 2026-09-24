@@ -1939,9 +1939,6 @@ class QuenchState:
             # NEW different-net pad intersection is never admitted.
             legal = self.legality_ctx.pads_ok(
                 ref, x, y, rot, self._pad_neighbors(ref), exclude=exclude)
-        if legal and self.legality_ctx is not None:
-            # #1031: rule-area keep-out band, no worse than the seed.
-            legal = self.legality_ctx.keepout_ok(ref, x, y, rot)
         if legal:
             return True
         # Only now, on a rejected candidate, is the incumbent's legality worth
@@ -1962,9 +1959,8 @@ class QuenchState:
         # The unfreeze branch gets the SAME pad/hole conjunct: a part may move
         # back toward the board only without worsening any pad pair.
         if self.legality_ctx is not None:
-            return (self.legality_ctx.pads_ok(
+            return self.legality_ctx.pads_ok(
                 ref, x, y, rot, self._pad_neighbors(ref), exclude=exclude)
-                and self.legality_ctx.keepout_ok(ref, x, y, rot))
         return True
 
     def swap_intent_ok(self, ra, rb) -> bool:

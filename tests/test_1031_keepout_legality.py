@@ -127,7 +127,26 @@ def default_parts(r2_at=(20, 15)):
         '    (property "Reference" "FID1" (at 0 -2 0) (layer "F.SilkS"))\n'
         '    (pad "" smd circle (at 0 0) (size 1 1) '
         '(layers "F.Cu" "F.Mask")))\n',
+        # R6: a WIDE pad whose CENTRE is inside the band (0.2 from the
+        # region, band 0.275) while its inward edge landing clears it
+        '  (footprint "R:R_wide" (layer "F.Cu") (uuid "u8") (at 3.2 23 0)\n'
+        '    (property "Reference" "R6" (at 0 -1.2 0) (layer "F.SilkS"))\n'
+        '    (pad "1" smd rect (at -1.0 0) (size 1.2 0.9) '
+        '(layers "F.Cu" "F.Mask" "F.Paste") (net 3 "/C"))\n'
+        '    (pad "2" smd rect (at 1.0 0) (size 1.2 0.9) '
+        '(layers "F.Cu" "F.Mask" "F.Paste") (net 4 "/D")))\n',
     ]
+
+
+def zone(net, x0, y0, x1, y1, layer='F.Cu', uid='z1'):
+    """A same-net copper zone outline (no fill needed: the channel reads the
+    outline)."""
+    return ('  (zone (net %d) (net_name "%s") (layer "%s") (uuid "%s")\n'
+            '    (hatch edge 0.5) (connect_pads (clearance 0.2))\n'
+            '    (min_thickness 0.25) (fill (thermal_gap 0.5) '
+            '(thermal_bridge_width 0.5))\n'
+            '    (polygon (pts (xy %s %s) (xy %s %s) (xy %s %s) (xy %s %s))))\n'
+            % (net, NETS[net], layer, uid, x0, y0, x1, y0, x1, y1, x0, y1))
 
 
 def write_board(work, name, parts=None, keepout=True):
@@ -282,6 +301,100 @@ def main():
         o2 = reach('R3.1', accept=True)
         check('6. check_reachability R3.1 is PASSABLE', 'PASSABLE' in o2,
               o2[-400:])
+
+        # 8 -- EVERY search move is gated, through the real callers rather
+        # than a hand-built context: candidate_valid, the swap phase and
+        # relocate's exact re-check all reach LegalityContext.pads_ok, which
+        # carries the keep-out conjunct.
+        from placement.quench import QuenchState
+        from placement import relocate as RL
+        st = QuenchState(parse_kicad_pcb(bd), bd, 0.2, 0.55, 10.0, 0.5, 0.25,
+                         2.0, 2.0, 2.0, 0.1, 1.0)
+        check('8. candidate_valid refuses R2 into the band, accepts clear',
+              not st.candidate_valid('R2', 37.6, 15, 0.0)
+              and st.candidate_valid('R2', 30.0, 15, 0.0))
+        check('8. the swap phase refuses R2 onto R1\'s in-band pose',
+              not st.swap_pads_ok('R1', 'R2'))
+        units = RL.rigid_units(st, None)
+        why = RL.exact_refusal(st, units, {units.of_ref['R2']: (17.6, 0.0)})
+        check('8. relocate refuses a block shift into the band, by the pad '
+              'gate', why.startswith('pad_gate_refused_a_shift:R2'), why)
+        check('8. ...and accepts the same shift that stays clear',
+              RL.exact_refusal(st, units,
+                               {units.of_ref['R2']: (10.0, 0.0)}) == '')
+        m = st.pad_legality_metrics()
+        check('8. the quench tallies the in-band part for the portfolio gate',
+              m.get('keepout_pad_parts') == 1
+              and m.get('keepout_pad_amount', 0) > 0, str(m))
+
+        # 9 -- the portfolio hard gate reads that tally
+        from placement import portfolio
+        qm = portfolio._quench_metrics({'legality': m})
+        check('9. _quench_metrics carries keepout_pad_parts',
+              qm.get('keepout_pad_parts') == 1, str(qm))
+
+        def _score(parts_in, base):
+            c = portfolio.Candidate(index=1, strategy='t', board=bd,
+                                    metrics={'keepout_pad_parts': parts_in})
+            portfolio.score_candidate(
+                c, free=[], baseline_overlap=1e9, baseline_oob=10 ** 6,
+                baseline_pad_pairs=10 ** 6, baseline_hole_shortfall=1e9,
+                baseline_keepout_parts=base, clearance=0.2,
+                board_edge_clearance=0.55, grid_step=0.1, ignore_nets=None)
+            return c
+        c = _score(1, 0)
+        check('9. score_candidate gates a candidate with MORE parts in the '
+              'band than the baseline',
+              c.gates.get('passed') is False and 'keep-out band' in
+              ' '.join(c.gates.get('reasons') or []), str(c.gates))
+        check('9. ...and not one that only keeps the baseline\'s',
+              _score(1, 1).gates.get('passed') is True)
+
+        # 10 -- pour-served means a same-net zone REACHES the pad
+        def ko_rows(parts, name, keepout_text=None):
+            p = os.path.join(work, name + '.kicad_pcb')
+            txt = board_text(parts)
+            if keepout_text is not None:
+                txt = txt.replace(KEEPOUT, keepout_text)
+            with open(p, 'w', encoding='utf-8') as fh:
+                fh.write(txt)
+            gg = grade_pad_legality(parse_kicad_pcb(p), 0.2, pcb_file=p)
+            return ({(r[0], r[1]) for r in gg['keepout_copper_pads']},
+                    {(r[0], r[1], r[-1]) for r in gg['keepout_copper_exempt']})
+        far = default_parts() + [zone(1, 20, 5, 24, 9)]
+        ill, ex = ko_rows(far, 'far_zone')
+        check('10. a same-net zone 20 mm away does NOT exempt R1.1',
+              ('R1', '1') in ill and ('R1', '1', 'pour_served') not in ex,
+              str((sorted(ill), sorted(ex))))
+        over = default_parts() + [zone(1, 0.5, 13, 3.0, 17)]
+        ill, ex = ko_rows(over, 'over_zone')
+        check('10. a same-net zone covering R1.1 exempts it (pour allowed)',
+              ('R1', '1') not in ill and ('R1', '1', 'pour_served') in ex
+              and ('R1', '2') in ill, str((sorted(ill), sorted(ex))))
+        ill, ex = ko_rows(over, 'over_zone_nopour',
+                          KEEPOUT.replace('(copperpour allowed)',
+                                          '(copperpour not_allowed)'))
+        check('10. ...but not where the rule area forbids pour',
+              ('R1', '1') in ill, str((sorted(ill), sorted(ex))))
+
+        # 11 -- the landing is ANY free point of the pad, not its centre:
+        # R6.1's centre sits 0.2 from the region (band 0.275) and its
+        # inward edge clears it, so it is legal; a centre-only reading
+        # would name it.
+        ko = legality.RuleAreaKeepouts.for_board(pcb, 0.2, bd)
+        r6 = parts['R6'].pad_rects(*seeds['R6'])[0]
+        cx = (r6[0] + r6[2]) / 2.0
+        check('11. R6.1 centre is INSIDE the band (the case is live)',
+              0.0 < ko._clear(ko.areas[0], cx, (r6[1] + r6[3]) / 2.0)
+              < ko.band)
+        check('11. ...yet an edge landing clears it: not named',
+              ko.rect_amount(0, r6) == 0.0
+              and not any(r[0] == 'R6' for r in g['keepout_copper_pads']))
+
+        # 12 -- one row per (part, pad number): J1-style duplicates collapse
+        check('12. no duplicate (ref, pad, area) rows in any list',
+              all(len({(r[0], r[1], r[4]) for r in g[k]}) == len(g[k])
+                  for k in ('keepout_copper_pads', 'keepout_copper_tht_refs')))
 
         # 7 -- inert without a keep-out
         pcb0 = parse_kicad_pcb(clean)
