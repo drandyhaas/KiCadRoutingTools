@@ -2447,6 +2447,17 @@ def oracle_reconnect(board_file: str, net_names, config,
                             board_edge_clearance=rung_cfg.board_edge_clearance):
                         break
                     result, used_width = wider, w
+            if result:
+                # #1033: say so when the link ships below the net's own
+                # requested width (a power net's --power-nets-widths).
+                try:
+                    from fab_tiers import note_narrowing
+                    note_narrowing(net_id, 'track_width',
+                                   config.get_net_track_width(
+                                       net_id, config.layers[0]),
+                                   used_width, 'oracle reconnect')
+                except Exception:                           # noqa: BLE001
+                    pass
             if not result:
                 # ESCALATION (quickfeather U6-pocket class): the weld router
                 # runs at the step's nominal parameters, and a sub-mm link

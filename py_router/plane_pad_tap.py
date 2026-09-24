@@ -231,7 +231,16 @@ def fine_tap_configs(config: GridRouteConfig, pad: Pad, pcb_data: PCBData):
     except Exception:                                          # noqa: BLE001
         pass
     fine_track = max(fab_track, min(min(pad.size_x, pad.size_y), config.track_width))
-    note_narrowing(getattr(pad, 'net_id', None), 'track_width', config.track_width,
+    # #1033: the requested width is the NET's (a power net asked for its
+    # --power-nets-widths), not the call's signal width -- measured against
+    # track_width, a 0.3 power tap delivered at 0.127 recorded nothing.
+    _tap_net = getattr(pad, 'net_id', 0) or 0
+    try:
+        _req_w = max(config.track_width,
+                     config.get_net_track_width(_tap_net, config.layers[0]))
+    except Exception:                                          # noqa: BLE001
+        _req_w = config.track_width
+    note_narrowing(getattr(pad, 'net_id', None), 'track_width', _req_w,
                    fine_track, 'fine-pitch tap')
     for clearance in _clearance_ladder(config.clearance, fab_clear, FINE_TAP_CLEARANCE_STEPS):
         yield replace(config, grid_step=fine_grid, clearance=clearance,

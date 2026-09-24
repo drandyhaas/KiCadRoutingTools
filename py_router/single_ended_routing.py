@@ -2228,15 +2228,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             )
             new_segments.append(seg)
 
-    if necked_down:
-        # Both endpoints are pads: neck the start side too
-        new_segments = _apply_neckdown_widths(new_segments, config, net_id, obstacles,
-                                              coord, layer_names, track_margin, neck_start=True)
-    elif uniform_width is not None:
-        # Short power edge routed at a stepped-down width: every segment is that
-        # width, so the obstacle map (reads seg.width) and the output match (#180).
-        for _s in new_segments:
-            _s.width = uniform_width
+    # Both endpoints are pads: a neck-down necks the start side too.
+    new_segments = _assign_wide_route_widths(
+        new_segments, config, net_id, obstacles, coord, layer_names,
+        track_margin, necked_down, uniform_width, neck_start=True)
 
     # Neck any terminal-connection segment that grazes a foreign pad (#157): the
     # endpoint stub is laid geometrically with the endpoint region obstacle-exempt,
@@ -4294,15 +4289,10 @@ def route_multipoint_main(
         through_hole_positions,
         pcb_data
     )
-    if necked_down:
-        # Both endpoints are pads: neck the start side too
-        segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
-                                          coord, layer_names, track_margin, neck_start=True)
-    elif uniform_width is not None:
-        # Short power edge routed at a stepped-down width (#180): every segment is
-        # that width, so obstacle blocking (reads seg.width) and output match.
-        for _s in segments:
-            _s.width = uniform_width
+    # Both endpoints are pads: a neck-down necks the start side too.
+    segments = _assign_wide_route_widths(
+        segments, config, net_id, obstacles, coord, layer_names,
+        track_margin, necked_down, uniform_width, neck_start=True)
     # Re-neck terminal grazes AFTER width assignment (#212): the neckdown/uniform
     # passes above rebuild widths and would otherwise restore a grazing terminal leg
     # to base/power width, undoing the graze-neck applied during conversion.
@@ -5026,14 +5016,9 @@ def _route_multipoint_taps_impl(
             through_hole_positions,
             pcb_data
         )
-        if necked_down:
-            segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
-                                              coord, layer_names, track_margin)
-        elif uniform_width is not None:
-            # Short power edge routed at a stepped-down width (#180): uniform width
-            # so obstacle blocking (reads seg.width) and output match.
-            for _s in segments:
-                _s.width = uniform_width
+        segments = _assign_wide_route_widths(
+            segments, config, net_id, obstacles, coord, layer_names,
+            track_margin, necked_down, uniform_width, neck_start=False)
         # Re-neck terminal grazes AFTER width assignment (#212): the neckdown/uniform
         # passes rebuild widths and would otherwise restore a grazing terminal leg to
         # base/power width, undoing the graze-neck applied during conversion.
@@ -5520,6 +5505,47 @@ def _flip_segments(segments):
     return [Segment(start_x=s.end_x, start_y=s.end_y, end_x=s.start_x, end_y=s.start_y,
                     width=s.width, layer=s.layer, net_id=s.net_id)
             for s in reversed(segments)]
+
+
+def _assign_wide_route_widths(segments, config: GridRouteConfig, net_id: int,
+                              obstacles, coord: GridCoord, layer_names,
+                              track_margin, necked_down, uniform_width,
+                              neck_start: bool):
+    """Give a wide (power / impedance) route its final widths, then DISCLOSE
+    what shipped below the requested width (#1033).
+
+    `necked_down` (a long trunk re-routed at the neck floor) goes through
+    _apply_neckdown_widths; `uniform_width` (a short edge that only routed at a
+    stepped-down width, #180) sets every segment to that width so the obstacle
+    map (reads seg.width) and the output match. Both used to shrink a power
+    net silently: the `design_rules` ledger recorded rescue and terminal-neck
+    narrowing but not these two, which are where most of a bulk route's
+    under-width power copper comes from (run 32 +3V3 scoped: 9 long-trunk
+    neck-downs, 21 short edges at 0.127/0.15 of a requested 0.3).
+    """
+    if necked_down:
+        segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
+                                          coord, layer_names, track_margin,
+                                          neck_start=neck_start)
+        site = 'power neck-down (long trunk)'
+    elif uniform_width is not None:
+        for _s in segments:
+            _s.width = uniform_width
+        site = 'power short edge'
+    else:
+        return segments
+    try:
+        from fab_tiers import note_narrowing
+        narrow = [s for s in segments
+                  if s.width < config.get_net_track_width(net_id, s.layer) - 1e-6]
+        if narrow:
+            req = max(config.get_net_track_width(net_id, s.layer) for s in narrow)
+            note_narrowing(net_id, 'track_width', req,
+                           min(s.width for s in narrow), site,
+                           count=len(narrow))
+    except Exception:                                           # noqa: BLE001
+        pass
+    return segments
 
 
 def _neck_width_for_net(config: GridRouteConfig, net_id: int, layer: str) -> float:

@@ -837,6 +837,7 @@ def score_net_widths(board: str, spec_file: str) -> dict:
     if not os.path.isfile(spec_file):
         return skipped(f'net-min-widths file not found: {spec_file}')
     import fnmatch
+    import math
     from collections import defaultdict
     from kicad_parser import parse_kicad_pcb
 
@@ -853,7 +854,8 @@ def score_net_widths(board: str, spec_file: str) -> dict:
     for seg in pcb.segments:
         name = by_id.get(seg.net_id)
         if name:
-            seen[name].append(seg.width)
+            seen[name].append((seg.width, math.hypot(seg.end_x - seg.start_x,
+                                                     seg.end_y - seg.start_y)))
 
     failures, detail = 0, {}
     for name, widths in sorted(seen.items()):
@@ -861,13 +863,23 @@ def score_net_widths(board: str, spec_file: str) -> dict:
                    None)
         if req is None:
             continue
-        under = [w for w in widths if w < float(req) - 1e-9]
+        under = [(w, L) for w, L in widths if w < float(req) - 1e-9]
         if under:
             failures += 1
+            # #1033: LENGTH, not only a segment count. A count cannot tell
+            # a 0.2 mm pad neck from a 59 mm pad-to-pad run at the signal
+            # width -- run 32's +3V3 read 561/1143 segments, which hid that
+            # a third of its copper LENGTH was at 0.127.
+            _tot = sum(L for _w, L in widths)
+            _und = sum(L for _w, L in under)
             detail[name] = {'required_mm': float(req),
-                            'narrowest_mm': round(min(widths), 4),
+                            'narrowest_mm': round(min(w for w, _L in widths), 4),
                             'segments_under': len(under),
-                            'segments_total': len(widths)}
+                            'segments_total': len(widths),
+                            'length_under_mm': round(_und, 2),
+                            'length_total_mm': round(_tot, 2),
+                            'length_under_share': (round(_und / _tot, 4)
+                                                   if _tot > 0 else 0.0)}
     unmatched = [p for p in want
                  if not any(fnmatch.fnmatch(n, p) for n in seen)]
     return {'ran': True, 'count': failures, 'nets': detail,
