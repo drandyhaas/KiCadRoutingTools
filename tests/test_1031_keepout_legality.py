@@ -117,6 +117,10 @@ def default_parts(r2_at=(20, 15)):
         '  (footprint "C:PinHeader" (layer "F.Cu") (uuid "u5") (at 1.2 5)\n'
         '    (property "Reference" "J1" (at 0 -2 0) (layer "F.SilkS"))\n'
         '    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) '
+        '(layers "*.Cu" "*.Mask") (net 5 "/E"))\n'
+        # a SECOND copper pad under the same number (a shield's two tabs,
+        # a mounting hole's ring): one finding row, not two
+        '    (pad "1" thru_hole circle (at 0 2) (size 1.7 1.7) (drill 1.0) '
         '(layers "*.Cu" "*.Mask") (net 5 "/E")))\n',
         '  (footprint "C:PinHeader" (layer "F.Cu") (uuid "u6") (at 25 8)\n'
         '    (property "Reference" "J2" (at 0 -2 0) (layer "F.SilkS"))\n'
