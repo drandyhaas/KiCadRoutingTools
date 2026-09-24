@@ -107,11 +107,15 @@ def main():
            abs(ga.get('hole_clearance', 0) - 0.25) < 1e-9, ga)
         ok('graded_at.hole_clearance_source names fab_floor_origin',
            ga.get('hole_clearance_source') == 'fab_floor_origin', ga)
-        ok('graded_at discloses the scope (NPTH only) and the via value',
-           ga.get('hole_clearance_scope') == 'npth'
+        ok('graded_at discloses the scope per arm and the via value',
+           ga.get('hole_clearance_scope') == {
+               'tracks': 'npth+uncovered_plated', 'vias': 'npth'}
            and abs(ga.get('hole_clearance_via', 0) - 0.25) < 1e-9, ga)
-        ok('the console states the NPTH-only scope',
-           'copper-to-hole scope: NPTH holes only' in _r.stdout, _r.stdout[-400:])
+        ok('the console states the scope, including what is NOT graded',
+           'copper-to-hole scope:' in _r.stdout
+           and 'ring does not cover the drill' in _r.stdout
+           and 'NPTH holes only' in _r.stdout
+           and 'not graded against it' in _r.stdout, _r.stdout[-600:])
 
         doc, _r = _grade(_stage(tmp, 'plain', None), tmp, 'plain', False)
         ga = doc.get('graded_at', {})
