@@ -9,8 +9,9 @@ plan_excluded_net_names; resolve names to ids on the board the maps were
 built from) was untested: passing `excluded_ids=None` there left test_600
 green. This drives the real engine:
 
-  A. (always) kicad_files/flat_hierarchy_routed -- a routed board with a GND
-     pour on B.Cu -- re-routing a few signal nets with GND outside --nets:
+  A. (always) kicad_files/lvds_converter_dualclk_gnd -- a TRACKED routed
+     board with a /GND pour on B.Cu -- re-routing a few signal nets with
+     /GND outside --nets:
        * CLI front (output file), finalize ON  -> GND excluded by plan;
        * GUI front (return_results=True)        -> GND excluded by plan;
        * CLI front with KICAD_PLANE_FINALIZE=0  -> the fallback derivation
@@ -40,7 +41,11 @@ sys.path.insert(0, HERE)
 
 from run_utils import evidence  # noqa: E402
 
-BOARD = os.path.join(ROOT, 'kicad_files', 'flat_hierarchy_routed.kicad_pcb')
+# TRACKED (git ls-files), routed, with a /GND pour on B.Cu. Not
+# flat_hierarchy_routed: that one is gitignored and only exists after
+# test_flat_hierarchy.py --overwrite, so a clean clone died on it.
+BOARD = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk_gnd.kicad_pcb')
+GND = '/GND'
 K3A = os.path.join(ROOT, 'wk', 'run32', 'K3A_it1_g.kicad_pcb')
 
 fails = []
@@ -59,17 +64,17 @@ def part_a():
     from copy_board import copy_board
     from kicad_parser import parse_kicad_pcb
 
-    evidence(BOARD, 'flat_hierarchy_routed board')
+    evidence(BOARD, 'lvds_converter_dualclk_gnd board')
     tmp = tempfile.mkdtemp(prefix='gate1032_')
     try:
         src = os.path.join(tmp, 'in.kicad_pcb')
         copy_board(BOARD, src)
         pcb = parse_kicad_pcb(src)
-        gnd = next(n for n, v in pcb.nets.items() if v.name == 'GND')
+        gnd = next(n for n, v in pcb.nets.items() if v.name == GND)
         check('fixture: GND is poured', any(z.net_id == gnd for z in pcb.zones))
         with_cu = {s.net_id for s in pcb.segments}
         names = sorted(v.name for n, v in pcb.nets.items()
-                       if n in with_cu and v.name and v.name != 'GND')[:4]
+                       if n in with_cu and v.name and v.name != GND)[:4]
         check('fixture: real routed signal nets to re-route', len(names) >= 2,
               names)
 
@@ -115,12 +120,12 @@ def part_a():
                       f'the connectivity map', gnd in c['excluded']
                       and c['in_map'], (sorted(c['excluded']), c['in_map']))
                 check(f'{label}: excluded_by_plan names GND, and GND is '
-                      f'neither lost nor worsened', ex == ['GND']
-                      and 'GND' not in c['res']['lost']
-                      and 'GND' not in [n for n, _b, _a
-                                        in c['res']['worsened']],
+                      f'neither lost nor worsened', ex == [GND]
+                      and GND not in c['res']['lost']
+                      and GND not in [n for n, _b, _a
+                                      in c['res']['worsened']],
                       c['res'])
-            c = one('control_gnd_in_scope', names + ['GND'])
+            c = one('control_gnd_in_scope', names + [GND])
             if c is not None:
                 check('control: GND inside --nets is JUDGED, not excluded',
                       gnd not in c['excluded']

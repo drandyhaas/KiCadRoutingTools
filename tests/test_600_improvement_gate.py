@@ -122,6 +122,14 @@ check("#1032 each list at its own clause: GND is WORSENED, not connected",
       'connected 1 -- REJECTED' in _head)
 check("#1032 worsened carries name + before->after",
       c['worsened'] == [('GND', 30, 36)] and 'GND 30->36' in r)
+# A net newly BROKEN is `lost`, never also `worsened` -- the JSON key and the
+# head line's "worsened K" count the same nets.
+c = _cmp({1: (True, 0), 2: (False, 2)}, {1: (False, 3), 2: (False, 5)},
+         names={1: '/A', 2: '/B'})
+_head = format_report(c, gate_verdict(c), 'x').splitlines()[0]
+check("#1032 worsened (JSON) is disjoint from lost and matches the head",
+      c['lost'] == ['/A'] and c['worsened'] == [('/B', 2, 5)]
+      and 'worsened 1 [/B 2->5]' in _head)
 
 # #1032: a net EXCLUDED by plan (a pour outside --nets, which the finalize was
 # told not to repair) cannot reject -- same shapes, GND excluded -> accept, and

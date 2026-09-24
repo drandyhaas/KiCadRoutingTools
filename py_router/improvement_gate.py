@@ -131,9 +131,11 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
     disconnected-pad counts, so the damage stays visible -- it just cannot
     vote.
 
-    `worsened` lists every compared net whose disconnected-pad count ROSE, as
-    (name, before, after). A pad-count rejection used to name no net at all
-    when the net was already broken before the run (it is then not `lost`).
+    `worsened` lists every compared net whose disconnected-pad count ROSE
+    WITHOUT being newly broken (it was already open before the run), as
+    (name, before, after) -- disjoint from `lost`, so a net is named once. A
+    pad-count rejection used to name no net at all in that case, because the
+    net is then not `lost`.
     """
     excluded = set(excluded_ids or ())
     lost: List[str] = []
@@ -156,7 +158,7 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
             lost.append(net_name(net_id))
         elif conn_a and not conn_b:
             gained.append(net_name(net_id))
-        if dis_a > dis_b:
+        elif dis_a > dis_b:
             worsened.append((net_name(net_id), dis_b, dis_a))
     return {
         'lost': sorted(lost),
@@ -212,8 +214,9 @@ def format_report(cmp: Dict, verdict: str, action: str) -> str:
     # read as if a net that got WORSE had been connected.
     worsened = cmp.get('worsened') or []
     lost = list(cmp['lost'])
-    # `worsened` here = pad count rose on a net that was NOT newly broken
-    # (a lost net's rise is already the "broke" clause).
+    # `worsened` is disjoint from `lost` (compare_connectivity): pad count
+    # rose on a net that was already open. The filter only guards a caller
+    # that built the dict by hand.
     wors = [(n, b, a) for n, b, a in worsened if n not in lost]
 
     def _capped(items, cap=6):

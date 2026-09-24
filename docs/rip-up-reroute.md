@@ -141,7 +141,8 @@ assert on it instead of grepping prose.
 **The head line names every net it judged on (#1032)**, each list at its own
 clause: `broke N [lost nets], worsened K [net before->after], connected M`.
 `worsened` is a net whose disconnected-pad count rose without being newly
-broken (it was already open), so it is not `lost`; each list is capped at six.
+broken (it was already open), so it is not `lost`; the JSON `worsened` key
+holds exactly the same nets. Each list is capped at six.
 A pad-count-only rejection used to name nothing.
 
 **A poured net outside a scoped call's `--nets` is not judged (#1032).** The
