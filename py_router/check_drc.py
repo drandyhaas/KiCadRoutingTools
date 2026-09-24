@@ -3766,6 +3766,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 }
                 if kicad_req > clearance + 1e-9:
                     v['required_mm'] = kicad_req
+                    # #1038: say WHICH rule set it -- a pad override, or the
+                    # board's declared copper-to-hole floor. Both print a
+                    # "Required clearance" line and were both labelled an
+                    # override.
+                    v['required_source'] = ('pad override'
+                                            if req_clr > npth_clr + 1e-9
+                                            else 'declared hole clearance')
                 violations.append(v)
 
     # Check board edge clearances. Measure to the real Edge.Cuts outline (outer
@@ -4511,8 +4518,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     # #326: attribute above-global requirements (pad/footprint
                     # local clearance or netclass), mirroring KiCad's wording.
                     if v.get('required_mm'):
+                        _src = v.get('required_source',
+                                     'local/netclass override')
                         print(f"    Required clearance: {v['required_mm']:.4f}mm "
-                              f"(local/netclass override; global {clearance:.4f}mm)")
+                              f"({_src}; global {clearance:.4f}mm)")
 
                 if len(vlist) > limit:
                     print(f"  ... and {len(vlist) - limit} more "
@@ -4789,6 +4798,15 @@ if __name__ == "__main__":
     except Exception as e:
         if not args.quiet:
             print(f"  (netclass/edge rules not read: {e})")
+    if args.hole_clearance > 0 and not args.quiet:
+        # #1038: say what the copper-to-hole floor COVERS. KiCad's
+        # hole_clearance also holds copper off via drills and plated holes;
+        # this grader applies it to NPTH holes only.
+        print(f"  (copper-to-hole scope: NPTH holes only -- tracks at "
+              f"{max(args.clearance or 0.0, defaults.NPTH_TO_TRACK_CLEARANCE, args.hole_clearance):.4g} mm, "
+              f"vias at {max(args.clearance or 0.0, args.hole_clearance):.4g} mm; "
+              f"via drills and plated holes are not graded against it, "
+              f"unlike KiCad's hole_clearance)")
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
@@ -4842,6 +4860,18 @@ if __name__ == "__main__":
                 'hole_clearance': max(args.clearance or 0.0,
                                       defaults.NPTH_TO_TRACK_CLEARANCE,
                                       args.hole_clearance),
+                # #1038 scope: `hole_clearance` above is the TRACK-to-NPTH
+                # value; a VIA's copper is held to max(clearance, the
+                # declared/auto floor) -- the flat NPTH fab floor is a track
+                # routing policy and stays out of the via arm (#505). Both
+                # arms grade NPTH holes ONLY: via drills and plated holes
+                # are NOT graded against this floor, which KiCad's own
+                # hole_clearance rule does (run 32 routed_c3: kicad-cli
+                # reports 199 items at 0.25). Pad overrides above either
+                # value are graded per hole and carry their own required_mm.
+                'hole_clearance_via': max(args.clearance or 0.0,
+                                          args.hole_clearance),
+                'hole_clearance_scope': 'npth',
                 'hole_clearance_source': (
                     _hole_clr_source
                     if args.hole_clearance >= max(

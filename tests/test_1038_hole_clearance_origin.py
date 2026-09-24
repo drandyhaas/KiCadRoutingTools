@@ -107,6 +107,11 @@ def main():
            abs(ga.get('hole_clearance', 0) - 0.25) < 1e-9, ga)
         ok('graded_at.hole_clearance_source names fab_floor_origin',
            ga.get('hole_clearance_source') == 'fab_floor_origin', ga)
+        ok('graded_at discloses the scope (NPTH only) and the via value',
+           ga.get('hole_clearance_scope') == 'npth'
+           and abs(ga.get('hole_clearance_via', 0) - 0.25) < 1e-9, ga)
+        ok('the console states the NPTH-only scope',
+           'copper-to-hole scope: NPTH holes only' in _r.stdout, _r.stdout[-400:])
 
         doc, _r = _grade(_stage(tmp, 'plain', None), tmp, 'plain', False)
         ga = doc.get('graded_at', {})
@@ -115,6 +120,9 @@ def main():
         ok('control: graded_at says 0.20 from the fab floor',
            abs(ga.get('hole_clearance', 0) - 0.20) < 1e-9
            and ga.get('hole_clearance_source') == 'fab floor', ga)
+        ok('control: vias are graded at the routing clearance, not the '
+           '0.20 track policy', abs(ga.get('hole_clearance_via', 0) - 0.1) < 1e-9,
+           ga)
 
     if fails:
         print(f'{len(fails)} FAILURE(S): {fails}')
@@ -127,14 +135,19 @@ def main():
         return 77
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, 'c3.json')
-        check([sys.executable, '-X', 'utf8', CHECK_DRC, RUN32,
-               '--clearance', '0.1', '--json', out],
-              refuse='TRACK-HOLE', code=1)
+        _r3 = check([sys.executable, '-X', 'utf8', CHECK_DRC, RUN32,
+                     '--clearance', '0.1', '--json', out],
+                    refuse='TRACK-HOLE', code=1)
         evidence(out, 'routed_c3 check_drc --json')
         with open(out, encoding='utf-8') as f:
             doc = json.load(f)
         ok('routed_c3 default grade: 2 track-hole (J5)',
            doc.get('by_type', {}).get('track-hole') == 2, doc.get('by_type'))
+        _vh = [ln for ln in _r3.stdout.splitlines()
+               if 'Required clearance: 0.2500mm' in ln]
+        ok('routed_c3 VIA-HOLE rows name the declared hole clearance, not an '
+           'override', _vh and all('declared hole clearance' in ln for ln in _vh),
+           _vh)
         ok('routed_c3 graded at the declared 0.25 from fab_floor_origin',
            doc['graded_at'].get('hole_clearance_source') == 'fab_floor_origin'
            and abs(doc['graded_at'].get('hole_clearance', 0) - 0.25) < 1e-9,
