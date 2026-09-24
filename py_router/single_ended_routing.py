@@ -5578,29 +5578,60 @@ def _neck_width_for_net(config: GridRouteConfig, net_id: int, layer: str) -> flo
 _WIDEN_PIECE_MM = 0.5
 
 
-def _widen_fitting_pieces(seg, fits, narrow_w):
+def _widen_fitting_pieces(seg, fits, narrow_w, coord=None):
     """`seg` (at its wide width) as a list of collinear pieces: wide where the
     wide body fits, `narrow_w` where it does not, in start->end order.
 
     Before #1033 the verdict was per SEGMENT, so one pinch anywhere along a
     long straight segment narrowed all of it: a 22 mm pad-to-pad run through
     a single 0.4 mm gap shipped entirely at the 0.127 neck width, and run 32's
-    +3V3 carried pad-to-pad runs up to 59 mm at the signal width."""
+    +3V3 carried pad-to-pad runs up to 59 mm at the signal width.
+
+    Piece boundaries sit on GRID POINTS whenever the segment runs grid point
+    to grid point on an octolinear bearing (every A* path segment does), so
+    the fit check -- which rounds endpoints to cells -- tests exactly the
+    piece that ships. Otherwise (an off-grid pad stub) the pieces are equal
+    and each is checked with a half-cell GUARD (`fits(piece, 0.5)`): an
+    unguarded check of off-grid boundaries passed pieces up to 0.49 cells
+    outside the cell-centre model (verifier, 438 of 3252 kept-wide pieces)."""
     if fits(seg):
         return [seg]
     L = _seg_length(seg)
-    n = int(math.ceil(L / _WIDEN_PIECE_MM)) if L > 0 else 1
+    wide_w = seg.width
+    pts = None
+    guard = 0.0
+    if coord is not None and L > 0:
+        ga = coord.to_grid(seg.start_x, seg.start_y)
+        gb = coord.to_grid(seg.end_x, seg.end_y)
+        fa = coord.to_float(*ga)
+        fb = coord.to_float(*gb)
+        on_grid = (abs(fa[0] - seg.start_x) < 1e-6 and abs(fa[1] - seg.start_y) < 1e-6
+                   and abs(fb[0] - seg.end_x) < 1e-6 and abs(fb[1] - seg.end_y) < 1e-6)
+        dgx, dgy = gb[0] - ga[0], gb[1] - ga[1]
+        steps = max(abs(dgx), abs(dgy))
+        if on_grid and steps > 1 and (dgx == 0 or dgy == 0 or abs(dgx) == abs(dgy)):
+            k = max(1, int(round(_WIDEN_PIECE_MM / (L / steps))))
+            ux, uy = dgx // steps, dgy // steps
+            idx = list(range(0, steps, k)) + [steps]
+            pts = [coord.to_float(ga[0] + ux * i, ga[1] + uy * i) for i in idx]
+    if pts is None:
+        n = int(math.ceil(L / _WIDEN_PIECE_MM)) if L > 0 else 1
+        if n <= 1:
+            seg.width = narrow_w
+            return [seg]
+        dx = (seg.end_x - seg.start_x) / n
+        dy = (seg.end_y - seg.start_y) / n
+        pts = [(seg.start_x + dx * i, seg.start_y + dy * i) for i in range(n)]
+        pts.append((seg.end_x, seg.end_y))
+        guard = 0.5
+    n = len(pts) - 1
     if n <= 1:
         seg.width = narrow_w
         return [seg]
-    wide_w = seg.width
-    dx = (seg.end_x - seg.start_x) / n
-    dy = (seg.end_y - seg.start_y) / n
-    pts = [(seg.start_x + dx * i, seg.start_y + dy * i) for i in range(n)]
-    pts.append((seg.end_x, seg.end_y))
     flags = [fits(Segment(start_x=pts[i][0], start_y=pts[i][1],
                           end_x=pts[i + 1][0], end_y=pts[i + 1][1],
-                          width=wide_w, layer=seg.layer, net_id=seg.net_id))
+                          width=wide_w, layer=seg.layer, net_id=seg.net_id),
+                  guard)
              for i in range(n)]
     out = []
     i = 0
@@ -5626,9 +5657,10 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
     preserves the first pass's neck). track_margin may be a scalar or a
     per-layer list (#156). `neck_w` overrides the neck width (the short-edge
     path necks to the width its edge routed at, #1033)."""
-    def fits(s):
+    def fits(s, guard=0.0):
         li = layer_map.get(s.layer, 0)
-        return _segment_fits_wide(s, obstacles, coord, li, _margin_at(track_margin, li))
+        return _segment_fits_wide(s, obstacles, coord, li,
+                                  _margin_at(track_margin, li) + guard)
 
     out = []  # built in reverse (pad-first)
     cum = 0.0
@@ -5639,14 +5671,14 @@ def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
         if seg.width <= narrow_w:
             out.append(seg)
         elif cum >= config.neckdown_length:
-            out.extend(reversed(_widen_fitting_pieces(seg, fits, narrow_w)))
+            out.extend(reversed(_widen_fitting_pieces(seg, fits, narrow_w, coord)))
         elif cum + length > config.neckdown_length:
             # Straddles the neck boundary: split there (the far piece,
             # touching the pad side, is neckdown_length - cum long)
             near, far = _split_segment_at(seg, config.neckdown_length - cum)
             far.width = narrow_w
             out.append(far)
-            out.extend(reversed(_widen_fitting_pieces(near, fits, narrow_w)))
+            out.extend(reversed(_widen_fitting_pieces(near, fits, narrow_w, coord)))
         else:
             seg.width = narrow_w
             out.append(seg)

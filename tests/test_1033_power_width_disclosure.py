@@ -133,6 +133,47 @@ def t_assign():
           all(abs(s.width - 0.15) < 1e-9 for s in out),
           [round(s.width, 4) for s in out])
 
+    # Verifier finding: piece boundaries must be what the fit check tests.
+    # _segment_fits_wide rounds endpoints to cells, so an off-grid boundary
+    # was tested up to 0.49 cells from where the piece ships.
+    from single_ended_routing import _widen_fitting_pieces, _segment_fits_wide
+    mp = GridObstacleMap(1)
+    for gx in range(40, 46):              # a pinch mid-way along a diagonal
+        for gy in range(40, 46):
+            mp.add_blocked_cell(gx, gy, 0)
+
+    def real_fits(s, guard=0.0):
+        return _segment_fits_wide(s, mp, coord, 0, 1.0 + guard)
+
+    diag = make_seg(0.0, 0.0, 8.0, 8.0, width=0.3, net_id=1)   # grid to grid
+    pieces = _widen_fitting_pieces(diag, real_fits, 0.127, coord)
+
+    def on_grid(x, y):
+        gx, gy = coord.to_grid(x, y)
+        fx, fy = coord.to_float(gx, gy)
+        return abs(fx - x) < 1e-9 and abs(fy - y) < 1e-9
+    check('grid snap: an on-grid diagonal is cut at GRID POINTS only',
+          len(pieces) >= 3 and all(on_grid(p.start_x, p.start_y)
+                                   and on_grid(p.end_x, p.end_y)
+                                   for p in pieces),
+          [(round(p.start_x, 4), round(p.start_y, 4), p.width) for p in pieces])
+    check('grid snap: it is both widened and necked (the pinch is local)',
+          any(p.width == 0.3 for p in pieces)
+          and any(p.width == 0.127 for p in pieces))
+    check('grid snap: every kept-wide piece passes the fit AS SHIPPED',
+          all(real_fits(p) for p in pieces if p.width == 0.3))
+
+    seen_guard = []
+
+    def rec_fits(s, guard=0.0):
+        seen_guard.append(guard)
+        return guard != 0.0
+    off = make_seg(0.013, 0.0, 3.013, 0.0, width=0.3, net_id=1)  # off grid
+    _widen_fitting_pieces(off, rec_fits, 0.127, coord)
+    check('off-grid segment: every piece is checked with the half-cell guard',
+          seen_guard[0] == 0.0 and len(seen_guard) > 2
+          and all(g == 0.5 for g in seen_guard[1:]), seen_guard)
+
     n1 = len(ledger())
     segs = [make_seg(0, 0, 3, 0, width=0.3, net_id=1)]
     _assign_wide_route_widths(segs, cfg, 1, GridObstacleMap(1), coord,
