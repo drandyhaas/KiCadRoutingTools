@@ -20,11 +20,6 @@ import shutil
 import subprocess
 import sys
 
-KICAD_CLI_CANDIDATES = [
-    shutil.which('kicad-cli'),
-    '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli',
-    '/usr/lib/kicad/bin/kicad-cli',
-]
 CHROME_CANDIDATES = [
     shutil.which('google-chrome'),
     shutil.which('chromium'),
@@ -35,10 +30,17 @@ DEFAULT_LAYERS = 'auto'  # all copper layers defined in the file + Edge.Cuts
 
 
 def find_kicad_cli():
-    for c in KICAD_CLI_CANDIDATES:
-        if c and os.path.exists(c):
-            return c
-    return None
+    """kicad_oracle's finder: $KICAD_CLI first, then PATH and the packaged
+    locations, then every versioned Windows install, newest by NUMERIC
+    version. This module kept its own list, which knew only the macOS and
+    Linux paths -- on Windows, where KiCad is never on PATH, it found nothing
+    and every render was skipped."""
+    py_router = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), 'py_router')
+    if py_router not in sys.path:
+        sys.path.append(py_router)   # appended: never shadows tests/stress
+    from kicad_oracle import find_kicad_cli as _find
+    return _find()
 
 
 def _find_chrome():

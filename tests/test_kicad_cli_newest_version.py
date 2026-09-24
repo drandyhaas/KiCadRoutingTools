@@ -12,14 +12,17 @@ that sort shipped:
     copy now delegates to it.
   * ten `KICAD_PYTHONS` lists in the gui_parity gates and measure_* scripts
     ("newest first" via `sorted(..., reverse=True)`), so every one of them ran
-    under KiCad 9's pcbnew. They now sort on `kicad_locate.path_version_key`.
+    under KiCad 9's pcbnew. They now sort on `kicad_locate.path_version_key`,
+    as do five more that hard-coded one version (10.0, or 10.0 and 9.0) and
+    so could never have found KiCad 11. tests/stress/board_image.py, which
+    knew no Windows path at all, now asks kicad_oracle too.
 
 Checks, none needing KiCad (the platform and filesystem are faked), over
 8.0 / 9.0 / 9.99 (a KiCad 10 nightly) / 10.0 / 11.0:
 
   1. the KICAD_PYTHONS sort ranks them newest first, 11.0 on top;
   2. kicad_oracle.find_kicad_cli picks the numerically newest install;
-  3. kicad_unconnected.find_kicad_cli IS that answer, not a second copy;
+  3. kicad_unconnected and board_image return that answer, not their own;
   4. nothing in the repo sorts a glob of KiCad install dirs without a key=
      -- with the old kicad_unconnected spelling as the scanner's own
      negative control, so a scanner that sees nothing cannot pass.
@@ -97,14 +100,21 @@ def test_oracle_finder_picks_the_newest():
           got == _install(NEWEST), got)
 
 
-# --- 2. kicad_unconnected has no finder of its own ------------------------
+# --- 2. the other finders have no discovery of their own ------------------
 
-def test_unconnected_delegates():
+def test_finders_delegate():
+    sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
+    try:
+        import board_image as bi
+    finally:
+        del sys.path[0]
     sentinel = os.path.join(FAKE_ROOT, 'whatever-the-oracle-says')
     with mock.patch.object(ko, 'find_kicad_cli', lambda: sentinel):
-        got = ku.find_kicad_cli()
-    check("kicad_unconnected.find_kicad_cli returns kicad_oracle's answer",
-          got == sentinel, got)
+        got = {'kicad_unconnected': ku.find_kicad_cli(),
+               'board_image': bi.find_kicad_cli()}
+    for who, answer in got.items():
+        check(f"{who}.find_kicad_cli returns kicad_oracle's answer",
+              answer == sentinel, answer)
 
 
 # --- 3. no unkeyed sort of a KiCad install glob anywhere -------------------
@@ -212,7 +222,7 @@ def test_no_unkeyed_kicad_sort():
 
 if __name__ == '__main__':
     for t in (test_gate_lists_sort_newest_first,
-              test_oracle_finder_picks_the_newest, test_unconnected_delegates,
+              test_oracle_finder_picks_the_newest, test_finders_delegate,
               test_no_unkeyed_kicad_sort):
         print(f"--- {t.__name__}")
         t()
