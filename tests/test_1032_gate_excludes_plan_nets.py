@@ -67,8 +67,20 @@ def part_a():
     evidence(BOARD, 'lvds_converter_dualclk_gnd board')
     tmp = tempfile.mkdtemp(prefix='gate1032_')
     try:
+        # The tracked board carries only its GND copper, so the fixture is
+        # GENERATED here: one route step lays the signal nets (GND outside
+        # its scope, as a real chain would), and part A then re-routes a few
+        # of them. Generated, not read from a gitignored artifact.
+        raw = os.path.join(tmp, 'raw.kicad_pcb')
+        copy_board(BOARD, raw)
+        pcb0 = parse_kicad_pcb(raw)
+        sig = sorted(v.name for n, v in pcb0.nets.items()
+                     if v.name and v.name != GND
+                     and len(pcb0.pads_by_net.get(n) or []) >= 2)
         src = os.path.join(tmp, 'in.kicad_pcb')
-        copy_board(BOARD, src)
+        _route.batch_route(raw, src, sig, track_width=0.2, clearance=0.2,
+                           grid_step=0.1)
+        evidence(src, 'generated routed fixture')
         pcb = parse_kicad_pcb(src)
         gnd = next(n for n, v in pcb.nets.items() if v.name == GND)
         check('fixture: GND is poured', any(z.net_id == gnd for z in pcb.zones))
