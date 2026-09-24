@@ -117,6 +117,9 @@ check("#1032 pad-count-only rejection: verdict is reject",
       gate_verdict(c) == 'reject' and not c['lost'])
 check("#1032 pad-count-only rejection names GND in the head line",
       'GND' in _head and 'REJECTED' in _head)
+check("#1032 each list at its own clause: GND is WORSENED, not connected",
+      'broke 0 previously-connected net(s), worsened 1 [GND 30->36], '
+      'connected 1 -- REJECTED' in _head)
 check("#1032 worsened carries name + before->after",
       c['worsened'] == [('GND', 30, 36)] and 'GND 30->36' in r)
 

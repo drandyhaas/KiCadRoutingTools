@@ -205,21 +205,28 @@ def format_report(cmp: Dict, verdict: str, action: str) -> str:
     and the whole point of the gate is that the operator can see WHICH
     already-routed copper a rip took out."""
     lines = []
-    head = ("IMPROVEMENT GATE: this run broke "
-            f"{len(cmp['lost'])} previously-connected net(s) and connected "
-            f"{len(cmp['gained'])}")
-    # #1032: the head line NAMES what it judged on. `broke 1 ... REJECTED`
-    # hid that the one net was GND, and a pad-count-only rejection (the net
-    # was already broken before the run, so it is not `lost`) named nothing.
+    # #1032: the head line NAMES what it judged on, each list at its OWN
+    # clause. `broke 1 ... REJECTED` hid that the one net was GND; a
+    # pad-count-only rejection (the net was already broken before the run,
+    # so it is not `lost`) named nothing; and one bracket after "connected"
+    # read as if a net that got WORSE had been connected.
     worsened = cmp.get('worsened') or []
-    named = list(cmp['lost'])
-    named += [n for n, _b, _a in worsened if n not in named]
-    if named:
-        cap = 6
-        shown = ', '.join(named[:cap])
-        if len(named) > cap:
-            shown += f", +{len(named) - cap} more"
-        head += f" [{shown}]"
+    lost = list(cmp['lost'])
+    # `worsened` here = pad count rose on a net that was NOT newly broken
+    # (a lost net's rise is already the "broke" clause).
+    wors = [(n, b, a) for n, b, a in worsened if n not in lost]
+
+    def _capped(items, cap=6):
+        shown = ', '.join(items[:cap])
+        if len(items) > cap:
+            shown += f", +{len(items) - cap} more"
+        return f" [{shown}]" if items else ""
+
+    head = ("IMPROVEMENT GATE: this run broke "
+            f"{len(lost)} previously-connected net(s){_capped(lost)}, "
+            f"worsened {len(wors)}"
+            f"{_capped([f'{n} {b}->{a}' for n, b, a in wors])}, "
+            f"connected {len(cmp['gained'])}")
     lines.append(head + f" -- {verdict.upper()}ED")
     if cmp['lost']:
         lines.append(f"  broken by this run: {', '.join(cmp['lost'])}")
