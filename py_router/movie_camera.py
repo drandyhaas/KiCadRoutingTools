@@ -522,8 +522,16 @@ class Stage:
                                                        rd['board']))
                 except Exception:
                     pcb = None
+            # The shot frames where the parts come FROM as well as where they
+            # land (#1036): focused on the destination alone, the camera
+            # zoomed onto the board before the glide and cut the off-board
+            # pile out of the frame, so parts glided in from outside it.
+            _focus = (_moved_bbox(pcb, moved) if (pcb and moved) else None)
+            _ext = rd.get('extent')
+            if _focus and _ext and len(_ext) == 4:
+                _focus = _union_box(_focus, tuple(_ext))
             acts.append(Action('place', f"round {rd['round']}",
-                               _moved_bbox(pcb, moved) if (pcb and moved) else None,
+                               _focus,
                                _moved_side(pcb, moved) if pcb else None,
                                frames=self.tween_frames))
         self.shots = plan_shots(acts, self._overview, self.opts)

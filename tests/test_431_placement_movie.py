@@ -358,6 +358,12 @@ def test_synthesised_rounds_zoom_and_frame_the_pile():
     acts = seen.get('acts') or []
     assert acts and all(a.focus is not None for a in acts),         [a.focus for a in acts]
     ext, ov = rounds[0]['extent'], seen['overview']
+    # the ACTION shot frames the pile too, not just where the parts land --
+    # focused on the destination alone the camera zoomed in before the glide
+    # and the parts flew in from outside the frame
+    f0 = acts[0].focus
+    assert (f0[0] <= ext[0] + 1e-6 and f0[1] <= ext[1] + 1e-6
+            and f0[2] >= ext[2] - 1e-6 and f0[3] >= ext[3] - 1e-6), (f0, ext)
     assert (ov[0] <= ext[0] and ov[1] <= ext[1] and ov[2] >= ext[2]
             and ov[3] >= ext[3]), (ov, ext)
 
