@@ -220,10 +220,78 @@ def test_no_unkeyed_kicad_sort():
           not hits, ', '.join(hits))
 
 
+# --- 5. every KICAD_PYTHONS list can find KiCad 10+ and re-launch into it ----
+
+def candidate_list_defects(src, label):
+    """Why a KICAD_PYTHONS re-exec cannot reach a versioned Windows install.
+
+    Two defects, each of which made a gate SKIP on a machine with KiCad
+    installed: a list with no search of the versioned install directories
+    (only the unversioned `KiCad/bin/python.exe` no KiCad >= 6 uses, or one
+    hard-coded version), and an `os.execv` re-exec with no Windows branch --
+    execv re-splits argv on spaces there, so the `Program Files` interpreter
+    it finally found died before the gate started.
+    """
+    tree = ast.parse(src)
+    lists = [n for n in tree.body if isinstance(n, ast.Assign)
+             and any(getattr(t, 'id', '') == 'KICAD_PYTHONS' for t in n.targets)]
+    if not lists:
+        return []
+    out = []
+    helper = 'kicad_python_candidates' in src
+    for n in lists:
+        if not (helper or _is_kicad_glob(n.value)):
+            out.append(f"{label}:{n.lineno}: KICAD_PYTHONS never searches the "
+                       f"versioned installs")
+    execv = any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                and c.func.attr == 'execv' for c in ast.walk(tree))
+    nt = any(isinstance(c, ast.Compare) and isinstance(c.left, ast.Attribute)
+             and c.left.attr in ('name', 'platform')
+             and any(isinstance(k, ast.Constant) and k.value in ('nt', 'win32')
+                     for k in c.comparators)
+             for c in ast.walk(tree))
+    if execv and not nt:
+        out.append(f"{label}: re-execs with os.execv and no Windows branch")
+    return out
+
+
+OLD_UNVERSIONED = '''
+import os, sys
+KICAD_PYTHONS = [
+    "/usr/bin/python3",
+    os.path.expandvars("C:/Program Files/KiCad/bin/python.exe"),
+]
+def _reexec():
+    os.execv(KICAD_PYTHONS[0], [KICAD_PYTHONS[0]] + sys.argv)
+'''
+
+
+def test_every_candidate_list_reaches_versioned_installs():
+    check("negative control: an unversioned list with a bare execv is "
+          "flagged twice", len(candidate_list_defects(OLD_UNVERSIONED, 'old')) == 2)
+    hits, lists = [], 0
+    for rel in _repo_py_files():
+        try:
+            with open(os.path.join(ROOT, rel), encoding='utf-8') as fh:
+                src = fh.read()
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', SyntaxWarning)
+                found = candidate_list_defects(src, rel.replace(os.sep, '/'))
+                lists += 'KICAD_PYTHONS = [' in src
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            continue
+        hits += found
+    check("the scan reached the gates' KICAD_PYTHONS lists", lists >= 25,
+          f"{lists} file(s)")
+    check("every KICAD_PYTHONS list finds a versioned install and re-execs "
+          "into it on Windows", not hits, '; '.join(hits))
+
+
 if __name__ == '__main__':
     for t in (test_gate_lists_sort_newest_first,
               test_oracle_finder_picks_the_newest, test_finders_delegate,
-              test_no_unkeyed_kicad_sort):
+              test_no_unkeyed_kicad_sort,
+              test_every_candidate_list_reaches_versioned_installs):
         print(f"--- {t.__name__}")
         t()
     print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'PASS: the newest KiCad wins everywhere discovery sorts'}")
