@@ -269,10 +269,12 @@ def widen_rescued_copper(result, pcb_data, net_id, config) -> float:
     if not segs:
         return 0.0
     check = ExactWideCheck(pcb_data, config, net_id)
-    board_idx = {id(s): i for i, s in enumerate(pcb_data.segments)}
     new_list = []
+    repl = {}
     widened = 0.0
-    changed = False
+    # Decide EVERYTHING first, then mutate the board once: the check reads
+    # pcb_data.segments, so editing it mid-loop would feed the next query a
+    # half-rewritten board (a first cut did, and crashed on a hole it left).
     for s in segs:
         target = config.get_net_track_width(net_id, s.layer)
         if s.width >= target - 1e-9:
@@ -282,17 +284,16 @@ def widen_rescued_copper(result, pcb_data, net_id, config) -> float:
         if len(pieces) == 1 and pieces[0] is s:
             new_list.append(s)
             continue
-        changed = True
         for q in pieces:
             if q.width > s.width + 1e-9:
                 widened += math.hypot(q.end_x - q.start_x, q.end_y - q.start_y)
         new_list.extend(pieces)
-        bi = board_idx.get(id(s))
-        if bi is not None:
-            pcb_data.segments[bi] = None
-        pcb_data.segments.extend(pieces)
-    if changed:
-        pcb_data.segments[:] = [x for x in pcb_data.segments if x is not None]
+        repl[id(s)] = pieces
+    if repl:
+        board = []
+        for x in pcb_data.segments:
+            board.extend(repl.get(id(x), (x,)))
+        pcb_data.segments[:] = board          # same list object, new contents
         result['new_segments'] = new_list
         pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
     return widened
