@@ -134,6 +134,16 @@ def main():
     d_view = _seg_foreign_pad_dist(chk.pad_view, NET, *PIECE, base_clearance=0.1)
     check('F&B.Cu THT pad: the SAMPLED term sees it (expanded layer view)',
           d_view < 0.1 + 0.15 - 1e-4, round(d_view, 4))
+    # ...and through clears() itself: an F&B.Cu pad whose CLASS clearance
+    # (0.25) is what refuses -- the exact confirm prices pair/override only,
+    # so only a sampled term that SEES F&B.Cu pads can refuse this one
+    tht2 = make_pad(FOREIGN, 1.0, 0.35 + 0.4, ref='J2', num='1', size_x=0.8,
+                    size_y=0.8, shape='circle', layers=('F&B.Cu', '*.Mask'),
+                    drill=0.4, pad_type='thru_hole', net_name='SIG')
+    c8 = cfg()
+    c8.net_clearances = {FOREIGN: 0.25}
+    wide_vs_narrow('F&B.Cu THT pad net class (sampled term, expanded view)',
+                   board(pads=[tht2]), c8)
 
     # 9. exact confirm is the strict word at the boundary: pad edge exactly
     #    5e-5 inside the 0.3 requirement -- the sampled term's 1e-4 slack
