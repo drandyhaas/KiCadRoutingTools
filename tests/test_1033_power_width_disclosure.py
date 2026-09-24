@@ -163,16 +163,83 @@ def t_assign():
     check('grid snap: every kept-wide piece passes the fit AS SHIPPED',
           all(real_fits(p) for p in pieces if p.width == 0.3))
 
-    seen_guard = []
+    import single_ended_routing as ser
+    G = ser._OFFGRID_FIT_GUARD
+    check('the off-grid guard covers a diagonal rounding (>= sqrt(0.5) cell)',
+          G >= math.sqrt(0.5), G)
 
-    def rec_fits(s, guard=0.0):
-        seen_guard.append(guard)
-        return guard != 0.0
-    off = make_seg(0.013, 0.0, 3.013, 0.0, width=0.3, net_id=1)  # off grid
-    _widen_fitting_pieces(off, rec_fits, 0.127, coord)
-    check('off-grid segment: every piece is checked with the half-cell guard',
-          seen_guard[0] == 0.0 and len(seen_guard) > 2
-          and all(g == 0.5 for g in seen_guard[1:]), seen_guard)
+    def guards_for(seg):
+        seen = []
+
+        def rec_fits(s, guard=0.0):
+            seen.append(guard)
+            return False if len(seen) == 1 else True   # whole fails, pieces fit
+        _widen_fitting_pieces(seg, rec_fits, 0.127, coord)
+        return seen
+    g_off = guards_for(make_seg(0.013, 0.0, 3.013, 0.0, width=0.3, net_id=1))
+    check('off-grid segment: the WHOLE-segment check is guarded too',
+          g_off[0] == G, g_off)
+    check('off-grid segment: every piece is checked with the guard',
+          len(g_off) > 2 and all(g == G for g in g_off[1:]), g_off)
+    g_any = guards_for(make_seg(0.0, 0.0, 3.0, 1.0, width=0.3, net_id=1))
+    check('on-grid ANY-angle segment: whole check exact, pieces guarded',
+          g_any[0] == 0.0 and len(g_any) > 2
+          and all(g == G for g in g_any[1:]), g_any)
+
+    # The cell-centre MODEL, measured: every kept-wide piece must keep its
+    # true centreline >= margin cells from every blocked cell centre. Random
+    # on-grid any-angle and off-grid segments; the same sweep with the guard
+    # forced to 0 is the control that shows the measurement can see a miss.
+    import random
+
+    def sweep(guard_value):
+        saved = ser._OFFGRID_FIT_GUARD
+        ser._OFFGRID_FIT_GUARD = guard_value
+        try:
+            rng = random.Random(1)
+            bad = kept = 0
+            for trial in range(400):
+                mpx = GridObstacleMap(1)
+                cells = []
+                for _ in range(25):
+                    cx, cy = rng.randint(0, 80), rng.randint(0, 80)
+                    mpx.add_blocked_cell(cx, cy, 0)
+                    cells.append((cx, cy))
+
+                def fx(s, guard=0.0, _m=mpx):
+                    return _segment_fits_wide(s, _m, coord, 0, 1.0 + guard)
+                if trial % 3 == 0:
+                    a = (rng.randint(0, 80) * 0.1, rng.randint(0, 80) * 0.1)
+                    b = (rng.randint(0, 80) * 0.1, rng.randint(0, 80) * 0.1)
+                else:
+                    a = (rng.uniform(0, 8), rng.uniform(0, 8))
+                    b = (rng.uniform(0, 8), rng.uniform(0, 8))
+                sg = make_seg(a[0], a[1], b[0], b[1], width=0.3, net_id=1)
+                for pc in _widen_fitting_pieces(sg, fx, 0.127, coord):
+                    if pc.width != 0.3:
+                        continue
+                    kept += 1
+                    ax_, ay_ = pc.start_x / 0.1, pc.start_y / 0.1
+                    bx_, by_ = pc.end_x / 0.1, pc.end_y / 0.1
+                    dx, dy = bx_ - ax_, by_ - ay_
+                    L2 = dx * dx + dy * dy
+                    dmin = 1e9
+                    for cx, cy in cells:
+                        t = 0.0 if L2 == 0 else max(0.0, min(1.0, (
+                            (cx - ax_) * dx + (cy - ay_) * dy) / L2))
+                        dmin = min(dmin, math.hypot(cx - ax_ - t * dx,
+                                                    cy - ay_ - t * dy))
+                    if dmin < 1.0 - 1e-6:
+                        bad += 1
+            return kept, bad
+        finally:
+            ser._OFFGRID_FIT_GUARD = saved
+    k0, b0 = sweep(0.0)
+    k1, b1 = sweep(G)
+    check('model control: with NO guard the sweep finds pieces outside the '
+          'model (the measurement can see a miss)', b0 > 0, (k0, b0))
+    check('model: with the guard, 0 kept-wide pieces outside the model',
+          b1 == 0 and k1 > 100, (k1, b1))
 
     n1 = len(ledger())
     segs = [make_seg(0, 0, 3, 0, width=0.3, net_id=1)]

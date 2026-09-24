@@ -5576,6 +5576,12 @@ def _neck_width_for_net(config: GridRouteConfig, net_id: int, layer: str) -> flo
 # same verdict are merged back, so a straight run costs at most one extra
 # segment per pinch it crosses.
 _WIDEN_PIECE_MM = 0.5
+# Fit-check guard, in cells, for a piece whose endpoints are NOT grid points:
+# rounding an endpoint to its cell can move it by up to sqrt(0.5) ~ 0.7071
+# cell (diagonally), so the guard must cover that whole displacement. 0.5 was
+# measured insufficient (12/4804 any-angle on-grid and 11/4904 off-grid pieces
+# still outside the cell-centre model, worst 0.158 cell); 0.7072 measured 0.
+_OFFGRID_FIT_GUARD = 0.7072
 
 
 def _widen_fitting_pieces(seg, fits, narrow_w, coord=None):
@@ -5587,26 +5593,35 @@ def _widen_fitting_pieces(seg, fits, narrow_w, coord=None):
     a single 0.4 mm gap shipped entirely at the 0.127 neck width, and run 32's
     +3V3 carried pad-to-pad runs up to 59 mm at the signal width.
 
-    Piece boundaries sit on GRID POINTS whenever the segment runs grid point
-    to grid point on an octolinear bearing (every A* path segment does), so
-    the fit check -- which rounds endpoints to cells -- tests exactly the
-    piece that ships. Otherwise (an off-grid pad stub) the pieces are equal
-    and each is checked with a half-cell GUARD (`fits(piece, 0.5)`): an
-    unguarded check of off-grid boundaries passed pieces up to 0.49 cells
-    outside the cell-centre model (verifier, 438 of 3252 kept-wide pieces)."""
-    if fits(seg):
-        return [seg]
+    The fit check rounds endpoints to cells, so:
+
+    * the WHOLE segment is checked unguarded only when both endpoints are
+      grid points (then it is tested exactly); an off-grid segment (a pad
+      stub, the neck-boundary split) is checked with `_OFFGRID_FIT_GUARD`
+      cells of extra margin -- unguarded, 149 of 1516 kept wide were up to
+      0.487 cell outside the cell-centre model;
+    * a segment running grid point to grid point on an octolinear bearing
+      (every A* path segment) is cut only at grid points along it, so each
+      piece is tested exactly, unguarded;
+    * anything else is cut into equal pieces, each checked with the guard.
+      A half-cell guard was not enough (a rounded endpoint can move
+      sqrt(0.5) cell); see _OFFGRID_FIT_GUARD."""
     L = _seg_length(seg)
-    wide_w = seg.width
-    pts = None
-    guard = 0.0
-    if coord is not None and L > 0:
+    on_grid = False
+    ga = gb = None
+    if coord is not None:
         ga = coord.to_grid(seg.start_x, seg.start_y)
         gb = coord.to_grid(seg.end_x, seg.end_y)
         fa = coord.to_float(*ga)
         fb = coord.to_float(*gb)
         on_grid = (abs(fa[0] - seg.start_x) < 1e-6 and abs(fa[1] - seg.start_y) < 1e-6
                    and abs(fb[0] - seg.end_x) < 1e-6 and abs(fb[1] - seg.end_y) < 1e-6)
+    if fits(seg, 0.0 if on_grid else _OFFGRID_FIT_GUARD):
+        return [seg]
+    wide_w = seg.width
+    pts = None
+    guard = 0.0
+    if coord is not None and L > 0:
         dgx, dgy = gb[0] - ga[0], gb[1] - ga[1]
         steps = max(abs(dgx), abs(dgy))
         if on_grid and steps > 1 and (dgx == 0 or dgy == 0 or abs(dgx) == abs(dgy)):
@@ -5623,7 +5638,7 @@ def _widen_fitting_pieces(seg, fits, narrow_w, coord=None):
         dy = (seg.end_y - seg.start_y) / n
         pts = [(seg.start_x + dx * i, seg.start_y + dy * i) for i in range(n)]
         pts.append((seg.end_x, seg.end_y))
-        guard = 0.5
+        guard = _OFFGRID_FIT_GUARD
     n = len(pts) - 1
     if n <= 1:
         seg.width = narrow_w
