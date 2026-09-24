@@ -155,13 +155,40 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
                camera=None, camera_budget=60.0, tween=10,
                panels=None, iso_opts=None, timing=None, theme=None,
-               layout=None, aspect=None, attempts=None):
+               layout=None, aspect=None, attempts=None, max_frames=None):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
     ``.mp4`` was asked for and imageio-ffmpeg is unavailable -- or None when
     there was nothing to animate.
+
+    Frames are SPOOLED to disk as they are drawn (#1036,
+    `frame_spool.FrameSpool`) and every post-pass -- the planned frame, the
+    attempts band, the run clock, the iso panel -- is a per-frame transform
+    applied while the encoder streams, so memory does not grow with the frame
+    count. ``max_frames`` is the film's frame budget (None = $KICAD_MOVIE_MAX_FRAMES,
+    default 2400; 0 = none): a route trace that does not fit its share falls
+    back to the chunked reveal, loudly.
     """
+    import frame_spool
+    spool = frame_spool.FrameSpool()
+    try:
+        return _make_movie(
+            inputs, out=out, size=size, fps=fps, supersample=supersample,
+            layer_alpha=layer_alpha, rip_hold=rip_hold, chunks=chunks,
+            end_hold=end_hold, png_dir=png_dir, quiet=quiet, camera=camera,
+            camera_budget=camera_budget, tween=tween, panels=panels,
+            iso_opts=iso_opts, timing=timing, theme=theme, layout=layout,
+            aspect=aspect, attempts=attempts, max_frames=max_frames,
+            spool=spool)
+    finally:
+        spool.close()
+
+
+def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
+                chunks, end_hold, png_dir, quiet, camera, camera_budget, tween,
+                panels, iso_opts, timing, theme, layout, aspect, attempts,
+                max_frames, spool):
     import animate_route as a
     if isinstance(inputs, str):
         inputs = [inputs]
@@ -278,10 +305,17 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
     # to a board name, and it is what the rail's stable left should carry.
     _title = (os.path.basename(os.path.abspath(inputs[0]))
               if len(inputs) == 1 and os.path.isdir(inputs[0]) else None)
+    if max_frames is None:
+        try:
+            import env_knobs as _ek2
+            max_frames = int(getattr(_ek2, 'MOVIE_MAX_FRAMES', 0) or 0)
+        except Exception:                                       # noqa: BLE001
+            max_frames = 0
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
                             theme=theme, layout=layout, aspect=aspect,
-                            geom_out=geom_out, title=_title)
+                            geom_out=geom_out, title=_title,
+                            frames_sink=spool, max_frames=max_frames)
     if not frames:
         if not quiet:
             print("make_movie: no frames (nothing routed?)", file=sys.stderr)
@@ -334,12 +368,18 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                 # wrapped lines, and a per-frame band would make the frames
                 # different sizes -- the one thing save_movie cannot take.
                 all_lines = [clock.lines(i) for i in range(len(frames))]
+                _f0 = frames[0]
                 band = cmd_timing.clock_band_height(
-                    all_lines, frames[0].width, frames[0].height)
-                # In place, so peak memory stays ~2 frames rather than 2x the
-                # movie: each original is released as its replacement lands.
-                for i, ln in enumerate(all_lines):
-                    frames[i] = cmd_timing.add_clock_band(frames[i], ln, band)
+                    all_lines, _f0.width, _f0.height)
+                # #1036: a per-frame transform, applied while the encoder
+                # streams -- it needs each frame's LINES, never another
+                # frame's pixels.
+                import frame_spool
+                frames = frame_spool.transform(
+                    frames,
+                    lambda i, f: cmd_timing.add_clock_band(f, all_lines[i],
+                                                           band),
+                    out_size=None)
                 frame_meta = [clock.meta(i) for i in range(len(frames))]
                 if not quiet:
                     unmapped = clock.unmapped()
@@ -419,6 +459,11 @@ def main():
                     help='reveal batches for a step with no fine trace')
     ap.add_argument('--end-hold', type=float, default=DEFAULT_END_HOLD,
                     help='seconds to hold the final frame')
+    ap.add_argument('--max-frames', type=int, default=None, metavar='N',
+                    help='frame budget for the whole film (#1036). A route '
+                         'trace that does not fit its share is revealed in '
+                         '--chunks batches instead, and the movie says so. '
+                         'Default: $KICAD_MOVIE_MAX_FRAMES or 2400; 0 = none')
     ap.add_argument('--png-dir', default=None,
                     help='also dump the raw PNG frames here')
     ap.add_argument('--png', action='store_true',
@@ -557,6 +602,7 @@ def main():
                          supersample=args.supersample, layer_alpha=args.layer_alpha,
                          rip_hold=args.rip_hold, chunks=args.chunks,
                          end_hold=args.end_hold, png_dir=args.png_dir,
+                         max_frames=args.max_frames,
                          quiet=args.quiet,
                        camera=args.camera,
                        camera_budget=args.camera_budget,

@@ -311,6 +311,15 @@ def refresh() -> None:
     g['MOVIE_LAYOUT'] = _s('KICAD_MOVIE_LAYOUT', 'legacy')
     g['MOVIE_ASPECT'] = _s('KICAD_MOVIE_ASPECT', '')
 
+    # #1036: the routing movie's FRAME BUDGET. A per-segment route trace
+    # (KICAD_ROUTE_TRACE=1) plays one frame per event, and run 32's 22-board
+    # chain over ~9000 segments made ~6100 frames -- a 17-minute film at
+    # 6 fps. Over budget, a traced step falls back to the chunked
+    # board-to-board reveal and the movie SAYS so. 2400 frames is 400 s at
+    # the default 6 fps. 0 = no budget. Same shape and same reason as
+    # MOVIE_CAMERA: one variable reaches every front end at once.
+    g['MOVIE_MAX_FRAMES'] = _i('KICAD_MOVIE_MAX_FRAMES', 2400)
+
     # --- truthy diagnostics / overrides -------------------------------------
     g['UNBLOCK_DEBUG'] = _truthy('KICAD_UNBLOCK_DEBUG')
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')

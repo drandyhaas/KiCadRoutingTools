@@ -684,8 +684,14 @@ def compose_two_panel(frames, marks, final_board, opts=None):
         # status line says so; the per-frame truth is in each caption.
         models = notes.get(shots[0].board, ({}, ''))[0]
 
-        for i in range(len(frames)):
-            frames[i] = stack(frames[i], panels[frame_to_shot[i]])
+        # #1036: a per-frame transform. On a `frame_spool.FrameSpool` it is
+        # applied lazily as the encoder streams, so no composed frame is ever
+        # held beyond the one being written; on a list it rewrites in place.
+        import frame_spool
+        _W0, _H0 = frames[0].size
+        frames = frame_spool.transform(
+            frames, lambda i, f: stack(f, panels[frame_to_shot[i]]),
+            out_size=(_W0, _H0 + H_iso))
 
         rep = _report('ran', '', shots=[{'board': s.board, 'yaw': s.rotate[2],
                                          'first': s.first, 'last': s.last,

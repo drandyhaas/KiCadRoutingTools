@@ -194,7 +194,7 @@ ROWS = [
      (T_LAY,), 'KILLED'),
 
     ('mixed-frame-sizes-are-squashed-silently', 'anim',
-     "        frame_layout.assert_frames_uniform([f.size for f in frames])",
+     "        frame_layout.assert_frames_uniform(sorted(sizes))",
      "        return frames",
      (T_LAY,), 'KILLED'),
 

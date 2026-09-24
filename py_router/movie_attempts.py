@@ -699,7 +699,8 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
     except Exception as exc:                                   # noqa: BLE001
         report['why'] = 'no PIL (%s)' % exc
         return frames, report
-    sizes = {f.size for f in frames}
+    import frame_spool
+    sizes = frame_spool.frame_sizes(frames)
     if len(sizes) != 1:
         # A caller that hands us a mixed list has a defect of its own, and
         # pasting onto the first frame's size would CROP the others silently --
@@ -737,19 +738,25 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None):
         th = None
     bg = th.rgb('ground') if th is not None else (14, 16, 18)
     box = frame_layout.Box(0, H, W, bh)
-    drew = False
-    for i in range(len(frames)):
-        f = frames[i]
-        canvas = Image.new('RGB', (W, H + bh), bg)
-        canvas.paste(f, (0, 0))
-        up = horizons[i] if horizons else (lo + (hi - lo) * (i / float(n)))
-        # `draw_track` RETURNS whether it drew: a band shorter than its own
-        # plot rectangle declines, and reporting `drawn=True` over a blank
-        # strip is an OFF state reading like success -- which is the one thing
-        # this module's degradation contract forbids.
-        ok = draw_track(ImageDraw.Draw(canvas), box, track, upto=up, theme=th)
-        drew = drew or bool(ok)
-        frames[i] = canvas          # in place: peak memory stays ~2 frames
+    # `draw_track` RETURNS whether it drew: a band shorter than its own plot
+    # rectangle declines, and reporting `drawn=True` over a blank strip is an
+    # OFF state reading like success -- which is the one thing this module's
+    # degradation contract forbids. The answer depends only on the band's
+    # size, so it is asked ONCE, on a scratch band, before any frame is
+    # touched -- which is also what lets a spool apply the band lazily while
+    # the encoder streams (#1036).
+    _probe = Image.new('RGB', (W, bh), bg)
+    drew = bool(draw_track(ImageDraw.Draw(_probe),
+                           frame_layout.Box(0, 0, W, bh), track, upto=hi,
+                           theme=th))
+    if drew:
+        def _band(i, f):
+            canvas = Image.new('RGB', (W, H + bh), bg)
+            canvas.paste(f, (0, 0))
+            up = horizons[i] if horizons else (lo + (hi - lo) * (i / float(n)))
+            draw_track(ImageDraw.Draw(canvas), box, track, upto=up, theme=th)
+            return canvas
+        frames = frame_spool.transform(frames, _band, out_size=(W, H + bh))
     if not drew:
         report.update(drawn=False, band_px=bh,
                       why='the band is %d px, too short for its own plot; '

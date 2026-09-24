@@ -633,9 +633,37 @@ def board_title(final, steps=(), hint=None):
     return os.path.basename(os.path.dirname(os.path.abspath(final))) or stem
 
 
+def trace_frame_estimate(trace, rip_hold=2):
+    """How many frames `Movie.play_trace` will emit for ``trace``, read off the
+    events alone -- before a single frame is drawn.
+
+    One frame per add event, `max(1, rip_hold)` per rip, plus the retract/grow
+    motion stages #1022 draws (bounded by `copper_motion`'s stage count, taken
+    here as 3 per rip and per restore). An ESTIMATE, and it is used only to
+    decide whether a trace fits the film's frame budget; it errs high, so a
+    trace that is played is never longer than it was allowed to be by much.
+    """
+    n = 0
+    motion = 3 if rip_hold > 0 else 0
+    for ev in (trace.get('events') or ()):
+        if ev.get('del_s') or ev.get('del_v'):
+            n += max(1, rip_hold) + (motion if ev.get('del_s') else 0)
+        if ev.get('add_s') or ev.get('add_v'):
+            n += 1
+            e = str(ev.get('event', '')).lower()
+            if 'reroute' in e or 'restore' in e or 'rescue' in e:
+                n += motion
+    return n
+
+
+class _OverBudget(Exception):
+    """A trace that does not fit the film's frame budget (#1036)."""
+
+
 def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                  marks=None, theme=None, layout=None, aspect=None,
-                 geom_out=None, title=None):
+                 geom_out=None, title=None, frames_sink=None,
+                 max_frames=None, notes=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
     final board. ``build_run`` is this with the chain discovered from a run dir.
 
@@ -649,10 +677,22 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     the boundaries back is the only way to keep ONE scale across the whole
     film; a per-segment call restarts from an empty board and re-reveals all
     the copper, which reads as the board redrawing itself between beats.
+
+    ``frames_sink`` (#1036), when given, replaces the in-memory frame list --
+    `make_movie` passes a `frame_spool.FrameSpool`, so a 6000-frame film costs
+    one frame of RAM instead of 29.5 GB. Every caller that passes nothing gets
+    the list it always got.
+
+    ``max_frames`` (#1036) is the film's FRAME BUDGET. A per-segment trace
+    whose estimated length does not fit its fair share of what is left
+    (`trace_frame_estimate`) is not played: its step falls back to the
+    board-to-board `reveal_delta(..., chunks)` reveal, and the fallback is
+    printed LOUDLY and appended to ``notes`` when a list is passed. ``None``
+    or 0 = no budget, today's behaviour.
     """
     from kicad_parser import parse_kicad_pcb
     if not final:
-        return []
+        return [] if frames_sink is None else frames_sink
     # dynamic_zones: plane pours reveal as each plane is created, rather than
     # sitting under every frame from the start. It is ALSO what lets a Stage
     # animate part motion: with it, frame() draws pads per frame from
@@ -709,6 +749,14 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         if geom_out is not None:
             geom_out.append(_g)
     m = Movie(r, layers, rip_hold=rip_hold)
+    if frames_sink is not None:
+        m.frames = frames_sink
+    # #1036: the frame budget, shared FAIRLY among the traced steps -- a
+    # greedy budget would let the first long trace eat the film and starve
+    # every later one into chunks, which is the opposite of what a viewer
+    # wants from the end of a run.
+    _budget = int(max_frames or 0)
+    _traced_left = sum(1 for _s in steps if len(_s) > 2 and _s[2])
     # #1020: the lower box's non-routing contents, decided ONCE. `want_panel`
     # also gates the per-frame copper snapshot, so a legacy film -- which has
     # no box -- retains nothing.
@@ -780,8 +828,24 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         step_zone_nets = {z.net_id for z in (getattr(pcb, 'zones', None) or [])
                           if z.net_id and len(z.polygon) >= 3}
         if trace_path:
+            _traced_left = max(0, _traced_left - 1)
             try:
-                m.play_trace(load_trace(trace_path), label_prefix=f"{label}: ",
+                _tr = load_trace(trace_path)
+                if _budget:
+                    _left = max(0, _budget - len(m.frames))
+                    _share = _left // (_traced_left + 1)
+                    _est = trace_frame_estimate(_tr, rip_hold)
+                    if _est > _share:
+                        _msg = ('step %r trace needs ~%d frames, its share of '
+                                'the --max-frames %d budget is %d; revealing '
+                                'its delta in %d chunks instead'
+                                % (str(label), _est, _budget, _share, chunks))
+                        print('animate_route: TRACE OVER BUDGET -- ' + _msg,
+                              file=sys.stderr)
+                        if notes is not None:
+                            notes.append(_msg)
+                        raise _OverBudget(_msg)
+                m.play_trace(_tr, label_prefix=f"{label}: ",
                              only_new=True)
                 for _nid in step_zone_nets:
                     m.reveal_zone(_nid)
@@ -789,6 +853,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                 if marks is not None:
                     marks.append((label, board, _first, len(m.frames)))
                 continue
+            except _OverBudget:
+                pass            # already said, loudly; fall through to chunks
             except Exception as e:
                 print(f"animate_route: trace {trace_path} failed ({e}); "
                       f"revealing delta", file=sys.stderr)
@@ -886,21 +952,28 @@ def _compose_into_frame(frames, geom, r, chrome=None):
       the reserved regions are ground until #1019/#1020/#1021 fill them.
     """
     from PIL import Image
+    import frame_spool
     th = getattr(r, 'theme', None)
     bg = th.rgb('ground') if th is not None else (14, 16, 18)
     W, H = geom.frame.w, geom.frame.h
-    for i in range(len(frames)):
-        f = frames[i]
-        if f.size == (W, H):
-            continue
-        if f.width >= W and f.height >= H and geom.board.x == 0                 and geom.board.y == 0 and geom.panel is None:
-            frames[i] = f.crop((0, 0, W, H))
-            continue
-        canvas = Image.new('RGB', (W, H), bg)
-        canvas.paste(f, (geom.board.x, geom.board.y))
-        frames[i] = canvas
-    if chrome and geom.rail.h > 0:
-        _draw_chrome(frames, geom, r, chrome)
+    # #1036: one per-frame transform. On a spool it is applied lazily while
+    # the encoder streams; on a list it rewrites in place, as it always did.
+    chrome_fn = (_chrome_drawer(len(frames), geom, r, chrome)
+                 if chrome and geom.rail.h > 0 else None)
+
+    def _one(i, f):
+        if f.size != (W, H):
+            if (f.width >= W and f.height >= H and geom.board.x == 0
+                    and geom.board.y == 0 and geom.panel is None):
+                f = f.crop((0, 0, W, H))
+            else:
+                canvas = Image.new('RGB', (W, H), bg)
+                canvas.paste(f, (geom.board.x, geom.board.y))
+                f = canvas
+        if chrome_fn is not None:
+            f = chrome_fn(i, f)
+        return f
+    frame_spool.transform(frames, _one, out_size=(W, H))
 
 
 def _draw_panel(d, geom, r, c):
@@ -943,40 +1016,54 @@ def _draw_panel(d, geom, r, c):
 
 
 def _draw_chrome(frames, geom, r, chrome):
-    """Fill the reserved rail and foot (#1019).
+    """Fill the reserved rail and foot (#1019), on a list or a spool."""
+    import frame_spool
+    frame_spool.transform(frames, _chrome_drawer(len(frames), geom, r, chrome))
+
+
+def _chrome_drawer(n_frames, geom, r, chrome):
+    """``fn(i, frame) -> frame`` drawing the rail and foot for frame ``i``.
 
     Each region is sized for ITS OWN content and ellipsises inside itself, so a
     long event line can no longer push the totals off the edge of a strip that
-    still looks complete.
+    still looks complete. It needs only the frame COUNT, never the pixels of
+    another frame, which is what lets a spool apply it while streaming (#1036).
     """
-    from PIL import ImageDraw
-    import render_chrome
     th = getattr(r, 'theme', None)
-    n = max(1, len(frames) - 1)
+    n = max(1, n_frames - 1)
     ticks = tuple(sorted({c.get('lap_at') for c in chrome
                           if c.get('lap_at') is not None}))
-    for i, f in enumerate(frames):
-        c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
-        d = ImageDraw.Draw(f)
-        _draw_panel(d, geom, r, c)
-        render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
-                                c.get('rail_right', ''), theme=th,
-                                progress=i / float(n), ticks=ticks)
-        if geom.foot.h > 0:
-            d.rectangle([geom.foot.x, geom.foot.y,
-                         geom.foot.x + geom.foot.w - 1,
-                         geom.foot.y + geom.foot.h - 1],
-                        fill=th.rgb('chrome_panel') if th else (14, 14, 18))
-            render_chrome.draw_totals(d, geom.foot, c.get('totals', ''),
-                                      theme=th)
-            ev = c.get('event', '')
-            if ev:
-                from route_render import load_font
-                font = load_font(max(9, int(geom.foot.h * 0.34)))
-                d.text((geom.foot.x + 6, geom.foot.y + 3),
-                       render_chrome._fit(d, ev, font, geom.foot.w * 0.55),
-                       font=font,
-                       fill=th.rgb('chrome_text') if th else (240, 240, 240))
+
+    def _fn(i, f):
+        _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks)
+        return f
+    return _fn
+
+
+def _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks):
+    from PIL import ImageDraw
+    import render_chrome
+    c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
+    d = ImageDraw.Draw(f)
+    _draw_panel(d, geom, r, c)
+    render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
+                            c.get('rail_right', ''), theme=th,
+                            progress=i / float(n), ticks=ticks)
+    if geom.foot.h > 0:
+        d.rectangle([geom.foot.x, geom.foot.y,
+                     geom.foot.x + geom.foot.w - 1,
+                     geom.foot.y + geom.foot.h - 1],
+                    fill=th.rgb('chrome_panel') if th else (14, 14, 18))
+        render_chrome.draw_totals(d, geom.foot, c.get('totals', ''),
+                                  theme=th)
+        ev = c.get('event', '')
+        if ev:
+            from route_render import load_font
+            font = load_font(max(9, int(geom.foot.h * 0.34)))
+            d.text((geom.foot.x + 6, geom.foot.y + 3),
+                   render_chrome._fit(d, ev, font, geom.foot.w * 0.55),
+                   font=font,
+                   fill=th.rgb('chrome_text') if th else (240, 240, 240))
 
 
 def _pad_rgb(theme=None):
@@ -999,10 +1086,15 @@ def _uniform_or_pad(frames, theme=None):
     optional because `save_movie` is called with a bare frame list from
     several places; without one the pad falls back to the dark ground, which
     is what it always was.
+
+    A `frame_spool.FrameSpool` is checked from its recorded sizes and padded
+    by a lazy transform, so the check decodes no frame it does not have to.
     """
+    import frame_spool
+    sizes = frame_spool.frame_sizes(frames)
     try:
         import frame_layout
-        frame_layout.assert_frames_uniform([f.size for f in frames])
+        frame_layout.assert_frames_uniform(sorted(sizes))
         return frames
     except Exception as exc:                                    # noqa: BLE001
         if 'frame_layout' not in str(type(exc)) and not isinstance(exc, ValueError):
@@ -1010,19 +1102,31 @@ def _uniform_or_pad(frames, theme=None):
     from PIL import Image
     W, H = frames[0].size
     print('animate_route: MIXED FRAME SIZES -- %s' % (
-        [f.size for f in frames if f.size != (W, H)][:3],), file=sys.stderr)
+        sorted(sz for sz in sizes if sz != (W, H))[:3],), file=sys.stderr)
     print('animate_route: padding every frame to %dx%d. Pillow would NOT have '
           'raised: it writes a valid GIF in which every later frame has been '
           'silently resized to the first.' % (W, H), file=sys.stderr)
-    out = []
-    for f in frames:
+    ground = _pad_rgb(theme)
+
+    def _pad(_i, f):
         if f.size == (W, H):
-            out.append(f)
-            continue
-        pad = Image.new(f.mode, (W, H), _pad_rgb(theme))
+            return f
+        pad = Image.new(f.mode, (W, H), ground)
         pad.paste(f, ((W - f.width) // 2, (H - f.height) // 2))
-        out.append(pad)
-    return out
+        return pad
+    if frame_spool.is_spool(frames):
+        frames.map(_pad, out_size=(W, H))
+        return frames
+    return [_pad(i, f) for i, f in enumerate(frames)]
+
+
+#: #1036: the most frames a GIF is handed. Pillow's GIF writer keeps every
+#: frame it is given (it diffs each against the last), so a 6000-frame film
+#: would be held whole no matter how it was streamed in. Above this the GIF
+#: STRIDES, as the owner's `awx/evolve_movie.py` does (`n_frames // 260`),
+#: and each kept frame lasts `stride` frame-times so the film keeps its
+#: length. The .mp4 is never strided: imageio streams it frame by frame.
+GIF_MAX_FRAMES = 260
 
 
 def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
@@ -1031,11 +1135,16 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
     (imageio-ffmpeg; falls back to a sibling `.gif` if unavailable) or `.gif`
     (native Pillow, no dependency).
 
+    ``frames`` is a list of Pillow images or a `frame_spool.FrameSpool`
+    (#1036). A spool is STREAMED: the .mp4 and the PNG dump read one frame at
+    a time, so memory does not grow with the frame count. A GIF over
+    `GIF_MAX_FRAMES` is strided, and says so.
+
     ``frame_meta`` (#887), when given, is one dict per frame written into the
     dumped PNGs' text chunks. It is indexed against ``frames``, NOT against
-    the ``seq`` built below: ``seq`` appends the end-hold repeats, while the
-    PNG loop iterates ``frames``. A short list raises rather than silently
-    misattributing every frame after the gap.
+    the end-hold repeats appended after them, while the PNG loop iterates
+    ``frames``. A short list raises rather than silently misattributing every
+    frame after the gap.
 
     Only the PNG dump carries it. The .mp4 hands numpy arrays to imageio and
     Pillow's GIF writer has no per-frame text channel, so there is nowhere
@@ -1059,18 +1168,42 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
     # anywhere says a word. After this the film is produced, the defect is
     # AUDIBLE, and the distortion is a letterbox rather than a squash.
     frames = _uniform_or_pad(frames, theme)
-    hold = [frames[-1]] * max(1, int(end_hold * fps))
-    seq = frames + hold
+    n = len(frames)
+    n_hold = max(1, int(end_hold * fps))
+    W, H = frames[0].size
+
+    def _seq():
+        last = None
+        for f in frames:
+            last = f
+            yield f
+        for _ in range(n_hold):
+            yield last
     ext = os.path.splitext(out)[1].lower()
-    if ext == '.mp4' and _write_mp4(seq, out, fps):
-        print(f"animate_route: wrote {out} ({len(frames)} frames @ {fps:g}fps, "
-              f"{frames[0].size[0]}x{frames[0].size[1]}, h264)")
+    if ext == '.mp4' and _write_mp4(_seq(), out, fps):
+        print(f"animate_route: wrote {out} ({n} frames @ {fps:g}fps, "
+              f"{W}x{H}, h264)")
     else:
         if ext == '.mp4':
             out = os.path.splitext(out)[0] + '.gif'
         dur = max(20, int(1000 / max(0.1, fps)))
-        frames[0].save(out, save_all=True, append_images=seq[1:],
-                       duration=dur, loop=0, optimize=False)
+        stride = max(1, -(-n // GIF_MAX_FRAMES))
+        if stride > 1:
+            keep = list(range(0, n, stride))
+            if keep[-1] != n - 1:
+                keep.append(n - 1)
+            print(f"animate_route: GIF STRIDED -- {n} frames is over the "
+                  f"{GIF_MAX_FRAMES}-frame GIF cap; keeping 1 frame in {stride} "
+                  f"({len(keep)} frames, {dur * stride}ms each). The .mp4 is "
+                  f"never strided.", file=sys.stderr)
+            seq = [frames[i] for i in keep]
+            seq += [seq[-1]] * max(1, n_hold // stride)
+            dur = dur * stride
+        else:
+            seq = list(_seq())
+        seq[0].save(out, save_all=True, append_images=seq[1:],
+                    duration=dur, loop=0, optimize=False)
+        del seq
         # Count what LANDED, not what was handed to the encoder. Pillow's GIF
         # writer collapses runs of byte-identical frames into one frame with an
         # accumulated duration, and this film is full of such runs by
@@ -1079,7 +1212,7 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
         # 377 and wrote 348, and the gap was only found by counting the
         # delivered GIF by hand. A number nobody can reconcile against the
         # artifact is worse than no number.
-        _n = len(frames)
+        _n = n
         try:
             from PIL import Image as _PILImage, ImageSequence
             with _PILImage.open(out) as _chk:
@@ -1087,7 +1220,7 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
         except Exception:                                       # noqa: BLE001
             pass
         print(f"animate_route: wrote {out} ({_n} frames, {dur}ms each, "
-              f"{frames[0].size[0]}x{frames[0].size[1]})")
+              f"{W}x{H})")
     if png_dir:
         os.makedirs(png_dir, exist_ok=True)
         for i, fr in enumerate(frames):
@@ -1096,7 +1229,7 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
             fr.save(os.path.join(png_dir, f'frame_{i:05d}.png'),
                     pnginfo=(_png_info(frame_meta[i]) if frame_meta
                              else None))
-        print(f"animate_route: dumped {len(frames)} PNG frames to {png_dir}")
+        print(f"animate_route: dumped {n} PNG frames to {png_dir}")
     return True
 
 
