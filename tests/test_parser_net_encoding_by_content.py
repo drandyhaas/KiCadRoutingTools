@@ -48,11 +48,11 @@ NAME_BODY = '''  (footprint "R" (layer "F.Cu") (at 10 10)
 
 
 def _parse(text):
-    d = tempfile.mkdtemp()
-    path = os.path.join(d, 'b.kicad_pcb')
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(text)
-    return parse_kicad_pcb(path)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'b.kicad_pcb')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return parse_kicad_pcb(path)
 
 
 def _assert_board(label, pcb, check):
@@ -128,18 +128,18 @@ def run():
     # End to end through a real writer: a track added to the KiCad-10-stamped
     # numeric board must go in as `(net 2)`, and land on SIG when read back.
     from kicad_writer import add_tracks_and_vias_to_pcb
-    d = tempfile.mkdtemp()
-    src, out = os.path.join(d, 'in.kicad_pcb'), os.path.join(d, 'out.kicad_pcb')
-    with open(src, 'w', encoding='utf-8') as f:
-        f.write(HEADER % 20260206 + NUMERIC_BODY)
     sig = {n.name: nid for nid, n in _parse(HEADER % 20260206 + NUMERIC_BODY).nets.items()}['SIG']
-    add_tracks_and_vias_to_pcb(src, out, [{'start': (11, 12), 'end': (15, 12),
-                                           'width': 0.2, 'layer': 'F.Cu', 'net_id': sig}])
-    with open(out, encoding='utf-8') as f:
-        written = f.read()
+    with tempfile.TemporaryDirectory() as d:
+        src, out = os.path.join(d, 'in.kicad_pcb'), os.path.join(d, 'out.kicad_pcb')
+        with open(src, 'w', encoding='utf-8') as f:
+            f.write(HEADER % 20260206 + NUMERIC_BODY)
+        add_tracks_and_vias_to_pcb(src, out, [{'start': (11, 12), 'end': (15, 12),
+                                               'width': 0.2, 'layer': 'F.Cu', 'net_id': sig}])
+        with open(out, encoding='utf-8') as f:
+            written = f.read()
+        back = parse_kicad_pcb(out)
     check("the writer emits no name ref into the numeric board",
           '(net "SIG")' not in written)
-    back = parse_kicad_pcb(out)
     names = {nid: n.name for nid, n in back.nets.items()}
     check("both segments read back on SIG",
           sorted(names.get(s.net_id) for s in back.segments) == ['SIG', 'SIG'])
