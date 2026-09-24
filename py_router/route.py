@@ -5123,6 +5123,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     else []),
                     'power_net_widths': dict(
                         getattr(config, 'power_net_widths', None) or {}),
+                    # #1033: the per-net widths the CLI's _ocfg carries, so
+                    # the GUI weld's width ladder reads the same net width.
+                    'net_track_widths': dict(
+                        getattr(config, 'net_track_widths', None) or {}),
+                    'net_layer_widths': dict(
+                        getattr(config, 'net_layer_widths', None) or {}),
                 }
                 # Hands-off for the reconcile comes from the FILL-AWARE
                 # checker instead of the oracle verdict: zone nets the model
@@ -6216,8 +6222,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     lambda _ni: (_board1033.nets[_ni].name
                                  if _ni in _board1033.nets else f"Net {_ni}"))
                 summary['power_widths'] = _pw1033
+                # WHICH copper was measured. The CLI reads the written file,
+                # which already holds every in-run pass (finalize, oracle,
+                # reconcile). The GUI reads the change-set it hands the
+                # applier; on the FALLBACK oracle path (posted as
+                # plane_finalize_oracle, run by the applier AFTER apply)
+                # that oracle's copper is not in it yet, so say so rather
+                # than let the two fronts' numbers be compared as equals.
+                if return_results:
+                    _stage1033 = 'change-set (write model)'
+                    if results_data.get('plane_finalize_oracle'):
+                        _stage1033 += (', before the post-apply plane-'
+                                       'finalize oracle leg')
+                else:
+                    _stage1033 = 'written board'
+                summary['power_widths_measured_on'] = _stage1033
                 if return_results:
                     results_data['power_widths'] = _pw1033
+                    results_data['power_widths_measured_on'] = _stage1033
                 _short1033 = [(_nm, _r) for _nm, _r in _pw1033.items()
                               if _r['under_mm'] > 0]
                 if _short1033:

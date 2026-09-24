@@ -185,11 +185,14 @@ def t_assign():
 def t_merge():
     from route_summary import merge_summaries
     first = {'routed_single': [], 'failed_single': ['A'],
-             'power_widths': {'+3V3': {'under_mm': 4.0}}}
+             'power_widths': {'+3V3': {'under_mm': 4.0}},
+             'power_widths_measured_on': 'written board'}
     sub = {'routed_single': ['A'], 'failed_single': []}
     m = merge_summaries([first, sub])
     check('merge: power_widths survives the reconciliation merge',
-          m.get('power_widths') == first['power_widths'], m.get('power_widths'))
+          m.get('power_widths') == first['power_widths']
+          and m.get('power_widths_measured_on') == 'written board',
+          m.get('power_widths'))
 
 
 # ---------------------------------------------------------------- end to end
@@ -309,9 +312,69 @@ def t_end_to_end():
               any(x['site'].startswith('power ') for x in rows), rows)
         check('end to end: the console names it',
               'Power widths: +3V3' in log, log[-800:])
+        check('end to end: the summary says which copper it measured',
+              doc.get('power_widths_measured_on') == 'written board',
+              doc.get('power_widths_measured_on'))
+
+        # GUI front (return_results): the same engine call, measured on the
+        # change-set it hands the applier. Same board, same copper as the
+        # CLI's written file (no plane pour here, so no post-apply oracle).
+        import route as _route
+        _ok, _f, _t, data = _route.batch_route(
+            src, '', ['+3V3'], return_results=True, layers=['F.Cu'],
+            track_width=0.127, clearance=0.1, grid_step=0.05,
+            power_nets=['+3V3'], power_nets_widths=[0.3])
+        gpw = (data.get('power_widths') or {}).get('+3V3')
+        check('GUI front: power_widths reaches results_data',
+              gpw is not None, sorted(data))
+        if gpw is not None:
+            check('GUI front: it measures the same copper as the CLI file',
+                  abs(gpw['length_mm'] - pw['length_mm']) < 0.02
+                  and abs(gpw['under_mm'] - pw['under_mm']) < 0.02,
+                  (gpw, pw))
+            check('GUI front: it says it measured the change-set',
+                  str(data.get('power_widths_measured_on', '')
+                      ).startswith('change-set'),
+                  data.get('power_widths_measured_on'))
+
+
+# ------------------------------------------------ GUI oracle payload parity
+def t_gui_oracle_payload():
+    """The GUI's fallback plane-finalize oracle (posted as
+    results_data['plane_finalize_oracle'], run by swig_gui through
+    gui_utils.run_kicad_oracle_on_live_board) must receive the per-net widths
+    the CLI's oracle config (_ocfg) carries, or its weld ladder stops at a
+    different width. Every payload key must be a parameter of the applier
+    and be forwarded by swig_gui."""
+    import ast
+    import inspect
+    sys.path.insert(0, ROOT)
+    import kicad_routing_plugin.gui_utils as gu
+    params = set(inspect.signature(gu.run_kicad_oracle_on_live_board).parameters)
+    src = open(os.path.join(ROOT, 'py_router', 'route.py'),
+               encoding='utf-8').read()
+    tree = ast.parse(src)
+    keys = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Subscript)
+                and isinstance(node.targets[0].slice, ast.Constant)
+                and node.targets[0].slice.value == 'plane_finalize_oracle'
+                and isinstance(node.value, ast.Dict)):
+            keys |= {k.value for k in node.value.keys
+                     if isinstance(k, ast.Constant)}
+    gui_src = open(os.path.join(ROOT, 'kicad_routing_plugin', 'swig_gui.py'),
+                   encoding='utf-8').read()
+    check('GUI oracle payload carries the per-net widths',
+          {'power_net_widths', 'net_track_widths',
+           'net_layer_widths'} <= keys, sorted(keys))
+    for k in ('net_track_widths', 'net_layer_widths'):
+        check(f'GUI applier accepts and swig_gui forwards {k}',
+              k in params and f"{k}=_pfo.get('{k}')" in gui_src)
 
 
 if __name__ == '__main__':
+    t_gui_oracle_payload()
     t_report()
     t_assign()
     t_merge()

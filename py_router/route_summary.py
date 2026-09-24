@@ -173,8 +173,9 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
         # reconciliation sub-run returned, and stamps it on `first` -- the
         # sub-run's own summary has none. A sub-run that ever measured one
         # would be measuring a slice, so first always wins.
-        if 'power_widths' in first:
-            merged['power_widths'] = first['power_widths']
+        for _k in ('power_widths', 'power_widths_measured_on'):
+            if _k in first:
+                merged[_k] = first[_k]
 
     # DISTURBED-BUT-UNOWNED NETS ARE STICKY (#622 yw1: SA1 shipped with ZERO
     # copper, SA2/SA6 open, and the merged MIN said failed:2 deficit:0). A

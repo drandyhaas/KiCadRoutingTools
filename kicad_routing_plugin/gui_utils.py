@@ -965,6 +965,8 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                                    layer_clearances=None,
                                    layers=None, layer_costs=None,
                                    power_net_widths=None,
+                                   net_track_widths=None,
+                                   net_layer_widths=None,
                                    progress_callback=None):
     """Staged-save kicad-oracle recheck against the LIVE pcbnew board.
 
@@ -1015,6 +1017,12 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
             _cfg_kw['layer_costs'] = list(layer_costs)
         if power_net_widths:
             _cfg_kw['power_net_widths'] = dict(power_net_widths)
+        # #1033: per-net widths too, mirroring route.py's _ocfg, so the weld's
+        # width ladder climbs to the same net width on both fronts.
+        if net_track_widths:
+            _cfg_kw['net_track_widths'] = dict(net_track_widths)
+        if net_layer_widths:
+            _cfg_kw['net_layer_widths'] = dict(net_layer_widths)
         ocfg = GridRouteConfig(
             clearance=clearance, track_width=track_width,
             via_size=via_size, via_drill=via_drill, grid_step=grid_step,
