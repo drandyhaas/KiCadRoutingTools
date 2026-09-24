@@ -1842,7 +1842,10 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
     (``npth_floor_ok`` seeds, ``wide_route_clear`` legs, ``build_base_obstacles``
     stamps), ``pcb_modification`` (``_seg_worst_offender``'s shortfall ranking
     and ``nudge_grazing_microshift``'s detector + acceptance gate) and
-    ``placement/fanout_clearance`` (``_Repair``'s NPTH keep-out rects).
+    ``placement/fanout_clearance`` (``_Repair``'s NPTH keep-out rects). #1038
+    added ``pcb_modification.smooth_octolinear_chains`` (a shortcut CHOOSES
+    where copper goes; refusing one keeps the original copper) and the VIA-
+    copper keep-out around NPTH holes in ``add_drill_hole_obstacles``.
 
     STILL AT THE FLAT ``NPTH_TO_TRACK_CLEARANCE``, and deliberately so -- read
     this before "finishing the job":
@@ -2081,6 +2084,29 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     if config.hole_to_hole_clearance > 0 and drill_holes:
         block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
                                     config.hole_to_hole_clearance, config.grid_step)
+
+    # #1038: via COPPER off an NPTH hole wall at the copper-to-hole floor. The
+    # h2h stamp above holds the via's DRILL off the hole, which leaves its
+    # annulus (via_size - via_drill)/2 closer: a 0.5/0.3 via at h2h 0.25 puts
+    # copper 0.15 mm from the hole, inside the board's declared 0.25 that
+    # check_drc's via-hole arm grades (run 32 routed_c3: J5 and J1). The same
+    # floor the TRACK keep-out above uses, held by the same idiom as the
+    # #448/#505 via bands (hole_r + clr + via_drill/2 == copper edge `clr` off
+    # the wall). Only when it is wider than the h2h stamp already laid.
+    #
+    # Only for a DECLARED floor (`_hole_clr` > 0: the board's
+    # min_hole_clearance, its fab_floor_origin, or an explicit
+    # config.hole_clearance), at max(clearance, that) -- exactly what
+    # check_drc's via-hole arm grades. NOT at the flat NPTH_TO_TRACK 0.20:
+    # that is a TRACK routing policy, not a KiCad rule, and grading or
+    # stamping vias at it invents phantoms (#505/crkbd), so a board that
+    # declares nothing keeps its via map byte-identical (test_505 pins that).
+    if npth_holes and _hole_clr > 0:
+        _via_hole_clr = (max(config.clearance, _hole_clr)
+                         + (config.via_size - config.via_drill) / 2.0)
+        if _via_hole_clr > config.hole_to_hole_clearance + 1e-9:
+            block_via_cells_near_drills(obstacles, npth_holes, config.via_drill,
+                                        _via_hole_clr, config.grid_step)
 
     # VIA arm of the #326 override (#505). KiCad's hole_clearance holds a via's
     # COPPER -- not merely its drill -- `local_clearance` off the hole wall. For
