@@ -6237,6 +6237,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 else:
                     _stage1033 = 'written board'
                 summary['power_widths_measured_on'] = _stage1033
+                # #1033 part 3: failures of the widen check itself -- a
+                # constructor that raised (widening OFF for that route, also
+                # printed) or a clears() that raised (piece refused, fail
+                # closed). Present only when nonzero.
+                try:
+                    from power_widen import ERRORS as _pwerr
+                    if _pwerr['check_errors'] or _pwerr['ctor_errors']:
+                        summary['power_widen_errors'] = dict(_pwerr)
+                        if return_results:
+                            results_data['power_widen_errors'] = dict(_pwerr)
+                except Exception:                               # noqa: BLE001
+                    pass
                 if return_results:
                     results_data['power_widths'] = _pw1033
                     results_data['power_widths_measured_on'] = _stage1033

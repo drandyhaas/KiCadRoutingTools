@@ -244,6 +244,32 @@ def test_rescued_power_net_is_widened_where_it_fits():
     assert any(s.width > 0.2 for s in rs)
 
 
+def test_rescue_widens_at_the_original_clearance_not_the_rungs():
+    """The rung that routed the pinch ran at a stepped-down clearance; the
+    widen-back must be judged at the run's ORIGINAL config (0.15 here), so
+    the config handed to widen_rescued_copper is the caller's, never the
+    rung's."""
+    import power_widen
+    seen = []
+    orig = power_widen.widen_rescued_copper
+
+    def spy(result, pcb_data, net_id, config):
+        seen.append(config.clearance)
+        return orig(result, pcb_data, net_id, config)
+    power_widen.widen_rescued_copper = spy
+    try:
+        pcb = _pinch_board()
+        cfg = _cfg()
+        cfg.power_net_widths = {VICTIM: 0.4}
+        summary = rescue_failed_nets(_state(pcb, cfg), [('VICTIM', VICTIM)])
+    finally:
+        power_widen.widen_rescued_copper = orig
+    assert summary is not None and summary['recovered'] == ['VICTIM']
+    assert seen, "the widen-back was never called"
+    assert all(abs(c - cfg.clearance) < 1e-12 for c in seen), \
+        f"widen judged at {seen}, not the original {cfg.clearance}"
+
+
 def main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

@@ -32,6 +32,21 @@ from typing import List, Optional
 
 from kicad_parser import Segment
 
+# Failures of the check itself, per run: a constructor that raised (the
+# widening for that route is OFF, loudly) and a clears() call that raised
+# (that piece is REFUSED -- fail closed). route.py puts both in JSON_SUMMARY.
+ERRORS = {'check_errors': 0, 'ctor_errors': 0, 'last': ''}
+
+
+def note_ctor_error(exc):
+    """Loud, one line: a raised constructor must not silently turn 3a off."""
+    ERRORS['ctor_errors'] += 1
+    ERRORS['last'] = f"{type(exc).__name__}: {exc}"
+    print(f"WARNING: power-width widen check could not be built "
+          f"({type(exc).__name__}: {exc}) -- this route keeps its neck/rescue "
+          f"width (#1033)")
+
+
 # Piece length for the neck-zone / rescue widen-back. Finer than the trunk's
 # 0.5 mm because the neck zone is short (2.5 mm) and pad fields are dense.
 PIECE_MM = 0.25
@@ -88,15 +103,54 @@ class ExactWideCheck:
             for p in pads:
                 for lay in expand_pad_layers(p.layers, self.layers or ['F.Cu', 'B.Cu']):
                     self.foreign_pads.setdefault(lay, []).append(p)
+        # The SAMPLED pad term reads single_ended_routing._foreign_pad_arrays,
+        # which matches a layer only by `layer in pad.layers or '*.Cu'` -- so
+        # an `F&B.Cu` through-hole pad is invisible to it (verifier: 418 of
+        # 800 probe cases cleared a graze without the exact confirm). Feed it
+        # a VIEW whose pads carry the expanded copper layers, the same set the
+        # exact confirm uses, so the two terms agree on WHICH pads exist. The
+        # router's own terminal checks keep the raw spelling (out of scope).
+        import copy as _copy
+        from types import SimpleNamespace
+        _view = {}
+        for nid, pads in (pcb_data.pads_by_net or {}).items():
+            lst = []
+            for p in pads:
+                q = _copy.copy(p)
+                q.layers = sorted(set(expand_pad_layers(
+                    p.layers, self.layers or ['F.Cu', 'B.Cu'])))
+                lst.append(q)
+            _view[nid] = lst
+        self.pad_view = SimpleNamespace(pads_by_net=_view)
+        # #908 lifts a footprint's own GRAPHIC copper for the net of the pad
+        # it touches (the router's reading). KiCad grades that copper as
+        # net-less, so for OPTIONAL widening it is foreign to everyone -- the
+        # conservative reading costs only width (watchy AE1: GND pieces on
+        # the antenna polygon read clear through the lift).
+        self.graphics = [g for g in (pcb_data.segments or [])
+                         if getattr(g, 'graphic', False)]
         self.keepouts = []
+        _all_cu = set(self.layers or ['F.Cu', 'B.Cu'])
         for ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
             if ko.get('tracks_allowed', True):
                 continue
             poly = ko.get('polygon') or []
             if len(poly) >= 3:
+                # composite tokens resolved like obstacle_map's rule-area
+                # stamp (#369 A5): '*.Cu' = every copper layer, 'F&B.Cu' =
+                # front and back. Empty = every layer.
+                kls = set(ko.get('layers') or ())
+                res = set()
+                for ln in kls:
+                    if ln == '*.Cu':
+                        res |= _all_cu
+                    elif ln in ('F&B.Cu', 'F&B'):
+                        res |= {'F.Cu', 'B.Cu'}
+                    else:
+                        res.add(ln)
                 self.keepouts.append(([poly] + [h for h in (ko.get('holes') or [])
                                                 if len(h) >= 3],
-                                      set(ko.get('layers') or ()) or None))
+                                      res or None))
 
     def _base(self, layer):
         if hasattr(self.cfg, 'layer_clearance'):
@@ -115,6 +169,16 @@ class ExactWideCheck:
         return cap
 
     def clears(self, x1, y1, x2, y2, layer, w) -> bool:
+        """Fail CLOSED: a check that raises refuses the piece (it keeps its
+        narrower width) and is counted in ERRORS, never crashes the route."""
+        try:
+            return self._clears(x1, y1, x2, y2, layer, w)
+        except Exception as exc:                                # noqa: BLE001
+            ERRORS['check_errors'] += 1
+            ERRORS['last'] = f"{type(exc).__name__}: {exc}"
+            return False
+
+    def _clears(self, x1, y1, x2, y2, layer, w) -> bool:
         from single_ended_routing import (_seg_foreign_pad_dist,
                                           _seg_foreign_seg_dist,
                                           _seg_foreign_via_dist,
@@ -122,7 +186,7 @@ class ExactWideCheck:
         eff = self._base(layer)
         need = eff + w / 2.0 - 1e-4
         nid = self.net_id
-        if _seg_foreign_pad_dist(self.pcb, nid, x1, y1, x2, y2, layer,
+        if _seg_foreign_pad_dist(self.pad_view, nid, x1, y1, x2, y2, layer,
                                  base_clearance=eff, net_clearances=self.nc) < need:
             return False
         if _seg_foreign_seg_dist(self.pcb, nid, x1, y1, x2, y2, layer,
@@ -138,6 +202,8 @@ class ExactWideCheck:
         if not self._edge_ok(x1, y1, x2, y2, w):
             return False
         if not self._keepout_ok(x1, y1, x2, y2, layer, w):
+            return False
+        if not self._graphics_ok(x1, y1, x2, y2, layer, w, eff):
             return False
         # #1029: the grader's EXACT pad copper as the final word on pads
         # (rect / roundrect / oval / custom polygon, rotation, overrides).
@@ -156,6 +222,30 @@ class ExactWideCheck:
                 clr = self.cfg.pad_override_clearance(eff, p)
             if check_pad_segment_overlap(p, seg, clr, self.layers or [layer],
                                          0.0)[0]:
+                return False
+        return True
+
+    def _graphics_ok(self, x1, y1, x2, y2, layer, w, eff):
+        """Footprint graphic copper on `layer`, foreign to EVERY net here
+        (no #908 own-pad lift for optional widening)."""
+        if not self.graphics:
+            return True
+        from geometry_utils import segment_to_segment_closest_points
+        reach = eff + w / 2.0
+        for g in self.graphics:
+            if g.layer != layer:
+                continue
+            gh = (g.width or 0.0) / 2.0
+            m = reach + gh
+            if (max(g.start_x, g.end_x) < min(x1, x2) - m
+                    or min(g.start_x, g.end_x) > max(x1, x2) + m
+                    or max(g.start_y, g.end_y) < min(y1, y2) - m
+                    or min(g.start_y, g.end_y) > max(y1, y2) + m):
+                continue
+            d = segment_to_segment_closest_points(
+                Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=w,
+                        layer=layer, net_id=self.net_id), g)[0]
+            if d - gh < reach - 1e-4:
                 return False
         return True
 
@@ -183,7 +273,7 @@ class ExactWideCheck:
         from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
         margin = self.cfg.clearance + w / 2.0
         for rings, kls in self.keepouts:
-            if kls is not None and not (layer in kls or '*.Cu' in kls):
+            if kls is not None and layer not in kls:
                 continue
             n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.1) + 1)
             for q in range(n + 1):
@@ -268,7 +358,11 @@ def widen_rescued_copper(result, pcb_data, net_id, config) -> float:
     segs = list(result.get('new_segments') or [])
     if not segs:
         return 0.0
-    check = ExactWideCheck(pcb_data, config, net_id)
+    try:
+        check = ExactWideCheck(pcb_data, config, net_id)
+    except Exception as exc:                                    # noqa: BLE001
+        note_ctor_error(exc)
+        return 0.0
     new_list = []
     repl = {}
     widened = 0.0

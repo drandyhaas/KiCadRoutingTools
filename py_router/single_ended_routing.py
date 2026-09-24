@@ -5532,7 +5532,10 @@ def _assign_wide_route_widths(segments, config: GridRouteConfig, net_id: int,
         try:
             from power_widen import ExactWideCheck
             _zc = ExactWideCheck(pcb_data, config, net_id)
-        except Exception:                                       # noqa: BLE001
+        except Exception as _zce:                               # noqa: BLE001
+            # never silently: a raised constructor turns 3a OFF for this route
+            from power_widen import note_ctor_error
+            note_ctor_error(_zce)
             _zc = None
     if necked_down:
         segments = _apply_neckdown_widths(segments, config, net_id, obstacles,

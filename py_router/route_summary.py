@@ -173,7 +173,8 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
         # reconciliation sub-run returned, and stamps it on `first` -- the
         # sub-run's own summary has none. A sub-run that ever measured one
         # would be measuring a slice, so first always wins.
-        for _k in ('power_widths', 'power_widths_measured_on'):
+        for _k in ('power_widths', 'power_widths_measured_on',
+                   'power_widen_errors'):
             if _k in first:
                 merged[_k] = first[_k]
 
