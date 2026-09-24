@@ -471,10 +471,11 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
     _verdict = bool(_track is not None and len(_track.attempts) >= 2)
     # #1042: THE PLACEMENT PANELS, in placement currency, beside the verdict
     # band and never on its axis. Measured on the film's own placement boards
-    # (render_placement, ~4-7 s each, cached per board sha) BEFORE the frame
-    # is planned, so their region is reserved like the band's. A chain whose
-    # parts never moved has no placement to show: no panel, nothing invented.
-    _ptrack, _pwhy = None, 'off (--no-placement-panel)'
+    # (render_placement's functions IN PROCESS, ~3 s each, cached per board
+    # sha) BEFORE the frame is planned, so their region is reserved like the
+    # band's. `build_track` runs its cheap gates first -- two copper-free
+    # boards and a part that moved -- so a routing chain measures nothing.
+    _ptrack, _pwhy, _pfn = None, 'off (--no-placement-panel)', None
     if placement_panel is not False:
         try:
             import movie_placement
@@ -486,16 +487,18 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
             _ptrack, _pwhy = movie_placement.build_track(
                 steps, [], ledger=_pled, benchmark=benchmark_board,
                 intent=floorplan_intent, quiet=quiet)
-            if _ptrack is not None and not movie_placement.placed_anything(
-                    _ptrack, steps):
-                _ptrack, _pwhy = None, ('no part moved between the chain\'s '
-                                        'boards: no placement to show')
         except Exception as exc:                                # noqa: BLE001
             _ptrack, _pwhy = None, 'could not measure (%s)' % exc
-    if _ptrack is not None and marks is None:
-        marks = []
-    _band = ('both' if (_verdict and _ptrack is not None)
-             else bool(_verdict or _ptrack is not None))
+    _lands = {}
+    if _ptrack is not None:
+        import movie_placement
+        if marks is None:
+            marks = []
+        # the band is SIZED for readable panels (`plan_band`), not scaled
+        _pfn = movie_placement.band_px(_ptrack, _verdict)
+        _band = _pfn
+    else:
+        _band = bool(_verdict)
     # The 3D view gets a region of the layout's own panel (#946/C4) when the
     # layout has one to split and the panel WOULD run -- asked now, before
     # the frame is planned, because a region reserved for a panel that is
@@ -516,7 +519,8 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
                             theme=theme, layout=layout, aspect=aspect,
                             geom_out=geom_out, title=_title,
                             frames_sink=spool, max_frames=max_frames,
-                            attempts_band=_band, iso_panel=_iso_box)
+                            attempts_band=_band, iso_panel=_iso_box,
+                            lands_out=_lands)
     if not frames:
         if not quiet:
             print("make_movie: no frames (nothing routed?)", file=sys.stderr)
@@ -529,19 +533,26 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
     # Imported HERE, like movie_panels below, so the GUI recorder and the
     # in-process callers do not pay for a feature they did not ask for.
     _pbox, _vbox = None, (_geom0.track if _geom0 is not None else None)
+    _plan = None
     if _ptrack is not None:
         import movie_placement
-        if _geom0 is not None and _geom0.track is not None:
+        _plan = _pfn.plans[-1] if _pfn is not None and _pfn.plans else None
+        if _plan is not None and _plan.mode == 'declined':
+            _ptrack, _pwhy = None, 'declined: %s' % _plan.why
+        elif _geom0 is not None and _geom0.track is not None:
             _pbox, _vbox = movie_placement.split_band(
-                _geom0.track, both=_verdict)
-            _ptrack = movie_placement.with_firsts(_ptrack, marks)
+                _geom0.track, both=_verdict, track=_ptrack,
+                frame_h=_geom0.frame.h)
+            _ptrack = movie_placement.with_firsts(_ptrack, marks, _lands)
             frames = movie_placement.compose(frames, _pbox, _ptrack, marks,
                                              theme, _geom0.frame.h)
         else:
             _ptrack, _pwhy = None, 'no band could be reserved in this frame'
-    if _ptrack is not None or placement_panel:
+    # SAID whenever a placement was found, drawn or declined
+    if _ptrack is not None or placement_panel or _plan is not None:
         import movie_placement
-        print(movie_placement.status_line(_ptrack, _pwhy), file=sys.stderr)
+        print(movie_placement.status_line(_ptrack, _pwhy, _plan),
+              file=sys.stderr)
     try:
         import movie_attempts
         frames, _arep = movie_attempts.attach(

@@ -819,9 +819,13 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                  marks=None, theme=None, layout=None, aspect=None,
                  geom_out=None, title=None, frames_sink=None,
                  max_frames=None, notes=None, attempts_band=False,
-                 iso_panel=False):
+                 iso_panel=False, lands_out=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
     final board. ``build_run`` is this with the chain discovered from a run dir.
+
+    ``lands_out`` (#1042), a dict when passed, collects ``{normcased abs
+    board path: frame}`` -- the frame a GLIDE lands on, which is where the
+    placement panels change beat (a glide shows the SOURCE board until then).
 
     ``stage`` (movie_camera.Stage, #431) adds a camera and animates FOOTPRINT
     motion for placement rounds. With ``stage=None`` -- every existing caller --
@@ -847,7 +851,9 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     or 0 = no budget, today's behaviour.
 
     ``attempts_band`` (#946/C4) reserves the attempts band INSIDE the planned
-    frame (`plan_frame(track_px=)`), so a declared ratio keeps its size; the
+    frame (`plan_frame(track_px=)`), so a declared ratio keeps its size. A
+    CALLABLE ``(frame_w, frame_h) -> px`` sizes it instead (#1042: the
+    placement panels' `movie_placement.band_px`); the
     band's box is `geom_out[0].track` and `movie_attempts.attach(box=)` draws
     into it. ``iso_panel`` asks the layout to split its panel so the 3D view
     has a region of its own (`geom.panel_split[0]`); the layer strip then
@@ -900,14 +906,15 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
             # band reserved. Two calls of pure arithmetic, no pixels.
             try:
                 import movie_attempts
-                _bh = movie_attempts.band_height(_g.frame.w, _g.frame.h)
-                # #1042: the placement panels SHARE the band with the verdict
-                # graph (`attempts_band='both'`), so the band is taller --
-                # 1.4x, still under the band's own ceiling of the frame.
-                if _bh and attempts_band == 'both':
-                    _bh = min(int(_bh * 1.4),
-                              int(_g.frame.h * movie_attempts.BAND_MAX_FRAC))
+                if callable(attempts_band):
+                    # #1042: the caller SIZES the band for this frame -- the
+                    # placement panels' `band_px`, which reserves room for
+                    # readable panels (plot >= PLOT_MIN_PX) beside or above
+                    # the verdict graph, or 0 when the frame cannot hold them.
+                    _bh = int(attempts_band(_g.frame.w, _g.frame.h) or 0)
                     _bh -= _bh % 2
+                else:
+                    _bh = movie_attempts.band_height(_g.frame.w, _g.frame.h)
             except Exception:                                  # noqa: BLE001
                 _bh = 0
             if _bh:
@@ -1018,8 +1025,15 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
             # destination's count, over parts still in the pile. The stage
             # calls `on_arrive` right before its landing frame.
             m.refresh_placement(r.pcb, _prev_board)
-            stage.on_arrive = (lambda _p=pcb, _b=board:
-                               m.refresh_placement(_p, _b))
+
+            def _on_arrive(_p=pcb, _b=board):
+                m.refresh_placement(_p, _b)
+                # #1042: the placement panels read the SAME landing frame,
+                # so their beat changes with the inventory, not before it.
+                if lands_out is not None:
+                    lands_out.setdefault(
+                        os.path.normcase(os.path.abspath(_b)), len(m.frames))
+            stage.on_arrive = _on_arrive
         else:
             m.refresh_placement(pcb, board)
         _prev_board = board

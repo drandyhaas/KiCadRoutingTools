@@ -744,6 +744,12 @@ blocking term (`score.blocking`, `failures`), and the label names both. A loop
 ranked on an `--accept-cmd` scalar is not joined, and the note says it was left
 out.
 
+**x is run time when the ledger has a clock (#1042).** A converge ledger's
+rows carry `t`. When every attempt has one, x is run time over the ledger's
+whole span, placement laps included, and the caption adds `[x: run time]`. The
+placement panels draw the same domain. A joined converge + loop graph has no
+time on its loop half, so it keeps the lap index.
+
 **Lineage follows `parent_sha`.** A ledger row with no `parent_sha`, or one
 naming a board no row produced, is drawn from the last accepted row before it,
 which is the loop's own rule. The caption counts those guesses, because under
@@ -788,45 +794,89 @@ its own beside the band (`py_router/movie_placement.py`):
 | panel | y | series | instrument |
 |---|---|---|---|
 | LEGALITY | log | off-outline parts, conflict pairs, overlap mm² | `render_placement --json-out` |
-| ARRANGEMENT, a SCREEN, not the verdict | own axis each | airwire crossings (left), hpwl mm (right); dashed benchmark lines | `render_placement --json-out` |
-| INTENT | linear | floorplan errors | the ledger's `score.blocking_by.floorplan`, else `check_floorplan --intent` |
+| ARRANGEMENT (screen) | own axis each | airwire crossings (left), hpwl mm (right); dashed benchmark lines | `render_placement --json-out` |
+| INTENT | linear | floorplan errors | `check_floorplan --intent` on every board, else the ledger's `board_score` |
 
-- **One point per placement board.** Never per frame: a glide's frames are
-  pixel interpolation, not evaluated placements. A placement board is a board
-  with no copper. The points are revealed board by board as the film reaches
-  each one, and once the film is routing the panels say "placement settled".
-- **The floor is labelled.** When the last board's conflict pairs are all
-  contacts between KiCad-locked parts (`metrics.locked_contact_pairs`), the
-  dashed line reads "floor N = locked parts".
+- **Measured in process.** The numbers are the ones `render_placement
+  --json-out` writes, computed by its own `PlacementModel` and
+  `legality_findings`, and `check_floorplan.main` runs in the same process.
+  Nothing starts a subprocess of `sys.executable`: inside KiCad that is the
+  pcbnew binary, and a child started that way hangs
+  (`kicad_routing_plugin/deps_check.py`). About 3 s per board for each
+  instrument, cached by board sha.
+- **Cheap gates first.** Before anything is measured, the chain must have at
+  least two copper-free boards and a part must have moved between them
+  (poses are parsed, no instrument runs). A routing chain whose first
+  snapshot is copper-free measures nothing.
+- **One instrument per line.** With `--floorplan-intent`, INTENT is
+  `check_floorplan --intent` on every board, the pile included. Without it,
+  INTENT is the ledger's own `score.blocking_by.floorplan`, labelled
+  `ledger board_score`. A board no row scores is unmeasured. The two
+  instruments are never mixed on one line.
+- **Unmeasured is said.** A board the instrument cannot answer for (no
+  parts, an unreadable file) is marked on the axis and listed on the status
+  line, never plotted as zero. With no intent and no ledger, the INTENT plot
+  reads "unmeasured".
+- **x is run time** when the ledger carries `t`, over the same domain the
+  verdict band draws (`movie_attempts.ledger_time_domain`, every row,
+  placement laps included). A re-entry sits where it happened. A board no
+  row names (the pile, the run's input) sits at the start. Boards closer
+  than `MIN_BEAT_PX` (8) are spread to it so each keeps its own point.
+  Without a clock, x is the board order. The header says which.
+- **One point per placement board.** Never per frame, because a glide's
+  frames are pixel interpolation, not evaluated placements. Points appear
+  board by board. A beat changes on the frame its glide LANDS
+  (`build_boards(lands_out=)`), the same frame the inventory changes. Before
+  the first beat lands, no point and no flag is drawn. Once the film is
+  routing, the header says "placement settled".
+- **The floor is in the legend.** When the last board's conflict pairs are
+  all contacts between KiCad-locked parts (`metrics.locked_contact_pairs`),
+  the legend reads "floor N = locked parts", and a dashed line marks the
+  value.
 - **Defect flags.** A ledger row with `kind == classification` and
-  `shape == placement` flags the first placement board the film shows after
-  it, labelled with the first sentence of its lever.
-- **Where the panels go.** They share the band's reserved region with the
-  verdict graph. In a wide band they sit on the left; in a narrow one
-  (the 9:16 frame) they are stacked on top. The band grows 1.4× when both are
-  drawn, and the declared frame size is kept.
+  `shape == placement` flags the first placement board after it. The flag is
+  a numbered marker in a lane above the INTENT plot, off every series line.
+  Flags on one board stack. The legend carries the lever's headline, the
+  text before its first ':', wrapped at words and never cut.
+- **Readable or not drawn.** Every plot is at least `PLOT_MIN_PX` (48) tall,
+  and every title, footer line and legend word renders whole.
+  `movie_placement.plan_band` sizes the band for this frame: side by side
+  (placement in 46, 52 or 58 % of the width) when three panels fit there,
+  else stacked with placement on top. The verdict graph gives up height down
+  to its 64 px floor, and the band never takes more than `BAND_MAX_FRAC`
+  (0.48) of the frame. `frame_layout` keeps the board box itself at
+  `BOARD_ALONE_MIN_SHARE` (0.30) of the frame, so a tall band shrinks the
+  lower panel, not the board. A box too narrow for three panels keeps fewer,
+  INTENT then LEGALITY then ARRANGEMENT, and the header names what was
+  dropped. When nothing readable fits, the panels are declined and the
+  status line says why. Measured over 5 layouts × 5 ratios × {500, 1000,
+  1400} px: every frame at 1000 and 1400 draws. At 500 px, landscape frames
+  decline, and so does any frame that also carries the verdict graph. A
+  failed draw repaints the box and says so.
 - **Flags.** `--attempts-ledger PATH`, `--benchmark-board PATH` (the human's
   board or a previous run, drawn dashed), `--floorplan-intent PATH` and
   `--no-placement-panel` exist on both `make_movie.py` and `make_film.py`.
-- **Degradation.** A chain with fewer than two copper-free boards, or one where
-  no part moved, gets no panel, and nothing is measured or synthesised.
-- **Cost.** About 3 to 7 s per placement board (`render_placement`), cached by
-  board sha within a run.
+  `--attempts-ledger` feeds both the verdict band and the panels, so a film
+  rendered from copies away from the run directory still has both.
 
 Measured on run 32's boards in `wk/run32`, the numbers reproduce #1042's table
 to the digit:
 
-| board | off-outline parts | conflict pairs | overlap mm² | crossings | hpwl mm |
-|---|---|---|---|---|---|
-| the pile | 243 | 3214 | 9503.03 | 10974 | 4834 |
-| placed_v2 | 0 | 6 | 23.69 | 3740 | 5760 |
-| placed_v3 | 0 | 6 | 23.69 | 3750 | 5743 |
-| glasgow_revC (the human benchmark) | 0 | 10 | 70.05 | 1352 | 3641 |
+| board | off-outline parts | conflict pairs | overlap mm² | crossings | hpwl mm | floorplan: `check_floorplan --intent` | floorplan: ledger |
+|---|---|---|---|---|---|---|---|
+| the pile | 243 | 3214 | 9503.03 | 10974 | 4834 | 131 | no row |
+| placed_v2 | 0 | 6 | 23.69 | 3740 | 5760 | 12 | 12 (row 9) |
+| placed_v3 | 0 | 6 | 23.69 | 3750 | 5743 | 11 | 11 (row 53) |
+| glasgow_revC (the human benchmark) | 0 | 10 | 70.05 | 1352 | 3641 | | |
 
-The floorplan errors reproduce as well: placed_v2 12 (ledger row 9) and
-placed_v3 11 (ledger row 53). The pile has no ledger row. `check_floorplan`
-grades it at 131 against `glasgow.intent.json`. The table's 303 is ledger row
-0, which is the pile after the P1 decisions, a different board.
+The table's 303 is ledger row 0's stored `board_score` floorplan. It is not a
+different instrument's view of the pile. It was scored under a different rule
+set: `rules_run` 10 with `must_lock` graded, and about 230
+`zone_containment` violations, where row 9 ran 9 rules. Grading row 0's board
+with `check_floorplan --intent glasgow.intent.json` gives 130 (the
+verifier's measurement; that board, `pinned.kicad_pcb`, is not in
+`wk/run32` here). The same board, two numbers from two instruments, is why a
+line reads from one.
 
 ### The ghost and the arrow
 

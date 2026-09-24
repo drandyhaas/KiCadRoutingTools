@@ -92,6 +92,10 @@ ISO_SIDE_FRAC = 0.30                # of frame WIDTH
 #: The board box plus the attempts band never get less than this share of
 #: the frame height: a lower box is capped so the board keeps it.
 BOARD_MIN_SHARE = 0.55
+#: ...and the BOARD BOX ALONE never less than this: a tall band (#1042's
+#: placement panels) must shrink the lower box, not the board -- run 32's
+#: 16:9 split frame put a 248 px band over an 86 px board before this.
+BOARD_ALONE_MIN_SHARE = 0.30
 
 
 class Box(NamedTuple):
@@ -380,7 +384,8 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
 def _cap_panel(ph, H, inner_h, track_h):
     """A lower box's height, capped so the board plus the attempts band
     keep `BOARD_MIN_SHARE` of the frame height."""
-    board_min = int(math.ceil(max(0.0, BOARD_MIN_SHARE * H - track_h)))
+    board_min = int(math.ceil(max(0.0, BOARD_MIN_SHARE * H - track_h,
+                                  BOARD_ALONE_MIN_SHARE * H)))
     board_min += board_min % 2
     return max(0, min(ph, even(max(0, inner_h - board_min))
                        if inner_h - board_min >= 2 else 0))

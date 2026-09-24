@@ -176,6 +176,10 @@ class Attempt(NamedTuple):
     score: Optional[float]
     admissible: bool
     board: Optional[str]
+    #: RUN TIME, epoch seconds, when the adapter's record carries it (the
+    #: converge ledger's `t`). The band draws x as run time only when EVERY
+    #: attempt has it (#1042).
+    t: Optional[float] = None
 
 
 class Track(NamedTuple):
@@ -201,6 +205,10 @@ class Track(NamedTuple):
     source: str                 # 'loop' | 'converge' | 'evolve'
     note: str                   # 'N of M attempts dropped'
     gate_record: bool = False   # see above
+    #: `(t0, t1)`, the RUN's time span -- every ledger row's `t`, placement
+    #: laps included, so the placement panels (#1042) share this x domain
+    #: with the band even though their laps are not plotted on it.
+    x_domain: Optional[Tuple[float, float]] = None
 
 
 def _note(rows: Sequence[Attempt]) -> str:
@@ -351,7 +359,8 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
             screened=False,
             score=None if b is None else float(b),
             admissible=(b == 0),
-            board=e.get('result_sha')))
+            board=e.get('result_sha'),
+            t=_row_t(e)))
         if e.get('accepted'):
             last_acc = idx
     if not rows:
@@ -366,7 +375,37 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
         note += ('; %d parent(s) by last-accepted (no parent_sha, until '
                  'record takes a parent explicitly, #1034)' % fallback)
     return Track(tuple(rows), 'blocking (lower better)', 'converge',
-                 note, gate_record=False)
+                 note, gate_record=False, x_domain=ledger_time_domain(rows_in))
+
+
+def _row_t(row) -> Optional[float]:
+    """A ledger row's run time (`t`, epoch seconds), or None."""
+    try:
+        v = row.get('t')
+        return None if v is None else float(v)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def ledger_time_domain(rows) -> Optional[Tuple[float, float]]:
+    """`(t0, t1)` over EVERY row that carries a time, or None when fewer
+    than two do or they span nothing. Shared by the verdict band and the
+    placement panels (#1042), so both draw one run clock."""
+    ts = [t for t in (_row_t(r) for r in rows) if t is not None]
+    if len(ts) < 2 or max(ts) - min(ts) <= 0:
+        return None
+    return (min(ts), max(ts))
+
+
+def x_is_time(track) -> bool:
+    """True when the band's x is RUN TIME: a domain, and a time on every
+    attempt inside it. A joined converge+loop track has none on its loop
+    half, so it keeps the lap index -- and says so by not saying 'run time'."""
+    dom = getattr(track, 'x_domain', None)
+    if not dom or track is None or not track.attempts:
+        return False
+    return all(a.t is not None and dom[0] <= a.t <= dom[1]
+               for a in track.attempts)
 
 
 def attempts_from_evolve_ledger(path: str) -> Optional[Track]:
@@ -780,7 +819,17 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
         span = max(1, x1v - x0v)
         horizon = x1v if upto is None else upto
 
+        # RUN TIME on x when every attempt carries it (#1042): laps sit where
+        # they happened, and the placement panels share the same domain.
+        # Otherwise the lap index, as before -- and the caption says which.
+        timed = x_is_time(track)
+        _tdom = track.x_domain
+        _tmap = {a.index: a.t for a in rows}
+
         def X(i):
+            if timed:
+                return px0 + (px1 - px0) * ((_tmap[i] - _tdom[0])
+                                            / float(_tdom[1] - _tdom[0]))
             return px0 + (px1 - px0) * ((i - x0v) / float(span))
 
         _tspan = (hi_w - vmin) if broken else (vmax - vmin)
@@ -840,8 +889,12 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
                 for dy in (-3, 3):
                     d.line([gx - 5, gy + dy + 3, gx + 5, gy + dy - 3],
                            fill=th.rgb('chrome_text_dim'), width=2)
+                # an OBSTACLE like any label: run 32's first record label
+                # ('604') printed into the left mark
+                taken.append((gx - 7, gy - 8, gx + 7, gy + 8))
         if debug is not None:
             debug['plot'] = (px0, py0, px1, py1)
+            debug['x_mode'] = 'time' if timed else 'index'
             debug['mode'] = ('broken' if broken else
                              'symlog' if symlog else 'linear')
             debug['work_hi'] = hi_w
@@ -853,7 +906,8 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
         # 'failures (lower bet...' invites the reader to guess the rest.
         metric = track.metric + (
             '  [axis broken above %s]' % _tick(hi_w) if broken
-            else '  [log scale]' if symlog else '')
+            else '  [log scale]' if symlog else '') + (
+            '  [x: run time]' if timed else '')
         cap = '%s  -  %s' % (metric, track.note)
         if d.textlength(cap, font=f) <= (px1 - px0) * 0.92:
             d.text((px1, box.y + 3), cap, fill=th.rgb('chrome_text_dim'),

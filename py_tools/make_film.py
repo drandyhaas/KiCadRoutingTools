@@ -447,19 +447,20 @@ def _build_film_body(a, frame_spool, sink, steps, final, size, supersample,
                 steps, [], ledger=placement.get('ledger'),
                 benchmark=placement.get('benchmark'),
                 intent=placement.get('intent'), quiet=quiet)
-            if _ptrack is not None and not movie_placement.placed_anything(
-                    _ptrack, steps):
-                _ptrack, _pwhy = None, 'no part moved: no placement to show'
         except Exception as exc:                                # noqa: BLE001
             _ptrack, _pwhy = None, 'could not measure (%s)' % exc
+    _pfn, _lands = None, {}
+    if _ptrack is not None:
+        import movie_placement
+        _pfn = movie_placement.band_px(_ptrack, _verdict)
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
                             frames_sink=sink, max_frames=max_frames,
                             theme=_th, layout=layout, aspect=aspect,
                             geom_out=_geom,
-                            attempts_band=('both' if (_verdict and _ptrack)
-                                           else bool(_verdict or _ptrack)),
-                            iso_panel=iso_box)
+                            attempts_band=(_pfn if _pfn is not None
+                                           else bool(_verdict)),
+                            iso_panel=iso_box, lands_out=_lands)
     if not frames:
         if sink is not None:
             sink.close()
@@ -468,17 +469,21 @@ def _build_film_body(a, frame_spool, sink, steps, final, size, supersample,
     _vbox = _g0.track if _g0 is not None else None
     if _ptrack is not None:
         import movie_placement
-        if _g0 is not None and _g0.track is not None:
-            _pbox, _vbox = movie_placement.split_band(_g0.track,
-                                                      both=_verdict)
-            _ptrack = movie_placement.with_firsts(_ptrack, marks)
+        _plan = _pfn.plans[-1] if _pfn.plans else None
+        if _plan is not None and _plan.mode == 'declined':
+            _ptrack, _pwhy = None, 'declined: %s' % _plan.why
+        elif _g0 is not None and _g0.track is not None:
+            _pbox, _vbox = movie_placement.split_band(
+                _g0.track, both=_verdict, track=_ptrack, frame_h=_g0.frame.h)
+            _ptrack = movie_placement.with_firsts(_ptrack, marks, _lands)
             frames = movie_placement.compose(frames, _pbox, _ptrack, marks,
                                              _th, _g0.frame.h)
         else:
             _ptrack, _pwhy = None, 'no band could be reserved in this frame'
-        if not quiet or _ptrack is not None:
-            print('make_film: ' + movie_placement.status_line(_ptrack, _pwhy),
-                  file=sys.stderr)
+        # SAID whenever a placement was found, drawn or declined
+        print('make_film: ' + movie_placement.status_line(_ptrack, _pwhy,
+                                                          _plan),
+              file=sys.stderr)
     if _ptrack is not None and _vbox is None:
         attempts = None           # the band is all placement: no verdict box
 
