@@ -14,7 +14,8 @@ behaviours the verifier found untested: F&B.Cu pads reach the SAMPLED term
 (not only the exact confirm), the exact confirm is the strict word at the
 boundary, footprint graphic copper is foreign even where #908 lifts it for the
 router, keep-outs on F&B.Cu, fail-closed on a raising check, a loud warning on
-a raising constructor, and widen_rescued_copper's board rewrite.
+a raising constructor, and the post-route pass (widen_power_copper):
+one board rewrite per net, the run's clearance, and nets judged in turn.
 
     python3 tests/test_1033_exact_wide_check.py
 """
@@ -32,7 +33,7 @@ from routing_config import GridRouteConfig  # noqa: E402
 from synth import make_net, make_pad, make_pcb, make_seg  # noqa: E402
 
 import power_widen  # noqa: E402
-from power_widen import ExactWideCheck, widen_rescued_copper  # noqa: E402
+from power_widen import ExactWideCheck, widen_power_copper  # noqa: E402
 
 fails = []
 NET, FOREIGN = 1, 2
@@ -180,30 +181,30 @@ def main():
           chk11.clears(*PIECE, 0.3) is False)
     check('...and is counted', power_widen.ERRORS['check_errors'] == before + 1)
 
-    # 12. a raising CONSTRUCTOR is loud, counted, and leaves the route narrow
-    from single_ended_routing import _assign_wide_route_widths
-    from routing_config import GridCoord
+    # 12. a raising CONSTRUCTOR is loud, counted, and leaves the copper as
+    #     routed (the post-route pass skips that net)
     import io
     import contextlib
     c12 = cfg()
     c12.power_net_widths = {NET: 0.3}
-    bad = SimpleNamespace()      # no pads_by_net, no board_info: ctor raises
-    segs12 = [make_seg(0.0, 0.0, 6.0, 0.0, width=0.3, net_id=NET)]
-    from obstacle_map import GridObstacleMap
+    bad = SimpleNamespace(segments=[])   # no pads_by_net / board_info: raises
+    s12 = make_seg(0.0, 0.0, 6.0, 0.0, width=0.127, net_id=NET)
+    r12 = [{'new_segments': [s12]}]
     ce0 = power_widen.ERRORS['ctor_errors']
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        _assign_wide_route_widths(segs12, c12, NET, GridObstacleMap(1),
-                                  GridCoord(0.05), ['F.Cu'], 0, True, None,
-                                  neck_start=True, pcb_data=bad)
+        st12 = widen_power_copper(r12, bad, c12)
     check('a raising constructor prints a WARNING naming the exception',
           'WARNING: power-width widen check could not be built' in buf.getvalue()
           and 'AttributeError' in buf.getvalue(), buf.getvalue()[-300:])
-    check('...and is counted', power_widen.ERRORS['ctor_errors'] == ce0 + 1)
+    check('...and is counted, and the copper stays as routed',
+          power_widen.ERRORS['ctor_errors'] == ce0 + 1
+          and st12['nets'] == 0 and r12[0]['new_segments'] == [s12])
 
-    # 13. widen_rescued_copper rewrites the board ONCE, after deciding every
-    #     piece (1f29b6cfe): several narrow segments, a foreign track to keep
-    #     the check busy -- every one must widen, the board list stays clean
+    # 13. the post-route pass rewrites the board ONCE per net, after deciding
+    #     every piece (the 1f29b6cfe rule): several narrow segments across two
+    #     results, a foreign track to keep the check busy -- every one widens,
+    #     both result lists and the board carry the pieces, nothing stale
     c13 = cfg()
     c13.power_net_widths = {NET: 0.3}
     rs = [make_seg(0.0, -1.0, 2.0, -1.0, width=0.127, net_id=NET),
@@ -211,30 +212,50 @@ def main():
           make_seg(4.0, -1.0, 4.0, 1.0, width=0.127, net_id=NET)]
     foreign = make_seg(-2.0, 2.0, 4.5, 2.0, width=0.2, net_id=FOREIGN)
     pcb13 = board(segs=[foreign] + rs)
-    res = {'new_segments': list(rs)}
-    wid = widen_rescued_copper(res, pcb13, NET, c13)
-    check('rescued copper: every segment widened (no piece lost to a '
-          'half-rewritten board)', abs(wid - 6.0) < 1e-6
-          and all(s.width == 0.3 for s in res['new_segments']), wid)
-    check('rescued copper: the board holds no None and no stale originals',
+    res13 = [{'new_segments': rs[:2]}, {'new_segments': rs[2:]}]
+    st13 = widen_power_copper(res13, pcb13, c13)
+    allnew = [x for r in res13 for x in r['new_segments']]
+    check('post-pass: every narrow segment widened across results',
+          abs(st13['widened_mm'] - 6.0) < 1e-6
+          and all(x.width == 0.3 for x in allnew), st13)
+    check('post-pass: the board holds no None and no stale originals',
           None not in pcb13.segments
-          and not any(s in pcb13.segments for s in rs)
-          and all(s in pcb13.segments for s in res['new_segments']))
+          and not any(x in pcb13.segments for x in rs)
+          and all(x in pcb13.segments for x in allnew))
 
-    # 14. the ORIGINAL clearance governs, not a rung's: foreign track edge
-    #     0.3 away -- 0.3 clears at clearance 0.1 (needs 0.25); at 0.2 it
-    #     does not (needs 0.35) and the ladder's 0.15 does (needs 0.275)
+    # 14. the run's clearance governs: foreign track edge 0.3 away -- 0.3
+    #     clears at clearance 0.1 (needs 0.25); at 0.2 it does not (needs
+    #     0.35) and the ladder's 0.15 does (needs 0.275)
     for clr, want in ((0.1, 0.3), (0.2, 0.15)):
         c14 = cfg(clearance=clr)
         c14.power_net_widths = {NET: 0.3}
         s14 = make_seg(0.0, 0.0, 2.0, 0.0, width=0.127, net_id=NET)
         pcb14 = board(segs=[make_seg(0.0, 0.4, 2.0, 0.4, width=0.2,
                                      net_id=FOREIGN), s14])
-        r14 = {'new_segments': [s14]}
-        widen_rescued_copper(r14, pcb14, NET, c14)
-        check(f'rescue widen at clearance {clr}: width {want}',
-              all(abs(s.width - want) < 1e-9 for s in r14['new_segments']),
-              [s.width for s in r14['new_segments']])
+        r14 = [{'new_segments': [s14]}]
+        widen_power_copper(r14, pcb14, c14)
+        check(f'post-pass at clearance {clr}: width {want}',
+              all(abs(x.width - want) < 1e-9 for x in r14[0]['new_segments']),
+              [x.width for x in r14[0]['new_segments']])
+
+    # 15. two power nets side by side: the second net's check must see the
+    #     FIRST net's widened copper (the board is rewritten between nets).
+    #     Centrelines 0.38 apart: net 1 widens to 0.3 (0.3165 from net 3's
+    #     edge); net 3 then sees net 1 at 0.3 (0.23 away) -> only 0.15 fits.
+    c15 = cfg()
+    c15.power_net_widths = {NET: 0.3, 3: 0.3}
+    a15 = make_seg(0.0, 0.0, 2.0, 0.0, width=0.127, net_id=NET)
+    b15 = make_seg(0.0, 0.38, 2.0, 0.38, width=0.127, net_id=3)
+    pcb15 = board(segs=[a15, b15])
+    pcb15.nets[3] = make_net(3, '+5V')
+    r15 = [{'new_segments': [a15]}, {'new_segments': [b15]}]
+    widen_power_copper(r15, pcb15, c15)
+    wa = max(x.width for x in r15[0]['new_segments'])
+    wb = max(x.width for x in r15[1]['new_segments'])
+    gap = 0.38 - wa / 2 - wb / 2
+    check('two nets: the second is judged against the first as WIDENED '
+          '(edge gap stays >= the 0.1 clearance)', gap >= 0.1 - 1e-6,
+          (wa, wb, round(gap, 4)))
 
     if fails:
         print(f'{len(fails)} FAILURE(S): {fails}')

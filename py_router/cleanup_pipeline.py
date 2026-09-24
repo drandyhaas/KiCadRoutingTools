@@ -101,6 +101,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            progress_callback=None,
                            smooth: bool = False,
                            merge_collinear: bool = True,
+                           power_widen: bool = True,
                            ) -> CleanupOutcome:
     """Run the post-route cleanup passes in their one canonical order.
 
@@ -496,6 +497,31 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _bridged:
             print(f"{label}Bridged {_bridged} same-net soft joint(s) with a tiny "
                   f"connector")
+
+    # #1033 part 3: widen power-net copper where its requested width fits,
+    # on exact geometry against the FINISHED board -- after every pass that
+    # can narrow or move copper (the graze neck, smoothing, soft-joint
+    # bridges) and before the collinear merge, which re-joins the equal-width
+    # pieces it cuts. Routing itself is untouched (completion first); a
+    # config without power_net_widths (plane round-trips, diff pairs) makes
+    # this a no-op. power_widen=False ablates it.
+    if power_widen and (getattr(config, 'power_net_widths', None) or None):
+        _prog("power-width widen")
+        try:
+            from power_widen import widen_power_copper
+            _pw_stats = widen_power_copper(results, pcb_data, config,
+                                           scope_net_ids)
+            counts['power_widened_nets'] = _pw_stats['nets']
+            counts['power_widened_mm'] = _pw_stats['widened_mm']
+            _trace('power_widen')
+            if _pw_stats['nets']:
+                print(f"{label}Power-width widen: {_pw_stats['widened_mm']:.2f} "
+                      f"mm widened toward --power-nets-widths on "
+                      f"{_pw_stats['nets']} net(s) (#1033)")
+        except Exception as _pwe:                               # noqa: BLE001
+            print(f"{label}WARNING: power-width widen pass failed "
+                  f"({type(_pwe).__name__}: {_pwe}); copper keeps its routed "
+                  f"widths (#1033)")
 
     # #811 FINAL pass. Geometry-preserving by construction (see the pass
     # docstring), which is what lets it run after close_soft_joints and what

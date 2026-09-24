@@ -207,6 +207,17 @@ def test_rescued_power_net_is_widened_where_it_fits():
     state = _state(pcb, cfg)
     summary = rescue_failed_nets(state, [('VICTIM', VICTIM)])
     assert summary is not None and summary['recovered'] == ['VICTIM'], summary
+    # The rescue itself lays its rung width -- no widening inside the
+    # routing loop (completion first, #1033 part 3 moved it out).
+    assert max(s.width for s in pcb.segments if s.net_id == VICTIM) < 0.2,         "the rescue must not widen in the loop any more"
+    # The SHARED post-route cleanup pipeline (both fronts) widens it, judged
+    # against the finished board at the run's clearance.
+    from cleanup_pipeline import run_post_route_cleanup
+    out = run_post_route_cleanup(state.results, pcb, {VICTIM}, cfg,
+                                 snap=False, phantom=False, graze=False,
+                                 octolinear=False, via_nudge=False,
+                                 cycles=False, neck=False, smooth=False)
+    assert out.counts.get('power_widened_nets') == 1, out.counts
     segs = [s for s in pcb.segments if s.net_id == VICTIM]
 
     def length(pred_x, pred_w):
@@ -242,32 +253,6 @@ def test_rescued_power_net_is_widened_where_it_fits():
     # the state's result carries the widened copper (it is what ships)
     rs = state.routed_results[VICTIM]['new_segments']
     assert any(s.width > 0.2 for s in rs)
-
-
-def test_rescue_widens_at_the_original_clearance_not_the_rungs():
-    """The rung that routed the pinch ran at a stepped-down clearance; the
-    widen-back must be judged at the run's ORIGINAL config (0.15 here), so
-    the config handed to widen_rescued_copper is the caller's, never the
-    rung's."""
-    import power_widen
-    seen = []
-    orig = power_widen.widen_rescued_copper
-
-    def spy(result, pcb_data, net_id, config):
-        seen.append(config.clearance)
-        return orig(result, pcb_data, net_id, config)
-    power_widen.widen_rescued_copper = spy
-    try:
-        pcb = _pinch_board()
-        cfg = _cfg()
-        cfg.power_net_widths = {VICTIM: 0.4}
-        summary = rescue_failed_nets(_state(pcb, cfg), [('VICTIM', VICTIM)])
-    finally:
-        power_widen.widen_rescued_copper = orig
-    assert summary is not None and summary['recovered'] == ['VICTIM']
-    assert seen, "the widen-back was never called"
-    assert all(abs(c - cfg.clearance) < 1e-12 for c in seen), \
-        f"widen judged at {seen}, not the original {cfg.clearance}"
 
 
 def main():

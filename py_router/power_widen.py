@@ -342,52 +342,83 @@ def widen_segment(seg, target_w, check: ExactWideCheck,
     return out
 
 
-def widen_rescued_copper(result, pcb_data, net_id, config) -> float:
-    """#1033 part 3b: after a rescue routed a POWER net's gap at its rung
-    width (the rescue pops the power width to find ANY path), widen the
-    rescued copper piecewise wherever the net's own width -- or a step of its
-    ladder -- clears, judged on exact geometry at the ORIGINAL config's
-    clearance (not the rung's stepped-down one). The rescue search itself is
-    unchanged; this only re-widths the copper it found. Pieces are collinear
-    with the originals, so connectivity is untouched.
+def widen_power_copper(results, pcb_data, config, scope_net_ids=None):
+    """#1033 part 3, AFTER routing: widen each power net's copper where its
+    requested width -- or a step of its ladder -- clears on exact geometry
+    against the FINISHED board.
 
-    Mutates result['new_segments'] and pcb_data.segments in place (the route
-    is already on the board). Returns the mm of copper widened."""
-    if net_id not in (getattr(config, 'power_net_widths', None) or {}):
-        return 0.0
-    segs = list(result.get('new_segments') or [])
-    if not segs:
-        return 0.0
-    try:
-        check = ExactWideCheck(pcb_data, config, net_id)
-    except Exception as exc:                                    # noqa: BLE001
-        note_ctor_error(exc)
-        return 0.0
-    new_list = []
-    repl = {}
-    widened = 0.0
-    # Decide EVERYTHING first, then mutate the board once: the check reads
-    # pcb_data.segments, so editing it mid-loop would feed the next query a
-    # half-rewritten board (a first cut did, and crashed on a hole it left).
-    for s in segs:
-        target = config.get_net_track_width(net_id, s.layer)
-        if s.width >= target - 1e-9:
-            new_list.append(s)
+    One pass over every result's power-net copper, run by the shared cleanup
+    pipeline (so the CLI and the GUI both get it). It replaces the in-loop
+    neck-zone widening (3a) and rescue widening (3b): those changed what the
+    NEXT net saw while routing and cost esp_prog@dru its /RTS net through
+    divergence (one sample). Completion comes first -- routing now runs
+    exactly as before part 3, and widening only takes space that every other
+    net has left over.
+
+    It covers whatever the run laid narrower than the net's width: the pad
+    neck zone, rescue rungs, short-edge ladders and trunk pieces the grid fit
+    refused. The exact check replaces the map's quantised fit, so a piece the
+    map refused may widen now. Collinear pieces only; connectivity unchanged.
+
+    Per net: decide every piece first, then rewrite that net's result lists
+    and the board ONCE (the 1f29b6cfe rule), so the next net's check sees the
+    widened copper. Returns {'nets': n, 'widened_mm': mm}."""
+    pw = getattr(config, 'power_net_widths', None) or {}
+    stats = {'nets': 0, 'widened_mm': 0.0}
+    if not pw or not results:
+        return stats
+    by_net = {}
+    for r in results:
+        for sg in (r.get('new_segments') or []):
+            nid = getattr(sg, 'net_id', None)
+            if nid in pw and not getattr(sg, 'graphic', False):
+                if scope_net_ids is not None and nid not in scope_net_ids:
+                    continue
+                by_net.setdefault(nid, []).append(sg)
+    for nid in sorted(by_net):
+        segs = [sg for sg in by_net[nid]
+                if sg.width < config.get_net_track_width(nid, sg.layer) - 1e-9]
+        if not segs:
             continue
-        pieces = widen_segment(s, target, check)
-        if len(pieces) == 1 and pieces[0] is s:
-            new_list.append(s)
+        try:
+            check = ExactWideCheck(pcb_data, config, nid)
+        except Exception as exc:                                # noqa: BLE001
+            note_ctor_error(exc)
             continue
-        for q in pieces:
-            if q.width > s.width + 1e-9:
-                widened += math.hypot(q.end_x - q.start_x, q.end_y - q.start_y)
-        new_list.extend(pieces)
-        repl[id(s)] = pieces
-    if repl:
+        repl = {}
+        widened = 0.0
+        for sg in segs:
+            pieces = widen_segment(sg, config.get_net_track_width(nid, sg.layer),
+                                   check)
+            if len(pieces) == 1 and pieces[0] is sg:
+                continue
+            for q in pieces:
+                if q.width > sg.width + 1e-9:
+                    widened += math.hypot(q.end_x - q.start_x, q.end_y - q.start_y)
+            repl[id(sg)] = pieces
+        if not repl:
+            continue
+        for r in results:
+            ns = r.get('new_segments')
+            if not ns:
+                continue
+            out = []
+            hit = False
+            for x in ns:
+                rp = repl.get(id(x))
+                if rp is None:
+                    out.append(x)
+                else:
+                    out.extend(rp)
+                    hit = True
+            if hit:
+                r['new_segments'] = out
         board = []
         for x in pcb_data.segments:
             board.extend(repl.get(id(x), (x,)))
-        pcb_data.segments[:] = board          # same list object, new contents
-        result['new_segments'] = new_list
+        pcb_data.segments[:] = board
         pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
-    return widened
+        stats['nets'] += 1
+        stats['widened_mm'] += widened
+    stats['widened_mm'] = round(stats['widened_mm'], 3)
+    return stats
