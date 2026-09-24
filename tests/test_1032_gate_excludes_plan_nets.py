@@ -216,4 +216,7 @@ if __name__ == '__main__':
         print(f'{len(fails)} FAILURE(S): {fails}')
         sys.exit(1)
     print('all checks passed' + ('' if ran_b else ' (part B skipped)'))
-    sys.exit(0 if ran_b else 77)
+    # Part A always asserts (a tracked fixture), so this file is a PASS even
+    # when part B's wk/ board is absent: exit 77 is reserved for a file that
+    # asserted nothing, and run_all fails a 77 with no "SKIP:" line.
+    sys.exit(0)
