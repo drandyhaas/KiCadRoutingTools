@@ -237,5 +237,88 @@ class MidRunWriterSeedsOriginTest(unittest.TestCase):
         self.assertEqual(self._origin().get('min_hole_clearance'), 0.25)
 
 
+class LiveBoardOriginTest(unittest.TestCase):
+    """The GUI's live-board writers (apply_targets_to_board, then
+    gui_utils.update_live_drc_floors) lowered the same floors with no origin
+    recorded, so a manual GUI run that relaxed a fab floor said nothing and a
+    later CLI step baselined on the already-lowered value. Fakes stand in for
+    pcbnew (design settings in nm); the real board runs in
+    tests/gui_parity/test_live_fab_floor_origin.py."""
+
+    class _BDS:
+        def __init__(self, track, via):
+            self.m_TrackMinWidth = int(track * 1e6)
+            self.m_ViasMinSize = int(via * 1e6)
+
+    class _Board:
+        def __init__(self, path, bds):
+            self.path, self.bds = path, bds
+
+        def GetFileName(self):
+            return self.path
+
+        def GetDesignSettings(self):
+            return self.bds
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.pcb = os.path.join(self.tmp, 'b.kicad_pcb')
+        with open(self.pcb, 'w') as f:
+            f.write('(kicad_pcb)\n')
+        F._LIVE_FAB_ORIGIN.clear()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        F._LIVE_FAB_ORIGIN.clear()
+
+    def _write_pro(self, origin=None):
+        with open(self.pcb[:-len('.kicad_pcb')] + '.kicad_pro', 'w') as f:
+            json.dump(_proj({"min_via_diameter": 0.5}, origin), f)
+
+    def _pro_origin(self):
+        with open(self.pcb[:-len('.kicad_pcb')] + '.kicad_pro') as f:
+            return (json.load(f).get('kicad_routing_tools') or {}).get(ORIGIN_KEY)
+
+    def test_the_live_floors_are_recorded_before_they_are_lowered(self):
+        self._write_pro()
+        bds = self._BDS(0.2, 0.5)
+        board = self._Board(self.pcb, bds)
+        origin = F.seed_live_fab_floor_origin(board)
+        self.assertEqual(origin, {'min_track_width': 0.2, 'min_via_diameter': 0.5})
+        self.assertEqual(self._pro_origin(), origin, 'recorded in the project')
+        bds.m_ViasMinSize = int(0.3 * 1e6)          # the step lowers it
+        again = F.seed_live_fab_floor_origin(board)
+        self.assertEqual(again['min_via_diameter'], 0.5,
+                         'a second writer must not re-seed from the lowered value')
+        self.assertEqual(self._pro_origin()['min_via_diameter'], 0.5)
+
+    def test_an_origin_already_in_the_project_wins(self):
+        """A GUI step after a CLI chain keeps the chain's original."""
+        self._write_pro(origin={'min_via_diameter': 0.8})
+        board = self._Board(self.pcb, self._BDS(0.2, 0.3))
+        self.assertEqual(F.seed_live_fab_floor_origin(board)['min_via_diameter'], 0.8)
+
+    def test_a_board_with_no_project_keeps_it_for_the_session(self):
+        bds = self._BDS(0.2, 0.5)
+        board = self._Board(self.pcb, bds)
+        F.seed_live_fab_floor_origin(board)
+        bds.m_ViasMinSize = int(0.3 * 1e6)
+        self.assertEqual(F.seed_live_fab_floor_origin(board)['min_via_diameter'], 0.5)
+        self.assertFalse(os.path.exists(self.pcb[:-len('.kicad_pcb')] + '.kicad_pro'),
+                         'no project is created just to hold the record')
+
+    def test_the_live_disclosure_names_the_original_and_counts(self):
+        origin = {'min_track_width': 0.2, 'min_via_diameter': 0.5}
+        after = {'min_track_width': 0.2, 'min_via_diameter': 0.3}
+        out = ' '.join(F.live_fab_floor_disclosure(
+            origin, after, {'min_via_diameter': [0.3, 0.45, 0.6]}))
+        self.assertIn('FAB FLOOR RELAXED', out)
+        self.assertIn('via diameter: 0.5 -> 0.3 mm', out)
+        self.assertIn('2 of 3 object(s)', out)
+        self.assertNotIn('track width', out, 'an unmoved floor is not reported')
+        self.assertEqual(F.live_fab_floor_disclosure(origin, dict(origin), {}), [],
+                         'nothing under its origin -> silent')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

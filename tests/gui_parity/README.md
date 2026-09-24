@@ -338,6 +338,11 @@ skip cleanly without KiCad python). Run any directly:
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).
+- `test_live_fab_floor_origin.py` -- a GUI routing step's live writeback
+  (`apply_targets_to_board`, then `update_live_drc_floors`) records the board's
+  ORIGINAL fab floors in `kicad_routing_tools.fab_floor_origin` before lowering
+  them, and prints FAB FLOOR RELAXED against it with a census of the live
+  copper -- the file writers' rule (ad7f24de), which the GUI never followed.
 - `test_gnd_vias_gui.py` -- the Planes tab's **Add GND vias** step, run for
   real (nothing mocked) against `route_planes.py --add-gnd-vias` on the same
   files: return vias keep a net-class clearance (#1030), a `.kicad_dru` layer

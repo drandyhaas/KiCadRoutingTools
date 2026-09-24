@@ -487,6 +487,97 @@ def seed_fab_floor_origin(proj: dict, rules_before: dict):
     return origin, bool(origin)
 
 
+# --- The LIVE-board twin (the GUI) -------------------------------------------
+#
+# The GUI lowers the same floors on the live pcbnew board -- apply_targets_to_
+# board, then gui_utils.update_live_drc_floors, every step -- and recorded no
+# origin, so a manual GUI run that relaxed a fab floor said nothing, and a later
+# CLI step baselined on the already-lowered value (the ad7f24de defect, on the
+# other front). These are the file writers' rules applied to a live board.
+
+#: FAB_FLOOR_KEYS rule -> BOARD_DESIGN_SETTINGS attribute. `min_via_drill` has
+#: no attribute of its own: KiCad grades via drills against m_MinThroughDrill,
+#: which is `min_through_hole_diameter`.
+FAB_FLOOR_LIVE_ATTR = {
+    "min_track_width": "m_TrackMinWidth",
+    "min_via_diameter": "m_ViasMinSize",
+    "min_via_annular_width": "m_ViasMinAnnularWidth",
+    "min_through_hole_diameter": "m_MinThroughDrill",
+    "min_hole_clearance": "m_HoleClearance",
+}
+
+#: Origins seeded for a live board this session, by board file. The project
+#: file is where the record belongs (it travels down a chain), but a board with
+#: no .kicad_pro has nowhere to keep it, and KiCad may rewrite the .kicad_pro
+#: from its in-memory copy when the user saves -- the same caveat the GUI's
+#: protected-net record carries. This keeps the session honest either way.
+_LIVE_FAB_ORIGIN: dict = {}
+
+
+def live_fab_floor_rules(bds) -> dict:
+    """The FAB_FLOOR_KEYS a live board's design settings declare now, mm."""
+    out = {}
+    for key, attr in FAB_FLOOR_LIVE_ATTR.items():
+        v = getattr(bds, attr, None)
+        if isinstance(v, (int, float)) and v > 0:
+            out[key] = v / 1e6                    # nm -> mm; divide (#493)
+    return out
+
+
+def seed_live_fab_floor_origin(board) -> dict:
+    """:func:`seed_fab_floor_origin` for a live pcbnew board. Returns the origin.
+
+    Call BEFORE lowering anything, from every live writer, exactly as the file
+    writers do. The first call of a session records the board's current floors
+    -- in its sibling .kicad_pro under ``kicad_routing_tools.fab_floor_origin``
+    when it has one and none is recorded there yet, and in memory regardless.
+    An origin already in the project wins, so a GUI step after a CLI chain (or
+    an earlier session) keeps the chain's original. Best-effort: never raises.
+    """
+    try:
+        before = live_fab_floor_rules(board.GetDesignSettings())
+        path = board.GetFileName() or ""
+    except Exception:                                           # noqa: BLE001
+        return {}
+    key = os.path.normcase(os.path.abspath(path)) if path else f"id:{id(board)}"
+    pro = os.path.splitext(path)[0] + ".kicad_pro" if path else ""
+    proj = None
+    if pro and os.path.isfile(pro):
+        try:
+            with open(pro, "r", encoding="utf-8") as f:
+                proj = json.load(f)
+        except Exception:                                       # noqa: BLE001
+            proj = None
+    if proj is not None:
+        origin, seeded = seed_fab_floor_origin(proj, _LIVE_FAB_ORIGIN.get(key)
+                                               or before)
+        if seeded:
+            try:
+                proj.setdefault("kicad_routing_tools", {})["fab_floor_origin"] = origin
+                tmp = pro + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(proj, f, indent=2)
+                    f.write("\n")
+                os.replace(tmp, pro)
+            except Exception:                                   # noqa: BLE001
+                pass
+    else:
+        origin = _LIVE_FAB_ORIGIN.get(key) or dict(before)
+    _LIVE_FAB_ORIGIN[key] = dict(origin)
+    return origin
+
+
+def live_fab_floor_disclosure(origin: dict, rules_after: dict,
+                              objects: dict = None) -> list:
+    """The FAB FLOOR RELAXED lines for a live board: :func:`_fab_floor_disclosure`
+    against the ORIGIN, with ``objects`` (``{rule key: [object sizes mm]}``
+    measured off the live board) as the census -- the live copper is not on
+    disk to count."""
+    return _fab_floor_disclosure(
+        "", origin, {"board": {"design_settings": {"rules": rules_after}}},
+        origin, objects=objects)
+
+
 def declared_fab_floor(pcb_path: str, key: str):
     """The floor the board declared for ``key`` BEFORE this chain touched it, mm.
 
@@ -527,7 +618,7 @@ def declared_fab_floor(pcb_path: str, key: str):
 
 
 def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
-                          origin: dict = None):
+                          origin: dict = None, objects: dict = None):
     """Say out loud when the writeback relaxed a MANUFACTURING floor.
 
     ``origin`` is the floor the board declared BEFORE this chain touched it
@@ -583,25 +674,26 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
 
     census = {}
     try:
-        from kicad_parser import parse_kicad_pcb
-        pcb = parse_kicad_pcb(output_pcb)
-        for key, _label, was, _now, _mv in relaxed:
-            if key == "min_track_width":
+        if objects is None:
+            # `objects` is {rule key: [object sizes, mm]}. The live-board twin
+            # passes it, measured off pcbnew's own objects; the file writers
+            # measure the board they just wrote.
+            from kicad_parser import parse_kicad_pcb
+            pcb = parse_kicad_pcb(output_pcb)
+            objects = {
                 # Graphic copper is a shape, not a track (#908, #337) -- the
                 # same exclusion `scan_board_minima` makes below. Counting a
                 # filled fp_poly's stroke here told the reader that N tracks
                 # sit under the original floor when none of them is a track.
-                objs = [s.width for s in pcb.segments
-                        if s.width and not getattr(s, 'graphic', False)]
-            elif key == "min_via_diameter":
-                objs = [v.size for v in pcb.vias if v.size]
-            elif key == "min_via_drill":
-                objs = [v.drill for v in pcb.vias if v.drill]
-            elif key == "min_via_annular_width":
-                objs = [(v.size - v.drill) / 2.0 for v in pcb.vias
-                        if v.size and v.drill and v.size > v.drill]
-            else:
-                objs = []
+                "min_track_width": [s.width for s in pcb.segments
+                                    if s.width and not getattr(s, 'graphic', False)],
+                "min_via_diameter": [v.size for v in pcb.vias if v.size],
+                "min_via_drill": [v.drill for v in pcb.vias if v.drill],
+                "min_via_annular_width": [(v.size - v.drill) / 2.0 for v in pcb.vias
+                                          if v.size and v.drill and v.size > v.drill],
+            }
+        for key, _label, was, _now, _mv in relaxed:
+            objs = list(objects.get(key) or [])
             if objs:
                 census[key] = (sum(1 for o in objs if o < was - _FLOOR_EPS), len(objs))
     except Exception:                                   # disclosure is best-effort
@@ -1511,6 +1603,10 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
     EPS = 1.0  # nm
     bds = board.GetDesignSettings()
     changes = []
+    # BEFORE anything is lowered: this runs first in a GUI step, ahead of
+    # gui_utils.update_live_drc_floors, and a writer that lowers without seeding
+    # leaves the next one to record the already-lowered value (ad7f24de).
+    seed_live_fab_floor_origin(board)
 
     # #498 parity with fix_project_for_output: cap min_clearance at the
     # smallest .kicad_dru layer rule (an absolute board floor above a relaxing
