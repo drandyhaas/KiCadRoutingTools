@@ -577,6 +577,19 @@ def main():
                 ok = bool(cells) and inside and span
             check('16. landings match the router\'s cells: %s %sx%s rot %s'
                   % (shape, sx, sy, rr), ok)
+        # 16b -- the end-of-run reconciliation hands the router
+        # connectivity._EndpointStub terminals: zero size and no `shape`.
+        # They must yield no cells, not raise (a raise skipped watchy's
+        # final reconciliation and changed its copper).
+        from connectivity import _EndpointStub
+        try:
+            stub_cells = _free_on_pad_cells(_EndpointStub(10.0, 10.0, 'F.Cu'), 0,
+                                            cfg, free_obs, coord)
+            check('16b. an _EndpointStub terminal yields no cells',
+                  stub_cells == [], str(stub_cells))
+        except Exception as e:
+            check('16b. an _EndpointStub terminal yields no cells', False,
+                  '%s: %s' % (type(e).__name__, e))
 
         # 17 -- two keep-out areas 0.2 mm apart act TOGETHER: each alone
         # leaves the pad a landing, the gap between them does not

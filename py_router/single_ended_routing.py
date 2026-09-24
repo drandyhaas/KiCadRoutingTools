@@ -1686,7 +1686,11 @@ def _free_on_pad_cells(pad, layer_idx, config, obstacles, coord,
     # The landing rule is shared with placement's keep-out channel (#1031),
     # which must not accept a pose this function would find no cell on.
     from net_queries import pad_landing_extent
-    _ext = pad_landing_extent(pad.size_x, pad.size_y, pad.shape,
+    # getattr: connectivity._EndpointStub (zero size, no `shape`) reaches
+    # here from the end-of-run reconciliation; it must yield no cells, not
+    # raise.
+    _ext = pad_landing_extent(pad.size_x, pad.size_y,
+                              getattr(pad, 'shape', None),
                               getattr(pad, 'rect_rotation', 0.0),
                               config.track_width)
     if _ext is None:
