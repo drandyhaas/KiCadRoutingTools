@@ -909,15 +909,28 @@ def _load_defects(paths):
 
 #: The net-list flags whose values `record` checks for a shell-expanded glob
 #: (#1039 item 5).
-_NET_LIST_FLAGS = ('--nets', '--ignore-nets', '--rip-existing-nets',
+_NET_LIST_FLAGS = ('--nets', '-n', '--ignore-nets', '--rip-existing-nets',
                    '--power-nets')
 
 
+def _looks_like_a_file(t):
+    """A token only a glob expansion would produce: it names a path
+    (a separator) or carries a file extension."""
+    base = os.path.basename(t)
+    return (t != base or '/' in t
+            or ('.' in base.strip('.') and not base.startswith('.')))
+
+
 def _globbed_net_tokens(argv):
-    """Values of a net-list flag in `argv` that are existing paths, until the
-    next `-`-prefixed token. A KiCad net name is never a file in the cwd, so
-    such a value is what an unquoted `*` became."""
-    out, on = [], False
+    """Values of a net-list flag in `argv` that an unquoted `*` became, until
+    the next `-`-prefixed token.
+
+    A value is suspect when it is an EXISTING path. That alone is not enough
+    -- `--nets GND` next to a file called GND is a real net -- so the list is
+    refused only when it LOOKS expanded: two or more values are existing files,
+    or one of them has a path separator or a file extension. Returns the
+    suspect values when refused, else []."""
+    hits, on = [], False
     for t in argv or ():
         t = str(t)
         if t.startswith('-'):
@@ -925,11 +938,13 @@ def _globbed_net_tokens(argv):
             if on and '=' in t:
                 v = t.split('=', 1)[1]
                 if v and os.path.exists(v):
-                    out.append(v)
+                    hits.append(v)
             continue
         if on and os.path.exists(t):
-            out.append(t)
-    return out
+            hits.append(t)
+    if len(hits) >= 2 or any(_looks_like_a_file(h) for h in hits):
+        return hits
+    return []
 
 
 def _resolve_parent(a, store, lg, out_sha):

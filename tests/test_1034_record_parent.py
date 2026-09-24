@@ -16,7 +16,7 @@ Invariants:
    "last_accepted", and a NOTE on stderr that says so and names --parent.
 5. A --parent that is neither a file nor a known sha exits 2 with "Nothing
    was written" and the ledger is unchanged.
-6. #1039.5: a --nets value that is an EXISTING path (a glob the shell
+6. #1039.5: a --nets value list that LOOKS shell-expanded (a glob the shell
    expanded) exits 2 with "Nothing was written"; a real net name is fine.
 7. `converge.parent_score` reads the corrected chain (A1 -> A0's score).
 
@@ -171,6 +171,28 @@ def main():
         check('6. real net names (and a quoted glob) are recorded',
               len(rows(L4)) == n + 1
               and rows(L4)[-1]['lever_argv'][4:6] == ['/A', 'GND*'])
+        # ...in the cwd, where a bare-name glob expands. One extension-less
+        # file that happens to share a net's name is a NET (no override
+        # exists for it); two such files, `-n`, or an extension is a glob.
+        for nm in ('GND', 'VCC', 'notes.txt'):
+            with open(os.path.join(work, nm), 'w', encoding='utf-8') as fh:
+                fh.write('x')
+        n = len(rows(L4))
+        record(L4, A1, 'net named like a file', '--parent', A0,
+               argv=[sys.executable, '-c', 'pass', '--nets', 'GND', '/A'],
+               accept=True, cwd=work)
+        check('6. --nets GND beside a file named GND is recorded',
+              len(rows(L4)) == n + 1)
+        n = len(rows(L4))
+        for label, argv in (
+                ('two extension-less files', ['--nets', 'GND', 'VCC']),
+                ('a file extension', ['--nets', '/A', 'notes.txt']),
+                ('-n spelling', ['-n', 'GND', 'VCC'])):
+            record(L4, A1, 'globbed ' + label, '--parent', A0,
+                   argv=[sys.executable, '-c', 'pass'] + argv,
+                   refuse='Nothing was written', code=2, cwd=work)
+        check('6. two files / an extension / -n are refused, nothing written',
+              len(rows(L4)) == n)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if FAILS:
