@@ -318,7 +318,7 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                layer_alpha=None, rip_hold=2, chunks=6, camera='auto',
                camera_budget=0.0, tween=10, quiet=False, theme=None,
                attempts=None, attempts_from=None, layout=None, aspect=None,
-               panels=None, iso_opts=None, spool=False):
+               panels=None, iso_opts=None, spool=False, max_frames=None):
     """Frames for the whole shot list. One render pass, one scale.
 
     `attempts` is a `movie_attempts.Track` -- the search behind this film. Left
@@ -399,22 +399,51 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
     iso_box = False
     if want_iso:
         import movie_panels
-        iso_opts = iso_opts or movie_panels.IsoOpts()
-        if iso_opts.theme is None:
-            iso_opts.theme = _th
+        import copy as _copy
+        # a COPY (#1036 review): the caller's IsoOpts is not ours to fill in
+        iso_opts = (_copy.copy(iso_opts) if iso_opts is not None
+                    else movie_panels.IsoOpts())
+        # the theme resolved ONCE, above -- never the name again
+        iso_opts.theme = _th
         if str(layout or 'legacy').lower() not in ('legacy', 'inset'):
             iso_box = movie_panels.preflight(steps[0][1], iso_opts) is None
     import frame_spool
+    # #1036 review: BOTH spools are closed on every way out -- an exception
+    # anywhere below, and the empty-film return. They leaked two krt_frames_*
+    # directories when an append raised (a full disk), where make_movie left
+    # none.
+    sink = frame_spool.FrameSpool() if spool else None
+    try:
+        return _build_film_body(
+            a, frame_spool, sink, steps, final, size, supersample,
+            layer_alpha, rip_hold, chunks, stage, marks, _th, layout, aspect,
+            _geom, attempts, iso_box, want_iso, iso_opts, owner, shots, fps,
+            boards, quiet, max_frames)
+    except BaseException:
+        if sink is not None:
+            sink.close()
+        raise
+
+
+def _build_film_body(a, frame_spool, sink, steps, final, size, supersample,
+                     layer_alpha, rip_hold, chunks, stage, marks, _th, layout,
+                     aspect, _geom, attempts, iso_box, want_iso, iso_opts,
+                     owner, shots, fps, boards, quiet, max_frames):
+    if sink is not None:
+        import make_movie as _mm
+        max_frames = _mm.spool_budget(sink, steps, size, max_frames,
+                                      rip_hold, who='make_film')
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
-                            frames_sink=(frame_spool.FrameSpool() if spool
-                                         else None),
+                            frames_sink=sink, max_frames=max_frames,
                             theme=_th, layout=layout, aspect=aspect,
                             geom_out=_geom,
                             attempts_band=bool(attempts is not None
                                                and len(attempts.attempts) >= 2),
                             iso_panel=iso_box)
     if not frames:
+        if sink is not None:
+            sink.close()
         return []
     _g0 = _geom[0] if _geom else None
 
@@ -505,13 +534,18 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
 
     if frame_spool.is_spool(frames):
         out = frame_spool.FrameSpool()
-        for i in range(len(frames)):
-            for c in inserts.get(i, []):
+        try:
+            for i in range(len(frames)):
+                for c in inserts.get(i, []):
+                    out.append(c)
+                out.append(frames[i])
+            for c in inserts.get(len(frames), []):
                 out.append(c)
-            out.append(frames[i])
-        for c in inserts.get(len(frames), []):
-            out.append(c)
-        frames.close()
+        except BaseException:
+            out.close()
+            raise
+        finally:
+            frames.close()
     else:
         out = []
         for i, f in enumerate(frames):
@@ -578,6 +612,10 @@ def main(argv=None):
     ap.add_argument('--rip-hold', type=int, default=2)
     ap.add_argument('--chunks', type=int, default=6)
     ap.add_argument('--end-hold', type=float, default=1.5)
+    ap.add_argument('--max-frames', type=int, default=None, metavar='N',
+                    help="frame budget, as make_movie's: a trace over its "
+                         "share is revealed in --chunks batches, loudly. "
+                         "Default: $KICAD_MOVIE_MAX_FRAMES or 2400; 0 = none")
     ap.add_argument('--camera', default='auto', choices=['off', 'auto'],
                     help="animate footprint motion (default: on -- the parts "
                          "arriving is most of what a film is for)")
@@ -655,6 +693,7 @@ def main(argv=None):
                         camera_budget=a.camera_budget, tween=a.tween,
                         quiet=a.quiet, layout=a.layout, aspect=a.aspect,
                         panels=a.panels, spool=True,
+                        max_frames=a.max_frames,
                         iso_opts=_iso_opts(a),
                         attempts=attempts,
                         attempts_from=('' if a.no_attempts else

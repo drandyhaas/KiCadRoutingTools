@@ -378,16 +378,29 @@ class Movie:
             unseated = st.stacked_suspect_refs
         except Exception:                                      # noqa: BLE001
             pass
-        # A part whose origin is OFF the board is not placed either (#1036).
+        # A part ENTIRELY off the board is not placed either (#1036).
         # `assess_placement` finds STACKED parts, and run 32's pile is laid out
         # in rows beside the outline, not stacked: 247 of its 272 parts sit
         # outside it, and the box read "272 of 272 placed" over the pile.
+        # ENTIRELY: the test is the part's pad extent against the outline, not
+        # its origin -- an edge connector whose origin overhangs the outline
+        # is placed, and read "N-1 of N" when the origin decided.
         try:
             bb = pcb.board_info.board_bounds
             if bb:
                 x0, y0, x1, y1 = bb
+
+                def _off(fp):
+                    pads = fp.pads or ()
+                    if not pads:
+                        return not (x0 <= fp.x <= x1 and y0 <= fp.y <= y1)
+                    px0 = min(p.global_x - p.size_x / 2.0 for p in pads)
+                    px1 = max(p.global_x + p.size_x / 2.0 for p in pads)
+                    py0 = min(p.global_y - p.size_y / 2.0 for p in pads)
+                    py1 = max(p.global_y + p.size_y / 2.0 for p in pads)
+                    return px1 < x0 or px0 > x1 or py1 < y0 or py0 > y1
                 off = {ref for ref, fp in pcb.footprints.items()
-                       if not (x0 <= fp.x <= x1 and y0 <= fp.y <= y1)}
+                       if _off(fp)}
                 if off:
                     unseated = set(unseated or ()) | off
         except Exception:                                      # noqa: BLE001
@@ -1427,22 +1440,30 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
         if ext == '.mp4':
             out = os.path.splitext(out)[0] + '.gif'
         dur = max(20, int(1000 / max(0.1, fps)))
-        stride = max(1, -(-n // GIF_MAX_FRAMES))
-        if stride > 1:
-            keep = list(range(0, n, stride))
-            if keep[-1] != n - 1:
-                keep.append(n - 1)
+        if n > GIF_MAX_FRAMES:
+            # EXACTLY the cap (#1036 review: it kept 261): the first and the
+            # last frame and evenly spaced ones between, and the end hold is
+            # folded into the LAST frame's duration instead of appended as
+            # frames of its own.
+            cap = GIF_MAX_FRAMES
+            keep = sorted({int(round(i * (n - 1) / float(cap - 1)))
+                           for i in range(cap)})
+            step = (n - 1) / float(cap - 1)
+            fdur = max(20, int(round(dur * step)))
             print(f"animate_route: GIF STRIDED -- {n} frames is over the "
-                  f"{GIF_MAX_FRAMES}-frame GIF cap; keeping 1 frame in {stride} "
-                  f"({len(keep)} frames, {dur * stride}ms each). The .mp4 is "
-                  f"never strided.", file=sys.stderr)
+                  f"{cap}-frame GIF cap; keeping {len(keep)} evenly spaced "
+                  f"frames, {fdur}ms each. The .mp4 is never strided.",
+                  file=sys.stderr)
             seq = [frames[i] for i in keep]
-            seq += [seq[-1]] * max(1, n_hold // stride)
-            dur = dur * stride
+            durs = [fdur] * len(seq)
+            durs[-1] += dur * n_hold
+            seq[0].save(out, save_all=True, append_images=seq[1:],
+                        duration=durs, loop=0, optimize=False)
+            dur = fdur
         else:
             seq = list(_seq())
-        seq[0].save(out, save_all=True, append_images=seq[1:],
-                    duration=dur, loop=0, optimize=False)
+            seq[0].save(out, save_all=True, append_images=seq[1:],
+                        duration=dur, loop=0, optimize=False)
         del seq
         # Count what LANDED, not what was handed to the encoder. Pillow's GIF
         # writer collapses runs of byte-identical frames into one frame with an

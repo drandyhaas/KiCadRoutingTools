@@ -103,6 +103,40 @@ def placement_chain(work_dir):
     return steps, steps[-1][1]
 
 
+def spool_budget(spool, steps, size, max_frames, rip_hold, who='make_movie'):
+    """The frame budget to render with, after checking the spool's DISK.
+
+    #1036: the spool trades RAM for disk (~1.27 MB per 1400 px frame, so
+    ~7.6 GB for 6000 frames). The film is estimated before it is drawn -- the
+    budget when there is one, else the traces' own frame estimates -- and
+    when the spool's disk cannot hold it that is said LOUDLY; an UNBUDGETED
+    film then falls back to the default budget rather than filling the disk.
+    Shared by `make_movie` and `make_film`.
+    """
+    try:
+        import animate_route as _a
+        import frame_spool as _fsp
+        est = (max_frames if max_frames else
+               sum(_a.trace_frame_estimate(_a.load_trace(s[2]), rip_hold)
+                   for s in steps if len(s) > 2 and s[2]
+                   and os.path.isfile(s[2])) + 50 * len(steps))
+        px = int(size) * int(size) * 0.6          # ~a 16:10 frame at `size`
+        fits, need, free = _fsp.disk_check(spool.dir, est, px)
+        if not fits:
+            print('%s: SPOOL DISK -- ~%d frames need ~%.1f GB, %s has %.1f GB '
+                  'free' % (who, est, need / 1e9, spool.dir,
+                            (free or 0) / 1e9), file=sys.stderr)
+            if not max_frames:
+                import env_knobs as _ek3
+                max_frames = int(getattr(_ek3, 'MOVIE_MAX_FRAMES', 2400)
+                                 or 2400)
+                print('%s: falling back to a %d-frame budget so the spool '
+                      'fits' % (who, max_frames), file=sys.stderr)
+    except Exception:                                           # noqa: BLE001
+        pass
+    return max_frames
+
+
 def leading_copper_free(steps):
     """How many boards at the head of the chain carry no copper at all.
 
@@ -111,7 +145,11 @@ def leading_copper_free(steps):
     board costs seconds to answer a yes/no question.
     """
     import re
-    copper = re.compile(r'\((?:segment|arc|via)[\s)]')
+    # TOP-LEVEL tokens only (#1036 review): `(arc` also appears inside a
+    # zone's or a gr_poly's `(pts ...)`. A board item sits one indent deep --
+    # a tab (KiCad 8+) or two spaces (older) -- and those are deeper.
+    copper = re.compile(r'^(?:\t| {2})\((?:segment|arc|via)[\s)]',
+                        re.MULTILINE)
     n = 0
     for st in steps:
         try:
@@ -226,6 +264,19 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
         if not quiet:
             print(f"make_movie: no boards found in {inputs[0]}", file=sys.stderr)
         return None
+    # THE THEME, RESOLVED ONCE (#1036 review). Passed down as a NAME, every
+    # region resolved it again -- and an invalid $KICAD_RENDER_THEME warned
+    # once per FRAME from the clock band and once per shot from the iso
+    # panel. A name given in code still refuses (strict); the environment's
+    # warns, here, once.
+    import render_theme as _rt
+    theme = (_rt.theme(theme) if theme is not None
+             else _rt.default_theme())
+    if iso_opts is not None:
+        # a COPY: the caller's IsoOpts is theirs, and filling in its theme
+        # here leaked this film's theme into their next call
+        import copy as _copy
+        iso_opts = _copy.copy(iso_opts)
     # #431: the camera is OPT-IN. camera=None falls back to the env knob, so
     # one variable turns it on for the GUI recorder, run_plan.py --movie and the
     # stress renderer at once -- and OFF is the default everywhere, because
@@ -378,30 +429,8 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
             max_frames = int(getattr(_ek2, 'MOVIE_MAX_FRAMES', 0) or 0)
         except Exception:                                       # noqa: BLE001
             max_frames = 0
-    # #1036: the spool trades RAM for DISK (~1.27 MB per 1400 px frame, so
-    # ~7.6 GB for 6000 frames). Estimate the film before drawing it and say so
-    # LOUDLY when the spool's disk cannot hold it; an UNBUDGETED film then
-    # falls back to the default budget rather than filling the disk.
-    try:
-        import frame_spool as _fsp
-        _est = (max_frames if max_frames else
-                sum(a.trace_frame_estimate(a.load_trace(s[2]), rip_hold)
-                    for s in steps if len(s) > 2 and s[2]
-                    and os.path.isfile(s[2])) + 50 * len(steps))
-        _px = int(size) * int(size) * 0.6        # ~a 16:10 frame at `size`
-        _fits, _need, _free = _fsp.disk_check(spool.dir, _est, _px)
-        if not _fits:
-            print('make_movie: SPOOL DISK -- ~%d frames need ~%.1f GB, %s has '
-                  '%.1f GB free' % (_est, _need / 1e9, spool.dir,
-                                    (_free or 0) / 1e9), file=sys.stderr)
-            if not max_frames:
-                import env_knobs as _ek3
-                max_frames = int(getattr(_ek3, 'MOVIE_MAX_FRAMES', 2400)
-                                 or 2400)
-                print('make_movie: falling back to a %d-frame budget so the '
-                      'spool fits' % max_frames, file=sys.stderr)
-    except Exception:                                           # noqa: BLE001
-        pass
+    max_frames = spool_budget(spool, steps, size, max_frames, rip_hold,
+                              who='make_movie')
     # #946/C4: THE ATTEMPTS ARE FOUND BEFORE THE FRAME IS PLANNED, so the
     # band is RESERVED in the layout (`plan_frame(track_px=)`) instead of
     # grown under every frame afterwards -- which is what made a declared

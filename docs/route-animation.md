@@ -219,7 +219,9 @@ drawing, `make_movie` estimates the film and checks the free space
 (`frame_spool.disk_check`, with a 20% margin). When the spool will not fit it
 prints `SPOOL DISK` with the numbers, and an unbudgeted (`--max-frames 0`)
 film falls back to the default budget. `make_film.py` streams through the same
-spool: its board frames first, then the assembled film with its cards.
+spool: its board frames first, then the assembled film with its cards. It takes
+the same `--max-frames` and makes the same disk check, and both spools are
+removed on every way out, including a failed write.
 
 A per-segment route trace plays one frame per event, and a long one makes a
 film nobody watches to the end. `--max-frames N` (default

@@ -160,9 +160,96 @@ def test_a_joined_note_states_ungraded_once():
         print('  PASS: %s' % j.note)
 
 
+class _Rec(object):
+    def __init__(self, d):
+        self._d, self.texts = d, []
+
+    def text(self, xy, txt, *a, **kw):
+        self.texts.append(txt)
+        return self._d.text(xy, txt, *a, **kw)
+
+    def __getattr__(self, k):
+        return getattr(self._d, k)
+
+
+def _track(scores):
+    rows = tuple(MA.Attempt(i, 'l%d' % i, 'completion', i - 1 if i else None,
+                            True, False, float(s), False, None)
+                 for i, s in enumerate(scores))
+    return MA.Track(rows, 'blocking (lower better)', 'converge', 't')
+
+
+def _draw(t, w=900, h=140):
+    im = Image.new('RGB', (w, h))
+    rec = _Rec(ImageDraw.Draw(im))
+    dbg = {}
+    ok = MA.draw_track(rec, FL.Box(0, 0, w, h), t, debug=dbg)
+    return ok, dbg, rec.texts, im
+
+
+def test_negative_scores_draw_and_a_band_is_never_blank():
+    """#1036 review: log10(1 + v) raised on a negative working range, the
+    except swallowed it and the reserved band stayed EMPTY; and the break
+    guard misfired once hi_w < 0."""
+    _mark = len(_FAIL)
+    cases = {
+        '-100..-10 then 5': [float(-100 + i) for i in range(0, 91, 3)] + [5],
+        'all negative': [float(-5000)] + [float(-100 + i)
+                                          for i in range(0, 91, 3)],
+        'negative + huge outlier': [float(-100 + i % 10)
+                                    for i in range(40)] + [5000.0],
+    }
+    for name, sc in cases.items():
+        ok, dbg, _t, _im = _draw(_track(sc))
+        if not ok:
+            fail('%s: the band did not draw' % name)
+            continue
+        print('    %-24s -> %s axis' % (name, dbg.get('mode')))
+    ok, dbg, _t, _im = _draw(_track(cases['negative + huge outlier']))
+    if dbg.get('mode') != 'broken':
+        fail('a negative range with a huge outlier did not break: %r'
+             % dbg.get('mode'))
+    # the fallback: make the broken path fail, and the band must still draw
+    saved = MA.STRIP_FRAC
+    MA.STRIP_FRAC = 'not a number'
+    try:
+        ok, dbg, _t, _im = _draw(_synthetic())
+    finally:
+        MA.STRIP_FRAC = saved
+    if not ok or dbg.get('mode') != 'linear':
+        fail('a failing axis left the band %s (mode %r)'
+             % ('drawn' if ok else 'BLANK', dbg.get('mode')))
+    if len(_FAIL) == _mark:
+        print('  PASS: negative ranges draw; a failing broken axis falls back '
+              'to linear rather than leaving the band blank')
+
+
+def test_tick_precision_follows_the_span():
+    """#1036 review: a 0.12..0.9 axis was labelled 0 / 1 / 1."""
+    _mark = len(_FAIL)
+    sc = [0.9 - 0.004 * i for i in range(200)] + [50.0]
+    ok, dbg, texts, _im = _draw(_track(sc))
+    # the ticks are drawn first, then the caption, then the record labels
+    ci = next((i for i, t in enumerate(texts) if 'axis broken' in t),
+              len(texts))
+    ticks = texts[:ci]
+    if not ok:
+        fail('BROKEN: the band did not draw')
+        return
+    if len(set(ticks)) != len(ticks) or any(t in ('0', '1') for t in ticks):
+        fail('the ticks are not distinct at this span: %r' % ticks)
+    cap = [t for t in texts if 'axis broken above' in t]
+    if not cap or '.' not in cap[0].split('above')[1]:
+        fail('the caption does not share the tick precision: %r' % cap)
+    if len(_FAIL) == _mark:
+        print('  PASS: ticks %r; caption %r' % (ticks, cap[0][:60]))
+
+
 TESTS = (
     test_the_working_range_gets_the_plot,
     test_a_joined_note_states_ungraded_once,
+    test_negative_scores_draw_and_a_band_is_never_blank,
+    test_tick_precision_follows_the_span,
 )
 
 

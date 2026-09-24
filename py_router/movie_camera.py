@@ -412,7 +412,7 @@ class Stage:
                                   max(b[2], ext[2]), max(b[3], ext[3]))
         for rd in self.rounds:
             if rd.get('board'):
-                self._by_board[os.path.basename(rd['board'])] = rd
+                self._by_board[self._key(rd['board'])] = rd
         self._plan()
         # THE OPENING FRAME holds the pile (#1036 verifier): `build_boards`
         # snapshots "input" right after this, and at the board's own bounds
@@ -622,7 +622,16 @@ class Stage:
     def handles(self, board):
         """True when `enter_step` will intercept this board's step."""
         return (self.moving_parts
-                and os.path.basename(board) in self._by_board)
+                and self._key(board) in self._by_board)
+
+    def _key(self, board):
+        """A board's identity for `_by_board`: its RESOLVED ABSOLUTE path
+        (#1036 review). Keyed by basename, two chain boards with one name in
+        different directories were the same round -- `synth_rounds` records
+        absolute paths, a loop sidecar a name relative to the work dir, and
+        both resolve here to one spelling."""
+        return os.path.normcase(os.path.abspath(
+            os.path.join(self.work_dir or '', str(board))))
 
     def _arrive(self):
         """Call `on_arrive` once, right before the frame the parts LAND on.
@@ -647,7 +656,7 @@ class Stage:
         Letting `reveal_delta` handle that calls `remove()`, which flashes red
         and labels it "(rip)" -- a lie. Clear silently, then tween the parts.
         """
-        rd = self._by_board.get(os.path.basename(board))
+        rd = self._by_board.get(self._key(board))
         if rd is None or not self.moving_parts:
             self._settle(label)
             return False
@@ -672,9 +681,16 @@ class Stage:
         # keeps the copper it has, so trueup to THIS board instead of to
         # nothing; for a loop round the board carries none and the two are the
         # same call.
-        self.movie.reconcile_to(seg_rows if rd.get('synth') else [],
-                                via_rows if rd.get('synth') else [],
-                                f"{label}: re-placing")
+        #
+        # A SYNTHESISED round keeps the copper it has and does NOT snap to
+        # this board's (#1036 review): a board that both moves parts and lays
+        # copper -- place_fanout_clearance's vias, a routed step after moves
+        # -- lost that copper's trace to a silent trueup. The glide plays
+        # first, then `False` hands the step back to `build_boards`, whose
+        # normal path reveals its copper (trace or chunks).
+        synth = bool(rd.get('synth'))
+        if not synth:
+            self.movie.reconcile_to([], [], f"{label}: re-placing")
         if moved:
             self._tween(pcb, moved, label)
         else:
@@ -682,7 +698,7 @@ class Stage:
             self._snap(label)
         self._arrive()          # no-op unless the tween never reached one
         self._mark = len(self.movie.frames)
-        return True
+        return not synth
 
     def exit_step(self, label):
         # Routing steps render through Movie's own path, not _snap, so their
@@ -897,8 +913,29 @@ def synth_rounds(boards, min_mm=None):
             continue
         moved = []
         if prev is not None:
+            # PAIRING (#1036 review). By uuid when the board has them; else by
+            # key -- except a duplicate reference's `~N` ordinal key when the
+            # number of blocks sharing that reference changed, because the
+            # ordinals are file order and then name different parts.
+            by_uuid = {f.uuid: f for f in prev.footprints.values()
+                       if getattr(f, 'uuid', '')}
+
+            def _base_counts(p):
+                c = {}
+                for k in p.footprints:
+                    b = k.split('~', 1)[0]
+                    c[b] = c.get(b, 0) + 1
+                return c
+            _nprev, _ncur = _base_counts(prev), _base_counts(pcb)
             for ref, fp in pcb.footprints.items():
-                old = prev.footprints.get(ref)
+                old = (by_uuid.get(fp.uuid)
+                       if getattr(fp, 'uuid', '') else None)
+                if old is None:
+                    base = ref.split('~', 1)[0]
+                    if (_nprev.get(base) != _ncur.get(base)
+                            and _ncur.get(base, 0) > 1):
+                        continue
+                    old = prev.footprints.get(ref)
                 if old is None:
                     continue
                 a_ = (round(old.x, 4), round(old.y, 4), round(old.rotation or 0.0, 3))

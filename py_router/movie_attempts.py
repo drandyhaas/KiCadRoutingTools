@@ -665,7 +665,22 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
 
     Never raises: a band is an artifact, and taking a routing run down for a
     font metric is the trade this repo refuses (`movie_panels._finite`).
+
+    **A reserved band is never left blank** (#1036 review): when the
+    `AXIS_MODE` axis fails to draw, the plain linear axis is drawn instead
+    (the box is repainted first, so nothing half-drawn survives).
     """
+    ok = _draw_track(d, box, track, upto=upto, theme=theme, debug=debug,
+                     _mode=AXIS_MODE)
+    if not ok and AXIS_MODE != 'linear':
+        ok = _draw_track(d, box, track, upto=upto, theme=theme, debug=debug,
+                         _mode='linear')
+    return ok
+
+
+def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
+                _mode='broken'):
+    """`draw_track`'s body for one axis mode; False when it could not draw."""
     if box is None or box.h <= 0 or track is None or not track.attempts:
         return False
     try:
@@ -710,22 +725,31 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
         srt = sorted(graded)
         hi_w = (srt[max(0, int(math.ceil(WORK_PCTL * len(srt))) - 1)]
                 if srt else vmax)
-        broken = (AXIS_MODE == 'broken' and hi_w > vmin
-                  and vmax > BREAK_RATIO * max(hi_w, 1e-9))
-        symlog = (AXIS_MODE == 'symlog' and vmin >= 0
+        # OFFSET-BASED, so a negative score cannot break it (#1036 review):
+        # the break needs a positive GAP above the working range, measured
+        # against the working range's own span -- not a ratio of raw values,
+        # which misfires once hi_w < 0 -- and the strip maps the distance
+        # ABOVE the working range, log1p(v - w_hi), which is defined for any
+        # sign. The old log10(1 + v) raised on a negative range and the
+        # except below left a reserved band blank.
+        _wspan = hi_w - vmin
+        _gap = vmax - hi_w
+        broken = (_mode == 'broken' and _wspan > 0 and _gap > 0
+                  and _gap > (BREAK_RATIO - 1.0) * _wspan)
+        symlog = (_mode == 'symlog' and vmin >= 0
                   and vmax > 50.0 * (vmin + 1.0))
         ph = py1 - py0
         if broken:
-            _r = max(hi_w - vmin, 1.0)
+            _r = _wspan
             w_lo, w_hi = vmin - 0.06 * _r, hi_w + 0.10 * _r
             main_h = ph * (1.0 - STRIP_FRAC)
             s0 = py0 + main_h + max(4.0, ph * 0.05)
-            _la, _lb = math.log10(1.0 + w_hi), math.log10(1.0 + vmax)
+            _top = math.log1p(max(0.0, vmax - w_hi))
 
             def Y(v):
                 if v <= w_hi:
                     return py0 + main_h * ((v - w_lo) / (w_hi - w_lo))
-                t = (math.log10(1.0 + v) - _la) / max(1e-9, _lb - _la)
+                t = math.log1p(v - w_hi) / max(1e-9, _top)
                 return s0 + (py1 - s0) * t
         else:
             def _fy(v):
@@ -742,6 +766,10 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
         def X(i):
             return px0 + (px1 - px0) * ((i - x0v) / float(span))
 
+        _tspan = (hi_w - vmin) if broken else (vmax - vmin)
+        _decimals = (0 if _tspan >= 10 else 1 if _tspan >= 1
+                     else 2 if _tspan >= 0.1 else 3)
+
         # the axis, and the one thing it means
         def _tick(v):
             # COMPACT, because the tick column is ~38 px wide: run 32's
@@ -751,7 +779,10 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
                 return '%.0fk' % (v / 1000.0)
             if av >= 1000:
                 return '%.1fk' % (v / 1000.0)
-            return '%g' % round(v, 0 if (symlog or broken) else 2)
+            # PRECISION FROM THE SPAN (#1036 review): rounding to integers
+            # on the broken and symlog axes labelled a 0.12..0.9 axis 0/1/1.
+            # The caption's "[axis broken above X]" uses this same function.
+            return '%g' % round(v, _decimals)
 
         # EVERY label drawn in the band is registered here, ticks and caption
         # included, so a record label is placed against all of them -- not
