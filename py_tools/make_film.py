@@ -318,7 +318,8 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                layer_alpha=None, rip_hold=2, chunks=6, camera='auto',
                camera_budget=0.0, tween=10, quiet=False, theme=None,
                attempts=None, attempts_from=None, layout=None, aspect=None,
-               panels=None, iso_opts=None, spool=False, max_frames=None):
+               panels=None, iso_opts=None, spool=False, max_frames=None,
+               placement=None):
     """Frames for the whole shot list. One render pass, one scale.
 
     `attempts` is a `movie_attempts.Track` -- the search behind this film. Left
@@ -418,7 +419,7 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
             a, frame_spool, sink, steps, final, size, supersample,
             layer_alpha, rip_hold, chunks, stage, marks, _th, layout, aspect,
             _geom, attempts, iso_box, want_iso, iso_opts, owner, shots, fps,
-            boards, quiet, max_frames)
+            boards, quiet, max_frames, placement)
     except BaseException:
         if sink is not None:
             sink.close()
@@ -428,24 +429,58 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
 def _build_film_body(a, frame_spool, sink, steps, final, size, supersample,
                      layer_alpha, rip_hold, chunks, stage, marks, _th, layout,
                      aspect, _geom, attempts, iso_box, want_iso, iso_opts,
-                     owner, shots, fps, boards, quiet, max_frames):
+                     owner, shots, fps, boards, quiet, max_frames,
+                     placement=None):
     if sink is not None:
         import make_movie as _mm
         max_frames = _mm.spool_budget(sink, steps, size, max_frames,
                                       rip_hold, who='make_film')
+    # #1042: the placement panels, measured before the frame is planned so
+    # their region is reserved -- the same call make_movie makes.
+    placement = placement or {}
+    _verdict = bool(attempts is not None and len(attempts.attempts) >= 2)
+    _ptrack, _pwhy = None, 'off (--no-placement-panel)'
+    if not placement.get('off'):
+        try:
+            import movie_placement
+            _ptrack, _pwhy = movie_placement.build_track(
+                steps, [], ledger=placement.get('ledger'),
+                benchmark=placement.get('benchmark'),
+                intent=placement.get('intent'), quiet=quiet)
+            if _ptrack is not None and not movie_placement.placed_anything(
+                    _ptrack, steps):
+                _ptrack, _pwhy = None, 'no part moved: no placement to show'
+        except Exception as exc:                                # noqa: BLE001
+            _ptrack, _pwhy = None, 'could not measure (%s)' % exc
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks,
                             frames_sink=sink, max_frames=max_frames,
                             theme=_th, layout=layout, aspect=aspect,
                             geom_out=_geom,
-                            attempts_band=bool(attempts is not None
-                                               and len(attempts.attempts) >= 2),
+                            attempts_band=('both' if (_verdict and _ptrack)
+                                           else bool(_verdict or _ptrack)),
                             iso_panel=iso_box)
     if not frames:
         if sink is not None:
             sink.close()
         return []
     _g0 = _geom[0] if _geom else None
+    _vbox = _g0.track if _g0 is not None else None
+    if _ptrack is not None:
+        import movie_placement
+        if _g0 is not None and _g0.track is not None:
+            _pbox, _vbox = movie_placement.split_band(_g0.track,
+                                                      both=_verdict)
+            _ptrack = movie_placement.with_firsts(_ptrack, marks)
+            frames = movie_placement.compose(frames, _pbox, _ptrack, marks,
+                                             _th, _g0.frame.h)
+        else:
+            _ptrack, _pwhy = None, 'no band could be reserved in this frame'
+        if not quiet or _ptrack is not None:
+            print('make_film: ' + movie_placement.status_line(_ptrack, _pwhy),
+                  file=sys.stderr)
+    if _ptrack is not None and _vbox is None:
+        attempts = None           # the band is all placement: no verdict box
 
     # #1021. THE ATTEMPTS BAND, AND IT GOES HERE -- BEFORE THE BADGE LOOP.
     # `_badge` draws a border on the frame it is given; attach the band
@@ -461,8 +496,7 @@ def _build_film_body(a, frame_spool, sink, steps, final, size, supersample,
     try:
         import movie_attempts
         frames, _rep = movie_attempts.attach(
-            frames, attempts, theme=_th, marks=marks,
-            box=(_g0.track if _g0 is not None else None))
+            frames, attempts, theme=_th, marks=marks, box=_vbox)
         if not quiet:
             print('make_film: ' + movie_attempts.status_line(_rep),
                   file=sys.stderr)
@@ -612,6 +646,19 @@ def main(argv=None):
     ap.add_argument('--rip-hold', type=int, default=2)
     ap.add_argument('--chunks', type=int, default=6)
     ap.add_argument('--end-hold', type=float, default=1.5)
+    ap.add_argument('--attempts-ledger', default=None, metavar='PATH',
+                    help='the converge ledger for the attempts band and the '
+                         'placement panels (#1042); --from-ledger also '
+                         'supplies one')
+    ap.add_argument('--benchmark-board', default=None, metavar='PATH',
+                    help="a benchmark placement drawn DASHED on the "
+                         "placement arrangement panel (a screen, not the "
+                         "verdict)")
+    ap.add_argument('--floorplan-intent', default=None, metavar='PATH',
+                    help='grade placement boards the ledger does not name '
+                         'with check_floorplan --intent')
+    ap.add_argument('--no-placement-panel', action='store_true',
+                    help='never draw the placement panels (#1042)')
     ap.add_argument('--max-frames', type=int, default=None, metavar='N',
                     help="frame budget, as make_movie's: a trace over its "
                          "share is revealed in --chunks batches, loudly. "
@@ -683,9 +730,9 @@ def main(argv=None):
         import movie_attempts
         if a.from_loop_dir:
             attempts = movie_attempts.attempts_from_loop_dir(a.from_loop_dir)
-        elif a.from_ledger:
+        elif a.from_ledger or a.attempts_ledger:
             attempts = movie_attempts.attempts_from_converge_ledger(
-                a.from_ledger)
+                a.attempts_ledger or a.from_ledger)
     frames = build_film(shots, theme=a.theme,
                         size=a.size, fps=a.fps, supersample=a.supersample,
                         layer_alpha=a.layer_alpha, rip_hold=a.rip_hold,
@@ -694,6 +741,11 @@ def main(argv=None):
                         quiet=a.quiet, layout=a.layout, aspect=a.aspect,
                         panels=a.panels, spool=True,
                         max_frames=a.max_frames,
+                        placement={'off': a.no_placement_panel,
+                                   'ledger': (a.attempts_ledger
+                                              or a.from_ledger),
+                                   'benchmark': a.benchmark_board,
+                                   'intent': a.floorplan_intent},
                         iso_opts=_iso_opts(a),
                         attempts=attempts,
                         attempts_from=('' if a.no_attempts else

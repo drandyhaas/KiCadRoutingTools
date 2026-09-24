@@ -69,6 +69,7 @@ _WK_DEPENDENT = {
     # absent case is SAID in the summary line, not passed silently.
     'test_1036_review_fixes.py': ['wk/run32'],
     'test_1036_attempts_axis.py': ['wk/run32'],
+    'test_1042_placement_panels.py': ['wk/run32'],
     # #887 CORROBORATION only. The regression lives in
     # test_887_cmd_timing_reader.py, against two small tracked fixtures, and
     # passes in full on a clean clone. This arm re-derives run 24's published

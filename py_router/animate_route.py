@@ -901,6 +901,13 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
             try:
                 import movie_attempts
                 _bh = movie_attempts.band_height(_g.frame.w, _g.frame.h)
+                # #1042: the placement panels SHARE the band with the verdict
+                # graph (`attempts_band='both'`), so the band is taller --
+                # 1.4x, still under the band's own ceiling of the frame.
+                if _bh and attempts_band == 'both':
+                    _bh = min(int(_bh * 1.4),
+                              int(_g.frame.h * movie_attempts.BAND_MAX_FRAC))
+                    _bh -= _bh % 2
             except Exception:                                  # noqa: BLE001
                 _bh = 0
             if _bh:

@@ -219,7 +219,8 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                camera=None, camera_budget=60.0, tween=10,
                panels=None, iso_opts=None, timing=None, theme=None,
                layout=None, aspect=None, attempts=None, max_frames=None,
-               title=None):
+               title=None, attempts_ledger=None, benchmark_board=None,
+               floorplan_intent=None, placement_panel=None):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -244,7 +245,10 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             camera_budget=camera_budget, tween=tween, panels=panels,
             iso_opts=iso_opts, timing=timing, theme=theme, layout=layout,
             aspect=aspect, attempts=attempts, max_frames=max_frames,
-            title=title,
+            title=title, attempts_ledger=attempts_ledger,
+            benchmark_board=benchmark_board,
+            floorplan_intent=floorplan_intent,
+            placement_panel=placement_panel,
             spool=spool)
     finally:
         spool.close()
@@ -253,7 +257,9 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
 def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
                 chunks, end_hold, png_dir, quiet, camera, camera_budget, tween,
                 panels, iso_opts, timing, theme, layout, aspect, attempts,
-                max_frames, spool, title=None):
+                max_frames, spool, title=None, attempts_ledger=None,
+                benchmark_board=None, floorplan_intent=None,
+                placement_panel=None):
     import animate_route as a
     if isinstance(inputs, str):
         inputs = [inputs]
@@ -446,6 +452,12 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
             _track = None
         elif attempts is not None:
             _track = attempts
+        elif attempts_ledger:
+            # #1042: a ledger named on the command line, for a film rendered
+            # from copies away from the run's work dir (`discover` only looks
+            # beside the boards, and run 32 had to render from copies).
+            _track = movie_attempts.attempts_from_converge_ledger(
+                attempts_ledger)
         else:
             _track = movie_attempts.discover(
                 os.path.dirname(os.path.abspath(final)))
@@ -456,7 +468,34 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
     # The band is reserved only when there is a graph to draw in it: one
     # attempt is a single point under a flat staircase, which `attach`
     # declines -- and a reserved band left empty is a stripe of nothing.
-    _band = bool(_track is not None and len(_track.attempts) >= 2)
+    _verdict = bool(_track is not None and len(_track.attempts) >= 2)
+    # #1042: THE PLACEMENT PANELS, in placement currency, beside the verdict
+    # band and never on its axis. Measured on the film's own placement boards
+    # (render_placement, ~4-7 s each, cached per board sha) BEFORE the frame
+    # is planned, so their region is reserved like the band's. A chain whose
+    # parts never moved has no placement to show: no panel, nothing invented.
+    _ptrack, _pwhy = None, 'off (--no-placement-panel)'
+    if placement_panel is not False:
+        try:
+            import movie_placement
+            _pled = attempts_ledger
+            if not _pled:
+                _cand = os.path.join(os.path.dirname(os.path.abspath(final)),
+                                     'ledger.jsonl')
+                _pled = _cand if os.path.isfile(_cand) else None
+            _ptrack, _pwhy = movie_placement.build_track(
+                steps, [], ledger=_pled, benchmark=benchmark_board,
+                intent=floorplan_intent, quiet=quiet)
+            if _ptrack is not None and not movie_placement.placed_anything(
+                    _ptrack, steps):
+                _ptrack, _pwhy = None, ('no part moved between the chain\'s '
+                                        'boards: no placement to show')
+        except Exception as exc:                                # noqa: BLE001
+            _ptrack, _pwhy = None, 'could not measure (%s)' % exc
+    if _ptrack is not None and marks is None:
+        marks = []
+    _band = ('both' if (_verdict and _ptrack is not None)
+             else bool(_verdict or _ptrack is not None))
     # The 3D view gets a region of the layout's own panel (#946/C4) when the
     # layout has one to split and the panel WOULD run -- asked now, before
     # the frame is planned, because a region reserved for a panel that is
@@ -489,11 +528,25 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
     #
     # Imported HERE, like movie_panels below, so the GUI recorder and the
     # in-process callers do not pay for a feature they did not ask for.
+    _pbox, _vbox = None, (_geom0.track if _geom0 is not None else None)
+    if _ptrack is not None:
+        import movie_placement
+        if _geom0 is not None and _geom0.track is not None:
+            _pbox, _vbox = movie_placement.split_band(
+                _geom0.track, both=_verdict)
+            _ptrack = movie_placement.with_firsts(_ptrack, marks)
+            frames = movie_placement.compose(frames, _pbox, _ptrack, marks,
+                                             theme, _geom0.frame.h)
+        else:
+            _ptrack, _pwhy = None, 'no band could be reserved in this frame'
+    if _ptrack is not None or placement_panel:
+        import movie_placement
+        print(movie_placement.status_line(_ptrack, _pwhy), file=sys.stderr)
     try:
         import movie_attempts
         frames, _arep = movie_attempts.attach(
-            frames, _track, theme=theme, marks=marks,
-            box=(_geom0.track if _geom0 is not None else None))
+            frames, _track if _vbox is not None or _ptrack is None else None,
+            theme=theme, marks=marks, box=_vbox)
         # PRINTED EVEN WHEN QUIET, for the reason iso_status_line is: this is
         # the only channel that says whether the band ran, and the front end
         # the discovery exists for (place_route_loop's film, the GUI recorder)
@@ -649,6 +702,19 @@ def main():
                          "when loop_round*.json sidecars or a converge ledger "
                          "sit next to the boards; a chain with no search "
                          "behind it has none and says so.")
+    ap.add_argument('--attempts-ledger', default=None, metavar='PATH',
+                    help='the converge ledger to draw the attempts band and '
+                         'the placement panels from, instead of looking '
+                         'beside the boards (#1042)')
+    ap.add_argument('--benchmark-board', default=None, metavar='PATH',
+                    help="a benchmark placement (the human's board, or a "
+                         "previous run) drawn DASHED on the placement "
+                         "arrangement panel -- a screen, not the verdict")
+    ap.add_argument('--floorplan-intent', default=None, metavar='PATH',
+                    help='the floorplan intent to grade placement boards the '
+                         'ledger does not name (check_floorplan --intent)')
+    ap.add_argument('--no-placement-panel', action='store_true',
+                    help='never draw the placement panels (#1042)')
     ap.add_argument('--title', default=None,
                     help="the film's name on the rail's left (default: the "
                          "run directory, or the directory the chain's boards "
@@ -772,6 +838,11 @@ def main():
                          rip_hold=args.rip_hold, chunks=args.chunks,
                          end_hold=args.end_hold, png_dir=args.png_dir,
                          max_frames=args.max_frames, title=args.title,
+                         attempts_ledger=args.attempts_ledger,
+                         benchmark_board=args.benchmark_board,
+                         floorplan_intent=args.floorplan_intent,
+                         placement_panel=(False if args.no_placement_panel
+                                          else None),
                          quiet=args.quiet,
                        camera=args.camera,
                        camera_budget=args.camera_budget,

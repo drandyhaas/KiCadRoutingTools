@@ -167,7 +167,13 @@ def test_three_producers_one_record_type():
             os.path.join(td, 'ledger.jsonl')))
         t3 = MA.attempts_from_evolve_ledger(_evolve(
             os.path.join(td, 'evolve_k51.json')))
-        for name, t, n in (('loop', t1, len(LOOP_ROWS)), ('converge', t2, 5),
+        # converge: 4, not 5 -- the fixture's one PLACEMENT row is off the
+        # verdict axis since #1042 (it scores the copper-free board), and
+        # the note says so.
+        if t2 is not None and 'placement lap' not in t2.note:
+            fail('the converge note does not say a placement lap was taken '
+                 'off the axis: %r' % t2.note)
+        for name, t, n in (('loop', t1, len(LOOP_ROWS)), ('converge', t2, 4),
                            ('evolve', t3, 5)):
             if t is None:
                 fail('%s: adapter returned None on its own fixture' % name)
@@ -712,11 +718,14 @@ def test_place_and_route_is_one_graph():
     if t is None or t.source != 'converge+loop':
         fail('discover did not join the halves: %r' % (t and t.source))
         return
-    n_led, n_loop = 5, len(LOOP_ROWS)
+    # 4 ledger laps on the axis: the fixture's placement row is off it (#1042)
+    n_led, n_loop = 4, len(LOOP_ROWS)
     idx = [a.index for a in t.attempts]
-    if idx != list(range(n_led + n_loop)):
-        fail('the joined x-axis is not laps 0..%d: %r'
-             % (n_led + n_loop - 1, idx))
+    # the ledger half keeps its OWN iteration numbers (lap 1, the placement
+    # lap, is off the axis and leaves its gap), the loop half follows it
+    want = [0, 2, 3, 4] + list(range(5, 5 + n_loop))
+    if idx != want:
+        fail('the joined x-axis is not %r: %r' % (want, idx))
     first_loop = t.attempts[n_led]
     last_acc_ledger = max(a.index for a in t.attempts[:n_led] if a.accepted)
     if first_loop.parent != last_acc_ledger:

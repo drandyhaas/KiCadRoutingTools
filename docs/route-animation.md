@@ -776,6 +776,58 @@ same images.
 | `BAND_MIN_PX` (`py_router/movie_attempts.py`) | 64 |
 | `BAND_MAX_FRAC` (`py_router/movie_attempts.py`) | 0.34 |
 
+### The placement panels (#1042)
+
+The attempts band keeps the routed VERDICT on its axis. A converge ledger's
+placement lap scores the copper-free board, where `blocking` is every net
+unrouted: run 32's accepted placement rows read 267 → 251 → 239 on that axis
+while the laps moved floorplan errors 41 → 11. So placement laps are taken OFF
+the verdict axis, and the caption counts them. Placement gets three panels of
+its own beside the band (`py_router/movie_placement.py`):
+
+| panel | y | series | instrument |
+|---|---|---|---|
+| LEGALITY | log | off-outline parts, conflict pairs, overlap mm² | `render_placement --json-out` |
+| ARRANGEMENT, a SCREEN, not the verdict | own axis each | airwire crossings (left), hpwl mm (right); dashed benchmark lines | `render_placement --json-out` |
+| INTENT | linear | floorplan errors | the ledger's `score.blocking_by.floorplan`, else `check_floorplan --intent` |
+
+- **One point per placement board.** Never per frame: a glide's frames are
+  pixel interpolation, not evaluated placements. A placement board is a board
+  with no copper. The points are revealed board by board as the film reaches
+  each one, and once the film is routing the panels say "placement settled".
+- **The floor is labelled.** When the last board's conflict pairs are all
+  contacts between KiCad-locked parts (`metrics.locked_contact_pairs`), the
+  dashed line reads "floor N = locked parts".
+- **Defect flags.** A ledger row with `kind == classification` and
+  `shape == placement` flags the first placement board the film shows after
+  it, labelled with the first sentence of its lever.
+- **Where the panels go.** They share the band's reserved region with the
+  verdict graph. In a wide band they sit on the left; in a narrow one
+  (the 9:16 frame) they are stacked on top. The band grows 1.4× when both are
+  drawn, and the declared frame size is kept.
+- **Flags.** `--attempts-ledger PATH`, `--benchmark-board PATH` (the human's
+  board or a previous run, drawn dashed), `--floorplan-intent PATH` and
+  `--no-placement-panel` exist on both `make_movie.py` and `make_film.py`.
+- **Degradation.** A chain with fewer than two copper-free boards, or one where
+  no part moved, gets no panel, and nothing is measured or synthesised.
+- **Cost.** About 3 to 7 s per placement board (`render_placement`), cached by
+  board sha within a run.
+
+Measured on run 32's boards in `wk/run32`, the numbers reproduce #1042's table
+to the digit:
+
+| board | off-outline parts | conflict pairs | overlap mm² | crossings | hpwl mm |
+|---|---|---|---|---|---|
+| the pile | 243 | 3214 | 9503.03 | 10974 | 4834 |
+| placed_v2 | 0 | 6 | 23.69 | 3740 | 5760 |
+| placed_v3 | 0 | 6 | 23.69 | 3750 | 5743 |
+| glasgow_revC (the human benchmark) | 0 | 10 | 70.05 | 1352 | 3641 |
+
+The floorplan errors reproduce as well: placed_v2 12 (ledger row 9) and
+placed_v3 11 (ledger row 53). The pile has no ledger row. `check_floorplan`
+grades it at 131 against `glasgow.intent.json`. The table's 303 is ledger row
+0, which is the pile after the P1 decisions, a different board.
+
 ### The ghost and the arrow
 
 A placement tween glides parts from their source pose to their parsed one, and watched frame by frame that reads as *the board assembling itself* rather than as *these parts moved, from there to here*. `py_router/place_motion.py` draws a **ghost** at the source pose and an **arrow** to the part's current one, through the `overlays=` seam, so it costs no frame geometry.

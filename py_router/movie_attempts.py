@@ -322,10 +322,22 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
     # row is the root either way.
     fallback = 0
     last_acc = None
+    n_place = 0
     for i, e in enumerate(rows_in):
         sc = e.get('score') if isinstance(e.get('score'), dict) else None
         b = sc.get('blocking') if sc else None
         idx = int(e.get('iteration', i))
+        if str(e.get('kind') or '') == 'placement':
+            # OFF THE VERDICT AXIS (#1042). A placement lap scores the
+            # COPPER-FREE board, where `blocking` is every net unrouted:
+            # run 32's accepted placement rows read 267 -> 251 -> 239 ... on
+            # this axis while the laps moved floorplan errors 41 -> 11. They
+            # belong to the placement panels (`movie_placement`), in their
+            # own currency; here they are counted and said, never plotted.
+            n_place += 1
+            if e.get('accepted'):
+                last_acc = idx
+            continue
         parent = by_sha.get(e.get('parent_sha'))
         if parent is None and i > 0 and last_acc is not None:
             parent = last_acc
@@ -342,7 +354,12 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
             board=e.get('result_sha')))
         if e.get('accepted'):
             last_acc = idx
+    if not rows:
+        return None
     note = _note(rows)
+    if n_place:
+        note += ('; %d placement lap(s) off this axis (copper-free, see the '
+                 'placement panels)' % n_place)
     if fallback:
         # No ';' inside the clause: the note is a '; '-separated list, and
         # `join_tracks` carries clauses over by splitting on it.
