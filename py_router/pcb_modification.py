@@ -2753,11 +2753,14 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
                 clr = config.pad_override_clearance(max(own, _own(pad.net_id)), pad)
                 d = _pt_seg_dist(pad.global_x, pad.global_y,
                                  seg.start_x, seg.start_y, seg.end_x, seg.end_y)
-                # Cheap REJECT: the bounding circle over-states rect/oval copper,
-                # so a segment it clears also clears the real pad. Custom-polygon
-                # copper can extend past size_x/size_y, so it always goes exact.
+                # Cheap REJECT on the CIRCUMSCRIBED circle, which contains every
+                # rect/roundrect/oval pad at any rotation -- max(size)/2 does not
+                # reach a rect's corners, so it rejected real corner grazes.
+                # Custom-polygon copper can extend past size_x/size_y, so it
+                # always goes exact.
                 if (not getattr(pad, 'polygons', None)
-                        and d - max(pad.size_x, pad.size_y) / 2.0 - seg.width / 2.0 >= clr):
+                        and d - math.hypot(pad.size_x, pad.size_y) / 2.0
+                        - seg.width / 2.0 >= clr):
                     continue
                 # Decide on the exact copper check_drc grades (rect/roundrect/
                 # oval/custom polygon, rect_rotation). The circle alone necked

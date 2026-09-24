@@ -4,6 +4,8 @@ max(size_x, size_y)/2. On an elongated pad (0.3 x 1.5 mm QFN/connector pad)
 the circle reaches 0.6 mm past the long side, so a legal wide trace running
 beside it was necked to the layer default -- and a real graze near the long
 side was missed because the circle said even the default width could not clear.
+The cheap pre-reject must use the CIRCUMSCRIBED circle: max(size)/2 falls short
+of a rect's corners, so a corner graze was rejected before the exact check (F).
 """
 import math
 import os
@@ -21,11 +23,11 @@ from pcb_modification import neck_wide_segments_grazing_pads  # noqa: E402
 WIDE, DEFAULT, CLR = 0.4, 0.1, 0.1
 
 
-def pad(rect_rotation=0.0):
+def pad(rect_rotation=0.0, size=(0.3, 1.5)):
     # 0.3 x 1.5 rect at the origin, foreign net 2. Real long side at x=+-0.15,
     # short end at y=+-0.75; bounding circle radius 0.75.
     return Pad(component_ref='J1', pad_number='1', global_x=0.0, global_y=0.0,
-               local_x=0.0, local_y=0.0, size_x=0.3, size_y=1.5, shape='rect',
+               local_x=0.0, local_y=0.0, size_x=size[0], size_y=size[1], shape='rect',
                layers=['F.Cu'], net_id=2, net_name='B', rect_rotation=rect_rotation)
 
 
@@ -79,6 +81,15 @@ def main():
     # E. Case B rotated 30 deg: still a graze -> neck.
     (x1, y1), (x2, y2) = rot(0.4, -0.5, 30), rot(0.4, 0.5, 30)
     check("E graze beside rotated pad", run(seg(x1, y1, x2, y2), pad(30.0)),
+          (1, DEFAULT))
+
+    # F. Corner graze on a 1 x 1 rect: a segment square to the diagonal, its
+    #    centreline 0.957 from the centre, so its edge is 0.05 off the corner
+    #    (0.707 out) -- a violation that necking to 0.1 clears (gap 0.20).
+    #    max(size)/2 = 0.5 read a 0.257 gap and rejected it before the exact check.
+    c, h = 0.957 / math.sqrt(2), 0.5 / math.sqrt(2)
+    check("F graze off a rect corner",
+          run(seg(c - h, c + h, c + h, c - h), pad(size=(1.0, 1.0))),
           (1, DEFAULT))
 
     if fails:
