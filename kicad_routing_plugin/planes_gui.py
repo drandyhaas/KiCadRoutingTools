@@ -1107,7 +1107,11 @@ class PlanesTab(wx.Panel):
                     coord = GridCoord(gnd_config.grid_step)
 
                     # Build obstacle map from PCB data (excluding no nets since we want all obstacles)
-                    obstacles = build_base_obstacle_map(self.pcb_data, gnd_config, [])
+                    # CLI parity: price foreign copper at its net class
+                    # (the same clamped map the plane step used above).
+                    obstacles = build_base_obstacle_map(
+                        self.pcb_data, gnd_config, [],
+                        net_clearances=_plane_net_clearances)
 
                     # Add GND vias near existing signal vias
                     gnd_vias = add_gnd_vias_to_existing_board(

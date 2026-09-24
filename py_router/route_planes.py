@@ -4628,8 +4628,19 @@ Examples:
         install_layer_clearances(gnd_config, None, None, pcb_data)  # #498
         coord = GridCoord(gnd_config.grid_step)
 
+        # Cross-class clearance (#434/#439), resolved exactly as create_plane
+        # does: a return via must clear each foreign net at max(base, its class)
+        # -- without the map an HV net's 0.8mm class was priced at the base 0.2.
+        from list_nets import net_clearance_map_by_id
+        gnd_net_clearances = net_clearance_map_by_id(
+            args.input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
+        if gnd_net_clearances and args._clamp_netclasses:
+            gnd_net_clearances = {nid: min(c, args._clearance_ceiling)
+                                  for nid, c in gnd_net_clearances.items()}
+
         # Build obstacle map
-        obstacles = build_base_obstacle_map(pcb_data, gnd_config, [])
+        obstacles = build_base_obstacle_map(pcb_data, gnd_config, [],
+                                            net_clearances=gnd_net_clearances)
 
         # Add GND vias
         gnd_vias = add_gnd_vias_to_existing_board(
