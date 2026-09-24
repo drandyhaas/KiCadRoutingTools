@@ -6229,7 +6229,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                      if _nm in _ids1033},
                     lambda _ni: (_board1033.nets[_ni].name
                                  if _ni in _board1033.nets else f"Net {_ni}"))
+                # #1033: WHICH power nets this run routed. The block above
+                # measures every --power-nets net on the board (disclosure);
+                # the design_rules rows and --strict-sizes below judge only
+                # the nets THIS run is responsible for -- its --nets scope,
+                # and any net it laid NEW copper for (rip victims) -- so a scoped `--nets +3V3` call is not failed by
+                # GND / +5V copper an earlier step (a BGA escape neck) laid.
+                # (not routed_results: it also registers nets this run found
+                # already connected and never touched)
+                _run1033 = set(sweep_scope_ids)
+                _orig1033 = set(original_segment_ids or ())
+                for _r1033 in (results or []):
+                    for _sg1033 in (_r1033.get('new_segments') or []):
+                        if id(_sg1033) not in _orig1033:   # NEW copper only
+                            _run1033.add(_sg1033.net_id)
+                _insc1033 = {pcb_data.nets[_n].name
+                             for _n in (set(config.power_net_widths)
+                                        & _run1033)
+                             if _n in pcb_data.nets}
+                for _nm, _r in _pw1033.items():
+                    _r['in_run_scope'] = _nm in _insc1033
                 summary['power_widths'] = _pw1033
+                summary['power_widths_run_scope'] = sorted(_insc1033)
                 # WHICH copper was measured. The CLI reads the written file,
                 # which already holds every in-run pass (finalize, oracle,
                 # reconcile). The GUI reads the change-set it hands the
@@ -6259,11 +6280,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _pid1033 = {_nn.name: _ni
                                 for _ni, _nn in pcb_data.nets.items()}
                     replace_power_track_rows(
-                        set(config.power_net_widths),
+                        {_pid1033[_nm] for _nm in _insc1033
+                         if _nm in _pid1033},
                         [(_pid1033.get(_nm), _nm, _r['requested_mm'],
                           _r['min_mm'], _r['under_mm'])
                          for _nm, _r in _pw1033.items()
-                         if _pid1033.get(_nm) is not None])
+                         if _nm in _insc1033
+                         and _pid1033.get(_nm) is not None])
                     _dr1033 = _es1033()
                     for _sm in list(_SUMMARY_SINK) + [summary]:
                         if isinstance(_sm.get('design_rules'), dict):
@@ -6288,6 +6311,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 if return_results:
                     results_data['power_widths'] = _pw1033
                     results_data['power_widths_measured_on'] = _stage1033
+                    results_data['power_widths_run_scope'] = sorted(_insc1033)
                 _short1033 = [(_nm, _r) for _nm, _r in _pw1033.items()
                               if _r['under_mm'] > 0]
                 if _short1033:

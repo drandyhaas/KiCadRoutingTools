@@ -316,6 +316,16 @@ def t_merge():
 # +3V3 from U1 (x=4) to U2 (x=26) on ONE layer, through a fence of foreign
 # pads at x=15 whose only gap (y=10) is 0.4 mm wide: a 0.3 track at 0.1
 # clearance needs 0.5, a 0.127 needs 0.327. The long trunk must neck down.
+_NARROW_5V = ''' (footprint "t:P" (layer "F.Cu") (at 4 17)
+  (property "Reference" "U3" (at 0 -2) (layer "F.SilkS"))
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 3 "+5V")))
+ (footprint "t:P" (layer "F.Cu") (at 10 17)
+  (property "Reference" "U4" (at 0 -2) (layer "F.SilkS"))
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 3 "+5V")))
+ (segment (start 4 17) (end 10 17) (width 0.127) (layer "F.Cu") (net 3) (uuid "n5"))
+'''
+
+
 _FLANK = ''' (footprint "t:K" (layer "F.Cu") (at 24.5 10)
   (property "Reference" "J2" (at 0 -2) (layer "F.SilkS"))
   (pad "1" smd rect (at 0 -0.3) (size 0.2 0.2) (layers "F.Cu") (net 2 "SIG"))
@@ -323,7 +333,7 @@ _FLANK = ''' (footprint "t:K" (layer "F.Cu") (at 24.5 10)
 '''
 
 
-def _board(path, gap=0.4, flank=True):
+def _board(path, gap=0.4, flank=True, narrow_5v=False):
     fence = []
     pad_h = 0.8
     y = 10.0 + gap / 2 + pad_h / 2
@@ -338,6 +348,10 @@ def _board(path, gap=0.4, flank=True):
         f'(size 0.8 {pad_h}) (layers "F.Cu") (net 2 "SIG"))\n'
         for i, (fx, fy) in enumerate(fence))
     flank_txt = _FLANK if flank else ''
+    # an OUT-OF-SCOPE power net carrying narrow copper an earlier step laid
+    net5 = ' (net 3 "+5V")\n ' if narrow_5v else ' '
+    if narrow_5v:
+        flank_txt += _NARROW_5V
     txt = f'''(kicad_pcb
  (version 20221018)
  (generator "test_1033")
@@ -346,7 +360,7 @@ def _board(path, gap=0.4, flank=True):
  (net 0 "")
  (net 1 "+3V3")
  (net 2 "SIG")
- (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts") (width 0.1))
+{net5}(gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts") (width 0.1))
  (footprint "t:P" (layer "F.Cu") (at 4 10)
   (property "Reference" "U1" (at 0 -2) (layer "F.SilkS"))
   (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "+3V3")))
@@ -541,19 +555,21 @@ def t_strict_sizes():
     pass widens it all back on exact geometry -> no row, exit 0. The 0.4 mm
     gap plus the flanking pads: a real neck ships -> one row, exit 3."""
     from kicad_parser import parse_kicad_pcb
-    for gap, flank, want in ((0.5, False, 0), (0.4, True, 3)):
+    for gap, flank, want, n5 in ((0.5, False, 0, False), (0.4, True, 3, False),
+                                 (0.5, False, 0, True), (0.4, True, 3, True)):
         with tempfile.TemporaryDirectory() as tmp:
             src = os.path.join(tmp, 'in.kicad_pcb')
             out = os.path.join(tmp, 'out.kicad_pcb')
             js = os.path.join(tmp, 'out.json')
-            _board(src, gap=gap, flank=flank)
+            _board(src, gap=gap, flank=flank, narrow_5v=n5)
             env = dict(os.environ, MSYS2_ARG_CONV_EXCL='*')
+            pnets = (['+3V3', '+5V'], ['0.3', '0.4']) if n5 else (['+3V3'], ['0.3'])
             r = subprocess.run(
                 [sys.executable, '-X', 'utf8',
                  os.path.join(ROOT, 'py_router', 'route.py'), src, out,
                  '--nets', '+3V3', '--layers', 'F.Cu', '--track-width', '0.127',
                  '--clearance', '0.1', '--grid-step', '0.05',
-                 '--power-nets', '+3V3', '--power-nets-widths', '0.3',
+                 '--power-nets', *pnets[0], '--power-nets-widths', *pnets[1],
                  '--json-out', js, '--strict-sizes'],
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', env=env, timeout=900)
@@ -566,12 +582,21 @@ def t_strict_sizes():
             pw = doc['power_widths']['+3V3']
             rows = [x for x in doc['design_rules']['narrowed']
                     if x['kind'] == 'track_width']
+            if n5:
+                p5 = doc['power_widths'].get('+5V') or {}
+                check(f'scoped (gap {gap}): the out-of-scope +5V is still '
+                      f'DISCLOSED, labelled out of scope, and has no row',
+                      p5.get('under_mm', 0) > 5.0
+                      and p5.get('in_run_scope') is False
+                      and doc.get('power_widths_run_scope') == ['+3V3']
+                      and not any(x.get('net_name') == '+5V' for x in rows),
+                      (p5, doc.get('power_widths_run_scope'), rows))
             necked = 'neck-down' in log or 'short edge at' in log
             if want == 0:
                 check('strict-sizes: the router DID neck this net (the case '
                       'is real)', necked)
-                check('strict-sizes: fully widened back -> 0 under, no row, '
-                      'exit 0', pw['under_mm'] == 0 and rows == []
+                check(f'strict-sizes (+5V narrow copper out of scope: {n5}): '
+                      'fully widened back -> 0 under, no row, exit 0', pw['under_mm'] == 0 and rows == []
                       and r.returncode == 0, (pw['under_mm'], rows, r.returncode))
                 drc = subprocess.run(
                     [sys.executable, '-X', 'utf8',
@@ -586,7 +611,8 @@ def t_strict_sizes():
                       all(abs(sg.width - 0.3) < 1e-6 for sg in p.segments
                           if sg.net_id == nid))
             else:
-                check('strict-sizes: a real neck ships -> one row, exit 3',
+                check(f'strict-sizes (+5V out of scope: {n5}): a real neck '
+                      'ships -> one row, exit 3',
                       pw['under_mm'] > 0 and len(rows) == 1
                       and r.returncode == 3,
                       (pw['under_mm'], rows, r.returncode))

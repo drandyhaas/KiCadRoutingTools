@@ -1,29 +1,38 @@
-"""Exact-geometry widening of power-net copper (#1033 part 3).
+"""Post-route widening of power-net copper (#1033 part 3).
 
-Two places laid a power net at its neck / rescue width even where the full
-``--power-nets-widths`` width fits:
+Routing lays a power net narrower than its ``--power-nets-widths`` in several
+places, each for a reason that holds while routing and not afterwards: the
+pad-neck zone (#72: ``neckdown_length`` mm from each pad, forced narrow),
+neck-downs and short-edge ladders where the grid map refused the full width,
+and rescue rungs (routed with the power width popped). Measured on run 32's
+K3C board, +3V3 force-reroute: ~200 of ~530 mm shipped under 0.3.
 
-* the PAD-NECK ZONE (#72): ``_neck_pass`` forced every wide route to the neck
-  width for ``neckdown_length`` mm from each pad, fit or not. Measured on the
-  run-32 K3C board (+3V3 force-reroute): ~60 mm of the net's 0.127/0.15 copper;
-* the RESCUE ladder: a rescued gap is routed at ``rescue_track`` with the power
-  width popped, and nothing widened it afterwards (~33 mm on the same repro).
+``widen_power_copper`` takes that width back ONCE, after routing, inside the
+shared cleanup pipeline (``cleanup_pipeline.run_post_route_cleanup``, so the
+CLI and the GUI both get it). Routing itself is unchanged -- completion comes
+first, and widening only uses space every other net has already left over.
+An earlier cut widened inside the routing loop and changed what later nets
+saw (esp_prog@dru lost /RTS); with the pass disabled the copper is
+segment-for-segment the pre-part-3 router's.
 
-The obstacle map cannot judge either: its endpoint regions are obstacle-EXEMPT
-near the pads being connected (so a net can reach its own pad), and a rescue's
-map is built at the rung's stepped-down clearance. So the widening is decided
-here on EXACT geometry at the net's own pairwise clearance -- the same
-measurements check_drc grades (#1029: "width neck judges a pad graze on exact
-pad copper") -- against every foreign pad (exact pad copper), track, via,
-NPTH hole (declared hole floor), the board edge and rule-area keep-outs.
+Each piece (~0.25 mm) takes the widest of the net's width and its ladder
+(width/2, /4, ...; plus an own pad's narrow side) that ``ExactWideCheck``
+clears, else keeps the width it shipped with, so nothing ever gets narrower.
+The check is exact geometry at the net's pair clearance (#498 layer rule
+applied) -- the measurements check_drc grades -- against foreign pads (the
+sampled distance over an expanded-layer view, then check_drc's exact pad
+copper, #1029), tracks (incl. .kicad_dru track rules), vias, NPTH holes at the
+declared hole floor, the board edge and NPTH slots, rule-area keep-outs
+(``*.Cu`` / ``F&B.Cu`` resolved), ``--keepout`` zones when enabled, and
+footprint graphic copper (foreign to every net here: no #908 own-pad lift).
+The grid map is not consulted: its endpoint regions are obstacle-exempt.
 
-The entry into a pad of the net ITSELF is capped at the pad's narrow side: a
-trace wider than the pad it lands on overhangs the pad outline, which is where
-KiCad's own copper-sliver / clearance checks start flagging a neighbour.
-
-Everything narrows back on failure: a piece that fits no candidate width keeps
-the width the caller gave it (the neck / rescue width), so the result is never
-worse than before -- only wider where the geometry allows it.
+Limits: foreign pours are not modelled (the refill decides), copper laid
+after the cleanup (the in-run plane finalize, the oracle reconnect) is not
+widened, and protected / matched / impedance nets are skipped like the
+smoother skips them. A check that raises refuses the piece (fail closed) and
+is counted in ``ERRORS``; a constructor that raises is announced and skips
+that net.
 """
 from __future__ import annotations
 
