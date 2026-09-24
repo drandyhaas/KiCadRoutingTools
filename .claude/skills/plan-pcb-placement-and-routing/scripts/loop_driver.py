@@ -1132,10 +1132,15 @@ def _agent(a):
     18-part board: 17 read-only probe scripts, ~950 lines, an hour, for facts
     the loop already held (#890).
 
-    A fork still carries the Agent tool, so each half's own close-out verifier
-    still spawns, and it does not weaken the delegation boundary: that boundary
-    is about what crosses BACK -- the parent reads a document, never a message
-    -- and a fork changes only what crosses forward.
+    A fork is meant to carry the Agent tool, so each half's own close-out
+    verifier can spawn, and it does not weaken the delegation boundary: that
+    boundary is about what crosses BACK -- the parent reads a document, never a
+    message -- and a fork changes only what crosses forward. MEASURED
+    otherwise in run 32 (#1040): all five forked placement halves reported
+    "I am a fork and may not dispatch subagents", so every placement close-out
+    was verified single-agent. The L1 prompt therefore tells the OUTER loop to
+    dispatch the P-close verifier itself when a half says it could not, the
+    way L5 dispatches the routing lenses.
 
     Two costs, and both point the same way for the END-TO-END VERIFIER, which
     is why `l5` does not call this. A fork inherits the parent's already-formed
@@ -1189,10 +1194,10 @@ def l1(a):
         return f'''<stage_instructions stage="L1" name="place (delegated)" of="{len(STAGES)}">
 DELEGATING: {why}.{_cycnote}{_clash}
 
-Delegate the placement half to a TEAMMATE of the agent type named in the tag
-below -- it HAS the Agent tool, which the half's own close-out verifier needs
-(SKILL.md "Delegating a half" has the fork-vs-fresh reasoning). Give it the
-prompt verbatim.
+Delegate the placement half, prompt verbatim, to a TEAMMATE of the tag's agent
+type; it needs the Agent tool for its P-close verifier (SKILL.md "How to run
+this skill"). If it hands back unable to dispatch one (run 32: all five forks,
+#1040), YOU dispatch the P-close verifier before L2, as L5 does the lenses.
 
 <subagent_prompt agent="{_ag}" description="place {os.path.basename(a.board)}">
 Drive the placement half of this board to its close-out, and do not route.
@@ -2045,6 +2050,20 @@ Three things that have each cost a run:
     -- the answer a blind classifier gives by default -- is the verdict L4 makes
     you evidence: --congestion-json plus --congestion-baseline.
 
+  * A MOVING VICTIM SET is a capacity finding (#1040). Diff the failing net
+    NAMES across two bulk lineages or two '*' passes: a flat count over a LOW
+    overlap of names is global capacity -- placement or floorplan, never
+    parameter. Run 32: four lineages failed ~30 DIFFERENT nets each, while
+    every per-net test above said "router work".
+
+  * With a benchmark placement (the human board, or a previous run), compare
+    `metrics.crossings` and `metrics.hpwl` from render_placement --json-out,
+    SAME instrument on both boards, and report the ratio (run 32: 3750 vs 1352
+    crossings, 5743 vs 3641 mm). Then name the lever honestly: capacity is a
+    placement-ENGINE gap. Run 32's local re-arrangement bought at most -2.3%
+    hpwl and fresh seeds without the zone plan were all worse, so do not imply
+    that another place_route_loop pass closes it.
+
 check_reachability answers about ONE pad per run -- give it a pad on a failing
 net (or --net <id> --at <x,y>). A single genuine CAGED (exit 1) on the
 copper-free board is enough to make the shape placement.
@@ -2686,9 +2705,14 @@ Connectivity is orthogonal to DRC: a DRC-clean board can be entirely
 disconnected, because isolated copper has no clearance conflicts.
 
 Then render the run. It is the only artifact that shows HOW the board got here,
-and because both halves recorded into one ledger it is ONE film, not two:
+and it is ONE make_movie call over the chain's KEPT boards in order -- the
+input, each placement, each routing step. Pose changes glide in, the frames
+stream, and the ledger beside the last board is drawn as one attempts graph
+(#1036). Not make_film --from-ledger: under parallel lineages its spine is
+not the chain you kept (#1034).
 
-  python3 -X utf8 py_tools/make_film.py --from-ledger {a.ledger} -o wk/run.mp4
+  python3 -X utf8 py_router/make_movie.py <input> <placements...> <routing steps...> \\
+      -o wk/run.mp4 --panels xray+iso --layout split --aspect 16:9
 
 And take the ONE still that shows whether the run made progress: the board this
 run started from against the board it is ending with, at identical instrument
@@ -3403,10 +3427,16 @@ def _close_out(a, name):
 #: -o, so render_placement wrote its PNG beside the BOARD): measured 81
 #: clear and 83 with the driver blind. An arm that fits only while every
 #: instrument is healthy is a ceiling that fails on the bad day.
+#: Then 84 -> 98 (#1040): the two capacity bullets -- a MOVING victim set is
+#: global capacity, and the benchmark-placement ratio on the same instrument
+#: with the placement-engine gap named. Re-measured with --dump-all: 95
+#: clear; the blind reading is taken as clear + the note's own 2 lines = 97
+#: (forcing the blind path from a harness did not trigger it on the dump
+#: fixture, so that number is computed, not observed). 98 keeps one line.
 _ARM_CEILING = {
     'L1': 105, 'L1 (delegated)': 105, 'L1 (inline)': 25,
     'L2': 225, 'L2 (delegated)': 225, 'L2 (inline)': 95,
-    'L3': 84, 'L4': 51, 'L5': 40,
+    'L3': 98, 'L4': 51, 'L5': 40,
     # 170 -> 174 (#963 item E): the REPORT_DONE marker and the sentence
     # saying what it is for, plus room for the 2-line blind note.
     # Then 174 -> 178 (#963, second pass): the DONE marker now NAMES the
@@ -3427,7 +3457,13 @@ _ARM_CEILING = {
     # #962 breached 178 alone; the sum did, which is the alarm working.
     # Re-measured: 182 clear, 184 blind -- 185 keeps the one line of
     # headroom the rule above asks for.
-    'L5 (DONE-EXHAUSTED)': 185, 'L5 (STUCK)': 185, 'L5 (BUDGET)': 185,
+    # Then 185 -> 190 (#1036/#1040): the film is ONE make_movie call over the
+    # kept chain (placement glides, then routing, one attempts graph), with
+    # the line saying why make_film --from-ledger is not it under parallel
+    # lineages (#1034). Re-measured with --dump-all: 187 clear; blind taken
+    # as 187 + the note's 2 lines = 189 (computed, see L3's note above). 190
+    # keeps one line of headroom.
+    'L5 (DONE-EXHAUSTED)': 190, 'L5 (STUCK)': 190, 'L5 (BUDGET)': 190,
 }
 
 STAGES = {'L1': l1, 'L2': l2, 'L3': l3, 'L4': l4, 'L5': l5}
@@ -5078,7 +5114,7 @@ def _self_test():
              'close-out refuses to SHIP without a routing close-out')
         out = STAGES['L5'](_args(done_args + [
             '--routing-close', closed('c_done.json')]))
-        want('DONE-EXHAUSTED' in out and 'make_film' in out,
+        want('DONE-EXHAUSTED' in out and 'make_movie' in out,
              'a plateaued solved board closes out, with the film')
         # #890, ON THE OUTPUT THAT ACTUALLY CARRIES THE PROMPT. Every other
         # L5 fixture in this self-test refuses, and `agent="fork" not in
