@@ -725,6 +725,13 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
     ``floorplan.grade``. Health signals are ADVISORY (they join the rank key,
     not the gate) -- routability.py states why: they say the floorplan will
     fight the router, not that it is wrong.
+
+    What the #1037 delta CANNOT see, by `grade_delta`'s own contract: an
+    error the input already carries that a candidate makes WORSE (a decap at
+    3 mm moved to 9 mm is still the same one error), and an error SWAPPED for
+    another of the same rule, ref, block and expected keys. Both read as no
+    change. The absolute count stays in `cand.intent['errors']` beside
+    `new_errors`, so a reader can still see them.
     """
     from kicad_parser import parse_kicad_pcb
     from placement.pair_order import pair_inversions

@@ -16,6 +16,8 @@ where the INPUT already fails decap_distance on C2 and C8.
 2. A candidate with C1 moved 3 mm (+x, a clear spot) is gated, and the reason names
    C1 -- not the inherited C2 / C8.
 3. Without `input_violations` (the legacy callers) the absolute gate stands.
+4. The same through place_portfolio's main(): a jitter candidate (decaps and
+   ICs locked) carrying only the input's two errors is viable, exit 0.
 
 Run:
     python3 tests/test_1037_portfolio_new_errors.py
@@ -35,6 +37,7 @@ from copy_board import copy_board  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 from placement import floorplan, portfolio  # noqa: E402
 from placement.writer import write_placed_output  # noqa: E402
+from run_utils import check as run_check, evidence  # noqa: E402
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 FAILS = []
@@ -110,6 +113,29 @@ def main():
               c.gates.get('passed') is False
               and '2 intent violation(s)' in ' '.join(c.gates['reasons']),
               str(c.gates))
+
+        # 4 -- THROUGH place_portfolio.main, so a main() that stops grading
+        # the input (or stops passing it) fails here, not only the unit.
+        # Decaps and ICs locked, so the jitter candidate cannot add a
+        # decap_distance error; the input's C2/C8 still carry two.
+        out = os.path.join(work, 'pf')
+        r = run_check([sys.executable, '-X', 'utf8',
+                       os.path.join(ROOT, 'py_placer', 'place_portfolio.py'),
+                       BOARD, '--out-dir', out, '--seed', '0',
+                       '--candidates', '2', '--keep', '1', '--route-top', '0',
+                       '--no-render', '--intent', ipath, '--strategy',
+                       'jitter', '--lock', 'C*', 'U*'], accept=True)
+        doc = json.load(open(evidence(os.path.join(out, 'portfolio.json')),
+                             encoding='utf-8'))
+        c1 = [c for c in doc['candidates'] if c['index'] == 1][0]
+        check('4. place_portfolio: the candidate carrying only the input\'s '
+              'errors is viable (exit 0)',
+              r.returncode == 0 and c1['gates'].get('passed') is True
+              and doc.get('input_intent_errors') == 2
+              and c1['intent'].get('input_errors') == 2
+              and c1['intent'].get('new_errors') == 0,
+              str((c1['gates'], c1.get('intent'),
+                   doc.get('input_intent_errors'))))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if FAILS:
