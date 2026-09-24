@@ -93,6 +93,12 @@ def test_run32_reproduces_the_table():
                bt.crossings, int(round(bt.hpwl)))
         if got != want[:5]:
             fail('%s: %r, the table says %r' % (bt.label, got, want[:5]))
+        # the LEDGER's number, where the ledger names the board: the table's
+        # floorplan column is the run's own record, not a re-grade
+        if want[5] is not None and not bt.floorplan_source.startswith(
+                'ledger row'):
+            fail('%s: floorplan taken from %r, not the ledger'
+                 % (bt.label, bt.floorplan_source))
         if want[5] is not None and bt.floorplan != want[5]:
             fail('%s: floorplan %r (%s), the table says %r'
                  % (bt.label, bt.floorplan, bt.floorplan_source, want[5]))
