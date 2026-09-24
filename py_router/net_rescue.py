@@ -1219,6 +1219,18 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             num = num_after
             if used_cfg.clearance < config.clearance - 1e-9:
                 note_clearance_used(pcb_data, used_cfg.clearance)
+            # #1033 part 3b: the rung routed a power net at the rung width
+            # (power width popped so ANY path is found). Widen what it laid
+            # wherever the net's own width clears at the ORIGINAL clearance,
+            # on exact geometry. Collinear pieces: connectivity unchanged.
+            try:
+                from power_widen import widen_rescued_copper
+                _wid = widen_rescued_copper(result, pcb_data, net_id, config)
+                if _wid > 0:
+                    print(f"    widened {_wid:.2f} mm of the rescued copper "
+                          f"back toward the power width (#1033)")
+            except Exception as _we:                           # noqa: BLE001
+                print(f"    (rescue widen-back skipped: {_we})")
             edge_results.append(result)
             used_widths.append(used_cfg.track_width)
             print(f"    {GREEN}rescued a gap{RESET}: grid {used_cfg.grid_step:g}, "

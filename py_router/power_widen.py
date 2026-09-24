@@ -251,3 +251,48 @@ def widen_segment(seg, target_w, check: ExactWideCheck,
         i = j
     return out
 
+
+def widen_rescued_copper(result, pcb_data, net_id, config) -> float:
+    """#1033 part 3b: after a rescue routed a POWER net's gap at its rung
+    width (the rescue pops the power width to find ANY path), widen the
+    rescued copper piecewise wherever the net's own width -- or a step of its
+    ladder -- clears, judged on exact geometry at the ORIGINAL config's
+    clearance (not the rung's stepped-down one). The rescue search itself is
+    unchanged; this only re-widths the copper it found. Pieces are collinear
+    with the originals, so connectivity is untouched.
+
+    Mutates result['new_segments'] and pcb_data.segments in place (the route
+    is already on the board). Returns the mm of copper widened."""
+    if net_id not in (getattr(config, 'power_net_widths', None) or {}):
+        return 0.0
+    segs = list(result.get('new_segments') or [])
+    if not segs:
+        return 0.0
+    check = ExactWideCheck(pcb_data, config, net_id)
+    board_idx = {id(s): i for i, s in enumerate(pcb_data.segments)}
+    new_list = []
+    widened = 0.0
+    changed = False
+    for s in segs:
+        target = config.get_net_track_width(net_id, s.layer)
+        if s.width >= target - 1e-9:
+            new_list.append(s)
+            continue
+        pieces = widen_segment(s, target, check)
+        if len(pieces) == 1 and pieces[0] is s:
+            new_list.append(s)
+            continue
+        changed = True
+        for q in pieces:
+            if q.width > s.width + 1e-9:
+                widened += math.hypot(q.end_x - q.start_x, q.end_y - q.start_y)
+        new_list.extend(pieces)
+        bi = board_idx.get(id(s))
+        if bi is not None:
+            pcb_data.segments[bi] = None
+        pcb_data.segments.extend(pieces)
+    if changed:
+        pcb_data.segments[:] = [x for x in pcb_data.segments if x is not None]
+        result['new_segments'] = new_list
+        pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
+    return widened

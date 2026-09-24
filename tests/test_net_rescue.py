@@ -172,6 +172,70 @@ def test_rescue_skips_connected_and_reports_unchanged():
     assert all(s.net_id != VICTIM for s in pcb.segments)
 
 
+def _pinch_board():
+    """#1033 part 3b: VICTIM is a POWER net (0.4 requested) whose only way
+    across is a 1 mm long pinch at x 1..2 -- solid net-2 copper above and
+    below it on both layers -- with free space on either side. Only a rung
+    below the power width fits the pinch."""
+    bi = BoardInfo(layers={0: 'F.Cu', 31: 'B.Cu'},
+                   copper_layers=['F.Cu', 'B.Cu'],
+                   board_bounds=(-1.5, -1.5, 4.5, 1.5))
+    pads = [make_pad(VICTIM, -0.8, 0.0, ref='U1', num='1', net_name='VICTIM',
+                     size_x=0.6, size_y=0.6),
+            make_pad(VICTIM, 3.8, 0.0, ref='U2', num='1', net_name='VICTIM',
+                     size_x=0.6, size_y=0.6)]
+    walls = []
+    for lay in ('F.Cu', 'B.Cu'):
+        for sgn in (1, -1):
+            y = 0.32
+            while y < 1.5:
+                walls.append(make_seg(1.0, sgn * y, 2.0, sgn * y, layer=lay,
+                                      net_id=WALL, width=0.2))
+                y += 0.18
+    return make_pcb(
+        nets={VICTIM: make_net(VICTIM, 'VICTIM'), WALL: make_net(WALL, 'WALL')},
+        segments=walls, pads_by_net={VICTIM: pads, WALL: []},
+        board_info=bi)
+
+
+def test_rescued_power_net_is_widened_where_it_fits():
+    import math
+    from power_widen import ExactWideCheck
+    pcb = _pinch_board()
+    cfg = _cfg()
+    cfg.power_net_widths = {VICTIM: 0.4}
+    state = _state(pcb, cfg)
+    summary = rescue_failed_nets(state, [('VICTIM', VICTIM)])
+    assert summary is not None and summary['recovered'] == ['VICTIM'], summary
+    segs = [s for s in pcb.segments if s.net_id == VICTIM]
+
+    def length(pred):
+        return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                   for s in segs if pred(s))
+    outside = length(lambda s: max(s.start_x, s.end_x) < 0.85
+                     or min(s.start_x, s.end_x) > 2.15)
+    outside_wide = length(lambda s: (max(s.start_x, s.end_x) < 0.85
+                                     or min(s.start_x, s.end_x) > 2.15)
+                          and s.width > 0.2)
+    pinch = [s.width for s in segs
+             if min(s.start_x, s.end_x) < 1.9 and max(s.start_x, s.end_x) > 1.1]
+    assert outside > 0.5 and outside_wide >= 0.5 * outside, \
+        f"free space either side of the pinch must be widened: " \
+        f"{outside_wide:.2f} of {outside:.2f} mm wide"
+    assert pinch and max(pinch) < 0.2, f"the pinch must stay narrow: {pinch}"
+    # every widened piece clears at the ORIGINAL clearance, exactly
+    chk = ExactWideCheck(pcb, cfg, VICTIM)
+    bad = [s for s in segs if s.width > 0.2 and not chk.clears(
+        s.start_x, s.start_y, s.end_x, s.end_y, s.layer, s.width)]
+    assert not bad, f"widened copper must clear at 0.15: {bad}"
+    # still one connected net
+    num, _cp, _cpads = _net_component_info(pcb, VICTIM)
+    assert num == 1, f"widening must not break connectivity ({num} parts)"
+    # the state's result carries the widened copper (it is what ships)
+    rs = state.routed_results[VICTIM]['new_segments']
+    assert any(s.width > 0.2 for s in rs)
+
+
 def main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:
