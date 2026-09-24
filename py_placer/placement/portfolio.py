@@ -710,7 +710,8 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
                     baseline_keepout_parts: int = 0,
                     clearance: float, board_edge_clearance: float,
                     grid_step: float, ignore_nets: Optional[Sequence[str]],
-                    intent=None, group_sources: Sequence[str] = ()) -> None:
+                    intent=None, group_sources: Sequence[str] = (),
+                    input_violations=None) -> None:
     """Fill gates / inversions / intent / health for one quenched candidate.
 
     Hard gates (fail => not ranked, reason kept): legality (no MORE courtyard
@@ -718,7 +719,9 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
     against the baseline rather than zero, because a legitimate board can
     already carry both: edge connectors and castellated rows overhang the
     outline by design, and dense hand placements sit under the courtyard
-    clearance) and, when an intent is given, an error-free
+    clearance) and, when an intent is given, no NEW intent error against the
+    INPUT board (#1037) when `input_violations` -- `floorplan.grade(...)
+    .violations` of the input, same arguments -- is given, else an error-free
     ``floorplan.grade``. Health signals are ADVISORY (they join the rank key,
     not the gate) -- routability.py states why: they say the floorplan will
     fight the router, not that it is wrong.
@@ -781,9 +784,38 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
         errors = [v.to_dict() for v in result.errors]
         cand.intent = {'errors': len(errors), 'warnings': len(result.warnings),
                        'violations': errors[:10]}
-        if errors:
-            reasons.append(f"{len(errors)} intent violation(s): "
-                           + '; '.join(v['message'] for v in errors[:3]))
+        if input_violations is None:
+            if errors:
+                reasons.append(f"{len(errors)} intent violation(s): "
+                               + '; '.join(v['message'] for v in errors[:3]))
+        else:
+            # #1037: the gate is what THIS candidate ADDS to the input board,
+            # through the exit gate's own currency (floorplan.grade_delta,
+            # as the seeder's no-worse test). Gating on the absolute count
+            # made every candidate of a board with 11 pre-existing errors
+            # inadmissible (run 32: 42-56 "violations" per candidate), and
+            # the quench itself moves decaps, so even the near-identity
+            # `poses` candidates were gated for the input's own errors.
+            from placement import floorplan
+            delta = floorplan.grade_delta(input_violations, result.violations)
+            added = [d for d in delta if 'added' in d]
+            new_n = sum(int(d['added']) for d in added) + (len(delta)
+                                                           - len(added))
+            keys = {(d['rule'], d.get('ref')) for d in added}
+            new_msgs = [v['message'] for v in errors
+                        if (v.get('rule'), v.get('ref')) in keys]
+            cand.intent.update({
+                'input_errors': sum(1 for v in input_violations
+                                    if v.severity == floorplan.ERROR),
+                'new_errors': new_n, 'new': delta[:10]})
+            if delta:
+                what = new_msgs[:3] or [
+                    f"{d['rule']} {d.get('budget')} {d.get('before')} -> "
+                    f"{d.get('after')}" if 'budget' in d else
+                    f"{d['rule']} {d.get('ref') or ''}".strip()
+                    for d in delta[:3]]
+                reasons.append(f"{new_n} NEW intent error(s) vs the input "
+                               f"board: " + '; '.join(what))
         h = result.health or {}
         rows = h.get('bus_corridors') or []
         # `intrusions` in the row is TRUNCATED for display (routability.health

@@ -126,18 +126,38 @@ with tempfile.TemporaryDirectory() as d:
     check("unplaced board refused with exit 3", r.returncode == 3,
           f"rc={r.returncode}")
 
-    # impossible intent -> every candidate gated -> exit 4
-    bad_intent = os.path.join(d, 'bad_intent.json')
+    # #1037: the intent gate is on errors a candidate ADDS to the input. An
+    # intent error the INPUT already carries (a must_lock pattern matching
+    # nothing) gates nobody -- this used to be the exit-4 case, and it was the
+    # run-32 defect in miniature: no candidate could ever be admissible.
     from placement.floorplan import emit_intent
+    inherited = os.path.join(d, 'inherited_intent.json')
     intent_doc = emit_intent(pcb, BOARD)
     intent_doc['must_lock'] = ['ZZNOSUCHREF*']
+    with open(inherited, 'w', encoding='utf-8') as f:
+        json.dump(intent_doc, f)
+    r = run([os.path.join(REPO, 'py_placer', 'place_portfolio.py'), BOARD,
+             '--out-dir', os.path.join(d, 'pf_inh'), '--seed', '0',
+             '--candidates', '2', '--keep', '1', '--route-top', '0',
+             '--no-render', '--intent', inherited])
+    check("an input-inherited intent error gates nothing (exit 0)",
+          r.returncode == 0 and '"input_intent_errors": 1' in r.stdout,
+          f"rc={r.returncode}\n{(r.stdout + r.stderr)[-300:]}")
+
+    # candidates that ADD errors -> every candidate gated -> exit 4. A decap
+    # limit of 1.45mm holds for most of splitflap's decaps at the input (it
+    # already fails C2 and C8) and a 4mm jitter moves them past it.
+    bad_intent = os.path.join(d, 'bad_intent.json')
+    intent_doc = emit_intent(pcb, BOARD)
+    intent_doc['decaps'] = {'max_distance_mm': 1.45}
     with open(bad_intent, 'w', encoding='utf-8') as f:
         json.dump(intent_doc, f)
     r = run([os.path.join(REPO, 'py_placer', 'place_portfolio.py'), BOARD,
              '--out-dir', os.path.join(d, 'pf_bad'), '--seed', '0',
              '--candidates', '2', '--keep', '1', '--route-top', '0',
-             '--no-render', '--intent', bad_intent])
-    check("all-candidates-gated run exits 4", r.returncode == 4,
+             '--no-render', '--intent', bad_intent, '--strategy', 'jitter'])
+    check("all-candidates-gated run exits 4", r.returncode == 4
+          and 'NEW intent error' in r.stdout,
           f"rc={r.returncode}\n{(r.stdout + r.stderr)[-300:]}")
 
 print(f"\n{passed}/{passed + failed} checks passed")
