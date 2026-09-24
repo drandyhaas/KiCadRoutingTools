@@ -193,6 +193,28 @@ def main():
                    refuse='Nothing was written', code=2, cwd=work)
         check('6. two files / an extension / -n are refused, nothing written',
               len(rows(L4)) == n)
+        # KiCad net names are '/'-rooted, and some of them name a root
+        # directory on this machine (/BOOT -> C:\boot, /DEV, /TMP; /HOME on
+        # macOS). One such value is a NET; `--nets /*` expanded by the shell
+        # into several root entries is a glob.
+        n = len(rows(L4))
+        record(L4, A1, 'rooted net names', '--parent', A0,
+               argv=[sys.executable, '-c', 'pass', '--nets', '/BOOT'],
+               accept=True)
+        record(L4, A1, 'rooted net names', '--parent', A0,
+               argv=[sys.executable, '-c', 'pass', '--nets', '/DEV',
+                     '/IO_Banks/U1'], accept=True)
+        check('6. --nets /BOOT and --nets /DEV /IO_Banks/U1 are recorded',
+              len(rows(L4)) == n + 2)
+        root = sorted('/' + e for e in os.listdir('/')
+                      if os.path.exists('/' + e))[:3]
+        check('6. the root has entries to expand into (the case is live)',
+              len(root) >= 2, str(root))
+        record(L4, A1, 'globbed root', '--parent', A0,
+               argv=[sys.executable, '-c', 'pass', '--nets'] + root,
+               refuse='Nothing was written', code=2)
+        check('6. `--nets /*` expanded to root entries is refused',
+              len(rows(L4)) == n + 2)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if FAILS:

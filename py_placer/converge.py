@@ -916,8 +916,13 @@ _NET_LIST_FLAGS = ('--nets', '-n', '--ignore-nets', '--rip-existing-nets',
 def _looks_like_a_file(t):
     """A token only a glob expansion would produce: it names a path
     (a separator) or carries a file extension."""
-    base = os.path.basename(t)
-    return (t != base or '/' in t
+    # ONE leading '/' is KiCad's net-name prefix, not a directory: `/BOOT`,
+    # `/DEV`, `/TMP` (and on macOS `/HOME`, `/VAR`, `/USR`) exist as root
+    # directories and are real net names. A lone rooted name is judged on the
+    # rest of the token; `--nets /*` still trips the two-or-more-files rule.
+    rest = t[1:] if t.startswith('/') and not t.startswith('//') else t
+    base = os.path.basename(rest)
+    return (rest != base or '/' in rest or '\\' in rest
             or ('.' in base.strip('.') and not base.startswith('.')))
 
 
