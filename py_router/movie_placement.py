@@ -617,11 +617,10 @@ def _chrome_h(d, spec, fs, width, flag_levels=0):
 
 
 def _flag_levels(track):
-    """How many lane rows the flags need: flags on one beat STACK."""
-    per = {}
-    for fl in track.flags:
-        per[fl.beat] = per.get(fl.beat, 0) + 1
-    return max(per.values()) if per else 0
+    """How many lane rows the flags may take: one per flag, up to three.
+    Decided before the panel's width is known, so it cannot count which
+    flags will touch; `_intent` stacks the ones that do."""
+    return min(len(track.flags), 3)
 
 
 def _header_lines(d, track, dropped, fs, width):
@@ -1114,15 +1113,21 @@ def _intent(d, T, sub, plot, lane, xs, track, cur, th, fs, debug):
     if cur is None:
         return
     # THE FLAGS, in their own lane above the plot -- never on a series line
-    # -- numbered as in the legend, flags on one beat STACKED.
+    # -- numbered as in the legend. A flag that would touch another (on the
+    # same beat, or a beat a few px away: run 32's v2 and v3 are 11 px
+    # apart on a 31.9 h axis) STACKS onto the next free row.
     lh = fs.size + 3
-    level = {}
+    rows = max(1, _flag_levels(track))
+    taken = [[] for _ in range(rows)]
     for k, fl in enumerate(track.flags):
         if fl.beat > cur:
             continue
-        lv = level.get(fl.beat, 0)
-        level[fl.beat] = lv + 1
         fx = xs[fl.beat]
+        span = (fx - 2, fx + 11 + d.textlength(str(k + 1), font=fs))
+        lv = next((i for i in range(rows)
+                   if all(span[1] <= a or b <= span[0]
+                          for a, b in taken[i])), rows - 1)
+        taken[lv].append(span)
         ty = lane[0] + lv * lh
         cy = ty + fs.size // 2 + 1
         d.polygon([(fx, cy - 4), (fx + 7, cy), (fx, cy + 4)],

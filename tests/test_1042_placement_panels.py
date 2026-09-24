@@ -535,6 +535,16 @@ def test_flags_stack_and_a_failure_repaints():
     lv = [f[2] for f in dbg.get('flags') or []]
     if lv != [0, 0, 1]:
         fail('flags on one beat do not stack: levels %r' % lv)
+    # beats a second apart on an hours-long axis sit MIN_BEAT_PX apart:
+    # their flags touch, so they stack too (run 32's v2 and v3)
+    tn = t._replace(beats=tuple(bt._replace(t=[0.0, 1.0, 2.0][i]) for i, bt
+                                in enumerate(t.beats)),
+                    flags=(MP.Flag(1, 'ONE pocket', 8),
+                           MP.Flag(2, 'Focus panels', 49)))
+    _ok, dbgn, _r, _im = _draw(tn, 2)
+    if [f[2] for f in dbgn.get('flags') or []] != [0, 1]:
+        fail('flags on neighbouring beats overprint: %r'
+             % dbgn.get('flags'))
     plot = (dbg.get('plots') or {}).get('intent')
     if plot is not None:
         for (r, tx, pnl) in dbg.get('texts') or []:
