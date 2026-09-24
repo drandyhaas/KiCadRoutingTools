@@ -68,12 +68,17 @@ from kicad_parser import (parse_kicad_pcb,                       # noqa: E402
 
 SKIP_EXIT = 77
 
+# Newest KiCad first by NUMERIC version: a plain string sort puts KiCad\9.0
+# above KiCad\10.0, so a box with both ran this under 9.0.
+from kicad_locate import path_version_key  # noqa: E402
+
 #: Same candidate list and order as tests/gui_parity/test_ref_label_pcbnew_parity.py.
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
     os.path.expandvars(r"C:\Program Files\KiCad\bin\python.exe"),
-    *sorted(_glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"), reverse=True),
+    *sorted(_glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
+           key=path_version_key, reverse=True),
 ]
 
 #: KiCad 8+ property form, then the KiCad 6/7 fallback. Both require at least

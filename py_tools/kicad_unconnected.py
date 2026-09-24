@@ -50,34 +50,16 @@ import subprocess
 import sys
 import tempfile
 
-KICAD_CLI_CANDIDATES = [
-    os.environ.get('KICAD_CLI', ''),
-    '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli',
-    '/usr/bin/kicad-cli',
-    '/usr/local/bin/kicad-cli',
-    'kicad-cli',
-]
-
-
 def find_kicad_cli():
-    for c in KICAD_CLI_CANDIDATES:
-        if not c:
-            continue
-        if os.path.sep in c:
-            if os.path.exists(c):
-                return c
-        else:
-            from shutil import which
-            w = which(c)
-            if w:
-                return w
-    # Windows installs are versioned and not on PATH; newest version wins.
-    if sys.platform == 'win32':
-        import glob
-        hits = sorted(glob.glob(r'C:\Program Files\KiCad\*\bin\kicad-cli.exe'))
-        if hits:
-            return hits[-1]
-    return None
+    """The one kicad-cli discovery, kicad_oracle's: $KICAD_CLI first, then
+    PATH and the packaged locations, then every versioned Windows install,
+    newest by NUMERIC version. This module used to keep its own copy, whose
+    string sort put KiCad\\9.0 above KiCad\\10.0 -- so with both installed,
+    converge's oracle ran 9.0 (no --refill-zones) and fill_for_delivery's
+    delta ran a kicad-cli that cannot read the KiCad-10 board it had just
+    filled."""
+    from kicad_oracle import find_kicad_cli as _find
+    return _find()
 
 
 def kicad_unconnected(board_path: str, keep_json: str = None):

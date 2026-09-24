@@ -39,11 +39,15 @@ sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
 sys.path.insert(0, os.path.join(REPO, 'py_placer'))
 sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 
+# Newest KiCad first by NUMERIC version: a plain string sort puts KiCad\9.0
+# above KiCad\10.0, so a box with both ran this under 9.0.
+from kicad_locate import path_version_key  # noqa: E402
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
     os.path.expandvars(r"C:\Program Files\KiCad\bin\python.exe"),
-    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"), reverse=True),
+    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
+           key=path_version_key, reverse=True),
 ]
 
 # IPC-4761 Type VII (filled + capped + plated), the #489 s8 motivating spec:
