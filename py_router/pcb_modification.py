@@ -2726,6 +2726,8 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
     """
     from net_queries import expand_pad_layers
     from collections import defaultdict
+    from dataclasses import replace
+    from check_drc import check_pad_segment_overlap
     pads_by_layer = defaultdict(list)
     for fp in pcb_data.footprints.values():
         for pad in fp.pads:
@@ -2751,10 +2753,22 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
                 clr = config.pad_override_clearance(max(own, _own(pad.net_id)), pad)
                 d = _pt_seg_dist(pad.global_x, pad.global_y,
                                  seg.start_x, seg.start_y, seg.end_x, seg.end_y)
-                # Bounding-circle pad half (conservative: never misses a violation).
-                pad_half = max(pad.size_x, pad.size_y) / 2.0
-                if (d - pad_half - seg.width / 2.0 < clr
-                        and d - pad_half - default_w / 2.0 >= clr):
+                # Cheap REJECT on the CIRCUMSCRIBED circle, which contains every
+                # rect/roundrect/oval pad at any rotation -- max(size)/2 does not
+                # reach a rect's corners, so it rejected real corner grazes.
+                # Custom-polygon copper can extend past size_x/size_y, so it
+                # always goes exact.
+                if (not getattr(pad, 'polygons', None)
+                        and d - math.hypot(pad.size_x, pad.size_y) / 2.0
+                        - seg.width / 2.0 >= clr):
+                    continue
+                # Decide on the exact copper check_drc grades (rect/roundrect/
+                # oval/custom polygon, rect_rotation). The circle alone necked
+                # legal traces beside elongated pads and missed real grazes.
+                if (check_pad_segment_overlap(pad, seg, clr, config.layers, 0.0)[0]
+                        and not check_pad_segment_overlap(
+                            pad, replace(seg, width=default_w), clr,
+                            config.layers, 0.0)[0]):
                     seg.width = default_w
                     necked += 1
                     break
