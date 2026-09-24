@@ -51,9 +51,13 @@ sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
 sys.path.insert(0, os.path.join(REPO, 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 
-# Env var wins; else PATH (Windows/Linux installs put kicad-cli there, the
-# kicad_oracle.py idiom); else the macOS app-bundle default.
-KICAD_CLI = (os.environ.get("KICAD_CLI") or shutil.which("kicad-cli")
+# kicad_oracle's finder: $KICAD_CLI, then PATH and the packaged locations,
+# then every versioned Windows install, newest by numeric version. Windows
+# installs do NOT put kicad-cli on PATH, so the PATH-then-macOS lookup this
+# replaced found nothing there. The macOS path stays as the last resort so
+# the "not found" message below names a concrete location.
+from kicad_oracle import find_kicad_cli as _find_kicad_cli  # noqa: E402
+KICAD_CLI = (_find_kicad_cli()
              or "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
 
 # kicad violation types that correspond to copper-clearance/short classes
