@@ -1573,7 +1573,7 @@ def oracle_reconnect(board_file: str, net_names, config,
              'links_failed': n, 'remaining': n}.
     """
     from dataclasses import replace
-    from kicad_parser import parse_kicad_pcb, is_kicad_10
+    from kicad_parser import parse_kicad_pcb, board_uses_name_nets
     from kicad_writer import generate_segment_sexpr, generate_via_sexpr
     from plane_region_connector import (build_base_obstacles,
                                         route_plane_connection_wide)
@@ -1868,7 +1868,7 @@ def oracle_reconnect(board_file: str, net_names, config,
             return _exact_cache['islands']
         with open(board_file, 'r', encoding='utf-8') as f:
             content = f.read()
-        v10 = is_kicad_10(content)
+        v10 = board_uses_name_nets(content)
         # #749 B: every via the oracle emits below -- the exact-fill strap weld,
         # the escalated/sliver weld, the main link route -- is NEW copper. It
         # emits no protection token and inherits the board's `(setup ...)`

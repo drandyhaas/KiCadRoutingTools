@@ -94,6 +94,56 @@ def run():
     check("numeric ids kept from the table",
           {nid: n.name for nid, n in pcb.nets.items() if nid} == {1: 'GND', 2: 'SIG'})
 
+    # --- The WRITE side: the dialect every writer emits and strips by. ------
+    # It used to be decided by the stamp (board_uses_name_nets: "v10 stamp OR
+    # name refs"; eleven plane/oracle/cleanup sites: the stamp alone), so a
+    # KiCad-10 stamp over a numeric table got NAME refs written into it -- a
+    # mixed file whose by-name strip/relabel matched none of its numeric copper.
+    from kicad_parser import board_uses_name_nets, pcb_uses_name_nets, PCBData, BoardInfo
+    round_tripped = (HEADER % 20241229 + NUMERIC_BODY).replace(
+        '(layer "F.Cu") (net 2) (uuid "s1")', '(layer "F.Cu") (net "SIG") (uuid "s1")')
+    assert '(net "SIG") (uuid "s1")' in round_tripped
+    dialects = [
+        ("v20260206 stamp + numeric table", HEADER % 20260206 + NUMERIC_BODY, False),
+        ("v20241229 stamp + name nets", HEADER % 20241229 + NAME_BODY, True),
+        ("KiCad 9 numeric", HEADER % 20241229 + NUMERIC_BODY, False),
+        ("KiCad 10 name nets", HEADER % 20260206 + NAME_BODY, True),
+        # #163: a pre-2025 board a previous pass round-tripped carries name
+        # refs beside its numeric table, and must be matched by name.
+        ("#163 round-tripped KiCad 9 (table + a name ref)", round_tripped, True),
+        ("an empty KiCad 10 board (no nets at all)",
+         HEADER % 20260206 + ')\n', True),
+    ]
+    for label, text, want in dialects:
+        check(f"{label}: board_uses_name_nets == {want}",
+              board_uses_name_nets(text) is want)
+        check(f"{label}: the parse records the same dialect",
+              pcb_uses_name_nets(_parse(text)) is want)
+    bare = PCBData(board_info=BoardInfo(layers={}, copper_layers=['F.Cu']),
+                   nets={}, footprints={}, vias=[], segments=[], pads_by_net={},
+                   kicad_version=20260206)
+    check("no recorded dialect (the pcbnew path): the stamp decides",
+          bare.uses_name_nets is None and pcb_uses_name_nets(bare) is True)
+
+    # End to end through a real writer: a track added to the KiCad-10-stamped
+    # numeric board must go in as `(net 2)`, and land on SIG when read back.
+    from kicad_writer import add_tracks_and_vias_to_pcb
+    d = tempfile.mkdtemp()
+    src, out = os.path.join(d, 'in.kicad_pcb'), os.path.join(d, 'out.kicad_pcb')
+    with open(src, 'w', encoding='utf-8') as f:
+        f.write(HEADER % 20260206 + NUMERIC_BODY)
+    sig = {n.name: nid for nid, n in _parse(HEADER % 20260206 + NUMERIC_BODY).nets.items()}['SIG']
+    add_tracks_and_vias_to_pcb(src, out, [{'start': (11, 12), 'end': (15, 12),
+                                           'width': 0.2, 'layer': 'F.Cu', 'net_id': sig}])
+    with open(out, encoding='utf-8') as f:
+        written = f.read()
+    check("the writer emits no name ref into the numeric board",
+          '(net "SIG")' not in written)
+    back = parse_kicad_pcb(out)
+    names = {nid: n.name for nid, n in back.nets.items()}
+    check("both segments read back on SIG",
+          sorted(names.get(s.net_id) for s in back.segments) == ['SIG', 'SIG'])
+
     print("=" * 60)
     if fails:
         for f in fails:

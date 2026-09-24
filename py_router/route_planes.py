@@ -39,7 +39,7 @@ exit_on_error_if_main(__name__)
 # These imports are guaranteed to work after startup_checks passes
 import numpy as np
 
-from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_MIN_VERSION, pad_is_plated_through
+from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, pcb_uses_name_nets, pad_is_plated_through
 from kicad_writer import (generate_zone_sexpr, generate_gr_line_sexpr,
                           zone_overlap_priorities)
 from routing_config import GridRouteConfig, GridCoord
@@ -1492,7 +1492,7 @@ def _generate_multinet_layer_zones(
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
                 direct_connect=not thermal_relief,
-                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
+                use_net_name=pcb_uses_name_nets(pcb_data)
             )
             zone_sexprs.append(zone_sexpr)
             zone_data_list.append({
@@ -1850,7 +1850,7 @@ def _generate_multinet_layer_zones(
             clearance=zone_clearance,
             min_thickness=min_thickness,
             direct_connect=not thermal_relief,
-            use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
+            use_net_name=pcb_uses_name_nets(pcb_data)
         )
         zone_sexprs.append(zone_sexpr)
         zone_data_list.append({
@@ -1905,7 +1905,7 @@ def _generate_multinet_layer_zones(
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
                 direct_connect=not thermal_relief,
-                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
+                use_net_name=pcb_uses_name_nets(pcb_data),
                 priority=_prio_of.get((net_id, poly_idx), 0)
             )
             zone_sexprs.append(zone_sexpr)
@@ -2260,7 +2260,7 @@ def _write_plane_output(
     if all_debug_lines:
         print(f"  Adding {len(all_debug_lines)} debug lines on User.4")
 
-    kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
+    kicad_v10_names = pcb_data.net_id_to_name if pcb_uses_name_nets(pcb_data) else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
                               exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace,
                               add_teardrops=add_teardrops, net_id_to_name=kicad_v10_names,
@@ -3819,7 +3819,7 @@ def create_plane(
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
                 direct_connect=not thermal_relief,
-                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
+                use_net_name=pcb_uses_name_nets(pcb_data),
                 priority=_prio
             )
             all_zone_sexprs.append(zone_sexpr)
@@ -4097,7 +4097,7 @@ def create_plane(
                         continue  # already present from an earlier plane run
                     all_zone_sexprs.append(generate_keepout_zone_sexpr(
                         _cu, _pts, _kname,
-                        use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION))
+                        use_net_name=pcb_uses_name_nets(pcb_data)))
                     all_zone_data.append({
                         'thermal_relief': thermal_relief,
                         'keepout': True, 'name': _kname, 'layers': _cu,
