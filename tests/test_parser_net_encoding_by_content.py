@@ -3,8 +3,8 @@
 (version ...) stamp.
 
 A file stamped >= KICAD_10_MIN_VERSION can still carry the numeric top-level
-net table `(net N "name")` with `(net N)` refs (KiCad 10.0.x pcbnew writes
-version 20250513 with a numeric table; other emitters/converters do the same).
+net table `(net N "name")` with `(net N)` refs: pcbnew never writes one (10.0.3
+saves 20260206 with name nets), but third-party generators and converters do.
 extract_nets used to switch on the stamp alone, found no `(net "name")` refs,
 and returned ZERO nets -- every pcb.nets consumer went silently inert.
 

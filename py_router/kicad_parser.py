@@ -3009,10 +3009,11 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
         (KiCad 10 name nets), synthetic IDs are assigned.
 
     The encoding is decided from the CONTENT, not ``kicad_version`` (kept for
-    caller compatibility): a KiCad-10 stamp can sit over a numeric
-    ``(net N "name")`` table (KiCad 10.0.x writes version 20250513 with one;
-    converters/other emitters do too), and a pre-10 stamp can sit over name-only
-    refs. Keying on the stamp returned ZERO nets for both.
+    caller compatibility). pcbnew keeps the two paired (10.0.3 saves version
+    20260206 with name nets and no table), but third-party generators and
+    converters write a KiCad-10 stamp over a numeric ``(net N "name")`` table,
+    and a pre-10 stamp can sit over name-only refs. Keying on the stamp
+    returned ZERO nets for both.
     """
     nets = {}
     name_to_id: Dict[str, int] = {}
@@ -3041,7 +3042,7 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
             name_to_id[net_name] = synthetic_id
             synthetic_id += 1
     else:
-        # Numeric table (KiCad 9, and KiCad 10.0.x): (net <id> "name")
+        # Numeric table (KiCad 9, whatever the stamp says): (net <id> "name")
         net_pattern = r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR
         for m in re.finditer(net_pattern, content):
             net_id = int(m.group(1))
