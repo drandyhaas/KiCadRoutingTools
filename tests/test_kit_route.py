@@ -106,8 +106,14 @@ def main():
         # relpath like ..\..\AppData\... collapsed into one literal filename
         # and the whole chain silently wrote kit-out* into the repo root,
         # the exact #426 repo-dirtying this temp dir exists to prevent.
-        return os.path.relpath(os.path.join(workdir, name),
-                               ROOT_DIR).replace(os.sep, '/')
+        # A temp dir on another Windows drive has no relative path at all
+        # (relpath raises ValueError); the absolute path works from ROOT_DIR
+        # just as well, and forward slashes keep it whole through shlex.
+        path = os.path.join(workdir, name)
+        try:
+            return os.path.relpath(path, ROOT_DIR).replace(os.sep, '/')
+        except ValueError:
+            return os.path.abspath(path).replace(os.sep, '/')
 
     out       = wpath('kit-out.kicad_pcb')
     out_plane = wpath('kit-out-plane.kicad_pcb')

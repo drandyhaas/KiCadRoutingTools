@@ -165,7 +165,9 @@ def _commit_sites():
             tree = ast.parse(open(f).read())
         except SyntaxError:
             continue
-        rel = os.path.relpath(f, ROOT)
+        # Forward slashes: the allowlist spells sites that way, and a Windows
+        # relpath's backslashes made every allowlisted site read as unlisted.
+        rel = os.path.relpath(f, ROOT).replace(os.sep, '/')
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue

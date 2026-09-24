@@ -916,10 +916,19 @@ unexpectedly quiet.</p>
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, 'w') as f:
         f.write(html)
-    print(f'  wrote {os.path.relpath(out, ROOT)} ({len(html):,} bytes)')
+    print(f'  wrote {_shown(out)} ({len(html):,} bytes)')
     land = write_landing(slug)
-    print(f'  wrote {os.path.relpath(land, ROOT)}')
+    print(f'  wrote {_shown(land)}')
     return out
+
+
+def _shown(path):
+    """`path` relative to the repo for the log line; as given when relpath
+    cannot reach it (another Windows drive raises ValueError)."""
+    try:
+        return os.path.relpath(path, ROOT)
+    except ValueError:
+        return path
 
 
 def write_landing(slug):

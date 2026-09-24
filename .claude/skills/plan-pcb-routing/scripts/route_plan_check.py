@@ -655,7 +655,11 @@ def main(argv=None):
         print(f'route_plan_check: {plan_err(exc)}', file=sys.stderr)
         return UNREADABLE
 
-    print(f'{os.path.relpath(plan.path)}: {len(plan.cmds)} recorded '
+    try:
+        shown = os.path.relpath(plan.path)
+    except ValueError:      # another Windows drive: no relative path exists
+        shown = plan.path
+    print(f'{shown}: {len(plan.cmds)} recorded '
           f'command(s), {len(plan.mutating)} of them board-mutating')
     for rid, what, cite, _fn in RULES:
         hit = next((f for f in failures if f[0] == rid), None)

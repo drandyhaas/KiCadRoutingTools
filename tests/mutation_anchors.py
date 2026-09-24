@@ -98,6 +98,17 @@ import sys
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS_DIR)
 
+
+def _shown(path):
+    """`path` for a message: repo-relative, forward slashes. A path relpath
+    cannot reach -- another Windows drive (a C: temp dir under a G: checkout)
+    raises ValueError -- is shown absolute instead of taking the report down."""
+    try:
+        return os.path.relpath(path, ROOT).replace(os.sep, '/')
+    except ValueError:
+        return os.path.abspath(path).replace(os.sep, '/')
+
+
 #: `_fold` could not decide. Distinct from None, which several row layouts use
 #: as a MEANINGFUL value (`old is None` means "create this file", not "unknown").
 UNKNOWN = object()
@@ -163,7 +174,7 @@ class Problem(object):
         self.detail = detail
 
     def __str__(self):
-        rel = os.path.relpath(self.anchor.target, ROOT).replace(os.sep, '/')
+        rel = _shown(self.anchor.target)
         if self.kind in (PROSE, CREATE_EXISTS):
             # `count` is not an occurrence count for these, and rendering it as
             # one printed "matched 458 time(s) in <the wrong file>".
@@ -546,7 +557,7 @@ def verify(anchors, repo_wide=False):
                     a, CREATE_EXISTS, 0,
                     'the row creates %s, which already exists -- the battery '
                     'reports BROKEN'
-                    % os.path.relpath(a.target, ROOT).replace(os.sep, '/')))
+                    % _shown(a.target)))
             continue
         if not os.path.isfile(a.target):
             problems.append(Problem(a, MISSING_TARGET, 0,
@@ -618,7 +629,7 @@ def _prose_problems(anchors):
                 a, PROSE, len(others),
                 'also in %d other tracked file(s): %s' % (
                     len(others),
-                    ', '.join(os.path.relpath(p, ROOT).replace(os.sep, '/')
+                    ', '.join(_shown(p)
                               for p in others[:3]))))
     return problems
 
@@ -721,7 +732,7 @@ def main():
             for a in anchors:
                 print('      %-52s %s' % (
                     a.label,
-                    os.path.relpath(a.target, ROOT).replace(os.sep, '/')))
+                    _shown(a.target)))
 
     summary = ', '.join('%d %s' % (kinds[k], k.lower())
                         for k in sorted(kinds)) or 'no problems'

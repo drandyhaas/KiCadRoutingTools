@@ -157,7 +157,10 @@ def main():
     if args.list:
         for i, step in enumerate(steps, 1):
             print("  " + describe(step, i))
-    rel = os.path.relpath(out)
+    try:
+        rel = os.path.relpath(out)
+    except ValueError:      # another Windows drive: no relative path exists
+        rel = out
     shown = out if rel.startswith('..') else rel
     print("Load it in the GUI (AI tab -> Load... -> Run Selected Steps), "
           "or run it headless:")
