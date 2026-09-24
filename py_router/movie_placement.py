@@ -706,6 +706,19 @@ def fit(track, width, frame_h, max_h=None, d=None):
     return out
 
 
+def _side_fit(track, W, H, d, max_h=None):
+    """`(frac, Fit)` for three panels SIDE BY SIDE: the `SIDE_FRACS` share
+    whose panels need the least height (wider panels wrap fewer legend
+    lines), the smaller share on a tie. None when three fit in none."""
+    best = None
+    for frac in SIDE_FRACS:
+        f = fit(track, int(W * frac), H, max_h=max_h, d=d)
+        if f is not None and len(f.names) == 3 and (
+                best is None or f.need_h < best[1].need_h):
+            best = (frac, f)
+    return best
+
+
 def plan_band(track, W, H, verdict):
     """How tall the band must be for this frame, and how it splits.
 
@@ -715,19 +728,27 @@ def plan_band(track, W, H, verdict):
     up height down to its own floor first, and past that the panels are
     DECLINED (`mode == 'declined'`, with why) rather than drawn unreadable."""
     import movie_attempts as MA
+    import frame_layout as FL
     cap = int(BAND_MAX_FRAC * H)
+    if W >= FL.ISO_SIDE_ASPECT * H:
+        # LANDSCAPE: the panel is a side column and the band the one bottom
+        # row, so the band is all that stands between the board box and
+        # BOARD_MIN_SHARE of the frame -- after the rail and the foot.
+        chrome = (max(FL.RAIL_MIN_PX, FL.even(H * FL.RAIL_FRAC))
+                  + max(FL.FOOT_MIN_PX, FL.even(H * FL.FOOT_FRAC)))
+        cap = min(cap, H - chrome
+                  - int(math.ceil(FL.BOARD_MIN_SHARE * H)))
     vh = MA.band_height(W, H) if verdict else 0
     if verdict and not vh:
         verdict = False
     d = _measure_draw()
     if verdict:
-        for frac in SIDE_FRACS:
-            f = fit(track, int(W * frac), H, d=d)
-            if f is not None and len(f.names) == 3:
-                h = max(vh, f.need_h)
-                if h <= cap:
-                    return BandPlan(h + h % 2, 'side', h, h,
-                                    '3 panels beside the verdict')
+        sf = _side_fit(track, W, H, d)
+        if sf is not None:
+            h = max(vh, sf[1].need_h)
+            if h <= cap:
+                return BandPlan(h + h % 2, 'side', h, h,
+                                '3 panels beside the verdict')
     f = fit(track, W, H, d=d)
     if f is None:
         return BandPlan(vh, 'declined', vh, 0,
@@ -782,12 +803,13 @@ def split_band(box, both, track=None, frame_h=None):
         import movie_attempts as MA
         fh = frame_h or box.h * 6
         d = _measure_draw()
-        for frac in SIDE_FRACS:
-            pw = int(box.w * frac)
-            f = fit(track, pw, fh, max_h=box.h, d=d)
-            if f is not None and len(f.names) == 3:
-                return box._replace(w=pw), box._replace(x=box.x + pw,
-                                                        w=box.w - pw)
+        # max_h: the frame can be TALLER than the one planned (a legacy
+        # frame grows by its band), and a larger type size then steps down
+        sf = _side_fit(track, box.w, fh, d, max_h=box.h)
+        if sf is not None:
+            pw = int(box.w * sf[0])
+            return box._replace(w=pw), box._replace(x=box.x + pw,
+                                                    w=box.w - pw)
         f = fit(track, box.w, fh, max_h=box.h - MA.BAND_MIN_PX, d=d)
         if f is None:
             return box, None

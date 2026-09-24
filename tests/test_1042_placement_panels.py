@@ -521,6 +521,16 @@ def test_run_time_is_the_shared_x_axis():
     if dbg3.get('x_mode') != 'time':
         fail('the verdict band did not draw run time: %r'
              % dbg3.get('x_mode'))
+    # beside the placement panels the band is narrow: its caption SHORTENS
+    # to a whole clause, it is never dropped
+    for w in (600, 300):
+        im = Image.new('RGB', (w, 160))
+        dbg4 = {}
+        MA.draw_track(ImageDraw.Draw(im), FL.Box(0, 0, w, 160), vt,
+                      debug=dbg4)
+        if not str(dbg4.get('caption') or '').startswith(vt.metric):
+            fail('a %d px verdict band has no caption: %r'
+                 % (w, dbg4.get('caption')))
     if len(_FAIL) == _mark:
         print('  PASS: x is run time on both, over one ledger domain; the '
               'board order says so when there is no clock')
@@ -602,10 +612,11 @@ def test_series_colours_are_distinct_in_both_themes():
               'deuteranope too' % len(pairs))
 
 
-def _sweep_one(tr, lk, rk, size, verdict):
+def _sweep_one(tr, lk, rk, size, verdict, iso=False):
     bounds = (0, 0, 100, 60)
     kw = dict(layout=lk, ratio=FL.parse_ratio(rk), size=size,
-              panel=(lk != 'legacy'), legacy_size=(size, int(size * 0.6)))
+              panel=(lk != 'legacy'), legacy_size=(size, int(size * 0.6)),
+              iso=iso)
     g = FL.plan_frame(bounds, **kw)
     fn = MP.band_px(tr, verdict)
     bh = fn(g.frame.w, g.frame.h)
@@ -632,13 +643,18 @@ def test_readable_or_not_drawn_across_layouts_ratios_sizes():
     drawn = declined = dropped = 0
     declines = []
     for lk in ('legacy', 'stacked', 'sidebar', 'inset', 'split'):
-        for rk in (None, '16:9', '9:16', '1:1', '4:3'):
-            for size in (500, 1000, 1400):
-                for verdict in (True, False):
-                    tag = '%s/%s/%d/%s' % (lk, rk, size,
-                                           'both' if verdict else 'place')
+        for rk in (None, '16:9', '16:10', '9:16', '1:1', '4:3'):
+            land = rk in ('16:9', '16:10')
+            for size, verdict, iso in [(s_, v_, i_) for s_ in (500, 1000,
+                                                               1400)
+                                       for v_ in (True, False)
+                                       for i_ in ((False, True) if land
+                                                  else (False,))]:
+                    tag = '%s/%s/%d/%s%s' % (lk, rk, size,
+                                             'both' if verdict else 'place',
+                                             '/iso' if iso else '')
                     plan, ok, dbg, geo = _sweep_one(tr, lk, rk, size,
-                                                    verdict)
+                                                    verdict, iso)
                     if plan.mode == 'declined':
                         declined += 1
                         declines.append(tag)
@@ -659,6 +675,20 @@ def test_readable_or_not_drawn_across_layouts_ratios_sizes():
                     if g2.board.h < 0.30 * g2.frame.h - 1:
                         fail('%s: the board box is %d px of %d'
                              % (tag, g2.board.h, g2.frame.h))
+                    # LANDSCAPE keeps r4's arrangement: the board box at
+                    # >= 55% of the frame height, panel in a side column,
+                    # the band the one bottom row (#1042 review: 16:9 split
+                    # gave the board 1000x170 under a full-width lower box)
+                    if land and g2.board.h < 0.55 * g2.frame.h:
+                        fail('%s: landscape board box %dx%d is %.0f%% of a '
+                             '%d px frame' % (tag, g2.board.w, g2.board.h,
+                                              100.0 * g2.board.h
+                                              / g2.frame.h, g2.frame.h))
+                    if (land and lk in ('split', 'stacked')
+                            and g2.panel is not None
+                            and g2.panel.y >= g2.board.y + g2.board.h):
+                        fail('%s: a full-width lower box beside the band '
+                             '(%r)' % (tag, g2.panel))
                     for name, p in dbg['plots'].items():
                         # 48 is the SPEC (#1042 verification), not the
                         # module's constant: a lowered constant must fail
@@ -692,7 +722,7 @@ def test_readable_or_not_drawn_across_layouts_ratios_sizes():
     print('    %d drawn (%d with fewer panels, named), %d declined: %s'
           % (drawn, dropped, declined, ', '.join(declines)))
     if len(_FAIL) == _mark:
-        print('  PASS: 5 layouts x 5 ratios x 3 sizes x 2 bands -- every '
+        print('  PASS: 5 layouts x 6 ratios x 3 sizes x 2 bands (+iso on landscape) -- every '
               'plot >= %d px, every text whole, inside, unoverlapped'
               % MP.PLOT_MIN_PX)
 

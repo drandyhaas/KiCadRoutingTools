@@ -328,14 +328,20 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     split = None
     if not panel or spec.panel is None:
         board = Box(0, inner_y, W, inner_h)
-    elif (spec.panel in ('below', 'split') and iso
+    elif (spec.panel in ('below', 'split') and (iso or track_h)
           and W >= ISO_SIDE_ASPECT * H):
+        # A LANDSCAPE frame puts its panel in a right-hand COLUMN when there
+        # is an iso view, or a reserved band (#1042): the band is then the
+        # frame's ONE bottom row, and a full-width lower box on top of it
+        # starved the board (16:9 split, panels on: a 1000x170 board box).
+        # Without iso the whole column is the layer strip and stats.
         cw = even(W * ISO_SIDE_FRAC)
         board = Box(0, inner_y, W - cw, inner_h)
         panel_box = Box(W - cw, inner_y, cw, inner_h)
-        ih = even(inner_h * SIDEBAR_ISO_FRAC)
-        split = (Box(W - cw, inner_y, cw, ih),
-                 Box(W - cw, inner_y + ih, cw, inner_h - ih))
+        if iso:
+            ih = even(inner_h * SIDEBAR_ISO_FRAC)
+            split = (Box(W - cw, inner_y, cw, ih),
+                     Box(W - cw, inner_y + ih, cw, inner_h - ih))
     elif spec.panel == 'below':
         ph = _cap_panel(even(H * STACKED_PANEL_FRAC), H, inner_h, track_h)
         board = Box(0, inner_y, W, max(2, inner_h - ph))

@@ -844,9 +844,18 @@ its own beside the band (`py_router/movie_placement.py`):
   (placement in 46, 52 or 58 % of the width) when three panels fit there,
   else stacked with placement on top. The verdict graph gives up height down
   to its 64 px floor, and the band never takes more than `BAND_MAX_FRAC`
-  (0.48) of the frame. `frame_layout` keeps the board box itself at
-  `BOARD_ALONE_MIN_SHARE` (0.30) of the frame, so a tall band shrinks the
-  lower panel, not the board. A box too narrow for three panels keeps fewer,
+  (0.48) of the frame. A LANDSCAPE frame (w >= 1.25 h) with a band keeps
+  the side-column arrangement: board on the left, iso, layer grid and stats
+  in a right-hand column (`ISO_SIDE_FRAC`, with or without iso), and the
+  band as the one bottom row, placement panels left and verdict right. The
+  band is capped there so the board box keeps `BOARD_MIN_SHARE` (0.55) of the
+  frame height after the rail and the foot. Side by side, placement takes
+  whichever of 46, 52 or 58 % of the width needs the least height. A
+  full-width lower box under the board as well as the band left a 16:9 split
+  frame a 1000x170 board box before this. Elsewhere `frame_layout` keeps the
+  board box at `BOARD_ALONE_MIN_SHARE` (0.30) of the frame, so a tall band
+  shrinks the lower panel, not the board. The verdict band's caption shortens
+  to whole clauses when it sits beside the panels, and is never dropped. A box too narrow for three panels keeps fewer,
   INTENT then LEGALITY then ARRANGEMENT, and the header names what was
   dropped. When nothing readable fits, the panels are declined and the
   status line says why. Measured over 5 layouts × 5 ratios × {500, 1000,

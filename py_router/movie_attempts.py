@@ -909,14 +909,19 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
             else '  [log scale]' if symlog else '') + (
             '  [x: run time]' if timed else '')
         cap = '%s  -  %s' % (metric, track.note)
-        if d.textlength(cap, font=f) <= (px1 - px0) * 0.92:
-            d.text((px1, box.y + 3), cap, fill=th.rgb('chrome_text_dim'),
-                   font=f, anchor='ra')
-            taken.append(_bbox((px1, box.y + 3), cap, f, 'ra'))
-        elif d.textlength(metric, font=f) <= (px1 - px0) * 0.92:
-            d.text((px1, box.y + 3), metric,
-                   fill=th.rgb('chrome_text_dim'), font=f, anchor='ra')
-            taken.append(_bbox((px1, box.y + 3), metric, f, 'ra'))
+        # WHOLE captions only, longest first: the note, then the axis
+        # qualifiers, and at the last the metric alone -- a band beside the
+        # placement panels is ~450 px wide and used to lose its caption
+        # entirely, leaving an axis that said nothing about what it plots.
+        short = track.metric + ('  [x: run time]' if timed else '')
+        for c in (cap, metric, short, track.metric):
+            if d.textlength(c, font=f) <= (px1 - px0) * 0.92:
+                d.text((px1, box.y + 3), c,
+                       fill=th.rgb('chrome_text_dim'), font=f, anchor='ra')
+                taken.append(_bbox((px1, box.y + 3), c, f, 'ra'))
+                if debug is not None:
+                    debug['caption'] = c
+                break
 
         vis = [a for a in rows if a.index <= horizon]
         pos = {a.index: (X(a.index), Y(a.score) if a.score is not None else py1)
