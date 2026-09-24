@@ -140,20 +140,31 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
     full-size via bodies/drills collide (VIA-VIA / hole-to-hole) or graze a foreign
     via/pad, and nothing on the solo-switch path validated them (only the bare-pad
     TARGET swap did, via #241). The swap itself is fine (the pair genuinely needs
-    that layer), so SHRINK the new vias toward the fab via floor until they fit;
-    only if even the floor via still overlaps does the caller revert the swap.
+    that layer), so SHRINK the new vias toward the deepest escalation rung until
+    they fit; only if even that via still overlaps does the caller revert the swap.
 
     Returns True if the vias fit (possibly after shrinking, mutating size/drill in
     place so the writer emits the shrunk via); False if they can't be made to fit
-    without going below the fab floor (originals restored). #277."""
+    without going below the floor (originals restored). #277."""
     if not new_vias:
         return True
     if _bare_pad_pair_vias_fit(pcb_data, new_vias, config)[0]:
         return True
-    from fab_tiers import fab_floor_for_param
+    from fab_tiers import escalation_rungs, warn_fab_escalation, note_narrowing
     copper = sum(1 for l in config.layers if l.endswith('.Cu'))
-    via_floor = fab_floor_for_param('via_diameter', copper) or 0.25
-    drill_floor = fab_floor_for_param('via_drill', copper) or 0.15
+    # escalation_rungs, never the physical fab floor: empty under --escalation
+    # off (the vias stay as asked and the caller reverts the swap), bounded by
+    # a hard tier, raised to the board's own minimums under board (#857) and to
+    # the stricter of the two nets' rule minimums (#530).
+    net_floors = {}
+    for v in new_vias:
+        for k, f in config.rule_floors(v.net_id).items():
+            net_floors[k] = max(net_floors.get(k, 0.0), f)
+    ladder = escalation_rungs(copper, extra_floors=net_floors)
+    if not ladder:
+        return False
+    via_floor = ladder[-1]['via_diameter']
+    drill_floor = ladder[-1]['via_drill']
     orig = [(v.size, v.drill) for v in new_vias]
     ANNULAR = 0.1  # keep body - drill >= this (2x ring) as we shrink
     size = config.via_size
@@ -165,6 +176,11 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
         for v in new_vias:
             v.size, v.drill = size, drill
         if _bare_pad_pair_vias_fit(pcb_data, new_vias, config)[0]:
+            if size < ladder[0]['via_diameter'] - 1e-9:
+                warn_fab_escalation("layer-swap pad vias")
+            for v in new_vias:
+                note_narrowing(v.net_id, 'via_diameter', config.via_size, size,
+                               'layer-swap pad via')
             return True
     for v, (s, d) in zip(new_vias, orig):
         v.size, v.drill = s, d
