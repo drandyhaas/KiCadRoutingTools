@@ -846,7 +846,13 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         # #1020: this step's OWN board answers the box, so the inventory
         # empties as the board fills and a seeding beat is a seeding beat.
         m.refresh_placement(pcb, board)
-        # Every step draws its OWN board's pads (#1036), stage or not.
+        # Every step draws its OWN board's pads (#1036), stage or not. The
+        # board it REPLACES is handed to the stage, whose camera shots before
+        # a placement beat must show the parts where they WERE -- otherwise
+        # the establishing shot shows the finished placement, and the parts
+        # then jump back into the pile to glide out of it.
+        if stage is not None:
+            stage.prev_pcb = r.pcb
         r.pcb = pcb
         if mode == 'revert':
             m.reconcile_to(seg_rows, via_rows, label)

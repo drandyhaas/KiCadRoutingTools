@@ -195,6 +195,34 @@ def test_each_step_draws_its_own_boards_pads():
         'the opening frame still shows the FINAL board\'s pads'
 
 
+def test_the_shots_before_a_glide_show_the_board_as_it_was():
+    """#1036, seen on the run-32 render: `build_boards` re-points `r.pcb` at
+    the step's board BEFORE `enter_step` drains the camera shots queued ahead
+    of the action, so the establishing shot showed the FINISHED placement and
+    the parts then jumped back to glide out of the pile. The shots before the
+    action must be drawn on the PREVIOUS board."""
+    import movie_camera as MC
+    rounds = MC.synth_rounds([SEED, PLACED])
+    st = MC.Stage(rounds, '', tween=4)
+    seen = []
+    orig = MC.Stage._emit
+
+    def _spy(self, kind, views, label, side=None):
+        seen.append((kind, os.path.basename(
+            getattr(self.r.pcb, 'source_path', '') or '')))
+        return orig(self, kind, views, label, side)
+    MC.Stage._emit = _spy
+    try:
+        A.build_boards([('seed', SEED, None), ('placed', PLACED, None)],
+                       PLACED, 200, 1, None, 2, 6, stage=st)
+    finally:
+        MC.Stage._emit = orig
+    pre = [b for k, b in seen if k != 'outro']
+    assert pre, seen
+    assert all(b == os.path.basename(SEED) for b in pre), \
+        ('a shot before the glide was drawn on the destination board', seen)
+
+
 def test_synthesised_rounds_zoom_and_frame_the_pile():
     """#1036: `make_movie` on a board LIST passes work_dir='' and synthesised
     rounds carry ABSOLUTE board paths. `Stage._plan` parsed the round's board
@@ -550,6 +578,7 @@ TESTS = [
     test_leading_copper_free_boards_are_counted,
     test_each_step_draws_its_own_boards_pads,
     test_synthesised_rounds_zoom_and_frame_the_pile,
+    test_the_shots_before_a_glide_show_the_board_as_it_was,
     test_build_boards_signature_keeps_stage_optional,
     test_moving_parts_animates_only_with_a_stage,
     test_only_accepted_rounds_enter_the_chain,

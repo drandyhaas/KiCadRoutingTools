@@ -617,7 +617,19 @@ class Stage:
         if rd is None or not self.moving_parts:
             return False
         moved = rd.get('moved') or []
-        self._drain_until_action(label)
+        # The camera shots queued before this action are shot on the board
+        # as it WAS (#1036): `build_boards` has already re-pointed `r.pcb` at
+        # this step's board, so without the swap the establishing shot showed
+        # the finished placement and the parts then jumped back to glide.
+        prev = getattr(self, 'prev_pcb', None)
+        if prev is not None and prev is not pcb:
+            cur, self.r.pcb = self.r.pcb, prev
+            try:
+                self._drain_until_action(label)
+            finally:
+                self.r.pcb = cur
+        else:
+            self._drain_until_action(label)
 
         # silent clear: the copper of the PREVIOUS round is genuinely gone.
         # That is a fact about the LOOP -- it re-routes from scratch every
