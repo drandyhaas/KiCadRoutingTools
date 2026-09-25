@@ -174,7 +174,10 @@ finally:
 #    off the hole on BOTH sides. NEAR (1.5mm) clears h2h (1.427) but its
 #    copper edge sits 1.5 - 1.05 - 0.275 = 0.175mm from the wall, inside a
 #    declared 0.25 (needs 1.575). The no-override case above pins that a board
-#    declaring NOTHING is untouched.
+#    whose project declares NOTHING is untouched. In a real chain that is only
+#    step 1: route.py's DRC writeback writes rules.min_hole_clearance into
+#    each route step's output project, so every later step reads as
+#    declaring a floor.
 # --------------------------------------------------------------------------
 def blocked_at_declared(path, xy, hole_clr):
     pcb = parse_kicad_pcb(path)
