@@ -766,16 +766,18 @@ takes a parent explicitly (#1034).
 
 **The axis breaks when a few attempts dwarf the rest.** Run 32's ledger
 opens at blocking 12 703 (the unplaced pile) and spends about 200 laps between
-19 and 43. On a linear axis those laps share one pixel row. A symlog axis,
-tried first, still left them the top ~7% of the band, and the record's drops
-41 → 38 → 33 → 32 → 30 could not be seen. So the working range (every graded
-attempt up to the 90th percentile, `WORK_PCTL`, padded) gets the main plot.
-The attempts above it are compressed on a log scale into a thin strip at the
-bottom (`STRIP_FRAC` 0.18) under a break mark, and the caption says
-`[axis broken above N]`. It breaks only when the worst attempt is at least
-`BREAK_RATIO` (2×) the working range's top. `tests/test_1036_attempts_axis.py`
-checks that the working laps span at least half the plot on the run-32 ledger
-and on a synthetic track, and that symlog and linear both fail that check.
+19 and 43. On a linear axis those laps share one pixel row, and the record's
+drops 41 → 38 → 33 → 32 → 30 cannot be seen. So the working range (every
+graded attempt up to the 90th percentile, `WORK_PCTL`, padded) gets the main
+plot. The attempts above it are compressed on a log scale into a thin strip at
+the bottom (`STRIP_FRAC` 0.18) under a break mark, and the caption says
+`[axis broken above N]`. The break is offset-based: it happens only when the
+gap between the worst attempt and the working range's top is larger than
+`BREAK_RATIO − 1` (1×) times the working range's own span, so it behaves the
+same for negative scores. Otherwise, or when the broken axis cannot be drawn,
+the whole range is one linear scale. `tests/test_1036_attempts_axis.py` checks
+that the working laps span at least half the plot on the run-32 ledger and on
+a synthetic track, and that a linear axis and a log axis both fail that check.
 
 **Nothing is synthesised.** No sidecars and no ledger means no band, and the
 status line says so in words. One attempt is also an OFF arm — `attach` then
@@ -876,8 +878,7 @@ its own beside the band (`py_router/movie_placement.py`):
   `--attempts-ledger` feeds both the verdict band and the panels, so a film
   rendered from copies away from the run directory still has both.
 
-Measured on run 32's boards in `wk/run32`, the numbers reproduce #1042's table
-to the digit:
+On run 32's glasgow_revC chain (#1042) the panels read:
 
 | board | off-outline parts | conflict pairs | overlap mm² | crossings | hpwl mm | floorplan: `check_floorplan --intent` | floorplan: ledger |
 |---|---|---|---|---|---|---|---|
@@ -885,15 +886,6 @@ to the digit:
 | placed_v2 | 0 | 6 | 23.69 | 3740 | 5760 | 12 | 12 (row 9) |
 | placed_v3 | 0 | 6 | 23.69 | 3750 | 5743 | 11 | 11 (row 53) |
 | glasgow_revC (the human benchmark) | 0 | 10 | 70.05 | 1352 | 3641 | | |
-
-The table's 303 is ledger row 0's stored `board_score` floorplan. It is not a
-different instrument's view of the pile. It was scored under a different rule
-set: `rules_run` 10 with `must_lock` graded, and about 230
-`zone_containment` violations, where row 9 ran 9 rules. Grading row 0's board
-with `check_floorplan --intent glasgow.intent.json` gives 130 (the
-verifier's measurement; that board, `pinned.kicad_pcb`, is not in
-`wk/run32` here). The same board, two numbers from two instruments, is why a
-line reads from one.
 
 ### The ghost and the arrow
 

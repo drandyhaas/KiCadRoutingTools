@@ -3,10 +3,9 @@
 
 A search spends most of its laps in a narrow WORKING RANGE and a few attempts
 far outside it. Run 32 opens at blocking 12703 and spends ~200 laps between
-19 and 43: on the symlog axis this band used first, all of those laps sat in
-the top ~7% of the plot and the record's drops 41 -> 38 -> 33 -> 32 -> 30
-were invisible. The axis is now BROKEN -- the working range gets the plot,
-the outliers a thin strip under a break mark.
+19 and 43, and the record's drops there (41 -> 38 -> 33 -> 32 -> 30) are the
+part worth seeing. The axis is BROKEN -- the working range gets the plot, the
+outliers a thin strip under a break mark.
 
 Pinned here, on the run-32 ledger when a machine has it (self-skipped and
 SAID otherwise) and always on a synthetic track with one huge outlier:
@@ -15,8 +14,10 @@ SAID otherwise) and always on a synthetic track with one huge outlier:
     at least half the plot height;
   * the record step line visibly descends across the working range (at least
     three distinct record rows, each 2+ px apart);
-  * CONTROL: with the axis switched back to 'symlog' or 'linear' the same
-    check FAILS -- a check both old axes pass would prove nothing.
+  * CONTROL: the same check FAILS on a plain linear axis (the band's own
+    fallback, drawn by `_draw_track(_mode='linear')`) and on a log axis
+    computed here from the same values -- a check either of those passed
+    would prove nothing about the working range.
 
 And `join_tracks` no longer repeats a half's "ungraded" clause in its note.
 """
@@ -63,11 +64,35 @@ def _synthetic():
     return MA.Track(rows, 'blocking (lower better)', 'converge', 'synthetic')
 
 
-def _measure(track, w=1400, h=126):
+def _draw_dbg(track, mode=None, w=1400, h=126):
+    """The drawer's debug record: `draw_track` (the broken axis), or the
+    linear fallback itself when `mode='linear'`."""
     dbg = {}
     im = Image.new('RGB', (w, h))
-    if not MA.draw_track(ImageDraw.Draw(im), FL.Box(0, 0, w, h), track,
-                         debug=dbg):
+    d, box = ImageDraw.Draw(im), FL.Box(0, 0, w, h)
+    ok = (MA._draw_track(d, box, track, debug=dbg, _mode=mode) if mode
+          else MA.draw_track(d, box, track, debug=dbg))
+    return dbg if ok else None
+
+
+def _log_axis(dbg):
+    """CONTROL: the same values on a log10(1 + v) axis over the same plot --
+    computed HERE, so the shipped drawer carries no axis it does not use."""
+    import math
+    px0, py0, px1, py1 = dbg['plot']
+    vals = [v for v, _y in dbg['ys']]
+    f = [math.log10(1.0 + max(0.0, v)) for v in vals]
+    fmin, fmax = min(f), max(f)
+    if fmax - fmin < 1e-12:
+        return None
+    ys = [(v, py0 + (py1 - py0) * ((fv - fmin) / (fmax - fmin)))
+          for v, fv in zip(vals, f)]
+    return dict(dbg, ys=ys, mode='log (control)')
+
+
+def _measure(track, mode=None, dbg=None):
+    dbg = dbg if dbg is not None else _draw_dbg(track, mode)
+    if dbg is None:
         return None
     px0, py0, px1, py1 = dbg['plot']
     graded = sorted(v for v, _y in dbg['ys'])
@@ -83,8 +108,8 @@ def _measure(track, w=1400, h=126):
     return span, steps + 1 if rys else 0, dbg.get('mode')
 
 
-def _check(track, name, expect_pass=True):
-    got = _measure(track)
+def _check(track, name, expect_pass=True, mode=None, dbg=None):
+    got = _measure(track, mode=mode, dbg=dbg)
     if got is None:
         fail('BROKEN: %s: the band declined' % name)
         return None
@@ -111,25 +136,25 @@ def test_the_working_range_gets_the_plot():
         if got:
             print('    %-14s %s axis: working laps span %.0f%%, record %d rows'
                   % (name, got[3], 100 * got[1], got[2]))
-        # CONTROL: both rejected axes must FAIL the same check
-        saved = MA.AXIS_MODE
-        try:
-            for mode in ('symlog', 'linear'):
-                MA.AXIS_MODE = mode
-                c = _check(t, name, expect_pass=False)
-                if c and c[0]:
-                    fail('BROKEN: %s passes on the %s axis too (span %.0f%%) '
-                         '-- the check cannot see the defect'
-                         % (name, mode, 100 * c[1]))
-                elif c:
-                    print('    %-14s CONTROL %s: span %.0f%%, record %d rows '
-                          '-> fails, as it must' % (name, mode, 100 * c[1],
-                                                   c[2]))
-        finally:
-            MA.AXIS_MODE = saved
+        # CONTROL: a linear axis and a log axis must both FAIL the check
+        lin = _draw_dbg(t, mode='linear')
+        for ctl, dbg in (('linear', lin),
+                         ('log', _log_axis(lin) if lin else None)):
+            if dbg is None:
+                fail('BROKEN: %s: the %s control could not be drawn'
+                     % (name, ctl))
+                continue
+            c = _check(t, name, expect_pass=False, dbg=dbg)
+            if c and c[0]:
+                fail('BROKEN: %s passes on the %s axis too (span %.0f%%) '
+                     '-- the check cannot see the defect'
+                     % (name, ctl, 100 * c[1]))
+            elif c:
+                print('    %-14s CONTROL %s: span %.0f%%, record %d rows '
+                      '-> fails, as it must' % (name, ctl, 100 * c[1], c[2]))
     if len(_FAIL) == _mark:
         print('  PASS: the working range gets >= 50% of the plot and the '
-              'record descends across it; symlog and linear both fail')
+              'record descends across it; linear and log both fail')
 
 
 def test_a_joined_note_states_ungraded_once():

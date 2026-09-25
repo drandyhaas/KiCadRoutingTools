@@ -133,14 +133,15 @@ BAND_MIN_PX = 64
 #: a smaller band, it is a different picture.
 BAND_MAX_FRAC = 0.34
 
-#: The band's Y axis (#946 review): 'broken' (the working range gets the plot,
-#: outliers a thin log strip under a break mark), or the two it replaced,
-#: 'symlog' and 'linear', kept so a test can show it tells them apart.
-AXIS_MODE = 'broken'
+#: The band's Y axis (#946 review) is BROKEN: the working range gets the
+#: plot, the outliers a thin log strip under a break mark. A band whose
+#: broken axis cannot draw falls back to one linear scale.
 #: The working range is every graded attempt up to this percentile.
 WORK_PCTL = 0.90
-#: The axis breaks only when the worst attempt is this many times the working
-#: range's top; otherwise the whole range is one linear scale.
+#: The axis breaks only when the GAP above the working range's top (the worst
+#: attempt minus that top) exceeds `BREAK_RATIO - 1` times the working range's
+#: own span; otherwise the whole range is one linear scale. Offset-based, so
+#: it means the same thing for negative scores.
 BREAK_RATIO = 2.0
 #: The outlier strip's share of the plot height.
 STRIP_FRAC = 0.18
@@ -723,12 +724,12 @@ def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
     font metric is the trade this repo refuses (`movie_panels._finite`).
 
     **A reserved band is never left blank** (#1036 review): when the
-    `AXIS_MODE` axis fails to draw, the plain linear axis is drawn instead
+    broken axis fails to draw, the plain linear axis is drawn instead
     (the box is repainted first, so nothing half-drawn survives).
     """
     ok = _draw_track(d, box, track, upto=upto, theme=theme, debug=debug,
-                     _mode=AXIS_MODE)
-    if not ok and AXIS_MODE != 'linear':
+                     _mode='broken')
+    if not ok:
         ok = _draw_track(d, box, track, upto=upto, theme=theme, debug=debug,
                          _mode='linear')
     return ok
@@ -766,17 +767,14 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
         # THE Y AXIS (#946 review). A search spends most of its laps in a
         # narrow WORKING RANGE and a few attempts far outside it: run 32 opens
         # at blocking 12703 (the unplaced pile) and spends ~200 laps between
-        # 19 and 43. A linear axis puts all of those laps on one pixel row; the
-        # symlog axis this used first still gave them the top ~7% of the band,
-        # so the record's drops 41 -> 38 -> 33 -> 32 -> 30 were invisible.
+        # 19 and 43. A linear axis puts all of those laps on one pixel row, so
+        # the record's drops 41 -> 38 -> 33 -> 32 -> 30 are invisible.
         #
         # So the axis is BROKEN, the way the owner's evolve_movie Ribbon makes
         # progress readable: the working range -- every graded attempt up to
         # the WORK_PCTL percentile, padded -- gets the main plot, and the
         # outliers above it are compressed (log) into a thin strip at the
-        # bottom, under a visible break mark. `AXIS_MODE` keeps the two
-        # rejected axes callable, because the test proves it can tell them
-        # apart.
+        # bottom, under a visible break mark.
         import math
         srt = sorted(graded)
         hi_w = (srt[max(0, int(math.ceil(WORK_PCTL * len(srt))) - 1)]
@@ -792,8 +790,6 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
         _gap = vmax - hi_w
         broken = (_mode == 'broken' and _wspan > 0 and _gap > 0
                   and _gap > (BREAK_RATIO - 1.0) * _wspan)
-        symlog = (_mode == 'symlog' and vmin >= 0
-                  and vmax > 50.0 * (vmin + 1.0))
         ph = py1 - py0
         if broken:
             _r = _wspan
@@ -808,12 +804,8 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
                 t = math.log1p(v - w_hi) / max(1e-9, _top)
                 return s0 + (py1 - s0) * t
         else:
-            def _fy(v):
-                return math.log10(1.0 + max(0.0, v)) if symlog else v
-            fmin, fmax = _fy(vmin), _fy(vmax)
-
             def Y(v):
-                return py0 + ph * ((_fy(v) - fmin) / (fmax - fmin))
+                return py0 + ph * ((v - vmin) / (vmax - vmin))
         xs = [a.index for a in rows]
         x0v, x1v = min(xs), max(xs)
         span = max(1, x1v - x0v)
@@ -846,7 +838,7 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
             if av >= 1000:
                 return '%.1fk' % (v / 1000.0)
             # PRECISION FROM THE SPAN (#1036 review): rounding to integers
-            # on the broken and symlog axes labelled a 0.12..0.9 axis 0/1/1.
+            # labelled a 0.12..0.9 axis 0/1/1.
             # The caption's "[axis broken above X]" uses this same function.
             return '%g' % round(v, _decimals)
 
@@ -867,9 +859,6 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
             ticks = [vmin, (vmin + hi_w) / 2.0, hi_w, vmax]
         else:
             ticks = [vmin, (vmin + vmax) / 2.0, vmax]
-            if symlog:
-                ticks = [10.0 ** (fmin + k * (fmax - fmin)) - 1.0
-                         for k in (0.0, 0.5, 1.0)]
         last_y = None
         for v in ticks:
             yy = Y(v)
@@ -895,8 +884,7 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
         if debug is not None:
             debug['plot'] = (px0, py0, px1, py1)
             debug['x_mode'] = 'time' if timed else 'index'
-            debug['mode'] = ('broken' if broken else
-                             'symlog' if symlog else 'linear')
+            debug['mode'] = 'broken' if broken else 'linear'
             debug['work_hi'] = hi_w
             debug['ys'] = [(v, Y(v)) for v in graded]
         # The caption is the axis's meaning plus the disclosure, and it is
@@ -906,7 +894,7 @@ def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
         # 'failures (lower bet...' invites the reader to guess the rest.
         metric = track.metric + (
             '  [axis broken above %s]' % _tick(hi_w) if broken
-            else '  [log scale]' if symlog else '') + (
+            else '') + (
             '  [x: run time]' if timed else '')
         cap = '%s  -  %s' % (metric, track.note)
         # WHOLE captions only, longest first: the note, then the axis
