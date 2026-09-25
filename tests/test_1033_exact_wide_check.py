@@ -109,11 +109,9 @@ def main():
     wide_vs_narrow('foreign track', board(
         segs=[make_seg(0.0, 0.3, 2.0, 0.3, width=0.2, net_id=FOREIGN)]))
 
-    # 6. net class on a foreign PAD (sampled term only): class 0.25, edge 0.35
-    #    away: 0.3 needs 0.4, 0.127 needs 0.3135. The exact confirm prices the
-    #    pad at the pair/override clearance only, so ONLY the sampled term
-    #    (which folds the class excess) refuses -- the sampled-pad and
-    #    net_clearances mutants both die here.
+    # 6. net class on a foreign PAD: class 0.25, edge 0.35 away: 0.3 needs
+    #    0.4, 0.127 needs 0.3135. Both pad terms refuse -- the sampled one
+    #    folds the class excess, the exact confirm prices the pair at it.
     fp = make_pad(FOREIGN, 1.0, 0.35 + 0.2, ref='R1', num='1', size_x=0.4,
                   size_y=0.4, net_name='SIG')
     c6 = cfg()
@@ -136,8 +134,7 @@ def main():
     check('F&B.Cu THT pad: the SAMPLED term sees it (expanded layer view)',
           d_view < 0.1 + 0.15 - 1e-4, round(d_view, 4))
     # ...and through clears() itself: an F&B.Cu pad whose CLASS clearance
-    # (0.25) is what refuses -- the exact confirm prices pair/override only,
-    # so only a sampled term that SEES F&B.Cu pads can refuse this one
+    # (0.25) is what refuses
     tht2 = make_pad(FOREIGN, 1.0, 0.35 + 0.4, ref='J2', num='1', size_x=0.8,
                     size_y=0.8, shape='circle', layers=('F&B.Cu', '*.Mask'),
                     drill=0.4, pad_type='thru_hole', net_name='SIG')
@@ -145,6 +142,49 @@ def main():
     c8.net_clearances = {FOREIGN: 0.25}
     wide_vs_narrow('F&B.Cu THT pad net class (sampled term, expanded view)',
                    board(pads=[tht2]), c8)
+
+    # 8c. the exact confirm prices the pad at the PAIR clearance check_drc
+    #     grades (the foreign pad's class, then the .kicad_dru layer rule
+    #     replacing it, then a pad override replacing that). A CUSTOM-polygon
+    #     pad isolates it: the sampled term measures custom pads exactly but
+    #     folds only their local override, not the foreign class, so here the
+    #     exact confirm is the only term that can see the class. Pad edge 0.35
+    #     off the centreline, class 0.25: 0.3 needs 0.4 (a 0.05 graze
+    #     check_drc flags), 0.127 needs 0.3135.
+    from check_drc import check_pad_segment_overlap
+
+    def custom_pad(**kw):
+        y0 = 0.35
+        cpad = make_pad(FOREIGN, 1.0, y0 + 0.2, ref='U7', num='1', size_x=0.4,
+                        size_y=0.4, shape='custom', net_name='SIG', **kw)
+        cpad.polygons = [[(0.8, y0), (1.2, y0), (1.2, y0 + 0.4),
+                          (0.8, y0 + 0.4)]]
+        return cpad
+    cp = custom_pad()
+    wide_seg = make_seg(*PIECE[:4], width=0.3, net_id=NET, layer='F.Cu')
+    check('custom pad at class 0.25: check_drc really grades 0.3 as a graze',
+          check_pad_segment_overlap(cp, wide_seg, 0.25, ['F.Cu', 'B.Cu'],
+                                    0.0)[0])
+    c8c = cfg()
+    c8c.net_clearances = {FOREIGN: 0.25}
+    chk8c = wide_vs_narrow('custom pad, foreign net class (exact confirm)',
+                           board(pads=[cp]), c8c)
+    check('pad_pair_clearance: the foreign class raises the pair',
+          abs(chk8c.pad_pair_clearance(cp, 'F.Cu') - 0.25) < 1e-9)
+    c8r = cfg()
+    c8r.net_clearances = {FOREIGN: 0.25}
+    c8r.layer_clearances = {'F.Cu': 0.1}
+    chk8r = ExactWideCheck(board(pads=[cp]), c8r, NET)
+    check('pad_pair_clearance: a .kicad_dru layer rule REPLACES the class '
+          '(check_drc semantics), so 0.3 clears at the relaxed 0.1',
+          abs(chk8r.pad_pair_clearance(cp, 'F.Cu') - 0.1) < 1e-9
+          and chk8r.clears(*PIECE, 0.3) is True)
+    cpo = custom_pad(local_clearance=0.12)
+    chk8o = ExactWideCheck(board(pads=[cpo]), c8c, NET)
+    check('pad_pair_clearance: a pad override REPLACES the class (floored at '
+          'the board minimum), so 0.3 clears at 0.12',
+          abs(chk8o.pad_pair_clearance(cpo, 'F.Cu') - 0.12) < 1e-9
+          and chk8o.clears(*PIECE, 0.3) is True)
 
     # 9. exact confirm is the strict word at the boundary: pad edge exactly
     #    5e-5 inside the 0.3 requirement -- the sampled term's 1e-4 slack

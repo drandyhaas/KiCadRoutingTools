@@ -19,10 +19,11 @@ clears, else keeps the width it shipped with, so nothing ever gets narrower.
 The check is exact geometry at the net's pair clearance (#498 layer rule
 applied) -- the measurements check_drc grades -- against foreign pads (the
 sampled distance over an expanded-layer view, then check_drc's exact pad
-copper, #1029), tracks (incl. .kicad_dru track rules), vias, NPTH holes at the
-declared hole floor, the board edge and NPTH slots, rule-area keep-outs
-(``*.Cu`` / ``F&B.Cu`` resolved), ``--keepout`` zones when enabled, and
-footprint graphic copper (foreign to every net here: no #908 own-pad lift).
+copper at the pair clearance check_drc grades: both nets' classes, the layer
+rule, the pad override, #1029), tracks (incl. .kicad_dru track rules), vias,
+NPTH holes at the declared hole floor, the board edge and NPTH slots, rule-area
+keep-outs (``*.Cu`` / ``F&B.Cu`` resolved), ``--keepout`` zones when enabled,
+and footprint graphic copper (foreign to every net here: no #908 own-pad lift).
 The grid map is not consulted: its endpoint regions are obstacle-exempt.
 
 Limits: foreign pours are not modelled (the refill decides), copper laid
@@ -230,24 +231,41 @@ class ExactWideCheck:
         if not self._graphics_ok(x1, y1, x2, y2, layer, w, eff):
             return False
         # #1029: the grader's EXACT pad copper as the final word on pads
-        # (rect / roundrect / oval / custom polygon, rotation, overrides).
+        # (rect / roundrect / oval / custom polygon, rotation), each priced at
+        # the PAIR clearance check_drc grades it at (pad_pair_clearance).
         from check_drc import check_pad_segment_overlap
         seg = Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2, width=w,
                       layer=layer, net_id=nid)
-        reach = w / 2.0 + eff + 1.0
         for p in self.foreign_pads.get(layer, ()):
-            ext = math.hypot(p.size_x, p.size_y) / 2.0 + reach
+            clr = self.pad_pair_clearance(p, layer)
+            ext = math.hypot(p.size_x, p.size_y) / 2.0 + w / 2.0 + clr + 1.0
             if (p.global_x < min(x1, x2) - ext or p.global_x > max(x1, x2) + ext
                     or p.global_y < min(y1, y2) - ext
                     or p.global_y > max(y1, y2) + ext):
                 continue
-            clr = eff
-            if hasattr(self.cfg, 'pad_override_clearance'):
-                clr = self.cfg.pad_override_clearance(eff, p)
             if check_pad_segment_overlap(p, seg, clr, self.layers or [layer],
                                          0.0)[0]:
                 return False
         return True
+
+    def pad_pair_clearance(self, pad, layer) -> float:
+        """The clearance check_drc grades this net's track against foreign
+        `pad` on `layer` at (its `_pad_pair_cl`), resolved with the router's
+        own helpers rather than re-derived: the pair's class clearance -- the
+        larger of both nets' ``config.obstacle_clearance``, so the FOREIGN
+        pad's net class counts -- then the .kicad_dru layer rule REPLACING it
+        (``config.layer_clearance``, #498), then a pad / footprint override
+        REPLACING that, floored at rules.min_clearance
+        (``config.pad_override_clearance``, #326)."""
+        cfg = self.cfg
+        clr = self.own
+        if hasattr(cfg, 'obstacle_clearance'):
+            clr = max(clr, cfg.obstacle_clearance(getattr(pad, 'net_id', 0)))
+        if hasattr(cfg, 'layer_clearance'):
+            clr = cfg.layer_clearance(layer, clr)
+        if hasattr(cfg, 'pad_override_clearance'):
+            clr = cfg.pad_override_clearance(clr, pad)
+        return clr
 
     def _graphics_ok(self, x1, y1, x2, y2, layer, w, eff):
         """Footprint graphic copper on `layer`, foreign to EVERY net here
