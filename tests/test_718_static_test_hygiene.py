@@ -60,11 +60,12 @@ ROOT = os.path.dirname(TESTS_DIR)
 _WK_DEPENDENT = {
     # #1032 part B only: the issue's own K3A lap, which really CUTS the In1
     # GND pour. Part A (the engine wiring on both fronts, on a TRACKED board)
-    # runs on a clean clone; without the run-32 assets the file exits 77.
+    # runs on a clean clone, so without the run-32 assets part B is skipped
+    # and the file still exits 0.
     'test_1032_gate_excludes_plan_nets.py': ['wk/run32/K3A_it1_g.kicad_pcb'],
     # #1038 repro arm only: routed_c3's two J5 TRACK-HOLE items. The
-    # synthetic origin/control arms run on a clean clone; absent the asset
-    # the file exits 77.
+    # synthetic origin/control arms run on a clean clone, so absent the asset
+    # the repro is skipped and the file still exits 0.
     'test_1038_hole_clearance_origin.py': ['wk/run32/routed_c3.kicad_pcb'],
     # #788 Arm B only: it re-grades 14 declared study boards to prove the
     # committed literals still match the instrument. Arm A -- the claim

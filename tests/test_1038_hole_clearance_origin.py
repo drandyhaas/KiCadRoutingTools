@@ -15,8 +15,9 @@ graded at --clearance 0.1:
     hole_clearance 0.25 from fab_floor_origin;
   * the same board with NO origin -> clean at the 0.20 fab floor (control:
     the origin, and nothing else, is what raised it).
-Repro (self-skips with 77 when wk/run32 is absent): routed_c3 now reports
-J5's two TRACK-HOLE items by default.
+Repro (only when wk/run32 is staged; the file still PASSES without it, since
+the synthetic arms above always assert): routed_c3 now reports J5's two
+TRACK-HOLE items by default.
 
     python3 tests/test_1038_hole_clearance_origin.py
 """
@@ -132,11 +133,15 @@ def main():
         print(f'{len(fails)} FAILURE(S): {fails}')
         return 1
 
-    # The issue's own repro, when the run-32 assets are staged.
+    # The issue's own repro, when the run-32 assets are staged. The synthetic
+    # arms above always assert (a generated board), so the file is a PASS
+    # without it: exit 77 is reserved for a file that asserted nothing, and
+    # run_all fails a 77 with no "SKIP:" line.
     if not os.path.isfile(RUN32):
-        print('SKIP: wk/run32/routed_c3.kicad_pcb absent -- the synthetic '
-              'checks above passed; the repro was not run')
-        return 77
+        print('SKIP (repro): wk/run32/routed_c3.kicad_pcb absent -- the '
+              'synthetic checks above passed; the repro was not run')
+        print('all checks passed (repro skipped)')
+        return 0
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, 'c3.json')
         _r3 = check([sys.executable, '-X', 'utf8', CHECK_DRC, RUN32,
