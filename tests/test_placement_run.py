@@ -72,6 +72,25 @@ check("staged .kicad_pro sibling",
       os.path.isfile(os.path.join(wk, "input.kicad_pro")))
 check("staged .kicad_dru sibling",
       os.path.isfile(os.path.join(wk, "input.kicad_dru")))
+check("no mechanical.json staged when the board dir has none",
+      not os.path.exists(os.path.join(wk, "mechanical.json")))
+
+# mechanical.json is a DIRECTORY file beside the board, not a stem sibling,
+# and discover_mechanical reads it from the run board's own directory -- so it
+# must be staged into the workdir under the same name or the run never sees it.
+open(os.path.join(board_dir, "mechanical.json"), "w").write('{"anchors": []}\n')
+wk_mech = create_workdir(board, "place")
+staged_mech = stage_inputs(wk_mech, snapshot, board)
+check("staged mechanical.json beside input.kicad_pcb",
+      os.path.isfile(os.path.join(wk_mech, "mechanical.json"))
+      and '"anchors"' in open(os.path.join(wk_mech, "mechanical.json")).read())
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py_placer'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py_router'))
+from placement.reconcile import discover_mechanical  # noqa: E402
+check("discover_mechanical finds it from the STAGED board",
+      os.path.normcase(discover_mechanical(staged_mech))
+      == os.path.normcase(os.path.join(wk_mech, "mechanical.json")),
+      discover_mechanical(staged_mech))
 
 # ------------------------------------------------------------- instructions
 

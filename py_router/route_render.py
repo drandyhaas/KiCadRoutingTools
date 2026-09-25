@@ -177,6 +177,11 @@ def _rot(cx: float, cy: float, dx: float, dy: float, ang_deg: float) -> Tuple[fl
     return (cx + dx * ca - dy * sa, cy + dx * sa + dy * ca)
 
 
+#: The margin a LAYOUT-chosen canvas keeps around the board, as a share of the
+#: canvas's short side (`BoardRenderer.set_canvas`, #946 review).
+CANVAS_MARGIN_FRAC = 0.035
+
+
 class BoardRenderer:
     """Render a parsed board to PIL images, geometry-first.
 
@@ -260,12 +265,19 @@ class BoardRenderer:
         of a board-shaped renderer. Naming it makes the seam supported and
         removes the duplicate substrate build that poke caused.
 
-        **`_margin_px` is deliberately NOT recomputed.** It is
-        `margin_frac * size * ss`, keyed off `size` rather than off W/H, and
-        `tests/test_431_render_seams.py:42-53` pins that arithmetic to 1e-12.
-        A canvas override is about the BOX, not about the margin rule.
+        **The margin follows the BOX here** (#946 review). `__init__`'s margin
+        is `margin_frac * size * ss`, keyed off the longest frame dimension,
+        and `tests/test_431_render_seams.py:42-53` pins that arithmetic to
+        1e-12 for the default canvas -- which is untouched. But a layout box
+        is a fraction of the frame, so a size-keyed margin became a large
+        share of it: a 16:9 film's 980x594 box kept 42 px each side, and at
+        size 400 a 124 px tall box kept 12 px of its 124. On a canvas the
+        LAYOUT chose, the margin is `CANVAS_MARGIN_FRAC` of the box's short
+        side instead.
         """
         self.W, self.H = max(2, int(width)), max(2, int(height))
+        self._margin_px = (CANVAS_MARGIN_FRAC * min(self.W, self.H)
+                           * self.ss)
         self.set_view(getattr(self, '_view', None))
 
     def set_layers(self, layers: Optional[Sequence[str]] = None) -> None:
@@ -849,9 +861,10 @@ def main() -> int:
                     help='anti-alias factor; 1 = fastest, 2 = crisp (default 2)')
     ap.add_argument('--layers', default=None,
                     help='comma-separated copper layers to draw (default: all)')
-    ap.add_argument('--layer-alpha', type=int, default=150,
+    ap.add_argument('--layer-alpha', type=int, default=None,
                     help='per-layer copper opacity 1-255; <255 blends overlapping '
-                         'layers at crossings, 255 = opaque (default 150)')
+                         'layers at crossings, 255 = opaque (default: the '
+                         'theme\'s own measured alpha, dark 150, light 205)')
     ap.add_argument('--no-pads', action='store_true')
     ap.add_argument('--no-zones', action='store_true')
     ap.add_argument('--view', default=None, metavar='X0,Y0,X1,Y1',
@@ -862,7 +875,7 @@ def main() -> int:
                     help='draw reference designators at footprint origins (a '
                          'cross marks the exact JSON coordinate). Default: on '
                          'for a --view crop, off whole-board')
-    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--ruler', default=None, action=argparse.BooleanOptionalAction,
                     help='mm coordinate ticks along the top/left edges, so the '
                          'picture is matchable to JSON coordinates. Default: '

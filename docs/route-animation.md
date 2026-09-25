@@ -108,7 +108,7 @@ with per-layer transparency so overlaps blend at crossings.
 
 ```bash
 python3 py_router/route_render.py BOARD.kicad_pcb [-o OUT.png] [--size 1600]
-    [--supersample 2] [--layer-alpha 150] [--no-pads] [--no-zones]
+    [--supersample 2] [--layer-alpha N] [--no-pads] [--no-zones]
     [--layers F.Cu,B.Cu]
 ```
 
@@ -197,7 +197,52 @@ The **output extension picks the format**:
   (bundles a static ffmpeg binary — no system install). If unavailable, the
   animator falls back to writing a sibling `.gif`.
 - **`.gif`** (default) — native Pillow, **no dependency**, autoplays inline in
-  chat / Markdown / GitHub issue bodies. Larger and 256-color.
+  chat / Markdown / GitHub issue bodies. Larger and 256-color. Pillow's GIF
+  writer holds every frame it is given, so a film over 260 frames is
+  **strided** to fit (one frame in N kept, each lasting N frame-times, the way
+  `awx/evolve_movie.py` does it), and the animator says so. The `.mp4` is never
+  strided.
+
+### Memory and the frame budget (#1036)
+
+`make_movie` spools every frame to a temp directory as it is drawn
+(`py_router/frame_spool.py`) and applies the post-passes (the planned frame,
+the attempts band, the run clock, the iso panel) per frame while the encoder
+streams. Run 32's 22-board chain reached 29.5 GB before this change. How
+flat memory stays depends on the output. An `.mp4` (imageio-ffmpeg) is encoded
+one frame at a time, so memory does not grow with the frame count. A `.gif`,
+which is also what an `.mp4` falls back to without imageio, goes through
+Pillow's writer, which holds every frame it is handed. The stride caps that at
+`GIF_MAX_FRAMES` (260) frames, so GIF memory grows up to the cap and then stays
+there. `tests/test_1036_streaming.py` measures whichever case the machine can
+render, from the platform's own peak-RSS counter (no psutil): 6x the frames as
+an `.mp4`, or two GIFs both over the cap. Either way peak RSS stays flat,
+while the same frames held in a list grow by about 300 MB.
+
+**An overlay that fails costs the overlay, not the film.** The attempts band,
+the run clock and the iso panel are drawn while the encoder streams, so a frame
+one of them cannot draw would otherwise surface in the encoder. That overlay is
+instead dropped from that frame to the end of the film, `movie: <overlay>
+DROPPED` is printed once, and the film is still written at one size. A frame
+that cannot be composed at all is re-raised as its own error. It is never
+reported as `mp4 encode failed`.
+
+**The spool uses disk instead.** A spooled 1400 px frame is about 1.27 MB,
+so a 6000-frame film spools about 7.6 GB into the temp directory. Before
+drawing, `make_movie` estimates the film and checks the free space
+(`frame_spool.disk_check`, with a 20% margin). When the spool will not fit it
+prints `SPOOL DISK` with the numbers, and an unbudgeted (`--max-frames 0`)
+film falls back to the default budget. `make_film.py` streams through the same
+spool: its board frames first, then the assembled film with its cards. It takes
+the same `--max-frames` and makes the same disk check, and both spools are
+removed on every way out, including a failed write.
+
+A per-segment route trace plays one frame per event, and a long one makes a
+film nobody watches to the end. `--max-frames N` (default
+`$KICAD_MOVIE_MAX_FRAMES`, else 2400; `0` = no budget) is the film's frame
+budget. Each traced step gets a fair share of what is left, and a trace that
+does not fit its share is revealed in `--chunks` batches instead. The movie
+prints `TRACE OVER BUDGET` naming the step.
 
 ---
 
@@ -216,6 +261,8 @@ per board:
 reveal). See the [stress-test runbook](../tests/stress/RUNBOOK.md#run-artifacts-final-snapshot--routing-movie-482).
 
 ## Placement movies: the camera (#431)
+
+**The camera turns itself on for a placement chain (#1036).** When `--camera` is not given and consecutive boards differ in part POSES, `make_movie` uses `auto` and says so. A move counts only at `$KICAD_MOVIE_MOVE_MIN_MM` (0.5 mm) or more, or with any rotation. Below that it is drift, which the per-step substrate draws without a camera. A 0.05 mm nudge used to switch a whole routing film to the placement camera.
 
 `make_movie.py` animates a `place_route_loop` work dir as well as a routing
 chain. It detects one by the `loop_round{N}.json` sidecars the loop writes --
@@ -497,6 +544,31 @@ existing movie bit-for-bit"*): making `auto` the default would change the shape
 of every existing artifact — the GUI recorder's, `place_route_loop`'s
 `placement.mp4`, `render_run`'s.
 
+**A declared size is kept.** With `--aspect` given, or a layout with an aspect
+of its own (`stacked`, `sidebar`, `split`), the frame is exactly that size.
+The attempts band is reserved inside it (`plan_frame(track_px=)`), out of the
+board's share. It used to be grown under every frame afterwards, so a 16:9 film
+with a band came out taller than 16:9. `tests/test_946_frame_layout.py` checks
+the whole layout × ratio cross product as plan data, and encodes 30 real films
+(5 layouts × 3 ratios × 2 themes) and reads their size back. Two things still
+grow the frame, and the status lines say so: the run clock (its height is
+measured from the finished text) and the iso view on `legacy`/`inset`, which
+have no panel to put it in.
+
+**The 3D view goes into the layout's own panel** with `--panels xray+iso` on
+`make_movie.py` or `make_film.py`. On `stacked` and `split` the lower box is
+split left/right (the iso view gets 42% of the width). On `sidebar` the column
+is split top/bottom. The per-layer strip draws into the other half. The panel's
+gate is asked before the frame is planned (`movie_panels.preflight`), so a
+board that would be gated as mostly bare gets no empty box reserved for it.
+
+**Themes reach every region.** The cards and badges in `make_film`, the iso
+panel's ground, caption strip and error text, and the run clock's band draw in
+the active theme. `--theme` takes `dark` or `light` in any case and refuses anything else.
+`--layer-alpha` defaults to the theme's own measured alpha (dark 150, light
+205). The CLIs used to pass 150 explicitly, so LIGHT's measured 205 was never
+used.
+
 | layout | arrangement | frame aspect | px/mm on copper | px per layer cell |
 |---|---|---|---|---|
 | `stacked` | board full width, panel below | 0.62:1 | 10.00 | 113 000 |
@@ -504,6 +576,8 @@ of every existing artifact — the GUI recorder's, `place_route_loop`'s
 | `inset` | board fills frame, panel a corner inset | 1.85:1 | **15.76** | 28 490 |
 | `split` | board on top, lower box split | 1.60:1 | 11.06 | **128 800** |
 | `auto` | `sidebar` on a wide board, `stacked` otherwise, **`legacy` on an extreme one** | — | — | — |
+
+`inset` covers part of the board with its corner panel **by design**. It is the layout that trades the panel for copper pixels, and the pads under the inset are hidden for the whole film. Use `split` or `stacked` when every pad must stay visible.
 
 *(one pixel budget — 1.62 Mpx — on a 1.85:1 board, four cells across the
 panel.)* **Re-derive it rather than trusting it:**
@@ -673,6 +747,44 @@ staircase collapses to a single point.
 component that was asked for could not answer. Neither is dropped and neither is
 plotted at the axis floor: they are a tick on the rail, counted in the caption.
 
+**A place-and-route run is ONE graph.** A combined run leaves two records of
+its search: the converge ledger (placement laps and routing laps, told apart by
+`kind`), and `loop_round*.json` sidecars when `place_route_loop` ran. When both
+sit next to the boards, `movie_attempts.discover` joins them
+(`join_tracks`). The x-axis counts laps across both halves: the half that
+started first keeps its indices and the other is shifted past it. The second
+half's root descends from the first half's last kept attempt. Both axes are a
+blocking term (`score.blocking`, `failures`), and the label names both. A loop
+ranked on an `--accept-cmd` scalar is not joined, and the note says it was left
+out.
+
+**x is run time when the ledger has a clock (#1042).** A converge ledger's
+rows carry `t`. When every attempt has one, x is run time over the ledger's
+whole span, placement laps included, and the caption adds `[x: run time]`. The
+placement panels draw the same domain. A joined converge + loop graph has no
+time on its loop half, so it keeps the lap index.
+
+**Lineage follows `parent_sha`.** A ledger row with no `parent_sha`, or one
+naming a board no row produced, is drawn from the last accepted row before it,
+which is the loop's own rule. The caption counts those guesses, because under
+parallel lineages the guess can be wrong. They stay guesses until `record`
+takes a parent explicitly (#1034).
+
+**The axis breaks when a few attempts dwarf the rest.** Run 32's ledger
+opens at blocking 12 703 (the unplaced pile) and spends about 200 laps between
+19 and 43. On a linear axis those laps share one pixel row, and the record's
+drops 41 → 38 → 33 → 32 → 30 cannot be seen. So the working range (every
+graded attempt up to the 90th percentile, `WORK_PCTL`, padded) gets the main
+plot. The attempts above it are compressed on a log scale into a thin strip at
+the bottom (`STRIP_FRAC` 0.18) under a break mark, and the caption says
+`[axis broken above N]`. The break is offset-based: it happens only when the
+gap between the worst attempt and the working range's top is larger than
+`BREAK_RATIO − 1` (1×) times the working range's own span, so it behaves the
+same for negative scores. Otherwise, or when the broken axis cannot be drawn,
+the whole range is one linear scale. `tests/test_1036_attempts_axis.py` checks
+that the working laps span at least half the plot on the run-32 ledger and on
+a synthetic track, and that a linear axis and a log axis both fail that check.
+
 **Nothing is synthesised.** No sidecars and no ledger means no band, and the
 status line says so in words. One attempt is also an OFF arm — `attach` then
 returns the frame list completely untouched, the same list object holding the
@@ -685,6 +797,105 @@ same images.
 | `BAND_FRAC` (`py_router/movie_attempts.py`) | 0.16 |
 | `BAND_MIN_PX` (`py_router/movie_attempts.py`) | 64 |
 | `BAND_MAX_FRAC` (`py_router/movie_attempts.py`) | 0.34 |
+
+### The placement panels (#1042)
+
+The attempts band keeps the routed VERDICT on its axis. A converge ledger's
+placement lap scores the copper-free board, where `blocking` is every net
+unrouted: run 32's accepted placement rows read 267 → 251 → 239 on that axis
+while the laps moved floorplan errors 41 → 11. So when the ledger also holds
+graded routing laps, or loop rounds supply the routing half, placement laps are
+taken OFF the verdict axis and the caption counts them. A placement-only ledger
+has no routed verdict to protect: its laps are the whole search, so the band
+draws them, as `make_film --from-ledger` does for the placement skill's film.
+Placement gets three panels of its own beside the band
+(`py_router/movie_placement.py`):
+
+| panel | y | series | instrument |
+|---|---|---|---|
+| LEGALITY | log | off-outline parts, conflict pairs, overlap mm² | `render_placement --json-out` |
+| ARRANGEMENT (screen) | own axis each | airwire crossings (left), hpwl mm (right); dashed benchmark lines | `render_placement --json-out` |
+| INTENT | linear | floorplan errors | `check_floorplan --intent` on every board, else the ledger's `board_score` |
+
+- **Measured in process.** The numbers are the ones `render_placement
+  --json-out` writes, computed by its own `PlacementModel` and
+  `legality_findings`, and `check_floorplan.main` runs in the same process.
+  Nothing starts a subprocess of `sys.executable`: inside KiCad that is the
+  pcbnew binary, and a child started that way hangs
+  (`kicad_routing_plugin/deps_check.py`). About 3 s per board for each
+  instrument, cached by board sha.
+- **Cheap gates first.** Before anything is measured, the chain must have at
+  least two copper-free boards and a part must have moved between them
+  (poses are parsed, no instrument runs). A routing chain whose first
+  snapshot is copper-free measures nothing.
+- **One instrument per line.** With `--floorplan-intent`, INTENT is
+  `check_floorplan --intent` on every board, the pile included. Without it,
+  INTENT is the ledger's own `score.blocking_by.floorplan`, labelled
+  `ledger board_score`. A board no row scores is unmeasured. The two
+  instruments are never mixed on one line.
+- **Unmeasured is said.** A board the instrument cannot answer for (no
+  parts, an unreadable file) is marked on the axis and listed on the status
+  line, never plotted as zero. With no intent and no ledger, the INTENT plot
+  reads "unmeasured".
+- **x is run time** when the ledger carries `t`, over the same domain the
+  verdict band draws (`movie_attempts.ledger_time_domain`, every row,
+  placement laps included). A re-entry sits where it happened. A board no
+  row names (the pile, the run's input) sits at the start. Boards closer
+  than `MIN_BEAT_PX` (8) are spread to it so each keeps its own point.
+  Without a clock, x is the board order. The header says which.
+- **One point per placement board.** Never per frame, because a glide's
+  frames are pixel interpolation, not evaluated placements. Points appear
+  board by board. A beat changes on the frame its glide LANDS
+  (`build_boards(lands_out=)`), the same frame the inventory changes. Before
+  the first beat lands, no point and no flag is drawn. Once the film is
+  routing, the header says "placement settled".
+- **The floor is in the legend.** When the last board's conflict pairs are
+  all contacts between KiCad-locked parts (`metrics.locked_contact_pairs`),
+  the legend reads "floor N = locked parts", and a dashed line marks the
+  value.
+- **Defect flags.** A ledger row with `kind == classification` and
+  `shape == placement` flags the first placement board after it. The flag is
+  a numbered marker in a lane above the INTENT plot, off every series line.
+  Flags on one board stack. The legend carries the lever's headline, the
+  text before its first ':', wrapped at words and never cut.
+- **Readable or not drawn.** Every plot is at least `PLOT_MIN_PX` (48) tall,
+  and every title, footer line and legend word renders whole.
+  `movie_placement.plan_band` sizes the band for this frame: side by side
+  (placement in 46, 52 or 58 % of the width) when three panels fit there,
+  else stacked with placement on top. The verdict graph gives up height down
+  to its 64 px floor, and the band never takes more than `BAND_MAX_FRAC`
+  (0.48) of the frame. A LANDSCAPE frame (w >= 1.25 h) with a band keeps
+  the side-column arrangement: board on the left, iso, layer grid and stats
+  in a right-hand column (`ISO_SIDE_FRAC`, with or without iso), and the
+  band as the one bottom row, placement panels left and verdict right. The
+  band is capped there so the board box keeps `BOARD_MIN_SHARE` (0.55) of the
+  frame height after the rail and the foot. Side by side, placement takes
+  whichever of 46, 52 or 58 % of the width needs the least height. A
+  full-width lower box under the board as well as the band left a 16:9 split
+  frame a 1000x170 board box before this. Elsewhere `frame_layout` keeps the
+  board box at `BOARD_ALONE_MIN_SHARE` (0.30) of the frame, so a tall band
+  shrinks the lower panel, not the board. The verdict band's caption shortens
+  to whole clauses when it sits beside the panels, and is never dropped. A box too narrow for three panels keeps fewer,
+  INTENT then LEGALITY then ARRANGEMENT, and the header names what was
+  dropped. When nothing readable fits, the panels are declined and the
+  status line says why. Measured over 5 layouts × 5 ratios × {500, 1000,
+  1400} px: every frame at 1000 and 1400 draws. At 500 px, landscape frames
+  decline, and so does any frame that also carries the verdict graph. A
+  failed draw repaints the box and says so.
+- **Flags.** `--attempts-ledger PATH`, `--benchmark-board PATH` (the human's
+  board or a previous run, drawn dashed), `--floorplan-intent PATH` and
+  `--no-placement-panel` exist on both `make_movie.py` and `make_film.py`.
+  `--attempts-ledger` feeds both the verdict band and the panels, so a film
+  rendered from copies away from the run directory still has both.
+
+On run 32's glasgow_revC chain (#1042) the panels read:
+
+| board | off-outline parts | conflict pairs | overlap mm² | crossings | hpwl mm | floorplan: `check_floorplan --intent` | floorplan: ledger |
+|---|---|---|---|---|---|---|---|
+| the pile | 243 | 3214 | 9503.03 | 10974 | 4834 | 131 | no row |
+| placed_v2 | 0 | 6 | 23.69 | 3740 | 5760 | 12 | 12 (row 9) |
+| placed_v3 | 0 | 6 | 23.69 | 3750 | 5743 | 11 | 11 (row 53) |
+| glasgow_revC (the human benchmark) | 0 | 10 | 70.05 | 1352 | 3641 | | |
 
 ### The ghost and the arrow
 

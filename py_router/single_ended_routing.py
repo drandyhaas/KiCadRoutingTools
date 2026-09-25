@@ -1683,13 +1683,19 @@ def _free_on_pad_cells(pad, layer_idx, config, obstacles, coord,
     track/2) so a landing there adds no copper edge nearer any obstacle than
     the pad itself already has. Non-axis-aligned (rect_rotation) pads yield
     nothing. Part of the #479 blocked-terminal seeding (see callers)."""
-    if getattr(pad, 'rect_rotation', 0.0):
+    # The landing rule is shared with placement's keep-out channel (#1031),
+    # which must not accept a pose this function would find no cell on.
+    from net_queries import pad_landing_extent
+    # getattr: connectivity._EndpointStub (zero size, no `shape`) reaches
+    # here from the end-of-run reconciliation; it must yield no cells, not
+    # raise.
+    _ext = pad_landing_extent(pad.size_x, pad.size_y,
+                              getattr(pad, 'shape', None),
+                              getattr(pad, 'rect_rotation', 0.0),
+                              config.track_width)
+    if _ext is None:
         return []
-    half_x = (pad.size_x or 0.0) / 2.0 - config.track_width / 2.0
-    half_y = (pad.size_y or 0.0) / 2.0 - config.track_width / 2.0
-    if half_x <= 0 or half_y <= 0:
-        return []
-    round_outline = pad.shape in ('circle', 'oval')
+    half_x, half_y, round_outline = _ext
     gx0, gy0 = coord.to_grid(pad.global_x - half_x, pad.global_y - half_y)
     gx1, gy1 = coord.to_grid(pad.global_x + half_x, pad.global_y + half_y)
     cells = []

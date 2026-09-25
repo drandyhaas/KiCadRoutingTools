@@ -144,6 +144,7 @@ Every proposal reports the corridor (*who* yielded, and how far) and a
 off the constraint graph's own shortest path. Every refusal is a named reason,
 never a count: `no_room_at_any_dose`, `block_member_locked:<ref>`,
 `geometry_worsened:<ref>`, `declared_keepout_refused_a_shift:<ref>`,
+`rule_area_keepout_refused_a_shift:<ref>` (a board rule-area band, #1031),
 `corridor_over_budget`, and the rest are enumerated in `relocate.py`.
 
 **The mechanism holds; the routed result does not support the feature.**

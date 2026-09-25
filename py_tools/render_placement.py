@@ -311,6 +311,8 @@ def legality_findings(model) -> Dict[str, object]:
         return cached
     out = {'oob_refs_pad_copper': [], 'oob_refs_courtyard': [],
            'oob_refs_graphic_copper': [], 'graphic_copper_unmeasured': [],
+           'keepout_copper_refs': [], 'keepout_copper_pads': [],
+           'keepout_copper_unmeasured': [],
            'pad_conflict_pairs_refs': [], 'hole_conflict_pairs_refs': [],
            'body_overlap_pairs_refs': [],
            'courtyard_overlap_pairs_refs': [],
@@ -397,6 +399,22 @@ def legality_findings(model) -> Dict[str, object]:
         _gc = _graphic_copper_findings(model, state)
         out['oob_refs_graphic_copper'] = _gc['refs']
         out['graphic_copper_unmeasured'] = _gc['unmeasured']
+        # #1031: pads in a board rule-area keep-out band, at the model's
+        # PROPOSED poses -- the one measurement grade_pad_legality makes at
+        # the file's poses (legality.keepout_pad_findings).
+        try:
+            from placement.legality import keepout_pad_findings
+            _ko = keepout_pad_findings(
+                getattr(ctx, 'keepouts', None), ctx.parts,
+                lambda r: ((state.parts[r].x, state.parts[r].y,
+                            state.parts[r].rot)
+                           if r in state.parts else None))
+            out['keepout_copper_refs'] = _ko['oob_keepout_copper_refs']
+            out['keepout_copper_pads'] = _ko['keepout_copper_pads']
+            out['keepout_copper_unmeasured'] = _ko['keepout_copper_unmeasured']
+        except Exception as e:                               # noqa: BLE001
+            out['keepout_copper_unmeasured'] = [['*', 'error', '%s: %s'
+                                                 % (type(e).__name__, e)]]
         refs = sorted(ctx.parts)
         for i, a in enumerate(refs):
             pa = state.parts.get(a)
@@ -1863,7 +1881,7 @@ Examples:
                         "JSON checklist then carries d={moved, expected, "
                         "match} -- mandate 8's question (d), quotable instead "
                         'of recalled (run-4 G5)')
-    p.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    p.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     p.add_argument('--quiet', action='store_true',
                    help='suppress narration. With --json-out it now also '
                         'suppresses the stdout JSON_SUMMARY echo and the '
@@ -2365,6 +2383,22 @@ def main(argv=None):
     # I/O, so building both unconditionally costs nothing; the JSON EMISSIONS
     # below stay gated on the flags that asked for them.
     fnd = legality_findings(model)
+    # #1031: the same keep-out census on the --before board, at the same
+    # clearance, so a consumer can tell a band pad the INPUT already had (a
+    # human reference: rp2350 C6.2) from one this placement put there -- the
+    # #962 --baseline idea. None without --before, or when the census on the
+    # before board could not be built: a consumer then judges ABSOLUTELY.
+    _ko_before = None
+    if args.before:
+        try:
+            from placement.legality import board_keepout_findings
+            _ko_before = board_keepout_findings(
+                parse_kicad_pcb(args.before),
+                model.floor_knobs.get('clearance', {}).get('value')
+                or args.clearance or 0.25,
+                args.before)['oob_keepout_copper_refs']
+        except Exception:                                  # noqa: BLE001
+            _ko_before = None
     doc = {
         'panels': [{'label': s.label, 'side': s.side, 'view': s.view,
                     'path': w} for s, w in zip(panels, written)],
@@ -2445,7 +2479,14 @@ def main(argv=None):
                 'courtyard': fnd['oob_refs_courtyard'],
                 # #962: footprint graphic copper past the outline
                 'graphic_copper': fnd.get('oob_refs_graphic_copper', []),
-                'graphic_copper_unmeasured': fnd.get('graphic_copper_unmeasured', [])},
+                'graphic_copper_unmeasured': fnd.get('graphic_copper_unmeasured', []),
+                # #1031: parts with a pad in a board rule-area keep-out band
+                # (no track can land). ALWAYS emitted, [] when clean.
+                'keepout_copper': fnd.get('keepout_copper_refs', []),
+                'keepout_copper_pads': fnd.get('keepout_copper_pads', []),
+                'keepout_copper_unmeasured': fnd.get('keepout_copper_unmeasured', []),
+                # the --before board's own [[ref, amount]], or None
+                'keepout_copper_before': _ko_before},
             # run-6 key honesty: the old 'b_overlap_pairs' NAME carried
             # the PAD-CLEARANCE channel, and a reader auditing overlap
             # with b_overlap_pairs=[] concluded there was none while two
@@ -2609,6 +2650,14 @@ def main(argv=None):
                 len(doc['checklist']['a_off_outline']['courtyard']),
             'a_off_outline.graphic_copper':
                 len(doc['checklist']['a_off_outline']['graphic_copper']),
+            'a_off_outline.keepout_copper':
+                len(doc['checklist']['a_off_outline']['keepout_copper']),
+            # a keep-out census that could not be BUILT is not a clean one
+            # (#1031): its error row fails the gate like a finding
+            'a_off_outline.keepout_copper_unmeasured(error)':
+                sum(1 for _u in doc['checklist']['a_off_outline'].get(
+                    'keepout_copper_unmeasured') or ()
+                    if len(_u) > 1 and _u[1] == 'error'),
             'b_pad_clearance_pairs':
                 len(doc['checklist']['b_pad_clearance_pairs']),
             'b_body_overlap_pairs':

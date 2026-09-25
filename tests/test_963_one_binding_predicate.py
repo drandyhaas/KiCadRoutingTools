@@ -83,6 +83,10 @@ NOT_THE_PREDICATE = {
     ('loop_driver.py', '_cross_check'):
         'are these the BYTES the --final row quoted -- compares a verdict '
         "file's sha against the lens_source the row stored (#963 item C)",
+    ('py_placer/converge.py', '_resolve_parent'):
+        'which STORED board was this lap made from (#1034) -- compares an '
+        "--argv board's sha to the OUTPUT board's, so the output is never "
+        'its own parent; no score is involved',
 }
 
 

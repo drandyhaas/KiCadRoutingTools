@@ -911,7 +911,7 @@ def clock_band_height(all_lines, width, frame_h):
     return (lh * worst + 2 * _CLOCK_PAD) if worst else 0
 
 
-def add_clock_band(frame, lines, band_h):
+def add_clock_band(frame, lines, band_h, theme=None):
     """``frame`` with a clock BAND grown underneath it. Returns a NEW image.
 
     **The band exists instead of an overlay, and that is the whole point.** The
@@ -935,7 +935,9 @@ def add_clock_band(frame, lines, band_h):
     from PIL import Image, ImageDraw
 
     W, H = frame.size
-    from render_theme import DARK as _TH
+    # The ACTIVE theme (#946/C4); it was DARK whatever `--theme` said.
+    import render_theme
+    _TH = render_theme.theme(theme, strict=False)
     out = Image.new('RGB', (W, H + int(band_h)), _TH.rgb('chrome_band'))
     out.paste(frame, (0, 0))
     d = ImageDraw.Draw(out)

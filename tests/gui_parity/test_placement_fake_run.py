@@ -14,6 +14,7 @@ and hand it to the CLI on stdin.
 Run: python3 tests/gui_parity/test_placement_fake_run.py
 (re-execs into KiCad's bundled python automatically, like its siblings)
 """
+import glob
 import os
 import subprocess
 import sys
@@ -25,11 +26,17 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(
 FAKE_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        'fixtures', 'fake_claude.py')
 
+# Every versioned install, newest first by NUMERIC version (a string sort
+# puts KiCad\9.0 above KiCad\10.0).
+sys.path.insert(0, os.path.join(REPO, 'py_router'))
+from kicad_locate import path_version_key  # noqa: E402
+del sys.path[0]    # this file orders its own sys.path further down
 KICAD_PYTHONS = [
     '/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/'
     'Versions/Current/bin/python3',
     '/usr/bin/python3',
-    r'C:\Program Files\KiCad\10.0\bin\python.exe',
+    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
+           key=path_version_key, reverse=True),
 ]
 
 

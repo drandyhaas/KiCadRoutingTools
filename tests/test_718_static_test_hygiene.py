@@ -67,11 +67,21 @@ _WK_DEPENDENT = {
     # synthetic origin/control arms run on a clean clone, so absent the asset
     # the repro is skipped and the file still exits 0.
     'test_1038_hole_clearance_origin.py': ['wk/run32/routed_c3.kicad_pcb'],
+    # #1031's run-32 repro only (exit 77 without it). The synthetic
+    # test_1031_keepout_legality.py covers every invariant on a clean clone.
+    'test_1031_keepout_run32_repro.py': ['wk/run32/placed_v2.kicad_pcb'],
     # #788 Arm B only: it re-grades 14 declared study boards to prove the
     # committed literals still match the instrument. Arm A -- the claim
     # those literals support -- runs on a clean clone and is what keeps
     # this file from being green-while-covering-nothing when wk/ is absent.
     'test_788_marginal_literals.py': ['wk/703/study'],
+    # #1036 CORROBORATION only: the run-32 value checks (glide inventory,
+    # band labels on the real ledger) run when a machine has run 32; every
+    # claim in the file is also pinned on tracked kicad_files/ boards, and the
+    # absent case is SAID in the summary line, not passed silently.
+    'test_1036_review_fixes.py': ['wk/run32'],
+    'test_1036_attempts_axis.py': ['wk/run32'],
+    'test_1042_placement_panels.py': ['wk/run32'],
     # #887 CORROBORATION only. The regression lives in
     # test_887_cmd_timing_reader.py, against two small tracked fixtures, and
     # passes in full on a clean clone. This arm re-derives run 24's published
@@ -605,6 +615,74 @@ def test_every_test_is_registered_in_its_files_own_list():
     print('  PASS: every registry-style test file lists all its tests')
 
 
+def _needs_pytest(src):
+    """Why this test file's tests run only under pytest -- or None.
+
+    Two shapes. It imports pytest, which is not a dependency (absent from
+    requirements.txt and from the suite image), so a plain run dies with
+    ModuleNotFoundError. Or it defines tests and has no `__main__` runner, so a
+    plain run defines them, runs none, and exits 0.
+    """
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+                a.name.split('.')[0] == 'pytest' for a in node.names):
+            return 'imports pytest'
+        if (isinstance(node, ast.ImportFrom)
+                and (node.module or '').split('.')[0] == 'pytest'):
+            return 'imports from pytest'
+    if _guard_end(tree) is None:
+        names = [n for node in tree.body for n in [_defines_tests(node)] if n]
+        if names:
+            return (f'defines {len(names)} test(s) and has no `__main__` '
+                    f'runner, so a plain run executes none of them')
+    return None
+
+
+def test_no_test_file_needs_pytest():
+    """Every test file must run as a plain script; none may need pytest.
+
+    run_all.py runs each file as a script and grades its exit code -- on the
+    suite image too, which does not install pytest. A pytest import dies at
+    once, which is at least loud. A file of bare `def test_*(tmp_path)`
+    functions with no runner is silent: it defines its tests, runs none, exits
+    0, and is recorded PASS. test_615_build_router_branch_guard did exactly
+    that from #615 until 2026-09-24 -- 13 tests on build_router's branch guard,
+    never run -- and the gate above could not see it, because it asks what is
+    defined AFTER the runner and skips a file that has no runner at all.
+    """
+    good = ("def test_a():\n    pass\n\n\n"
+            "if __name__ == '__main__':\n    test_a()\n")
+    for label, snippet in (
+            ('a runner-less test file', 'def test_a(tmp_path):\n    pass\n'),
+            ('a runner-less TestCase', 'class T:\n    def test_a(self):\n'
+                                       '        pass\n'),
+            ('an `import pytest`', 'import pytest\n' + good),
+            ('a `from pytest import`', 'from pytest import raises\n' + good)):
+        assert _needs_pytest(snippet), (
+            f'the scanner cleared {label} -- it has stopped seeing the shape '
+            f'it exists for, so a clean tree below would mean nothing')
+    assert _needs_pytest(good) is None, 'the scanner flagged a plain-script file'
+
+    bad, scanned = {}, 0
+    for rel, src in _py_files(only_tests=True):
+        try:
+            why = _needs_pytest(src)
+        except SyntaxError:                                # pragma: no cover
+            continue
+        scanned += 1
+        if why:
+            bad[rel] = why
+    assert not bad, (
+        'test file(s) that only pytest can run, which neither run_all nor the '
+        'suite image uses:\n  ' + '\n  '.join(
+            f'{rel}: {why}' for rel, why in sorted(bad.items()))
+        + '\n  Give the file an `if __name__ == \'__main__\':` runner that '
+          'calls its tests, and replace pytest fixtures with the stdlib '
+          '(tempfile, unittest.mock) -- see test_615_build_router_branch_guard.')
+    print(f'  PASS: no test file needs pytest, over {scanned} test file(s)')
+
+
 #: Every committed `.json`/`.jsonl` baseline under `tests/`, mapped to the test
 #: that READS it and fails when it is wrong -- or, in `_BASELINE_UNGATED`, to
 #: the reason it has none (#879).
@@ -999,8 +1077,8 @@ _UNRESOLVABLE = {}
 #: `mutate_975.py`; 53 before #983/#987/#988 added `mutate_983.py`; 54
 #: before #962 added `mutate_962.py`; 55 before #959 added `mutate_959.py`;
 #: 56 before #963 added `mutate_963.py`; 57 before #946 added
-#: `mutate_946.py`.
-_BATTERY_COUNT = 58
+#: `mutate_946.py`; 58 before #1042 added `mutate_1042.py`.
+_BATTERY_COUNT = 59
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.
@@ -1115,6 +1193,7 @@ TESTS = [
     test_no_module_scope_posix_only_import,
     test_no_test_is_defined_after_its_own_runner,
     test_every_test_is_registered_in_its_files_own_list,
+    test_no_test_file_needs_pytest,
     test_every_committed_baseline_is_declared,
     test_every_mutation_anchor_matches_exactly_once,
 ]

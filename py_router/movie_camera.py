@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 Rect = Tuple[float, float, float, float]
 
@@ -400,10 +400,26 @@ class Stage:
         self.r = renderer
         self.layers = layers
         self._overview = renderer.bounds
+        # #1036: a chain that opens on an unplaced PILE has parts outside the
+        # outline (run 32's glasgow pile reaches 13 mm below the board). The
+        # overview must hold where the parts come FROM, or the glide starts
+        # off-frame; `synth_rounds` records that as each round's `extent`.
+        for rd in self.rounds:
+            ext = rd.get('extent')
+            if ext and len(ext) == 4:
+                b = self._overview
+                self._overview = (min(b[0], ext[0]), min(b[1], ext[1]),
+                                  max(b[2], ext[2]), max(b[3], ext[3]))
         for rd in self.rounds:
             if rd.get('board'):
-                self._by_board[os.path.basename(rd['board'])] = rd
+                self._by_board[self._key(rd['board'])] = rd
         self._plan()
+        # THE OPENING FRAME holds the pile (#1036 verifier): `build_boards`
+        # snapshots "input" right after this, and at the board's own bounds
+        # an off-board pile was clipped -- then the establishing shot jumped
+        # out to the overview three frames later.
+        if tuple(self._overview) != tuple(renderer.bounds):
+            self._aim(self._overview)
 
     def _aim(self, view):
         """Point the renderer at `view`, accounting for the flip.
@@ -495,13 +511,27 @@ class Stage:
                 continue
             pcb = None
             moved = rd.get('moved') or []
-            if moved and self.work_dir:
+            # A SYNTHESISED round (`synth_rounds`) records an ABSOLUTE board
+            # path and there is no work dir: `make_movie` on a board list
+            # passes ''. Requiring a work dir here meant every hand-driven
+            # chain planned its placement shots with no box, so the camera
+            # never zoomed on the parts that moved (#1036).
+            if moved and (self.work_dir or os.path.isabs(rd['board'])):
                 try:
-                    pcb = parse_kicad_pcb(os.path.join(self.work_dir, rd['board']))
+                    pcb = parse_kicad_pcb(os.path.join(self.work_dir or '',
+                                                       rd['board']))
                 except Exception:
                     pcb = None
+            # The shot frames where the parts come FROM as well as where they
+            # land (#1036): focused on the destination alone, the camera
+            # zoomed onto the board before the glide and cut the off-board
+            # pile out of the frame, so parts glided in from outside it.
+            _focus = (_moved_bbox(pcb, moved) if (pcb and moved) else None)
+            _ext = rd.get('extent')
+            if _focus and _ext and len(_ext) == 4:
+                _focus = _union_box(_focus, tuple(_ext))
             acts.append(Action('place', f"round {rd['round']}",
-                               _moved_bbox(pcb, moved) if (pcb and moved) else None,
+                               _focus,
                                _moved_side(pcb, moved) if pcb else None,
                                frames=self.tween_frames))
         self.shots = plan_shots(acts, self._overview, self.opts)
@@ -589,6 +619,35 @@ class Stage:
         self._mark = len(self.movie.frames)
 
     # -- the build_boards hooks -----------------------------------------
+    def handles(self, board):
+        """True when `enter_step` will intercept this board's step."""
+        return (self.moving_parts
+                and self._key(board) in self._by_board)
+
+    def _key(self, board):
+        """A board's identity for `_by_board`: its RESOLVED ABSOLUTE path
+        (#1036 review). Keyed by basename, two chain boards with one name in
+        different directories were the same round -- `synth_rounds` records
+        absolute paths, a loop sidecar a name relative to the work dir, and
+        both resolve here to one spelling."""
+        return os.path.normcase(os.path.abspath(
+            os.path.join(self.work_dir or '', str(board))))
+
+    def _arrive(self):
+        """Call `on_arrive` once, right before the frame the parts LAND on.
+
+        `build_boards` sets it so the lower box's inventory reads the SOURCE
+        board through the glide and the destination only from the landing
+        frame (#1036) -- it read the destination's "272 of 272 placed" over
+        parts still in the pile.
+        """
+        fn, self.on_arrive = getattr(self, 'on_arrive', None), None
+        if fn is not None:
+            try:
+                fn()
+            except Exception:                                  # noqa: BLE001
+                pass
+
     def enter_step(self, label, board, pcb, seg_rows, via_rows):
         """True = this stage handled the step itself.
 
@@ -597,11 +656,24 @@ class Stage:
         Letting `reveal_delta` handle that calls `remove()`, which flashes red
         and labels it "(rip)" -- a lie. Clear silently, then tween the parts.
         """
-        rd = self._by_board.get(os.path.basename(board))
+        rd = self._by_board.get(self._key(board))
         if rd is None or not self.moving_parts:
+            self._settle(label)
             return False
         moved = rd.get('moved') or []
-        self._drain_until_action(label)
+        # The camera shots queued before this action are shot on the board
+        # as it WAS (#1036): `build_boards` has already re-pointed `r.pcb` at
+        # this step's board, so without the swap the establishing shot showed
+        # the finished placement and the parts then jumped back to glide.
+        prev = getattr(self, 'prev_pcb', None)
+        if prev is not None and prev is not pcb:
+            cur, self.r.pcb = self.r.pcb, prev
+            try:
+                self._drain_until_action(label)
+            finally:
+                self.r.pcb = cur
+        else:
+            self._drain_until_action(label)
 
         # silent clear: the copper of the PREVIOUS round is genuinely gone.
         # That is a fact about the LOOP -- it re-routes from scratch every
@@ -609,15 +681,24 @@ class Stage:
         # keeps the copper it has, so trueup to THIS board instead of to
         # nothing; for a loop round the board carries none and the two are the
         # same call.
-        self.movie.reconcile_to(seg_rows if rd.get('synth') else [],
-                                via_rows if rd.get('synth') else [],
-                                f"{label}: re-placing")
+        #
+        # A SYNTHESISED round keeps the copper it has and does NOT snap to
+        # this board's (#1036 review): a board that both moves parts and lays
+        # copper -- place_fanout_clearance's vias, a routed step after moves
+        # -- lost that copper's trace to a silent trueup. The glide plays
+        # first, then `False` hands the step back to `build_boards`, whose
+        # normal path reveals its copper (trace or chunks).
+        synth = bool(rd.get('synth'))
+        if not synth:
+            self.movie.reconcile_to([], [], f"{label}: re-placing")
         if moved:
             self._tween(pcb, moved, label)
         else:
+            self._arrive()
             self._snap(label)
+        self._arrive()          # no-op unless the tween never reached one
         self._mark = len(self.movie.frames)
-        return True
+        return not synth
 
     def exit_step(self, label):
         # Routing steps render through Movie's own path, not _snap, so their
@@ -625,14 +706,43 @@ class Stage:
         # the tracks landing on it were not.
         self._mirror_new_frames(label)
 
-    def outro(self):
+    def _settle(self, label, n=None):
+        """Bring the camera home to the BOARD before a copper step (#1036).
+
+        The placement shots aim at the pile-inclusive overview (`extent`), which
+        is right while parts are off the board and wrong once they have
+        landed: every routing frame after a glide was drawn at that overview,
+        so on run 32 the board filled ~600x370 of its 980x594 box. A short
+        glide to the board's own bounds, then the renderer's default view --
+        so a routing frame fills its box exactly as a film without a camera
+        does. A no-op when the camera is already home.
+        """
         from movie_camera import lerp_rect, smoothstep
-        cur = getattr(self.r, '_view', None) or self._overview
+        cur = getattr(self.r, '_view', None)
+        home = self.r.bounds
+        if cur is None or tuple(cur) == tuple(home):
+            return
+        n = n if n is not None else max(2, (self.opts.outro if self.opts
+                                            else 10) // 2)
+        start = len(self.movie.frames)
+        for k in range(n):
+            t = smoothstep((k + 1) / n)
+            self._aim(lerp_rect(cur, home, t))
+            self._snap(label)
+        self.r.set_view(None)
+        self._log.append(('settle', start, len(self.movie.frames)))
+
+    def outro(self):
+        """The closing move, onto the BOARD -- the parts have landed, so the
+        pile-inclusive overview would only shrink the finished board."""
+        from movie_camera import lerp_rect, smoothstep
+        home = self.r.bounds
+        cur = getattr(self.r, '_view', None) or home
         n = (self.opts.outro if self.opts else 10)
         start = len(self.movie.frames)
         for k in range(n):
             t = smoothstep((k + 1) / n)
-            self._aim(lerp_rect(cur, self._overview, t))
+            self._aim(lerp_rect(cur, home, t))
             self._snap("overview")
         self._log.append(('outro', start, len(self.movie.frames)))
         self.r.set_view(None)
@@ -668,6 +778,7 @@ class Stage:
             deltas.append((ref, fp, m['from'][0] - m['to'][0],
                            m['from'][1] - m['to'][1]))
         if not deltas:
+            self._arrive()
             self._snap(label)
             return
         n = self.tween_frames
@@ -682,6 +793,7 @@ class Stage:
             self._snap(f"{label}  before ({len(deltas)} part(s))")
             for ref, fp, _dx, _dy in deltas:
                 _offset_to(fp, home[ref], 0.0, 0.0)
+            self._arrive()
             self._snap(f"{label}  moved {len(deltas)} part(s)")
         else:
             # #1020: the GHOST and the ARROW, through the overlay seam, so
@@ -701,6 +813,8 @@ class Stage:
                         getattr(self.r, 'theme', None), t=t)
                 except Exception:                              # noqa: BLE001
                     self.movie.overlay = None
+                if i == n - 1:
+                    self._arrive()      # t = 1: the parts are where they land
                 self._snap(f"{label}  moving {len(deltas)} part(s)")
             self.movie.overlay = None
             for ref, fp, _dx, _dy in deltas:      # exact restore
@@ -736,6 +850,14 @@ def _moved_bbox(pcb, moved):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def _union_box(a, b):
+    if not a:
+        return b
+    if not b:
+        return a
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
 def _moved_side(pcb, moved):
     """Majority side of the parts that MOVED -- a block can straddle both
     (ulx3s sheet:58d686d9 is 9 back / 11 front), so the side is a property of
@@ -754,7 +876,67 @@ def _moved_side(pcb, moved):
     return 'B' if b > f else 'F'
 
 
-def synth_rounds(boards):
+def _move_floor_mm():
+    try:
+        import env_knobs
+        return float(getattr(env_knobs, 'MOVIE_MOVE_MIN_MM', 0.5))
+    except Exception:                                          # noqa: BLE001
+        return 0.5
+
+
+_FP_TOKEN = None
+
+
+def pose_signature(path):
+    """Every footprint's identity and pose read off the file TEXT, in file
+    order -- or None when the text cannot be read that way.
+
+    Per footprint: its header up to and including its own `(at x y rot)` (the
+    library id, layer, uuid/tstamp and the pose) and its reference. Two boards
+    with EQUAL signatures have every part where it was, so `synth_rounds`
+    needs to parse neither to know that nothing moved -- which is the answer
+    for every routing chain, and a parse of a large board costs about half a
+    second. Anything the reading is unsure of returns None, and the caller
+    parses: a footprint whose first `(at` is not before its first child (so
+    the pose read might be a child's), or a file with no footprint token.
+    """
+    import re
+    global _FP_TOKEN
+    if _FP_TOKEN is None:
+        _FP_TOKEN = (re.compile(r'\((?:footprint|module)\s'),
+                     re.compile(r'\(at\s[^()]*\)'),
+                     re.compile(r'\((?:property|fp_text|fp_line|fp_arc|'
+                                r'fp_circle|fp_rect|fp_poly|pad|model|attr)'
+                                r'[\s)]'),
+                     re.compile(r'\(property\s+"Reference"\s+'
+                                r'"((?:[^"\\]|\\.)*)"'
+                                r'|\(fp_text\s+reference\s+'
+                                r'("(?:[^"\\]|\\.)*"|[^\s()]+)'))
+    fp_re, at_re, child_re, ref_re = _FP_TOKEN
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            txt = f.read()
+    except OSError:
+        return None
+    starts = [m.start() for m in fp_re.finditer(txt)]
+    if not starts:
+        return None
+    sig = []
+    for k, s0 in enumerate(starts):
+        s1 = starts[k + 1] if k + 1 < len(starts) else len(txt)
+        at = at_re.search(txt, s0, s1)
+        if at is None:
+            return None
+        child = child_re.search(txt, s0 + 1, s1)
+        if child is not None and child.start() < at.start():
+            return None       # the first (at might be a child's: parse
+        ref = ref_re.search(txt, at.end(), s1)
+        sig.append((txt[s0:at.end()],
+                    (ref.group(1) or ref.group(2)) if ref else None))
+    return tuple(sig)
+
+
+def synth_rounds(boards, min_mm=None):
     """Round records for a chain that has NO loop_round*.json sidecars.
 
     Footprint motion is already animated -- but only through a Stage, and a
@@ -774,22 +956,82 @@ def synth_rounds(boards):
     show rejected attempts should say so by passing them and labelling them,
     not by having them inferred here.
     """
-    from kicad_parser import parse_kicad_pcb
+    import kicad_parser
     out, prev = [], None
+    # THE CHEAP PATH (#1036 review): a board whose `pose_signature` equals the
+    # previous board's moved nothing, so it is not parsed -- and the previous
+    # board is parsed only when a later one DOES differ from it. A routing
+    # chain (every GUI recorder film) therefore costs no parse at all here.
+    prev_path, prev_sig = None, None
     for i, b in enumerate(boards):
+        sig = pose_signature(b)
+        if prev_path is None:
+            # the first board: parsed only if a later board differs from it
+            prev_path, prev_sig = b, sig
+            continue
+        if sig is not None and sig == prev_sig:
+            prev_path = b             # its poses are prev's poses
+            continue
         try:
-            pcb = parse_kicad_pcb(b)
+            pcb = kicad_parser.parse_kicad_pcb(b)
         except Exception:
             continue
+        if prev is None and prev_path is not None:
+            try:
+                prev = kicad_parser.parse_kicad_pcb(prev_path)
+            except Exception:
+                prev = None
+        prev_path, prev_sig = b, sig
         moved = []
         if prev is not None:
+            # PAIRING (#1036 review). By uuid when the uuid names ONE block
+            # on BOTH boards; else by key -- except a duplicate reference's
+            # `~N` ordinal key when the number of blocks sharing that
+            # reference changed, because the ordinals are file order and then
+            # name different parts. A uuid two blocks share (a footprint
+            # copy-pasted in a text editor, as kicad_files/cap_chain does)
+            # identifies neither: pairing on it matched C1 to C2 and reported
+            # a board compared with ITSELF as moving parts.
+            def _uuid_counts(p):
+                c = {}
+                for f in p.footprints.values():
+                    u = getattr(f, 'uuid', '')
+                    if u:
+                        c[u] = c.get(u, 0) + 1
+                return c
+            _uprev, _ucur = _uuid_counts(prev), _uuid_counts(pcb)
+            by_uuid = {f.uuid: f for f in prev.footprints.values()
+                       if getattr(f, 'uuid', '')
+                       and _uprev.get(f.uuid) == 1
+                       and _ucur.get(f.uuid) == 1}
+
+            def _base_counts(p):
+                c = {}
+                for k in p.footprints:
+                    b = k.split('~', 1)[0]
+                    c[b] = c.get(b, 0) + 1
+                return c
+            _nprev, _ncur = _base_counts(prev), _base_counts(pcb)
             for ref, fp in pcb.footprints.items():
-                old = prev.footprints.get(ref)
+                old = (by_uuid.get(fp.uuid)
+                       if getattr(fp, 'uuid', '') else None)
+                if old is None:
+                    base = ref.split('~', 1)[0]
+                    if (_nprev.get(base) != _ncur.get(base)
+                            and _ncur.get(base, 0) > 1):
+                        continue
+                    old = prev.footprints.get(ref)
                 if old is None:
                     continue
                 a_ = (round(old.x, 4), round(old.y, 4), round(old.rotation or 0.0, 3))
                 b_ = (round(fp.x, 4), round(fp.y, 4), round(fp.rotation or 0.0, 3))
-                if a_ != b_:
+                # THE DISPLACEMENT FLOOR (#1036 review): a 0.05 mm nudge used
+                # to switch a whole film to the placement camera. Below
+                # `min_mm` a translation is drift, not a move; a rotation is
+                # always a move.
+                _floor = _move_floor_mm() if min_mm is None else min_mm
+                _dist = ((a_[0] - b_[0]) ** 2 + (a_[1] - b_[1]) ** 2) ** 0.5
+                if a_ != b_ and (a_[2] != b_[2] or _dist >= _floor):
                     # ROTATION is part of the pose. A part that turns 180 in
                     # place moves no origin at all, and a position-only diff
                     # shows nothing -- which is exactly how a rotation that
@@ -800,9 +1042,17 @@ def synth_rounds(boards):
             # ONLY a board whose parts moved is a placement beat. Emitting a
             # record for every board would make `enter_step` intercept the
             # routing steps too -- and it clears the copper on the way in.
+            refs = {m['reference'] for m in moved}
+            # Where the moved parts START and END (#1036): the camera's
+            # overview has to hold both, or a glide out of an off-board pile
+            # begins off-frame.
+            ext = _union_box(_moved_bbox(prev, moved),
+                             _moved_bbox(pcb, moved))
             out.append({'schema': 1, 'round': i, 'board': os.path.abspath(b),
                         'accepted': True, 'screened': False, 'synth': True,
-                        'moved': sorted(moved, key=lambda m: m['reference'])})
+                        'moved': sorted(moved, key=lambda m: m['reference']),
+                        'extent': list(ext) if ext else None,
+                        'n_moved': len(refs)})
         prev = pcb
     return out
 

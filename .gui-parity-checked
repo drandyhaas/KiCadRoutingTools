@@ -1,3 +1,136 @@
+48eb5d62 2026-09-24 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 5f881142..48eb5d62: the three findings the previous entry left open, all
+FIXED, each with a test that fails on the code before it. No other engine/GUI
+change in range (af9e1e73 is a test-only cleanup).
+
+  * 606682a8 -- a GUI placement run now stages mechanical.json. It is a
+    DIRECTORY file (<board dir>/mechanical.json, read by
+    reconcile.discover_mechanical beside the run's board), and
+    placement_run.stage_inputs copied only stem siblings, so every declared
+    mechanical fact was invisible to a run launched from the Placement tab.
+    test_placement_run: staged, and found by discover_mechanical from the
+    staged board.
+  * 48eb5d62 -- the GUI's live writers (apply_targets_to_board, then
+    update_live_drc_floors) now seed kicad_routing_tools.fab_floor_origin
+    before lowering, as the file writers do (ad7f24de), and print FAB FLOOR
+    RELAXED against it with a live-copper census. Engine-side helpers
+    (seed_live_fab_floor_origin, live_fab_floor_disclosure) back both fronts.
+    New gate tests/gui_parity/test_live_fab_floor_origin.py (real board):
+    9/9 PASS; fails 6 on the previous code.
+  * b2b23e9e -- build_film honours $KICAD_MOVIE_LAYOUT/ASPECT through
+    frame_layout.resolve_layout_aspect, the resolver make_movie now shares.
+    CLI/agent only (the GUI never calls build_film); test_film_composition
+    pins env -> film, explicit args win, defaults.
+
+GATES RUN (Windows, KiCad 10.0.3): test_live_fab_floor_origin,
+test_900_live_class_clearance, test_782_fanout_netclass_clamp,
+test_768_cap_ceiling_real_dialog, test_772_cap_params_reach_engine,
+test_gnd_vias_gui, test_movie_recorder, test_cli_postpass_coverage all PASS;
+test_gui_engine_parity PARITY, copper sets IDENTICAL, kicad unconnected 0/0.
+Suites: fab-floor/DRC-settings families 41 passed; movie/film/layout 20 passed;
+placement_run + sibling lists pass.
+
+5f881142 2026-09-24 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 5363397f..5f881142 (126 commits: #1026, the #1027-#1030 PR merges and
+their follow-ups, bus622-take5, #946/#959/#962/#963 tails, awx, and this
+session's test-infrastructure work). FOUR GAPS FOUND AND FIXED, all in one
+block -- the Planes tab's GND return vias -- plus the net-dialect half #1028
+left open, and 20 gates that could not run on Windows made to run.
+
+METHOD. A read-only review of every commit in range against CLAUDE.md's five
+parity edges (argparse flags/defaults, engine signatures, CLI-main post-passes,
+text-parser vs build_pcb_data_from_board, kicad_routing_plugin/ changes), then
+each candidate verified in code and, where a gap was claimed, by a gate that
+fails on the pre-fix tree.
+
+NO routing CLI flag was added, removed or renamed in range (the only argparse
+change is --same-net-pad-clearance help text, #962, matched by the
+swig_gui.py:1252 tooltip). manifest_to_plan.py, ai_plan.py and
+settings_persistence.py are untouched; batch_route, batch_route_diff_pairs,
+create_plane, the fanouts, add_gnd_vias_to_existing_board and
+build_base_obstacle_map signatures are unchanged. #1027 (escalation rungs),
+#1029 (exact-copper neck) and 9927d324 (flip_hints legs) are engine-internal:
+NO GAP. #1028 is text-path only: NO GAP for the GUI.
+
+GAPS, FIXED in 3e82dba1 (GUI GND-via block vs route_planes main):
+  1. .kicad_dru layer rules (#498): the GUI never installed them. And the
+     CLI's call was INERT: it discovered the rules via pcb_data.source_path,
+     the OUTPUT board, whose .kicad_dru fix_project_for_output copies only
+     after the GND-via block -- so on a fresh output path neither front's
+     return vias saw a layer rule. CLI now reads args.input_file's, GUI the
+     live board's (as create_plane does).
+  2. Layers: the GUI passed `all_layers` (the plane step's outer + pour set),
+     so a through via could land on an inner signal track; the CLI has used
+     every copper layer since 5c4a9f8d. Measured pre-fix: a GUI via ON the
+     In1.Cu track (-0.4 mm).
+  3. Edge: the GUI used the live raw copper-to-edge rule; the CLI pins it up
+     to the fab floor (effective_board_edge_clearance, #441). A board
+     declaring 0 got 0.0 vs 0.2.
+  4. #1030's GUI half shipped compile-checked only, and NO gate executed the
+     GUI GND-via block (test_cli_postpass_coverage matches it by name only).
+     NEW GATE tests/gui_parity/test_gnd_vias_gui.py: real PlanesTab + real
+     create_plane vs route_planes.py --add-gnd-vias on the same files, arms
+     class / dru / layers, GUI config read back, identical positions required,
+     in-process negative controls. Fails 9 checks on the pre-fix tree.
+  Also 82918349: the writers' net dialect. #1028 fixed the parser; eleven text
+  writers (route_planes x6, repair_planes x2, kicad_oracle, pcb_modification
+  x2) and board_uses_name_nets still asked the version stamp. One rule now,
+  recorded at parse time (PCBData.uses_name_nets / pcb_uses_name_nets). The
+  pcbnew path leaves it None and falls back to the stamp -- it writes through
+  pcbnew, not tokens -- so build_pcb_data_from_board needs no mirror.
+
+GATES THAT COULD NOT RUN ON WINDOWS, now running (dbd4f473, 2653e962,
+d9f66157, 5f881142). EARLIER LEDGER ENTRIES WRITTEN ON A KiCad 9 + 10 BOX MAY
+HAVE RUN UNDER 9.0.6: every "newest first" candidate list string-sorted
+KiCad\9.0 above KiCad\10.0.
+  * discovery: 28 KICAD_PYTHONS lists sorted as strings, hard-coded one
+    version, or listed only the unversioned path no KiCad >= 6 uses;
+  * re-exec: 7 gates (and py_tools/validate_pcb_data.py, which then EXITED 0
+    having validated nothing) used os.execv, which tears "Program Files";
+  * waiting: the fanout gates pumped wx.YieldIfNeeded, which never fires the
+    wx.CallLater that collects a worker's result on MSW -- worker done in
+    0.5 s, gate waiting 16-35 min, then grading nothing. wx_pump.run_until
+    runs a real MainLoop (CLAUDE.md now says so);
+  * kicad-cli: test_gui_engine_parity derived it from the macOS python path
+    (kicad_unconnected=-1 on both fronts elsewhere), and the stress grader
+    kicad_drc_compare.py looked on PATH, where Windows KiCad never puts it.
+  tests/test_kicad_cli_newest_version.py pins discovery, delegation, the
+  candidate lists and the Windows re-exec.
+
+GATES RUN on this machine (Windows, KiCad 10.0.3, wx 4.2.2 msw phoenix /
+wxWidgets 3.3.2, KiCad python 3.11.5), all PASS:
+  test_gui_engine_parity      PARITY; copper sets IDENTICAL (1076 seg, 128 via);
+                              drc 0/0; kicad unconnected 0/0
+  test_gui_livechain_rp2350   GUI and CLI chains grade clean at every stage
+  test_gnd_vias_gui (new)     class / dru / layers, GUI == CLI
+  test_plane_all_layers_parity, test_settings_roundtrip, test_movie_recorder,
+  test_fanout_rotated_gui (10/10), test_fanout_backside_gui (11/11),
+  test_fanout_threaded_gui, test_ref_label_pcbnew_parity,
+  test_726_parse_path_parity, test_726_gui_sync, test_962_paste_parity,
+  test_962_native_graphic_overrun, test_751_via_protection_readback,
+  test_group_scope_parity, test_714_mirror_pcbnew_parity, test_733 x2,
+  test_746_cap_summary_gui, test_768_cap_ceiling_real_dialog,
+  test_772_cap_params_reach_engine, test_782_fanout_netclass_clamp,
+  test_829_edge_cuts_owner_parity, test_860 (14/14), test_900,
+  test_footprint_position_sync, test_placement_fake_run,
+  test_manifest_plan_parity, test_cli_postpass_coverage.
+  py_tools/validate_pcb_data.py splitflap_driver: pcbnew data matches file parse.
+  Full suite (run_all.py -j 6): 696 passed, 0 failed, 0 timed out
+                              (+2 wk/ self-skips); 0 items left in TEMP
+
+FOUND, NOT FIXED -- recorded for a decision, none a routing parity gap:
+  * PLAUSIBLE: a `mechanical.json` beside the user's board is invisible to a
+    placement run launched from the GUI -- placement_run.stage_inputs stages
+    copy_board.SIBLING_EXTS only, and mechanical.json is not a stem sibling.
+    The skill run in place does see it.
+  * gui_utils.update_live_drc_floors never records fab_floor_origin, so a
+    manual GUI run gets no FAB FLOOR RELAXED disclosure (ad7f24de seeded it
+    for the file writers; a GUI plan run ends in fix_project_for_output and is
+    covered).
+  * build_film ignores the KICAD_MOVIE_LAYOUT/ASPECT env knobs make_movie
+    reads (CLI/agent-only; the GUI never calls build_film).
+
+
 5363397f 2026-09-21 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of the #946 render-design-system branch (25 commits, ab8d0c364..5363397f).
 NO GAP FOUND in the engine/GUI boundary. One gate FIXED (see below), and it is

@@ -143,6 +143,52 @@ def _rect(occ, cx, cy, sx, sy, view, step, rot_deg=0.0):
     occ[gy0:gy1, gx0:gx1] |= ((np.abs(px) <= sx / 2) & (np.abs(py) <= sy / 2))
 
 
+def _region(occ, polygon, holes, view, step):
+    """Stamp a polygon MINUS its holes (a rule-area keep-out, #1031), with
+    check_connected's even-odd point-in-polygon on the cell centres."""
+    from check_connected import points_in_polygon_mask
+    vx0, vy0 = view[0], view[1]
+    h, w = occ.shape
+    xs_ = [p[0] for p in polygon]
+    ys_ = [p[1] for p in polygon]
+    gx0 = max(0, int((min(xs_) - vx0) / step))
+    gx1 = min(w, int((max(xs_) - vx0) / step) + 2)
+    gy0 = max(0, int((min(ys_) - vy0) / step))
+    gy1 = min(h, int((max(ys_) - vy0) / step) + 2)
+    if gx0 >= gx1 or gy0 >= gy1:
+        return
+    ys, xs = np.mgrid[gy0:gy1, gx0:gx1]
+    px = (vx0 + (xs + 0.5) * step).ravel()
+    py = (vy0 + (ys + 0.5) * step).ravel()
+    m = points_in_polygon_mask(px, py, polygon)
+    for hole in holes or ():
+        if len(hole) >= 3 and m.any():
+            m &= ~points_in_polygon_mask(px, py, hole)
+    occ[gy0:gy1, gx0:gx1] |= m.reshape(ys.shape)
+
+
+def rule_area_keepouts(pcb, layer):
+    """The rule-area keep-outs on `layer` as the router reads them
+    (obstacle_map.add_rule_area_keepout_obstacles): tokens expanded, no layer
+    list = every layer, footprint-owned ones included (their file position is
+    current). [(polygon, holes, tracks_allowed, vias_allowed)] (#1031)."""
+    from net_queries import expand_pad_layers
+    copper = list(getattr(pcb.board_info, 'copper_layers', None)
+                  or ['F.Cu', 'B.Cu'])
+    out = []
+    for ko in getattr(pcb.board_info, 'keepouts', None) or ():
+        poly = ko.get('polygon') or []
+        if len(poly) < 3:
+            continue
+        toks = sorted(str(t) for t in (ko.get('layers') or ()))
+        if toks and layer not in expand_pad_layers(toks, copper):
+            continue
+        out.append((poly, ko.get('holes') or [],
+                    bool(ko.get('tracks_allowed', True)),
+                    bool(ko.get('vias_allowed', True))))
+    return out
+
+
 def _pad_on_layer(pad, layer) -> bool:
     if pad.drill and pad.drill > 0:
         return True                               # a barrel blocks every layer
@@ -192,6 +238,13 @@ def slack_field(pcb, target_net_id, layer, view, base_clearance,
             g = own if p.net_id == target_net_id else grid_for(p.net_id)
             _rect(g, p.global_x, p.global_y, p.size_x, p.size_y, view, step,
                   getattr(p, 'rect_rotation', 0.0) or 0.0)
+    # #1031: a rule area forbidding tracks on this layer is an obstacle at the
+    # base clearance, exactly as the router prices it (clearance +
+    # track_width/2 from the region), so a pad seated in the band no longer
+    # reads PASSABLE.
+    for poly, holes, tracks_ok, _vias_ok in rule_area_keepouts(pcb, layer):
+        if not tracks_ok:
+            _region(grid_for(None), poly, holes, view, step)
 
     # D(p) = min_k(dist_k(p) - clearance_k): the clearance-adjusted room at p.
     # A track of width t fits iff D >= t/2, so track slack is 2D.
@@ -802,6 +855,16 @@ def pad_reachability(pcb, seed_xy, net_name=None, net_id=None, *,
     via_ok = np.ones_like(Ds[0], dtype=bool)
     for D in Ds:
         via_ok &= (D >= via_mm / 2.0)
+    # #1031: a rule area forbidding VIAS on any layer the via spans refuses
+    # it, at the router's via reach (clearance + via/2 from the region).
+    _via_occ = np.zeros_like(via_ok)
+    for layer in layers:
+        for poly, holes, _t, vias_ok in rule_area_keepouts(pcb, layer):
+            if not vias_ok:
+                _region(_via_occ, poly, holes, view, step)
+    if _via_occ.any():
+        _dv = ndimage.distance_transform_edt(~_via_occ) * step - base_clearance
+        via_ok &= (_dv >= via_mm / 2.0)
 
     # The seed pad IS own-net copper, so "reach the net" would be trivially
     # true unless the pad's island is separated from the rest of the net.

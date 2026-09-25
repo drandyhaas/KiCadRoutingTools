@@ -17,14 +17,23 @@ Usage:
 
 A test is "integration" (slow; skipped by --fast) if its source shells out --
 it imports run_utils or uses subprocess. That auto-classification needs no
-maintained list; a new pytest-style test can instead use @pytest.mark.integration.
+maintained list.
+
+Each test runs with TMPDIR/TEMP/TMP pointed at a scratch dir of its own, which
+is removed when it ends: `tempfile` honours those variables in the test and in
+every child it spawns, so whatever a test forgets to clean up goes with it
+(a full local run used to leave ~525 fixture copies, ~220 MB, in the system
+temp dir). Run a single test directly to keep its temp output for a look.
 """
 import argparse
 import glob
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -220,9 +229,21 @@ def main():
         except subprocess.TimeoutExpired:
             print('WARN  fixture pre-build timed out; continuing')
 
+    # Short names on purpose: Windows paths cap at 260 characters, and tests
+    # build deep trees (git object stores, run/board/stage dirs) under TEMP.
+    scratch_root = tempfile.mkdtemp(prefix='krt_')
+
     def run_one(f):
         name = os.path.basename(f)
         budget = _declared_budget(f, args.timeout)
+        tdir = tempfile.mkdtemp(prefix='t', dir=scratch_root)
+        env = dict(os.environ, TMPDIR=tdir, TEMP=tdir, TMP=tdir)
+        try:
+            return _run_test(f, name, budget, env)
+        finally:
+            _rmtree_scratch(tdir)
+
+    def _run_test(f, name, budget, env):
         try:
             # `text=True` alone decodes with the LOCALE default (cp1252 on
             # Windows) and raises UnicodeDecodeError in the reader thread the
@@ -234,7 +255,7 @@ def main():
             r = subprocess.run([sys.executable, '-X', 'utf8', f], cwd=ROOT,
                                capture_output=True, text=True,
                                encoding='utf-8', errors='replace',
-                               timeout=budget)
+                               timeout=budget, env=env)
         except subprocess.TimeoutExpired:
             return name, ('timeout', budget), (f'TIME  {name}  (timeout after '
                                 f'{budget:.0f}s -- NOT a failed '
@@ -299,14 +320,17 @@ def main():
         print(line)
 
     t0 = time.time()
-    if jobs == 1:
-        for f in to_run:
-            record(*run_one(f))
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=jobs) as ex:
-            for name, ok, line in ex.map(run_one, to_run):
-                record(name, ok, line)
+    try:
+        if jobs == 1:
+            for f in to_run:
+                record(*run_one(f))
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=jobs) as ex:
+                for name, ok, line in ex.map(run_one, to_run):
+                    record(name, ok, line)
+    finally:
+        _rmtree_scratch(scratch_root)
 
     dt = time.time() - t0
     # A TIMEOUT AND A FAILED ASSERTION ARE DIFFERENT FACTS: a timeout moving
@@ -331,6 +355,39 @@ def main():
         print('  A timeout is not evidence of a broken test. Re-run each one '
               'alone (or raise --timeout) before recording it as a failure.')
     return 1 if (failed or timed_out) else 0
+
+
+def _rmtree_scratch(path, waits=(0.25, 0.5, 1.0, 2.0)):
+    """Remove a test's scratch dir, read-only files included.
+
+    Git writes its object files read-only, and on Windows rmtree cannot unlink
+    one, so a plain rmtree(ignore_errors=True) silently keeps any test's git
+    fixture. Clear the bit and retry.
+
+    A file still OPEN cannot be removed on Windows either, and a test's child
+    can hold one for a moment after the test itself has exited -- measured: a
+    run left two scratch dirs behind, one holding KiCad's single-instance lock
+    (org.kicad.kicad/instances) from a kicad-cli it spawned, and a rerun of the
+    same tests left none. So a dir that survives the first pass is retried
+    after short waits (3.75 s in all, and only then). Anything still held after
+    that (a child a timeout orphaned) is NAMED, never hidden.
+    """
+    def _writable_retry(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+    handler = ({'onexc': _writable_retry} if sys.version_info >= (3, 12)
+               else {'onerror': _writable_retry})
+    shutil.rmtree(path, **handler)
+    for wait in waits:
+        if not os.path.exists(path):
+            return
+        time.sleep(wait)
+        shutil.rmtree(path, **handler)
+    if os.path.exists(path):
+        print(f'WARN  could not fully remove scratch dir {path}')
 
 
 if __name__ == '__main__':

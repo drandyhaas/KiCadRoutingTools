@@ -85,7 +85,7 @@ are listed here because each is a trap that will come back:
 |---|---|
 | a git **index** | `run_utils.corpus_boards()` asks `git ls-files`, and `git archive` ships no `.git`, so it returned `[]` and 9 corpus-walking tests graded an EMPTY corpus instead of skipping |
 | `Pillow` | `startup_checks.check_render_dependencies` raised; 3 render tests died |
-| `pytest` | 2 tests import it for fixtures; it is a test-only dep, so it is correctly absent from `requirements.txt` |
+| `pytest` | 2 tests imported it for fixtures (a test-only dep, correctly absent from `requirements.txt`). No test needs it now, so the image no longer installs it, and `test_718_static_test_hygiene.py` refuses a test file that imports pytest or that only pytest can run |
 | the right **Python version** | 2 tests behave differently on 3.12 vs 3.13+ |
 
 Three of those deserve spelling out:

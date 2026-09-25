@@ -641,7 +641,11 @@ def test_each_panels_caption_describes_its_own_board():
     real_panel = mp.iso_panel
 
     def spy(box, png, caption, error='', **kw):
-        grabbed.append(caption)
+        # A caption may be PARTS since #946's review -- `[(text, rank)]`,
+        # shortened by dropping parts rather than cutting words. The claim
+        # here is about what it SAYS, so read it joined.
+        grabbed.append(caption if isinstance(caption, str)
+                       else '  |  '.join(p[0] for p in caption))
         return real_panel(box, png, caption, error=error, **kw)
 
     mp.iso_panel = spy

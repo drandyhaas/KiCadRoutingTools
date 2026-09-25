@@ -194,7 +194,7 @@ ROWS = [
      (T_LAY,), 'KILLED'),
 
     ('mixed-frame-sizes-are-squashed-silently', 'anim',
-     "        frame_layout.assert_frames_uniform([f.size for f in frames])",
+     "        frame_layout.assert_frames_uniform(sorted(sizes))",
      "        return frames",
      (T_LAY,), 'KILLED'),
 
@@ -262,8 +262,8 @@ ROWS = [
      (T_ATT,), 'KILLED'),
 
     ('attempts-are-synthesised-from-the-boards', 'attempts',
-     "    t = attempts_from_loop_dir(d)\n    if t:\n        return t",
-     "    t = attempts_from_loop_dir(d)\n    if t:\n        return t\n    import glob as _g\n    _b = sorted(_g.glob(os.path.join(d, '*.kicad_pcb')))\n    if len(_b) > 1:\n        return Track(tuple(Attempt(i, b, 'round', i - 1 or None, True, False,\n                                   float(len(_b) - i), False, b)\n                           for i, b in enumerate(_b)),\n                     'boards', 'loop', 'synthesised')",
+     "    loop = attempts_from_loop_dir(d)\n",
+     "    loop = attempts_from_loop_dir(d)\n    import glob as _g\n    _b = sorted(_g.glob(os.path.join(d, '*.kicad_pcb')))\n    if not loop and len(_b) > 1:\n        loop = Track(tuple(Attempt(i, b, 'round', i - 1 or None, True, False,\n                                   float(len(_b) - i), False, b)\n                           for i, b in enumerate(_b)),\n                     'boards', 'loop', 'synthesised')\n",
      (T_ATT,), 'KILLED'),
 
     # --- P12: retract and grow ---------------------------------------------

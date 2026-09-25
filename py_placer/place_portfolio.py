@@ -430,6 +430,30 @@ def main():
     else:
         swap_blocks = derive_groups(pcb, sources) if sources else {}
 
+    # #1037: the INPUT board's own intent grade, with the SAME arguments every
+    # candidate is graded with (score_candidate), so the gate is on the errors
+    # a candidate ADDS -- not on the ones the input already carries. Graded on
+    # a fresh parse, before `generate` touches anything.
+    input_violations = None
+    input_intent_errors = None
+    if intent is not None:
+        from placement import floorplan
+        from placement.floorplan import UntrustworthyOutline
+        try:
+            _in = floorplan.grade(intent, parse_kicad_pcb(args.input_file),
+                                  args.input_file, group_sources=sources,
+                                  clearance=args.clearance,
+                                  board_edge_clearance=args.board_edge_clearance,
+                                  with_health=True)
+        except UntrustworthyOutline as exc:
+            print(f"board outline cannot be trusted for grading: {exc}",
+                  file=sys.stderr)
+            return 3
+        input_violations = list(_in.violations)
+        input_intent_errors = len(_in.errors)
+        print(f"intent: the input board carries {input_intent_errors} intent "
+              f"error(s); candidates are gated on NEW ones only (#1037)")
+
     result = portfolio.generate(
         args.input_file, args.out_dir, seed=args.seed,
         n_candidates=args.candidates, strategies=args.strategy,
@@ -464,6 +488,7 @@ def main():
     baseline_oob = baseline.metrics.get('oob_count', 0)
     baseline_pad_pairs = baseline.metrics.get('pad_conflict_pairs', 0) or 0
     baseline_hole = baseline.metrics.get('hole_shortfall', 0.0) or 0.0
+    baseline_keepout = baseline.metrics.get('keepout_pad_parts', 0) or 0
     try:
         for c in cands:
             portfolio.score_candidate(
@@ -471,19 +496,23 @@ def main():
                 baseline_oob=baseline_oob,
                 baseline_pad_pairs=baseline_pad_pairs,
                 baseline_hole_shortfall=baseline_hole,
+                baseline_keepout_parts=baseline_keepout,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 grid_step=args.grid_step, ignore_nets=args.ignore_nets,
-                intent=intent, group_sources=sources)
+                intent=intent, group_sources=sources,
+                input_violations=input_violations)
         portfolio.score_candidate(
             baseline, free=free, baseline_overlap=baseline_overlap,
             baseline_oob=baseline_oob,
             baseline_pad_pairs=baseline_pad_pairs,
             baseline_hole_shortfall=baseline_hole,
+            baseline_keepout_parts=baseline_keepout,
             clearance=args.clearance,
             board_edge_clearance=args.board_edge_clearance,
             grid_step=args.grid_step, ignore_nets=args.ignore_nets,
-            intent=intent, group_sources=sources)
+            intent=intent, group_sources=sources,
+            input_violations=input_violations)
     except UntrustworthyOutline as exc:
         print(f"board outline cannot be trusted for grading: {exc}",
               file=sys.stderr)
@@ -819,6 +848,8 @@ def main():
            'ranking_routed': ranking_routed,
            'ranking_full': ranking_full,
            'rule1_violators': sorted(rule1_violators),
+           # #1037: the input's own intent errors; candidates gate on NEW ones
+           'input_intent_errors': input_intent_errors,
            'kept': kept, 'backfilled': backfilled,
            'renders': {str(k): v for k, v in renders.items()}}
     doc_path = os.path.join(args.out_dir, 'portfolio.json')
@@ -855,6 +886,7 @@ def main():
         # "capability absent" from "the clock ran out" -- all three were
         # candidates with no plane_islands key.
         'plane_score': plane_status,
+        'input_intent_errors': input_intent_errors,
         'out_dir': args.out_dir}, sort_keys=True))
     return 0 if viable else 4
 

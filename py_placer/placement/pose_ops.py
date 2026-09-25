@@ -71,6 +71,7 @@ FACE_ALIASES = {'n': 'north', 'north': 'north',
 #: off the board with every arm here reading 0.
 LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
                  'pad_edge_conflicts', 'pad_edge_unmeasured',
+                 'oob_keepout_copper_count',
                  'oob_graphic_copper_count')
 
 #: The MAGNITUDES, and they are not a nicety: a count arm alone accepts a
@@ -83,13 +84,15 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
 #: outline the top-priority placement defect, so its AMOUNT is an arm too.
 #: The graphic-copper overrun is one for the same reason (#962).
 MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall',
+                  'oob_keepout_copper_amount',
                   'oob_graphic_copper_amount')
 
 #: What `legal` does and does NOT cover, published with every summary (#962
 #: follow-up item 4). A partial claim must read as partial.
 LEGAL_SCOPE = ('pad-pad clearance', 'hole-hole clearance', 'pad copper vs the '
                'outline', 'pad copper vs the edge-clearance floor',
-               'footprint graphic copper vs the outline')
+               'footprint graphic copper vs the outline',
+               'pad copper vs a board rule-area keep-out band (#1031)')
 LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     '(disclosed as graphic_edge_shortfall_refs, not gated)',
                     'footprint copper the parser does not model: pad-less '
@@ -98,6 +101,8 @@ LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     'footprint graphic copper on a board with no outline, and '
                     'on a part that changed side in memory (listed as '
                     'no-outline / moved-side in oob_graphic_copper_unmeasured)',
+                    'rule areas a footprint owns (listed in '
+                    'keepout_copper_unmeasured)',
                     'solder paste and mask openings', 'component bodies / '
                     'courtyards', 'routing', 'zone fill')
 MAGNITUDE_EPS = 1e-6
@@ -449,6 +454,11 @@ def _legality_row(before: Dict, after: Dict) -> Dict:
     row['oob_graphic_copper_waived_after'] = after.get('oob_graphic_copper_waived')
     row['oob_graphic_copper_unmeasured_after'] = after.get('oob_graphic_copper_unmeasured')
     row['graphic_edge_shortfall_refs_after'] = after.get('graphic_edge_shortfall_refs')
+    # #1031: which pads sit in a rule-area keep-out band, and which are only
+    # reported (through-hole, reachable on an uncovered layer).
+    row['keepout_copper_pads_after'] = after.get('keepout_copper_pads')
+    row['keepout_copper_tht_refs_after'] = after.get('keepout_copper_tht_refs')
+    row['keepout_copper_unmeasured_after'] = after.get('keepout_copper_unmeasured')
     return row
 
 

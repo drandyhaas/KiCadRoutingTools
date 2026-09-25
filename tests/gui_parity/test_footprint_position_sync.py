@@ -14,15 +14,23 @@ the board, sync, and assert pcb_data (and the shared pads_by_net view the router
 consults) now reports the NEW position. Needs KiCad's pcbnew; skips if absent.
 Run: python3 tests/gui_parity/test_footprint_position_sync.py
 """
+import glob
 import os
 import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Every versioned install, newest first by NUMERIC version (a string sort
+# puts KiCad\9.0 above KiCad\10.0).
+sys.path.insert(0, os.path.join(REPO, 'py_router'))
+from kicad_locate import path_version_key  # noqa: E402
+del sys.path[0]    # this file orders its own sys.path further down
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
     os.path.expandvars(r"C:\\Program Files\\KiCad\\bin\\python.exe"),
+    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
+           key=path_version_key, reverse=True),
 ]
 
 
@@ -31,7 +39,12 @@ def _reexec_into_kicad():
         if cand != sys.executable and os.path.exists(cand):
             if subprocess.run([cand, '-c', 'import pcbnew'],
                               capture_output=True).returncode == 0:
-                os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
+                argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
+                if os.name == 'nt':
+                    # os.execv re-splits argv on spaces on Windows, and the
+                    # interpreter lives under "Program Files".
+                    sys.exit(subprocess.run(argv).returncode)
+                os.execv(cand, argv)
     print("SKIP: no python with pcbnew found")
     sys.exit(0)
 
