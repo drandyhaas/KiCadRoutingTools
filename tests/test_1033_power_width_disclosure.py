@@ -13,8 +13,6 @@ What must hold:
   * _assign_wide_route_widths lays a short edge at the net's width and necks
     it only where the full width does not fit, and records NO `design_rules`
     row (it runs per routing attempt; the ledger records shipped copper);
-  * the post-route widen pass's exact pad check never clears a graze
-    check_drc grades, and caps an own-pad entry at the pad's narrow side;
   * route_summary.merge_summaries carries `power_widths` from the outermost
     summary through a reconciliation merge;
   * board_score --net-min-widths reports length_under_mm;
@@ -252,57 +250,6 @@ def t_assign():
     check('full width: nothing recorded', len(ledger()) == n1)
 
 
-# ------------------------------- the widen pass's exact check at the pad
-def t_exact_check():
-    """#1033: the widen pass's pad check is the GRADER's pad copper (#1029): it must
-    never call clear what check_drc calls a graze, including a tilted rect
-    whose corner a circle approximation misjudges; and a piece landing in an
-    own pad is capped at the pad's narrow side."""
-    from kicad_parser import BoardInfo
-    from synth import make_pcb, make_pad, make_net
-    from routing_config import GridRouteConfig
-    from power_widen import ExactWideCheck, widen_segment
-    from check_drc import check_pad_segment_overlap
-    cfg = GridRouteConfig(layers=['F.Cu'], track_width=0.127, clearance=0.1,
-                          grid_step=0.05)
-    bi = BoardInfo(layers={0: 'F.Cu'}, copper_layers=['F.Cu'],
-                   board_bounds=(-5.0, -5.0, 5.0, 5.0))
-    tilt = make_pad(2, 0.0, 0.6, ref='R1', num='1', size_x=0.8, size_y=0.25,
-                    net_name='SIG', rect_rotation=30.0)
-    own = make_pad(1, 2.0, 0.0, ref='U1', num='1', size_x=0.2, size_y=0.6,
-                   net_name='+3V3')
-    pcb = make_pcb(nets={1: make_net(1, '+3V3'), 2: make_net(2, 'SIG')},
-                   pads_by_net={1: [own], 2: [tilt]}, board_info=bi)
-    chk = ExactWideCheck(pcb, cfg, 1)
-    disagree = 0
-    loose = 0
-    n = 0
-    for k in range(60):
-        yy = -0.2 + k * 0.01
-        for w in (0.127, 0.2, 0.3):
-            n += 1
-            ok = chk.clears(-1.0, yy, 1.0, yy, 'F.Cu', w)
-            graze = check_pad_segment_overlap(
-                tilt, make_seg(-1.0, yy, 1.0, yy, width=w, net_id=1,
-                               layer='F.Cu'), 0.1, ['F.Cu'], 0.0)[0]
-            if ok and graze:
-                disagree += 1
-            if not ok and not graze:
-                loose += 1
-    check('widen exact check: never clears what check_drc grades as a pad graze '
-          '(tilted rect, 180 cases)', disagree == 0, disagree)
-    check('widen exact check: and is not needlessly conservative beside it',
-          loose <= n * 0.1, (loose, n))
-    # own-pad entry cap: a segment ending in U1's 0.2-wide pad
-    s_ = make_seg(0.8, 0.0, 2.0, 0.0, width=0.127, net_id=1, layer='F.Cu')
-    pieces = widen_segment(s_, 0.3, chk)
-    at_pad = [p.width for p in pieces if max(p.start_x, p.end_x) > 1.9 - 1e-9]
-    check('widen own-pad entry: capped at the pad narrow side (0.2), wider before',
-          at_pad and max(at_pad) <= 0.2 + 1e-9
-          and any(abs(p.width - 0.3) < 1e-9 for p in pieces),
-          [(round(p.start_x, 3), round(p.end_x, 3), p.width) for p in pieces])
-
-
 # ------------------------------------------------------------ summary merge
 def t_merge():
     from route_summary import merge_summaries
@@ -427,40 +374,8 @@ def t_end_to_end():
         check('end to end: no 0.127 run where 0.3 fits (under <= 10 of 22 mm)',
               und <= 10.0, (und, tot))
 
-        # #1033 post-route widen: the PAD-NECK ZONE. U1's approach (x 4.5..6.5, free
-        # space) used to be forced to the neck width for 2.5 mm; it now carries
-        # 0.3 wherever that clears. J2's two SIG pads flank U2's approach at
-        # x=24.5, 0.2 mm from the centreline: 0.3 does not fit between them
-        # at 0.1 clearance (needs 0.25), so that stretch stays narrower.
-        def _len_where(pred_x, pred_w):
-            tot_ = 0.0
-            for s_ in segs:
-                n_ = 20
-                for k_ in range(n_):
-                    t_ = (k_ + 0.5) / n_
-                    x_ = s_.start_x + (s_.end_x - s_.start_x) * t_
-                    if pred_x(x_) and pred_w(s_.width):
-                        tot_ += math.hypot(s_.end_x - s_.start_x,
-                                           s_.end_y - s_.start_y) / n_
-            return tot_
-        free_wide = _len_where(lambda x: 4.6 < x < 6.4,
-                               lambda w: abs(w - 0.3) < 1e-6)
-        free_all = _len_where(lambda x: 4.6 < x < 6.4, lambda w: True)
-        check('widen: the pad approach in free space is WIDE (0.3) in the neck zone',
-              free_all > 1.0 and free_wide >= 0.9 * free_all,
-              (round(free_wide, 3), round(free_all, 3)))
-        flank_wide = _len_where(lambda x: 24.35 < x < 24.65,
-                                lambda w: w > 0.25)
-        flank_all = _len_where(lambda x: 24.35 < x < 24.65, lambda w: True)
-        check('widen: between the flanking foreign pads it stays NECKED (< 0.3)',
-              flank_all > 0.1 and flank_wide < 1e-6,
-              (round(flank_wide, 3), round(flank_all, 3)))
-        into_u2 = [s_.width for s_ in segs
-                   if max(s_.start_x, s_.end_x) > 25.5 + 1e-6]
-        check('widen: the entry into the 1 mm pad is no wider than the pad',
-              into_u2 and max(into_u2) <= 1.0 + 1e-9, into_u2)
-        # ...and the widened copper is legal: DRC-clean at the routed
-        # clearance, and still connected (connectivity is orthogonal to DRC).
+        # ...and the copper is legal: DRC-clean at the routed clearance,
+        # and still connected (connectivity is orthogonal to DRC).
         drc = subprocess.run(
             [sys.executable, '-X', 'utf8',
              os.path.join(ROOT, 'py_router', 'check_drc.py'), out,
@@ -556,12 +471,12 @@ def t_gui_oracle_payload():
 # ------------------------------------------- --strict-sizes, both ways
 def t_strict_sizes():
     """--strict-sizes exits 3 only when SHIPPED copper is under width.
-    A 0.5 mm gap: the router necks (its grid map refuses 0.3), the post-route
-    pass widens it all back on exact geometry -> no row, exit 0. The 0.4 mm
-    gap plus the flanking pads: a real neck ships -> one row, exit 3."""
+    A 1.2 mm gap: 0.3 fits, the router lays it at full width -> no row,
+    exit 0. The 0.4 mm gap plus the flanking pads: a real neck ships -> one
+    row, exit 3."""
     from kicad_parser import parse_kicad_pcb
-    for gap, flank, want, n5 in ((0.5, False, 0, False), (0.4, True, 3, False),
-                                 (0.5, False, 0, True), (0.4, True, 3, True)):
+    for gap, flank, want, n5 in ((1.2, False, 0, False), (0.4, True, 3, False),
+                                 (1.2, False, 0, True), (0.4, True, 3, True)):
         with tempfile.TemporaryDirectory() as tmp:
             src = os.path.join(tmp, 'in.kicad_pcb')
             out = os.path.join(tmp, 'out.kicad_pcb')
@@ -598,17 +513,17 @@ def t_strict_sizes():
                       (p5, doc.get('power_widths_run_scope'), rows))
             necked = 'neck-down' in log or 'short edge at' in log
             if want == 0:
-                check('strict-sizes: the router DID neck this net (the case '
-                      'is real)', necked)
+                check('strict-sizes: the router did not need to neck this net',
+                      not necked)
                 check(f'strict-sizes (+5V narrow copper out of scope: {n5}): '
-                      'fully widened back -> 0 under, no row, exit 0', pw['under_mm'] == 0 and rows == []
+                      'at width -> 0 under, no row, exit 0', pw['under_mm'] == 0 and rows == []
                       and r.returncode == 0, (pw['under_mm'], rows, r.returncode))
                 drc = subprocess.run(
                     [sys.executable, '-X', 'utf8',
                      os.path.join(ROOT, 'py_router', 'check_drc.py'), out,
                      '--clearance', '0.1'], capture_output=True, text=True,
                     encoding='utf-8', errors='replace', env=env, timeout=600)
-                check('strict-sizes: the widened board is DRC-clean at 0.1',
+                check('strict-sizes: the board is DRC-clean at 0.1',
                       drc.returncode == 0, (drc.stdout or '')[-400:])
                 p = parse_kicad_pcb(out)
                 nid = next(n for n, v in p.nets.items() if v.name == '+3V3')
@@ -626,7 +541,6 @@ def t_strict_sizes():
 if __name__ == '__main__':
     t_gui_oracle_payload()
     t_report()
-    t_exact_check()
     t_assign()
     t_merge()
     t_end_to_end()

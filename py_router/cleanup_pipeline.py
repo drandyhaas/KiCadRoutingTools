@@ -137,10 +137,6 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                   _restore_soft_joint_bridges guard, so every
                                   joint close sees is router-born, never one a
                                   cleanup pass manufactured.
-     10b. widen_power_copper  -- #1033: widen this run's power-net copper
-                                  toward its requested width where it clears
-                                  on exact geometry (width only, collinear
-                                  pieces; no-op without power_net_widths).
      11. merge_collinear_segments -- #811: join collinear same-net/layer/width
                                   pieces into one track. Runs AFTER close on
                                   purpose, and is the only pass allowed to:
@@ -500,31 +496,6 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _bridged:
             print(f"{label}Bridged {_bridged} same-net soft joint(s) with a tiny "
                   f"connector")
-
-    # #1033: widen power-net copper where its requested width fits, on
-    # exact geometry against the FINISHED board -- after every pass that can
-    # narrow or move copper (the graze neck, smoothing, soft-joint bridges)
-    # and before the collinear merge, which re-joins the equal-width pieces
-    # it cuts. Routing itself is untouched (completion first); a config
-    # without power_net_widths (plane round-trips, diff pairs) makes this a
-    # no-op.
-    if getattr(config, 'power_net_widths', None) or None:
-        _prog("power-width widen")
-        try:
-            from power_widen import widen_power_copper
-            _pw_stats = widen_power_copper(results, pcb_data, config,
-                                           scope_net_ids)
-            counts['power_widened_nets'] = _pw_stats['nets']
-            counts['power_widened_mm'] = _pw_stats['widened_mm']
-            _trace('power_widen')
-            if _pw_stats['nets']:
-                print(f"{label}Power-width widen: {_pw_stats['widened_mm']:.2f} "
-                      f"mm widened toward --power-nets-widths on "
-                      f"{_pw_stats['nets']} net(s) (#1033)")
-        except Exception as _pwe:                               # noqa: BLE001
-            print(f"{label}WARNING: power-width widen pass failed "
-                  f"({type(_pwe).__name__}: {_pwe}); copper keeps its routed "
-                  f"widths (#1033)")
 
     # #811 FINAL pass. Geometry-preserving by construction (see the pass
     # docstring), which is what lets it run after close_soft_joints and what

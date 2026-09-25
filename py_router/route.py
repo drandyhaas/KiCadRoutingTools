@@ -991,14 +991,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # batch_route repeatedly in one process). main() reads it to skip the
     # post-passes that would otherwise mutate a reverted board.
     batch_route._improvement_gate_reverted = False
-    if final_reconcile:
-        # #1033: the widen pass's failure counters are process-wide; a GUI
-        # session / in-process caller must not inherit the last run's.
-        try:
-            from power_widen import reset_errors as _pw_reset
-            _pw_reset()
-        except Exception:                                       # noqa: BLE001
-            pass
 
     # Issue #8: snapshot the input board's copper per net BEFORE any routing.
     # The final connectivity reconciliation reports against the copper that will
@@ -6296,18 +6288,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 except Exception as _dre1033:                   # noqa: BLE001
                     print(f"  (design_rules power reconcile skipped: "
                           f"{_dre1033})")
-                # #1033 part 3: failures of the widen check itself -- a
-                # constructor that raised (widening OFF for that route, also
-                # printed) or a clears() that raised (piece refused, fail
-                # closed). Present only when nonzero.
-                try:
-                    from power_widen import ERRORS as _pwerr
-                    if _pwerr['check_errors'] or _pwerr['ctor_errors']:
-                        summary['power_widen_errors'] = dict(_pwerr)
-                        if return_results:
-                            results_data['power_widen_errors'] = dict(_pwerr)
-                except Exception:                               # noqa: BLE001
-                    pass
                 if return_results:
                     results_data['power_widths'] = _pw1033
                     results_data['power_widths_measured_on'] = _stage1033

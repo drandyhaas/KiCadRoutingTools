@@ -636,8 +636,8 @@ def replace_power_track_rows(power_net_ids, shipped):
 
     Width rows for power nets are recorded per routing ATTEMPT (terminal
     necks, rescue rungs, fine-pitch taps, oracle reconnects) -- retries and
-    rescues included, and before the post-route widen pass takes most of them
-    back. Drop every ``track_width`` row of a power net and add ONE
+    rescues included, so they count attempts, not copper. Drop every
+    ``track_width`` row of a power net and add ONE
     row per power net that still ships copper under its requested width,
     from the same measurement as JSON_SUMMARY power_widths. ``shipped`` is
     [(net_id, net_name, requested, min_delivered, under_mm), ...]. Other

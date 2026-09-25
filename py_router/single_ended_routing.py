@@ -5527,8 +5527,8 @@ def _assign_wide_route_widths(segments, config: GridRouteConfig, net_id: int,
     returned unchanged.
 
     It records nothing in the `design_rules` ledger: it runs per routing
-    ATTEMPT (retries, rescues) and before the post-route widen pass, so a row
-    here would count attempts rather than shipped copper. route.py records one
+    ATTEMPT (retries, rescues), so a row here would count attempts rather
+    than shipped copper. route.py records one
     row per power net from the shipped board instead
     (fab_tiers.replace_power_track_rows).
     """
