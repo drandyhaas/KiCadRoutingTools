@@ -911,7 +911,9 @@ rules, and only then hands it on.
   (every corridor member laid) and clean on every check -- nothing waived.
   `whole_lint.py` checks what the snap promises: grid points, 0/45/90
   pieces, continuity, no reversal, a via at every layer change, a pair's
-  turns and dives as the pair router makes them. `whole_loop.sh` stops a
+  turns and dives as the pair router makes them, its end connectors, and an
+  opposite-hands pair's crossover (both poses on the grid, each leg changing
+  layer at its own barrel, the legs swapping sides). `whole_loop.sh` stops a
   loop that is NOT CONVERGING: two rounds that do not beat the best count
   of findings so far.
 - **The route** (`route_lanes.py --plan`). The router on the installed
@@ -1288,16 +1290,10 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
 
 First, the whole-route plan (`whole_*.py`):
 
-- **The crossover in the lint.** `whole_lint.py` checks a pair's end
-  connectors but not an opposite-hands pair's crossover's own shape.
 - **A lane's turn per column in the geometry.** Its bends cost next to
   nothing against its hard rules, so where those conflict it can zigzag
   (SDQS1 at its dive, before the via cut moved it); at most 45 degrees per
   column, as an elastic rule, would make such a conflict a paid row instead.
-- **A stable re-solve.** A re-solve with a new cut is a fresh optimum: the
-  one that moved SDQS1's dive moved 24 other lanes' changes too, and the
-  findings with them. A price on moving crossings and changes from the last
-  solve, below the vias, would move only what the cut needs.
 - **Flips and cuts in one round.** `whole_loop.sh` applies a round's side
   flips and leaves its cuts to the next round; applying both at once (a cut
   on a flipped island dropped) saves a round.

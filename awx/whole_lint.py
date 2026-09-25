@@ -12,7 +12,11 @@
            each side of a via (the joins to its tips excepted)
   ends     a pair's END CONNECTORS: each pose a grid point on a router heading where its body starts or ends, each
            leg ending on the pose's own leg (half its pitch across the heading), turning 45 degrees at most, the two
-           a track and the clearance apart (a pair with them has no copper join: the join and stub rules skip it)"""
+           a track and the clearance apart (a pair with them has no copper join: the join and stub rules skip it)
+  cross    an opposite-hands pair's CROSSOVER: its two poses grid points on a router heading, the body straight
+           through them and its centre; each leg from its entry point to its exit point, on the one layer then the
+           other, changing layer at its own barrel, every piece on a router direction; the entry and exit points on
+           their poses' two legs, P and N on opposite sides and SWAPPED between entry and exit"""
 import sys, json, math, collections
 geo = json.load(open(sys.argv[1]))
 RU = geo['rules']; g = RU['grid']; TW = RU['track']
@@ -144,6 +148,44 @@ for n in [n for n in geo['lanes'] if geo['lanes'][n].get('ends')]:
                    + [_ps(p_, a_, b_) for p_ in N_ for a_, b_ in zip(P_, P_[1:])])
         if dmin < TW + RU['clear'] - 1e-6:
             bad['ends'].append((n, k_, f'legs {dmin:.3f} apart (need {TW + RU["clear"]:.3f})'))
+# a crossed pair's CROSSOVER: what the snap promises of it (the pair step lays it as drawn)
+octi_ok = lambda dx, dy: min(math.degrees(math.atan2(dy, dx)) % 45, 45 - math.degrees(math.atan2(dy, dx)) % 45) < 1e-3
+for n in [n for n in geo['lanes'] if geo['lanes'][n].get('cross')]:
+    xo, pcs = geo['lanes'][n]['cross'], geo['lanes'][n]['pieces']
+    hx, hy = xo['heading']
+    hl = math.hypot(hx, hy)
+    ux, uy = hx / hl, hy / hl
+    if not octi_ok(hx, hy):
+        bad['cross'].append((n, 'heading off the router directions'))
+    for q in xo['poses']:
+        if not (on(q[0]) and on(q[1])):
+            bad['cross'].append((n, 'pose off the grid', (round(q[0], 4), round(q[1], 4))))
+    for q in list(xo['poses']) + [xo['at']]:
+        if not any(_ps(q, (p[0], p[1]), (p[2], p[3])) < 1e-6 for p in pcs):
+            bad['cross'].append((n, 'the body does not pass its pose or centre', (round(q[0], 3), round(q[1], 3))))
+    for k, runs in xo['legs'].items():
+        (pts0, _La), (pts1, _Lb) = runs[0], runs[-1]
+        barrel = [(x, y) for x, y, kk in xo['vias'] if kk == k]
+        if math.hypot(pts0[0][0] - xo['entry'][k][0], pts0[0][1] - xo['entry'][k][1]) > 1e-6 \
+                or math.hypot(pts1[-1][0] - xo['exit'][k][0], pts1[-1][1] - xo['exit'][k][1]) > 1e-6:
+            bad['cross'].append((n, k, 'leg not from its entry point to its exit point'))
+        if [L_ for _q, L_ in runs] != list(xo['layers']):
+            bad['cross'].append((n, k, 'leg layers', [L_ for _q, L_ in runs]))
+        if len(barrel) != 1 or math.hypot(pts0[-1][0] - barrel[0][0], pts0[-1][1] - barrel[0][1]) > 1e-6 \
+                or math.hypot(pts1[0][0] - barrel[0][0], pts1[0][1] - barrel[0][1]) > 1e-6:
+            bad['cross'].append((n, k, 'leg does not change layer at its own barrel'))
+        for pts, _L in runs:
+            for a_, b_ in zip(pts, pts[1:]):
+                if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > EPS and not octi_ok(b_[0] - a_[0], b_[1] - a_[1]):
+                    bad['cross'].append((n, k, 'a leg piece off the router directions', (round(a_[0], 3), round(a_[1], 3))))
+    side = {}
+    for which, pose in (('entry', xo['poses'][0]), ('exit', xo['poses'][1])):
+        offs = {k: (pt[0] - pose[0]) * -uy + (pt[1] - pose[1]) * ux for k, pt in xo[which].items()}
+        if abs(abs(offs['P']) - abs(offs['N'])) > 1e-6 or offs['P'] * offs['N'] > 0:
+            bad['cross'].append((n, f'{which} points not on the pose\'s two legs'))
+        side[which] = offs['P'] > 0
+    if side.get('entry') == side.get('exit'):
+        bad['cross'].append((n, 'the legs do not swap sides'))
 for k, v in bad.items():
     for row in v[:12]:
         print('LINT', k, *row)
