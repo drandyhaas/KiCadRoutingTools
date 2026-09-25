@@ -159,12 +159,12 @@ def last_dir(net, pt, layer):
 
 
 def end_dirs(n):
-    """(out of the tooth, into the berth) as unit vectors, from the stubs' last segments"""
+    """(out of the tooth, into the berth) as unit vectors, from the stubs' last segments -- a PAIR's from the pair's
+    own escape directions, the ones the pair step works from (a leg's own last stub segment can converge on the tips
+    at 45 degrees: SDQS1's berth)"""
     L0, L1 = LANE[n]['lays'][0], LANE[n]['lays'][-1]
     if n in prs:
-        (sp_, _sn), (tp_, _tn) = ctx.pair_ends[n]
-        leg = prs[n][0]
-        a, b = last_dir(leg, sp_, L0), last_dir(leg, tp_, L1)
+        a, b = ctx.tooth_dir.get(n), ctx.stub_dir.get(n)
     else:
         a, b = last_dir(n, ctx.ends[n][0], L0), last_dir(n, ctx.ends[n][1], L1)
     P = LANE[n]['pts']
@@ -203,6 +203,198 @@ def term_cell(p, e, way, start, n, layer, free):
             if best is None or key_ < best[0]:
                 best = (key_, i, j)
     return best[1], best[2]
+
+
+# ------------------------------------------------------------------ a pair's end connectors
+STATIC_NEAR = {}
+
+
+def static_near(n, end):
+    """other nets' copper near a pair's end: static_around its tips' midpoint"""
+    tips = ctx.pair_ends[n][end]
+    return static_around(_pairs.mid(tips[0], tips[1]), end_reach(tips) + 4 * bd.LANE_MIN)
+
+
+def end_reach(tips):
+    """how far from a pair's tips its end connector's pose is looked for: its end run and two pair pitches more (the
+    shortest clear connector is taken)"""
+    return _pairs.end_run(cfg, tips) + 2 * _pairs.pitch(TW)
+
+
+def static_around(m, R):
+    """the board's copper within R of m, per net it is foreign to: (pads [(pad, layers, kind)], segments, vias) -- a
+    leg or a barrel is measured against every one not of its own net, the pair's other leg's stub included"""
+    key = (round(m[0] / g), round(m[1] / g), round(R / g))
+    if key in STATIC_NEAR:
+        return STATIC_NEAR[key]
+    near = lambda x, y: math.hypot(x - m[0], y - m[1]) < R
+    pads = []
+    for fp in ctx.pcb.footprints.values():
+        for pd in fp.pads:
+            if not near(pd.global_x, pd.global_y):
+                continue
+            if pd.pad_type == 'np_thru_hole':
+                pads.append((pd, {'F.Cu', 'B.Cu'}, 'hole'))
+            elif (pd.drill and pd.drill > 0) or any(L_.startswith('*') for L_ in pd.layers):
+                pads.append((pd, {'F.Cu', 'B.Cu'}, 'pad'))
+            else:
+                pads.append((pd, {L_ for L_ in pd.layers if L_ in ('F.Cu', 'B.Cu')}, 'pad'))
+    segs = [s_ for s_ in ctx.base_segments if near(s_.start_x, s_.start_y) or near(s_.end_x, s_.end_y)]
+    vias = [v_ for v_ in ctx.base_vias if near(v_.x, v_.y)]
+    STATIC_NEAR[key] = (pads, segs, vias)
+    return STATIC_NEAR[key]
+
+
+def leg_clear(pts, L, net, n, near):
+    """a leg (points, layer, its net) clear of every other net's copper at half a track and the clearance -- pads as
+    drawn, the other leg's stub among them -- and of the copper placed so far (a placed pair's legs off the grid by
+    half a step), exactly: the pair step lays it where it is"""
+    pads, segs, vias = near
+    bar = TW / 2 + CL
+    step = g / 4
+    samples = []
+    for a_, b_ in zip(pts, pts[1:]):
+        k = max(1, int(math.ceil(math.hypot(b_[0] - a_[0], b_[1] - a_[1]) / step)))
+        samples += [(a_[0] + (b_[0] - a_[0]) * t / k, a_[1] + (b_[1] - a_[1]) * t / k) for t in range(k + 1)]
+    S_ = np.array(samples)
+    for pd, Ls, kind in pads:
+        if pd.net_id == net or L not in Ls:
+            continue
+        if kind == 'hole':
+            d = np.hypot(S_[:, 0] - pd.global_x, S_[:, 1] - pd.global_y) - (pd.drill or 0) / 2
+        else:
+            d = _pairs.pad_distance(S_[:, 0] - pd.global_x, S_[:, 1] - pd.global_y, pd.size_x / 2, pd.size_y / 2,
+                                    _pairs.pad_corner_radius(pd))
+        if float(np.min(d)) < bar + step / 2:
+            return False
+    for s_ in segs:
+        if s_.net_id == net or s_.layer != L:
+            continue
+        if _pairs.poly_dist(pts, [(s_.start_x, s_.start_y), (s_.end_x, s_.end_y)]) < bar + s_.width / 2 - 1e-9:
+            return False
+    for v_ in vias:
+        if v_.net_id != net and min(_pairs._pt_seg((v_.x, v_.y), a_, b_) for a_, b_ in zip(pts, pts[1:])) \
+                < bar + v_.size / 2 - 1e-9:
+            return False
+    for (m_, L_, p_, q_) in LEGS:
+        if m_ != n and L_ == L and _pairs.poly_dist(pts, [p_, q_]) < TW + CL + g / 2 - 1e-9:
+            return False
+    for (m_, L_, p_, q_) in PLACED:
+        if m_ != n and m_ not in prs and L_ == L and _pairs.poly_dist(pts, [p_, q_]) < TW + CL - 1e-9:
+            return False
+    for (m_, bx_, by_) in PVIAS:
+        if m_ != n and min(_pairs._pt_seg((bx_, by_), a_, b_) for a_, b_ in zip(pts, pts[1:])) < VR + TW / 2 + CL - 1e-9:
+            return False
+    return True
+
+
+def via_clear(x, y, net, n, near):
+    """a barrel of net at (x, y), laid as drawn, clear of every other net's copper on both layers -- pads as drawn,
+    holes by their drill -- and of what is placed (a placed pair's legs off the grid by half a step)"""
+    pads, segs, vias = near
+    for pd, Ls, kind in pads:
+        if pd.net_id == net:
+            continue
+        if kind == 'hole':
+            if math.hypot(x - pd.global_x, y - pd.global_y) < cfg.via_drill / 2 + (pd.drill or 0) / 2 + h2h - 1e-9:
+                return False
+            continue
+        d = float(_pairs.pad_distance(x - pd.global_x, y - pd.global_y, pd.size_x / 2, pd.size_y / 2,
+                                      _pairs.pad_corner_radius(pd)))
+        if d < VR + CL - 1e-9:
+            return False
+    for s_ in segs:
+        if s_.net_id != net and _pairs._pt_seg((x, y), (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)) \
+                < VR + s_.width / 2 + CL - 1e-9:
+            return False
+    for v_ in vias:
+        if v_.net_id != net and math.hypot(x - v_.x, y - v_.y) < max(VR + v_.size / 2 + CL,
+                                                                        cfg.via_drill / 2 + v_.drill / 2 + h2h) - 1e-9:
+            return False
+    for (m_, L_, p_, q_) in LEGS:
+        if m_ != n and _pairs._pt_seg((x, y), p_, q_) < VR + TW / 2 + CL + g / 2 - 1e-9:
+            return False
+    for (m_, L_, p_, q_) in PLACED:
+        if m_ != n and m_ not in prs and _pairs._pt_seg((x, y), p_, q_) < VR + TW / 2 + CL - 1e-9:
+            return False
+    for (m_, bx_, by_) in PVIAS:
+        if m_ != n and math.hypot(x - bx_, y - by_) < VVB - 1e-9:
+            return False
+    return True
+
+
+def is_crossed(n):
+    """an OPPOSITE-HANDS pair: P on one side of its travel at its tooth, on the other arriving at its berth (pairs.hand)
+    -- its legs must swap sides once, at a dive"""
+    (tp, tn), (sp, sn) = ctx.pair_ends[n]
+    a = _pairs.hand(ctx.tooth_dir.get(n), tp, tn)
+    b = _pairs.hand(ctx.stub_dir.get(n), sp, sn, arriving=True)
+    return a != 0 and b != 0 and a != b
+
+
+def crossover_at(n, V, d, hand0, L1, L2):
+    """the pair's crossover at V on heading DIRS[d] (pairs.crossover: P or N diving first, the first clean), its legs
+    and barrels clear of everything, or None"""
+    pn, nn = prs[n]
+    ids = {'P': ctx.byname[pn][0], 'N': ctx.byname[nn][0]}
+    near = static_around(V, 4 * bd.LANE_MIN)
+    for first in ('P', 'N'):
+        c = _pairs.crossover(V, DIRS[d], hand0, HALF, cfg.via_size, VX[n], TW, CL, g, L1, L2, first=first,
+                             floor=_pairs.handover_setback(cfg))
+        if c is None:
+            continue
+        if all(leg_clear(pts, L, ids[k], n, near) for k, v in c['legs'].items() for pts, L in v) \
+                and all(via_clear(x, y, ids[k], n, near) for x, y, k in c['vias']):
+            c['first'] = first
+            c['at'] = [V[0], V[1]]
+            c['heading'] = list(DIRS[d])
+            c['layers'] = [L1, L2]
+            return c
+    return None
+
+
+def pair_end_cands(n, end, W, esc):
+    """lane n's end connectors at one end (0 its tooth, 1 its berth), shortest first: (length, pose cell (i, j),
+    heading index (walking into the lane), the end as the plan records it -- pose, heading, layer, the P and N legs
+    from the tips to the pose's legs, the router's own straight onto the pose included)"""
+    tips = ctx.pair_ends[n][end]
+    L = LANE[n]['lays'][0] if end == 0 else LANE[n]['lays'][-1]
+    pn, nn = prs[n]
+    nets = (ctx.byname[pn][0], ctx.byname[nn][0])
+    m = _pairs.mid(tips[0], tips[1])
+    el = math.hypot(*esc)
+    e = (esc[0] / el, esc[1] / el)
+    floor_ = _pairs.handover_setback(cfg)                 # the router takes over this far past the legs' ends
+    reach = end_reach(tips)
+    i0, j0, band, bad = W['i0'], W['j0'], W['band'], W['bad']
+    out = []
+    for (ii, jj) in np.argwhere(band):
+        i, j = int(ii) + i0, int(jj) + j0
+        x, y = i * g, j * g
+        ahead = (x - m[0]) * e[0] + (y - m[1]) * e[1]
+        if ahead < max(floor_, g) or math.hypot(x - m[0], y - m[1]) > reach or bad[L][ii, jj]:
+            continue
+        for k in range(8):
+            hx, hy = DIRS[k]
+            hl = math.hypot(hx, hy)
+            u = (hx / hl, hy / hl)
+            if u[0] * e[0] + u[1] * e[1] < -1e-9:
+                continue
+            q = (x - u[0] * floor_, y - u[1] * floor_)
+            legs = _pairs.end_legs(tips, e, q, u, HALF, TW + CL, g, reach)
+            if legs is None:
+                continue
+            full = []
+            for pts, net in zip(legs, nets):
+                E_ = pts[-1]
+                full.append(list(pts) + ([(E_[0] + u[0] * floor_, E_[1] + u[1] * floor_)] if floor_ > 0 else []))
+            if not all(leg_clear(pts, L, net, n, static_near(n, end)) for pts, net in zip(full, nets)):
+                continue
+            ln = sum(math.hypot(b_[0] - a_[0], b_[1] - a_[1]) for pts in full for a_, b_ in zip(pts, pts[1:]))
+            out.append((ln, (i, j), k, {'pose': [x, y], 'heading': [u[0], u[1]], 'layer': L,
+                                        'legs': [[list(p_) for p_ in pts] for pts in legs],
+                                        'handover': [list(pts[-1]) for pts in legs]}))
+    return sorted(out, key=lambda c_: (c_[0], c_[1], c_[2]))
 
 
 # ------------------------------------------------------------------ what is placed so far
@@ -405,85 +597,162 @@ def route(n, strict=True):
         jS = a_out
     if math.hypot(*jE) < 1e-9:
         jE = a_in
-    h = lambda i, j: math.hypot(i - E[0], j - E[1]) * g
     # a PAIR moves as the pair router does (pose_router.rs), its two counters in the state: straight steps still owed
     # and straight steps taken. After a 45-degree turn RT straight steps before the next (its turning radius); a via
     # only with none owed and ST taken, and ST owed after it; one heading through the via. A single owes nothing.
     ST = _pairs.via_straight_steps(cfg) if no90 else 0
+    CAP = max(ST, _pairs.pose_probe_steps(cfg)) if no90 else 0     # the straight count's ceiling: the most any rule asks
     RT = _pairs.turn_straight_steps(cfg) if no90 else 0
-    # ...and dives no nearer either end than its END RUN (pairs.end_run: the pair step's approach, then the router's
-    # first setback) and a via's straight run past it: the router launches from that pose and runs straight into its via
-    room0 = _pairs.end_run(cfg, ctx.pair_ends[n][0]) + _pairs.via_straight(cfg, a_out) if no90 else 0.0
-    room1 = _pairs.end_run(cfg, ctx.pair_ends[n][1]) + _pairs.via_straight(cfg, a_in) if no90 else 0.0
-    start = (S[0], S[1], d0, 0, (0, 0))
-    best = {start: 0.0}
-    prev = {}
-    pq = [(h(*S), 0.0, start)]
-    goal = None
-    npop = 0
-    while pq:
-        f_, c_, st = heapq.heappop(pq)
-        if best.get(st, math.inf) < c_ - 1e-12:
-            continue
-        npop += 1
-        i, j, d, k, sc = st
-        if (i, j) == E and k == K:
-            goal = st
-            break
-        L = lays[k]
-        # a via here: the next layer, near the plan's via, where a via clears
-        if k < K and not vbad[d % 4][i, j] and sc[0] <= 0 and sc[1] >= ST and room0 <= arc[i, j] <= total - room1:
-            x_, y_ = (i + i0) * g, (j + j0) * g
-            dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
-            if dv <= RVIA and not bad[lays[k + 1]][i, j]:
-                nst = (i, j, d, k + 1, (ST, 0))
-                nc = c_ + W_VIA * dv
+    # an OPPOSITE-HANDS pair (P on one side of its travel at its tooth, the other at its berth) swaps its legs at its
+    # dive with a CROSSOVER (pairs.crossover), laid as drawn: its dive only where the crossover clears everything, and
+    # straight on its heading from the pair router's probe before the crossover's entry pose to the probe after its
+    # exit pose (the pair router routes up to the one and on from the other)
+    cross = no90 and is_crossed(n)
+    XO = {}
+    if cross:
+        hand0 = _pairs.hand(ctx.tooth_dir.get(n), *ctx.pair_ends[n][0])
+        PR = _pairs.pose_probe_steps(cfg)
+
+        def xo(i, j, d):
+            key = (i, j, d)
+            if key not in XO:
+                XO[key] = crossover_at(n, ((i + i0) * g, (j + j0) * g), d, hand0, lays[0], lays[-1])
+            return XO[key]
+
+        def xo_steps(d):
+            dx_, dy_ = DIRS[d]
+            step_ = g * math.hypot(dx_, dy_)
+            c_ = _pairs.crossover((0.0, 0.0), (dx_, dy_), hand0, HALF, cfg.via_size, VX[n], TW, CL, g, 'F.Cu', 'B.Cu',
+                                  floor=_pairs.handover_setback(cfg))
+            return int(round(-c_['span'][0] / step_)) + PR, int(round(c_['span'][1] / step_)) + PR
+        XS = {d: xo_steps(d) for d in range(8)}
+        CAP = max(CAP, max(v[0] for v in XS.values()))
+    # ...and dives no nearer either end than its DIVE ROOM (pairs.dive_room: its end connector onto the pose, then the
+    # router's straight from the pose into the via)
+    room0 = _pairs.dive_room(cfg, ctx.pair_ends[n][0], a_out) if no90 else 0.0
+    room1 = _pairs.dive_room(cfg, ctx.pair_ends[n][1], a_in) if no90 else 0.0
+    def search(S, d0, E, dN, poses=False):
+        """the A* from grid cell S, leaving on heading d0, to E: its states, or (None, states searched). poses: S and E
+        are a pair's POSES past its end runs, not terminal joins -- no join rules, E reached on its heading dN and
+        clear of everything"""
+        h = lambda i, j: math.hypot(i - E[0], j - E[1]) * g
+        # from a pose, the pair router looks pairs.pose_probe_steps straight ahead before it accepts it: that many
+        # straight steps owed at the start, and taken into the far pose
+        PR = _pairs.pose_probe_steps(cfg) if poses else 0
+        start = (S[0], S[1], d0, 0, (PR, 0))
+        best = {start: 0.0}
+        prev = {}
+        pq = [(h(*S), 0.0, start)]
+        goal = None
+        npop = 0
+        while pq:
+            f_, c_, st = heapq.heappop(pq)
+            if best.get(st, math.inf) < c_ - 1e-12:
+                continue
+            npop += 1
+            i, j, d, k, sc = st
+            if (i, j) == E and k == K and (not poses or sc[1] >= PR):
+                goal = st
+                break
+            L = lays[k]
+            # a via here: the next layer, near the plan's via, where a via clears
+            if cross and k < K:
+                if sc[0] <= 0 and sc[1] >= XS[d][0] and room0 <= arc[i, j] <= total - room1 \
+                        and not bad[lays[k + 1]][i, j] and xo(i, j, d) is not None:
+                    x_, y_ = (i + i0) * g, (j + j0) * g
+                    dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
+                    if dv <= RVIA:
+                        nst = (i, j, d, k + 1, (XS[d][1], 0))
+                        nc = c_ + W_VIA * dv
+                        if nc < best.get(nst, math.inf) - 1e-12:
+                            best[nst] = nc; prev[nst] = st
+                            heapq.heappush(pq, (nc + h(i, j), nc, nst))
+            elif k < K and not vbad[d % 4][i, j] and sc[0] <= 0 and sc[1] >= ST and room0 <= arc[i, j] <= total - room1:
+                x_, y_ = (i + i0) * g, (j + j0) * g
+                dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
+                if dv <= RVIA and not bad[lays[k + 1]][i, j]:
+                    nst = (i, j, d, k + 1, (ST, 0))
+                    nc = c_ + W_VIA * dv
+                    if nc < best.get(nst, math.inf) - 1e-12:
+                        best[nst] = nc; prev[nst] = st
+                        heapq.heappush(pq, (nc + h(i, j), nc, nst))
+            for nd in range(8):
+                bend = min(abs(nd - d), 8 - abs(nd - d))
+                if bend >= 3 or (no90 and bend >= 2) or (bend and sc[0] > 0):
+                    continue
+                di, dj = DIRS[nd]
+                ni, nj = i + di, j + dj
+                if not ok(ni, nj) or not band[ni, nj]:
+                    continue
+                if not poses:
+                    # no fold at either end: the first move within 90 degrees of the join out of the tooth, the last
+                    # within 90 of the join into the berth (the audit folds a turn over 100)
+                    if (i, j) == S and k == 0 and DIRS[nd][0] * jS[0] + DIRS[nd][1] * jS[1] < -1e-9:
+                        continue
+                    if (ni, nj) == E and k == K and DIRS[nd][0] * jE[0] + DIRS[nd][1] * jE[1] < -1e-9:
+                        continue
+                    # ...and every move within a track width of either end runs within 90 degrees of its stub's own
+                    # way (a sum of such moves cannot fold, so neither can the lane's first or last track width:
+                    # SDQ4's stub runs 14 degrees off north, and a last move east read as 90 degrees against the
+                    # router direction)
+                    if strict and k == 0 and math.hypot(i - S[0], j - S[1]) * g <= TW and DIRS[nd][0] * a_out[0] + DIRS[nd][1] * a_out[1] < -1e-9:
+                        continue
+                    if strict and k == K and math.hypot(ni - E[0], nj - E[1]) * g <= TW and DIRS[nd][0] * a_in[0] + DIRS[nd][1] * a_in[1] < -1e-9:
+                        continue
+                if ((ni, nj) != E or poses) and bad[L][ni, nj]:
+                    continue
+                a_ = arc[ni, nj]
+                if not (gate[k][0] <= a_ <= gate[k][1]):
+                    continue
+                step = g * (math.sqrt(2) if di and dj else 1.0)
+                nc = c_ + step * (1 + W_DEV * dist[ni, nj]) + W_BEND * bend
+                if (ni, nj) == E:
+                    eb = min(abs(nd - dN), 8 - abs(nd - dN))
+                    if (no90 and eb >= 2) or (poses and eb):
+                        continue
+                    nc += W_BEND * eb
+                nst = (ni, nj, nd, k, ((max(sc[0] - 1, 0), min(sc[1] + 1, CAP)) if not bend else (RT, 1)) if no90 else (0, 0))
                 if nc < best.get(nst, math.inf) - 1e-12:
                     best[nst] = nc; prev[nst] = st
-                    heapq.heappush(pq, (nc + h(i, j), nc, nst))
-        for nd in range(8):
-            bend = min(abs(nd - d), 8 - abs(nd - d))
-            if bend >= 3 or (no90 and bend >= 2) or (bend and sc[0] > 0):
-                continue
-            di, dj = DIRS[nd]
-            ni, nj = i + di, j + dj
-            if not ok(ni, nj) or not band[ni, nj]:
-                continue
-            # no fold at either end: the first move within 90 degrees of the join out of the tooth, the last within
-            # 90 of the join into the berth (the audit folds a turn over 100)
-            if (i, j) == S and k == 0 and DIRS[nd][0] * jS[0] + DIRS[nd][1] * jS[1] < -1e-9:
-                continue
-            if (ni, nj) == E and k == K and DIRS[nd][0] * jE[0] + DIRS[nd][1] * jE[1] < -1e-9:
-                continue
-            # ...and every move within a track width of either end runs within 90 degrees of its stub's own way (a sum
-            # of such moves cannot fold, so neither can the lane's first or last track width: SDQ4's stub runs 14
-            # degrees off north, and a last move east read as 90 degrees against the router direction)
-            if strict and k == 0 and math.hypot(i - S[0], j - S[1]) * g <= TW and DIRS[nd][0] * a_out[0] + DIRS[nd][1] * a_out[1] < -1e-9:
-                continue
-            if strict and k == K and math.hypot(ni - E[0], nj - E[1]) * g <= TW and DIRS[nd][0] * a_in[0] + DIRS[nd][1] * a_in[1] < -1e-9:
-                continue
-            if (ni, nj) != E and bad[L][ni, nj]:
-                continue
-            a_ = arc[ni, nj]
-            if not (gate[k][0] <= a_ <= gate[k][1]):
-                continue
-            step = g * (math.sqrt(2) if di and dj else 1.0)
-            nc = c_ + step * (1 + W_DEV * dist[ni, nj]) + W_BEND * bend
-            if (ni, nj) == E:
-                eb = min(abs(nd - dN), 8 - abs(nd - dN))
-                if no90 and eb >= 2:
-                    continue
-                nc += W_BEND * eb
-            nst = (ni, nj, nd, k, ((max(sc[0] - 1, 0), min(sc[1] + 1, ST)) if not bend else (RT, 1)) if no90 else (0, 0))
-            if nc < best.get(nst, math.inf) - 1e-12:
-                best[nst] = nc; prev[nst] = st
-                heapq.heappush(pq, (nc + h(ni, nj), nc, nst))
-    if goal is None:
+                    heapq.heappush(pq, (nc + h(ni, nj), nc, nst))
+        if goal is None:
+            return None, npop
+        path = [goal]
+        while path[-1] in prev:
+            path.append(prev[path[-1]])
+        return path[::-1], npop
+
+    # a PAIR's two ends are its END CONNECTORS (pairs.end_legs): from its tips, two legs to a POSE on the grid where the
+    # pair router takes over, heading along a router direction -- the pair step lays these legs as they are and runs
+    # the pair router from the pose (no end search of its own), so the plan and the router share one end. Each end's
+    # candidates are the band's cells ahead of its tips, each heading within 90 degrees of the escape, whose legs
+    # (and the router's own straight onto the pose) clear other nets' copper, the other leg's stub and what is
+    # placed; the body is searched pose to pose, the shortest ends first
+    ends_out = None
+    if no90:
+        cands = [pair_end_cands(n, 0, W, (a_out[0], a_out[1])), pair_end_cands(n, 1, W, (-a_in[0], -a_in[1]))]
+        combos = sorted(((c0[0] + c1[0], x0, x1) for x0, c0 in enumerate(cands[0][:12]) for x1, c1 in enumerate(cands[1][:12])))
+        path = None
+        for _tot, x0, x1 in combos:
+            c0, c1 = cands[0][x0], cands[1][x1]
+            path, npop = search((c0[1][0] - i0, c0[1][1] - j0), c0[2], (c1[1][0] - i0, c1[1][1] - j0), (c1[2] + 4) % 8,
+                                poses=True)
+            if path is not None:
+                ends_out = [c0[3], c1[3]]
+                break
+        if path is None:
+            return None, (f'no end connector with a body between them ({len(cands[0])} x {len(cands[1])} candidate '
+                          f'poses, {len(combos)} tried)')
+    else:
+        path, npop = search(S, d0, E, dN)
+    if path is None:
         return None, f'no path in its band ({npop} states searched)'
-    path = [goal]
-    while path[-1] in prev:
-        path.append(prev[path[-1]])
-    path.reverse()
+    cross_out = None
+    if cross:
+        for (i, j, d, k, _sc), (i2, j2, d2, k2, _s2) in zip(path, path[1:]):
+            if (i, j) == (i2, j2) and k2 == k + 1:
+                cross_out = XO[(i, j, d)]
+                break
     pts, vias = [], []
     for (i, j, d, k, _sc) in path:
         xy = ((i + i0) * g, (j + j0) * g)
@@ -509,7 +778,7 @@ def route(n, strict=True):
                 merged[-1] = (p0, b_, L)
                 continue
         merged.append((a_, b_, L))
-    return (merged, vias), f'{npop} states'
+    return (merged, vias, {'ends': ends_out, 'cross': cross_out} if no90 else None), f'{npop} states'
 
 
 # ------------------------------------------------------------------ one lane at a time
@@ -520,18 +789,42 @@ res = {'lanes': {}, 'vias': [], 'conflicts': [], 'pairs': sorted(n for n in M if
                  'pair_turn_steps': _pairs.turn_straight_steps(cfg), 'pair_via_steps': _pairs.via_straight_steps(cfg)}}
 t_all = time.time()
 def place(n, out):
-    pieces, vias = out
-    for (a_, b_, L) in pieces:
+    pieces, vias = out[0], out[1]
+    extra = (out[2] if len(out) > 2 else None) or {}
+    ends, cross = extra.get('ends'), extra.get('cross')
+    # a pair with END CONNECTORS: its body runs pose to pose (its first and last pieces join its tips' midpoints to
+    # them, no copper); its copper is the body's two legs and the end legs -- and, crossed, the crossover's legs and
+    # barrels in place of the body's legs between the crossover's poses
+    body = pieces[1:-1] if ends else pieces
+    for (a_, b_, L) in body:
         PLACED.append((n, L, a_, b_))
     if n in prs:
-        for lg in bd._pair_legs([(a_, b_, L) for (a_, b_, L) in pieces], HALF):
-            (a_, b_, L) = lg[:3]
-            LEGS.append((n, L, tuple(map(float, a_)), tuple(map(float, b_))))
-    for v in vias:
-        for b_ in (_pairs.dive_barrels(v, pieces, VX[n]) if n in prs else [v]):
-            PVIAS.append((n, b_[0], b_[1]))
+        parts = list(_pairs.cut_span(body, cross['poses'][0], cross['poses'][1])) if cross else [body]
+        for part in parts:
+            for lg in bd._pair_legs([(a_, b_, L) for (a_, b_, L) in part], HALF):
+                (a_, b_, L) = lg[:3]
+                LEGS.append((n, L, tuple(map(float, a_)), tuple(map(float, b_))))
+        for e_ in (ends or []):
+            for pts in e_['legs']:
+                for a_, b_ in zip(pts, pts[1:]):
+                    LEGS.append((n, e_['layer'], tuple(map(float, a_)), tuple(map(float, b_))))
+        for k_, v_ in ((cross or {}).get('legs') or {}).items():
+            for pts, L in v_:
+                for a_, b_ in zip(pts, pts[1:]):
+                    LEGS.append((n, L, tuple(map(float, a_)), tuple(map(float, b_))))
+    if cross:
+        for (x_, y_, _k) in cross['vias']:
+            PVIAS.append((n, x_, y_))
+    else:
+        for v in vias:
+            for b_ in (_pairs.dive_barrels(v, pieces, VX[n]) if n in prs else [v]):
+                PVIAS.append((n, b_[0], b_[1]))
     res['lanes'][n] = {'xy': [list(pieces[0][0])] + [list(p[1]) for p in pieces],
                        'pieces': [[a_[0], a_[1], b_[0], b_[1], L] for (a_, b_, L) in pieces], 'vias': [list(v) for v in vias]}
+    if ends:
+        res['lanes'][n]['ends'] = ends
+    if cross:
+        res['lanes'][n]['cross'] = json.loads(json.dumps(cross))
 
 
 def lift(m):
@@ -545,7 +838,8 @@ def lift(m):
 failed = {}
 folded = {}
 for n in [n for n in order if n in HELD]:
-    place(n, ([((p_[0], p_[1]), (p_[2], p_[3]), p_[4]) for p_ in plan['lanes'][n]['pieces']], list(LANE[n]['vias'])))
+    place(n, ([((p_[0], p_[1]), (p_[2], p_[3]), p_[4]) for p_ in plan['lanes'][n]['pieces']], list(LANE[n]['vias']),
+              {'ends': plan['lanes'][n].get('ends'), 'cross': plan['lanes'][n].get('cross')}))
     log(f'  {n:7s} held as the plan lays it')
 lay = [n for n in order if n not in HELD and (n in prs or not PAIRS_ONLY)]
 for n in lay:

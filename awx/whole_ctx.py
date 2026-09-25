@@ -106,56 +106,87 @@ def install(ctx, c, geo):
     for n, x, y in geo['vias']:
         V[n].append((float(x), float(y)))
 
+    # a pair with END CONNECTORS (whole_snap: its legs from the tips to a pose on the grid, which the pair step lays
+    # as they are): its copper is its body's two legs (pose to pose; the first and last pieces join the tips'
+    # midpoints to the poses and are no copper) and the end legs, exact
+    ENDS = {n: v['ends'] for n, v in geo['lanes'].items() if v.get('ends')}
+    CROSS = {n: v['cross'] for n, v in geo['lanes'].items() if v.get('cross')}
+    END_LEGS = {n: [((a_[0], a_[1]), (b_[0], b_[1]), e_['layer']) for e_ in es for pts in e_['legs']
+                    for a_, b_ in zip(pts, pts[1:])] for n, es in ENDS.items()}
+    # ...and, crossed (an opposite-hands pair, whole_snap), the crossover's legs and barrels in place of the body's
+    # legs between the crossover's poses
+    for n, xo in CROSS.items():
+        END_LEGS.setdefault(n, []).extend(((a_[0], a_[1]), (b_[0], b_[1]), L_) for v_ in xo['legs'].values()
+                                          for pts, L_ in v_ for a_, b_ in zip(pts, pts[1:]))
+
+    def body_parts(om):
+        body = P[om][1:-1] if om in ENDS else P[om]
+        if om not in CROSS:
+            return [body]
+        return list(_pairs.cut_span(body, CROSS[om]['poses'][0], CROSS[om]['poses'][1]))
+
     def virtual_of(unrouted):
         out = []
         for om in unrouted:
-            if om in P:
-                out.extend(bd._pair_legs(P[om], half) if om in prs else P[om])
+            if om not in P:
+                continue
+            if om in prs:
+                for part in body_parts(om):
+                    out.extend(bd._pair_legs(part, half))
+                out.extend(END_LEGS.get(om, []))
+            else:
+                out.extend(P[om])
         return out
 
     def virtual_vias_of(unrouted):
-        return [p for om in unrouted for p in V.get(om, ())]
+        out = []
+        for om in unrouted:
+            xo = CROSS.get(om)
+            for p in V.get(om, ()):
+                if xo is not None and math.hypot(p[0] - xo['at'][0], p[1] - xo['at'][1]) < 1e-6:
+                    out.extend((vx, vy) for vx, vy, _k in xo['vias'])    # the crossover's two barrels
+                else:
+                    out.append(p)
+        return out
 
     # a SNAPPED lane (every piece but its two terminal joins on the router's grid: whole_snap) is handed a band just
     # wide enough to hold it: its own line within half a grid step, a grid step and a half round each end (the cell
     # the router starts from), its via cells. A snapped plan is legal on the grid as it stands, and a lane free to
     # roam a track and a clearance either side takes the next lane's row: all at once, 39 of 48 lanes kept their
     # band so, 43 with the singles' bands narrowed (their copper within 0.02 of the plan, from 0.23). A PAIR's band
-    # also opens a grid step either side along its end run (the pose the router launches from rounds onto the grid
-    # from the tips' midpoint) and its approach legs' end cells (the pair step checks those against the band)
+    # runs pose to pose (its end connectors and a crossover are laid as drawn): its body, its poses, and the end cells
+    # of the legs it takes over from (the pair step checks those against the band)
     g = ctx.cfg.grid_step
     snapped = {n for n, v in geo['lanes'].items()
                if all(pa._on_grid(np.array(p_[:2], float), np.array(p_[2:4], float), g) for p_ in v['pieces'][1:-1])}
-    dirs = (getattr(ctx, 'tooth_dir', {}) or {}, getattr(ctx, 'stub_dir', {}) or {})
 
     def narrow(nm, slack, open_layers):
         segs, vias = P.get(nm, []), V.get(nm, [])
         w = g / 2 + slack
         ends = [segs[0][0], segs[-1][1]]
-        legs, runs = [], []
-        if nm in prs and nm in getattr(ctx, 'pair_ends', {}):
-            for k_, tips in enumerate(ctx.pair_ends[nm]):
-                d = dirs[k_].get(nm)
-                mid = ((tips[0][0] + tips[1][0]) / 2, (tips[0][1] + tips[1][1]) / 2)
-                runs.append((ends[k_], _pairs.end_run(ctx.cfg, tips) + g))
-                if d is not None:
-                    dl = float(np.hypot(*d))
-                    u, nn = (d[0] / dl, d[1] / dl), (-d[1] / dl, d[0] / dl)
-                    A = _pairs.approach_len(ctx.cfg)
-                    c_ = (mid[0] + u[0] * A, mid[1] + u[1] * A)
-                    legs += [(c_[0] + sg * nn[0] * half, c_[1] + sg * nn[1] * half) for sg in (1, -1)]
+        legs = []
+        if nm in ENDS:
+            # a pair with END CONNECTORS: its body, its poses, its legs' end cells (the pair step checks those) and the
+            # router's own run from the legs' ends onto each pose (it checks that line on this map)
+            segs = segs[1:-1] + [(((e_['handover'][0][0] + e_['handover'][1][0]) / 2,
+                                   (e_['handover'][0][1] + e_['handover'][1][1]) / 2), tuple(e_['pose']), e_['layer'])
+                                 for e_ in ENDS[nm]]
+            ends = [tuple(e_['pose']) for e_ in ENDS[nm]]
+            legs = [tuple(h_) for e_ in ENDS[nm] for h_ in e_['handover']]
+            if nm in CROSS:
+                # the crossover's poses and its handover points, the pair router's ends either side of it
+                xo = CROSS[nm]
+                ends += [tuple(p_) for p_ in xo['poses']]
+                legs += [tuple(xo['entry']['P']), tuple(xo['entry']['N']), tuple(xo['exit']['P']), tuple(xo['exit']['N'])]
 
         def band(xs, ys, L):
             X, Y = np.meshgrid(np.asarray(xs, float), np.asarray(ys, float), indexing='ij')
             ok = np.zeros(X.shape, dtype=bool)
-            near_end = [np.hypot(X - e[0], Y - e[1]) <= r_ for e, r_ in runs]
             for (p, q, L_) in segs:
                 if not open_layers and L_ != L:
                     continue
                 d_ = _seg_dist(X, Y, p, q)
                 ok |= d_ <= w + 1e-9
-                for ne in near_end:
-                    ok |= ne & (d_ <= g + slack + 1e-9)
             for e in ends:
                 ok |= np.hypot(X - e[0], Y - e[1]) <= 1.5 * g + slack + 1e-9
             for (vx, vy) in vias:
@@ -203,6 +234,9 @@ def install(ctx, c, geo):
                 out.append((float(np.asarray(s_).ravel()[0]), p_[4]))
         return out
 
+    c.end_legs_of = lambda nm: list(END_LEGS.get(nm, []))
+    c.cross_of = lambda nm: CROSS.get(nm)
+    c.ends_of = lambda nm: ENDS.get(nm)
     c.virtual_of = virtual_of
     c._virtual_of_plain = lambda unrouted: [pc for om in unrouted for pc in P.get(om, ())]   # a pair's centreline
     c.layer_profile = layer_profile

@@ -136,6 +136,10 @@ class GridRouteConfig:
     diff_pair_setback_no_ladder: bool = False  # when True, _setback_ladder yields ONLY
     # the configured setback (no 0.75/0.5/floor/1.5/2x expansion) -- used by the pinch
     # retry in _maybe_swap_to_hybrid so each attempt routes at the EXACT setback asked.
+    diff_pair_setback_floor: float = None  # mm - the least setback from a terminal (None =
+    # track_width/2 + clearance, clear of the pad edge it launched from). A caller whose
+    # terminals are already coupled copper in open space -- a whole-route plan's end
+    # connectors (awx) -- sets 0 to take over at the terminals themselves.
     # In a multi-point pair, a "terminal" whose P and N pads are farther apart
     # than diff_pair_uncouple_factor * (track_width + diff_pair_gap) is not a
     # coupled differential connection (e.g. spread-out test points). If the full

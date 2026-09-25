@@ -312,6 +312,7 @@ def connect_pair(pcb: PCBData, p_id: int, n_id: int,
                  lead: float = 0.15,
                  a_n_layer: Optional[str] = None, b_n_layer: Optional[str] = None,
                  a_conn: Optional[Point] = None, b_conn: Optional[Point] = None,
+                 a_given=None, b_given=None, x_given=None,
                  ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """The pair form of `connect` (#622 pairs, 2026-09-20): route the
     DIFFERENTIAL PAIR (p_id, n_id) coupled from its two copper ends at
@@ -325,14 +326,25 @@ def connect_pair(pcb: PCBData, p_id: int, n_id: int,
     "use the pose routing, constrained to a band").
 
     `gap`: the P-to-N edge gap (default the config's diff_pair_gap,
-    never below the clearance). Returns (segments, vias) of BOTH nets,
-    not yet appended, or None."""
+    never below the clearance). `a_given` / `b_given`: an end's connector
+    GIVEN by the plan -- (legs, vias, end P, end N, heading, layer), a
+    whole-route plan's end connector (pairs.end_legs) -- laid as it is,
+    and the pair router run from its end on its heading at the router's
+    own floor of setback, with no setback search. `x_given`: an
+    opposite-hands pair's CROSSOVER given by the plan (pairs.crossover,
+    as whole_snap records it) -- laid as it is, the pair router run on
+    each side of it (_connect_pair_crossover). Returns (segments, vias)
+    of BOTH nets, not yet appended, or None."""
     layer_map = build_layer_map(cfg.layers)
     if a_layer not in layer_map or b_layer not in layer_map:
         raise ValueError(f'layer not routable: {a_layer} / {b_layer}')
     g = max(gap if gap is not None else cfg.diff_pair_gap, cfg.clearance)
     half = (cfg.track_width + g) / 2.0                 # a leg's offset from the centreline
-    if a_dir is not None and b_dir is not None:
+    if x_given is not None:
+        return _connect_pair_crossover(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
+                                       cfg, band, margin, band_slack, virtual, window_pts,
+                                       virtual_vias, report, g, a_dir, b_dir, half, a_given, b_given, x_given)
+    if a_dir is not None and b_dir is not None and a_given is None and b_given is None:
         import pairs as _pairs
         ha = _pairs.hand(a_dir, a_p, a_n)
         hb = _pairs.hand(b_dir, b_p, b_n, arriving=True)
@@ -355,7 +367,7 @@ def connect_pair(pcb: PCBData, p_id: int, n_id: int,
     return _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                                   cfg, band, margin, band_slack, virtual, window_pts,
                                   virtual_vias, report, g, a_dir, b_dir, half,
-                                  a_conn=a_conn, b_conn=b_conn)
+                                  a_conn=a_conn, b_conn=b_conn, a_given=a_given, b_given=b_given)
 
 
 STRAIGHTEN_STEPS = 1.2   # a staircase's chord may stand this many grid steps off it
@@ -745,13 +757,15 @@ def _cross_slides(poly, a_layer, b_layer, keep):
                 [(a_layer, before), (b_layer, after)]
 
 
-def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None, virt_tol=0.0):
+def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None, virt_tol=0.0, vias=()):
     """Why a connector's legs (Segments) are NOT clean against the
     window's foreign copper and the virtual lines -- a string -- or None.
     Segment-to-segment distances on a shared layer, foreign vias on
     every layer, foreign pads as discs (conservative), and, when `band`
     is a callable band(xs, ys, layer), the legs' END cells inside it
-    (the pose search that follows is confined to the band)."""
+    (the pose search that follows is confined to the band). `vias`: the
+    connector's own barrels, each checked as its copper disc on every
+    layer."""
     import pairs as _pairs
     clr = cfg.clearance
     tw = cfg.track_width
@@ -760,7 +774,7 @@ def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None
 
     def pt(x, y, L):
         return Segment(x, y, x, y, 0.0, L, 0)
-    for s in legs:
+    for s in list(legs) + [Segment(v.x, v.y, v.x, v.y, v.size, L, v.net_id) for v in vias for L in cfg.layers]:
         L = s.layer
         for o in window.segments:
             if o.net_id in own or o.layer != L:
@@ -800,6 +814,46 @@ def _legs_clear(window, legs, own, cfg, virtual, layer_map, band=None, ends=None
             if not bool(ok.ravel()[0]):
                 return f'leg end ({x:.2f},{y:.2f}) on {L} is outside the band'
     return None
+
+
+def _connect_pair_crossover(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer, cfg, band, margin, band_slack,
+                            virtual, window_pts, virtual_vias, report, gap, a_dir, b_dir, half, a_given, b_given,
+                            x_given):
+    """connect_pair for an OPPOSITE-HANDS pair whose crossover the plan gives (pairs.crossover): its legs and its two
+    barrels laid as they are drawn, once clean, and the pair router run twice on the production path, each span one
+    hand -- from the tooth end to the crossover's entry pose, arriving on its heading, and from its exit pose on that
+    heading to the berth end, both taking over at the poses themselves (the ends are given, so no setback search). The
+    second span is routed with the first's copper on the board, so its own dives keep their spacing from the
+    crossover's barrels. (segments, vias) of both nets, or None."""
+    import copy as _copy
+    u = (float(x_given['heading'][0]), float(x_given['heading'][1]))
+    L1, L2 = x_given['layers']
+    ent, ext = x_given['entry'], x_given['exit']
+    ids = {'P': p_id, 'N': n_id}
+    xsegs = [Segment(p[0], p[1], q[0], q[1], cfg.track_width, L, ids[k])
+             for k, runs in x_given['legs'].items() for pts, L in runs for p, q in zip(pts, pts[1:])
+             if math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-9]
+    xvias = [Via(x, y, cfg.via_size, cfg.via_drill, ['F.Cu', 'B.Cu'], ids[k]) for x, y, k in x_given['vias']]
+    first = _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, tuple(ent['P']), tuple(ent['N']), L1,
+                               cfg, band, margin, band_slack, virtual, window_pts, virtual_vias, report, gap,
+                               a_dir, (-u[0], -u[1]), half, a_given=a_given,
+                               b_given=(xsegs, xvias, tuple(ent['P']), tuple(ent['N']), (-u[0], -u[1]), L1))
+    if first is None:
+        if report is not None:
+            report['cross_span'] = 1
+        return None
+    pcb2 = _copy.copy(pcb)
+    pcb2.segments = list(pcb.segments) + list(first[0])
+    pcb2.vias = list(pcb.vias) + list(first[1])
+    second = _connect_pair_prod(pcb2, p_id, n_id, tuple(ext['P']), tuple(ext['N']), L2, b_p, b_n, b_layer,
+                                cfg, band, margin, band_slack, virtual, window_pts, virtual_vias, report, gap,
+                                u, b_dir, half, a_given=([], [], tuple(ext['P']), tuple(ext['N']), u, L2),
+                                b_given=b_given)
+    if second is None:
+        if report is not None:
+            report['cross_span'] = 2
+        return None
+    return list(first[0]) + list(second[0]), list(first[1]) + list(second[1])
 
 
 def _geo_connector(tip_p, tip_n, d, t, layer, half, cfg, p_id, n_id, lead=0.3, fwd=0.0):
@@ -951,7 +1005,7 @@ def _routed_connector(pcb, p_id, n_id, tip_p, tip_n, d, layer, far, cfg, half, v
 def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                        cfg, band, margin, band_slack, virtual, window_pts,
                        virtual_vias, report, gap, a_dir=None, b_dir=None, half=None,
-                       a_conn=None, b_conn=None, appr_scale=1.0, attempt=0):
+                       a_conn=None, b_conn=None, appr_scale=1.0, attempt=0, a_given=None, b_given=None):
     """connect_pair on the production pair router (see connect_pair), given
     CLEAN ENDS: a coupled APPROACH is laid first at each end -- each leg
     from its tip straight out along the escape direction for a via pitch,
@@ -980,6 +1034,27 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
                                (min(p[1] for p in pts0) + max(p[1] for p in pts0)) / 2,
                                max(max(p[0] for p in pts0) - min(p[0] for p in pts0),
                                    max(p[1] for p in pts0) - min(p[1] for p in pts0)) / 2 + margin)
+    # the ends the plan GIVES (a whole-route plan's end connectors): laid as they are, once clean
+    for end, gv in (('a', a_given), ('b', b_given)):
+        if gv is None:
+            continue
+        segs_c, vias_c, end_p, end_n, end_dir, end_layer = gv
+        why = _legs_clear(vw, segs_c, [p_id, n_id], cfg, virtual, layer_map, band=band,
+                          ends=[(end_p[0], end_p[1], end_layer), (end_n[0], end_n[1], end_layer)], vias=vias_c)
+        if os.environ.get('BRAID_PAIR_DEBUG'):
+            print(f"    connector {end} (the plan's): {len(segs_c)} seg(s), ends ({end_p[0]:.2f},{end_p[1]:.2f})/"
+                  f"({end_n[0]:.2f},{end_n[1]:.2f}) heading ({end_dir[0]:.2f},{end_dir[1]:.2f}): {why or 'clean'}")
+        if why is not None:
+            if report is not None:
+                report['given_refused'] = why
+            return None
+        connectors += segs_c
+        conn_vias += vias_c
+        if end == 'a':
+            a_p, a_n, a_dir, a_layer = end_p, end_n, end_dir, end_layer
+        else:
+            b_p, b_n, b_dir, b_layer = end_p, end_n, end_dir, end_layer
+        connected.add(end)
     if a_dir is not None and b_dir is not None and half is not None and (a_conn or b_conn):
         # BETTER CONNECTORS (Andy, 2026-09-20): the fan-in in front of the
         # teeth is where every neighbour's lane crosses, and a straight
@@ -1258,6 +1333,12 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
         report['ends'] = (a_p, a_n, a_layer, b_p, b_n, b_layer, a_dir, b_dir)
     pcfg = _copy.copy(cfg)
     pcfg.diff_pair_gap = gap
+    if a_given is not None and b_given is not None:
+        # the plan's poses: the router takes over at the given ends themselves (pairs.handover_setback), no search
+        import pairs as _pairs
+        pcfg.diff_pair_centerline_setback = _pairs.handover_setback(cfg)
+        pcfg.diff_pair_setback_floor = _pairs.handover_setback(cfg)
+        pcfg.diff_pair_setback_no_ladder = True
     pcfg.gnd_via_enabled = False          # no return vias inside a bus lane
     pcfg.diff_pair_intra_match = False
     names = {i: n.name for i, n in pcb.nets.items()}
@@ -1280,7 +1361,7 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     if not result or result.get('failed'):
         blocked = (list((result or {}).get('blocked_cells_forward') or [])
                    + list((result or {}).get('blocked_cells_backward') or []))
-        if result and not blocked and attempt < 2:
+        if result and not blocked and attempt < 2 and a_given is None and b_given is None:
             # a refusal with NO frontier is the router's own check on the
             # pose it chose -- its connectors crossing the legs, or an
             # intra-pair graze ("rejecting the pair rather than shipping a

@@ -62,6 +62,10 @@ c = cs[0]
 M = list(c.members)
 GRID2 = ctx.cfg.grid_step / 2
 G = 4 * ctx.cfg.grid_step                 # a column: four router grid steps
+# a pair's straight run either side of its via (the longer, diagonal one, and a grid step) and a turn's own straight
+# run, in columns
+W_DIVE = int(math.ceil((_pairs.via_straight(ctx.cfg, (math.sqrt(0.5), math.sqrt(0.5))) + ctx.cfg.grid_step) / G - 1e-9))
+W_TURN = int(math.ceil(_pairs.turn_straight_steps(ctx.cfg) * ctx.cfg.grid_step / G - 1e-9))
 HOLD = max(1, int(round(TW / G)))
 EXC = max(2, int(math.ceil(bd.LANE_MIN / G)))
 P_MIN = max(P_MIN, TW + CL + 2 * GRID2)      # two planned lines: each lands up to half a grid step off (the router's bar)
@@ -260,10 +264,10 @@ FR = {'T': dict(sp=c.spine, u=lambda s: s, s=lambda u: u)}
 for k_, sp in ring_sp.items():
     FR[k_] = dict(sp=sp, u=(lambda s, k_=k_: H0 + (s - RS[k_])), s=(lambda u, k_=k_: RS[k_] + (u - H0)))
 def hold_pair(tips):
-    """A PAIR's end is held straight (in columns) for its END RUN (pairs.end_run: the pair step's approach from those
-    tips, then the pair router's first setback from it): the pose it launches from lies on the plan, and the legs
-    converge along the end's own direction. (SDQS1 turned 66 degrees 0.125 mm before a berth whose tips stand 0.45
-    apart, and the pair router could not leave it.)"""
+    """A PAIR's end is held straight (in columns) for its END RUN (pairs.end_run: its end connector from those tips to
+    the pose where the pair router takes over, then the straight the router probes past the pose): the pose lies on
+    the plan, and the legs converge along the end's own direction. (SDQS1 turned 66 degrees 0.125 mm before a berth
+    whose tips stand 0.45 apart, and the pair router could not leave it.)"""
     return max(HOLD, int(math.ceil(_pairs.end_run(ctx.cfg, tips) / G)))
 
 
@@ -522,6 +526,29 @@ def build_and_solve(sides, prev=None):
                 d2 = newvar(W_BEND)
                 le([(b, 1.0), (a, -2.0), (p, 1.0), (d2, -1.0)], 0.0)
                 le([(b, -1.0), (a, 2.0), (p, -1.0), (d2, -1.0)], 0.0)
+    # a PAIR moves through its dives as the pair router does: straight for its straight run either side of each change
+    # (no turn at or near its via), and where a dive falls within its end hold, that run and a turn of its fixed end,
+    # straight from the end right through it -- its sideways shift onto its terminal comes before the dive, never
+    # between the terminal and the dive (SDQS0 dived in its last 0.4 mm, where the lanes shift onto the berths, and
+    # could not be laid straight). Elastic, priced as the other hard rules, so the singles crossing the pair there keep
+    # their room; what the room will not give is paid, and sent to the solve as a via cut
+    for (f, n, cu, kc) in vias:
+        if n not in prs:
+            continue
+        v = PIECE[(f, n)]
+        tag = ('pdive', f, kc, n)
+        if v['o1'] is not None and v['k1'] - kc <= v['hold1'] + W_DIVE + W_TURN:
+            for k in range(max(v['k0'], kc - W_DIVE), v['k1'] - v['hold1']):
+                le([(var[(f, n, k)], 1.0)], v['o1'], tag); le([(var[(f, n, k)], -1.0)], -v['o1'], tag)
+            continue
+        if v['o0'] is not None and kc - v['k0'] <= v['hold0'] + W_DIVE + W_TURN:
+            for k in range(v['k0'] + v['hold0'] + 1, min(v['k1'], kc + W_DIVE) + 1):
+                le([(var[(f, n, k)], 1.0)], v['o0'], tag); le([(var[(f, n, k)], -1.0)], -v['o0'], tag)
+            continue
+        for k in range(max(v['k0'] + 1, kc - W_DIVE + 1), min(v['k1'] - 1, kc + W_DIVE - 1) + 1):
+            a_, b_, p_ = var[(f, n, k - 1)], var[(f, n, k)], var[(f, n, k + 1)]
+            le([(p_, 1.0), (b_, -2.0), (a_, 1.0)], 0.0, tag)
+            le([(p_, -1.0), (b_, 2.0), (a_, -1.0)], 0.0, tag)
     # a lane approaches its fixed terminals monotonically over its terminal zone (pass 2: the direction from pass 1)
     if prev is not None:
         for (f, n), v in PIECE.items():
@@ -883,8 +910,16 @@ for q in sol['paid'].get('via', []):
         if f2 == f and n2 == n and abs(kc - k) * G <= VS[n] + G and (n, round(cu, 3)) not in vseen:
             vseen.add((n, round(cu, 3)))
             vcuts.append({'lane': n, 'u': cu, 'w': VS[n]})
+# ...and a pair's dive the room would not give its straight run (paid 'pdive' rows)
+for q in sol['paid'].get('pdive', []):
+    _v, f, kc, n = q[:4]
+    for (f2, n2, cu, kc2) in sol['vias']:
+        if f2 == f and n2 == n and kc2 == kc and (n, round(cu, 3)) not in vseen:
+            vseen.add((n, round(cu, 3)))
+            vcuts.append({'lane': n, 'u': cu, 'w': W_DIVE * G})
 res['vcuts'] = vcuts
 res['flips'] = sorted(FLIP)
+res['changes'] = {n: sorted(J['changes'].get(n, [])) for n in res['lanes']}    # each lane's changes in route u, in order
 res['rules'] = {'grid': ctx.cfg.grid_step, 'track': TW, 'clear': CL, 'lane_min': bd.LANE_MIN}
 json.dump(res, open(OUT, 'w'))
 log(f'cuts for the solve: {[(c_["lane"], c_["island"], round(c_["u_lo"], 2), round(c_["u_hi"], 2)) for c_ in cuts]}; via cuts {[(c_["lane"], round(c_["u"], 2)) for c_ in vcuts]}')

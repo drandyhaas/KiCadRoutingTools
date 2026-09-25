@@ -400,6 +400,7 @@ search speed on proximity-heavy boards.
 | `diff_chamfer_extra` | `1.5` | Meander chamfer multiplier for pairs (avoids P/N crossings) |
 | `diff_pair_hybrid_escape` | `True` | When a coupled pair's terminal connector can't clear foreign copper (#165 graze), keep the coupled middle and defer each terminal leg to a single-ended point-to-point join instead of failing the whole pair |
 | `diff_pair_setback_no_ladder` | `False` | When `True`, the setback ladder yields ONLY the configured setback (no 0.75/0.5/floor/1.5/2× expansion) — used by the pinch retry so each attempt routes at the exact setback asked |
+| `diff_pair_setback_floor` | `None` | The least setback from a terminal; `None` = `track_width/2 + clearance`, clear of the pad edge it launched from. A caller whose terminals are already coupled copper in open space (a whole-route plan's end connectors, awx) sets `0` to take over at the terminals themselves |
 | `diff_pair_uncouple_factor` | `6.0` | Multiples of pair spacing (`track_width + diff_pair_gap`); a multi-point terminal whose P/N pads are farther apart than this is treated as uncoupled and routed single-ended (#121) |
 
 ### Length / time matching

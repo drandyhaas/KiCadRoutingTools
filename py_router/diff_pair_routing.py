@@ -2050,7 +2050,9 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # would have put it, instead of being pushed a full pad-length further out
     # into a downstream blockage (issue #166 esp_prog). Floored so the setback
     # still clears the pad edge it launched from.
-    _setback_floor = config.track_width / 2 + config.clearance
+    _setback_floor = getattr(config, 'diff_pair_setback_floor', None)
+    if _setback_floor is None:
+        _setback_floor = config.track_width / 2 + config.clearance
     setback_src = max(_setback_floor, setback - (p_src_shift + n_src_shift) / 2)
     setback_tgt = max(_setback_floor, setback - (p_tgt_shift + n_tgt_shift) / 2)
 

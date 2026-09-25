@@ -8,7 +8,8 @@
 #   -> a smooth plan that passes: its PAIRS laid first as the pair router moves (whole_snap --pairs), the singles
 #      fitted round them (whole_polish, the pairs held) and SNAPPED onto the router's grid (whole_snap); audited, gated
 #      and linted (the pair router's turning radius and straight dives) -- done
-#   -> else the island / via cuts the geometry could not meet: the solve again (warm, every cut so far)
+#   -> else the island / via cuts the geometry could not meet, and the via cuts of the pair dives the polish could not
+#      lay straight: the solve again (warm, every cut so far)
 # The bench from BENCH / NETS / DEST (whole_ctx), under the chain's plan environment (set below).
 # SEED_FLIPS / SEED_CUTS: comma lists of earlier polish / geometry JSONs to start from.
 # A loop that is NOT CONVERGING stops: each round's smooth plan is measured by its audit findings (dive, static,
@@ -73,9 +74,9 @@ for i in $(seq 1 $rounds); do
     python3 whole_gate.py $out/plan.json $out/plan.audit > /dev/null && [ "$lint" = "LINT clean" ] && { echo "=== the plan passes: $out/plan.json"; exit 0; }
     echo "=== round $i: the snapped plan does not pass"; exit 1
   fi
-  n=$(python3 -c "import json; d=json.load(open('$out/g$i.json')); print(len(d.get('cuts', [])) + len(d.get('vcuts', [])))")
+  n=$(python3 -c "import json; d=json.load(open('$out/g$i.json')); p=json.load(open('$out/p$i.json')); print(len(d.get('cuts', [])) + len(d.get('vcuts', [])) + len(p.get('vcuts', [])))")
   if [ "$n" = "0" ]; then echo "=== round $i: no flips and no cuts left"; exit 1; fi
-  cuts="${cuts:+$cuts,}$out/g$i.json"
+  cuts="${cuts:+$cuts,}$out/g$i.json,$out/p$i.json"
   echo "=== round $i: $n cut(s) -> the solve again"
   HINT=$solve CUTS=$cuts python3 whole_solve.py $out/s$((i + 1)).json 2>&1 | grep -E "whole_solve|vias|check" | sed 's/^/  /'
   solve=$out/s$((i + 1)).json

@@ -4441,6 +4441,21 @@ class Corridor:
         virt = list(virt or []) + cross_
         rep = {}
         _ca, _cb = self._pair_conn_points(nm) if getattr(self, '_geo', None) is None else (None, None)
+        # a whole-route plan's END CONNECTORS (whole_snap: legs from the tips to the pose's own legs, pairs.end_legs):
+        # given to the pair step as they are drawn, the pair router taking over at their handover points
+        _ga = _gb = None
+        _ends = ((getattr(self, '_geo', None) or {}).get('lanes', {}).get(nm) or {}).get('ends')
+        if _ends:
+            _given = []
+            for e_ in _ends:
+                legs_ = [[Segment(a_[0], a_[1], b_[0], b_[1], TRACK, e_['layer'], lid)
+                          for a_, b_ in zip(pts, pts[1:]) if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > 1e-9]
+                         for pts, lid in zip(e_['legs'], (pid, nid_n))]
+                _given.append(([s_ for lg in legs_ for s_ in lg], [], tuple(e_['handover'][0]), tuple(e_['handover'][1]),
+                               tuple(e_['heading']), e_['layer']))
+            _ga, _gb = _given
+        # ...and an opposite-hands pair's CROSSOVER (pairs.crossover), laid as drawn between its two spans
+        _gx = ((getattr(self, '_geo', None) or {}).get('lanes', {}).get(nm) or {}).get('cross')
         if os.environ.get('BRAID_PAIR_DEBUG') and virt_vias:
             xy_ = self.lane_xy.get(nm) or [self.teeth[nm], self.stubs[nm]]
             nv = [f'({vx:.2f},{vy:.2f})' for (vx, vy) in virt_vias
@@ -4453,7 +4468,7 @@ class Corridor:
                               virtual_vias=virt_vias, gap=_pairs.GAP,
                               a_dir=ctx.tooth_dir.get(nm), b_dir=ctx.stub_dir.get(nm),
                               a_n_layer=ctx.pair_layers[nm][0], b_n_layer=ctx.pair_layers[nm][1],
-                              report=rep, a_conn=_ca, b_conn=_cb)
+                              report=rep, a_conn=_ca, b_conn=_cb, a_given=_ga, b_given=_gb, x_given=_gx)
         if res is None:
             # where the search died: the blocked frontier's extent, in mm,
             # with the lane's planned extent beside it

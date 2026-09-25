@@ -9,7 +9,10 @@
   via      every layer change at one of the lane's vias, every via at a layer change
   pair     a pair moves as the pair router does (pose_router.rs): its turns 45 degrees, each followed by
            pair_turn_steps straight steps before the next; pair_via_steps straight steps with one heading on
-           each side of a via (the joins to its tips excepted)"""
+           each side of a via (the joins to its tips excepted)
+  ends     a pair's END CONNECTORS: each pose a grid point on a router heading where its body starts or ends, each
+           leg ending on the pose's own leg (half its pitch across the heading), turning 45 degrees at most, the two
+           a track and the clearance apart (a pair with them has no copper join: the join and stub rules skip it)"""
 import sys, json, math, collections
 geo = json.load(open(sys.argv[1]))
 RU = geo['rules']; g = RU['grid']; TW = RU['track']
@@ -41,6 +44,7 @@ for n, L in geo['lanes'].items():
     pcs = L['pieces']
     if not pcs:
         continue
+    has_ends = bool(L.get('ends'))
     for i, p in enumerate(pcs):
         first, last = i == 0, i == len(pcs) - 1
         if ln(p) < EPS:
@@ -49,7 +53,7 @@ for n, L in geo['lanes'].items():
         a = math.degrees(ang(p)) % 45
         if min(a, 45 - a) > 1e-3 and not (first or last):
             bad['angle'].append((n, p[:2], round(math.degrees(ang(p)), 1)))
-        if (first or last) and ln(p) > 2 * g * math.sqrt(2) + EPS and min(a, 45 - a) > 1e-3:
+        if (first or last) and not has_ends and ln(p) > 2 * g * math.sqrt(2) + EPS and min(a, 45 - a) > 1e-3:
             bad['join'].append((n, p[:2], round(ln(p), 3)))
         for k, (x, y) in enumerate(((p[0], p[1]), (p[2], p[3]))):
             if (first and k == 0) or (last and k == 1):
@@ -71,7 +75,7 @@ for n, L in geo['lanes'].items():
         if not any(math.hypot(vx - x, vy - y) < 1e-4 for x, y in chg):
             bad['via'].append((n, 'via with no layer change', (round(vx, 3), round(vy, 3))))
     td = geo.get('tdir', {}).get(n)
-    if td:
+    if td and not has_ends:
         for fwd, e in ((True, td[0]), (False, [-td[1][0], -td[1][1]])):
             d = chord_dir(pcs, fwd, TW)
             dd = math.hypot(*d)
@@ -106,6 +110,40 @@ for n in [n for n in geo['lanes'] if n in PAIRS]:
         for s_ in vs:
             if (k_ and s_ < ST - 1e-6) or (k_ < len(runs) - 1 and L - s_ < ST - 1e-6):
                 bad['pair'].append((n, f'via {s_:.1f} / {L - s_:.1f} straight steps either side (need {ST})'))
+# a pair's END CONNECTORS: what the snap promises of each (the pair step lays them as drawn)
+def _ps(p_, a_, b_):
+    dx, dy = b_[0] - a_[0], b_[1] - a_[1]
+    l2 = dx * dx + dy * dy
+    t = 0 if l2 < 1e-18 else max(0, min(1, ((p_[0] - a_[0]) * dx + (p_[1] - a_[1]) * dy) / l2))
+    return math.hypot(p_[0] - a_[0] - t * dx, p_[1] - a_[1] - t * dy)
+
+
+for n in [n for n in geo['lanes'] if geo['lanes'][n].get('ends')]:
+    pcs = geo['lanes'][n]['pieces']
+    for k_, e_ in enumerate(geo['lanes'][n]['ends']):
+        (px, py), (hx, hy) = e_['pose'], e_['heading']
+        if not (on(px) and on(py)):
+            bad['ends'].append((n, k_, 'pose off the grid', (round(px, 4), round(py, 4))))
+        if min(abs(math.degrees(math.atan2(hy, hx)) % 45), 45 - abs(math.degrees(math.atan2(hy, hx)) % 45)) > 1e-3:
+            bad['ends'].append((n, k_, 'heading off the router directions'))
+        body_end = (pcs[0][2], pcs[0][3]) if k_ == 0 else (pcs[-1][0], pcs[-1][1])
+        if math.hypot(body_end[0] - px, body_end[1] - py) > 1e-6:
+            bad['ends'].append((n, k_, 'the body does not start at its pose'))
+        legs = e_['legs']
+        offs = [((q[-1][0] - px) * -hy + (q[-1][1] - py) * hx) for q in legs]      # across the heading
+        if abs(abs(offs[0]) - abs(offs[1])) > 1e-6 or offs[0] * offs[1] > 0:
+            bad['ends'].append((n, k_, 'legs not on the pose\'s two legs'))
+        for q in legs:
+            for a_, b_, c_ in zip(q, q[1:], q[2:]):
+                h1 = math.atan2(b_[1] - a_[1], b_[0] - a_[0]); h2 = math.atan2(c_[1] - b_[1], c_[0] - b_[0])
+                t = abs(math.degrees((h2 - h1 + math.pi) % (2 * math.pi) - math.pi))
+                if t > 45 + 1e-3 and math.hypot(c_[0] - b_[0], c_[1] - b_[1]) > EPS and math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > EPS:
+                    bad['ends'].append((n, k_, f'a leg turns {t:.0f} degrees'))
+        P_, N_ = legs                               # two lines apart: nearest at a vertex of one or the other
+        dmin = min([_ps(p_, a_, b_) for p_ in P_ for a_, b_ in zip(N_, N_[1:])]
+                   + [_ps(p_, a_, b_) for p_ in N_ for a_, b_ in zip(P_, P_[1:])])
+        if dmin < TW + RU['clear'] - 1e-6:
+            bad['ends'].append((n, k_, f'legs {dmin:.3f} apart (need {TW + RU["clear"]:.3f})'))
 for k, v in bad.items():
     for row in v[:12]:
         print('LINT', k, *row)

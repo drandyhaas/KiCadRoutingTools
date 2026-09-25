@@ -241,8 +241,12 @@ def check_pitch(ctx, corridors, png=None):
         # each piece with its ALLOWANCE (_router_terminals): none on the grid or at a fixed end, half a grid step at a
         # free end off it; a pair's pieces on the grid or off it
         prs_ = getattr(ctx, 'pairs', {}) or {}
+        # (a pair's END LEGS -- whole_snap's connectors, laid by the pair step where they are drawn -- exact)
+        exact = {nm: {(tuple(map(float, p)), tuple(map(float, q)), L) for (p, q, L) in
+                      (c.end_legs_of(nm) if hasattr(c, 'end_legs_of') else [])} for nm in V}
         R = {nm: (_router_terminals(v, (c.teeth[nm], c.stubs[nm]), g) if nm not in prs_
-                  else [(p, q, L, *((0.0, 0.0) if _on_grid(p, q, g) else (g / 2, g / 2))) for (p, q, L) in v])
+                  else [(p, q, L, *((0.0, 0.0) if (_on_grid(p, q, g) or (tuple(map(float, p)), tuple(map(float, q)), L)
+                                                   in exact[nm]) else (g / 2, g / 2))) for (p, q, L) in v])
              for nm, v in V.items()}
         for i, nm in enumerate(mem):
             for L in ctx.cfg.layers:
@@ -357,6 +361,25 @@ def _pad_edge(x, y, pd):
                                      _pairs.pad_corner_radius(pd)))
 
 
+def _straight_len(pieces, s, u, tol=1e-6):
+    """how far a centreline [(p, q, layer)] runs straight from s along the unit heading u, its pieces on that line
+    joined end to end in any order and across layers (the pair router's straight runs on through a dive): 0 when no
+    piece leaves s along u"""
+    iv = []
+    for (p, q, _L) in pieces:
+        tp = (p[0] - s[0]) * u[0] + (p[1] - s[1]) * u[1]
+        tq = (q[0] - s[0]) * u[0] + (q[1] - s[1]) * u[1]
+        if abs((p[0] - s[0]) * u[1] - (p[1] - s[1]) * u[0]) < tol and abs((q[0] - s[0]) * u[1] - (q[1] - s[1]) * u[0]) < tol:
+            iv.append((min(tp, tq), max(tp, tq)))
+    reach, grew = 0.0, True
+    while grew:
+        grew = False
+        for t0, t1 in iv:
+            if t0 <= reach + tol and t1 > reach + tol:
+                reach, grew = t1, True
+    return reach
+
+
 def _dive_straight(pieces, s, tol=1e-4):
     """((straight length arriving at the dive site s, its heading), (leaving it, its heading)) along a centreline
     [(p, q, layer)] in any order: the pieces chained per layer, the run that ends at s on one layer and the run
@@ -420,10 +443,14 @@ def check_dives(ctx, corridors, show_all=False):
         sites = {nm: [tuple(p) for p in c.virtual_vias_of([nm])] for nm in M}
         lines = {nm: c.virtual_of([nm]) for nm in M}
         centre = getattr(c, '_virtual_of_plain', c.virtual_of)
+        # a crossed pair's crossover barrels (whole_snap: laid where they are drawn, one leg each)
+        cross = {nm: (c.cross_of(nm) if hasattr(c, 'cross_of') else None) for nm in M}
+        exact_b = {nm: ({(float(v_[0]), float(v_[1])) for v_ in cross[nm]['vias']} if cross[nm] else set()) for nm in M}
         # the copper each site stands for: one barrel, or a pair's two
-        barrels = {nm: {s: (_pairs.dive_barrels(s, centre([nm]), off) if nm in pairs else [s])
+        barrels = {nm: {s: (_pairs.dive_barrels(s, centre([nm]), off) if nm in pairs and s not in exact_b[nm] else [s])
                         for s in sites[nm]} for nm in M}
-        boff = lambda nm, x, y: 0 if (nm not in pairs and _pt_on_grid(x, y, g)) else 1   # a barrel off the grid
+        # a barrel off the grid (one laid where it is drawn lands on itself)
+        boff = lambda nm, x, y: 0 if ((x, y) in exact_b[nm] or (nm not in pairs and _pt_on_grid(x, y, g))) else 1
         half_ = _pairs.pitch(TW) / 2
         ring = {om: _pairs.via_ring(cfg, half_ if om in pairs else 0.0) for om in M}
         ring_lines = {om: (centre([om]) if om in pairs else lines[om]) for om in M}
@@ -455,8 +482,8 @@ def check_dives(ctx, corridors, show_all=False):
                     # centreline by the pair's ring -- the router's pair map is its centreline's
                     # (a site ON the grid is where the router puts it: its barrels' own offsets; a smooth plan's
                     # site is not yet placed -- half a step, the allowance the polish leaves it)
-                    voff = (math.hypot(x - round(x / g) * g, y - round(y / g) * g) if _pt_on_grid(s[0], s[1], g)
-                            else g2)
+                    voff = (math.hypot(x - round(x / g) * g, y - round(y / g) * g)
+                            if _pt_on_grid(s[0], s[1], g) or s in exact_b[nm] else g2)
                     ln = min(((dseg(x, y, p, q), ring[om] + voff + g2 * (0 if _on_grid(p, q, g) else 1), om, L)
                               for om in M if om != nm for (p, q, L) in ring_lines[om]),
                              key=lambda r: r[0] - r[1], default=(9, 0, '', ''))
@@ -481,9 +508,9 @@ def check_dives(ctx, corridors, show_all=False):
                             hits.append(f'straight {lb:.3f}/{need_b:.3f} before, {la:.3f}/{need_a:.3f} after'
                                         + (f', turning {math.degrees(math.acos(max(-1.0, min(1.0, ub[0] * ua[0] + ub[1] * ua[1])))):.0f} deg' if turn_ else ''))
                             fail['straight'] += 1
-                    # ...and no nearer either end than its END RUN (pairs.end_run: the pair step's approach from its
-                    # tips, then the router's first setback) and that straight run past it: the router launches from
-                    # that pose, so a dive inside it is one it cannot reach (SDQS0 dived 0.53 mm from its berth)
+                    # ...and no nearer either end than its DIVE ROOM (pairs.dive_room: its end connector from the tips
+                    # to the pose where the pair router takes over, then the router's straight from the pose into the
+                    # via): a dive inside it is one the router cannot reach (SDQS0 once dived 0.53 mm from its berth)
                     pcs_ = centre([nm])
                     k_ = next((k for k in range(1, len(pcs_)) if pcs_[k][2] != pcs_[k - 1][2]
                                and math.hypot(pcs_[k][0][0] - s[0], pcs_[k][0][1] - s[1]) < 1e-6), None)
@@ -491,14 +518,42 @@ def check_dives(ctx, corridors, show_all=False):
                         plen = [math.hypot(q[0] - p[0], q[1] - p[1]) for (p, q, _L) in pcs_]
                         a0, a1 = sum(plen[:k_]), sum(plen[k_:])
                         ub, ua = (st_[0][1], st_[1][1]) if st_ is not None else ((1.0, 0.0), (1.0, 0.0))
-                        need0 = _pairs.end_run(cfg, ctx.pair_ends[nm][0]) + _pairs.via_straight(cfg, ub)
-                        need1 = _pairs.end_run(cfg, ctx.pair_ends[nm][1]) + _pairs.via_straight(cfg, ua)
+                        need0 = _pairs.dive_room(cfg, ctx.pair_ends[nm][0], ub)
+                        need1 = _pairs.dive_room(cfg, ctx.pair_ends[nm][1], ua)
                         if a0 < need0 - 1e-6 or a1 < need1 - 1e-6:
                             hits.append(f'end {a0:.3f}/{need0:.3f} from its tooth, {a1:.3f}/{need1:.3f} from its berth')
                             fail['end'] += 1
                 if hits or show_all:
-                    tag = ' pair' if nm in pairs else ''
+                    tag = ' pair' if nm in pairs and s not in exact_b[nm] else (' crossover' if nm in pairs else '')
                     print(f'DIVE {nm:7s} ({s[0]:7.2f},{s[1]:6.2f}){tag}  ' + ('; '.join(hits) if hits else 'ok'))
+            # a pair with END CONNECTORS: the pair router runs pose to pose, and from a pose it looks
+            # pairs.pose_probe_steps straight ahead before it accepts it -- that many grid steps straight along the
+            # heading out of the pose it starts from and into the pose it ends at (whole_snap's search owes the same);
+            # a crossed pair's crossover is two such poses round its centre, its half-span and those steps each side
+            ends_ = c.ends_of(nm) if hasattr(c, 'ends_of') else None
+            if nm in pairs and ends_:
+                pcs_ = centre([nm])[1:-1]
+                PR = _pairs.pose_probe_steps(cfg)
+                step_ = lambda u: g / max(abs(u[0]), abs(u[1]))
+                hits = []
+                for k_, e_ in enumerate(ends_):
+                    u_ = tuple(map(float, e_['heading']))
+                    got, need_ = _straight_len(pcs_, tuple(e_['pose']), u_), PR * step_(u_)
+                    if got < need_ - 1e-6:
+                        hits.append(f'pose {got:.3f}/{need_:.3f} straight from its {("tooth", "berth")[k_]} pose')
+                        fail['pose'] += 1
+                xo = cross[nm]
+                if xo is not None:
+                    u_ = tuple(map(float, xo['heading']))
+                    at_ = tuple(map(float, xo['at']))
+                    lb = _straight_len(pcs_, at_, (-u_[0], -u_[1]))
+                    la = _straight_len(pcs_, at_, u_)
+                    nb, na = -xo['span'][0] + PR * step_(u_), xo['span'][1] + PR * step_(u_)
+                    if lb < nb - 1e-6 or la < na - 1e-6:
+                        hits.append(f'crossover {lb:.3f}/{nb:.3f} straight before, {la:.3f}/{na:.3f} after')
+                        fail['crossover'] += 1
+                if hits or show_all:
+                    print(f'DIVE {nm:7s} poses  ' + ('; '.join(hits) if hits else 'ok'))
     print(f'DIVE {n_sites} planned via sites'
           + (f' (a pair\'s dive = two barrels {off:.3f} either side of its centreline)' if pairs else '')
           + f'; failing: {dict(fail)}')
@@ -537,10 +592,13 @@ def check_static(ctx, corridors, only=None):
                 continue
             own = {ctx.byname[nm][0]} | {ctx.byname[leg][0] for leg in pairs.get(nm, ()) if leg in ctx.byname}
             R = c.virtual_of([nm])
+            exact_ = {(tuple(map(float, p)), tuple(map(float, q)), L_) for (p, q, L_) in
+                      (c.end_legs_of(nm) if hasattr(c, 'end_legs_of') else [])}
+            is_on = lambda s_: _on_grid(s_[0], s_[1], g) or (tuple(map(float, s_[0])), tuple(map(float, s_[1])), s_[2]) in exact_
             for L in ('F.Cu', 'B.Cu'):
                 RR = [(np.array(p, float), np.array(q, float), L_) for p, q, L_ in R]
-                on_ = [s for s in RR if _on_grid(s[0], s[1], g)]
-                off_ = [s for s in RR if not _on_grid(s[0], s[1], g)]
+                on_ = [s for s in RR if is_on(s)]
+                off_ = [s for s in RR if not is_on(s)]
                 P_on, P_off = _samples(on_, L), _samples(off_, L)
                 P = np.concatenate([P_on, P_off]) if len(P_on) and len(P_off) else (P_on if len(P_on) else P_off)
                 # each sample's bar: track/2 + clearance, plus half a grid step where its piece is off the grid
@@ -648,6 +706,12 @@ def check_bands(ctx, corridors, only=None, png_dir=None):
             geo_ = getattr(c, '_geo', None)
             w = [tuple(p) for p in geo_['lanes'][nm]['xy']] if geo_ is not None and nm in geo_['lanes'] else list(c.lane_xy[nm])
             a, b = c.teeth[nm], c.stubs[nm]
+            ends_ = geo_['lanes'][nm].get('ends') if geo_ is not None and nm in geo_['lanes'] else None
+            if ends_:
+                # a pair with END CONNECTORS: the router's band runs pose to pose (the legs are laid as drawn)
+                pcs_ = geo_['lanes'][nm]['pieces'][1:-1]
+                w = [tuple(pcs_[0][:2])] + [tuple(p_[2:4]) for p_ in pcs_]
+                a, b = tuple(ends_[0]['pose']), tuple(ends_[1]['pose'])
             P = w + [a, b]
             x0, x1 = min(p[0] for p in P) - pad_, max(p[0] for p in P) + pad_
             y0, y1 = min(p[1] for p in P) - pad_, max(p[1] for p in P) + pad_

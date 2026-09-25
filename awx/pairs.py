@@ -109,6 +109,20 @@ def via_straight(cfg, u) -> float:
     return via_straight_steps(cfg) * cfg.grid_step / max(abs(u[0]), abs(u[1]))
 
 
+def handover_setback(cfg) -> float:
+    """The setback the pair router is given from a plan's own end connectors and crossovers: none -- their legs end
+    in open copper on the pose's own legs, so the router takes over there (diff_pair_setback_floor 0, no ladder),
+    and no room is spent on a run of its own onto the pose."""
+    return 0.0
+
+
+def pose_probe_steps(cfg) -> int:
+    """How many grid steps straight on its heading the pair router looks past a pose before it accepts it
+    (diff_pair_routing._find_open_positions: the cell that many steps ahead must be free) -- a plan's pair runs at
+    least that straight from each pose."""
+    return 3
+
+
 def pose_via_cells(cfg, half: float) -> int:
     """How many grid steps across its heading the pair router checks each of a pair's two barrels at a via, the
     centre cell being checked too (py_router diff_pair_routing._try_route_direction: the widest of the half pitch,
@@ -120,27 +134,188 @@ def pose_via_cells(cfg, half: float) -> int:
     return max(1, int(spacing / cfg.grid_step + 0.5))
 
 
-def approach_len(cfg) -> float:
-    """The straight APPROACH the pair step lays from a pair's two tips before the pair router launches
-    (connect._connect_pair_prod: a via and a clearance long, the legs converging onto the pair pitch)."""
-    return cfg.via_size + cfg.clearance
-
-
-def launch_setback(cfg, tips=None) -> float:
-    """How far from where it launches the pair router's first pose stands (diff_pair_routing: 4 x the leg spacing,
-    never under its floor -- twice the spacing, or the taper from the launch's half-gap to the spacing at 45 degrees
-    plus a grid step; `tips` None: a launch already at the pair pitch)."""
+def end_connector(cfg, tips) -> float:
+    """The least run of a plan's END CONNECTOR (end_legs) from a pair's two tips to its pose: the legs converging from
+    the tips' half gap onto the pair's half pitch at 45 degrees, the pose a grid point at least a grid step ahead of
+    the tips, and up to a grid step more for the pose's rounding onto the grid."""
     spacing = pitch(cfg.track_width) / 2
-    gap_half = spacing if tips is None else math.hypot(tips[0][0] - tips[1][0], tips[0][1] - tips[1][1]) / 2
-    return max(4 * spacing, 2 * spacing, abs(gap_half - spacing) + cfg.grid_step)
+    gap_half = math.hypot(tips[0][0] - tips[1][0], tips[0][1] - tips[1][1]) / 2
+    return max(cfg.grid_step, abs(gap_half - spacing)) + cfg.grid_step
 
 
-def end_run(cfg, tips) -> float:
-    """How far from its two tips a pair runs STRAIGHT before the pair router's first pose: the pair step's approach,
-    then the router's setback from where the approach ends. A plan lays that stretch straight, crosses nothing in it,
-    and dives no nearer than a via's straight run past it (via_straight): the router launches from that pose and
-    runs pairs.via_straight_steps straight into its via."""
-    return approach_len(cfg) + launch_setback(cfg, tips)
+def probe_len(cfg, u=None) -> float:
+    """The straight run (mm) pose_probe_steps asks for past a pose along u -- a diagonal's longer steps when u is not
+    known."""
+    step = cfg.grid_step / max(abs(u[0]), abs(u[1])) if u is not None else cfg.grid_step * math.sqrt(2)
+    return pose_probe_steps(cfg) * step
+
+
+def end_run(cfg, tips, u=None) -> float:
+    """How far from its two tips a pair runs STRAIGHT: its end connector onto the pose (end_connector; the pair step
+    lays it as drawn and the router takes over there, handover_setback), then the router's straight probe past the
+    pose (probe_len). A plan lays that stretch straight."""
+    return end_connector(cfg, tips) + handover_setback(cfg) + probe_len(cfg, u)
+
+
+def dive_room(cfg, tips, u=None) -> float:
+    """How far from its two tips a pair's own DIVE may stand: its end connector onto the pose, then the router's
+    straight from the pose into the via (via_straight, or the probe past the pose where that is longer -- both are
+    counted from the pose)."""
+    uu = u if u is not None else (math.sqrt(0.5), math.sqrt(0.5))
+    return end_connector(cfg, tips) + handover_setback(cfg) + max(probe_len(cfg, u), via_straight(cfg, uu))
+
+
+def _pt_seg(p, a, b) -> float:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    l2 = dx * dx + dy * dy
+    t = 0.0 if l2 < 1e-18 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2))
+    return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+
+def poly_dist(A, B) -> float:
+    """the least distance between two polylines [(x, y), ...]"""
+    best = math.inf
+    for a0, a1 in zip(A, A[1:]):
+        for b0, b1 in zip(B, B[1:]):
+            dx1, dy1 = a1[0] - a0[0], a1[1] - a0[1]
+            dx2, dy2 = b1[0] - b0[0], b1[1] - b0[1]
+            den = dx1 * dy2 - dy1 * dx2
+            if abs(den) > 1e-15:
+                t = ((b0[0] - a0[0]) * dy2 - (b0[1] - a0[1]) * dx2) / den
+                u = ((b0[0] - a0[0]) * dy1 - (b0[1] - a0[1]) * dx1) / den
+                if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+                    return 0.0
+            best = min(best, _pt_seg(a0, b0, b1), _pt_seg(a1, b0, b1), _pt_seg(b0, a0, a1), _pt_seg(b1, a0, a1))
+    return best
+
+
+def end_legs(tips, esc, q, h, half: float, apart: float, grid: float, reach: float):
+    """A pair's END CONNECTOR: its two legs from its tips (P, N) to where the pair router takes over at q, heading h,
+    the legs there half its pitch either side of q across h, each on its own tip's side of the escape `esc`. Each leg
+    runs from its tip along the escape a knee's length (none, or whole grid steps up to `reach`), then straight to its
+    end. Neither folds -- its first move within 90 degrees of the escape, a turn at its knee and onto h of 45 at most
+    -- and the two keep `apart` between their lines. The pair step lays these legs as they are and runs the pair
+    router from q (connect.connect_pair: the plan's connector), so the plan and the router share one end.
+    -> the shortest such ([P points], [N points]), or None"""
+    el = math.hypot(*esc)
+    hl = math.hypot(*h)
+    e = (esc[0] / el, esc[1] / el)
+    u = (h[0] / hl, h[1] / hl)
+    m = mid(tips[0], tips[1])
+    side = 1.0 if _cross(e, (tips[0][0] - m[0], tips[0][1] - m[1])) >= 0 else -1.0
+    nh = _left(u)
+    ends = [(q[0] + side * nh[0] * half, q[1] + side * nh[1] * half),
+            (q[0] - side * nh[0] * half, q[1] - side * nh[1] * half)]
+    c45 = math.cos(math.pi / 4) - 1e-9
+
+    def unit(a, b):
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        return None if L < 1e-9 else ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+
+    def options(T, E):
+        out = []
+        for k in range(0, int(reach / grid) + 1):
+            K = (T[0] + e[0] * k * grid, T[1] + e[1] * k * grid)
+            v = unit(K, E)
+            if v is None:
+                continue
+            first = e if k else v
+            if first[0] * e[0] + first[1] * e[1] <= 1e-9:
+                continue                             # folds back against its stub
+            if k and v[0] * e[0] + v[1] * e[1] < c45:
+                continue                             # a turn of more than 45 at the knee
+            if v[0] * u[0] + v[1] * u[1] < c45:
+                continue                             # ... or onto the router's heading
+            pts = [T] + ([K] if k else []) + [E]
+            out.append((sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:])), pts))
+        return sorted(out, key=lambda o: o[0])
+    op, on = options(tips[0], ends[0]), options(tips[1], ends[1])
+    best = None
+    for lp, P in op:
+        for ln, N in on:
+            if best is not None and lp + ln >= best[0]:
+                break
+            if poly_dist(P, N) >= apart - 1e-9:
+                best = (lp + ln, P, N)
+    return None if best is None else (best[1], best[2])
+
+
+def cut_span(pieces, P_in, P_out):
+    """a lane's pieces with the stretch between two points on it taken out: (before P_in, after P_out)"""
+    def on(p, a, b):
+        return _pt_seg(p, a, b) < 1e-6
+    before, after, state = [], [], 0
+    for (a, b, L) in pieces:
+        if state == 0:
+            if on(P_in, a, b):
+                if math.hypot(P_in[0] - a[0], P_in[1] - a[1]) > 1e-9:
+                    before.append((a, tuple(P_in), L))
+                state = 1
+                if on(P_out, a, b):
+                    if math.hypot(b[0] - P_out[0], b[1] - P_out[1]) > 1e-9:
+                        after.append((tuple(P_out), b, L))
+                    state = 2
+                continue
+            before.append((a, b, L))
+        elif state == 1:
+            if on(P_out, a, b):
+                if math.hypot(b[0] - P_out[0], b[1] - P_out[1]) > 1e-9:
+                    after.append((tuple(P_out), b, L))
+                state = 2
+        else:
+            after.append((a, b, L))
+    return before, after
+
+
+def crossover(V, u, s_in: int, half: float, via_size: float, via_half: float, track: float, clearance: float,
+              grid: float, L1: str, L2: str, p_id: int = 1, n_id: int = 2, first: str = 'P', floor: float = 0.0):
+    """A pair's CROSSOVER at its dive V on a straight stretch along u (#622): the two legs swap sides the way a
+    designer swaps them. The FIRST diver runs its old line on L1, steps out to its barrel (away from the other leg,
+    by what an ordinary dive gives a barrel: via_half - half), dives, and jogs at 45 degrees on L2 onto its new line
+    (the other's old one); the SECOND runs its old line on L1, jogs at 45 degrees over the first's new-layer leg to
+    its barrel beside its new line, dives and steps back onto it. Both barrels stand on one side, staggered along u
+    by the least whole grid steps that keep a via's pitch and each jog its clearance from the other's barrel. `s_in`:
+    the side of u P lies on before the dive (+1 left, -1 right); after it, the other. Each leg is exact copper, laid
+    as drawn; the pair router takes over from the entry and exit points, half the pitch either side of the centre
+    line, on each side's own hand -- its POSES `floor` further out (its own setback), each run on to a whole grid step
+    from V along u so the pose is a grid point when V is. -> dict(entry={P, N}, exit={P, N}, poses=(in, out),
+    legs={P: [(points, layer)], N: ...}, vias=[(x, y, 'P' | 'N')], span=(x_in, x_out) along u from V), or None when
+    its own legs would not clear"""
+    ul = math.hypot(*u)
+    ux, uy = u[0] / ul, u[1] / ul
+    lx, ly = -uy, ux
+    to_xy = lambda x, y: (V[0] + x * ux + y * lx, V[1] + x * uy + y * ly)
+    yP0 = s_in * half                                         # P's line before; after, -yP0
+    yF0 = yP0 if first == 'P' else -yP0                       # the first diver's old line (the barrels' side)
+    sg = 1.0 if yF0 > 0 else -1.0
+    vy = sg * via_half                                        # both barrels' offset
+    jog = half + via_half                                     # a jog's sideways reach (and its length along u at 45)
+    need = max(via_size + clearance, (via_size / 2 + track / 2 + clearance) / math.sin(math.pi / 4))
+    dx = math.ceil(need / grid - 1e-9) * grid                 # the stagger
+    xa = -math.floor(dx / 2 / grid) * grid
+    xb = xa + dx
+    x_in, x_out = min(xa, xb - jog), max(xa + jog, xb)
+    step = grid / max(abs(ux), abs(uy))                       # a grid step along u
+    pose_in = math.floor((x_in - floor) / step + 1e-9) * step
+    pose_out = math.ceil((x_out + floor) / step - 1e-9) * step
+    x_in, x_out = pose_in + floor, pose_out - floor
+    F = [([(x_in, yF0), (xa, yF0), (xa, vy)], L1), ([(xa, vy), (xa + jog, -yF0), (x_out, -yF0)], L2)]
+    S = [([(x_in, -yF0), (xb - jog, -yF0), (xb, vy)], L1), ([(xb, vy), (xb, yF0), (x_out, yF0)], L2)]
+    legs = {'P': F, 'N': S} if first == 'P' else {'P': S, 'N': F}
+    legs = {k: [([to_xy(*q) for q in pts], L) for pts, L in v] for k, v in legs.items()}
+    va, vb = to_xy(xa, vy), to_xy(xb, vy)
+    vias = [(va[0], va[1], first), (vb[0], vb[1], 'N' if first == 'P' else 'P')]
+    from kicad_parser import Segment, Via
+    ids = {'P': p_id, 'N': n_id}
+    segs = [Segment(a[0], a[1], b[0], b[1], track, L, ids[k]) for k, v in legs.items() for pts, L in v
+            for a, b in zip(pts, pts[1:]) if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-9]
+    vs = [Via(x, y, via_size, via_size / 2, [L1, L2], ids[k]) for x, y, k in vias]
+    if intra_ok(segs, vs, p_id, n_id, track, via_size, clearance) is not None:
+        return None
+    return dict(entry={'P': to_xy(x_in, yP0), 'N': to_xy(x_in, -yP0)},
+                exit={'P': to_xy(x_out, -yP0), 'N': to_xy(x_out, yP0)},
+                poses=(to_xy(pose_in, 0.0), to_xy(pose_out, 0.0)),
+                legs=legs, vias=vias, span=(pose_in, pose_out))
 
 
 def envelope_via_half(cfg, half: float) -> float:

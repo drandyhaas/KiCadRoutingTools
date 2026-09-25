@@ -86,9 +86,34 @@ def densify(pts, lays, dmax):
 LANES = {}
 for n, v in geo['lanes'].items():
     pcs = v['pieces']
+    xo = v.get('cross')
+    mid = set()
+    if xo:
+        # a CROSSED pair (whole_snap): its centreline between the crossover's two poses is no copper either -- the
+        # crossover's legs and barrels are (below, as static copper)
+        bef, aft = _pairs.cut_span([((pc[0], pc[1]), (pc[2], pc[3]), pc[4]) for pc in pcs], xo['poses'][0],
+                                   xo['poses'][1])
+        span = [(tuple(xo['poses'][0]), tuple(xo['at']), xo['layers'][0]),
+                (tuple(xo['at']), tuple(xo['poses'][1]), xo['layers'][1])]
+        pcs = [(a_[0], a_[1], b_[0], b_[1], L_) for a_, b_, L_ in bef + span + aft]
+        mid = {len(bef), len(bef) + 1}
     pts = [(pcs[0][0], pcs[0][1])] + [(pc[2], pc[3]) for pc in pcs]
     X, Ls = densify(pts, [pc[4] for pc in pcs], 4 * cfg.grid_step)
     LANES[n] = dict(X=np.array(X, float), L=Ls, H=np.zeros(len(X), bool))     # H: vertices held where they are laid
+    # a pair with END CONNECTORS (whole_snap): its first and last pieces join its tips' midpoints to its poses and are
+    # no copper -- its end legs are (below, as static copper): their segments take part in no row
+    nc, xv = set(), set()
+    if v.get('ends') or xo:
+        seg_n = [max(1, int(math.ceil(math.hypot(pc[2] - pc[0], pc[3] - pc[1]) / (4 * cfg.grid_step)))) for pc in pcs]
+        off_ = np.concatenate([[0], np.cumsum(seg_n)])
+        if v.get('ends'):
+            nc = set(range(seg_n[0])) | set(range(len(X) - 1 - seg_n[-1], len(X) - 1))
+        for k_ in mid:
+            nc |= set(range(int(off_[k_]), int(off_[k_ + 1])))
+        if mid:
+            xv = {int(off_[min(mid) + 1])}                # the crossover's centre: no pair dive, no barrels of its own
+    LANES[n]['NC'] = nc
+    LANES[n]['XV'] = xv
 # a plan's HELD lanes (the pairs, laid as the pair router moves by whole_snap --pairs) stay exactly where they are:
 # the singles are fitted round them
 HELD = set(geo.get('held', []))
@@ -222,6 +247,24 @@ for s in ctx.base_segments:
     STATIC.append(('seg', {s.layer}, s.net_id, (s.start_x, s.start_y, s.end_x, s.end_y, s.width / 2), 'copper'))
 for v in ctx.base_vias:
     STATIC.append(('circ', {'F.Cu', 'B.Cu'}, v.net_id, (v.x, v.y, v.size / 2), 'via'))
+# a held pair's END LEGS are laid where they are drawn: copper the singles are fitted round -- and a crossed pair's
+# crossover, its legs and its two barrels
+for n in HELD:
+    for e_ in geo['lanes'][n].get('ends', []):
+        for pts, leg in zip(e_['legs'], prs[n]):
+            for a_, b_ in zip(pts, pts[1:]):
+                STATIC.append(('seg', {e_['layer']}, ctx.byname[leg][0], (a_[0], a_[1], b_[0], b_[1], TW / 2),
+                               f'{n} end leg'))
+    xo = geo['lanes'][n].get('cross')
+    if xo:
+        legs_ = dict(zip(('P', 'N'), prs[n]))
+        for k_, runs in xo['legs'].items():
+            for pts, L_ in runs:
+                for a_, b_ in zip(pts, pts[1:]):
+                    STATIC.append(('seg', {L_}, ctx.byname[legs_[k_]][0], (a_[0], a_[1], b_[0], b_[1], TW / 2),
+                                   f'{n} crossover leg'))
+        for vx_, vy_, k_ in xo['vias']:
+            STATIC.append(('circ', {'F.Cu', 'B.Cu'}, ctx.byname[legs_[k_]][0], (vx_, vy_, VR), f'{n} crossover via'))
 OWN = {n: {ctx.byname[n][0]} | {ctx.byname[leg][0] for leg in prs.get(n, ()) if leg in ctx.byname} for n in LANES}
 # static objects binned by bounding box; a query looks SREACH round its point: the widest bar to static copper
 SCELL = 2 * _pairs.pitch(TW)
@@ -398,6 +441,8 @@ def gather():
     for n, ln in LANES.items():
         X = ln['X']
         for i in range(len(X) - 1):
+            if i in ln['NC']:
+                continue
             lo, hi = np.minimum(X[i], X[i + 1]), np.maximum(X[i], X[i + 1])
             for cx in range(int(math.floor(lo[0] / CELL)), int(math.floor(hi[0] / CELL)) + 1):
                 for cy in range(int(math.floor(lo[1] / CELL)), int(math.floor(hi[1] / CELL)) + 1):
@@ -415,6 +460,8 @@ def gather():
     for n, ln in LANES.items():
         X, Ls = ln['X'], ln['L']
         for i in range(len(X) - 1):
+            if i in ln['NC']:
+                continue
             mid = (X[i] + X[i + 1]) / 2
             r = np.linalg.norm(X[i + 1] - X[i]) / 2 + BLOCK + 2 * (HALF_SNAP + g2) + MARGIN
             for (m, j) in near_segs(mid, r):
@@ -434,7 +481,7 @@ def gather():
                 rows.append(([(n, i, nv * (1 - s)), (n, i + 1, nv * s), (m, j, -nv * (1 - t)), (m, j + 1, -nv * t)],
                              need + EPS - d, 'pitch', f'{n}/{m} {Ls[i][0]}', d - need))
     # vias: each barrel vs other lanes' segments (either layer), other lanes' barrels, static of other nets
-    VIAS = [(n, i) for n in LANES for i in via_idx(n)]
+    VIAS = [(n, i) for n in LANES for i in via_idx(n) if i not in LANES[n]['XV']]
     for (n, i) in VIAS:
         X = LANES[n]['X']
         for bo in barrels(n, i):
@@ -524,6 +571,8 @@ def gather():
     for n, ln in LANES.items():
         X, Ls = ln['X'], ln['L']
         for i in range(len(X) - 1):
+            if i in ln['NC']:
+                continue
             for dd, s, q, lab in static_seg(X[i], X[i + 1], Ls[i], OWN[n]):
                 need = NEED_ST + hw[n]
                 if dd >= need + MARGIN:
@@ -639,14 +688,13 @@ DIVE_U = {}          # (lane, via vertex) -> the heading its dive is laid on (pa
 
 
 def pair_approaches():
-    """a PAIR's end stretch -- its END RUN (pairs.end_run) -- laid as the pair step lays it, and held: its APPROACH
-    (pairs.approach_len) straight along the stub's own way, then the router's first SETBACK straight, within the
-    router's max_setback_angle of that way (the chord's own direction, turned into that cone when it lies outside; its
-    ladder tries its pose at angles up to it). An approach at an angle leaves the pair step's first pose off the plan
-    (SDQS1's berth run left at 45 degrees; in a band that follows the plan its first pose had no cell); a whole end run
-    along the stub pinned the lanes round SCK's ends (four pitch findings round 1, not converging). Without a stub's
-    way, the chord's own direction, straight. At a ring berth the frame runs across the stub (SCK came along the ring
-    and turned 90 degrees into its berth), which no frame offset can express."""
+    """a PAIR's end stretch -- its END RUN (pairs.end_run) -- laid straight and held: its END CONNECTOR
+    (pairs.end_connector) along the stub's own way, then the straight the pair router probes past its pose, within
+    max_setback_angle of that way (the chord's own direction, turned into that cone when it lies outside). A connector
+    at an angle leaves the pose off the plan (SDQS1's berth run left at 45 degrees; in a band that follows the plan its
+    pose had no cell); a whole end run along the stub pinned the lanes round SCK's ends (four pitch findings round 1,
+    not converging). Without a stub's way, the chord's own direction, straight. At a ring berth the frame runs across
+    the stub (SCK came along the ring and turned 90 degrees into its berth), which no frame offset can express."""
     laid = []
     cone = math.radians(cfg.max_setback_angle)
     for n in [n for n in LANES if n in prs and n not in HELD]:
@@ -660,8 +708,8 @@ def pair_approaches():
                 continue                                 # too short to hold both ends apart
             k = int(np.searchsorted(s, sb))
             vs = [v if end == 0 else len(Ls) - v for v in via_idx(n)]
-            if any(0 < v <= k for v in vs):
-                continue                                 # a dive inside the setback: the plan's own, left as it is
+            if stub_ways(n)[end] is None and any(0 < v <= k for v in vs):
+                continue                                 # a dive inside the end run with no way to lay it: left as it is
             chord = X[k] - X[0]
             c = chord / np.linalg.norm(chord)
             u = stub_ways(n)[end]
@@ -671,38 +719,40 @@ def pair_approaches():
                 A = X[0] + c * float(np.linalg.norm(chord))
             else:
                 u = np.asarray(u, float) / float(np.linalg.norm(u))
-                A0 = X[0] + u * _pairs.approach_len(cfg)             # the approach, along the stub
+                A0 = X[0] + u * _pairs.end_connector(cfg, tips)      # the end connector, along the stub
                 ch2 = X[k] - A0
                 c2 = ch2 / max(float(np.linalg.norm(ch2)), 1e-12)
                 ang = math.atan2(u[0] * c2[1] - u[1] * c2[0], u[0] * c2[0] + u[1] * c2[1])
                 a_ = max(-cone, min(cone, ang))
                 c2 = np.array([u[0] * math.cos(a_) - u[1] * math.sin(a_), u[0] * math.sin(a_) + u[1] * math.cos(a_)])
-                A = A0 + c2 * max(float(np.linalg.norm(ch2)), 0.0)    # the setback, within the cone
-            # a dive of its own just past the end run: the router launches its pose and runs straight on into the
-            # via, so the setback and the dive's straight run are ONE line -- the router heading within the cone
+                A = A0 + c2 * max(float(np.linalg.norm(ch2)), 0.0)    # the probe, within the cone
+            # a dive of its own just past the end run: the router runs straight on from its pose into the via,
+            # so the probe and the dive's straight run are ONE line -- the router heading within the cone
             # nearest the way to the via, the via moved onto it (laid apart, SDQS1 folded 122 degrees between them)
+            # (a dive inside the end run as well: the end run is short, a grid step or two past the connector's pose,
+            # and the dive is moved out along the line to where the router can make it)
             Lst = _pairs.via_straight(cfg, (1.0, 1.0)) + cfg.grid_step
-            vn = sorted(v for v in vs if v > k)
+            vn = sorted(v for v in vs if v > 1)
             joined = None
             if u is not None and vn and s[vn[0]] - Lst <= sb + Lst:
                 v0 = vn[0]
                 w = X[v0] - A0
                 c2 = max([o for o in OCT if float(o @ u) >= math.cos(cone) - 1e-9], key=lambda o: float(o @ w))
-                sbk = sb - _pairs.approach_len(cfg)                      # the setback's own length
+                sbk = sb - _pairs.end_connector(cfg, tips)               # the probe's own length
                 A = A0 + c2 * sbk
-                Pv = A0 + c2 * max(float(w @ c2), sbk + Lst)
+                # the router may dive once its probe past the pose and its straight run into a via are both behind it
+                # -- both are counted from the pose (whole_snap's search: its straight count starts there)
+                Pv = A0 + c2 * max(float(w @ c2), sbk, _pairs.via_straight(cfg, c2) + cfg.grid_step)
                 joined = (v0, Pv)
                 DIVE_U[(n, v0 if end == 0 else len(Ls) - v0)] = c2 if end == 0 else -c2
             new = X.copy()
-            l0, l1 = float(np.linalg.norm(A0 - X[0])), float(np.linalg.norm(A - A0))
-            # a vertex ON the corner between approach and setback; the others spread evenly either side of it
-            i0 = min(k - 1, max(1, int(round(k * l0 / max(l0 + l1, 1e-12))))) if l0 > 1e-12 else 0
-            for i in range(1, k + 1):
-                new[i] = (X[0] + (A0 - X[0]) * (i / i0)) if i <= i0 else (A0 + (A - A0) * ((i - i0) / (k - i0)))
-            if joined is not None:
-                v0, Pv = joined
-                for i in range(k + 1, v0 + 1):
-                    new[i] = A + (Pv - A) * ((i - k) / (v0 - k))
+            # the end run's vertices -- and a joined dive's, up to its via: one line from the pose on
+            kk, Aend = (joined[0], joined[1]) if joined is not None else (k, A)
+            l0, l1 = float(np.linalg.norm(A0 - X[0])), float(np.linalg.norm(Aend - A0))
+            # a vertex ON the corner between connector and the line; the others spread evenly either side of it
+            i0 = min(kk - 1, max(1, int(round(kk * l0 / max(l0 + l1, 1e-12))))) if l0 > 1e-12 else 0
+            for i in range(1, kk + 1):
+                new[i] = (X[0] + (A0 - X[0]) * (i / i0)) if i <= i0 else (A0 + (Aend - A0) * ((i - i0) / (kk - i0)))
             # the next setback of lane runs straight into the setback (not held): turning the chord into the cone moves
             # its far end sideways, and the lane behind it would jog to meet it (a notch, SCK)
             k2 = int(np.searchsorted(s, s[k] + sb))
@@ -711,18 +761,37 @@ def pair_approaches():
                     new[i] = A + (X[k2] - A) * ((i - k) / (k2 - k))
             ln['X'] = new if end == 0 else new[::-1]
             if end == 0:
-                ln['H'][:k + 1] = True
+                ln['H'][:kk + 1] = True
             else:
-                ln['H'][len(X) - 1 - k:] = True
+                ln['H'][len(X) - 1 - kk:] = True
             laid.append(f'{n}{"<>"[end]} {math.degrees(abs(ang)) if u is not None else 0:.0f}deg')
     return laid
+
+
+VCUT = []           # the via cuts the polish sends the solve (pair_dive_straights)
+
+
+def via_cut(n, v, L):
+    """a via cut for lane n's change at its vertex v: its route coordinate from the geometry (the solve's changes, in
+    order along the lane), the stretch either side of it that the change must leave"""
+    ch = geo.get('changes', {}).get(n)
+    vs = via_idx(n)
+    if ch is None or len(ch) != len(vs) or v not in vs:
+        return
+    u = float(ch[vs.index(v)])
+    if not any(c_['lane'] == n and abs(c_['u'] - u) < 1e-9 for c_ in VCUT):     # one cut per change
+        VCUT.append({'lane': n, 'u': u, 'w': float(L)})
 
 
 def pair_dive_straights():
     """a PAIR's dive laid straight and held: one heading through the via (the router direction nearest the lane's
     own there), the pair router's straight run (pairs.via_straight) and a grid step more on each side -- it neither
     turns at a via nor within that many steps of one (pose_router.rs straight_after_via; SDQS0 turned 45 degrees at
-    its dive, SCK 0.035 mm before its). The next stretch on each side runs straight into it (not held)."""
+    its dive, SCK 0.035 mm before its). The next stretch on each side runs straight into it (not held). A dive JOINED
+    to its end run (pair_approaches) has its end's side laid already, on that line: only its other side is laid. A
+    dive that cannot be laid so -- an end or a held stretch within its straight run, or a straight that folds the lane
+    where it joins it (the audit's own shape rule) -- is left as it is and sent to the solve as a VIA CUT (its lane, its
+    change's route coordinate, the straight run either side): the change moves off that stretch."""
     laid = []
     for n in [n for n in LANES if n in prs and n not in HELD]:
         ln = LANES[n]
@@ -730,31 +799,49 @@ def pair_dive_straights():
             X, s = ln['X'], arclen(ln['X'])
             reach = _pairs.via_straight(cfg, (1.0, 1.0)) + cfg.grid_step          # the longer (diagonal) run
             at = lambda u_: np.array([np.interp(u_, s, X[:, 0]), np.interp(u_, s, X[:, 1])])
+            joined = (n, v) in DIVE_U
             u = DIVE_U.get((n, v), octi(at(s[v] + reach) - at(s[v] - reach)))
             L = _pairs.via_straight(cfg, u) + cfg.grid_step
             ib = int(np.searchsorted(s, s[v] - L, side='left'))
             ia = int(np.searchsorted(s, s[v] + L, side='right')) - 1
-            if s[v] - L < 0 or s[v] + L > s[-1] or ib >= v or ia <= v or ln['H'][ib:ia + 1].any():
+            lay_b = not (joined and ln['H'][v - 1])
+            lay_a = not (joined and ln['H'][min(v + 1, len(X) - 1)])
+            if (lay_b and (s[v] - L < 0 or ib >= v or ln['H'][ib:v].any())) \
+                    or (lay_a and (s[v] + L > s[-1] or ia <= v or ln['H'][v + 1:ia + 1].any())) \
+                    or (not joined and ln['H'][v]):
                 laid.append(f'{n}@{v} not laid (an end or a held stretch within {L:.3f})')
+                via_cut(n, v, L)
                 continue
             new = X.copy()
             P0, Pb, Pa = X[v], X[v] - u * L, X[v] + u * L
-            for i in range(ib, v):
-                new[i] = Pb + (P0 - Pb) * ((s[i] - s[ib]) / max(s[v] - s[ib], 1e-12))
-            for i in range(v + 1, ia + 1):
-                new[i] = P0 + (Pa - P0) * ((s[i] - s[v]) / max(s[ia] - s[v], 1e-12))
-            new[ib], new[ia] = Pb, Pa
+            if lay_b:
+                for i in range(ib, v):
+                    new[i] = Pb + (P0 - Pb) * ((s[i] - s[ib]) / max(s[v] - s[ib], 1e-12))
+                new[ib] = Pb
+            if lay_a:
+                for i in range(v + 1, ia + 1):
+                    new[i] = P0 + (Pa - P0) * ((s[i] - s[v]) / max(s[ia] - s[v], 1e-12))
+                new[ia] = Pa
             # the lane runs straight into the held stretch from a straight run's length further on each side
             jb = int(np.searchsorted(s, s[ib] - L, side='left'))
             ja = int(np.searchsorted(s, s[ia] + L, side='right')) - 1
-            if 0 < jb < ib and not ln['H'][jb:ib].any() and not any(jb < w < ib for w in via_idx(n)):
+            if lay_b and 0 < jb < ib and not ln['H'][jb:ib].any() and not any(jb < w < ib for w in via_idx(n)):
                 for i in range(jb + 1, ib):
                     new[i] = X[jb] + (Pb - X[jb]) * ((i - jb) / (ib - jb))
-            if ia < ja < len(X) - 1 and not ln['H'][ia + 1:ja + 1].any() and not any(ia < w < ja for w in via_idx(n)):
+            if lay_a and ia < ja < len(X) - 1 and not ln['H'][ia + 1:ja + 1].any() and not any(ia < w < ja for w in via_idx(n)):
                 for i in range(ia + 1, ja):
                     new[i] = Pa + (X[ja] - Pa) * ((i - ia) / (ja - ia))
+            # laid only if it folds nothing where it joins the lane (the audit's shape rule, on the stretch it moved)
+            lo_, hi_ = min(jb, ib) if lay_b else v, max(ja, ia) if lay_a else v
+            before_ = {f for f in shape_faults(n) if f[1] >= lo_ - 1 and f[0] <= hi_ + 1}
             ln['X'] = new
-            ln['H'][ib:ia + 1] = True
+            after_ = {f for f in shape_faults(n) if f[1] >= lo_ - 1 and f[0] <= hi_ + 1}
+            if len(after_) > len(before_):
+                ln['X'] = X
+                laid.append(f'{n}@{v} not laid (its straight folds the lane)')
+                via_cut(n, v, L)
+                continue
+            ln['H'][(ib if lay_b else v):(ia if lay_a else v) + 1] = True
             laid.append(f'{n}@({P0[0]:.2f},{P0[1]:.2f}) {L:.3f}')
     return laid
 
@@ -827,6 +914,8 @@ for n, ln in LANES.items():
                 pieces[-1] = (a[0], a[1], float(q[0]), float(q[1]), a[4]); continue
         pieces.append((float(p[0]), float(p[1]), float(q[0]), float(q[1]), Ls[i]))
     res['lanes'][n] = {'xy': [(pieces[0][0], pieces[0][1])] + [(pc[2], pc[3]) for pc in pieces], 'pieces': pieces}
+    if n in HELD:
+        res['lanes'][n] = dict(geo['lanes'][n])          # laid as it was given (its ends and joins with it)
     for i in via_idx(n):
         res['vias'].append((n, float(X[i][0]), float(X[i][1])))
 # the lane-island clearances the polish could not meet on the side the geometry chose: fed back as side flips
@@ -856,5 +945,14 @@ for r in bad:
 res['flips'] = sorted(flips)
 if flips - {tuple(x) for x in geo.get('flips', [])}:
     log(f'side flips for the next geometry: {sorted(flips - {tuple(x) for x in geo.get("flips", [])})}')
+# ...and every change the rounds could not give its room (a via or a pair's dive against a lane, a via against a via):
+# a via cut on its own change, a via's room wide (as the geometry cuts the via rows it had to pay)
+for r in bad:
+    if r[2] in ('via-lane', 'dive-lane', 'via-via'):
+        n_, i_ = r[0][0][0], r[0][0][1]
+        via_cut(n_, i_, VR + (HALF if n_ in prs else 0.0))
+res['vcuts'] = VCUT
+if VCUT:
+    log(f'via cuts for the solve: {[(c_["lane"], round(c_["u"], 2), round(c_["w"], 3)) for c_ in VCUT]}')
 json.dump(res, open(OUT, 'w'))
 log(f'wrote {OUT}: {len(res["lanes"])} lanes, {len(res["vias"])} vias')

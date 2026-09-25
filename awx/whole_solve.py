@@ -106,18 +106,54 @@ for n in M:
         end[n] = c.se[n][0]
 tend = {n: (H0 if n in bname else c.se[n][0]) for n in M}      # where the lane leaves the TRUNK frame
 VW = VIA / 2 + TRK / 2                                               # a change's room from its lane's terminals
-# a PAIR's end: no CROSSING inside the pair router's first setback from its tips (pairs.launch_setback; SDQS1 crossed
-# SDQ15 and SDQ13 in the last 0.3 mm before their berths, inside its run-in), and no CHANGE of its own nearer than its
-# END RUN (pairs.end_run: the pair step's approach, then that setback) and a via's straight run past it (SDQS0 dived
-# 0.53 mm from its berth, where the router launches 0.90 out and runs 0.23 straight into its via). A crossing lane is
-# on the other layer there; only the pair's own dive has to stand beyond its launch
-RIN0 = {n: (_pairs.launch_setback(ctx.cfg, ctx.pair_ends[n][0]) if n in prs else 0.0) for n in M}   # at the tooth end
-RIN1 = {n: (_pairs.launch_setback(ctx.cfg, ctx.pair_ends[n][1]) if n in prs else 0.0) for n in M}   # ... the berth end
+# a PAIR's end: no CROSSING inside its END CONNECTOR (pairs.end_connector: the legs from its tips to the pose where the
+# pair router takes over; SDQS1 once crossed SDQ15 and SDQ13 in the last 0.3 mm before their berths), and no CHANGE of
+# its own nearer than its DIVE ROOM (pairs.dive_room: that connector, then the router's straight from the pose into the
+# via). A crossing lane is on the other layer there; only the pair's own dive has to stand beyond its pose
+RIN0 = {n: (_pairs.end_connector(ctx.cfg, ctx.pair_ends[n][0]) if n in prs else 0.0) for n in M}   # at the tooth end
+RIN1 = {n: (_pairs.end_connector(ctx.cfg, ctx.pair_ends[n][1]) if n in prs else 0.0) for n in M}   # ... the berth end
 _axis = lambda u: u if u is not None else (1.0, 0.0)
-VIN0 = {n: (_pairs.end_run(ctx.cfg, ctx.pair_ends[n][0]) + _pairs.via_straight(ctx.cfg, _axis(ctx.tooth_dir.get(n)))
-            if n in prs else VW) for n in M}
-VIN1 = {n: (_pairs.end_run(ctx.cfg, ctx.pair_ends[n][1]) + _pairs.via_straight(ctx.cfg, _axis(ctx.stub_dir.get(n)))
-            if n in prs else VW) for n in M}
+VIN0 = {n: (_pairs.dive_room(ctx.cfg, ctx.pair_ends[n][0], _axis(ctx.tooth_dir.get(n))) if n in prs else VW) for n in M}
+VIN1 = {n: (_pairs.dive_room(ctx.cfg, ctx.pair_ends[n][1], _axis(ctx.stub_dir.get(n))) if n in prs else VW) for n in M}
+# a PAIR's KNOWN TURNS: the pair router neither turns at its via nor within its straight run of one, so its changes
+# stay out of every stretch of its route where the frames already turn (below, as built-in via cuts) -- and, where an
+# end's stub stands more than its connector's 45 degrees off the route's own way there, beyond the turn onto that way
+# as well. A turn is one the router must make: half a router step or more. The rest -- a lane's own sweep onto its
+# berth -- only the geometry knows, and it and the polish send those (whole_geo / whole_polish vcuts)
+TURN_DEG = 22.5
+L_DIVE = _pairs.via_straight(ctx.cfg, (math.sqrt(0.5), math.sqrt(0.5))) + ctx.cfg.grid_step   # the longer (diagonal) run
+
+
+def turn_room(deg):
+    """half the stretch a pair's turn of `deg` takes: its 45-degree turns, a turning radius's straight run apart"""
+    return _pairs.turn_straight_steps(ctx.cfg) * ctx.cfg.grid_step * max(0, math.ceil(abs(deg) / 45.0 - 1e-9) - 1) / 2
+
+
+def _deg(a, b):
+    return math.degrees(math.acos(max(-1.0, min(1.0, (a[0] * b[0] + a[1] * b[1]) / (math.hypot(*a) * math.hypot(*b))))))
+
+
+def route_dir(n, u):
+    """the unit way lane n's route runs at u: its trunk's spine, or past the handoff its ring's"""
+    if n in bname and u > H0:
+        sp_ = ring_of[bname[n]].spine
+        return tuple(sp_.d[sp_.seg_of(u - H0 + rs[bname[n]])])
+    return tuple(c.spine.d[c.spine.seg_of(u)])
+
+
+for n in prs:
+    if n not in M:
+        continue
+    for k_, (u_e, esc, sg) in enumerate(((entry[n], ctx.tooth_dir.get(n), 1.0), (end[n], ctx.stub_dir.get(n), -1.0))):
+        if esc is None:
+            continue
+        rd = route_dir(n, u_e)
+        th = _deg((esc[0] * sg, esc[1] * sg), rd) - 45.0         # what the connector's 45 degrees leave to turn
+        if th >= TURN_DEG:
+            if k_ == 0:
+                VIN0[n] += 2 * turn_room(th) + L_DIVE
+            else:
+                VIN1[n] += 2 * turn_room(th) + L_DIVE
 print('classes:', dict(collections.Counter(bname.get(n, 'W') for n in M)), 'W ends', sorted(round(end[n], 2) for n in M if n not in bname))
 W_, H_ = x1 - x0, y1 - y0
 def perim(p):
@@ -162,6 +198,22 @@ if CUTS:
 VCUTS = []
 for fn_ in [x for x in os.environ.get('CUTS', '').split(',') if x]:
     VCUTS += json.load(open(fn_)).get('vcuts', [])
+# ...and a pair's built-in via cuts, at its route's known turns: its trunk's spine corners, its ring's (the pad box's
+# corners) and the handoff from the one onto the other
+NVC0 = len(VCUTS)
+for n in prs:
+    if n not in M:
+        continue
+    turns = [(s_, d_) for _i, s_, d_ in c.spine.corners(TURN_DEG) if entry[n] < s_ < tend[n]]
+    if n in bname:
+        sp_ = ring_of[bname[n]].spine
+        turns += [(u_, d_) for _i, sb_, d_ in sp_.corners(TURN_DEG) for u_ in [u_ring(n, sb_)] if H0 < u_ < end[n]]
+        dh = _deg(route_dir(n, H0 - G), route_dir(n, H0 + G))
+        if dh >= TURN_DEG and entry[n] < H0 < end[n]:
+            turns.append((H0, dh))
+    VCUTS += [{'lane': n, 'u': u_, 'w': L_DIVE + turn_room(d_)} for u_, d_ in turns]
+if len(VCUTS) > NVC0:
+    print(f'   built-in via cuts at the pairs\' known turns: {len(VCUTS) - NVC0}')
 # ---- the braid rule over every triple
 nt = 0
 for i, j, k in itertools.combinations(Ln, 3):
@@ -417,7 +469,18 @@ if os.environ.get('HINT'):
             else:
                 m.AddHint(act_h[i_], 0)
     print(f'   warm start from {os.path.basename(os.environ["HINT"])}: {nh} crossing hints')
-m.Minimize(W_V * sum(tot.values()) + sum(cost))
+# ---- no more than TWO VIAS on a net where that can be had (Andy, 2026-09-25): a net's vias on the board are its stubs'
+# own (the bench's copper) and its lane's changes -- a pair's leg a barrel at each dive. The objective is
+# lexicographic: first how far the nets go over two, then the vias, then congestion -- a preference, never a cap, so a
+# board that cannot keep it still plans
+VIA_PREF = 2
+SV = {n: max(sum(1 for v in ctx.base_vias if v.net_id == ctx.byname[leg][0]) for leg in (prs[n] if n in prs else (n,)))
+      for n in M}
+over = {n: m.NewIntVar(0, KMAX + SV[n], f'over_{n}') for n in M}
+for n in M:
+    m.Add(over[n] >= SV[n] + tot[n] - VIA_PREF)
+W_OVER = W_V * (KMAX * len(M) + 1)        # one via over two outweighs every via the plan could save
+m.Minimize(W_OVER * sum(over.values()) + W_V * sum(tot.values()) + sum(cost))
 sv = cp_model.CpSolver()
 sv.parameters.num_workers = SOLVE_WORKERS
 # REPRODUCIBLE: stopped by a count of interleaved batches, the workers sharing no clauses. Measured on this model
@@ -433,8 +496,8 @@ print(f'whole_solve: {len(t)} crossings ({sum(1 for k in t if same(*k))} same-br
 if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
     print(); sys.exit(1)
 per = {n: int(sv.Value(tot[n])) for n in M}
-ov = [n for n in M if per[n] > 2]
-print(f'vias {sum(per.values())}, nets over 2: {len(ov)} {ov}, hist {dict(sorted(collections.Counter(per.values()).items()))}, obj {sv.ObjectiveValue():.0f} bound {sv.BestObjectiveBound():.0f}')
+ov = [n for n in M if SV[n] + per[n] > VIA_PREF]
+print(f'vias {sum(per.values())}, nets over {VIA_PREF} vias on the board: {len(ov)} {ov}, changes per lane {dict(sorted(collections.Counter(per.values()).items()))}, obj {sv.ObjectiveValue():.0f} bound {sv.BestObjectiveBound():.0f}')
 # verify: every crossing on two layers, every lane on its berth layer
 lay = lambda n, u: tl[n] ^ (sum(1 for x, a_ in zip(*chg[n]) if sv.Value(a_) and sv.Value(x) * G < u) & 1)
 bad = [(a, b) for (a, b), v in t.items() if lay(a, sv.Value(v) * G) == lay(b, sv.Value(v) * G)]
