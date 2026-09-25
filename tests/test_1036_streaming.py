@@ -11,10 +11,13 @@ it was stopped. These tests pin the fix:
     than one decoded frame;
   * `make_movie` hands `save_movie` a SPOOL, and `save_movie` still takes the
     plain list `awx/evolve_movie.py` passes it;
-  * memory stays bounded as the frame count grows: the same film at 6x the
-    frames, rendered in a child process, grows peak RSS by far less than the
-    frames themselves would occupy, and the Python heap (tracemalloc) by a
-    small amount;
+  * memory stays bounded as the frame count grows, measured in a child
+    process with the platform's own peak-RSS counter (no psutil needed):
+    with imageio the .mp4 streams, so the same film at 6x the frames grows
+    peak RSS by far less than the frames would occupy; without it the film
+    falls back to a GIF, whose writer holds what it is given, so what is
+    pinned there is the GIF's own bound -- at most `GIF_MAX_FRAMES` frames,
+    so two films both over the cap cost the same;
   * a trace over the `--max-frames` budget falls back to the chunked reveal
     and SAYS so, and with no budget the same trace plays in full.
 
@@ -167,13 +170,68 @@ def test_gif_strides_over_its_cap():
               % (n, got, a.GIF_MAX_FRAMES))
 
 
+def _peak_rss():
+    """This process's PEAK resident set in bytes, from the platform itself:
+    `GetProcessMemoryInfo` on Windows, `VmHWM` in /proc/self/status on Linux,
+    `getrusage` elsewhere (bytes on macOS, KiB on other Unixes). None when
+    none answers. No psutil: the suite image does not install it, and a
+    memory check that skips wherever the suite runs pins nothing."""
+    if sys.platform == 'win32':
+        import ctypes
+        from ctypes import wintypes
+
+        class _PMC(ctypes.Structure):
+            _fields_ = [('cb', wintypes.DWORD),
+                        ('PageFaultCount', wintypes.DWORD),
+                        ('PeakWorkingSetSize', ctypes.c_size_t),
+                        ('WorkingSetSize', ctypes.c_size_t),
+                        ('QuotaPeakPagedPoolUsage', ctypes.c_size_t),
+                        ('QuotaPagedPoolUsage', ctypes.c_size_t),
+                        ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t),
+                        ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+                        ('PagefileUsage', ctypes.c_size_t),
+                        ('PeakPagefileUsage', ctypes.c_size_t)]
+        try:
+            k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            k32.GetCurrentProcess.restype = wintypes.HANDLE
+            fn = k32.K32GetProcessMemoryInfo
+            fn.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC),
+                           wintypes.DWORD]
+            fn.restype = wintypes.BOOL
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(_PMC)
+            if fn(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb):
+                return int(pmc.PeakWorkingSetSize)
+        except (OSError, AttributeError):
+            pass
+        return None
+    try:
+        with open('/proc/self/status', encoding='ascii') as f:
+            for line in f:
+                if line.startswith('VmHWM:'):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import resource
+        r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(r) if sys.platform == 'darwin' else int(r) * 1024
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def _mp4_available():
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None
+               for m in ('imageio', 'imageio_ffmpeg', 'numpy'))
+
+
 def _child(n_events, out, mode='spool'):
     """Render the movie of a board built up by an `n_events` trace; print the
     peak RSS and the tracemalloc peak as JSON. `mode='list'` is the CONTROL:
     the same frames built into an in-memory list, as before #1036, so the
     measurement is shown able to see growth at all."""
     import tracemalloc
-    import psutil
     import make_movie
     tmp = os.path.dirname(out)
     board = os.path.join(tmp, 'b.kicad_pcb')
@@ -191,64 +249,85 @@ def _child(n_events, out, mode='spool'):
         got = make_movie.make_movie([board], out=out, size=500, quiet=True,
                                     attempts=False, max_frames=0, fps=30)
     _cur, peak = tracemalloc.get_traced_memory()
-    mi = psutil.Process().memory_info()
-    rss = getattr(mi, 'peak_wset', None)
-    if rss is None:
-        import resource
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-    print(json.dumps({'peak_rss': rss, 'py_peak': peak, 'out': got}))
+    print(json.dumps({'peak_rss': _peak_rss(), 'py_peak': peak, 'out': got}))
 
 
 def test_memory_is_bounded_in_the_frame_count():
     _mark = len(_FAIL)
-    import importlib.util
-    if importlib.util.find_spec('psutil') is None:
+    import animate_route as a
+    if _peak_rss() is None:
         # NOT a pass: said as a skip, and counted, so the summary line cannot
         # read "all checks passed" over a measurement that never ran.
-        _SKIPPED.append('memory: needs psutil for the child RSS measurement')
-        print('  SKIP: needs psutil for the child RSS measurement')
+        _SKIPPED.append('memory: this platform reports no peak RSS')
+        print('  SKIP: this platform reports no peak RSS')
         return
+    if _mp4_available():
+        # the .mp4 STREAMS: memory must not follow the frame count at all
+        lo, hi, ext = 100, 600, '.mp4'
+        what = 'mp4 (streamed)'
+    else:
+        # no imageio: the film falls back to a GIF, and Pillow's GIF writer
+        # holds every frame it is handed -- which the stride caps at
+        # GIF_MAX_FRAMES. So the pinned bound is the CAP: two films BOTH over
+        # it must cost the same, however many frames each has.
+        lo = a.GIF_MAX_FRAMES + 40
+        hi, ext = 3 * lo, '.gif'
+        what = 'GIF (no imageio; strided to %d frames)' % a.GIF_MAX_FRAMES
+    print('    arm: %s, %d vs %d events' % (what, lo, hi))
+    import shutil
     res = {}
-    for key, n, mode in ((100, 100, 'spool'), (600, 600, 'spool'),
-                         ('c100', 100, 'list'), ('c600', 600, 'list')):
+    for key, n, mode in ((lo, lo, 'spool'), (hi, hi, 'spool'),
+                         ('c_lo', lo, 'list'), ('c_hi', hi, 'list')):
         tmp = tempfile.mkdtemp(prefix='t1036m_')
-        r = subprocess.run([sys.executable, '-X', 'utf8', __file__, '--child',
-                            str(n), os.path.join(tmp, 'm.mp4'), mode],
-                           capture_output=True, text=True, timeout=1200)
+        try:
+            r = subprocess.run([sys.executable, '-X', 'utf8', __file__,
+                                '--child', str(n), os.path.join(tmp, 'm' + ext),
+                                mode],
+                               capture_output=True, text=True, timeout=1200)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
         line = [ln for ln in r.stdout.splitlines() if ln.startswith('{')]
         if r.returncode != 0 or not line:
             fail('BROKEN: %s child for %d events exited %d: %s'
                  % (mode, n, r.returncode, (r.stderr or r.stdout)[-400:]))
             return
         res[key] = json.loads(line[-1])
+        if not res[key].get('peak_rss'):
+            fail('BROKEN: the %s child for %d events reported no peak RSS'
+                 % (mode, n))
+            return
+    more = hi - lo
     # THE CONTROL: the same frames held in a list must be SEEN to grow, or a
     # flat reading below proves nothing about streaming.
-    c_rss = res['c600']['peak_rss'] - res['c100']['peak_rss']
-    print('    CONTROL (in-memory list): +%.1f MB peak RSS for 500 more frames'
-          % (c_rss / 1e6))
-    # a 500 px frame of this board is ~500x310x3 = 0.46 MB; 500 more frames
-    # held in memory would be ~230 MB. Streaming must grow by far less.
+    c_rss = res['c_hi']['peak_rss'] - res['c_lo']['peak_rss']
+    print('    CONTROL (in-memory list): +%.1f MB peak RSS for %d more frames'
+          % (c_rss / 1e6, more))
+    # a 500 px frame of this board is ~500x310x3 = 0.46 MB; `more` frames
+    # held in memory would cost that many times it. The film must grow by
+    # far less.
     frame_bytes = 500 * 310 * 3
-    held = 500 * frame_bytes
-    d_rss = res[600]['peak_rss'] - res[100]['peak_rss']
-    d_py = res[600]['py_peak'] - res[100]['py_peak']
-    print('    peak RSS   100 events: %6.1f MB   600 events: %6.1f MB  '
-          '(+%.1f MB; holding 500 more frames would be +%.0f MB)'
-          % (res[100]['peak_rss'] / 1e6, res[600]['peak_rss'] / 1e6,
-             d_rss / 1e6, held / 1e6))
+    held = more * frame_bytes
+    d_rss = res[hi]['peak_rss'] - res[lo]['peak_rss']
+    d_py = res[hi]['py_peak'] - res[lo]['py_peak']
+    print('    peak RSS   %d events: %6.1f MB   %d events: %6.1f MB  '
+          '(+%.1f MB; holding %d more frames would be +%.0f MB)'
+          % (lo, res[lo]['peak_rss'] / 1e6, hi, res[hi]['peak_rss'] / 1e6,
+             d_rss / 1e6, more, held / 1e6))
     print('    tracemalloc peak      %6.1f MB              %6.1f MB  (+%.1f MB)'
-          % (res[100]['py_peak'] / 1e6, res[600]['py_peak'] / 1e6, d_py / 1e6))
+          % (res[lo]['py_peak'] / 1e6, res[hi]['py_peak'] / 1e6, d_py / 1e6))
     if c_rss < held * 0.5:
         fail('BROKEN: the in-memory control grew only %.1f MB, so this '
              'measurement cannot see held frames' % (c_rss / 1e6))
     if d_rss > held * 0.25:
-        fail('peak RSS grew %.1f MB for 500 more frames -- over a quarter of '
-             'what holding them would cost (%.0f MB)' % (d_rss / 1e6,
-                                                          held / 1e6))
+        fail('%s: peak RSS grew %.1f MB for %d more frames -- over a quarter '
+             'of what holding them would cost (%.0f MB)'
+             % (what, d_rss / 1e6, more, held / 1e6))
     if d_py > 40e6:
-        fail('the Python heap grew %.1f MB for 500 more frames' % (d_py / 1e6))
+        fail('the Python heap grew %.1f MB for %d more frames'
+             % (d_py / 1e6, more))
     if len(_FAIL) == _mark:
-        print('  PASS: 6x the frames, memory flat')
+        print('  PASS: %s -- %dx the frames, peak RSS +%.1f MB'
+              % (what, hi // lo, d_rss / 1e6))
 
 
 def test_a_trace_over_budget_falls_back_loudly():

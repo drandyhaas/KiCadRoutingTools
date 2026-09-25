@@ -252,8 +252,9 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
     Frames are SPOOLED to disk as they are drawn (#1036,
     `frame_spool.FrameSpool`) and every post-pass -- the planned frame, the
     attempts band, the run clock, the iso panel -- is a per-frame transform
-    applied while the encoder streams, so memory does not grow with the frame
-    count. ``max_frames`` is the film's frame budget (None = $KICAD_MOVIE_MAX_FRAMES,
+    applied while the encoder streams, so an .mp4's memory does not grow
+    with the frame count (a .gif's grows up to `animate_route.GIF_MAX_FRAMES`
+    frames, which Pillow's writer holds). ``max_frames`` is the film's frame budget (None = $KICAD_MOVIE_MAX_FRAMES,
     default 2400; 0 = none): a route trace that does not fit its share falls
     back to the chunked reveal, loudly.
     """

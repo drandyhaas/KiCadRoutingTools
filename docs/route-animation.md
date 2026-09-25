@@ -208,10 +208,16 @@ The **output extension picks the format**:
 `make_movie` spools every frame to a temp directory as it is drawn
 (`py_router/frame_spool.py`) and applies the post-passes (the planned frame,
 the attempts band, the run clock, the iso panel) per frame while the encoder
-streams, so memory does not grow with the frame count. Run 32's 22-board chain
-reached 29.5 GB before this change. `tests/test_1036_streaming.py` measures it:
-with 6x the frames, peak RSS stays flat, while the same frames held in a list
-grow by about 300 MB.
+streams. Run 32's 22-board chain reached 29.5 GB before this change. How
+flat memory stays depends on the output. An `.mp4` (imageio-ffmpeg) is encoded
+one frame at a time, so memory does not grow with the frame count. A `.gif`,
+which is also what an `.mp4` falls back to without imageio, goes through
+Pillow's writer, which holds every frame it is handed. The stride caps that at
+`GIF_MAX_FRAMES` (260) frames, so GIF memory grows up to the cap and then stays
+there. `tests/test_1036_streaming.py` measures whichever case the machine can
+render, from the platform's own peak-RSS counter (no psutil): 6x the frames as
+an `.mp4`, or two GIFs both over the cap. Either way peak RSS stays flat,
+while the same frames held in a list grow by about 300 MB.
 
 **An overlay that fails costs the overlay, not the film.** The attempts band,
 the run clock and the iso panel are drawn while the encoder streams, so a frame

@@ -1445,8 +1445,9 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
 
     ``frames`` is a list of Pillow images or a `frame_spool.FrameSpool`
     (#1036). A spool is STREAMED: the .mp4 and the PNG dump read one frame at
-    a time, so memory does not grow with the frame count. A GIF over
-    `GIF_MAX_FRAMES` is strided, and says so.
+    a time, so memory does not grow with the frame count. Pillow's GIF
+    writer holds every frame it is handed, so a GIF over `GIF_MAX_FRAMES` is
+    strided, and says so: its memory is bounded by the cap, not flat.
 
     ``frame_meta`` (#887), when given, is one dict per frame written into the
     dumped PNGs' text chunks. It is indexed against ``frames``, NOT against
