@@ -106,6 +106,43 @@ c = _cmp({1: (True, 0)}, {1: (False, 2)}, names={1: '/GND'})
 r = format_report(c, gate_verdict(c), 'REVERTED')
 check("report names the broken net", '/GND' in r and 'REVERT' in r)
 
+# #1032: a PAD-COUNT-ONLY rejection must still name the net. GND already had
+# open pads before the run, so it is not `lost`; before the fix the head line
+# read "broke 0 ... connected 1 -- REJECTED" and named nothing.
+c = _cmp({1: (False, 30), 2: (False, 2)}, {1: (False, 36), 2: (True, 0)},
+         names={1: 'GND', 2: '/SIG'})
+r = format_report(c, gate_verdict(c), 'REVERTED')
+_head = r.splitlines()[0]
+check("#1032 pad-count-only rejection: verdict is reject",
+      gate_verdict(c) == 'reject' and not c['lost'])
+check("#1032 pad-count-only rejection names GND in the head line",
+      'GND' in _head and 'REJECTED' in _head)
+check("#1032 each list at its own clause: GND is WORSENED, not connected",
+      'broke 0 previously-connected net(s), worsened 1 [GND 30->36], '
+      'connected 1 -- REJECTED' in _head)
+check("#1032 worsened carries name + before->after",
+      c['worsened'] == [('GND', 30, 36)] and 'GND 30->36' in r)
+# A net newly BROKEN is `lost`, never also `worsened` -- the JSON key and the
+# head line's "worsened K" count the same nets.
+c = _cmp({1: (True, 0), 2: (False, 2)}, {1: (False, 3), 2: (False, 5)},
+         names={1: '/A', 2: '/B'})
+_head = format_report(c, gate_verdict(c), 'x').splitlines()[0]
+check("#1032 worsened (JSON) is disjoint from lost and matches the head",
+      c['lost'] == ['/A'] and c['worsened'] == [('/B', 2, 5)]
+      and 'worsened 1 [/B 2->5]' in _head)
+
+# A cut pour counts like any other net: the gate has no exclusion list, so a
+# lap that breaks GND is judged on it (shipping the lap would ship the cut).
+c = _cmp({1: (True, 0), 2: (False, 2)}, {1: (False, 3), 2: (True, 0)},
+         names={1: 'GND', 2: '/SIG'})
+check("a lap that cuts GND off 3 pads while connecting /SIG is rejected",
+      c['lost'] == ['GND'] and gate_verdict(c) == 'reject')
+
+# The head line caps its list.
+c = _cmp({i: (True, 0) for i in range(10)}, {i: (False, 2) for i in range(10)})
+_head = format_report(c, gate_verdict(c), 'x').splitlines()[0]
+check("#1032 head line caps the named nets", '+4 more' in _head)
+
 
 # ------------------------------------------------------- connectivity map
 # Two pads joined by one segment = connected; the same pads with the segment

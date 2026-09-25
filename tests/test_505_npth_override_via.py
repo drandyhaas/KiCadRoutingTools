@@ -167,6 +167,55 @@ try:
 finally:
     os.unlink(p)
 
+
+# --------------------------------------------------------------------------
+# 5. #1038: a DECLARED copper-to-hole floor (min_hole_clearance / its
+#    fab_floor_origin / an explicit config.hole_clearance) holds via COPPER
+#    off the hole on BOTH sides. NEAR (1.5mm) clears h2h (1.427) but its
+#    copper edge sits 1.5 - 1.05 - 0.275 = 0.175mm from the wall, inside a
+#    declared 0.25 (needs 1.575). The no-override case above pins that a board
+#    whose project declares NOTHING is untouched. In a real chain that is only
+#    step 1: route.py's DRC writeback writes rules.min_hole_clearance into
+#    each route step's output project, so every later step reads as
+#    declaring a floor.
+# --------------------------------------------------------------------------
+def blocked_at_declared(path, xy, hole_clr):
+    pcb = parse_kicad_pcb(path)
+    cfg = GridRouteConfig(layers=["F.Cu", "B.Cu"], grid_step=0.1, clearance=0.2,
+                          track_width=0.2, via_size=0.55, via_drill=0.254,
+                          hole_to_hole_clearance=0.25)
+    cfg.hole_clearance = hole_clr
+    obs = GridObstacleMap(len(cfg.layers))
+    add_drill_hole_obstacles(obs, pcb, cfg, set())
+    gx, gy = GridCoord(cfg.grid_step).to_grid(*xy)
+    return obs.is_via_blocked(gx, gy)
+
+
+p = write(board('', None))
+try:
+    check("#1038 declared 0.25 -> router blocks the via cell whose copper "
+          "would sit 0.175mm off the hole", blocked_at_declared(p, NEAR, 0.25))
+    check("#1038 declared 0.25 -> a cell clearing it (1.6mm) stays free",
+          not blocked_at_declared(p, (15 + 1.6, 15.0), 0.25))
+finally:
+    os.unlink(p)
+
+p = write(board('', NEAR))
+try:
+    items = [v for v in run_drc(p, clearance=0.2, quiet=True,
+                                print_summary=False,
+                                hole_to_hole_clearance=0.25,
+                                hole_clearance=0.25)
+             if v['type'] == 'via-hole']
+    check("#1038 check_drc grades the via at the declared hole floor",
+          len(items) == 1
+          and abs(items[0].get('required_mm', 0) - 0.25) < 1e-9)
+    check("#1038 ...and at clearance 0.2 alone (nothing declared) it is "
+          "still a via-hole item at the routing clearance, unchanged",
+          len(via_hole_items(p)) == 1)
+finally:
+    os.unlink(p)
+
 print("-" * 60)
 if fails:
     print(f"{len(fails)} FAILED: " + "; ".join(fails))

@@ -2413,7 +2413,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                 # needlessly thin). Same quantization-guarded margin as the
                 # region joins; stop at the first width that no longer fits.
                 from single_ended_routing import _track_margin_for_width
-                for w in (0.2, 0.4, 0.8):
+                # #1033: the NET's own requested width is a rung too -- a
+                # 0.3 power net used to land at 0.2 whenever 0.4 did not
+                # fit, below what it asked for. Same validated upgrade path.
+                try:
+                    _net_w = float(config.get_net_track_width(
+                        net_id, config.layers[0]))
+                except Exception:                           # noqa: BLE001
+                    _net_w = used_width
+                for w in sorted({0.2, 0.4, 0.8, round(_net_w, 4)}):
                     if w <= used_width:
                         continue
                     # +1.0 = the #268 stamp-shell quantization guard (see the
@@ -2447,6 +2455,17 @@ def oracle_reconnect(board_file: str, net_names, config,
                             board_edge_clearance=rung_cfg.board_edge_clearance):
                         break
                     result, used_width = wider, w
+            if result:
+                # #1033: say so when the link ships below the net's own
+                # requested width (a power net's --power-nets-widths).
+                try:
+                    from fab_tiers import note_narrowing
+                    note_narrowing(net_id, 'track_width',
+                                   config.get_net_track_width(
+                                       net_id, config.layers[0]),
+                                   used_width, 'oracle reconnect')
+                except Exception:                           # noqa: BLE001
+                    pass
             if not result:
                 # ESCALATION (quickfeather U6-pocket class): the weld router
                 # runs at the step's nominal parameters, and a sub-mm link

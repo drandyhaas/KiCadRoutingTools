@@ -181,6 +181,15 @@ def dominant_net_widths(segments) -> Dict[int, float]:
     stubs. Used to preserve a ripped net's routed width across a same-run
     reconciliation (a rip-reconcile must not silently change a power net's
     width). Graphic and net-0 segments are ignored."""
+    acc = net_width_lengths(segments)
+    return {nid: max(wl.items(), key=lambda kv: kv[1])[0]
+            for nid, wl in acc.items() if wl}
+
+
+def net_width_lengths(segments) -> Dict[int, Dict[float, float]]:
+    """{net_id: {width (4dp): copper length mm}} -- the width PROFILE of each
+    net, the measurement under dominant_net_widths and power_width_report.
+    Graphic and net-0 segments are ignored."""
     import math as _math
     acc: Dict[int, Dict[float, float]] = {}
     for s in segments:
@@ -192,8 +201,41 @@ def dominant_net_widths(segments) -> Dict[int, float]:
         acc.setdefault(s.net_id, {})
         w = round(s.width, 4)
         acc[s.net_id][w] = acc[s.net_id].get(w, 0.0) + L
-    return {nid: max(wl.items(), key=lambda kv: kv[1])[0]
-            for nid, wl in acc.items() if wl}
+    return acc
+
+
+def power_width_report(segments, requested: Dict[int, float],
+                       name_of) -> Dict[str, Dict]:
+    """Per requested-width net, how much of its copper is at that width (#1033).
+
+    `requested` is {net_id: width asked for} -- the run's --power-nets-widths
+    as resolved onto net ids (GridRouteConfig.power_net_widths, floored UP to
+    the track width exactly as get_net_track_width does). Measured on the
+    copper the run SHIPS, not on what any one pass requested: a request is not
+    a result (run 32: +3V3 asked 0.3, 34% of its length shipped at the 0.127
+    signal width, and nothing in the summary said so).
+
+    Returns {net_name: {requested_mm, length_mm, under_mm, under_share,
+    min_mm, by_width_mm}}. `under_mm` counts copper narrower than requested
+    by more than 1 um, so the taper steps of a neck-down count as narrow --
+    they are. Nets with no copper are listed with length 0 (asked, not laid).
+    """
+    acc = net_width_lengths(segments)
+    out: Dict[str, Dict] = {}
+    for nid, req in sorted(requested.items()):
+        prof = acc.get(nid, {})
+        total = sum(prof.values())
+        under = sum(L for w, L in prof.items() if w < req - 1e-3)
+        out[name_of(nid)] = {
+            'requested_mm': round(float(req), 4),
+            'length_mm': round(total, 2),
+            'under_mm': round(under, 2),
+            'under_share': round(under / total, 4) if total > 0 else 0.0,
+            'min_mm': (round(min(prof), 4) if prof else None),
+            'by_width_mm': {f'{w:g}': round(L, 2)
+                            for w, L in sorted(prof.items())},
+        }
+    return out
 
 
 def resolve_net_ids(pcb_data: PCBData, net_names: List[str]) -> List[Tuple[str, int]]:

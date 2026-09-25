@@ -15,6 +15,14 @@ decision, because the difference is measured, not stylistic:
       _seg_worst_offender        the shortfall ranking that drives the shift
       nudge_grazing_microshift   the graze DETECTOR + the shift acceptance gate
 
+  CHANGED LATER (#1038) -- a pass that CHOOSES where new copper goes:
+      smooth_octolinear_chains   a shortcut REPLACING a staircase the router
+                                 already laid clear; refusing it keeps the
+                                 original copper, so nothing is abandoned.
+                                 At the flat floor it collapsed spans into the
+                                 declared band (run 32: J5's NPTH, 0.201 and
+                                 0.212 mm against an announced 0.25).
+
   DELIBERATELY UNCHANGED -- passes whose only alternative to their single
   candidate is doing nothing. Raising the floor there does not move copper
   somewhere legal, it abandons the repair:
@@ -56,7 +64,8 @@ from single_ended_routing import (_seg_foreign_hole_dist, _seg_foreign_pad_dist,
                                   _seg_foreign_seg_dist, _seg_foreign_via_dist)
 from pcb_modification import (_connector_clear, _seg_worst_offender,
                               close_soft_joints, nudge_grazing_microshift,
-                              nudge_grazing_octolinear)
+                              nudge_grazing_octolinear,
+                              smooth_octolinear_chains)
 from routing_defaults import NPTH_TO_TRACK_CLEARANCE
 from synth import make_pad, make_pcb, make_seg
 
@@ -147,6 +156,7 @@ def run():
         _worst_offender(check, declares, silent)
         _microshift(check, declares, silent)
         _microshift_trade(check, declares, silent)
+        _smoother(check, declares, silent)
         _soft_joint_stays_flat(check, declares)
         _connector_stays_flat(check, declares)
         _octolinear_stays_flat(check, declares)
@@ -272,6 +282,45 @@ def _microshift_trade(check, declares, silent):
                   nets == 0 and abs(cop1 - cop0) < 1e-12)
             check('and the incumbent copper-to-hole clearance is untouched',
                   abs(hole1 - hole0) < 1e-12)
+    print()
+
+
+# === CHANGED site 3 (#1038): smooth_octolinear_chains ======================
+def _smoother(check, declares, silent):
+    """A staircase whose jog keeps the copper 0.32 mm off an NPTH hole; the
+    direct shortcut would run 0.22 mm off it -- legal at the flat 0.20 floor,
+    inside the declared 0.25. On the declaring board the smoother must not
+    lay that shortcut (any connector it does lay clears 0.25); on the silent
+    board it still does (raise-only)."""
+    print('CHANGED site 3 (#1038): smooth_octolinear_chains -- shortcut '
+          'priced at the declared floor')
+    hx, hy = 1.5, -(DRILL / 2.0 + BAND + W / 2.0)      # direct line 0.22 off
+    for path, label, want_band in ((declares, 'declared 0.25', False),
+                                   (silent, 'nothing declared', True)):
+        segs = [make_seg(0.0, 0.0, 1.0, 0.0, width=W, net_id=1),
+                make_seg(1.0, 0.0, 1.0, 0.1, width=W, net_id=1),
+                make_seg(1.0, 0.1, 2.0, 0.1, width=W, net_id=1),
+                make_seg(2.0, 0.1, 2.0, 0.0, width=W, net_id=1),
+                make_seg(2.0, 0.0, 4.0, 0.0, width=W, net_id=1)]
+        pads = {0: [_npth(hx, hy, DRILL, layers=('F.Mask', 'B.Mask'))],
+                1: [make_pad(net_id=1, x=0.0, y=0.0, ref='U1', num='1',
+                             size_x=0.3, size_y=0.3),
+                    make_pad(net_id=1, x=4.0, y=0.0, ref='U2', num='1',
+                             size_x=0.3, size_y=0.3)]}
+        pcb = _pcb(path, segs, pads, bounds=(-5.0, -5.0, 15.0, 15.0))
+        hole0 = min(_hole_gaps(pcb))
+        _n, nets, _strip, _added, st = smooth_octolinear_chains(
+            [], pcb, clearance=CLEARANCE)
+        hole1 = min(_hole_gaps(pcb))
+        print(f'        {label}: nets smoothed={nets} spans={st.get("spans")}; '
+              f'copper-to-hole {hole0:.4f} -> {hole1:.4f}')
+        if want_band:
+            check('silent board: the smoother still lays the direct shortcut '
+                  'into the 0.20-0.25 band (raise-only)',
+                  nets == 1 and abs(hole1 - BAND) < 1e-3)
+        else:
+            check('declaring board: no smoothed copper enters the declared '
+                  'band', hole1 >= DECLARED - 1e-4)
     print()
 
 

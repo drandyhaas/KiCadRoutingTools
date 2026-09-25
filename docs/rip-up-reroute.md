@@ -127,15 +127,29 @@ passed `--rip-existing-nets` authorised that; what they could not do before was
 see it.
 
 ```
-IMPROVEMENT GATE: this run broke 3 previously-connected net(s) and connected 3 -- ACCEPTED
+IMPROVEMENT GATE: this run broke 3 previously-connected net(s) [/BMS.Can_L, /BMS.Enable_Out, V_+5V], worsened 0, connected 3 -- ACCEPTED
   broken by this run: /BMS.Can_L, /BMS.Enable_Out, V_+5V
   connected by this run: /CAN.Interrupt, /SPI.Clock, /SPI.Miso
   disconnected pads: 3 -> 3 over 43 multi-pad net(s)
 ```
 
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
-(`lost`, `gained`, `disconnected_pads_before/after`, `nets_compared`,
-`verdict`), so a chain can assert on it instead of grepping prose.
+(`lost`, `gained`, `worsened`,
+`disconnected_pads_before/after`, `nets_compared`, `verdict`), so a chain can
+assert on it instead of grepping prose.
+
+**The head line names every net it judged on (#1032)**, each list at its own
+clause: `broke N [lost nets], worsened K [net before->after], connected M`.
+`worsened` is a net whose disconnected-pad count rose without being newly
+broken (it was already open), so it is not `lost`; the JSON `worsened` key
+holds exactly the same nets. Each list is capped at six.
+A pad-count-only rejection used to name nothing.
+
+**A poured net outside a scoped call's `--nets` is still judged.** The in-run
+finalize does not repair such a net (`finalize_excluded_nets`), so a lap that
+cuts its pour leaves those pads open, and the gate counts them: shipping the
+lap would ship the cut. Put the poured nets in `--nets` when the lap may cross
+their pours, so its finalize repairs what it cuts.
 
 **If you see `REVERTED`, the retry did not fail to run — it ran and was
 rejected.** Re-running it with *more* rip authority is the one response

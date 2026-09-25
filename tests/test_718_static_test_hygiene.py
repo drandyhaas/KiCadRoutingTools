@@ -58,6 +58,10 @@ ROOT = os.path.dirname(TESTS_DIR)
 #: One direction is not enough -- a stale registration passed the #696
 #: containment guard 28/28 while the thing it named had moved.
 _WK_DEPENDENT = {
+    # #1038 repro arm only: routed_c3's two J5 TRACK-HOLE items. The
+    # synthetic origin/control arms run on a clean clone, so absent the asset
+    # the repro is skipped and the file still exits 0.
+    'test_1038_hole_clearance_origin.py': ['wk/run32/routed_c3.kicad_pcb'],
     # #1031's run-32 repro only (exit 77 without it). The synthetic
     # test_1031_keepout_legality.py covers every invariant on a clean clone.
     'test_1031_keepout_run32_repro.py': ['wk/run32/placed_v2.kicad_pcb'],

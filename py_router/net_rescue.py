@@ -13,6 +13,9 @@ their shot. Any net still failed outright (no result) or partially connected
              power-net-only; a below-layer-width retry gains nothing on the
              shared obstacle map because its inflation is baked at the layer
              width, so the neck-down needs this rebuilt scoped map anyway)
+             A power net keeps its requested width on these rungs and is
+             necked to the fab-floor width only where that width is blocked
+             (#1033), as the main router does.
 
 Design constraints (#331/#371 review):
   - NO rip-up here: the rescue routes through free space only, and each
@@ -427,8 +430,16 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     _rf = config.rule_floors(net_id, config.layers[0]).get('track_width')
     if _rf:
         rescue_track = min(nominal_w, max(rescue_track, _rf))
+    # #1033: the rescued net KEEPS its power width, so each rung routes it the
+    # way the main router does -- at the requested width where that fits,
+    # necked to the rung's floor width (track_width below) only where it
+    # must, and widened back wherever the full width clears. Dropping it laid
+    # the whole rescued gap at the floor width. Without neck-down
+    # (power_tap_neckdown off) a blocked wide attempt has no fallback, so the
+    # net then routes at the floor width as before.
     power_widths = dict(config.power_net_widths)
-    power_widths.pop(net_id, None)  # this net necks down; other nets are obstacles
+    if not config.power_tap_neckdown:
+        power_widths.pop(net_id, None)
     if not may_narrow():
         # --escalation off: the finer grid is the only retry. Width, power
         # width and clearance stay exactly what was asked (#842).

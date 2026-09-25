@@ -120,26 +120,38 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
     Only nets present in BOTH maps are compared: a net that exists in one
     reading and not the other is a parse/scope difference, not a routing
     outcome, and must not be able to trip the gate.
+
+    `worsened` lists every compared net whose disconnected-pad count ROSE
+    WITHOUT being newly broken (it was already open before the run), as
+    (name, before, after) -- disjoint from `lost`, so a net is named once. A
+    pad-count rejection used to name no net at all in that case, because the
+    net is then not `lost`.
     """
     lost: List[str] = []
     gained: List[str] = []
+    worsened: List[Tuple[str, int, int]] = []
     pads_before = pads_after = 0
+    compared = 0
     for net_id, (conn_b, dis_b) in before.items():
         if net_id not in after:
             continue
         conn_a, dis_a = after[net_id]
+        compared += 1
         pads_before += dis_b
         pads_after += dis_a
         if conn_b and not conn_a:
             lost.append(net_name(net_id))
         elif conn_a and not conn_b:
             gained.append(net_name(net_id))
+        elif dis_a > dis_b:
+            worsened.append((net_name(net_id), dis_b, dis_a))
     return {
         'lost': sorted(lost),
         'gained': sorted(gained),
+        'worsened': sorted(worsened),
         'disconnected_pads_before': pads_before,
         'disconnected_pads_after': pads_after,
-        'nets_compared': sum(1 for n in before if n in after),
+        'nets_compared': compared,
     }
 
 
@@ -162,12 +174,35 @@ def format_report(cmp: Dict, verdict: str, action: str) -> str:
     and the whole point of the gate is that the operator can see WHICH
     already-routed copper a rip took out."""
     lines = []
+    # The head line NAMES what it judged on, each list at its OWN
+    # clause (#1032). `broke 1 ... REJECTED` hid that the one net was GND; a
+    # pad-count-only rejection (the net was already broken before the run,
+    # so it is not `lost`) named nothing; and one bracket after "connected"
+    # read as if a net that got WORSE had been connected.
+    worsened = cmp.get('worsened') or []
+    lost = list(cmp['lost'])
+    # `worsened` is disjoint from `lost` (compare_connectivity): pad count
+    # rose on a net that was already open. The filter only guards a caller
+    # that built the dict by hand.
+    wors = [(n, b, a) for n, b, a in worsened if n not in lost]
+
+    def _capped(items, cap=6):
+        shown = ', '.join(items[:cap])
+        if len(items) > cap:
+            shown += f", +{len(items) - cap} more"
+        return f" [{shown}]" if items else ""
+
     head = ("IMPROVEMENT GATE: this run broke "
-            f"{len(cmp['lost'])} previously-connected net(s) and connected "
-            f"{len(cmp['gained'])}")
+            f"{len(lost)} previously-connected net(s){_capped(lost)}, "
+            f"worsened {len(wors)}"
+            f"{_capped([f'{n} {b}->{a}' for n, b, a in wors])}, "
+            f"connected {len(cmp['gained'])}")
     lines.append(head + f" -- {verdict.upper()}ED")
     if cmp['lost']:
         lines.append(f"  broken by this run: {', '.join(cmp['lost'])}")
+    if worsened:
+        lines.append("  more disconnected pads: " + ', '.join(
+            f"{n} {b}->{a}" for n, b, a in worsened))
     if cmp['gained']:
         lines.append(f"  connected by this run: {', '.join(cmp['gained'])}")
     lines.append(f"  disconnected pads: {cmp['disconnected_pads_before']} "

@@ -168,6 +168,15 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
         if ('finalize_excluded_nets' in first
                 and 'finalize_excluded_nets' not in merged):
             merged['finalize_excluded_nets'] = first['finalize_excluded_nets']
+        # `power_widths` (#1033) carries WHOLE for the same reason: the
+        # outermost run measures it on the board it SHIPS, after the
+        # reconciliation sub-run returned, and stamps it on `first` -- the
+        # sub-run's own summary has none. A sub-run that ever measured one
+        # would be measuring a slice, so first always wins.
+        for _k in ('power_widths', 'power_widths_measured_on',
+                   'power_widths_run_scope'):
+            if _k in first:
+                merged[_k] = first[_k]
 
     # DISTURBED-BUT-UNOWNED NETS ARE STICKY (#622 yw1: SA1 shipped with ZERO
     # copper, SA2/SA6 open, and the merged MIN said failed:2 deficit:0). A

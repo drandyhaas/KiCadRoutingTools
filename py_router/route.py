@@ -99,7 +99,7 @@ from routing_common import (
 )
 import routing_defaults as defaults
 import re
-from terminal_colors import RED, RESET
+from terminal_colors import RED, RESET, YELLOW
 from routing_constants import DEFAULT_4_LAYER_STACK, POWER_NET_EXCLUSION_PATTERNS
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
@@ -5123,6 +5123,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     else []),
                     'power_net_widths': dict(
                         getattr(config, 'power_net_widths', None) or {}),
+                    # #1033: the per-net widths the CLI's _ocfg carries, so
+                    # the GUI weld's width ladder reads the same net width.
+                    'net_track_widths': dict(
+                        getattr(config, 'net_track_widths', None) or {}),
+                    'net_layer_widths': dict(
+                        getattr(config, 'net_layer_widths', None) or {}),
                 }
                 # Hands-off for the reconcile comes from the FILL-AWARE
                 # checker instead of the oracle verdict: zone nets the model
@@ -5193,6 +5199,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # (power_layer_config in oracle_reconnect) can fire.
                     power_net_widths=dict(
                         getattr(config, 'power_net_widths', None) or {}),
+                    # #1033: per-net widths ride along too, so the weld's
+                    # width ladder (and its narrowing record) reads the
+                    # net's own width -- a netclass or stored-impedance
+                    # width, not only a --power-nets one.
+                    net_track_widths=dict(
+                        getattr(config, 'net_track_widths', None) or {}),
+                    net_layer_widths=dict(
+                        getattr(config, 'net_layer_widths', None) or {}),
                     board_edge_clearance=_oedge)
                 from kicad_dru import install_layer_clearances
                 install_layer_clearances(_ocfg, None, input_file, None)
@@ -6144,6 +6158,153 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             pcb_data, output_file, return_results, locals().get('results_data'),
             _input_vias962)
 
+    def _gui_write_model(rd):
+        """The board the GUI applier will produce from `rd`: input copper
+        MINUS what it removes PLUS what it adds, as ({net: segs}, {net: vias}).
+        NOT pcb_data, which also carries orphan copper from rip/reroute that
+        reaches no apply channel (the same trap the #8 write-model sweep
+        documents)."""
+        _drop_s = {id(s) for s in (rd.get('segments_to_remove') or [])}
+        _drop_v = {id(v) for v in (rd.get('vias_to_remove') or [])}
+        _as = {nid: [s for s in lst if id(s) not in _drop_s]
+               for nid, lst in _orig_seg_by_net.items()}
+        _av = {nid: [v for v in lst if id(v) not in _drop_v]
+               for nid, lst in _orig_via_by_net.items()}
+        for _r6 in rd.get('results', []):
+            for _s6 in (_r6.get('new_segments') or []):
+                _as.setdefault(_s6.net_id, []).append(_s6)
+            for _v6 in (_r6.get('new_vias') or []):
+                _av.setdefault(_v6.net_id, []).append(_v6)
+        for _s6 in (rd.get('all_swap_segments') or []):
+            _as.setdefault(_s6.net_id, []).append(_s6)
+        for _v6 in (rd.get('all_swap_vias') or []):
+            _av.setdefault(_v6.net_id, []).append(_v6)
+        return _as, _av
+
+    # ---- POWER WIDTHS (#1033) ---------------------------------------------
+    # Disclosure, not a gate: per requested-width net, how much of the copper
+    # this run SHIPS is narrower than asked. A request is not a result -- run
+    # 32's bulk route asked +3V3 for 0.3 and shipped 34% of its length at the
+    # 0.127 signal width with nothing in the summary saying so; the per-site
+    # `design_rules` ledger records narrowing EVENTS, this records the board.
+    # Measured on the board this run WROTE -- the file on the CLI, the write
+    # model on the GUI (_gui_write_model, shared with the improvement gate) --
+    # so both fronts report the same numbers. Outermost run only (nested
+    # sub-runs measure a slice). It runs here, before --json-out is written,
+    # so the key reaches --json-out, the returned dict and results_data, and
+    # route_summary carries it through the merge. Like every other summary
+    # key it describes the run's attempt: if the improvement gate below then
+    # reverts the output, the gate's own line says so.
+    if (final_reconcile and not _ckpt_stop
+            and (getattr(config, 'power_net_widths', None) or {})):
+        try:
+            from routing_common import power_width_report
+            _req1033 = {pcb_data.nets[_n].name: max(_w, config.track_width)
+                        for _n, _w in config.power_net_widths.items()
+                        if _n in pcb_data.nets}
+            _board1033 = None
+            _segs1033 = None
+            if return_results:
+                _board1033 = pcb_data
+                _as1033, _ = _gui_write_model(results_data)
+                _segs1033 = [s for _l in _as1033.values() for s in _l]
+            elif output_file and os.path.isfile(output_file):
+                from kicad_parser import parse_kicad_pcb as _pk1033
+                _board1033 = _pk1033(output_file)
+                _segs1033 = _board1033.segments
+            if _board1033 is not None:
+                _ids1033 = {_nn.name: _ni
+                            for _ni, _nn in _board1033.nets.items()}
+                _pw1033 = power_width_report(
+                    _segs1033,
+                    {_ids1033[_nm]: _w for _nm, _w in _req1033.items()
+                     if _nm in _ids1033},
+                    lambda _ni: (_board1033.nets[_ni].name
+                                 if _ni in _board1033.nets else f"Net {_ni}"))
+                # #1033: WHICH power nets this run routed. The block above
+                # measures every --power-nets net on the board (disclosure);
+                # the design_rules rows and --strict-sizes below judge only
+                # the nets THIS run is responsible for -- its --nets scope,
+                # and any net it laid NEW copper for (rip victims) -- so a scoped `--nets +3V3` call is not failed by
+                # GND / +5V copper an earlier step (a BGA escape neck) laid.
+                # (not routed_results: it also registers nets this run found
+                # already connected and never touched)
+                _run1033 = set(sweep_scope_ids)
+                _orig1033 = set(original_segment_ids or ())
+                for _r1033 in (results or []):
+                    for _sg1033 in (_r1033.get('new_segments') or []):
+                        if id(_sg1033) not in _orig1033:   # NEW copper only
+                            _run1033.add(_sg1033.net_id)
+                _insc1033 = {pcb_data.nets[_n].name
+                             for _n in (set(config.power_net_widths)
+                                        & _run1033)
+                             if _n in pcb_data.nets}
+                for _nm, _r in _pw1033.items():
+                    _r['in_run_scope'] = _nm in _insc1033
+                summary['power_widths'] = _pw1033
+                summary['power_widths_run_scope'] = sorted(_insc1033)
+                # WHICH copper was measured. The CLI reads the written file,
+                # which already holds every in-run pass (finalize, oracle,
+                # reconcile). The GUI reads the change-set it hands the
+                # applier; on the FALLBACK oracle path (posted as
+                # plane_finalize_oracle, run by the applier AFTER apply)
+                # that oracle's copper is not in it yet, so say so rather
+                # than let the two fronts' numbers be compared as equals.
+                if return_results:
+                    _stage1033 = 'change-set (write model)'
+                    if results_data.get('plane_finalize_oracle'):
+                        _stage1033 += (', before the post-apply plane-'
+                                       'finalize oracle leg')
+                else:
+                    _stage1033 = 'written board'
+                summary['power_widths_measured_on'] = _stage1033
+                # #1033: the design_rules ledger describes SHIPPED power
+                # copper: every per-attempt power-net track_width row is
+                # replaced by one row per power net that still ships under
+                # its width (same measurement as power_widths), and every
+                # summary this run printed or will write is re-stamped, so
+                # --json-out, the MIN line and --strict-sizes agree.
+                try:
+                    from fab_tiers import (replace_power_track_rows,
+                                           escalation_summary as _es1033)
+                    # ledger rows key on THIS run's net ids (pcb_data), not
+                    # the re-parsed output's
+                    _pid1033 = {_nn.name: _ni
+                                for _ni, _nn in pcb_data.nets.items()}
+                    replace_power_track_rows(
+                        {_pid1033[_nm] for _nm in _insc1033
+                         if _nm in _pid1033},
+                        [(_pid1033.get(_nm), _nm, _r['requested_mm'],
+                          _r['min_mm'], _r['under_mm'])
+                         for _nm, _r in _pw1033.items()
+                         if _nm in _insc1033
+                         and _pid1033.get(_nm) is not None])
+                    _dr1033 = _es1033()
+                    for _sm in list(_SUMMARY_SINK) + [summary]:
+                        if isinstance(_sm.get('design_rules'), dict):
+                            _keep = {k: v for k, v in _sm['design_rules'].items()
+                                     if k == 'unsupported_rules'}
+                            _sm['design_rules'] = dict(_dr1033, **_keep)
+                except Exception as _dre1033:                   # noqa: BLE001
+                    print(f"  (design_rules power reconcile skipped: "
+                          f"{_dre1033})")
+                if return_results:
+                    results_data['power_widths'] = _pw1033
+                    results_data['power_widths_measured_on'] = _stage1033
+                    results_data['power_widths_run_scope'] = sorted(_insc1033)
+                _short1033 = [(_nm, _r) for _nm, _r in _pw1033.items()
+                              if _r['under_mm'] > 0]
+                if _short1033:
+                    print(f"{YELLOW}Power widths: "
+                          + "; ".join(
+                              f"{_nm} {_r['under_mm']:.1f}/{_r['length_mm']:.1f}"
+                              f" mm under the requested {_r['requested_mm']:g}"
+                              f" (min {_r['min_mm']:g})"
+                              for _nm, _r in _short1033)
+                          + f" -- JSON_SUMMARY power_widths{RESET}")
+        except Exception as _pwe:                               # noqa: BLE001
+            print(f"  (power-width disclosure skipped: {_pwe})")
+
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
     # rescues, Phase-3 tap order, costs -- assembled from state.
@@ -6278,26 +6439,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                           compare_connectivity, gate_verdict,
                                           format_report)
             if return_results:
-                # The board the GUI applier will produce: input copper MINUS
-                # what it removes PLUS what it adds. NOT pcb_data, which also
-                # carries orphan copper from rip/reroute that reaches no
-                # apply channel and would grade a broken net as connected
-                # (the same trap the #8 write-model sweep documents).
-                _drop_s = {id(s) for s in (results_data.get('segments_to_remove') or [])}
-                _drop_v = {id(v) for v in (results_data.get('vias_to_remove') or [])}
-                _after_s = {nid: [s for s in lst if id(s) not in _drop_s]
-                            for nid, lst in _orig_seg_by_net.items()}
-                _after_v = {nid: [v for v in lst if id(v) not in _drop_v]
-                            for nid, lst in _orig_via_by_net.items()}
-                for _r6 in results_data.get('results', []):
-                    for _s6 in (_r6.get('new_segments') or []):
-                        _after_s.setdefault(_s6.net_id, []).append(_s6)
-                    for _v6 in (_r6.get('new_vias') or []):
-                        _after_v.setdefault(_v6.net_id, []).append(_v6)
-                for _s6 in (results_data.get('all_swap_segments') or []):
-                    _after_s.setdefault(_s6.net_id, []).append(_s6)
-                for _v6 in (results_data.get('all_swap_vias') or []):
-                    _after_v.setdefault(_v6.net_id, []).append(_v6)
+                # The board the GUI applier will produce (_gui_write_model):
+                # a broken net must not grade connected on orphan copper.
+                _after_s, _after_v = _gui_write_model(results_data)
                 _before_map = net_connectivity_map(
                     pcb_data, segs_by_net=_orig_seg_by_net,
                     vias_by_net=_orig_via_by_net)

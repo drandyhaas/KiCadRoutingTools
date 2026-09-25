@@ -1842,7 +1842,13 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
     (``npth_floor_ok`` seeds, ``wide_route_clear`` legs, ``build_base_obstacles``
     stamps), ``pcb_modification`` (``_seg_worst_offender``'s shortfall ranking
     and ``nudge_grazing_microshift``'s detector + acceptance gate) and
-    ``placement/fanout_clearance`` (``_Repair``'s NPTH keep-out rects).
+    ``placement/fanout_clearance`` (``_Repair``'s NPTH keep-out rects). #1038
+    added ``pcb_modification.smooth_octolinear_chains`` (a shortcut CHOOSES
+    where copper goes; refusing one keeps the original copper) and the VIA-
+    copper keep-out around NPTH holes in ``add_drill_hole_obstacles``. That
+    one is NOT floored at the fab floor, so any value above 0 turns it on --
+    including the ``min_hole_clearance`` route.py's writeback puts in each
+    route step's output project (see the comment there).
 
     STILL AT THE FLAT ``NPTH_TO_TRACK_CLEARANCE``, and deliberately so -- read
     this before "finishing the job":
@@ -2081,6 +2087,39 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     if config.hole_to_hole_clearance > 0 and drill_holes:
         block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
                                     config.hole_to_hole_clearance, config.grid_step)
+
+    # #1038: via COPPER off an NPTH hole wall at the copper-to-hole floor. The
+    # h2h stamp above holds the via's DRILL off the hole, which leaves its
+    # annulus (via_size - via_drill)/2 closer: a 0.5/0.3 via at h2h 0.25 puts
+    # copper 0.15 mm from the hole, inside the board's declared 0.25 that
+    # check_drc's via-hole arm grades (run 32 routed_c3: J5 and J1). It reads
+    # the same resolved floor as the TRACK keep-out above (but not its 0.20
+    # fab floor, below), held by the same idiom as the #448/#505 via bands
+    # (hole_r + clr + via_drill/2 == copper edge `clr` off the wall), and only
+    # when it is wider than the h2h stamp already laid.
+    #
+    # It fires whenever `_hole_clr` > 0 -- an explicit config.hole_clearance,
+    # the board's fab_floor_origin, or ANY `rules.min_hole_clearance` in its
+    # project -- at max(clearance, that), which is what check_drc's via-hole
+    # arm grades. NOT at the flat NPTH_TO_TRACK 0.20: that is a TRACK routing
+    # policy, not a KiCad rule, and grading or stamping vias at it invents
+    # phantoms (#505/crkbd).
+    #
+    # SCOPE, precisely: route.py's DRC writeback writes rules.min_hole_clearance
+    # into each route step's output project (at the clearance the step routed
+    # at), so from step 2 of any chain on, every board reads as declaring a
+    # floor and this stamp holds via copper at least `clearance` off every NPTH
+    # wall. Only a board with no project, or one declaring nothing -- in a
+    # chain, step 1 of such a board -- keeps its pre-#1038 via map
+    # byte-identical (test_505's no-override case pins that). `npth_holes`
+    # also carries #441's ring-uncovered plated holes, which check_drc's via
+    # arm does not grade.
+    if npth_holes and _hole_clr > 0:
+        _via_hole_clr = (max(config.clearance, _hole_clr)
+                         + (config.via_size - config.via_drill) / 2.0)
+        if _via_hole_clr > config.hole_to_hole_clearance + 1e-9:
+            block_via_cells_near_drills(obstacles, npth_holes, config.via_drill,
+                                        _via_hole_clr, config.grid_step)
 
     # VIA arm of the #326 override (#505). KiCad's hole_clearance holds a via's
     # COPPER -- not merely its drill -- `local_clearance` off the hole wall. For

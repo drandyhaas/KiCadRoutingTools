@@ -3736,7 +3736,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # NPTH pads carry no override at all -- exactly the 0.20-vs-0.127
             # gap). Above the floor the value can only have come from the pad
             # override, which KiCad does honor.
-            kicad_req = req_clr if req_clr > npth_clr + 1e-9 else clearance
+            #
+            # #1038: the board's DECLARED copper-to-hole floor (`hole_clearance`
+            # -- its min_hole_clearance, or the fab_floor_origin a writeback
+            # relaxed) is a real rule, unlike the NPTH_TO_TRACK fab floor, so a
+            # via is held to it: KiCad's hole_clearance holds via copper off a
+            # hole at min_hole_clearance, and route.py's via keep-out prices it.
+            kicad_req = (req_clr if req_clr > npth_clr + 1e-9
+                         else max(clearance, hole_clearance))
             for via in pcb_data.vias:
                 # Own-net copper legitimately lands on the pad (mirrors the
                 # track arm's snet != hnet exemption, #442).
@@ -3759,6 +3766,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 }
                 if kicad_req > clearance + 1e-9:
                     v['required_mm'] = kicad_req
+                    # #1038: say WHICH rule set it -- a pad override, or the
+                    # board's declared copper-to-hole floor. Both print a
+                    # "Required clearance" line and were both labelled an
+                    # override.
+                    v['required_source'] = ('pad override'
+                                            if req_clr > npth_clr + 1e-9
+                                            else 'declared hole clearance')
                 violations.append(v)
 
     # Check board edge clearances. Measure to the real Edge.Cuts outline (outer
@@ -4504,8 +4518,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     # #326: attribute above-global requirements (pad/footprint
                     # local clearance or netclass), mirroring KiCad's wording.
                     if v.get('required_mm'):
+                        _src = v.get('required_source',
+                                     'local/netclass override')
                         print(f"    Required clearance: {v['required_mm']:.4f}mm "
-                              f"(local/netclass override; global {clearance:.4f}mm)")
+                              f"({_src}; global {clearance:.4f}mm)")
 
                 if len(vlist) > limit:
                     print(f"  ... and {len(vlist) - limit} more "
@@ -4689,6 +4705,10 @@ if __name__ == "__main__":
     # min_copper_edge_clearance; honor it unless --board-edge-clearance is
     # explicitly larger.
     net_clearances = None
+    # #1038: where the copper-to-hole floor came from, for graded_at.
+    _hole_clr_requested = args.hole_clearance
+    _hole_clr_source = ('--hole-clearance' if args.hole_clearance > 0
+                        else 'fab floor')
     try:
         from list_nets import read_design_rules, net_clearance_map
         _rules = read_design_rules(args.pcb)
@@ -4757,9 +4777,39 @@ if __name__ == "__main__":
                 float(_rules.get('constraints', {})
                       .get('min_hole_clearance') or 0.0),
                 'min_hole_clearance', 'Copper-to-hole clearance')
+        if args.hole_clearance > _hole_clr_requested:
+            _hole_clr_source = 'min_hole_clearance'
+        # #1038: ...and the floor the board DECLARED before this chain touched
+        # it. A pour/repair DRC writeback clamps `rules.min_hole_clearance`
+        # DOWN to the routed clearance (run 32: 0.25 -> 0.1), so reading the
+        # rules alone graded routed_c3 clean while two tracks sat 0.201 and
+        # 0.212 mm from J5's NPTH hole -- inside the 0.25 every route.py step
+        # of that chain announced it was routing to. The origin is the durable
+        # record, the same one route.py resolves its hole floor from
+        # (obstacle_map.resolve_hole_clearance), so grader and generator agree.
+        from fix_kicad_drc_settings import declared_fab_floor as _dff1038
+        _origin_hc = _dff1038(args.pcb, 'min_hole_clearance') or 0.0
+        _before1038 = args.hole_clearance
+        _pin_up('hole_clearance', float(_origin_hc),
+                'fab_floor_origin.min_hole_clearance',
+                'Copper-to-hole clearance')
+        if args.hole_clearance > _before1038:
+            _hole_clr_source = 'fab_floor_origin'
     except Exception as e:
         if not args.quiet:
             print(f"  (netclass/edge rules not read: {e})")
+    if args.hole_clearance > 0 and not args.quiet:
+        # #1038: say what the copper-to-hole floor COVERS. KiCad's
+        # hole_clearance also holds copper off via drills and plated holes;
+        # this grader applies it to NPTH holes (and, for tracks, to #441
+        # ring-uncovered plated holes) only.
+        print(f"  (copper-to-hole scope: tracks at "
+              f"{max(args.clearance or 0.0, defaults.NPTH_TO_TRACK_CLEARANCE, args.hole_clearance):.4g} mm "
+              f"to NPTH holes and to plated holes whose copper ring does not "
+              f"cover the drill (#441); vias at "
+              f"{max(args.clearance or 0.0, args.hole_clearance):.4g} mm to "
+              f"NPTH holes only. Via drills and ordinary plated holes are "
+              f"not graded against it, unlike KiCad's hole_clearance)")
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
@@ -4804,6 +4854,41 @@ if __name__ == "__main__":
                 'clearance': args.clearance,
                 'clearance_margin': args.clearance_margin,
                 'hole_to_hole_clearance': args.hole_to_hole_clearance,
+                # #1038: copper-to-hole, as graded (the NPTH track arm uses
+                # max(clearance, NPTH fab floor, this)), and where it came
+                # from: '--hole-clearance', 'min_hole_clearance' (the
+                # project's rules), 'fab_floor_origin' (the floor the board
+                # declared before a writeback relaxed it), 'clearance' or
+                # 'fab floor' -- whichever term BINDS.
+                'hole_clearance': max(args.clearance or 0.0,
+                                      defaults.NPTH_TO_TRACK_CLEARANCE,
+                                      args.hole_clearance),
+                # #1038 scope: `hole_clearance` above is the TRACK-to-NPTH
+                # value; a VIA's copper is held to max(clearance, the
+                # declared/auto floor) -- the flat NPTH fab floor is a track
+                # routing policy and stays out of the via arm (#505). WHICH
+                # holes: the track arm grades NPTH holes plus plated holes
+                # whose copper ring does not cover the drill (#441, graded
+                # like NPTH); the via arm grades NPTH holes only. Via drills
+                # and ordinary plated holes are NOT graded against this
+                # floor, which KiCad's own hole_clearance rule does (run 32
+                # routed_c3: kicad-cli reports 199 items at 0.25). Pad
+                # overrides are graded per hole and carry their own
+                # required_mm.
+                'hole_clearance_via': max(args.clearance or 0.0,
+                                          args.hole_clearance),
+                'hole_clearance_scope': {
+                    'tracks': 'npth+uncovered_plated',
+                    'vias': 'npth'},
+                'hole_clearance_source': (
+                    _hole_clr_source
+                    if args.hole_clearance >= max(
+                        args.clearance or 0.0,
+                        defaults.NPTH_TO_TRACK_CLEARANCE) - 1e-12
+                    else ('clearance'
+                          if (args.clearance or 0.0)
+                          > defaults.NPTH_TO_TRACK_CLEARANCE
+                          else 'fab floor')),
                 'board_edge_clearance': args.board_edge_clearance,
                 'per_net_clearances': bool(net_clearances),
                 'size_checks': not args.no_size_checks,
