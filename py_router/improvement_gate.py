@@ -69,7 +69,7 @@ Authority is only safe when someone checks the result and can say no.
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 def net_connectivity_map(pcb_data, tolerance: float = 0.02,
@@ -114,22 +114,12 @@ def net_connectivity_map(pcb_data, tolerance: float = 0.02,
 
 def compare_connectivity(before: Dict[int, Tuple[bool, int]],
                          after: Dict[int, Tuple[bool, int]],
-                         net_name: callable,
-                         excluded_ids: Optional[Iterable[int]] = None) -> Dict:
+                         net_name: callable) -> Dict:
     """Per-net connectivity delta between two states of the same board.
 
     Only nets present in BOTH maps are compared: a net that exists in one
     reading and not the other is a parse/scope difference, not a routing
     outcome, and must not be able to trip the gate.
-
-    `excluded_ids` (#1032) are nets the run was told, BY PLAN, not to repair:
-    the poured plane nets outside a scoped call's `--nets`, which the in-run
-    finalize skips (`finalize_excluded_nets`). A signal lap crossing such a
-    pour still cuts it, and judging the lap on pads its own finalize was
-    forbidden to heal compares unlike with unlike. They are dropped from BOTH
-    maps and reported apart in `excluded_by_plan` as (name, before, after)
-    disconnected-pad counts, so the damage stays visible -- it just cannot
-    vote.
 
     `worsened` lists every compared net whose disconnected-pad count ROSE
     WITHOUT being newly broken (it was already open before the run), as
@@ -137,20 +127,15 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
     pad-count rejection used to name no net at all in that case, because the
     net is then not `lost`.
     """
-    excluded = set(excluded_ids or ())
     lost: List[str] = []
     gained: List[str] = []
     worsened: List[Tuple[str, int, int]] = []
-    excluded_by_plan: List[Tuple[str, int, int]] = []
     pads_before = pads_after = 0
     compared = 0
     for net_id, (conn_b, dis_b) in before.items():
         if net_id not in after:
             continue
         conn_a, dis_a = after[net_id]
-        if net_id in excluded:
-            excluded_by_plan.append((net_name(net_id), dis_b, dis_a))
-            continue
         compared += 1
         pads_before += dis_b
         pads_after += dis_a
@@ -164,7 +149,6 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
         'lost': sorted(lost),
         'gained': sorted(gained),
         'worsened': sorted(worsened),
-        'excluded_by_plan': sorted(excluded_by_plan),
         'disconnected_pads_before': pads_before,
         'disconnected_pads_after': pads_after,
         'nets_compared': compared,
@@ -185,30 +169,13 @@ def gate_verdict(cmp: Dict) -> str:
     return 'reject' if (net_delta > 0 or pad_delta > 0) else 'accept'
 
 
-def plan_excluded_net_names(zone_net_names: Iterable[str],
-                            net_names: Optional[List[str]]) -> List[str]:
-    """The poured nets a scoped call leaves to a LATER step (#1032).
-
-    The same rule route.py's in-run finalize applies (`finalize_excluded_nets`):
-    a zone net that the call's `--nets` filter does not match. An unscoped call
-    (no filter) excludes nothing. Used by the gate when the finalize did not
-    run (KICAD_PLANE_FINALIZE=0, a checkpoint stop) so the gate still compares
-    like with like.
-    """
-    if not net_names:
-        return []
-    from net_queries import matches_net_filter
-    return sorted({n for n in zone_net_names
-                   if n and not matches_net_filter(n, net_names)})
-
-
 def format_report(cmp: Dict, verdict: str, action: str) -> str:
     """The human line(s). Names the nets -- a count alone is not actionable,
     and the whole point of the gate is that the operator can see WHICH
     already-routed copper a rip took out."""
     lines = []
-    # #1032: the head line NAMES what it judged on, each list at its OWN
-    # clause. `broke 1 ... REJECTED` hid that the one net was GND; a
+    # The head line NAMES what it judged on, each list at its OWN
+    # clause (#1032). `broke 1 ... REJECTED` hid that the one net was GND; a
     # pad-count-only rejection (the net was already broken before the run,
     # so it is not `lost`) named nothing; and one bracket after "connected"
     # read as if a net that got WORSE had been connected.
@@ -236,12 +203,6 @@ def format_report(cmp: Dict, verdict: str, action: str) -> str:
     if worsened:
         lines.append("  more disconnected pads: " + ', '.join(
             f"{n} {b}->{a}" for n, b, a in worsened))
-    excl = cmp.get('excluded_by_plan') or []
-    if excl:
-        lines.append(
-            "  excluded (plane nets outside --nets, not repaired BY PLAN, "
-            "so not judged): " + ', '.join(
-                f"{n} {b}->{a}" for n, b, a in excl))
     if cmp['gained']:
         lines.append(f"  connected by this run: {', '.join(cmp['gained'])}")
     lines.append(f"  disconnected pads: {cmp['disconnected_pads_before']} "

@@ -134,7 +134,7 @@ IMPROVEMENT GATE: this run broke 3 previously-connected net(s) [/BMS.Can_L, /BMS
 ```
 
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
-(`lost`, `gained`, `worsened`, `excluded_by_plan`,
+(`lost`, `gained`, `worsened`,
 `disconnected_pads_before/after`, `nets_compared`, `verdict`), so a chain can
 assert on it instead of grepping prose.
 
@@ -145,14 +145,11 @@ broken (it was already open), so it is not `lost`; the JSON `worsened` key
 holds exactly the same nets. Each list is capped at six.
 A pad-count-only rejection used to name nothing.
 
-**A poured net outside a scoped call's `--nets` is not judged (#1032).** The
-in-run finalize excludes such a net BY PLAN (`finalize_excluded_nets`), so a
-signal lap that cuts its pour was forbidden to heal the cut; judging the lap on
-those pads compares unlike with unlike. The gate drops them from both readings
-and reports them on an `excluded (plane nets outside --nets ...)` line and in
-`excluded_by_plan` as `[name, before, after]`. Put the poured nets in `--nets`
-when the lap should repair them. With the finalize off (`KICAD_PLANE_FINALIZE=0`)
-the gate derives the same list by the same rule.
+**A poured net outside a scoped call's `--nets` is still judged.** The in-run
+finalize does not repair such a net (`finalize_excluded_nets`), so a lap that
+cuts its pour leaves those pads open, and the gate counts them: shipping the
+lap would ship the cut. Put the poured nets in `--nets` when the lap may cross
+their pours, so its finalize repairs what it cuts.
 
 **If you see `REVERTED`, the retry did not fail to run — it ran and was
 rejected.** Re-running it with *more* rip authority is the one response

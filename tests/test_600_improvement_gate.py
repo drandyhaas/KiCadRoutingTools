@@ -131,42 +131,17 @@ check("#1032 worsened (JSON) is disjoint from lost and matches the head",
       c['lost'] == ['/A'] and c['worsened'] == [('/B', 2, 5)]
       and 'worsened 1 [/B 2->5]' in _head)
 
-# #1032: a net EXCLUDED by plan (a pour outside --nets, which the finalize was
-# told not to repair) cannot reject -- same shapes, GND excluded -> accept, and
-# the damage is still reported on its own line.
+# A cut pour counts like any other net: the gate has no exclusion list, so a
+# lap that breaks GND is judged on it (shipping the lap would ship the cut).
 c = _cmp({1: (True, 0), 2: (False, 2)}, {1: (False, 3), 2: (True, 0)},
          names={1: 'GND', 2: '/SIG'})
-check("#1032 control: GND lost without exclusion -> reject",
+check("a lap that cuts GND off 3 pads while connecting /SIG is rejected",
       c['lost'] == ['GND'] and gate_verdict(c) == 'reject')
-c = compare_connectivity({1: (True, 0), 2: (False, 2)},
-                         {1: (False, 3), 2: (True, 0)},
-                         lambda nid: {1: 'GND', 2: '/SIG'}[nid],
-                         excluded_ids={1})
-r = format_report(c, gate_verdict(c), 'shipped')
-check("#1032 excluded net cannot reject",
-      gate_verdict(c) == 'accept' and not c['lost'] and not c['worsened']
-      and c['nets_compared'] == 1
-      and c['disconnected_pads_before'] == 2
-      and c['disconnected_pads_after'] == 0)
-check("#1032 excluded net is reported, not hidden",
-      c['excluded_by_plan'] == [('GND', 0, 3)]
-      and 'excluded' in r and 'GND 0->3' in r)
 
 # The head line caps its list.
 c = _cmp({i: (True, 0) for i in range(10)}, {i: (False, 2) for i in range(10)})
 _head = format_report(c, gate_verdict(c), 'x').splitlines()[0]
 check("#1032 head line caps the named nets", '+4 more' in _head)
-
-# The fallback derivation uses the finalize's own rule.
-from improvement_gate import plan_excluded_net_names
-check("#1032 plan exclusion: zone nets outside --nets",
-      plan_excluded_net_names(['GND', '+3V3'], ['/D1', '+3V3']) == ['GND'])
-check("#1032 plan exclusion: globs follow matches_net_filter",
-      plan_excluded_net_names(['GND', '+3V3'], ['*']) == []
-      and plan_excluded_net_names(['GND', '+3V3'], ['*', '!GND']) == ['GND'])
-check("#1032 plan exclusion: an unscoped call excludes nothing",
-      plan_excluded_net_names(['GND'], []) == []
-      and plan_excluded_net_names(['GND'], None) == [])
 
 
 # ------------------------------------------------------- connectivity map
