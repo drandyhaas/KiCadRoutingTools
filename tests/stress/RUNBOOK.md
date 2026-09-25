@@ -871,6 +871,15 @@ boards" and "which commit broke connectivity".
    therefore the faster path on such a wave, and it does not violate this rule:
    the rule is same-TERMS, and same terms is exactly what a shared grader gives.
 
+   **The baseline arm can be re-graded in the cloud too.** `--regrade-baseline`
+   re-grades on this machine; `modal_sweep/regrade_arm.py` runs the same
+   `ab_replay_grade.py --regrade` per kept board on Modal, in the image built
+   from a checkout's HEAD (`KICAD_REGRADE_REPO` picks the checkout, i.e. the
+   grader), and writes a new arm on the results volume that `pair_arms.py`
+   pairs like any other. Use it when the change under test touches a grader
+   (`check_drc`, the connectivity checker) and the baseline arm was graded by
+   an older one.
+
    What the rule still forbids is mixing GRADERS, and that is what the "+40
    worse / -37 better" incident actually was -- a wave whose `drc_real` had
    fallen back to raw DRC, paired against a kicad-cli baseline. So the regrade
