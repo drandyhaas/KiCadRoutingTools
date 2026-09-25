@@ -742,7 +742,7 @@ def main():
                     help="the film's name on the rail's left (default: the "
                          "run directory, or the directory the chain's boards "
                          "share; never a later board's name)")
-    ap.add_argument('--theme', default=None, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--camera', default=None,
                     choices=('off', 'auto'),

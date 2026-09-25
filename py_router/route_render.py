@@ -875,7 +875,7 @@ def main() -> int:
                     help='draw reference designators at footprint origins (a '
                          'cross marks the exact JSON coordinate). Default: on '
                          'for a --view crop, off whole-board')
-    ap.add_argument('--theme', default=None, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--ruler', default=None, action=argparse.BooleanOptionalAction,
                     help='mm coordinate ticks along the top/left edges, so the '
                          'picture is matchable to JSON coordinates. Default: '

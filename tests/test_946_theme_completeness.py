@@ -341,7 +341,49 @@ def test_the_film_chrome_reads_the_active_theme():
               'active theme')
 
 
+def test_the_theme_flag_is_validated_but_not_case_sensitive():
+    """`--theme` refuses a name that is no theme (the #1036 review's
+    `choices`), but takes `Light` / `DARK` as the theme they name -- which
+    it always did before choices, since `render_theme.theme` folds case.
+    Behaviour on route_render (the fastest of the four CLIs), and the same
+    `type=str.lower` asserted on every front end's `--theme` argument."""
+    _mark = len(_FAIL)
+    import re
+    import tempfile
+    from run_utils import check
+    for rel in ('py_router/make_movie.py', 'py_tools/make_film.py',
+                'py_router/route_render.py', 'py_tools/render_placement.py'):
+        src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+        args = re.findall(r"add_argument\('--theme',[^\n]*", src)
+        if len(args) != 1:
+            fail('%s: %d --theme arguments' % (rel, len(args)))
+        elif ('type=str.lower' not in args[0]
+              or "choices=('dark', 'light')" not in args[0]):
+            fail('%s: --theme is not case-folded AND validated: %s'
+                 % (rel, args[0][:90]))
+    board = os.path.join(ROOT, 'kicad_files', 'cap_chain.kicad_pcb')
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, 'r.png')
+        rr = [sys.executable, '-X', 'utf8',
+              os.path.join(ROOT, 'py_router', 'route_render.py'), board,
+              '-o', out, '--size', '200']
+        try:
+            check(rr + ['--theme', 'LIGHT'], accept=True)
+            if not os.path.isfile(out):
+                fail('route_render --theme LIGHT wrote nothing')
+            # argparse's own message IS the refusal here
+            check(rr + ['--theme', 'Chartreuse'], code=2,
+                  refuse="invalid choice: 'chartreuse'",
+                  allow=('error: argument',))
+        except AssertionError as exc:
+            fail(str(exc)[:400])
+    if len(_FAIL) == _mark:
+        print('  PASS: --theme LIGHT renders, --theme Chartreuse refuses; '
+              'all four CLIs fold case and validate')
+
+
 TESTS = (
+    test_the_theme_flag_is_validated_but_not_case_sensitive,
     test_the_film_chrome_reads_the_active_theme,
     test_dark_is_value_preserving,
     test_every_theme_is_complete_in_both_directions,

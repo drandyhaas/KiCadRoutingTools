@@ -690,7 +690,7 @@ def main(argv=None):
                     help="frames per part move (0 snaps)")
     ap.add_argument('--png-dir', help="also dump every frame as a PNG")
     ap.add_argument('--shots-json', help="write the resolved shot list here")
-    ap.add_argument('--theme', default=None, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--layout', default=None,
                     help="frame layout: 'legacy' (default, or "
                          "$KICAD_MOVIE_LAYOUT; today's frame), "

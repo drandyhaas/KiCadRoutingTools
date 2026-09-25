@@ -564,7 +564,7 @@ board that would be gated as mostly bare gets no empty box reserved for it.
 
 **Themes reach every region.** The cards and badges in `make_film`, the iso
 panel's ground, caption strip and error text, and the run clock's band draw in
-the active theme. `--theme` takes `dark` or `light` and refuses anything else.
+the active theme. `--theme` takes `dark` or `light` in any case and refuses anything else.
 `--layer-alpha` defaults to the theme's own measured alpha (dark 150, light
 205). The CLIs used to pass 150 explicitly, so LIGHT's measured 205 was never
 used.

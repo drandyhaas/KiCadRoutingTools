@@ -1863,7 +1863,7 @@ Examples:
                         "JSON checklist then carries d={moved, expected, "
                         "match} -- mandate 8's question (d), quotable instead "
                         'of recalled (run-4 G5)')
-    p.add_argument('--theme', default=None, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    p.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     p.add_argument('--quiet', action='store_true',
                    help='suppress narration. With --json-out it now also '
                         'suppresses the stdout JSON_SUMMARY echo and the '
