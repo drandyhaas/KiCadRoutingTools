@@ -10,16 +10,21 @@ and no key measured the SHIPPED board per net.
 What must hold:
   * routing_common.power_width_report measures length at / under the
     requested width per net, on the copper it is given;
-  * _assign_wide_route_widths records a `design_rules` narrowing for a
-    short-edge uniform width and for a long-trunk neck-down, and nothing for
-    a route that shipped at full width;
+  * _assign_wide_route_widths lays a short edge at the net's width and necks
+    it only where the full width does not fit, and records NO `design_rules`
+    row (it runs per routing attempt; the ledger records shipped copper);
+  * the post-route widen pass's exact pad check never clears a graze
+    check_drc grades, and caps an own-pad entry at the pad's narrow side;
   * route_summary.merge_summaries carries `power_widths` from the outermost
     summary through a reconciliation merge;
   * board_score --net-min-widths reports length_under_mm;
   * END TO END: route.py on a board whose +3V3 must pass a 0.4 mm gap in a
     pad fence writes `power_widths` into --json-out, its under_mm agrees with
-    the written board measured independently, and every under-width run is
-    also in `design_rules.narrowed`.
+    the written board measured independently, and `design_rules.narrowed`
+    carries exactly ONE shipped row for the net whose length is that
+    under_mm; the GUI front measures the same copper;
+  * --strict-sizes exits 3 only when SHIPPED copper of a power net this step
+    routed is under width.
 
     python3 tests/test_1033_power_width_disclosure.py
 """
@@ -99,7 +104,7 @@ def t_assign():
     # A 9 mm short edge whose route only fit at 0.15 overall, in FREE space
     # away from its pads: the pad necks (neckdown_length each end) stay at
     # the edge's width, the middle goes back to the requested 0.3 (#1033
-    # honour), and the ledger records the narrowing that remains.
+    # honour), and no ledger row is written for this attempt.
     n0 = len(ledger())
     segs = [make_seg(0, 0, 4.5, 0, width=0.3, net_id=1),
             make_seg(4.5, 0, 9, 0, width=0.3, net_id=1)]
