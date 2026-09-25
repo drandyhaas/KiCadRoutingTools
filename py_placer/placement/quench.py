@@ -1025,7 +1025,12 @@ class QuenchState:
                                    self.parts[r].rot),
                 seed_of=lambda r: (self.parts[r].seed_x, self.parts[r].seed_y,
                                    self.parts[r].orig_rot),
-                model=pad_model)
+                model=pad_model,
+                # #1031: the board's rule-area keep-outs; inert (None
+                # inside) on a board that declares none with tracks
+                # forbidden.
+                keepouts=legality.RuleAreaKeepouts.for_board(
+                    pcb_data, clearance, pcb_file))
 
         # net -> refs touching it, as a SORTED LIST, not a set (#457).
         #
@@ -2390,7 +2395,19 @@ class QuenchState:
                         sf.stack or sf.hole > legality.EPS
                         or sf.pad > legality.EPS):
                     locked_contacts += 1
+        # #1031: parts with an ILLEGAL pad in a rule-area keep-out band, at
+        # the current poses (0 on a board without such a keep-out).
+        ko_parts = 0
+        ko_amount = 0.0
+        if self.legality_ctx.keepouts is not None:
+            for r in refs:
+                amt = self.legality_ctx.keepout_amount(r, *self.legality_ctx.pose_of(r))
+                if amt > legality.EPS:
+                    ko_parts += 1
+                    ko_amount += amt
         return {'pad_conflict_pairs': pairs,
+                'keepout_pad_parts': ko_parts,
+                'keepout_pad_amount': round(ko_amount, 4),
                 'pad_shortfall': round(short, 4),
                 'pad_overlap_pairs': overlaps,
                 # run-6: ANY-net cross-footprint pad intersections -- the

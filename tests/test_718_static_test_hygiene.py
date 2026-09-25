@@ -58,6 +58,9 @@ ROOT = os.path.dirname(TESTS_DIR)
 #: One direction is not enough -- a stale registration passed the #696
 #: containment guard 28/28 while the thing it named had moved.
 _WK_DEPENDENT = {
+    # #1031's run-32 repro only (exit 77 without it). The synthetic
+    # test_1031_keepout_legality.py covers every invariant on a clean clone.
+    'test_1031_keepout_run32_repro.py': ['wk/run32/placed_v2.kicad_pcb'],
     # #788 Arm B only: it re-grades 14 declared study boards to prove the
     # committed literals still match the instrument. Arm A -- the claim
     # those literals support -- runs on a clean clone and is what keeps

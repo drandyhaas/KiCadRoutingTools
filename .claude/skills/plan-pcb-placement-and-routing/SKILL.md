@@ -1219,10 +1219,15 @@ the ledger as names (`score.failed_nets`, or the names in the lever text),
 for the candidate AND the baseline row it beat. `record` now nags exactly
 this: a score carrying `failures` without `failed_nets` draws a NOTE.
 
-**`parent_sha` is the board this iteration actually came from** — `record`
-derives it from the last accepted entry, not from iteration N−1. When you need a
+**`parent_sha` is the board this iteration actually came from**, never
+iteration N−1. When you need a
 path for `render_placement --before`, resolve it out of the store by that sha
-rather than guessing; using N−1 renders a delta that never existed. **Never
+rather than guessing; using N−1 renders a delta that never existed. `record`
+takes the parent from `--parent <board path or sha>`, else from the first
+stored `.kicad_pcb` in the recorded `--argv`, and only then from the last
+accepted entry (with a NOTE; `parent_source` says which). **When lineages run
+in parallel, pass `--parent`**: the last accepted entry is whichever lineage
+accepted last (#1034). **Never
 reuse an output path across iterations**: a ledger that says
 `wk/placed.kicad_pcb` when three iterations wrote that name is unauditable, and
 one that named a *rejected* board as the parent of everything downstream got

@@ -917,6 +917,12 @@ def exact_refusal(state, units: Units, moves, tol: float = 1e-6) -> str:
         if intent_ok is not None and not intent_ok(ref, nx, ny, part.rot):
             return 'declared_claim_refused_a_shift:%s' % ref
         if ctx is not None:
+            # #1031: pads_ok also carries the board rule-area keep-out
+            # conjunct; asked first here so the refusal NAMES which gate held
+            # (a keep-out band is not a pad-to-pad clearance).
+            keepout_ok = getattr(ctx, 'keepout_ok', None)
+            if keepout_ok is not None and not keepout_ok(ref, nx, ny, part.rot):
+                return 'rule_area_keepout_refused_a_shift:%s' % ref
             pads_ok = getattr(ctx, 'pads_ok', None)
             nbrs = [r for r in state.parts if r != ref and r not in ex]
             if pads_ok is not None and not pads_ok(ref, nx, ny, part.rot, nbrs):

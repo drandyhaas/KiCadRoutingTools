@@ -1481,6 +1481,29 @@ def find_single_ended_nets(
     return result
 
 
+def pad_landing_extent(size_x: float, size_y: float, shape: str,
+                       rect_rotation: float, track_width: float):
+    """Where on a pad's copper a track may LAND -- the router's own rule.
+
+    Returns ``None`` when the router lands only at the pad centre (a pad
+    tilted off-axis, or one too small to hold the track cross-section),
+    else ``(half_x, half_y, round_outline)``: the pad's half-dims shrunk by
+    track_width/2 so the whole track stays inside the copper, clipped to the
+    inscribed ellipse when ``round_outline`` (circle and oval pads).
+
+    ONE rule for two consumers: `single_ended_routing._free_on_pad_cells`
+    (#479, the blocked-terminal seeding) and placement's rule-area keep-out
+    channel (#1031), which must not accept a pose the router cannot land on.
+    """
+    if rect_rotation:
+        return None
+    half_x = (size_x or 0.0) / 2.0 - track_width / 2.0
+    half_y = (size_y or 0.0) / 2.0 - track_width / 2.0
+    if half_x <= 0 or half_y <= 0:
+        return None
+    return half_x, half_y, shape in ('circle', 'oval')
+
+
 def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
     """
     Expand wildcard layer specifications to actual layer names.
