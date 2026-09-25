@@ -1,4 +1,4 @@
-"""one_net.py -- route chosen lanes of a braid plan ONE AT A TIME, in band.
+"""route_lanes.py -- route chosen lanes of a plan ONE AT A TIME, each in its band.
 
 The bench is planned exactly as braid.run plans it (plan_audit.plan, the
 caller's environment), then ONLY the named lanes are routed, in the braid's
@@ -8,12 +8,19 @@ pair through the braid's pair step) against every other lane's reservation --
 no rescue, no last call, no econ re-lay. What the router does with ONE lane
 in its band is then visible apart from what the rest of the run does to it.
 
-usage: one_net.py NETS|all --board B --nets N1,..|@FILE [--dest REF]
-                  [--mode alone|seq] [--png DIR] [--probe X,Y;..|stops]
-                  [--box X0,Y0,X1,Y1] [--viacheck]
+usage: route_lanes.py NETS|all --board B --nets N1,..|@FILE [--dest REF]
+                  [--plan PLAN.json] [--mode alone|seq] [--write OUT.kicad_pcb]
+                  [--png DIR] [--probe X,Y;..|stops] [--box X0,Y0,X1,Y1] [--viacheck]
 
+  --plan PLAN   a WHOLE-ROUTE plan (whole_snap's) installed in place of the braid's
+                (whole_ctx.install): its reservations, via sites, bands and
+                search windows are what the lanes route against
   --mode alone  the copper is reset before each lane (each alone against the plan)
          seq    the lanes accumulate in order (the kept attempt, these lanes only)
+  --write OUT   the board the run leaves -- the bench plus every segment and via
+                it added (seq: all the lanes together), its project stamped at
+                the routed floor -- for check_connected / check_drc: a lane the
+                router reports routed is not proof its net connects
 
 Per lane: IN BAND / REFUSED, vias (routed vs the plan's layer changes), length
 vs the plan, the copper's distance from the planned line (max, and the share
@@ -33,8 +40,10 @@ each got, and where it stopped).
 import argparse
 import contextlib
 import io
+import json
 import math
 import os
+import shutil
 import sys
 
 import numpy as np
@@ -218,9 +227,22 @@ def main(argv=None):
     ap.add_argument('--probe', default='', help="X,Y;X,Y;.. or 'stops'")
     ap.add_argument('--box', default='', help='X0,Y0,X1,Y1: the render view')
     ap.add_argument('--viacheck', action='store_true')
+    ap.add_argument('--plan', default='', help='a whole-route plan (JSON) to route instead of the braid\'s')
+    ap.add_argument('--write', default='', help='the board the run leaves (.kicad_pcb)')
     a = ap.parse_args(argv)
+    for k in ('board', 'plan', 'write', 'png'):          # whole_ctx works from awx/: every path absolute first
+        if getattr(a, k):
+            setattr(a, k, os.path.abspath(getattr(a, k)))
+    if a.nets.startswith('@'):
+        a.nets = '@' + os.path.abspath(a.nets[1:])
     box = tuple(map(float, a.box.split(','))) if a.box else None
     ctx, corridors, logs = plan(a.board, read_nets(a.nets), a.dest)
+    if a.plan:
+        import whole_ctx
+        geo = json.load(open(a.plan))
+        whole_ctx.install(ctx, corridors[0], geo)
+        corridors = corridors[:1]
+        print(f'installed {os.path.basename(a.plan)}: {len(geo["lanes"])} lanes, {len(geo["vias"])} vias')
     base_s, base_v = list(ctx.base_segments), list(ctx.base_vias)
     ctx.pcb.segments, ctx.pcb.vias = list(base_s), list(base_v)
     order = attempt0_order(ctx, corridors)
@@ -334,6 +356,31 @@ def main(argv=None):
             render(ctx, c, nm, calls[-1], segs_nm, vias_nm, os.path.join(a.png, f'{nm}.png'), box)
     print(f'SUMMARY {a.mode}: {n_ok}/{len(chosen)} in band' + (f' (+{n_free} free)' if n_free else '')
           + f', {v_tot} vias (plan {v_plan} for those)')
+    if a.write:
+        write(ctx, a.board, a.write, base_s, base_v)
+
+
+def write(ctx, board, out, base_s, base_v):
+    """the bench plus every segment and via the run added, its project stamped at the routed floor (as braid.run
+    stamps its own)"""
+    from kicad_writer import add_tracks_and_vias_to_pcb
+    from fix_kicad_drc_settings import fix_project_for_output
+    cfg = ctx.cfg
+    old_s, old_v = set(map(id, base_s)), set(map(id, base_v))
+    segs = [s_ for s_ in ctx.pcb.segments if id(s_) not in old_s]
+    vias = [v_ for v_ in ctx.pcb.vias if id(v_) not in old_v]
+    add_tracks_and_vias_to_pcb(board, out,
+                               [dict(start=(s_.start_x, s_.start_y), end=(s_.end_x, s_.end_y), width=s_.width,
+                                     layer=s_.layer, net_id=s_.net_id) for s_ in segs],
+                               [dict(x=v_.x, y=v_.y, size=v_.size, drill=v_.drill, layers=list(v_.layers),
+                                     net_id=v_.net_id) for v_ in vias],
+                               net_id_to_name={i: n.name for i, n in ctx.pcb.nets.items()})
+    pro = os.path.splitext(board)[0] + '.kicad_pro'
+    if os.path.exists(pro):
+        shutil.copy(pro, os.path.splitext(out)[0] + '.kicad_pro')
+    fix_project_for_output(out, board, clearance=cfg.clearance, track_width=cfg.track_width,
+                           via_diameter=cfg.via_size, via_drill=cfg.via_drill, verbose=False)
+    print(f'wrote {out}: {len(segs)} segment(s), {len(vias)} via(s) added, routed at clearance {cfg.clearance}')
 
 
 if __name__ == '__main__':

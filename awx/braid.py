@@ -4413,7 +4413,9 @@ class Corridor:
         else:
             band = None if swim else self.band_of(nm, slack=half)
             margin = max(margin, half + 0.6)
-            if band is not None and PAIR_FANIN_BAND > 0:
+            # (a WHOLE-ROUTE plan draws the pair's ends as the pair step lays them -- its approach and first setback
+            # along the stub's own way: no widening there, and no lane-guided connectors below)
+            if band is not None and PAIR_FANIN_BAND > 0 and getattr(self, '_geo', None) is None:
                 band, corners = self._pair_fanin_band(nm, band)
                 wpts += corners
         # the CROSS-CORRIDOR reservation (other corridors' planned lanes,
@@ -4438,7 +4440,7 @@ class Corridor:
             cross_ = reserve(ctx, nm)
         virt = list(virt or []) + cross_
         rep = {}
-        _ca, _cb = self._pair_conn_points(nm)
+        _ca, _cb = self._pair_conn_points(nm) if getattr(self, '_geo', None) is None else (None, None)
         if os.environ.get('BRAID_PAIR_DEBUG') and virt_vias:
             xy_ = self.lane_xy.get(nm) or [self.teeth[nm], self.stubs[nm]]
             nv = [f'({vx:.2f},{vy:.2f})' for (vx, vy) in virt_vias
@@ -6047,7 +6049,11 @@ def _route_pairs_planned_in_order(ctx, corridors, log, order):
                     sep_ = math.hypot(u_[0] - w_[0], u_[1] - w_[1])
                     boxes.append((e_, d_, sep_ / 2 + TRACK + SPEC_CLEARANCE, PAIR_APPROACH))
             stubs = []
-            for om in others:
+            # a WHOLE-ROUTE plan draws every lane's own exit (whole_ctx.install): the others' planned lines are its
+            # reservation there, and a synthetic stub along an escape a lane does not take is an obstacle nothing
+            # lays (SDQS1 and SCK refused in their bands behind them, landed in band without)
+            drawn = getattr(c, '_geo', None) is not None
+            for om in ([] if drawn else others):
                 for k_, dirs in ((0, ctx.tooth_dir), (1, ctx.stub_dir)):
                     d = dirs.get(om)
                     e = ctx.ends[om][k_]
@@ -6066,7 +6072,7 @@ def _route_pairs_planned_in_order(ctx, corridors, log, order):
             # the FAN-IN rule: a piece with an end within PAIR_FANIN of either
             # of the pair's ends dropped whole, the stubs whole
             fan_stubs = []
-            for om in others:
+            for om in ([] if drawn else others):
                 for k_, dirs in ((0, ctx.tooth_dir), (1, ctx.stub_dir)):
                     d = dirs.get(om)
                     e = ctx.ends[om][k_]
@@ -6394,7 +6400,7 @@ def plan_corridors(board, names, dest, log):
     per group -- under BRAID_BRANCH each a trunk with branches -- and every
     corridor PLANNED, the board's copper reset to its base. (ctx,
     corridors): what run() routes, and what the plan tools (plan_audit.py,
-    one_net.py) audit, so a tool never plans differently from the run."""
+    route_lanes.py) audit, so a tool never plans differently from the run."""
     ctx, groups = setup(board, names, dest, log, pairs=bool(PAIRS))
     ctx.pre_segs, ctx.pre_vias, ctx.protected = {}, {}, set()
     corridors = []

@@ -6,7 +6,10 @@
   zero     no zero-length piece
   reverse  no turn sharper than a right angle between consecutive pieces
   stub     the first (last) track's width of the lane runs within 90 degrees of its stub (no fold at the end)
-  via      every layer change at one of the lane's vias, every via at a layer change"""
+  via      every layer change at one of the lane's vias, every via at a layer change
+  pair     a pair moves as the pair router does (pose_router.rs): its turns 45 degrees, each followed by
+           pair_turn_steps straight steps before the next; pair_via_steps straight steps with one heading on
+           each side of a via (the joins to its tips excepted)"""
 import sys, json, math, collections
 geo = json.load(open(sys.argv[1]))
 RU = geo['rules']; g = RU['grid']; TW = RU['track']
@@ -77,6 +80,32 @@ for n, L in geo['lanes'].items():
             if dd > EPS and (d[0] * e[0] + d[1] * e[1]) / dd < -1e-6:     # more than 90 degrees off: a fold
                 bad['stub'].append((n, 'tooth' if fwd else 'berth',
                                     round(math.degrees(math.acos(max(-1, min(1, (d[0] * e[0] + d[1] * e[1]) / dd))))), 'deg off'))
+PAIRS = set(geo.get('pairs', []))
+RT, ST = RU.get('pair_turn_steps', 0), RU.get('pair_via_steps', 0)
+for n in [n for n in geo['lanes'] if n in PAIRS]:
+    pcs = [p for p in geo['lanes'][n]['pieces'][1:-1] if ln(p) > EPS]        # the joins to the tips excepted
+    runs = []                                  # [heading, length in steps, [via positions in steps from the run's start]]
+    for i, p in enumerate(pcs):
+        u = (round((p[2] - p[0]) / ln(p), 6), round((p[3] - p[1]) / ln(p), 6))
+        steps = ln(p) / (g / max(abs(u[0]), abs(u[1])))
+        if runs and runs[-1][0] == u:
+            if pcs[i - 1][4] != p[4]:
+                runs[-1][2].append(runs[-1][1])
+            runs[-1][1] += steps
+        else:
+            if runs and pcs[i - 1][4] != p[4]:
+                bad['pair'].append((n, 'turns at a via', p[:2]))
+            runs.append([u, steps, []])
+    for k_, (u, L, vs) in enumerate(runs):
+        if 0 < k_ < len(runs) - 1 and L < RT - 1e-6:
+            bad['pair'].append((n, f'{L:.1f} straight steps after a turn (need {RT})', ))
+        if k_:
+            a0 = runs[k_ - 1][0]
+            if a0[0] * u[0] + a0[1] * u[1] < math.cos(math.radians(45)) - 1e-6:
+                bad['pair'].append((n, 'turns more than 45 degrees'))
+        for s_ in vs:
+            if (k_ and s_ < ST - 1e-6) or (k_ < len(runs) - 1 and L - s_ < ST - 1e-6):
+                bad['pair'].append((n, f'via {s_:.1f} / {L - s_:.1f} straight steps either side (need {ST})'))
 for k, v in bad.items():
     for row in v[:12]:
         print('LINT', k, *row)

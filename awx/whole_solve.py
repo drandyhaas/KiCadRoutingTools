@@ -106,16 +106,18 @@ for n in M:
         end[n] = c.se[n][0]
 tend = {n: (H0 if n in bname else c.se[n][0]) for n in M}      # where the lane leaves the TRUNK frame
 VW = VIA / 2 + TRK / 2                                               # a change's room from its lane's terminals
-# a PAIR's end needs the pair router's own first setback straight (diff_pair_routing: 4 x the leg spacing, never under
-# its taper floor from that end's tip gap): no crossing and no change inside it (SDQS1 crossed SDQ15 and SDQ13 in the
-# last 0.3 mm before their berths, inside its run-in)
-_spc = _pairs.pitch(TRK) / 2
-def _setback(tips):
-    (p_, q_) = tips
-    gap_half = math.hypot(p_[0] - q_[0], p_[1] - q_[1]) / 2
-    return max(4 * _spc, 2 * _spc, abs(gap_half - _spc) + ctx.cfg.grid_step)
-RIN0 = {n: (_setback(ctx.pair_ends[n][0]) if n in prs else 0.0) for n in M}      # room at the tooth end
-RIN1 = {n: (_setback(ctx.pair_ends[n][1]) if n in prs else 0.0) for n in M}      # ... and at the berth end
+# a PAIR's end: no CROSSING inside the pair router's first setback from its tips (pairs.launch_setback; SDQS1 crossed
+# SDQ15 and SDQ13 in the last 0.3 mm before their berths, inside its run-in), and no CHANGE of its own nearer than its
+# END RUN (pairs.end_run: the pair step's approach, then that setback) and a via's straight run past it (SDQS0 dived
+# 0.53 mm from its berth, where the router launches 0.90 out and runs 0.23 straight into its via). A crossing lane is
+# on the other layer there; only the pair's own dive has to stand beyond its launch
+RIN0 = {n: (_pairs.launch_setback(ctx.cfg, ctx.pair_ends[n][0]) if n in prs else 0.0) for n in M}   # at the tooth end
+RIN1 = {n: (_pairs.launch_setback(ctx.cfg, ctx.pair_ends[n][1]) if n in prs else 0.0) for n in M}   # ... the berth end
+_axis = lambda u: u if u is not None else (1.0, 0.0)
+VIN0 = {n: (_pairs.end_run(ctx.cfg, ctx.pair_ends[n][0]) + _pairs.via_straight(ctx.cfg, _axis(ctx.tooth_dir.get(n)))
+            if n in prs else VW) for n in M}
+VIN1 = {n: (_pairs.end_run(ctx.cfg, ctx.pair_ends[n][1]) + _pairs.via_straight(ctx.cfg, _axis(ctx.stub_dir.get(n)))
+            if n in prs else VW) for n in M}
 print('classes:', dict(collections.Counter(bname.get(n, 'W') for n in M)), 'W ends', sorted(round(end[n], 2) for n in M if n not in bname))
 W_, H_ = x1 - x0, y1 - y0
 def perim(p):
@@ -199,7 +201,7 @@ if True:                              # (the mover / stayer model)
 cost = []
 chg, tot = {}, {}
 for n in M:
-    lo_n, hi_n = Q(entry[n] + max(VW, RIN0[n])), Q(end[n] - max(VW, RIN1[n]))
+    lo_n, hi_n = Q(entry[n] + max(VW, VIN0[n])), Q(end[n] - max(VW, VIN1[n]))
     cs_ = [m.NewIntVar(lo_n, hi_n + 1, f'c_{n}_{k}') for k in range(KMAX)]
     act = [m.NewBoolVar('') for _ in range(KMAX)]
     for k in range(KMAX):

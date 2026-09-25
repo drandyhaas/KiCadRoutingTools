@@ -58,14 +58,89 @@ def pitch(track: float = None) -> float:
     return (_rules.TRACK if track is None else track) + GAP
 
 
-def approach_setback(tips, track: float, grid: float) -> float:
-    """How far from its two tips a pair's centreline pose stands when the pair router launches from them
-    (diff_pair_routing: 4 x the leg spacing, never under its floor -- twice the spacing, or the taper from the tips'
-    half-gap to the spacing at 45 degrees plus a grid step). A plan lays that stretch straight, so the pose lies on it."""
-    (p, q) = tips
-    spacing = pitch(track) / 2
-    gap_half = math.hypot(p[0] - q[0], p[1] - q[1]) / 2
-    return max(4 * spacing, 2 * spacing, abs(gap_half - spacing) + grid)
+def via_straight_steps(cfg) -> int:
+    """How many router grid steps a pair runs STRAIGHT on each side of its via: the pair router's
+    straight_after_via (rust_router pose_router.rs: max(ceil(min_turning_radius / grid) + 1, 3), the P/N
+    tracks clearing each other's barrels before they turn), which it also demands before the via. The via
+    does not change the heading; a step is a grid step along an axis, its diagonal on a diagonal."""
+    return max(int(math.ceil(cfg.min_turning_radius / cfg.grid_step)) + 1, 3)
+
+
+def via_ring(cfg, extra: float = 0.0, size: float = None) -> float:
+    """How far (mm, from the grid point a via is rounded to) a via keeps a TRACK's grid cells: its via-to-track
+    clearance rounded UP to whole grid cells, plus a quarter cell for a track passing between grid points
+    diagonally -- ceil((via/2 + track/2 + clearance + extra) / grid) + 1/4 cells, the boundary cell blocked
+    (py_router obstacle_map: _via_track_expansion_per_layer + DIAGONAL_MARGIN). extra is half a pair's pitch
+    for a pair's centreline; size a via's own diameter (the routing via's by default). A via off its grid point
+    reaches that much further."""
+    size = cfg.via_size if size is None else size
+    return (math.ceil((size / 2 + cfg.track_width / 2 + cfg.clearance + extra) / cfg.grid_step)
+            + 0.25) * cfg.grid_step
+
+
+def pad_corner_radius(pad) -> float:
+    """A pad's corner radius, as KiCad draws its copper: a circle or an oval a stadium (its half width), a roundrect
+    by its ratio of the shorter side (none declared: square-cornered, as the router reads it), a rectangle or a
+    custom pad square-cornered (its bounding rectangle)."""
+    if pad.shape in ('circle', 'oval'):
+        return min(pad.size_x, pad.size_y) / 2
+    if pad.shape == 'roundrect':
+        return (getattr(pad, 'roundrect_rratio', 0.0) or 0.0) * min(pad.size_x, pad.size_y)
+    return 0.0
+
+
+def pad_distance(dx, dy, hx, hy, cr):
+    """Signed distance from points (dx, dy) -- offsets from a pad's centre, arrays or numbers -- to the pad's
+    copper: a (hx x hy) half-size rectangle with its corners rounded to cr; negative inside."""
+    import numpy as _np
+    qx, qy = _np.abs(dx) - (hx - cr), _np.abs(dy) - (hy - cr)
+    return (_np.hypot(_np.maximum(qx, 0.0), _np.maximum(qy, 0.0)) + _np.minimum(_np.maximum(qx, qy), 0.0)) - cr
+
+
+def turn_straight_steps(cfg) -> int:
+    """How many router grid steps a pair runs straight after each 45-degree turn before it may turn again: the
+    pair router's turning radius (rust_router pose_router.rs, ceil(min_turning_radius / grid))."""
+    return int(math.ceil(cfg.min_turning_radius / cfg.grid_step))
+
+
+def via_straight(cfg, u) -> float:
+    """The straight run (mm) via_straight_steps asks for along the direction u: a step is a grid cell along
+    the axis u runs nearest, so its length is the grid step over max(|ux|, |uy|)."""
+    return via_straight_steps(cfg) * cfg.grid_step / max(abs(u[0]), abs(u[1]))
+
+
+def pose_via_cells(cfg, half: float) -> int:
+    """How many grid steps across its heading the pair router checks each of a pair's two barrels at a via, the
+    centre cell being checked too (py_router diff_pair_routing._try_route_direction: the widest of the half pitch,
+    half a via-to-via spacing, and a track's clearance to a via less the half pitch; rust_router pose_router.rs steps
+    that many times along the heading's INTEGER perpendicular, so on a diagonal the barrels are checked sqrt(2)
+    further out)."""
+    tvc = (cfg.clearance + cfg.get_max_track_width() / 2 + cfg.via_size / 2) * cfg.routing_clearance_margin
+    spacing = max(half, (cfg.via_size + cfg.clearance) / 2, tvc - half)
+    return max(1, int(spacing / cfg.grid_step + 0.5))
+
+
+def approach_len(cfg) -> float:
+    """The straight APPROACH the pair step lays from a pair's two tips before the pair router launches
+    (connect._connect_pair_prod: a via and a clearance long, the legs converging onto the pair pitch)."""
+    return cfg.via_size + cfg.clearance
+
+
+def launch_setback(cfg, tips=None) -> float:
+    """How far from where it launches the pair router's first pose stands (diff_pair_routing: 4 x the leg spacing,
+    never under its floor -- twice the spacing, or the taper from the launch's half-gap to the spacing at 45 degrees
+    plus a grid step; `tips` None: a launch already at the pair pitch)."""
+    spacing = pitch(cfg.track_width) / 2
+    gap_half = spacing if tips is None else math.hypot(tips[0][0] - tips[1][0], tips[0][1] - tips[1][1]) / 2
+    return max(4 * spacing, 2 * spacing, abs(gap_half - spacing) + cfg.grid_step)
+
+
+def end_run(cfg, tips) -> float:
+    """How far from its two tips a pair runs STRAIGHT before the pair router's first pose: the pair step's approach,
+    then the router's setback from where the approach ends. A plan lays that stretch straight, crosses nothing in it,
+    and dives no nearer than a via's straight run past it (via_straight): the router launches from that pose and
+    runs pairs.via_straight_steps straight into its via."""
+    return approach_len(cfg) + launch_setback(cfg, tips)
 
 
 def envelope_via_half(cfg, half: float) -> float:

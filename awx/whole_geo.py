@@ -260,12 +260,11 @@ FR = {'T': dict(sp=c.spine, u=lambda s: s, s=lambda u: u)}
 for k_, sp in ring_sp.items():
     FR[k_] = dict(sp=sp, u=(lambda s, k_=k_: H0 + (s - RS[k_])), s=(lambda u, k_=k_: RS[k_] + (u - H0)))
 def hold_pair(tips):
-    """A PAIR's end is held straight (in columns) for the pair router's own first setback from those tips
-    (diff_pair_routing: 4 x the leg spacing, never under its floor -- twice the spacing, or the taper from the tips'
-    half-gap to the spacing at 45 degrees plus a grid step): the pose it launches from lies on the plan, and the legs
+    """A PAIR's end is held straight (in columns) for its END RUN (pairs.end_run: the pair step's approach from those
+    tips, then the pair router's first setback from it): the pose it launches from lies on the plan, and the legs
     converge along the end's own direction. (SDQS1 turned 66 degrees 0.125 mm before a berth whose tips stand 0.45
     apart, and the pair router could not leave it.)"""
-    return max(HOLD, int(math.ceil(_pairs.approach_setback(tips, TW, ctx.cfg.grid_step) / G)))
+    return max(HOLD, int(math.ceil(_pairs.end_run(ctx.cfg, tips) / G)))
 
 
 SB0 = {}

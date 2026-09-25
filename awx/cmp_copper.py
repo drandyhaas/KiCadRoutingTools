@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Do two boards carry the SAME copper? (UUIDs differ every write, so a
-file diff or a hash says nothing -- compare the geometry.)
+file diff or a hash says nothing -- compare the geometry.) Segments by
+start/end/width/layer/net, vias by xy/size/drill/layers/net, the net by its
+NAME (two boards can number the same nets differently), as multisets (a
+board carrying one segment twice is not the board carrying it once).
+Exit 0 identical, 1 different.
 
 usage: cmp_copper.py A.kicad_pcb B.kicad_pcb
 """
@@ -15,16 +19,17 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 def copper(path):
     p = parse_kicad_pcb(path)
+    nm = {i: n.name for i, n in p.nets.items()}
     # COUNTERS, not sets: as sets, a board carrying the same segment
     # twice compared IDENTICAL to one carrying it once -- and this repo
     # has a name for that copper (`stacked_copper`), so the gate that is
     # supposed to prove a change inert was blind to the one thing it
     # would most likely introduce.
     segs = Counter((round(s.start_x, 4), round(s.start_y, 4), round(s.end_x, 4),
-                    round(s.end_y, 4), round(s.width, 4), s.layer, s.net_id)
+                    round(s.end_y, 4), round(s.width, 4), s.layer, nm.get(s.net_id, s.net_id))
                    for s in p.segments)
     vias = Counter((round(v.x, 4), round(v.y, 4), round(v.size, 4),
-                    round(v.drill, 4), v.net_id) for v in p.vias)
+                    round(v.drill, 4), tuple(v.layers), nm.get(v.net_id, v.net_id)) for v in p.vias)
     return segs, vias
 
 

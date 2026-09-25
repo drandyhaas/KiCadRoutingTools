@@ -124,6 +124,81 @@ def _pt_on_grid(x, y, g):
     return abs(x / g - round(x / g)) <= 1e-3 and abs(y / g - round(y / g)) <= 1e-3
 
 
+def _router_terminals(v, ends, g):
+    """A single lane's pieces [(p, q, L)], each with the most the router's copper may stand off it at either end (its
+    ALLOWANCE): none where it lies on the grid or is fixed, half a grid step at a free end off the grid, linear
+    between. At an off-grid END the router lays a short stub exactly to the grid point the end rounds to
+    (single_ended_routing: the start cell is the end rounded to the grid; the stub from the exact end, or the terminal
+    vertex moved onto it), then moves onto the plan's grid: a snapped lane's terminal join is graded as THAT, exactly
+    (a planned join to another grid point is not what gets laid); a smooth lane's first piece runs from none at its
+    fixed end to half a step at its free one -- copper cannot stand further off its plan than it has run from where
+    it is fixed. -> [(p, q, L, allowance at p, at q)]"""
+    g2 = g / 2
+    out = []
+    near = lambda a, b: abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6
+    for (p, q, L) in v:
+        p, q = np.asarray(p, float), np.asarray(q, float)
+        done = False
+        for E in ends:
+            E = np.asarray(E, float)
+            for a_, b_, rev in ((p, q, False), (q, p, True)):
+                if done or not near(a_, E) or _pt_on_grid(E[0], E[1], g):
+                    continue
+                if _pt_on_grid(b_[0], b_[1], g):
+                    r = np.round(E / g) * g
+                    pcs = [(E, r, 0.0, 0.0)] + ([] if near(r, b_) else [(r, b_, 0.0, 0.0 if _on_grid(r, b_, g) else g2)])
+                else:
+                    pcs = [(E, b_, 0.0, g2)]
+                if rev:
+                    pcs = [(y, x, ay, ax) for (x, y, ax, ay) in reversed(pcs)]
+                out += [(x, y, L, ax, ay) for (x, y, ax, ay) in pcs]
+                done = True
+        if not done:
+            a0 = 0.0 if _on_grid(p, q, g) else g2
+            out.append((p, q, L, a0, a0))
+    return out
+
+
+def _samples_allow(segs, L, step):
+    """points every `step` along the pieces [(p, q, L, a0, a1)] on L, each with its allowance there"""
+    P, A = [], []
+    for p, q, L_, a0, a1 in segs:
+        if L_ != L:
+            continue
+        n = max(1, int(np.hypot(*(q - p)) / step))
+        t = np.linspace(0, 1, n + 1)
+        P.append(p + (q - p) * t[:, None])
+        A.append(a0 + (a1 - a0) * t)
+    return (np.concatenate(P), np.concatenate(A)) if P else (np.zeros((0, 2)), np.zeros(0))
+
+
+def _dist_allow(P, segs, L):
+    """per point of P: (the distance to the pieces [(p, q, L, a0, a1)] on L less the nearest piece's allowance there,
+    that distance, that allowance) -- the piece that binds, not merely the nearest"""
+    S = [(p, q, a0, a1) for p, q, L_, a0, a1 in segs if L_ == L]
+    best = np.full(len(P), 1e9)
+    dd, aa = np.full(len(P), 1e9), np.zeros(len(P))
+    if not S or not len(P):
+        return best, dd, aa
+    A_ = np.array([s_[0] for s_ in S]); B_ = np.array([s_[1] for s_ in S])
+    a0_ = np.array([s_[2] for s_ in S]); a1_ = np.array([s_[3] for s_ in S])
+    for i in range(0, len(A_), 256):
+        a, b = A_[i:i + 256], B_[i:i + 256]
+        d = b - a
+        l2 = np.maximum((d ** 2).sum(1), 1e-12)
+        t = np.clip(((P[:, None, :] - a[None]) * d[None]).sum(2) / l2[None], 0, 1)
+        dist = np.hypot(*(P[:, None, :] - (a[None] + t[..., None] * d[None])).transpose(2, 0, 1))
+        al = a0_[i:i + 256][None] + (a1_[i:i + 256] - a0_[i:i + 256])[None] * t
+        m = dist - al
+        k = m.argmin(1)
+        r_ = np.arange(len(P))
+        better = m[r_, k] < best
+        best[better] = m[r_, k][better]
+        dd[better] = dist[r_, k][better]
+        aa[better] = al[r_, k][better]
+    return best, dd, aa
+
+
 def _dist_to_segs(P, segs, L):
     S = [(p, q) for p, q, L_ in segs if L_ == L]
     if not S or not len(P):
@@ -163,30 +238,28 @@ def check_pitch(ctx, corridors, png=None):
         if off:
             print(f'PITCH corridor {c.idx}: lanes with a reserved piece off the board bounds: {dict(off)}')
         mem = list(c.members)
-        split = {nm: ([s for s in v if _on_grid(s[0], s[1], g)], [s for s in v if not _on_grid(s[0], s[1], g)])
-                 for nm, v in V.items()}
+        # each piece with its ALLOWANCE (_router_terminals): none on the grid or at a fixed end, half a grid step at a
+        # free end off it; a pair's pieces on the grid or off it
+        prs_ = getattr(ctx, 'pairs', {}) or {}
+        R = {nm: (_router_terminals(v, (c.teeth[nm], c.stubs[nm]), g) if nm not in prs_
+                  else [(p, q, L, *((0.0, 0.0) if _on_grid(p, q, g) else (g / 2, g / 2))) for (p, q, L) in v])
+             for nm, v in V.items()}
         for i, nm in enumerate(mem):
             for L in ctx.cfg.layers:
+                Pa, Aa = _samples_allow(R[nm], L, g)
+                if not len(Pa):
+                    continue
                 for om in mem[i + 1:]:
-                    worst = None
-                    for off_a, segs_a in enumerate(split[nm]):
-                        P = _samples(segs_a, L)
-                        if not len(P):
-                            continue
-                        for off_b, segs_b in enumerate(split[om]):
-                            d = _dist_to_segs(P, segs_b, L)
-                            need = bar(off_a, off_b)
-                            bad = d < need - 1e-6
-                            if bad.any():
-                                k = int(np.argmin(d - need))
-                                if worst is None or d[k] - need < worst[0] - worst[1]:
-                                    worst = (float(d[k]), need, P[k], float(bad.sum()) * 0.025)
-                    if worst is not None:
-                        d_, need, (x, y), ln_ = worst
+                    _m, d, ab = _dist_allow(Pa, R[om], L)
+                    need = TW + CL + Aa + ab
+                    bad = d < need - 1e-6
+                    if bad.any():
+                        k = int(np.argmin(d - need))
+                        d_, need_, (x, y), ln_ = float(d[k]), float(need[k]), Pa[k], float(bad.sum()) * g
                         S, _O = c.spine.project(np.array([x]), np.array([y]))
                         S = float(np.asarray(S).ravel()[0])
                         where = 'branch' if s_h is not None and S >= s_h else 'trunk'
-                        hits.append((d_, nm, om, L, (float(x), float(y)), S, where, ln_, c.idx, need))
+                        hits.append((d_, nm, om, L, (float(x), float(y)), S, where, ln_, c.idx, need_))
     hits.sort()
     for (d, a, b, L, xy, S, where, ln, ci, need) in hits:
         print(f'PITCH {a:7s} {b:7s} {L[0]} min {d:.3f}  over {ln:4.2f} mm  at ({xy[0]:.2f},{xy[1]:.2f})  '
@@ -279,11 +352,48 @@ def check_swim(ctx, corridors, only=None):
 
 
 def _pad_edge(x, y, pd):
-    if pd.shape == 'circle':
-        return math.hypot(x - pd.global_x, y - pd.global_y) - pd.size_x / 2
-    dx = abs(x - pd.global_x) - pd.size_x / 2
-    dy = abs(y - pd.global_y) - pd.size_y / 2
-    return math.hypot(max(dx, 0), max(dy, 0)) + min(max(dx, dy), 0)
+    """signed distance to a pad's copper as KiCad draws it: rounded corners, a stadium for an oval"""
+    return float(_pairs.pad_distance(x - pd.global_x, y - pd.global_y, pd.size_x / 2, pd.size_y / 2,
+                                     _pairs.pad_corner_radius(pd)))
+
+
+def _dive_straight(pieces, s, tol=1e-4):
+    """((straight length arriving at the dive site s, its heading), (leaving it, its heading)) along a centreline
+    [(p, q, layer)] in any order: the pieces chained per layer, the run that ends at s on one layer and the run
+    that starts at s on the other, headings as unit vectors along travel. None when s is not where two layers'
+    runs meet."""
+    at = lambda pt: math.hypot(pt[0] - s[0], pt[1] - s[1]) < tol
+    ends = []
+    for L in sorted({pc[2] for pc in pieces}):
+        for run in bd._chain_runs(pieces, L):
+            if at(run[-1]):
+                ends.append(list(run))
+            elif at(run[0]):
+                ends.append(list(reversed(run)))
+    if len(ends) != 2:
+        return None
+
+    def straight(run):
+        """(length, heading) of the collinear stretch ending at run[-1]"""
+        pts = [run[-1]]
+        for q in reversed(run[:-1]):
+            if math.hypot(q[0] - pts[-1][0], q[1] - pts[-1][1]) > 1e-9:
+                pts.append(q)
+        if len(pts) < 2:
+            return 0.0, (1.0, 0.0)
+        d0 = math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1])
+        u = ((pts[0][0] - pts[1][0]) / d0, (pts[0][1] - pts[1][1]) / d0)       # toward s
+        L = 0.0
+        for a_, b_ in zip(pts, pts[1:]):
+            dx, dy = a_[0] - b_[0], a_[1] - b_[1]
+            dd = math.hypot(dx, dy)
+            if (dx * u[0] + dy * u[1]) / dd < 1 - 1e-6:
+                break
+            L += dd
+        return L, u
+    (la, ua), (lb, ub) = straight(ends[0]), straight(ends[1])
+    # one run arrives at s (heading toward it), the other leaves (heading away): travel through the dive
+    return (la, ua), (lb, (-ub[0], -ub[1]))
 
 
 def check_dives(ctx, corridors, show_all=False):
@@ -314,6 +424,9 @@ def check_dives(ctx, corridors, show_all=False):
         barrels = {nm: {s: (_pairs.dive_barrels(s, centre([nm]), off) if nm in pairs else [s])
                         for s in sites[nm]} for nm in M}
         boff = lambda nm, x, y: 0 if (nm not in pairs and _pt_on_grid(x, y, g)) else 1   # a barrel off the grid
+        half_ = _pairs.pitch(TW) / 2
+        ring = {om: _pairs.via_ring(cfg, half_ if om in pairs else 0.0) for om in M}
+        ring_lines = {om: (centre([om]) if om in pairs else lines[om]) for om in M}
         for nm in M:
             for s in sites[nm]:
                 n_sites += 1
@@ -337,8 +450,15 @@ def check_dives(ctx, corridors, show_all=False):
                     if st[0] < st[1] - 1e-6:
                         hits.append(f'static {st[0]:+.3f}/{st[1]:.3f} ({st[2]})')
                         fail['static'] += 1
-                    ln = min(((dseg(x, y, p, q), VR + CL + TW / 2 + g2 * (vo + (0 if _on_grid(p, q, g) else 1)), om, L)
-                              for om in M if om != nm for (p, q, L) in lines[om]),
+                    # a via keeps a track's grid cells out of its RING (pairs.via_ring: the clearance rounded up to
+                    # whole cells plus a quarter, and as far again as the via stands off its grid point); a pair's
+                    # centreline by the pair's ring -- the router's pair map is its centreline's
+                    # (a site ON the grid is where the router puts it: its barrels' own offsets; a smooth plan's
+                    # site is not yet placed -- half a step, the allowance the polish leaves it)
+                    voff = (math.hypot(x - round(x / g) * g, y - round(y / g) * g) if _pt_on_grid(s[0], s[1], g)
+                            else g2)
+                    ln = min(((dseg(x, y, p, q), ring[om] + voff + g2 * (0 if _on_grid(p, q, g) else 1), om, L)
+                              for om in M if om != nm for (p, q, L) in ring_lines[om]),
                              key=lambda r: r[0] - r[1], default=(9, 0, '', ''))
                     if ln[0] < ln[1] - 1e-6:
                         hits.append(f'lane {ln[0]:.3f}/{ln[1]:.3f} ({ln[2]} {ln[3][0]})')
@@ -349,6 +469,33 @@ def check_dives(ctx, corridors, show_all=False):
                     if vv[0] < vv[1] - 1e-6:
                         hits.append(f'via {vv[0]:.3f}/{vv[1]:.3f} ({vv[2]})')
                         fail['via'] += 1
+                if nm in pairs:
+                    # the pair router dives straight: one heading through the via, and that many grid steps of it on
+                    # each side (pairs.via_straight_steps) -- a plan that turns at its dive is one it cannot follow
+                    st_ = _dive_straight(centre([nm]), s)
+                    if st_ is not None:
+                        (lb, ub), (la, ua) = st_
+                        need_b, need_a = _pairs.via_straight(cfg, ub), _pairs.via_straight(cfg, ua)
+                        turn_ = ub[0] * ua[0] + ub[1] * ua[1] < 1 - 1e-6
+                        if turn_ or lb < need_b - 1e-6 or la < need_a - 1e-6:
+                            hits.append(f'straight {lb:.3f}/{need_b:.3f} before, {la:.3f}/{need_a:.3f} after'
+                                        + (f', turning {math.degrees(math.acos(max(-1.0, min(1.0, ub[0] * ua[0] + ub[1] * ua[1])))):.0f} deg' if turn_ else ''))
+                            fail['straight'] += 1
+                    # ...and no nearer either end than its END RUN (pairs.end_run: the pair step's approach from its
+                    # tips, then the router's first setback) and that straight run past it: the router launches from
+                    # that pose, so a dive inside it is one it cannot reach (SDQS0 dived 0.53 mm from its berth)
+                    pcs_ = centre([nm])
+                    k_ = next((k for k in range(1, len(pcs_)) if pcs_[k][2] != pcs_[k - 1][2]
+                               and math.hypot(pcs_[k][0][0] - s[0], pcs_[k][0][1] - s[1]) < 1e-6), None)
+                    if k_ is not None and nm in ctx.pair_ends:
+                        plen = [math.hypot(q[0] - p[0], q[1] - p[1]) for (p, q, _L) in pcs_]
+                        a0, a1 = sum(plen[:k_]), sum(plen[k_:])
+                        ub, ua = (st_[0][1], st_[1][1]) if st_ is not None else ((1.0, 0.0), (1.0, 0.0))
+                        need0 = _pairs.end_run(cfg, ctx.pair_ends[nm][0]) + _pairs.via_straight(cfg, ub)
+                        need1 = _pairs.end_run(cfg, ctx.pair_ends[nm][1]) + _pairs.via_straight(cfg, ua)
+                        if a0 < need0 - 1e-6 or a1 < need1 - 1e-6:
+                            hits.append(f'end {a0:.3f}/{need0:.3f} from its tooth, {a1:.3f}/{need1:.3f} from its berth')
+                            fail['end'] += 1
                 if hits or show_all:
                     tag = ' pair' if nm in pairs else ''
                     print(f'DIVE {nm:7s} ({s[0]:7.2f},{s[1]:6.2f}){tag}  ' + ('; '.join(hits) if hits else 'ok'))
@@ -409,12 +556,9 @@ def check_static(ctx, corridors, only=None):
                         continue
                     if kind == 'hole':
                         d = np.hypot(P[:, 0] - pd.global_x, P[:, 1] - pd.global_y) - (pd.drill or 0) / 2
-                    elif pd.shape == 'circle':
-                        d = np.hypot(P[:, 0] - pd.global_x, P[:, 1] - pd.global_y) - pd.size_x / 2
-                    else:
-                        dx = np.abs(P[:, 0] - pd.global_x) - pd.size_x / 2
-                        dy = np.abs(P[:, 1] - pd.global_y) - pd.size_y / 2
-                        d = np.hypot(np.maximum(dx, 0), np.maximum(dy, 0)) + np.minimum(np.maximum(dx, dy), 0)
+                    else:       # the copper as KiCad draws it: rounded corners, a stadium for an oval
+                        d = _pairs.pad_distance(P[:, 0] - pd.global_x, P[:, 1] - pd.global_y, pd.size_x / 2,
+                                                pd.size_y / 2, _pairs.pad_corner_radius(pd))
                     cand.append((d, f'{kind} {ref}.{pd.pad_number} {name(pd.net_id)}'))
                 for s in ctx.base_segments:
                     if s.layer != L or s.net_id in own or not (inb(s.start_x, s.start_y) or inb(s.end_x, s.end_y)):
@@ -455,7 +599,7 @@ def _flood(ok, xs, ys, layers, a, aL, b, bL, G):
     def seed(c_):
         if open_at(c_):
             return c_
-        r = int(0.3 / G)
+        r = int(math.ceil(bd.LANE_MIN / G))
         best = None
         for di in range(-r, r + 1):
             for dj in range(-r, r + 1):
@@ -482,8 +626,12 @@ def _flood(ok, xs, ys, layers, a, aL, b, bL, G):
     return 'BROKEN'
 
 
-def check_bands(ctx, corridors, only=None, png_dir=None, G=0.05):
+def check_bands(ctx, corridors, only=None, png_dir=None):
+    """sampled on the router's own grid (a band may be a single grid line wide: a snapped lane's), a few lane pitches
+    round the plan"""
     layers = list(ctx.cfg.layers)
+    G = ctx.cfg.grid_step
+    pad_ = 4 * bd.LANE_MIN
     tot_out = 0.0
     for c in corridors:
         for nm in c.members:
@@ -496,16 +644,21 @@ def check_bands(ctx, corridors, only=None, png_dir=None, G=0.05):
             if band is None:
                 print(f'BAND {nm:7s} {kind:5s} no band (free)')
                 continue
-            w = list(c.lane_xy[nm])
+            # the plan's own line: a whole-route plan's exact geometry (its lane_xy is simplified for the search window)
+            geo_ = getattr(c, '_geo', None)
+            w = [tuple(p) for p in geo_['lanes'][nm]['xy']] if geo_ is not None and nm in geo_['lanes'] else list(c.lane_xy[nm])
             a, b = c.teeth[nm], c.stubs[nm]
             P = w + [a, b]
-            x0, x1 = min(p[0] for p in P) - 1.2, max(p[0] for p in P) + 1.2
-            y0, y1 = min(p[1] for p in P) - 1.2, max(p[1] for p in P) + 1.2
-            xs, ys = np.arange(x0, x1, G), np.arange(y0, y1, G)
+            x0, x1 = min(p[0] for p in P) - pad_, max(p[0] for p in P) + pad_
+            y0, y1 = min(p[1] for p in P) - pad_, max(p[1] for p in P) + pad_
+            xs = np.arange(math.floor(x0 / G), math.ceil(x1 / G) + 1) * G
+            ys = np.arange(math.floor(y0 / G), math.ceil(y1 / G) + 1) * G
             ok = {L: np.asarray(band(xs, ys, L), dtype=bool) for L in layers}
             pts = []
             for p, q in zip(w, w[1:]):
-                n = max(1, int(math.hypot(q[0] - p[0], q[1] - p[1]) / G))
+                # a step per grid step along the leading axis: an octilinear piece on the grid is sampled at its own
+                # grid points
+                n = max(1, int(math.ceil(max(abs(q[0] - p[0]), abs(q[1] - p[1])) / G - 1e-6)))
                 pts += [(p[0] + (q[0] - p[0]) * k / n, p[1] + (q[1] - p[1]) * k / n) for k in range(n)]
             runs, cur, s, out, prev = [], None, 0.0, 0.0, pts[0]
             for (x, y) in pts:
@@ -526,7 +679,7 @@ def check_bands(ctx, corridors, only=None, png_dir=None, G=0.05):
             runs.append(cur)
             tot_out += out
             fl = _flood(ok, xs, ys, layers, a, ctx.tooth_layer[nm], b, ctx.dest_layer[nm], G)
-            gaps = [r for r in runs if r[0] == '-' * len(layers) and r[2] - r[1] > 0.05]
+            gaps = [r for r in runs if r[0] == '-' * len(layers) and r[2] - r[1] > 2 * G]
             print(f'BAND {nm:7s} {kind:5s} plan {s:5.1f} mm  outside {out:4.1f} mm  {fl:9s} '
                   + ' '.join(f'out:{r[1]:.1f}-{r[2]:.1f}' for r in gaps))
             if png_dir:
@@ -556,13 +709,31 @@ def check_bands(ctx, corridors, only=None, png_dir=None, G=0.05):
     return tot_out
 
 
-def _turns(run):
-    """(vertex, signed turn in degrees, length of the segment after it) along
-    a polyline, its sub-5 um segments dropped."""
+def _polyline(run):
+    """a polyline as the plan's writers leave it: its sub-5 um segments dropped and its collinear runs merged (the
+    polish writes its pieces so) -- a shape measured on a dense vertex list must see the turns the written plan
+    has: a collinear vertex between two sharp turns hid SDQ13's notch from the polish, then the audit found it"""
     pts = [run[0]]
     for q in run[1:]:
         if math.hypot(q[0] - pts[-1][0], q[1] - pts[-1][1]) > 0.005:
             pts.append(q)
+    out = [pts[0]]
+    start = pts[0]
+    for q in pts[1:]:
+        if len(out) >= 2:
+            e = out[-1]
+            if abs((e[0] - start[0]) * (q[1] - start[1]) - (e[1] - start[1]) * (q[0] - start[0])) < 1e-7:
+                out[-1] = q
+                continue
+            start = out[-1]
+        out.append(q)
+    return out
+
+
+def _turns(run):
+    """(vertex, signed turn in degrees, length of the segment after it) along
+    a polyline as its writers leave it (_polyline)."""
+    pts = _polyline(run)
     out = []
     for a_, b_, c_ in zip(pts, pts[1:], pts[2:]):
         h1 = math.atan2(b_[1] - a_[1], b_[0] - a_[0])
@@ -576,10 +747,7 @@ def _scale_turns(run, w):
     """(vertex, signed turn in degrees) at every inner vertex of a polyline,
     the directions measured over `w` either side along it: a turn made over
     segments shorter than w is ONE turn at this scale."""
-    pts = [run[0]]
-    for q in run[1:]:
-        if math.hypot(q[0] - pts[-1][0], q[1] - pts[-1][1]) > 0.005:
-            pts.append(q)
+    pts = _polyline(run)
     if len(pts) < 3:
         return []
     s = [0.0]
