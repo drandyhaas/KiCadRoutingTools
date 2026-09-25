@@ -47,7 +47,7 @@ from startup_checks import exit_on_error_if_main
 # (#457 item 3).
 exit_on_error_if_main(__name__)
 
-from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VERSION, pad_is_plated_through
+from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, pcb_uses_name_nets, pad_is_plated_through
 from kicad_writer import (generate_segment_sexpr, generate_gr_line_sexpr,
                           generate_via_sexpr, via_net_name)
 from routing_config import GridRouteConfig
@@ -2336,7 +2336,7 @@ def repair_planes(
                     suffix='.kicad_pcb', delete=False)
                 _tmp.close()
                 _nm10 = (pcb_data.net_id_to_name
-                         if pcb_data.kicad_version >= KICAD_10_MIN_VERSION
+                         if pcb_uses_name_nets(pcb_data)
                          else None)
                 _reconcile_write_list_vs_board('pre-oracle')
                 _write_output(input_file, _tmp.name, all_new_segments,
@@ -2982,7 +2982,7 @@ def repair_planes(
     except Exception as _e:
         print(f"  (soft-joint close skipped: {_e})")
 
-    kv10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
+    kv10_names = pcb_data.net_id_to_name if pcb_uses_name_nets(pcb_data) else None
 
     # GUI (return_results): hand the plane/repair copper + the ripped net ids
     # back; the partial-restore kept pieces were emitted (and the in-memory

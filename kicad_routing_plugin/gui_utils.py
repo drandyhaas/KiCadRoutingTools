@@ -838,6 +838,16 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
         # phantom-violation class #493 fixed elsewhere.
         from kicad_parser import mm_to_iu
         bds = board.GetDesignSettings()
+        # The fab-floor ORIGIN, before anything below lowers a floor -- the
+        # file writers' rule (seed_fab_floor_origin), on the live board. A
+        # no-op when apply_targets_to_board already seeded it this step.
+        try:
+            from fix_kicad_drc_settings import seed_live_fab_floor_origin
+            _fab_origin = seed_live_fab_floor_origin(board)
+        except Exception:
+            _fab_origin = {}
+        _objs = {'min_track_width': [], 'min_via_diameter': [],
+                 'min_via_annular_width': []}   # mm, for the disclosure census
 
         # Actual board minima (copper tracks/vias only).
         min_w = min_via = min_drill = min_ann = None
@@ -862,9 +872,13 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                     min_drill = d if min_drill is None else min(min_drill, d)
                     ann = (w - d) // 2
                     min_ann = ann if min_ann is None else min(min_ann, ann)
+                    _objs['min_via_diameter'].append(w / 1e6)
+                    if w > d:
+                        _objs['min_via_annular_width'].append((w - d) / 2e6)
                 else:
                     w = t.GetWidth()
                     min_w = w if min_w is None else min(min_w, w)
+                    _objs['min_track_width'].append(w / 1e6)
             except Exception:
                 continue
 
@@ -951,6 +965,19 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
         if log:
             log("Live DRC floors relaxed to this step's routed values "
                 "(clamped to actual board minima)\n")
+        # FAB FLOOR RELAXED, as the CLI's writeback says it: against the
+        # board's ORIGINAL floors, every step it is still true, counted off the
+        # live copper. print(), not `log` -- every tab's apply phase routes
+        # prints into its log (redirect_prints_to_log), and no caller passes
+        # `log`. Silent when nothing is under its origin.
+        try:
+            from fix_kicad_drc_settings import (live_fab_floor_disclosure,
+                                                live_fab_floor_rules)
+            for _line in live_fab_floor_disclosure(
+                    _fab_origin, live_fab_floor_rules(bds), _objs):
+                print(_line)
+        except Exception:
+            pass
         return _clamped
     except Exception as e:
         if log:

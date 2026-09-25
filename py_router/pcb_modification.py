@@ -1300,7 +1300,7 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     a file -- see kicad_routing_plugin/planes_gui.py -- so CLI and GUI plane
     copper come out identical.
     """
-    from kicad_parser import parse_kicad_pcb, is_kicad_10
+    from kicad_parser import parse_kicad_pcb, board_uses_name_nets
     from kicad_writer import remove_segments_from_content, generate_segment_sexpr
 
     pcb = parse_kicad_pcb(output_file)
@@ -1311,7 +1311,7 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
         return 0, 0
 
     n2n = getattr(pcb, 'net_id_to_name', {}) or {}
-    v10 = is_kicad_10(content)
+    v10 = board_uses_name_nets(content)
     if delta.segments_to_remove:
         content, _ = remove_segments_from_content(content, delta.segments_to_remove,
                                                   n2n if v10 else None)
@@ -1459,7 +1459,7 @@ def retract_castellated_landings(output_file: str,
     stripped and re-emitted with the retracted endpoint). Returns the number of
     landings retracted. The GUI applies the SAME delta to the live pcbnew board
     (gui_utils.apply_castellated_landing_retract), so the two cannot drift."""
-    from kicad_parser import parse_kicad_pcb, is_kicad_10
+    from kicad_parser import parse_kicad_pcb, board_uses_name_nets
     from kicad_writer import remove_segments_from_content, generate_segment_sexpr
 
     pcb = parse_kicad_pcb(output_file)
@@ -1469,7 +1469,7 @@ def retract_castellated_landings(output_file: str,
     with open(output_file, 'r', encoding='utf-8') as f:
         content = f.read()
     n2n = getattr(pcb, 'net_id_to_name', {}) or {}
-    v10 = is_kicad_10(content)
+    v10 = board_uses_name_nets(content)
     content, _ = remove_segments_from_content(
         content, [m[0] for m in delta.moves], n2n if v10 else None)
     sexprs = []

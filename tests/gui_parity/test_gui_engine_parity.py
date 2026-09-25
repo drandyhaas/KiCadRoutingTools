@@ -259,11 +259,13 @@ def grade(pcb, label):
     m = re.search(r'FOUND (\d+) DRC', drc.stdout)
     drc_n = 0 if 'NO DRC' in drc.stdout else (int(m.group(1)) if m else -1)
     kicad_n = -1
-    for cand in KICAD_PYTHONS[:1]:
-        cli = cand.replace(
-            'Frameworks/Python.framework/Versions/Current/bin/python3',
-            'MacOS/kicad-cli')
-        if os.path.exists(cli):
+    # kicad_oracle's finder (env, PATH, packaged locations, every versioned
+    # Windows install). Deriving kicad-cli from the macOS python path, as this
+    # did, never found it anywhere else -- both fronts read -1 on Windows and
+    # KiCad's own unconnected count was never compared.
+    from kicad_oracle import find_kicad_cli
+    for cli in [find_kicad_cli()]:
+        if cli and os.path.exists(cli):
             out = pcb + '.drc.json'
             subprocess.run([cli, 'pcb', 'drc', pcb, '--format', 'json', '-o',
                             out, '--severity-all', '--refill-zones'],

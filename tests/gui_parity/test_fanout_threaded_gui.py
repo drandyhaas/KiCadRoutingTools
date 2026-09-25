@@ -32,6 +32,7 @@ identical to the CLI's, which `test_fanout_cancel.py` pins at engine level.
 
     python3 -X utf8 tests/gui_parity/test_fanout_threaded_gui.py
 """
+import glob
 import os
 import subprocess
 import sys
@@ -43,10 +44,17 @@ os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BOARD = os.path.join(REPO, 'kicad_files', 'haasoscope_pro_max_test.kicad_pcb')
 REF = 'U2'
+# Every versioned install, newest first by NUMERIC version (a string sort
+# puts KiCad\9.0 above KiCad\10.0).
+sys.path.insert(0, os.path.join(REPO, 'py_router'))
+from kicad_locate import path_version_key  # noqa: E402
+del sys.path[0]    # this file orders its own sys.path further down
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
     os.path.expandvars(r"C:\\Program Files\\KiCad\\bin\\python.exe"),
+    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
+           key=path_version_key, reverse=True),
 ]
 
 
@@ -55,7 +63,12 @@ def _reexec_into_kicad():
         if cand != sys.executable and os.path.exists(cand):
             if subprocess.run([cand, '-c', 'import wx, pcbnew'],
                               capture_output=True).returncode == 0:
-                os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
+                argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
+                if os.name == 'nt':
+                    # os.execv re-splits argv on spaces on Windows, and the
+                    # interpreter lives under "Program Files".
+                    sys.exit(subprocess.run(argv).returncode)
+                os.execv(cand, argv)
     print("SKIP: no python with wx + pcbnew found")
     sys.exit(0)
 
@@ -109,14 +122,12 @@ def main():
         _ok('the busy signal is asserted before the call returns',
             tab._running and not tab.fanout_btn.IsEnabled())
 
-        # Pump the real event loop until the tab reports idle -- this is what
-        # ai_plan._poll_until_idle does, and it is the only honest way to wait.
-        for _ in range(60000):
-            if not tab._running:
-                break
-            wx.YieldIfNeeded()
-            wx.MilliSleep(5)
-        else:
+        # Run the real event loop until the tab reports idle -- the condition
+        # ai_plan._poll_until_idle waits on. A MainLoop, not a Yield loop: the
+        # tab collects the worker's result through wx.CallLater, and Yield
+        # never fires wx timers on Windows (see wx_pump.py).
+        from wx_pump import run_until
+        if not run_until(lambda: not tab._running, 300):
             _ok('the worker finished within the pump budget', False)
 
         _ok('the results arrived after the worker finished',

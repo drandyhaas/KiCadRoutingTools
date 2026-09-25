@@ -275,6 +275,55 @@ def test_a_part_move_never_gets_fewer_than_ten_frames():
     print(f"  PASS: moves floored at {MIN_MOVE_FRAMES} through the tween AND "
           f"the budget")
 
+def test_the_movie_layout_knobs_reach_the_film():
+    """`$KICAD_MOVIE_LAYOUT` / `$KICAD_MOVIE_ASPECT` apply to a film as they do
+    to make_movie. build_film passed a None layout/aspect straight through,
+    and build_boards reads None as 'legacy', so both knobs were no-ops on the
+    render that actually shows placement. Spies on the renderer's inputs: the
+    rendering itself is covered by the tests above."""
+    import animate_route
+    import env_knobs
+    import make_film as mf
+    seen = {}
+
+    def spy(*a, **k):
+        seen['got'] = (k.get('layout'), k.get('aspect'))
+        return []
+
+    names = ('KICAD_MOVIE_LAYOUT', 'KICAD_MOVIE_ASPECT')
+    saved = {n: os.environ.get(n) for n in names}
+    real = animate_route.build_boards
+    shots = mf.parse_positional([BOARD], [])
+    try:
+        animate_route.build_boards = spy
+        os.environ['KICAD_MOVIE_LAYOUT'] = 'split'
+        os.environ['KICAD_MOVIE_ASPECT'] = '16:9'
+        env_knobs.refresh()
+        mf.build_film(shots, size=300, fps=6.0, camera='off', quiet=True)
+        assert seen.get('got') == ('split', '16:9'), \
+            f"the env knobs did not reach the film: {seen.get('got')}"
+        mf.build_film(shots, size=300, fps=6.0, camera='off', quiet=True,
+                      layout='stacked', aspect='4:3')
+        assert seen['got'] == ('stacked', '4:3'), \
+            f"an explicit layout/aspect must win over the env: {seen['got']}"
+        for n in names:
+            os.environ.pop(n, None)
+        env_knobs.refresh()
+        mf.build_film(shots, size=300, fps=6.0, camera='off', quiet=True)
+        assert seen['got'] == ('legacy', None), \
+            f"with neither set, legacy and the board's own aspect: {seen['got']}"
+    finally:
+        animate_route.build_boards = real
+        for n, v in saved.items():
+            if v is None:
+                os.environ.pop(n, None)
+            else:
+                os.environ[n] = v
+        env_knobs.refresh()
+    print("  PASS: $KICAD_MOVIE_LAYOUT/ASPECT reach build_film; explicit "
+          "arguments win")
+
+
 if __name__ == '__main__':
     if not os.path.isfile(BOARD):
         print("SKIP: fixture missing")

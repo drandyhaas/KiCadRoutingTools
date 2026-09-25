@@ -615,6 +615,16 @@ through there too.
   mirror frame was TAKEN on both fronts (a spy on `to_front_frame`, the
   change detector), identical tracks/vias/failed nets, and every surface
   escape on the part's own face. Under a minute.
+- `tests/gui_parity/test_gnd_vias_gui.py` — needs KiCad python; the only gate
+  that runs the Planes tab's **Add GND vias** step. Real PlanesTab, real
+  create_plane, against `route_planes.py --add-gnd-vias` on the same files:
+  class clearance, `.kicad_dru` layer rules, every copper layer and the fab
+  edge floor, and identical via positions on both fronts. Seconds to run.
+- **A gate that waits on a tab's worker must run a real MainLoop**
+  (`tests/gui_parity/wx_pump.run_until`), never a `wx.YieldIfNeeded()` loop:
+  the tabs collect results through `wx.CallLater`, and Yield-pumping never
+  fires wx timers on Windows -- the fanout gates sat out 16-35 min budgets
+  there and graded empty results while the worker had finished in 0.5 s.
 - `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
   plan through the GUI engine path and grades against the CLI chain
   (`KICAD_DUMP_BATCH_KWARGS` diffs the full batch_route param set, ~105 keys).

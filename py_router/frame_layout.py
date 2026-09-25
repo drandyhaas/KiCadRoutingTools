@@ -173,6 +173,27 @@ def even(n) -> int:
     return max(2, int(n) & ~1)
 
 
+def resolve_layout_aspect(layout=None, aspect=None):
+    """`(layout, aspect)` for a render: an explicit argument wins, and `None`
+    falls back to `$KICAD_MOVIE_LAYOUT` / `$KICAD_MOVIE_ASPECT` (env_knobs),
+    then to `'legacy'` / the board's own aspect.
+
+    The ONE resolution, for make_movie and make_film's build_film alike. It
+    lived inline in make_movie only, so a film -- the render that actually
+    shows placement -- ignored both knobs while make_movie's `--help`
+    advertised them."""
+    if layout is None or aspect is None:
+        try:
+            import env_knobs as _ek
+        except Exception:                                       # noqa: BLE001
+            _ek = None
+        if layout is None:
+            layout = getattr(_ek, 'MOVIE_LAYOUT', 'legacy')
+        if aspect is None:
+            aspect = getattr(_ek, 'MOVIE_ASPECT', '') or None
+    return layout, aspect
+
+
 def parse_ratio(text) -> Optional[float]:
     """`'16:9'`, `'16/9'`, `1.78`, or a RATIOS key. `None` = the board's own."""
     if text is None or text == '':

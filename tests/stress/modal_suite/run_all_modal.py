@@ -128,11 +128,8 @@ PY_VERSION = os.environ.get(
 image = (
     modal.Image.debian_slim(python_version=PY_VERSION)
     .pip_install_from_requirements(str(_repo_root / "requirements.txt"))
-    # pytest is a TEST-only dependency, so it is deliberately absent from
-    # requirements.txt (which is the shipping runtime). A handful of tests
-    # import it for fixtures/parametrisation and die with
-    # ModuleNotFoundError without it -- not a skip, a hard failure.
-    .pip_install("pytest")
+    # No pytest: run_all.py runs every test as a plain script, and
+    # test_718_static_test_hygiene refuses a test file that needs pytest.
     .apt_install("git", "procps", "curl")
     .env({"KICAD_SWEEP_GIT": GIT_SHA, "PYTHONUNBUFFERED": "1"})
     .add_local_dir(_src_dir, REPO, copy=True, ignore=[

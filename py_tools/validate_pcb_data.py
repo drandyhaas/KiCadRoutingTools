@@ -26,6 +26,7 @@ import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import argparse
 import os
+import subprocess
 import sys
 
 # Non-fatal pcbnew asserts (PCB_VIA::GetWidth layer arg, wxApp traits) spam
@@ -44,7 +45,13 @@ def _reexec_with_kicad_python():
         if cand == sys.executable:
             continue
         if os.path.isfile(cand):
-            os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
+            argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
+            if os.name == 'nt':
+                # os.execv re-splits argv on spaces on Windows: the
+                # `Program Files` interpreter tore in two, and the exec'd
+                # process died while this one exited 0.
+                sys.exit(subprocess.run(argv).returncode)
+            os.execv(cand, argv)
     print("ERROR: pcbnew module not available and no KiCad python found. "
           "Run with KiCad's bundled python3.")
     sys.exit(2)

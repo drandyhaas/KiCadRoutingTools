@@ -67,6 +67,7 @@ Run: python3 tests/gui_parity/test_gui_livechain_rp2350.py
 # A sandboxed HOME does NOT help -- cfprefsd serves that pref per-user
 # regardless of HOME. With the default set, test_gui_engine_parity.py runs ~90s.
 # ---------------------------------------------------------------------------
+import glob
 import os
 import re
 import shutil
@@ -81,10 +82,17 @@ sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))
 START_BOARD = os.path.join(REPO, 'kicad_files', 'rp2350_fpga_eensy_prePlane.kicad_pcb')
 
+# Every versioned install, newest first by NUMERIC version (a string sort
+# puts KiCad\9.0 above KiCad\10.0).
+sys.path.insert(0, os.path.join(REPO, 'py_router'))
+from kicad_locate import path_version_key  # noqa: E402
+del sys.path[0]    # this file orders its own sys.path further down
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
     os.path.expandvars(r"C:\\Program Files\\KiCad\\bin\\python.exe"),
+    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
+           key=path_version_key, reverse=True),
 ]
 
 
@@ -93,7 +101,12 @@ def _reexec_into_kicad():
         if cand != sys.executable and os.path.exists(cand):
             if subprocess.run([cand, '-c', 'import pcbnew'],
                               capture_output=True).returncode == 0:
-                os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
+                argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
+                if os.name == 'nt':
+                    # os.execv re-splits argv on spaces on Windows, and the
+                    # interpreter lives under "Program Files".
+                    sys.exit(subprocess.run(argv).returncode)
+                os.execv(cand, argv)
     print("SKIP: no python with pcbnew found")
     sys.exit(0)
 

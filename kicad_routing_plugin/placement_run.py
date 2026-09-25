@@ -146,6 +146,18 @@ def stage_inputs(workdir, snapshot_path, board_filename):
             sibling = stem + ext
             if os.path.isfile(sibling):
                 shutil.copyfile(sibling, os.path.join(workdir, "input" + ext))
+        # mechanical.json is a DIRECTORY file, not a stem sibling:
+        # reconcile.discover_mechanical reads <board dir>/mechanical.json, and
+        # the run's board is <workdir>/input.kicad_pcb. Unstaged, every
+        # declared mechanical fact beside the user's board was invisible to a
+        # run launched from this tab, while the same skill run in place saw it.
+        try:
+            from placement.reconcile import MECHANICAL_NAME
+        except Exception:                                  # noqa: BLE001
+            MECHANICAL_NAME = "mechanical.json"
+        mech = os.path.join(os.path.dirname(stem), MECHANICAL_NAME)
+        if os.path.isfile(mech):
+            shutil.copyfile(mech, os.path.join(workdir, MECHANICAL_NAME))
     return staged
 
 
