@@ -193,6 +193,10 @@ class Rules:
         return self.via_size / 2 + self.hug + self.track / 2 + 0.03  # braid.VIA_NEED
 
     @property
+    def lane_min(self):
+        return self.track + self.hug + 0.02          # braid.LANE_MIN
+
+    @property
     def end_keep(self):
         return self.track + self.hug + 0.05          # braid.END_KEEP
 
@@ -358,6 +362,7 @@ def install(rules, verbose=False):
     put('braid', 'VIA_DRILL', rules.via_drill)
     put('braid', 'HALF_SEP', rules.half_sep)
     put('braid', 'VIA_NEED', rules.via_need)
+    put('braid', 'LANE_MIN', rules.lane_min)
     put('braid', 'END_KEEP', rules.end_keep)
     put('braid', 'LPITCH', rules.lane_pitch)
     put('braid', 'MINP', rules.exit_pitch)

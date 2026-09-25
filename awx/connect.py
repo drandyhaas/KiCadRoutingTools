@@ -460,9 +460,7 @@ def _connect_pair_cross(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
     pitch = cfg.via_size + cfg.clearance
     appr = pitch * appr_scale
     reach = JOIN_PITCHES * pitch
-    via_r = cfg.via_size / 2.0
-    via_half = max((cfg.via_size + cfg.clearance) / 2.0,
-                   (via_r + cfg.clearance + cfg.track_width / 2.0 - half) / 0.7071 + 0.005)
+    via_half = _pairs.envelope_via_half(cfg, half)
     dbg = bool(os.environ.get('BRAID_PAIR_DEBUG'))
 
     def approach(tip_p, tip_n, d, layer):
@@ -993,9 +991,7 @@ def _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_layer,
         # pose router then runs between the connectors' ends, which stand
         # in the open corridor. Either connector that cannot be routed
         # falls back to the straight approach piece.
-        via_r = cfg.via_size / 2.0
-        via_half = max((cfg.via_size + cfg.clearance) / 2.0,
-                       (via_r + cfg.clearance + cfg.track_width / 2.0 - half) / 0.7071 + 0.005)
+        via_half = _pairs.envelope_via_half(cfg, half)
         dbg = os.environ.get('BRAID_PAIR_DEBUG')
         for end, tip_p, tip_n, d, layer, far in (('a', a_p, a_n, a_dir, a_layer, a_conn),
                                                    ('b', b_p, b_n, b_dir, b_layer, b_conn)):

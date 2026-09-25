@@ -9,17 +9,48 @@ failure here is a refusal found without paying for the route.
 usage: plan_audit.py CHECK --board B --nets N1,N2,..|@FILE [--dest REF] [--png OUT]
 
   pitch   two lanes' reservations (virtual_of: exactly what the router stamps
-          for a lane not routed yet) nearer than track/2 + clearance + track/2
-          on one layer: a planned line the router cannot sit on. Also lists
-          lanes with a reserved piece off the board's bounds.
+          for a lane not routed yet) nearer than the router's bar on one layer:
+          track + clearance, plus half a grid step for each of the two pieces
+          that is OFF the router's grid. A piece ON the grid (its ends grid
+          points, running at 0, 45 or 90 degrees) is laid where it is planned;
+          one off it lands up to half a step from its line. Also lists lanes
+          with a reserved piece off the board's bounds.
   dives   every planned via site (virtual_vias_of: exit corners, split legs, a
           swimmer's reserved diamonds) against static copper of other
           nets (pads, teeth, berth stubs), other lanes' planned lines and other
-          lanes' via sites.
+          lanes' via sites, each bar plus half a grid step per participant off
+          the grid (a pair's two barrels always are).
+          A PAIR's site is its two barrels, pairs.dive_offset either side of the
+          centreline across the arriving direction, each checked; via to via is
+          the copper and the drill (hole-to-hole) rule, whichever binds.
+The bars are the ROUTER's: the DRC clearance, plus half the router's grid step
+(ctx.cfg.grid_step) for every participant that is off its grid -- the router
+places a centre on a grid point, so an item planned off the grid may land half a
+step away. Static copper stays where it is.
   bands   each lane's band -- the one route_lane hands the router -- against
           its planned line: the planned length no layer's band covers, and
           whether the band connects tooth to berth at all (a flood over band
           cells, no obstacles). --only N1,N2 restricts; --png DIR renders.
+  swim    every SWIMMER's planned line (a lane with no page, which the plan
+          lets weave, so no other lane's reservation is checked
+          against it)
+          against the lines that cross it: the crossings in order along it,
+          by layer, and each F crossing and B crossing nearer each other than
+          one layer change fits between (two via rooms, plus the pair pitch
+          for a pair) -- a place the swimmer cannot weave. --only restricts.
+  static  every lane's reservation against other nets' static copper on its
+          layer (pads, base segments -- stubs and teeth --, base vias) nearer
+          than track/2 + clearance + grid/2 to that copper's edge: a line through
+          a pad, or one the router cannot keep on its grid.
+  shape   every lane's reserved lines (virtual_of, chained per layer) for a
+          shape no router lays: a FOLD (a vertex turning back more than
+          100 degrees) or a NOTCH (two opposite turns of 60+ degrees nearer
+          than a track width and a grid step -- a step or a dip). A turn is ALSO measured at the
+          lane's own scale -- the directions into and out of a vertex taken
+          track + clearance back and ahead along the line -- so a fold made in
+          two or three steps over segments shorter than that is one fold. The
+          pitch and dives audits measure one lane against another and cannot
+          see either.
   near NET X,Y [R]   every other lane's reservation within R (0.45) of (X, Y),
           and the plan facts of NET and of those lanes (page, layers, slots,
           layer profile).
@@ -30,6 +61,7 @@ import argparse
 import collections
 import contextlib
 import io
+import bisect
 import math
 import os
 import sys
@@ -40,6 +72,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 import braid as bd  # noqa: E402
+import pairs as _pairs  # noqa: E402
 
 
 def read_nets(arg):
@@ -77,6 +110,20 @@ def _samples(segs, L, step=0.025):
     return np.concatenate(out) if out else np.zeros((0, 2))
 
 
+def _on_grid(p, q, g):
+    """A reservation piece the router lays EXACTLY: both ends on grid points and its direction 0, 45 or 90
+    degrees -- a planned line that IS a grid row (or diagonal) lands on itself, where an off-grid one lands up to
+    half a step off. Every bar adds half a grid step per participant that is NOT on the grid."""
+    if any(abs(x / g - round(x / g)) > 1e-3 for x in (p[0], p[1], q[0], q[1])):
+        return False
+    dx, dy = abs(q[0] - p[0]), abs(q[1] - p[1])
+    return dx < 1e-9 or dy < 1e-9 or abs(dx - dy) < 1e-6
+
+
+def _pt_on_grid(x, y, g):
+    return abs(x / g - round(x / g)) <= 1e-3 and abs(y / g - round(y / g)) <= 1e-3
+
+
 def _dist_to_segs(P, segs, L):
     S = [(p, q) for p, q, L_ in segs if L_ == L]
     if not S or not len(P):
@@ -95,8 +142,11 @@ def _dist_to_segs(P, segs, L):
 
 
 def check_pitch(ctx, corridors, png=None):
-    TW, CL = ctx.cfg.track_width, ctx.cfg.clearance
-    block = TW / 2 + CL + TW / 2
+    TW, CL, g = ctx.cfg.track_width, ctx.cfg.clearance, ctx.cfg.grid_step
+    # the router's threading bar, either lane first: track + clearance, plus half a grid step for each of the two
+    # pieces that is off the grid (it lands up to half a step off its plan; one ON the grid lands on itself)
+    bar = lambda off_a, off_b: TW + CL + g / 2 * (off_a + off_b)
+    block = bar(1, 1)
     bx0, by0, bx1, by1 = ctx.pcb.board_info.board_bounds
     hits, V_all = [], {}
     for c in corridors:
@@ -113,28 +163,36 @@ def check_pitch(ctx, corridors, png=None):
         if off:
             print(f'PITCH corridor {c.idx}: lanes with a reserved piece off the board bounds: {dict(off)}')
         mem = list(c.members)
+        split = {nm: ([s for s in v if _on_grid(s[0], s[1], g)], [s for s in v if not _on_grid(s[0], s[1], g)])
+                 for nm, v in V.items()}
         for i, nm in enumerate(mem):
             for L in ctx.cfg.layers:
-                P = _samples(V[nm], L)
-                if not len(P):
-                    continue
                 for om in mem[i + 1:]:
-                    d = _dist_to_segs(P, V[om], L)
-                    bad = d < block - 0.005
-                    if bad.any():
-                        k = int(np.argmin(d))
-                        x, y = P[k]
+                    worst = None
+                    for off_a, segs_a in enumerate(split[nm]):
+                        P = _samples(segs_a, L)
+                        if not len(P):
+                            continue
+                        for off_b, segs_b in enumerate(split[om]):
+                            d = _dist_to_segs(P, segs_b, L)
+                            need = bar(off_a, off_b)
+                            bad = d < need - 1e-6
+                            if bad.any():
+                                k = int(np.argmin(d - need))
+                                if worst is None or d[k] - need < worst[0] - worst[1]:
+                                    worst = (float(d[k]), need, P[k], float(bad.sum()) * 0.025)
+                    if worst is not None:
+                        d_, need, (x, y), ln_ = worst
                         S, _O = c.spine.project(np.array([x]), np.array([y]))
                         S = float(np.asarray(S).ravel()[0])
                         where = 'branch' if s_h is not None and S >= s_h else 'trunk'
-                        hits.append((float(d[k]), nm, om, L, (float(x), float(y)), S, where,
-                                     float(bad.sum()) * 0.025, c.idx))
+                        hits.append((d_, nm, om, L, (float(x), float(y)), S, where, ln_, c.idx, need))
     hits.sort()
-    for (d, a, b, L, xy, S, where, ln, ci) in hits:
+    for (d, a, b, L, xy, S, where, ln, ci, need) in hits:
         print(f'PITCH {a:7s} {b:7s} {L[0]} min {d:.3f}  over {ln:4.2f} mm  at ({xy[0]:.2f},{xy[1]:.2f})  '
-              f'corridor {ci} s {S:6.2f} {where}')
-    print(f'PITCH {len(hits)} pair(s) within {block:.3f} mm on one layer: '
-          f'{dict(collections.Counter(h[6] for h in hits))}')
+              f'corridor {ci} s {S:6.2f} {where}  (bar {need:.4f})')
+    print(f'PITCH {len(hits)} pair(s) short of their bar on one layer (track + clearance {TW + CL:.3f}, + half a '
+          f'grid step per piece off the grid): {dict(collections.Counter(h[6] for h in hits))}')
     if png:
         from route_render import BoardRenderer
         from kicad_parser import Segment as _S
@@ -160,6 +218,66 @@ def check_pitch(ctx, corridors, png=None):
     return hits
 
 
+def _cross_t(a, b, p, q):
+    """The parameter along a->b where it crosses p->q, or None."""
+    rx, ry = b[0] - a[0], b[1] - a[1]
+    sx, sy = q[0] - p[0], q[1] - p[1]
+    den = rx * sy - ry * sx
+    if abs(den) < 1e-12:
+        return None
+    t = ((p[0] - a[0]) * sy - (p[1] - a[1]) * sx) / den
+    u = ((p[0] - a[0]) * ry - (p[1] - a[1]) * rx) / den
+    return t if (0.0 <= t <= 1.0 and 0.0 <= u <= 1.0) else None
+
+
+def check_swim(ctx, corridors, only=None):
+    """Each swimmer's crossings along its planned line, and the F/B crossings
+    too close together for it to change layer between them."""
+    prs = getattr(ctx, 'pairs', {}) or {}
+    bad_all = []
+    for c in corridors:
+        sc = getattr(c, 'sched_cur', None)
+        if sc is None:
+            continue
+        for nm in c.members:
+            if sc.page.get(nm) is not None or (only and nm not in only):
+                continue          # a page lane does not weave
+            xy = list((getattr(c, 'lane_xy', {}) or {}).get(nm) or [])
+            if len(xy) < 2:
+                continue
+            need = 2 * bd.VIA_NEED + (_pairs.pitch(bd.TRACK) if nm in prs else 0.0)
+            cum = [0.0]
+            for a, b in zip(xy, xy[1:]):
+                cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+            hits = []
+            for om in c.members:
+                if om == nm:
+                    continue
+                for (p, q, L) in c.virtual_of([om]):
+                    for k, (a, b) in enumerate(zip(xy, xy[1:])):
+                        t = _cross_t(a, b, p, q)
+                        if t is not None:
+                            hits.append((cum[k] + t * (cum[k + 1] - cum[k]), L, om))
+            # a pair's two legs cross twice: one crossing per lane and layer within one and a half pair pitches
+            hits.sort()
+            merged = []
+            leg_span = 1.5 * _pairs.pitch(bd.TRACK)
+            for h in hits:
+                if merged and merged[-1][2] == h[2] and merged[-1][1] == h[1] and h[0] - merged[-1][0] < leg_span:
+                    continue
+                merged.append(h)
+            tri = [(a_, b_) for a_, b_ in zip(merged, merged[1:]) if a_[1] != b_[1] and b_[0] - a_[0] < need]
+            kind = 'pair' if nm in prs else 'single'
+            seq = ' | '.join(f'{d:.2f} {L[0]} {om}' for d, L, om in merged) or 'none'
+            print(f'SWIM {nm:7s} ({kind}) corridor {c.idx} line {cum[-1]:.2f} mm, {len(merged)} crossing(s): {seq}')
+            for a_, b_ in tri:
+                print(f'  CANNOT WEAVE: {a_[2]} {a_[1][0]} at {a_[0]:.2f} / {b_[2]} {b_[1][0]} at {b_[0]:.2f} '
+                      f'-- {b_[0] - a_[0]:.2f} mm apart, a layer change needs {need:.2f}')
+                bad_all.append((nm, a_, b_))
+    print(f'SWIM {len(bad_all)} place(s) a swimmer cannot weave')
+    return bad_all
+
+
 def _pad_edge(x, y, pd):
     if pd.shape == 'circle':
         return math.hypot(x - pd.global_x, y - pd.global_y) - pd.size_x / 2
@@ -171,8 +289,15 @@ def _pad_edge(x, y, pd):
 def check_dives(ctx, corridors, show_all=False):
     cfg = ctx.cfg
     VR, CL, TW = cfg.via_size / 2, cfg.clearance, cfg.track_width
-    need_static, need_lane, need_via = VR + CL, VR + CL + TW / 2, 2 * VR + CL
+    g = cfg.grid_step
+    g2 = g / 2                                   # the router puts a via on its grid
+    h2h = getattr(cfg, 'hole_to_hole_clearance', 0.0) or 0.0
+    from fab_tiers import min_via_center_distance
+    # every bar: the clearance, plus half a grid step for each participant OFF the grid (static copper stays put;
+    # a via on a grid point, or a lane piece on a grid line, lands on itself)
+    c2c = min_via_center_distance(cfg.via_size, CL, cfg.via_drill, h2h)
     pairs = getattr(ctx, 'pairs', {}) or {}
+    off = _pairs.dive_offset(cfg, _pairs.pitch(TW) / 2) if pairs else 0.0
     name = lambda i: (ctx.pcb.nets[i].name.split('/')[-1] if i in ctx.pcb.nets else str(i))
     pads = [(fp.reference, pd) for fp in ctx.pcb.footprints.values() for pd in fp.pads
             if pd.pad_type != 'np_thru_hole' and any(L.endswith('.Cu') for L in pd.layers)]
@@ -184,36 +309,134 @@ def check_dives(ctx, corridors, show_all=False):
                for nm in M}
         sites = {nm: [tuple(p) for p in c.virtual_vias_of([nm])] for nm in M}
         lines = {nm: c.virtual_of([nm]) for nm in M}
+        centre = getattr(c, '_virtual_of_plain', c.virtual_of)
+        # the copper each site stands for: one barrel, or a pair's two
+        barrels = {nm: {s: (_pairs.dive_barrels(s, centre([nm]), off) if nm in pairs else [s])
+                        for s in sites[nm]} for nm in M}
+        boff = lambda nm, x, y: 0 if (nm not in pairs and _pt_on_grid(x, y, g)) else 1   # a barrel off the grid
         for nm in M:
-            for (x, y) in sites[nm]:
+            for s in sites[nm]:
                 n_sites += 1
                 hits = []
-                near = lambda px, py: abs(px - x) < 2 and abs(py - y) < 2
-                st = min([(_pad_edge(x, y, pd), f'pad {ref}.{pd.pad_number} {name(pd.net_id)}')
-                          for ref, pd in pads if pd.net_id not in own[nm] and near(pd.global_x, pd.global_y)]
-                         + [(dseg(x, y, (s.start_x, s.start_y), (s.end_x, s.end_y)) - s.width / 2,
-                             f'{s.layer[0]} copper {name(s.net_id)}')
-                            for s in ctx.base_segments if s.net_id not in own[nm] and near(s.start_x, s.start_y)]
-                         + [(math.hypot(v.x - x, v.y - y) - v.size / 2, f'via {name(v.net_id)}')
-                            for v in ctx.base_vias if v.net_id not in own[nm] and near(v.x, v.y)],
-                         default=(9, ''))
-                if st[0] < need_static - 1e-6:
-                    hits.append(f'static {st[0]:+.3f}/{need_static:.3f} ({st[1]})')
-                    fail['static'] += 1
-                ln = min(((dseg(x, y, p, q), om, L) for om in M if om != nm for (p, q, L) in lines[om]),
-                         default=(9, '', ''))
-                if ln[0] < need_lane - 1e-6:
-                    hits.append(f'lane {ln[0]:.3f}/{need_lane:.3f} ({ln[1]} {ln[2][0]})')
-                    fail['lane'] += 1
-                vv = min(((math.hypot(px - x, py - y), om) for om in M if om != nm for (px, py) in sites[om]),
-                         default=(9, ''))
-                if vv[0] < need_via - 1e-6:
-                    hits.append(f'via {vv[0]:.3f}/{need_via:.3f} ({vv[1]})')
-                    fail['via'] += 1
+                for (x, y) in barrels[nm][s]:
+                    near = lambda px, py: abs(px - x) < 2 and abs(py - y) < 2
+                    vo = boff(nm, x, y)
+                    need_static = VR + CL + g2 * vo
+                    # (distance, its bar, what): a via's bar is the via-to-via
+                    # rule (copper and drill), everything else copper's
+                    st = min([(_pad_edge(x, y, pd), need_static, f'pad {ref}.{pd.pad_number} {name(pd.net_id)}')
+                              for ref, pd in pads if pd.net_id not in own[nm] and near(pd.global_x, pd.global_y)]
+                             + [(dseg(x, y, (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)) - s_.width / 2,
+                                 need_static, f'{s_.layer[0]} copper {name(s_.net_id)}')
+                                for s_ in ctx.base_segments if s_.net_id not in own[nm] and near(s_.start_x, s_.start_y)]
+                             + [(math.hypot(v.x - x, v.y - y),
+                                 max(VR + v.size / 2 + CL, cfg.via_drill / 2 + v.drill / 2 + h2h) + g2 * vo,
+                                 f'via {name(v.net_id)}')
+                                for v in ctx.base_vias if v.net_id not in own[nm] and near(v.x, v.y)],
+                             key=lambda r: r[0] - r[1], default=(9, 0, ''))
+                    if st[0] < st[1] - 1e-6:
+                        hits.append(f'static {st[0]:+.3f}/{st[1]:.3f} ({st[2]})')
+                        fail['static'] += 1
+                    ln = min(((dseg(x, y, p, q), VR + CL + TW / 2 + g2 * (vo + (0 if _on_grid(p, q, g) else 1)), om, L)
+                              for om in M if om != nm for (p, q, L) in lines[om]),
+                             key=lambda r: r[0] - r[1], default=(9, 0, '', ''))
+                    if ln[0] < ln[1] - 1e-6:
+                        hits.append(f'lane {ln[0]:.3f}/{ln[1]:.3f} ({ln[2]} {ln[3][0]})')
+                        fail['lane'] += 1
+                    vv = min(((math.hypot(px - x, py - y), c2c + g2 * (vo + boff(om, px, py)), om) for om in M if om != nm
+                              for bs in barrels[om].values() for (px, py) in bs),
+                             key=lambda r: r[0] - r[1], default=(9, 0, ''))
+                    if vv[0] < vv[1] - 1e-6:
+                        hits.append(f'via {vv[0]:.3f}/{vv[1]:.3f} ({vv[2]})')
+                        fail['via'] += 1
                 if hits or show_all:
-                    print(f'DIVE {nm:7s} ({x:7.2f},{y:6.2f})  ' + ('; '.join(hits) if hits else 'ok'))
-    print(f'DIVE {n_sites} planned via sites; failing: {dict(fail)}')
+                    tag = ' pair' if nm in pairs else ''
+                    print(f'DIVE {nm:7s} ({s[0]:7.2f},{s[1]:6.2f}){tag}  ' + ('; '.join(hits) if hits else 'ok'))
+    print(f'DIVE {n_sites} planned via sites'
+          + (f' (a pair\'s dive = two barrels {off:.3f} either side of its centreline)' if pairs else '')
+          + f'; failing: {dict(fail)}')
     return fail
+
+
+def check_static(ctx, corridors, only=None):
+    """Each lane's reservation (virtual_of) against the static copper of OTHER
+    nets on its layer -- pads (a drilled pad on both layers, an unplated hole by
+    its drill), the base segments (other nets' and other lanes' stubs and teeth)
+    and base vias -- nearer than half a track plus the clearance to that
+    copper's edge: a planned line the router cannot sit on. The pitch audit
+    measures lanes against lanes and the dives audit vias against static
+    copper; neither sees a line through a pad."""
+    cfg = ctx.cfg
+    TW, CL, g = cfg.track_width, cfg.clearance, cfg.grid_step
+    need = TW / 2 + CL + g / 2                   # the bar for a lane piece off the grid (it lands up to half a step off)
+    pairs = getattr(ctx, 'pairs', {}) or {}
+    pads = []
+    for fp in ctx.pcb.footprints.values():
+        for pd in fp.pads:
+            drilled = bool(pd.drill and pd.drill > 0)
+            if pd.pad_type == 'np_thru_hole':
+                pads.append((fp.reference, pd, {'F.Cu', 'B.Cu'}, 'hole'))
+            elif drilled or any(L.startswith('*') for L in pd.layers):
+                pads.append((fp.reference, pd, {'F.Cu', 'B.Cu'}, 'pad'))
+            else:
+                Ls = {L for L in pd.layers if L in ('F.Cu', 'B.Cu')}
+                if Ls:
+                    pads.append((fp.reference, pd, Ls, 'pad'))
+    name = lambda i: (ctx.pcb.nets[i].name.split('/')[-1] if i in ctx.pcb.nets else str(i))
+    hits = {}
+    for c in corridors:
+        for nm in c.members:
+            if only and nm not in only:
+                continue
+            own = {ctx.byname[nm][0]} | {ctx.byname[leg][0] for leg in pairs.get(nm, ()) if leg in ctx.byname}
+            R = c.virtual_of([nm])
+            for L in ('F.Cu', 'B.Cu'):
+                RR = [(np.array(p, float), np.array(q, float), L_) for p, q, L_ in R]
+                on_ = [s for s in RR if _on_grid(s[0], s[1], g)]
+                off_ = [s for s in RR if not _on_grid(s[0], s[1], g)]
+                P_on, P_off = _samples(on_, L), _samples(off_, L)
+                P = np.concatenate([P_on, P_off]) if len(P_on) and len(P_off) else (P_on if len(P_on) else P_off)
+                # each sample's bar: track/2 + clearance, plus half a grid step where its piece is off the grid
+                NEED = np.concatenate([np.full(len(P_on), TW / 2 + CL), np.full(len(P_off), need)])[:len(P)]
+                if not len(P):
+                    continue
+                x0, y0 = P.min(0) - 4 * bd.LANE_MIN       # the static copper near the lane: a few lane pitches round it
+                x1, y1 = P.max(0) + 4 * bd.LANE_MIN
+                inb = lambda x, y: x0 <= x <= x1 and y0 <= y <= y1
+                cand = []
+                for ref, pd, Ls, kind in pads:
+                    if L not in Ls or pd.net_id in own or not inb(pd.global_x, pd.global_y):
+                        continue
+                    if kind == 'hole':
+                        d = np.hypot(P[:, 0] - pd.global_x, P[:, 1] - pd.global_y) - (pd.drill or 0) / 2
+                    elif pd.shape == 'circle':
+                        d = np.hypot(P[:, 0] - pd.global_x, P[:, 1] - pd.global_y) - pd.size_x / 2
+                    else:
+                        dx = np.abs(P[:, 0] - pd.global_x) - pd.size_x / 2
+                        dy = np.abs(P[:, 1] - pd.global_y) - pd.size_y / 2
+                        d = np.hypot(np.maximum(dx, 0), np.maximum(dy, 0)) + np.minimum(np.maximum(dx, dy), 0)
+                    cand.append((d, f'{kind} {ref}.{pd.pad_number} {name(pd.net_id)}'))
+                for s in ctx.base_segments:
+                    if s.layer != L or s.net_id in own or not (inb(s.start_x, s.start_y) or inb(s.end_x, s.end_y)):
+                        continue
+                    d = _dist_to_segs(P, [(np.array([s.start_x, s.start_y]), np.array([s.end_x, s.end_y]), L)], L)
+                    cand.append((d - s.width / 2, f'copper {name(s.net_id)}'))
+                for v in ctx.base_vias:
+                    if v.net_id in own or not inb(v.x, v.y):
+                        continue
+                    cand.append((np.hypot(P[:, 0] - v.x, P[:, 1] - v.y) - v.size / 2, f'via {name(v.net_id)}'))
+                for d, what in cand:
+                    k = int(np.argmin(d - NEED))
+                    if d[k] < NEED[k] - 1e-6:
+                        key = (nm, L, what)
+                        if key not in hits or d[k] - NEED[k] < hits[key][0] - hits[key][2]:
+                            hits[key] = (float(d[k]), tuple(P[k]), float(NEED[k]))
+    rows = sorted((v[0], k[0], k[1], k[2], v[1], v[2]) for k, v in hits.items())
+    for d, nm, L, what, xy, nd in rows:
+        print(f'STATIC {nm:7s} {L[0]} {d:+.3f}/{nd:.3f} {what} at ({xy[0]:.2f},{xy[1]:.2f})')
+    print(f'STATIC {len(rows)} lane/object pair(s) short of their bar (track/2 + clearance {TW / 2 + CL:.3f}, + half a '
+          f'grid step off the grid): {dict(collections.Counter(r[3].split()[0] for r in rows))}')
+    return rows
 
 
 def router_band(c, nm):
@@ -333,6 +556,85 @@ def check_bands(ctx, corridors, only=None, png_dir=None, G=0.05):
     return tot_out
 
 
+def _turns(run):
+    """(vertex, signed turn in degrees, length of the segment after it) along
+    a polyline, its sub-5 um segments dropped."""
+    pts = [run[0]]
+    for q in run[1:]:
+        if math.hypot(q[0] - pts[-1][0], q[1] - pts[-1][1]) > 0.005:
+            pts.append(q)
+    out = []
+    for a_, b_, c_ in zip(pts, pts[1:], pts[2:]):
+        h1 = math.atan2(b_[1] - a_[1], b_[0] - a_[0])
+        h2 = math.atan2(c_[1] - b_[1], c_[0] - b_[0])
+        t = math.degrees((h2 - h1 + math.pi) % (2 * math.pi) - math.pi)
+        out.append((b_, t, math.hypot(c_[0] - b_[0], c_[1] - b_[1])))
+    return out
+
+
+def _scale_turns(run, w):
+    """(vertex, signed turn in degrees) at every inner vertex of a polyline,
+    the directions measured over `w` either side along it: a turn made over
+    segments shorter than w is ONE turn at this scale."""
+    pts = [run[0]]
+    for q in run[1:]:
+        if math.hypot(q[0] - pts[-1][0], q[1] - pts[-1][1]) > 0.005:
+            pts.append(q)
+    if len(pts) < 3:
+        return []
+    s = [0.0]
+    for a_, b_ in zip(pts, pts[1:]):
+        s.append(s[-1] + math.hypot(b_[0] - a_[0], b_[1] - a_[1]))
+
+    def at(u):
+        u = min(max(u, 0.0), s[-1])
+        k = max(1, min(len(s) - 1, bisect.bisect_left(s, u)))
+        f = 0.0 if s[k] - s[k - 1] < 1e-12 else (u - s[k - 1]) / (s[k] - s[k - 1])
+        return (pts[k - 1][0] + (pts[k][0] - pts[k - 1][0]) * f, pts[k - 1][1] + (pts[k][1] - pts[k - 1][1]) * f)
+    out = []
+    for i in range(1, len(pts) - 1):
+        a_, b_, c_ = at(s[i] - w), pts[i], at(s[i] + w)
+        if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) < 1e-3 or math.hypot(c_[0] - b_[0], c_[1] - b_[1]) < 1e-3:
+            continue
+        h1 = math.atan2(b_[1] - a_[1], b_[0] - a_[0])
+        h2 = math.atan2(c_[1] - b_[1], c_[0] - b_[0])
+        out.append((b_, math.degrees((h2 - h1 + math.pi) % (2 * math.pi) - math.pi)))
+    return out
+
+
+def check_shape(ctx, corridors, only=None):
+    hits = []
+    W = ctx.cfg.track_width + ctx.cfg.clearance          # the lane's own scale
+    NOTCH = ctx.cfg.track_width + ctx.cfg.grid_step      # a step or a dip shorter than a track and a grid step
+    for c in corridors:
+        for nm in c.members:
+            if only and nm not in only:
+                continue
+            R = c.virtual_of([nm])
+            for L in ('F.Cu', 'B.Cu'):
+                for run in bd._chain_runs(R, L):
+                    tr = _turns(run)
+                    for i, (v, t, _l) in enumerate(tr):
+                        if abs(t) > 100:
+                            hits.append((nm, L, 'fold', v, f'{t:+.0f}'))
+                    for v, t in _scale_turns(run, W):
+                        if abs(t) > 100:
+                            hits.append((nm, L, 'fold', v, f'{t:+.0f} over {W:.3f}'))
+                    for (v1, t1, l1), (v2, t2, _l2) in zip(tr, tr[1:]):
+                        if abs(t1) > 60 and abs(t2) > 60 and t1 * t2 < 0 and l1 < NOTCH:
+                            hits.append((nm, L, 'notch', v1, f'{t1:+.0f}/{t2:+.0f} over {l1:.3f}'))
+    seen = set()
+    for nm, L, kind, v, how in hits:
+        key = (nm, L, kind, round(v[0] / W), round(v[1] / W))     # one report per place, at the lane's scale
+        if key in seen:
+            continue
+        seen.add(key)
+        print(f'SHAPE {nm:7s} {L[0]} {kind:5s} at ({v[0]:.2f},{v[1]:.2f}) {how}')
+    print(f'SHAPE {len(seen)} place(s): {dict(collections.Counter(k[2] for k in seen))} '
+          f'in {len({k[0] for k in seen})} lane(s)')
+    return hits
+
+
 def show_near(ctx, corridors, nm, P, R=0.45):
     c = next((c for c in corridors if nm in c.members), None)
     if c is None:
@@ -358,12 +660,12 @@ def show_near(ctx, corridors, nm, P, R=0.45):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('check', choices=('pitch', 'dives', 'bands', 'near'))
+    ap.add_argument('check', choices=('pitch', 'dives', 'static', 'bands', 'swim', 'shape', 'near'))
     ap.add_argument('args', nargs='*', help='near: NET X,Y [R]')
     ap.add_argument('--board', required=True)
     ap.add_argument('--nets', required=True, help='N1,N2,.. or @FILE')
     ap.add_argument('--dest', default='DU1')
-    ap.add_argument('--only', default='', help='bands: these lanes only')
+    ap.add_argument('--only', default='', help='bands, swim, shape: these lanes only')
     ap.add_argument('--png', default='')
     ap.add_argument('--all', action='store_true', help='dives: print every site, not only the failing ones')
     a = ap.parse_args(argv)
@@ -372,8 +674,14 @@ def main(argv=None):
         check_pitch(ctx, corridors, a.png or None)
     elif a.check == 'dives':
         check_dives(ctx, corridors, a.all)
+    elif a.check == 'static':
+        check_static(ctx, corridors, set(a.only.split(',')) - {''} or None)
     elif a.check == 'bands':
         check_bands(ctx, corridors, set(a.only.split(',')) - {''} or None, a.png or None)
+    elif a.check == 'shape':
+        check_shape(ctx, corridors, set(a.only.split(',')) - {''} or None)
+    elif a.check == 'swim':
+        check_swim(ctx, corridors, set(a.only.split(',')) - {''} or None)
     else:
         if len(a.args) < 2:
             ap.error('near: NET X,Y [R]')

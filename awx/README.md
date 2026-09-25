@@ -16,6 +16,8 @@ came from that evolution.
     python3 evolve_movie.py TAG 51 --gif                # the movie of a run
     python3 make_bench.py BOARD SRC DST OUT             # another array pair, from any board
     bash pose_gate.sh BOARD SRC DST 15 28               # the same pair in every pose
+    python3 whole_solve.py SOLVE.json                   # the whole-route plan: crossings and layer changes (BENCH/NETS/DEST)
+    bash whole_loop.sh SOLVE.json OUTDIR                # ... geometry, polish, snap, audit: OUTDIR/plan.json
 
 Run everything under the chain's own environment, `PLAN_PAGES=1
 PLAN_JUDGE=count PLAN_JUDGE_LEN=lane`. (We have no idea what `awx`
@@ -144,6 +146,17 @@ each general:
   (via at the ball, track to the pad), not built. A bench rebuilt with it
   loses `SZQ` from the K51 ladder, which is right: it is not a bus net.
 
+**The whole-route plan** (2026-09-24, below). On the human's ends at K51
+(48 lanes, three of them pairs) a plan that decides every lane's whole path
+before anything is routed -- crossings, layer changes, geometry, octilinear
+on the router's grid -- passes the plan audit on every check: 36 layer
+changes where the human's copper has 41 between the same ends. It is a plan:
+nothing has been routed on it yet. The braid planner changes it was made on
+(berth rows, the rings' order and dips, directional pair floors, leg costs)
+are in `braid.py` and change the braid's default routing; the tables above
+predate them, and were run with the portfolio chain
+(`CHAIN_FANOUT_AB=1 CHAIN_BRAID_AB=1`), which is no longer the default.
+
 ## The pack (`pack_board.py`, opt-in)
 
 A braided board's lanes are the router's staircases: legal, graded the
@@ -239,11 +252,15 @@ result back, so any of the four poses is the same computation.
 two crossing-free chains, a swimmer priced at 100) and realises the plan
 with the production fanout engine in a realise-and-confirm loop (a move
 the engine did not lay as asked leaves the menu and the round re-plans).
-Two fanout arms (`SRC_REFAN_JOINT` 0 and 1) and two braid arms per fanout
-board (the sidecar's pages-first marker on and off) give four routed
-boards; `pick_braid` keeps the best by (open, vias). Deduplicated by
-copper, all four are the population's seeds -- the K51 record's lineage
-began in an arm with two nets open.
+By default the chain is one fanout and one braid. The PORTFOLIO
+(`CHAIN_FANOUT_AB=1 CHAIN_BRAID_AB=1`, the one to run before a number is
+recorded, and the one every table here used) makes two fanout arms
+(`SRC_REFAN_JOINT` 0 and 1) and two braid arms per fanout board (the
+sidecar's pages-first marker on and off): four routed boards, and
+`pick_braid` keeps the best by (open, vias). Deduplicated by copper, all
+four are the population's seeds -- the K51 record's lineage began in an arm
+with two nets open. `modal_k.py` runs the chain as its arm's environment
+says: an arm that should match these numbers sets both flags.
 
 **The braid** (`braid.py`) routes a fanout board: corridors from the
 geometry (`corridor.py`), a relaxed spine per corridor, launch and target
@@ -751,10 +768,103 @@ it route, each rule general:
   part of its end, not a stop on the way (`pairs.wired`: the human's R1
   sits inside SCK's berth stub).
 
-`plan_audit.py` checks a plan against these rules before anything is
-routed (reservation pitch, via sites, bands), and `one_net.py` routes
-chosen lanes one at a time in their bands, with renders and the router's
-frontiers on a refusal.
+`plan_audit.py` checks a plan against the router's own rules before
+anything is routed: reservation pitch (track + clearance, plus half a grid
+step for each piece off the router's grid, which lands up to half a step
+from its line), via sites (a pair's dive as its two barrels), clearance to
+other nets' static copper, shape (folds and notches, a turn also measured
+at the lane's own scale), bands and swimmers. `one_net.py` routes chosen
+lanes one at a time in their bands, with renders and the router's frontiers
+on a refusal.
+
+## The whole-route plan (`whole_*.py`)
+
+The braid plans a corridor's lanes stage by stage -- launch order, pages,
+exits, rings -- and learns at the last call what the plan could not fit.
+The whole-route plan decides every lane's whole path first -- crossings,
+layer changes and geometry together -- checks it against the router's own
+rules, and only then hands it on.
+
+    NETS=$(python3 coherent_nets.py 51 --board=fb_t2q_pairs.kicad_pcb)
+    python3 human_ends_bench.py HUMAN.kicad_pcb tmp/hp/HHe_k51.kicad_pcb "$NETS" \
+        --others bench:fb_t2q_pairs.kicad_pcb --ladder fb_t2q_pairs.ladder.txt --sidecar --marker
+    export BENCH=tmp/hp/HHe_k51.kicad_pcb NETS DEST=DU1   # the bench every whole_* tool reads (whole_ctx.py)
+    python3 whole_solve.py SOLVE.json                  # crossings and layer changes
+    bash whole_loop.sh SOLVE.json OUTDIR               # geometry -> polish -> audit -> snap -> audit
+    python3 whole_render.py OUTDIR/plan.json OUT.png   # look at it (AUDIT=FILE marks the audit's findings)
+
+- **The solve** (`whole_solve.py`, CP-SAT). Every lane's route is one
+  coordinate: the trunk from its tooth, then its ring round the destination
+  (the pad box unrolled from a cut between the branches) to its berth. Every
+  pair whose launch and berth orders disagree crosses once; the braid rule
+  holds over every triple; a lane's crossings keep a pitch along a stayer
+  and less along a mover's sweep; up to four layer changes per lane, each a
+  via's room from its own crossings and a via from the next lane's; crossing
+  lanes on different layers. Vias first, then congestion (the copper packed
+  crossings and vias add, priced by how full that stretch of route already
+  is). Bounded in work, not time: a count of CP-SAT's interleaved
+  batches, the workers sharing no clauses (`WHOLE_SOLVE_BATCHES`) -- bounded
+  by deterministic time, or sharing clauses, one model gave a different
+  answer on every run.
+- **The geometry** (`whole_geo.py`). One joint LP over the trunk and both
+  rings, columns four grid steps apart: each lane's offset per column in the
+  solve's order on its solved layers, same-layer neighbours a bar apart
+  (slope-corrected), a via's room round every change, inside the board and
+  off the pad boxes. A second pass holds each lane to one side of every piece
+  of static copper near it: one split per island and layer, in the lane
+  order, pinned by the lanes' own ends. What it had to pay becomes CUTS for
+  the solve.
+- **The polish** (`whole_polish.py`). The audit's own measures -- pitch, via
+  rooms, static clearance, turns -- met in board xy by small vertex moves,
+  one LP per round, each bar the snap's plus a grid step, so every gap the
+  snap later splits holds a grid row. The audit's own shape findings (a
+  fold at a vertex or at the lane's scale, a notch) are straightened before
+  the rounds and after them, and the rounds run again. A pair is priced at its legs' reach at
+  a 45-degree corner plus the half step its off-grid legs and barrels take,
+  and its end stretch -- the pair router's own first setback from its tips
+  -- is laid straight within 45 degrees of its stub and held (a pair turns
+  no more at a time). A single's last track and clearance at either end
+  stays inside the arc of router directions that each keep within 90
+  degrees of its stub -- the moves the snap may make there -- so its grid
+  path cannot fold where lane and stub meet. A
+  lane held off an island's side -- no room for its clearance, or no
+  approach to its stub -- is FLIPPED, and the geometry runs again with the
+  flip before anything is snapped.
+- **The snap** (`whole_snap.py`). The smooth plan made octilinear on the
+  router's grid, one lane at a time, pairs first: a grid search in a band
+  round each lane's smooth line (length, bends, distance from the line),
+  hard clearance at the audit's bars to static copper and to every lane
+  already placed (a pair as its two mitred legs), vias at grid points that
+  clear (a pair's dive as its two barrels across the way it arrives). A
+  lane not yet placed keeps its SHARE of every gap -- the side of the
+  midline nearer its own smooth line, less half a bar, for its track and
+  for its via -- so the lanes laid first cannot take the room the later ones
+  need. An off-grid tooth or berth joins the nearest grid point whose join
+  folds neither against the stub nor against the lane, a row off where the
+  nearest would crowd a neighbouring terminal, and every move within a track
+  width of an end runs within 90 degrees of its stub. A lane that cannot
+  arrive so is laid without that rule and named, and the gate fails it. Two
+  sweeps then lay every lane again against the others' real copper, which
+  turns the staircases the shares force into clean jogs.
+- **The audit and the gate.** `whole_audit.py` installs a plan into the
+  planned corridor -- reservations, via sites, bands, search windows -- and
+  runs every `plan_audit.py` check. `whole_gate.py` passes a plan only when
+  it is COMPLETE (every corridor member laid) and clean on every check, the
+  fanout's own too-close teeth named, never waived. `whole_lint.py` checks
+  what the snap promises: grid points, 0/45/90 pieces, continuity, no
+  reversal, a via at every layer change.
+
+On the human's ends (`HHe`, K51) the snapped plan passes: pitch, dives,
+static, shape, bands and swim all clean, 48 of 48 lanes, 36 layer changes
+against the human's 41 between the same ends. The only pitch findings are
+two pairs of the human's teeth standing 0.254 mm apart, under the 0.257 bar
+for two off-grid pieces -- the fanout's copper. From the human's board,
+by the commands above: the bench, the solve (about four minutes), then
+`whole_loop.sh` in two rounds (about ten more) -- the first polish flips
+SCAS to the far side of C6 (on the near side it could only descend into
+its berth, folding against the stub), the second smooth plan passes, and
+the snap lays all 48 lanes with the lint clean. Every step writes the same
+bytes on every run, under any Python hash seed.
 
 ## The chain's other pieces
 
@@ -932,7 +1042,9 @@ is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 | `pack.py`, `pack_board.py` | the pack: every lane of a finished board a taut string, vias fixed (opt-in) |
 | `ship_vias.py` | a via the chain lays in a pad declares IPC-4761 Type VII, as the route step does (#962) |
 | `human_ends_bench.py` | a bench on a human's ends: their teeth and berths clipped from their board, with the plan sidecar |
-| `plan_audit.py`, `one_net.py` | a plan checked before routing (reservation pitch, via sites, bands, what is reserved near a point); chosen lanes routed one at a time in band, with renders and a refused search's frontiers |
+| `plan_audit.py`, `one_net.py` | a plan checked before routing (reservation pitch, via sites, static clearance, shape, bands, swimmers, what is reserved near a point); chosen lanes routed one at a time in band, with renders and a refused search's frontiers |
+| `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py`, `whole_loop.sh` | the whole-route plan: the crossing and layer solve, the geometry LP, the polish, the snap onto the router's grid, the loop that drives them |
+| `whole_audit.py`, `whole_gate.py`, `whole_lint.py`, `whole_render.py`, `whole_ctx.py` | a whole-route plan installed and audited, gated (complete and clean), linted, drawn; the bench they share |
 | `wall_probe.py`, `pinch_gate.py`, `judge_gate.py`, `floor_survey.py`, `ledger_cal.py`, `cut_ledger.py`, `rule_table.py`, `solve_curve.py`, `modal_curve.py` | probes and gates: a lane's walls, the braid's refusals, the plan judge, the floor per net, a corridor's cut, the length rule over arms, the CP-SAT's convergence |
 | `modal_k.py`, `arms.example.json`, `arms.rec51.json` | cloud arms, one container per (arm, K); `return_board`, `return_files` bring artifacts back |
 
@@ -1081,6 +1193,32 @@ prefers a surface berth two faces away to a dogbone into the band.
 Ordered, highest value first. An item leaves this list when it is done or
 abandoned with a measurement. Untried ideas live here and nowhere else.
 
+First, the whole-route plan (`whole_*.py`):
+
+- **Route the whole-route plan.** It passes the audit; nothing has been
+  routed on it. The pairs one at a time first (`one_net.py`, post-passes
+  off), then the singles in their bands, then a braid on the plan.
+  `whole_audit.py` installs the plan's reservations, via sites and bands
+  for the audit; the widths it installs them at have not yet been
+  exercised by the router.
+
+- **The teeth where the bar holds.** Two pairs of the human's teeth
+  (SDQ15/SDQ13, SDQ0/SDQ2) stand 0.254 apart, under the 0.257 two
+  off-grid pieces keep; the gate names them. Our own fanout should lay
+  its teeth where the plan's bar holds.
+
+- **Calibrate `WHOLE_SOLVE_BATCHES`.** The default (100 batches, about
+  four minutes on four workers) reaches 36 layer changes on the bench, the
+  objective within 0.03% of its bound; what less buys, and what more, is
+  unmeasured.
+
+- **The ladder after the braid planner changes.** The tables above
+  predate the berth rows, the rings' order and dips, the directional pair
+  floors and the leg costs now in `braid.py`: the ladder again, with the
+  portfolio chain.
+
+Then:
+
 1. **One placement of every layer change** (`place_dives`). A lane's
    layer changes are placed by separate rules one after another -- the
    exit corner, the split leg, a swimmer's diamonds -- each against what
@@ -1154,3 +1292,10 @@ abandoned with a measurement. Untried ideas live here and nowhere else.
 14. **Unverified review findings**: `dedupe_boards` fingerprints copper
     but not the sidecar; `blockers_of` double-counts half a track;
     `flip_frame` does not mirror `pad.polygons`.
+
+15. **The pages-first solve may not be reproducible.** `pages_first.py`
+    bounds CP-SAT by deterministic time with four workers sharing clauses.
+    On the whole-route model (OR-tools 9.15) those settings gave a
+    different answer on every run, alone or under load; a batch count with
+    clause sharing off gave identical answers. Not yet measured on the
+    pages-first model.

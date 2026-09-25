@@ -68,17 +68,17 @@ for K in "$@"; do
     if [ ! -f "$RUNBASE" ]; then echo "  FLOW FRAME: turn failed"; continue; fi
     echo "  flow frame: $FK quarter turn(s) about ($FCX, $FCY) -> $(basename "$RUNBASE")"
   fi
-  # CHAIN_FANOUT_AB / CHAIN_BRAID_AB are ON BY DEFAULT since 2026-09-16.
-  # THE GATE THEY PASSED, which is the one this file's own note asked for:
-  # `synth_ladder --batch b1`, 23 planted-optimum cases, control against
-  # both flags -- better on 5, WORSE ON 0, identical on 18; 331 -> 319
-  # total vias at unchanged completion (2 open either way). On the bench
-  # ladder: 34 / 60 / 74 / 98 against jcl's 34 / 60 / 80 / 115, better on
-  # two rungs and worse on none. It cannot regress by construction -- it
-  # routes what the chain already produces and keeps the better by
-  # (open, vias) -- so the ONLY case against it is TIME: K51 goes ~3 min
-  # to ~8 (two fanouts, four braids), K28/K41 about 2x (the dedupe drops
-  # the duplicate fanout). Set either to 0 for the single-shot chain.
+  # CHAIN_FANOUT_AB / CHAIN_BRAID_AB are OFF BY DEFAULT: the chain is ONE
+  # fanout (SRC_REFAN_JOINT as exported, default 0) and ONE braid (the
+  # sidecar as written). CHAIN_FANOUT_AB=1 turns on the PORTFOLIO: both
+  # fanouts, each braided both ways, the better kept by (open, vias). It
+  # cannot regress by construction -- it routes what the chain already
+  # produces and keeps the better -- and its gate (`synth_ladder --batch
+  # b1`, 23 planted-optimum cases: better on 5, worse on 0, 331 -> 319
+  # vias; the bench ladder 34 / 60 / 74 / 98 against 34 / 60 / 80 / 115)
+  # stands; the case against it is TIME, K51 ~3 min -> ~8+ (two fanouts,
+  # four braids). The single shot is the working chain; the portfolio is
+  # the one to run before a number is recorded.
   # CHAIN_FANOUT_AB=1 (2026-09-15, session 13): plan and fan out BOTH ways
   # -- with and without the JOINT SOURCE RE-FAN (SRC_REFAN_JOINT) -- and
   # carry every DISTINCT board into the braid portfolio below. The joint
@@ -89,7 +89,7 @@ for K in "$@"; do
   # worse, and at K28/K41 it is inert -- the boards are copper-IDENTICAL, so
   # the identity check below costs the extra braids nothing there.
   FOS=""
-  if [ "${CHAIN_FANOUT_AB:-1}" != "0" ]; then
+  if [ "${CHAIN_FANOUT_AB:-0}" != "0" ]; then
     # NOTE: the loop below OWNS SRC_REFAN_JOINT -- `SRC_REFAN_JOINT=$J` is a
     # command-prefix assignment and overrides whatever the caller exported.
     # That is correct (the portfolio's whole point is to try both and keep
@@ -155,7 +155,7 @@ for K in "$@"; do
   # board-specific hack. Routing both and keeping the better is general, it
   # cannot regress, and it costs one braid. The verdict is (open, vias):
   # completion first, as every grade in this chain is.
-  if [ "${CHAIN_BRAID_AB:-1}" != "0" ]; then
+  if [ "${CHAIN_BRAID_AB:-0}" != "0" ]; then
     # ONE AT A TIME: two braids in parallel is the thing this box cannot do
     # (8 GB), and a concurrent run is also how a deterministic stage stops
     # being one. Each candidate is named after the fanout board it came

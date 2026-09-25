@@ -999,7 +999,7 @@ def octo_hull(pts: Sequence[Pt], margin: float) -> List[Pt]:
 def build_wrap_spine(dest_pts: Sequence[Pt], stubs: Sequence[Pt],
                      teeth: Sequence[Pt], ccw: bool, arrive: Pt,
                      margin: float, reach_deg: float = 8.0,
-                     per_edge: int = 40) -> Spine:
+                     per_edge: int = 40, hull_extra: Sequence[Pt] = ()) -> Spine:
     """A WRAP corridor's spine: the bundle comes in from its teeth, meets
     the destination array at the corner where the face the incoming
     bundle meets ends (the straight corridor's face), and runs round the
@@ -1008,8 +1008,10 @@ def build_wrap_spine(dest_pts: Sequence[Pt], stubs: Sequence[Pt],
     round the array's centre increasing) to just past the farthest stub,
     so every stub lies on the spine's inner side and the lanes peel off
     in arc order, innermost first, as a human's ring does. `arrive` is
-    the incoming bundle's direction at the array."""
-    V = octo_hull(list(dest_pts) + list(stubs), margin)
+    the incoming bundle's direction at the array. `hull_extra`: more copper
+    the ring must pass outside (the trunk's head-on lanes on their way to
+    their berths), in the hull only."""
+    V = octo_hull(list(dest_pts) + list(stubs) + list(hull_extra), margin)
     cen = (sum(p[0] for p in dest_pts) / len(dest_pts),
            sum(p[1] for p in dest_pts) / len(dest_pts))
     Ct = (sum(p[0] for p in teeth) / len(teeth), sum(p[1] for p in teeth) / len(teeth))

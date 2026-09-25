@@ -58,6 +58,57 @@ def pitch(track: float = None) -> float:
     return (_rules.TRACK if track is None else track) + GAP
 
 
+def approach_setback(tips, track: float, grid: float) -> float:
+    """How far from its two tips a pair's centreline pose stands when the pair router launches from them
+    (diff_pair_routing: 4 x the leg spacing, never under its floor -- twice the spacing, or the taper from the tips'
+    half-gap to the spacing at 45 degrees plus a grid step). A plan lays that stretch straight, so the pose lies on it."""
+    (p, q) = tips
+    spacing = pitch(track) / 2
+    gap_half = math.hypot(p[0] - q[0], p[1] - q[1]) / 2
+    return max(4 * spacing, 2 * spacing, abs(gap_half - spacing) + grid)
+
+
+def envelope_via_half(cfg, half: float) -> float:
+    """How far each barrel stands from the centreline at a dive the ENVELOPE
+    lays (connect.py: the crossover and the routed end connectors): half a
+    via pitch, or wider so a leg leaving the dive at 45 degrees clears the
+    partner barrel."""
+    via_r = cfg.via_size / 2.0
+    return max((cfg.via_size + cfg.clearance) / 2.0,
+               (via_r + cfg.clearance + cfg.track_width / 2.0 - half) / 0.7071 + 0.005)
+
+
+def dive_offset(cfg, half: float) -> float:
+    """How far each of a pair's two barrels stands from the centreline at a
+    planned dive: the wider of the two pair routers' offsets -- the production
+    router's (diff_pair_routing._pair_via_offset) and the envelope's -- since
+    either may lay it."""
+    from diff_pair_routing import _pair_via_offset
+    return max(_pair_via_offset(cfg, half), envelope_via_half(cfg, half))
+
+
+def dive_barrels(site: Pt, centreline, off: float) -> List[Pt]:
+    """The two barrels of a pair's dive at `site`: `off` either side of the
+    centreline, across the direction the lane ARRIVES in (the piece of
+    `centreline` [(p, q, layer)] that ends at the site; else the one leaving
+    it; else the nearest) -- where both pair routers stand them."""
+    best = None
+    for (p, q, _L) in centreline:
+        if math.hypot(q[0] - p[0], q[1] - p[1]) < 1e-6:
+            continue
+        rank = (0 if math.hypot(q[0] - site[0], q[1] - site[1]) < 1e-3 else
+                1 if math.hypot(p[0] - site[0], p[1] - site[1]) < 1e-3 else 2)
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        t = max(0.0, min(1.0, ((site[0] - p[0]) * dx + (site[1] - p[1]) * dy) / (dx * dx + dy * dy)))
+        key = (rank, math.hypot(p[0] + t * dx - site[0], p[1] + t * dy - site[1]))
+        if best is None or key < best[0]:
+            best = (key, p, q)
+    if best is None:
+        return [site]
+    n = _left(_unit(best[1], best[2]))
+    return [(site[0] + n[0] * off, site[1] + n[1] * off), (site[0] - n[0] * off, site[1] - n[1] * off)]
+
+
 def pair_names(names: Sequence[str], admit_all: bool = False) -> Dict[str, Tuple[str, str]]:
     """{base: (P name, N name)} over the given net names, by suffix.
     BRAID_PAIR_ONLY narrows it to the named pairs unless admit_all."""
