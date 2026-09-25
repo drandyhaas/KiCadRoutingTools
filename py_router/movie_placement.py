@@ -304,7 +304,7 @@ def _ledger_match(sha, rows):
     return None, int(r0.get('iteration', i0)), _row_t(r0)
 
 
-def is_placement_board(path, prev_path=None, moved=None):
+def is_placement_board(path):
     """A board is a placement beat when it carries NO COPPER -- the boards of
     the placement half, the ones #1042's table measures. A routed board whose
     parts moved (a clearance nudge) is a routing step: its legality is read
@@ -1230,13 +1230,3 @@ def status_line(track, why, plan=None):
             % (len(track.beats), b, len(track.flags), x,
                track.floorplan_source or 'nothing (unmeasured)', p,
                ('; ' + '; '.join(track.notes)) if track.notes else ''))
-
-
-def placed_anything(track, steps):
-    """True when placement HAPPENED in this chain: at least two placement
-    beats, and some part moved between them. `build_track` already refuses
-    a chain that fails this -- before measuring -- so a track it returned
-    passes; kept for callers holding a track from elsewhere."""
-    if track is None or len(track.beats) < 2:
-        return False
-    return _poses_moved([b.board for b in track.beats])
