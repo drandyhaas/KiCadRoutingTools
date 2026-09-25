@@ -3243,7 +3243,8 @@ class LegalityContext:
 
     def keepout_amount(self, ref: str, x: float, y: float,
                        rot: float) -> float:
-        """This part's ILLEGAL keep-out reach at a pose (#1031), in mm."""
+        """This part's worst ILLEGAL keep-out pad reach at a pose (#1031), in
+        mm -- `RuleAreaKeepouts.part_amount`, the gates' own currency."""
         pp = self.parts.get(ref)
         if pp is None or self.keepouts is None:
             return 0.0
@@ -4576,11 +4577,19 @@ class RuleAreaKeepouts:
         return out
 
     def part_amount(self, ref: str, rects, delta: float = 0.0) -> float:
-        """Sum of the ILLEGAL amounts -- the search's currency."""
+        """The part's WORST illegal pad reach, in mm (0 when none).
+
+        The one per-part currency: `keepout_pad_findings` publishes it per
+        part in `oob_keepout_copper_refs` and sums it over parts into
+        `oob_keepout_copper_amount` (place_pose's magnitude arm), the
+        placement skill's `--before` gate compares it per part, and
+        `LegalityContext.keepout_ok` compares it with the seed's. A sum over
+        pads here would let the search accept a move that deepens one pad
+        while pulling another out, which those gates then refuse."""
         if not self.active:
             return 0.0
-        return sum(r[2] for r in self.part_rows(ref, rects, delta)
-                   if r[3] == 'illegal')
+        return max((r[2] for r in self.part_rows(ref, rects, delta)
+                    if r[3] == 'illegal'), default=0.0)
 
 
 def board_keepout_findings(pcb_data, clearance: float,
@@ -4607,8 +4616,8 @@ def keepout_pad_findings(keepouts: 'RuleAreaKeepouts',
     `RuleAreaKeepouts.part_amount`. `pose_of(ref) -> (x, y, rot)` or None.
 
     - `oob_keepout_copper_count/_amount/_refs`: parts with an ILLEGAL pad;
-      `_amount` sums each part's worst pad reach (mm), like
-      `oob_graphic_copper_amount`.
+      `_refs` carries each part's worst pad reach (mm, `part_amount`) and
+      `_amount` sums it over parts, like `oob_graphic_copper_amount`.
     - `keepout_copper_pads`: `[ref, pad, net, amount, area]` per illegal pad.
     - `keepout_copper_tht_refs`: through-hole pads in the band that stay
       reachable on an uncovered layer -- reported, not failed.

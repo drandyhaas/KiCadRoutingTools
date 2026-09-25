@@ -673,6 +673,93 @@ def main():
                   % (label, 'refused' if refused else 'passes'),
                   got == refused, o6[:200])
 
+        # 20 -- ONE per-part currency for the search and the gates: the
+        # part's WORST illegal pad. R7 (wide pad 1, narrow pad 2) is seeded
+        # upright with BOTH pads shallowly in the band; turned 180 and slid
+        # over, pad 1 leaves the band while pad 2 goes deeper than either
+        # seed pad did. A per-pad SUM falls there while the worst pad grows,
+        # so a search pricing the sum accepted a move place_pose and the
+        # --before gate refuse. The band edge sits at x = 2.05.
+        ko7 = KEEPOUT.replace('(xy 2 2) (xy 38 2) (xy 38 28) (xy 2 28)',
+                              '(xy 2.05 2) (xy 38 2) (xy 38 28) (xy 2.05 28)')
+
+        def _r7(x, rot):
+            return ('  (footprint "R:R_asym" (layer "F.Cu") (uuid "u9") '
+                    '(at %s 19 %s)\n'
+                    '    (property "Reference" "R7" (at 0 -1.2 0) '
+                    '(layer "F.SilkS"))\n'
+                    '    (fp_rect (start -1.5 -0.7) (end 1.5 0.7) (stroke '
+                    '(width 0.05) (type solid)) (fill none) (layer "F.CrtYd"))\n'
+                    # a pad's `at` angle is its ABSOLUTE orientation
+                    '    (pad "1" smd rect (at -0.8 0 %s) (size 0.8 0.9) '
+                    '(layers "F.Cu" "F.Mask" "F.Paste") (net 1 "/A"))\n'
+                    '    (pad "2" smd rect (at 0.8 0 %s) (size 0.4 0.9) '
+                    '(layers "F.Cu" "F.Mask" "F.Paste") (net 2 "/B")))\n'
+                    % (x, rot, rot, rot))
+
+        def _board7(name, x, rot):
+            return write_board(work, name, [ko7, _r7(x, rot),
+                                             _res('R2', 20, 15, 1, 2, 'u2')],
+                               keepout=False)
+        seed7, deeper7, out7 = (1.835, 90), (2.865, 180), (3.05, 180)
+        b7 = _board7('r7_seed', *seed7)
+        pcb7 = parse_kicad_pcb(b7)
+        parts7 = legality.build_part_pads(pcb7.footprints, 0.2)
+        k7 = legality.RuleAreaKeepouts.for_board(pcb7, 0.2, b7)
+        p7 = parts7['R7']
+
+        def _ill(x, rot):
+            return [r[2] for r in k7.part_rows('R7', p7.pad_rects(x, 19, rot),
+                                               p7._delta_key(rot))
+                    if r[3] == 'illegal']
+        s_ill, d_ill = _ill(*seed7), _ill(*deeper7)
+        check('20. the case is live: two seed pads in the band; the move '
+              'leaves one, deeper than the seed\'s worst, with a smaller sum',
+              len(s_ill) == 2 and len(d_ill) == 1
+              and max(d_ill) > max(s_ill) and sum(d_ill) < sum(s_ill),
+              str((s_ill, d_ill)))
+        ctx7 = legality.LegalityContext(
+            parts7, None, 0.2, pose_of=lambda r: (seed7[0], 19, seed7[1]),
+            seed_of=lambda r: (seed7[0], 19, seed7[1]), keepouts=k7)
+        check('20. the search prices the worst pad: keepout_amount == max',
+              abs(ctx7.keepout_amount('R7', seed7[0], 19, seed7[1])
+                  - max(s_ill)) < 1e-9)
+        posed7 = os.path.join(work, 'r7_posed.kicad_pcb')
+        run_check([sys.executable, '-X', 'utf8',
+                   os.path.join(ROOT, 'py_placer', 'place_pose.py'), b7,
+                   posed7, '--clearance', '0.2', 'set', 'R7',
+                   str(deeper7[0]), '19', '--rot', str(deeper7[1])],
+                  refuse='oob_keepout_copper_amount', code=4)
+        before7 = legality.board_keepout_findings(pcb7, 0.2, b7)[
+            'oob_keepout_copper_refs']
+        for label, pose, ok in (('deeper worst pad, smaller sum', deeper7,
+                                 False),
+                                ('out of the band', out7, True)):
+            bm = _board7('r7_%d' % int(ok), *pose)
+            after7 = legality.board_keepout_findings(
+                parse_kicad_pcb(bm), 0.2, bm)['oob_keepout_copper_refs']
+            rdoc6['checklist']['a_off_outline'] = {
+                'pad_copper': [], 'courtyard': [],
+                'keepout_copper': after7, 'keepout_copper_before': before7}
+            rj7 = os.path.join(ftmp, 'r_r7_%d.json' % int(ok))
+            with open(rj7, 'w', encoding='utf-8') as fh:
+                json.dump(rdoc6, fh)
+            a7 = pdrv._args(dargv + ['--waive', 'X:checked'])
+            a7.render_json = rj7
+            gate_ok = ('seat pads inside a rule-area KEEP-OUT band'
+                       not in pdrv.STAGES['P-close'](a7))
+            search_ok = ctx7.keepout_ok('R7', pose[0], 19, pose[1])
+            check('20. %s: the search and the --before gate agree (%s)'
+                  % (label, 'accept' if ok else 'refuse'),
+                  search_ok == gate_ok == ok,
+                  'search %s, gate %s' % (search_ok, gate_ok))
+        run_check([sys.executable, '-X', 'utf8',
+                   os.path.join(ROOT, 'py_placer', 'place_pose.py'), b7,
+                   posed7, '--clearance', '0.2', 'set', 'R7',
+                   str(out7[0]), '19', '--rot', str(out7[1])], accept=True)
+        check('20. ...and place_pose accepts the move out of the band',
+              os.path.exists(posed7))
+
         # 7 -- inert without a keep-out
         pcb0 = parse_kicad_pcb(clean)
         g0 = grade_pad_legality(pcb0, 0.2, pcb_file=clean)
