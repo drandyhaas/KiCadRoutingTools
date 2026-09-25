@@ -42,7 +42,10 @@ if _HERE not in sys.path:
 DEFAULT_SIZE = 1000
 DEFAULT_FPS = 6.0
 DEFAULT_SUPERSAMPLE = 1
-DEFAULT_LAYER_ALPHA = 150
+#: None = the THEME's measured alpha (dark 150, light 205). A number here
+#: overrode it for every film, so LIGHT's 205 -- measured by
+#: `palette_audit` for a light ground -- was never used (#946/C4).
+DEFAULT_LAYER_ALPHA = None
 DEFAULT_RIP_HOLD = 2
 DEFAULT_CHUNKS = 6
 DEFAULT_END_HOLD = 1.5
@@ -100,6 +103,88 @@ def placement_chain(work_dir):
     return steps, steps[-1][1]
 
 
+#: The film's frame budget when neither the caller nor $KICAD_MOVIE_MAX_FRAMES
+#: names one -- the env knob's own default (`env_knobs.MOVIE_MAX_FRAMES`).
+DEFAULT_MAX_FRAMES = 2400
+
+
+def resolve_max_frames(max_frames=None):
+    """The film's frame budget, resolved ONE way for every front end.
+
+    An explicit value wins (0 = no budget); else `$KICAD_MOVIE_MAX_FRAMES`;
+    else `DEFAULT_MAX_FRAMES`. `make_movie` and `make_film` both call this,
+    so the two cannot drift: `make_film` used to hand `None` straight to
+    `build_boards`, which reads it as "no budget", so its documented default
+    and the env knob were both no-ops on films.
+    """
+    if max_frames is not None:
+        return max(0, int(max_frames))
+    try:
+        import env_knobs
+        return max(0, int(getattr(env_knobs, 'MOVIE_MAX_FRAMES',
+                                  DEFAULT_MAX_FRAMES)))
+    except Exception:                                           # noqa: BLE001
+        return DEFAULT_MAX_FRAMES
+
+
+def spool_budget(spool, steps, size, max_frames, rip_hold, who='make_movie'):
+    """The frame budget to render with, after checking the spool's DISK.
+
+    #1036: the spool trades RAM for disk (~1.27 MB per 1400 px frame, so
+    ~7.6 GB for 6000 frames). The film is estimated before it is drawn -- the
+    budget when there is one, else the traces' own frame estimates -- and
+    when the spool's disk cannot hold it that is said LOUDLY; an UNBUDGETED
+    film then falls back to the default budget rather than filling the disk.
+    Shared by `make_movie` and `make_film`.
+    """
+    try:
+        import animate_route as _a
+        import frame_spool as _fsp
+        est = (max_frames if max_frames else
+               sum(_a.trace_frame_estimate(_a.load_trace(s[2]), rip_hold)
+                   for s in steps if len(s) > 2 and s[2]
+                   and os.path.isfile(s[2])) + 50 * len(steps))
+        px = int(size) * int(size) * 0.6          # ~a 16:10 frame at `size`
+        fits, need, free = _fsp.disk_check(spool.dir, est, px)
+        if not fits:
+            print('%s: SPOOL DISK -- ~%d frames need ~%.1f GB, %s has %.1f GB '
+                  'free' % (who, est, need / 1e9, spool.dir,
+                            (free or 0) / 1e9), file=sys.stderr)
+            if not max_frames:
+                max_frames = resolve_max_frames(None) or DEFAULT_MAX_FRAMES
+                print('%s: falling back to a %d-frame budget so the spool '
+                      'fits' % (who, max_frames), file=sys.stderr)
+    except Exception:                                           # noqa: BLE001
+        pass
+    return max_frames
+
+
+def leading_copper_free(steps):
+    """How many boards at the head of the chain carry no copper at all.
+
+    Read off the file TEXT (a `(segment`, `(arc` or `(via` token), not a
+    parse: it is asked on every film without a camera, and a parse of a large
+    board costs seconds to answer a yes/no question.
+    """
+    import re
+    # TOP-LEVEL tokens only (#1036 review): `(arc` also appears inside a
+    # zone's or a gr_poly's `(pts ...)`. A board item sits one indent deep --
+    # a tab (KiCad 8+) or two spaces (older) -- and those are deeper.
+    copper = re.compile(r'^(?:\t| {2})\((?:segment|arc|via)[\s)]',
+                        re.MULTILINE)
+    n = 0
+    for st in steps:
+        try:
+            with open(st[1], encoding='utf-8', errors='replace') as f:
+                txt = f.read()
+        except OSError:
+            break
+        if copper.search(txt):
+            break
+        n += 1
+    return n
+
+
 def default_output(inputs):
     """Where the movie lands when no -o is given: inside a run dir, else next to
     the last board."""
@@ -155,13 +240,49 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
                camera=None, camera_budget=60.0, tween=10,
                panels=None, iso_opts=None, timing=None, theme=None,
-               layout=None, aspect=None, attempts=None):
+               layout=None, aspect=None, attempts=None, max_frames=None,
+               title=None, attempts_ledger=None, benchmark_board=None,
+               floorplan_intent=None, placement_panel=None):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
     ``.mp4`` was asked for and imageio-ffmpeg is unavailable -- or None when
     there was nothing to animate.
+
+    Frames are SPOOLED to disk as they are drawn (#1036,
+    `frame_spool.FrameSpool`) and every post-pass -- the planned frame, the
+    attempts band, the run clock, the iso panel -- is a per-frame transform
+    applied while the encoder streams, so an .mp4's memory does not grow
+    with the frame count (a .gif's grows up to `animate_route.GIF_MAX_FRAMES`
+    frames, which Pillow's writer holds). ``max_frames`` is the film's frame budget (None = $KICAD_MOVIE_MAX_FRAMES,
+    default 2400; 0 = none): a route trace that does not fit its share falls
+    back to the chunked reveal, loudly.
     """
+    import frame_spool
+    spool = frame_spool.FrameSpool()
+    try:
+        return _make_movie(
+            inputs, out=out, size=size, fps=fps, supersample=supersample,
+            layer_alpha=layer_alpha, rip_hold=rip_hold, chunks=chunks,
+            end_hold=end_hold, png_dir=png_dir, quiet=quiet, camera=camera,
+            camera_budget=camera_budget, tween=tween, panels=panels,
+            iso_opts=iso_opts, timing=timing, theme=theme, layout=layout,
+            aspect=aspect, attempts=attempts, max_frames=max_frames,
+            title=title, attempts_ledger=attempts_ledger,
+            benchmark_board=benchmark_board,
+            floorplan_intent=floorplan_intent,
+            placement_panel=placement_panel,
+            spool=spool)
+    finally:
+        spool.close()
+
+
+def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
+                chunks, end_hold, png_dir, quiet, camera, camera_budget, tween,
+                panels, iso_opts, timing, theme, layout, aspect, attempts,
+                max_frames, spool, title=None, attempts_ledger=None,
+                benchmark_board=None, floorplan_intent=None,
+                placement_panel=None):
     import animate_route as a
     if isinstance(inputs, str):
         inputs = [inputs]
@@ -172,18 +293,57 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         if not quiet:
             print(f"make_movie: no boards found in {inputs[0]}", file=sys.stderr)
         return None
+    # THE THEME, RESOLVED ONCE (#1036 review). Passed down as a NAME, every
+    # region resolved it again -- and an invalid $KICAD_RENDER_THEME warned
+    # once per FRAME from the clock band and once per shot from the iso
+    # panel. A name given in code still refuses (strict); the environment's
+    # warns, here, once.
+    import render_theme as _rt
+    theme = (_rt.theme(theme) if theme is not None
+             else _rt.default_theme())
+    if iso_opts is not None:
+        # a COPY: the caller's IsoOpts is theirs, and filling in its theme
+        # here leaked this film's theme into their next call
+        import copy as _copy
+        iso_opts = _copy.copy(iso_opts)
     # #431: the camera is OPT-IN. camera=None falls back to the env knob, so
     # one variable turns it on for the GUI recorder, run_plan.py --movie and the
     # stress renderer at once -- and OFF is the default everywhere, because
     # every GUI movie is a routing movie and changing those is pure regression
     # risk for no user-visible win.
     stage = None
+    # #1036: whether anyone SAID 'off'. The default is still off for a chain
+    # whose boards only differ in copper -- every GUI movie -- but a chain
+    # whose parts MOVE between boards is a placement film, and rendering it
+    # without the camera silently dropped every copper-free placement board
+    # (run 32: boards 01-07 of 22 contributed no frames). So an UNSTATED
+    # camera switches to 'auto' exactly when the boards themselves show a pose
+    # change; an explicit `--camera off` or $KICAD_MOVIE_CAMERA is obeyed.
+    camera_explicit = (camera is not None
+                       or bool(os.environ.get('KICAD_MOVIE_CAMERA')))
     if camera is None:
         try:
             import env_knobs
             camera = getattr(env_knobs, 'MOVIE_CAMERA', 'off')
         except Exception:
             camera = 'off'
+    _synth = None
+    _is_dir = len(inputs) == 1 and os.path.isdir(inputs[0])
+    if (str(camera).lower() in ('off', '', 'none', '0')
+            and not camera_explicit and len(steps) > 1):
+        try:
+            from movie_camera import synth_rounds
+            _synth = synth_rounds([s[1] for s in steps])
+        except Exception:                                       # noqa: BLE001
+            _synth = None
+        if _synth and any(rd['moved'] for rd in _synth):
+            camera = 'auto'
+            # PRINTED EVEN WHEN QUIET: the film changed shape because of what
+            # was on disk, and the only way to learn that is this line.
+            print('make_movie: %d of %d boards move parts -- camera auto, so '
+                  'the placement glides in before the routing (#1036); pass '
+                  '--camera off for a copper-only film'
+                  % (len(_synth), len(steps)), file=sys.stderr)
     if str(camera).lower() not in ('off', '', 'none', '0'):
         rounds = []
         if len(inputs) == 1 and os.path.isdir(inputs[0]):
@@ -202,7 +362,8 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             # diff them and the camera has everything it needs.
             try:
                 from movie_camera import synth_rounds
-                rounds = synth_rounds([s[1] for s in steps])
+                rounds = (_synth if _synth is not None
+                          else synth_rounds([s[1] for s in steps]))
                 if not any(rd['moved'] for rd in rounds):
                     rounds = []      # pure routing chain: nothing to tween
                 elif not quiet:
@@ -219,6 +380,16 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             from movie_camera import Stage
             stage = Stage(rounds, work_dir, fps=fps,
                           budget=camera_budget, tween=tween, quiet=quiet)
+    if stage is None and not _is_dir:
+        # #1036, the other half: without a stage a board that carries no copper
+        # draws nothing, so a chain that OPENS with placement boards opens on
+        # the first routed one and never says why. Say so, and name the lever.
+        _lead = leading_copper_free(steps)
+        if _lead and _lead < len(steps):
+            print('make_movie: %d leading copper-free board(s) skipped -- they '
+                  'change no copper, so a film without the camera shows '
+                  'nothing for them; use --camera auto (or make_film) to film '
+                  'the placement' % _lead, file=sys.stderr)
     # #887: the second panel is OPT-IN, exactly like the camera above, and for
     # the same reason -- one variable turns it on for the GUI recorder,
     # run_plan.py --movie and the stress renderer at once. `marks` is asked for
@@ -269,22 +440,19 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
     layout, aspect = frame_layout.resolve_layout_aspect(layout, aspect)
     # The run directory's own name is the closest thing a multi-step chain has
     # to a board name, and it is what the rail's stable left should carry.
-    _title = (os.path.basename(os.path.abspath(inputs[0]))
-              if len(inputs) == 1 and os.path.isdir(inputs[0]) else None)
-    frames = a.build_boards(steps, final, size, supersample, layer_alpha,
-                            rip_hold, chunks, stage=stage, marks=marks,
-                            theme=theme, layout=layout, aspect=aspect,
-                            geom_out=geom_out, title=_title)
-    if not frames:
-        if not quiet:
-            print("make_movie: no frames (nothing routed?)", file=sys.stderr)
-        return None
-    # #1021. THE ATTEMPTS BAND, before the clock and before the iso panel:
-    # composition order is board -> attempts -> clock -> iso, so the band sits
-    # adjacent to the board it annotates and the iso panel still stacks last.
-    #
-    # Imported HERE, like movie_panels below, so the GUI recorder and the
-    # in-process callers do not pay for a feature they did not ask for.
+    # `title` (--title) wins; else the run directory; else `board_title`
+    # derives one that is never a LATER board's name (#1036 review).
+    _title = title or (os.path.basename(os.path.abspath(inputs[0]))
+                       if len(inputs) == 1 and os.path.isdir(inputs[0])
+                       else None)
+    max_frames = resolve_max_frames(max_frames)
+    max_frames = spool_budget(spool, steps, size, max_frames, rip_hold,
+                              who='make_movie')
+    # #946/C4: THE ATTEMPTS ARE FOUND BEFORE THE FRAME IS PLANNED, so the
+    # band is RESERVED in the layout (`plan_frame(track_px=)`) instead of
+    # grown under every frame afterwards -- which is what made a declared
+    # `--aspect 16:9` film come out taller than 16:9.
+    _track = None
     try:
         import movie_attempts
         # `False` is the OFF arm (`--no-attempts`); `None` means "look", which
@@ -295,11 +463,112 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             _track = None
         elif attempts is not None:
             _track = attempts
+        elif attempts_ledger:
+            # #1042: a ledger named on the command line, for a film rendered
+            # from copies away from the run's work dir (`discover` only looks
+            # beside the boards, and run 32 had to render from copies).
+            _track = movie_attempts.attempts_from_converge_ledger(
+                attempts_ledger)
         else:
             _track = movie_attempts.discover(
                 os.path.dirname(os.path.abspath(final)))
-        frames, _arep = movie_attempts.attach(frames, _track, theme=theme,
-                                              marks=marks)
+    except Exception as exc:                                    # noqa: BLE001
+        if not quiet:
+            print('make_movie: no attempts band (%s)' % exc, file=sys.stderr)
+        _track = None
+    # The band is reserved only when there is a graph to draw in it: one
+    # attempt is a single point under a flat staircase, which `attach`
+    # declines -- and a reserved band left empty is a stripe of nothing.
+    _verdict = bool(_track is not None and len(_track.attempts) >= 2)
+    # #1042: THE PLACEMENT PANELS, in placement currency, beside the verdict
+    # band and never on its axis. Measured on the film's own placement boards
+    # (render_placement's functions IN PROCESS, ~3 s each, cached per board
+    # sha) BEFORE the frame is planned, so their region is reserved like the
+    # band's. `build_track` runs its cheap gates first -- two copper-free
+    # boards and a part that moved -- so a routing chain measures nothing.
+    _ptrack, _pwhy, _pfn = None, 'off (--no-placement-panel)', None
+    if placement_panel is not False:
+        try:
+            import movie_placement
+            _pled = attempts_ledger
+            if not _pled:
+                _cand = os.path.join(os.path.dirname(os.path.abspath(final)),
+                                     'ledger.jsonl')
+                _pled = _cand if os.path.isfile(_cand) else None
+            _ptrack, _pwhy = movie_placement.build_track(
+                steps, [], ledger=_pled, benchmark=benchmark_board,
+                intent=floorplan_intent, quiet=quiet)
+        except Exception as exc:                                # noqa: BLE001
+            _ptrack, _pwhy = None, 'could not measure (%s)' % exc
+    _lands = {}
+    if _ptrack is not None:
+        import movie_placement
+        if marks is None:
+            marks = []
+        # the band is SIZED for readable panels (`plan_band`), not scaled
+        _pfn = movie_placement.band_px(_ptrack, _verdict)
+        _band = _pfn
+    else:
+        _band = bool(_verdict)
+    # The 3D view gets a region of the layout's own panel (#946/C4) when the
+    # layout has one to split and the panel WOULD run -- asked now, before
+    # the frame is planned, because a region reserved for a panel that is
+    # then gated off would be a blank box in every frame.
+    _iso_box = False
+    if want_iso and str(layout or 'legacy').lower() not in ('legacy',
+                                                            'inset'):
+        try:
+            import movie_panels
+            if iso_opts is None:
+                iso_opts = movie_panels.IsoOpts()
+            _iso_box = movie_panels.preflight(
+                steps[0][1] if steps else final, iso_opts) is None
+        except Exception:                                      # noqa: BLE001
+            _iso_box = False
+    frames = a.build_boards(steps, final, size, supersample, layer_alpha,
+                            rip_hold, chunks, stage=stage, marks=marks,
+                            theme=theme, layout=layout, aspect=aspect,
+                            geom_out=geom_out, title=_title,
+                            frames_sink=spool, max_frames=max_frames,
+                            attempts_band=_band, iso_panel=_iso_box,
+                            lands_out=_lands)
+    if not frames:
+        if not quiet:
+            print("make_movie: no frames (nothing routed?)", file=sys.stderr)
+        return None
+    _geom0 = geom_out[0] if geom_out else None
+    # #1021. THE ATTEMPTS BAND, before the clock and before the iso panel:
+    # composition order is board -> attempts -> clock -> iso, so the band sits
+    # adjacent to the board it annotates and the iso panel still stacks last.
+    #
+    # Imported HERE, like movie_panels below, so the GUI recorder and the
+    # in-process callers do not pay for a feature they did not ask for.
+    _pbox, _vbox = None, (_geom0.track if _geom0 is not None else None)
+    _plan = None
+    if _ptrack is not None:
+        import movie_placement
+        _plan = _pfn.plans[-1] if _pfn is not None and _pfn.plans else None
+        if _plan is not None and _plan.mode == 'declined':
+            _ptrack, _pwhy = None, 'declined: %s' % _plan.why
+        elif _geom0 is not None and _geom0.track is not None:
+            _pbox, _vbox = movie_placement.split_band(
+                _geom0.track, both=_verdict, track=_ptrack,
+                frame_h=_geom0.frame.h)
+            _ptrack = movie_placement.with_firsts(_ptrack, marks, _lands)
+            frames = movie_placement.compose(frames, _pbox, _ptrack, marks,
+                                             theme, _geom0.frame.h)
+        else:
+            _ptrack, _pwhy = None, 'no band could be reserved in this frame'
+    # SAID whenever a placement was found, drawn or declined
+    if _ptrack is not None or placement_panel or _plan is not None:
+        import movie_placement
+        print(movie_placement.status_line(_ptrack, _pwhy, _plan),
+              file=sys.stderr)
+    try:
+        import movie_attempts
+        frames, _arep = movie_attempts.attach(
+            frames, _track if _vbox is not None or _ptrack is None else None,
+            theme=theme, marks=marks, box=_vbox)
         # PRINTED EVEN WHEN QUIET, for the reason iso_status_line is: this is
         # the only channel that says whether the band ran, and the front end
         # the discovery exists for (place_route_loop's film, the GUI recorder)
@@ -327,12 +596,19 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                 # wrapped lines, and a per-frame band would make the frames
                 # different sizes -- the one thing save_movie cannot take.
                 all_lines = [clock.lines(i) for i in range(len(frames))]
+                _f0 = frames[0]
                 band = cmd_timing.clock_band_height(
-                    all_lines, frames[0].width, frames[0].height)
-                # In place, so peak memory stays ~2 frames rather than 2x the
-                # movie: each original is released as its replacement lands.
-                for i, ln in enumerate(all_lines):
-                    frames[i] = cmd_timing.add_clock_band(frames[i], ln, band)
+                    all_lines, _f0.width, _f0.height)
+                # #1036: a per-frame transform, applied while the encoder
+                # streams -- it needs each frame's LINES, never another
+                # frame's pixels.
+                import frame_spool
+                frames = frame_spool.transform(
+                    frames,
+                    lambda i, f: cmd_timing.add_clock_band(
+                        f, all_lines[i], band, theme=theme),
+                    out_size=None, optional='run clock',
+                    ground=theme.rgb('chrome_band'), grow_px=band)
                 frame_meta = [clock.meta(i) for i in range(len(frames))]
                 if not quiet:
                     unmapped = clock.unmapped()
@@ -354,8 +630,18 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         # ask for. Bound through the module rather than `from ... import`, so a
         # test that monkeypatches movie_panels.compose_two_panel still bites.
         import movie_panels
+        if iso_opts is None:
+            iso_opts = movie_panels.IsoOpts()
+        if iso_opts.theme is None:
+            iso_opts.theme = theme
+        _box = None
+        if _iso_box and _geom0 is not None and _geom0.panel_split:
+            _box = _geom0.panel_split[0]
+        # `box=` only when there IS one: an in-process caller (and the tests)
+        # may stand in for compose_two_panel with the four-argument shape.
         frames, report = movie_panels.compose_two_panel(
-            frames, marks, final, iso_opts)
+            frames, marks, final, iso_opts,
+            **({'box': _box} if _box is not None else {}))
         # PRINTED EVEN WHEN QUIET. `quiet` silences the ordinary progress
         # chatter, but this line is the only channel that says whether the
         # panel ran, was skipped, or failed -- and the one front end the env
@@ -405,13 +691,20 @@ def main():
     ap.add_argument('--supersample', type=int, default=DEFAULT_SUPERSAMPLE,
                     help='anti-aliasing factor (1 = fastest, 2 = crisp)')
     ap.add_argument('--layer-alpha', type=int, default=DEFAULT_LAYER_ALPHA,
-                    help='per-layer copper opacity 1-255 (<255 blends crossings)')
+                    help='per-layer copper opacity 1-255 (<255 blends '
+                         'crossings). Default: the theme\'s own measured '
+                         'alpha (dark 150, light 205)')
     ap.add_argument('--rip-hold', type=int, default=DEFAULT_RIP_HOLD,
                     help='frames to hold ripped copper red before it vanishes')
     ap.add_argument('--chunks', type=int, default=DEFAULT_CHUNKS,
                     help='reveal batches for a step with no fine trace')
     ap.add_argument('--end-hold', type=float, default=DEFAULT_END_HOLD,
                     help='seconds to hold the final frame')
+    ap.add_argument('--max-frames', type=int, default=None, metavar='N',
+                    help='frame budget for the whole film (#1036). A route '
+                         'trace that does not fit its share is revealed in '
+                         '--chunks batches instead, and the movie says so. '
+                         'Default: $KICAD_MOVIE_MAX_FRAMES or 2400; 0 = none')
     ap.add_argument('--png-dir', default=None,
                     help='also dump the raw PNG frames here')
     ap.add_argument('--png', action='store_true',
@@ -432,7 +725,24 @@ def main():
                          "when loop_round*.json sidecars or a converge ledger "
                          "sit next to the boards; a chain with no search "
                          "behind it has none and says so.")
-    ap.add_argument('--theme', default=None, help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--attempts-ledger', default=None, metavar='PATH',
+                    help='the converge ledger to draw the attempts band and '
+                         'the placement panels from, instead of looking '
+                         'beside the boards (#1042)')
+    ap.add_argument('--benchmark-board', default=None, metavar='PATH',
+                    help="a benchmark placement (the human's board, or a "
+                         "previous run) drawn DASHED on the placement "
+                         "arrangement panel -- a screen, not the verdict")
+    ap.add_argument('--floorplan-intent', default=None, metavar='PATH',
+                    help='the floorplan intent to grade placement boards the '
+                         'ledger does not name (check_floorplan --intent)')
+    ap.add_argument('--no-placement-panel', action='store_true',
+                    help='never draw the placement panels (#1042)')
+    ap.add_argument('--title', default=None,
+                    help="the film's name on the rail's left (default: the "
+                         "run directory, or the directory the chain's boards "
+                         "share; never a later board's name)")
+    ap.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--camera', default=None,
                     choices=('off', 'auto'),
@@ -550,6 +860,12 @@ def main():
                          supersample=args.supersample, layer_alpha=args.layer_alpha,
                          rip_hold=args.rip_hold, chunks=args.chunks,
                          end_hold=args.end_hold, png_dir=args.png_dir,
+                         max_frames=args.max_frames, title=args.title,
+                         attempts_ledger=args.attempts_ledger,
+                         benchmark_board=args.benchmark_board,
+                         floorplan_intent=args.floorplan_intent,
+                         placement_panel=(False if args.no_placement_panel
+                                          else None),
                          quiet=args.quiet,
                        camera=args.camera,
                        camera_budget=args.camera_budget,

@@ -63,6 +63,13 @@ _WK_DEPENDENT = {
     # those literals support -- runs on a clean clone and is what keeps
     # this file from being green-while-covering-nothing when wk/ is absent.
     'test_788_marginal_literals.py': ['wk/703/study'],
+    # #1036 CORROBORATION only: the run-32 value checks (glide inventory,
+    # band labels on the real ledger) run when a machine has run 32; every
+    # claim in the file is also pinned on tracked kicad_files/ boards, and the
+    # absent case is SAID in the summary line, not passed silently.
+    'test_1036_review_fixes.py': ['wk/run32'],
+    'test_1036_attempts_axis.py': ['wk/run32'],
+    'test_1042_placement_panels.py': ['wk/run32'],
     # #887 CORROBORATION only. The regression lives in
     # test_887_cmd_timing_reader.py, against two small tracked fixtures, and
     # passes in full on a clean clone. This arm re-derives run 24's published
@@ -1058,8 +1065,8 @@ _UNRESOLVABLE = {}
 #: `mutate_975.py`; 53 before #983/#987/#988 added `mutate_983.py`; 54
 #: before #962 added `mutate_962.py`; 55 before #959 added `mutate_959.py`;
 #: 56 before #963 added `mutate_963.py`; 57 before #946 added
-#: `mutate_946.py`.
-_BATTERY_COUNT = 58
+#: `mutate_946.py`; 58 before #1042 added `mutate_1042.py`.
+_BATTERY_COUNT = 59
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

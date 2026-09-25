@@ -77,6 +77,25 @@ SIDEBAR_BOARD_FRAC = 0.73           # of frame WIDTH            (B)
 INSET_PANEL_FRAC = (0.30, 0.26)     # of frame W, H             (C)
 SPLIT_PANEL_FRAC = 0.32             # of frame HEIGHT           (D)
 SPLIT_ISO_FRAC = 0.42               # of the split box's WIDTH  (D)
+#: With the iso view on, the SIDEBAR's panel is split top/bottom rather than
+#: left/right: it is a tall column, and a left/right split of a column gives
+#: two slivers.
+SIDEBAR_ISO_FRAC = 0.50             # of the sidebar box's HEIGHT (B)
+#: A LANDSCAPE frame with the iso view on puts the lower box in a side
+#: column instead (#1036 review): below the board, a 16:9 split film left the
+#: board a 1400x342 strip -- 43% of the height for the thing the film is
+#: about, beside a 3D view that shows no routing. At or above this frame
+#: aspect the panel is a right-hand column of this share of the width, iso on
+#: top and the layer strip under it.
+ISO_SIDE_ASPECT = 1.25
+ISO_SIDE_FRAC = 0.30                # of frame WIDTH
+#: The board box plus the attempts band never get less than this share of
+#: the frame height: a lower box is capped so the board keeps it.
+BOARD_MIN_SHARE = 0.55
+#: ...and the BOARD BOX ALONE never less than this: a tall band (#1042's
+#: placement panels) must shrink the lower box, not the board -- run 32's
+#: 16:9 split frame put a 248 px band over an 86 px board before this.
+BOARD_ALONE_MIN_SHARE = 0.30
 
 
 class Box(NamedTuple):
@@ -254,7 +273,7 @@ def resolve_layout(name, board_bounds, *, quiet=False) -> Tuple[str, str]:
 
 
 def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
-               panel=False, foot_px=0, track_px=0,
+               panel=False, foot_px=0, track_px=0, iso=False,
                rail_frac=RAIL_FRAC, foot_frac=FOOT_FRAC,
                legacy_size=None, quiet=False) -> FrameGeometry:
     """The whole frame, decided ONCE.
@@ -264,6 +283,20 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     clock's band) passed IN, so this module never needs PIL to measure text.
     `legacy_size` is the `(W, H)` the board-aspect path already produced, so
     `'legacy'` can reproduce it exactly rather than recompute it.
+
+    **A DECLARED SIZE IS KEPT (#946/C4).** When the frame's aspect is
+    declared -- an explicit `ratio`, or a layout with an aspect of its own
+    (A, B, D) -- `foot_px` and `track_px` are reserved INSIDE that frame, out
+    of the board's share. They used to be ADDED to it, so `--aspect 16:9`
+    with an attempts band came out 1600x1036 rather than 1600x900. Only a
+    frame whose aspect is the BOARD's (legacy with no ratio, inset) still
+    grows to hold them, because there is no declared size to keep.
+
+    `iso=True` asks for the panel to be SPLIT so the 3D view has a region of
+    its own: `panel_split = (iso box, layer-strip box)` for the stacked (A),
+    sidebar (B) and split (D) layouts. D always splits, as it always has.
+    Inset (C) and legacy have no panel to split; there the iso view stacks
+    under the frame, as it always has, and the frame grows.
     """
     key, why = resolve_layout(layout, board_bounds, quiet=quiet)
     spec = LAYOUTS[key]
@@ -271,6 +304,7 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     # An explicit ratio always wins: `legacy_size` is a shortcut for
     # reproducing today's frame EXACTLY, and asking for a ratio is asking
     # for something other than today's frame.
+    declared = bool(ratio) or spec.aspect is not None
     if key == 'legacy' and legacy_size and not ratio:
         W, H = int(legacy_size[0]), int(legacy_size[1])
         aspect = (W / float(H)) if H else 1.0
@@ -288,7 +322,8 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
         else:
             W, H = max(1, int(round(size * aspect))), size
 
-    H += int(foot_px) + int(track_px)
+    if not declared:
+        H += int(foot_px) + int(track_px)
     # BOTH dimensions, see the module docstring.
     W, H = even(W), even(H)
     aspect = W / float(H)
@@ -314,21 +349,43 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     split = None
     if not panel or spec.panel is None:
         board = Box(0, inner_y, W, inner_h)
+    elif (spec.panel in ('below', 'split') and (iso or track_h)
+          and W >= ISO_SIDE_ASPECT * H):
+        # A LANDSCAPE frame puts its panel in a right-hand COLUMN when there
+        # is an iso view, or a reserved band (#1042): the band is then the
+        # frame's ONE bottom row, and a full-width lower box on top of it
+        # starved the board (16:9 split, panels on: a 1000x170 board box).
+        # Without iso the whole column is the layer strip and stats.
+        cw = even(W * ISO_SIDE_FRAC)
+        board = Box(0, inner_y, W - cw, inner_h)
+        panel_box = Box(W - cw, inner_y, cw, inner_h)
+        if iso:
+            ih = even(inner_h * SIDEBAR_ISO_FRAC)
+            split = (Box(W - cw, inner_y, cw, ih),
+                     Box(W - cw, inner_y + ih, cw, inner_h - ih))
     elif spec.panel == 'below':
-        ph = even(H * STACKED_PANEL_FRAC)
+        ph = _cap_panel(even(H * STACKED_PANEL_FRAC), H, inner_h, track_h)
         board = Box(0, inner_y, W, max(2, inner_h - ph))
         panel_box = Box(0, inner_y + board.h, W, ph)
+        if iso:
+            iw = even(W * SPLIT_ISO_FRAC)
+            split = (Box(0, panel_box.y, iw, ph),
+                     Box(iw, panel_box.y, W - iw, ph))
     elif spec.panel == 'right':
         bw = even(W * SIDEBAR_BOARD_FRAC)
         board = Box(0, inner_y, bw, inner_h)
         panel_box = Box(bw, inner_y, W - bw, inner_h)
+        if iso:
+            ih = even(inner_h * SIDEBAR_ISO_FRAC)
+            split = (Box(bw, inner_y, W - bw, ih),
+                     Box(bw, inner_y + ih, W - bw, inner_h - ih))
     elif spec.panel == 'inset':
         board = Box(0, inner_y, W, inner_h)
         pw = even(W * INSET_PANEL_FRAC[0])
         ph = even(inner_h * INSET_PANEL_FRAC[1])
         panel_box = Box(W - pw - 6, inner_y + inner_h - ph - 6, pw, ph)
     elif spec.panel == 'split':
-        ph = even(H * SPLIT_PANEL_FRAC)
+        ph = _cap_panel(even(H * SPLIT_PANEL_FRAC), H, inner_h, track_h)
         board = Box(0, inner_y, W, max(2, inner_h - ph))
         panel_box = Box(0, inner_y + board.h, W, ph)
         iw = even(W * SPLIT_ISO_FRAC)
@@ -351,6 +408,16 @@ def plan_frame(board_bounds, *, layout='legacy', ratio=None, size=1000,
     return geom
 
 
+def _cap_panel(ph, H, inner_h, track_h):
+    """A lower box's height, capped so the board plus the attempts band
+    keep `BOARD_MIN_SHARE` of the frame height."""
+    board_min = int(math.ceil(max(0.0, BOARD_MIN_SHARE * H - track_h,
+                                  BOARD_ALONE_MIN_SHARE * H)))
+    board_min += board_min % 2
+    return max(0, min(ph, even(max(0, inner_h - board_min))
+                       if inner_h - board_min >= 2 else 0))
+
+
 def _self_check(g: FrameGeometry) -> None:
     """Every named box inside the frame, and (unless the layout says so) not
     on top of the board. Cheap, and it turns a layout arithmetic slip into a
@@ -362,6 +429,12 @@ def _self_check(g: FrameGeometry) -> None:
         if not g.frame.contains(b):
             raise FrameSizeError('layout %r: %s %s is outside the frame %s'
                                  % (g.layout, name, tuple(b), tuple(g.frame)))
+    if g.panel_split and g.panel is not None:
+        for b in g.panel_split:
+            if not g.panel.contains(b):
+                raise FrameSizeError('layout %r: split box %s is outside the '
+                                     'panel %s' % (g.layout, tuple(b),
+                                                   tuple(g.panel)))
     if g.panel is not None and not g.overlays_board:
         if g.board.overlaps(g.panel):
             raise FrameSizeError('layout %r: the panel %s overlaps the board '
@@ -411,6 +484,8 @@ def frame_status_line(geom: FrameGeometry) -> str:
     line = ('movie: layout %s%s  %dx%d at %.2f:1, board %dx%d'
             % (title, letter, geom.frame.w, geom.frame.h, geom.aspect,
                geom.board.w, geom.board.h))
+    if geom.track is not None:
+        line += ', attempts band %dpx inside' % geom.track.h
     if geom.requested_layout != geom.layout:
         line += '  |  %s -> %s' % (geom.requested_layout, geom.chosen_by)
     return line

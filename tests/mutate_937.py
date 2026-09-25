@@ -154,7 +154,7 @@ ROWS = [
     # own text asks for. The row is unchanged in what it does: drop L3's
     # ceiling entry and `--dump-all` must stop exiting 0.
     ('arm-ceiling-undeclared', 'ld',
-     "    'L3': 84, 'L4': 51, 'L5': 40,",
+     "    'L3': 98, 'L4': 51, 'L5': 40,",
      "    'L4': 51, 'L5': 40,",
      (T_431,), KILLED),
 

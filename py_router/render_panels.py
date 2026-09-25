@@ -132,8 +132,61 @@ def _cell_boxes(box, n, gap=6, caption_h=14):
              int(cw), int(ch)) for i in range(n)], n
 
 
+#: A cell's mini-board is at most this much wider than the board is (#946
+#: review). Cells shaped by the panel rather than the board came out 85x500
+#: in a 1:1 sidebar, with the copper a thumbnail in the middle of each.
+CELL_ASPECT_CAP = 1.0
+
+#: How much smaller than the largest-cell grid a squarer grid may make its
+#: cells and still win (`grid_boxes`).
+GRID_BALANCE = 0.72
+
+
+def grid_boxes(box, n, aspect, gap=6, caption_h=14):
+    """`(boxes, n, grid_h)`: `n` cells shaped like the BOARD, in a grid.
+
+    Every columns count from 1 to `n` is tried and the one giving the largest
+    mini-board wins -- so a wide lower box gets one row, and a tall column (the
+    1:1 sidebar) gets a 2x2 grid. Each cell's mini-board keeps the board's
+    `aspect` (capped at `CELL_ASPECT_CAP` of it). The grid is centred
+    horizontally in `box`, starts at its top, and `grid_h` is its height, so
+    a caller can centre it vertically or use the space under it.
+    """
+    if n <= 0 or box is None or box.w <= 0 or box.h <= 0 or not aspect:
+        return [], 0, 0
+    cands = []
+    for cols in range(1, n + 1):
+        rows = -(-n // cols)
+        cw = (box.w - gap * (cols + 1)) / float(cols)
+        ch = (box.h - gap * (rows + 1)) / float(rows) - caption_h
+        if cw < CELL_FLOOR_W or ch < CELL_FLOOR_H:
+            continue
+        mw = min(cw, ch * aspect * CELL_ASPECT_CAP)
+        mh = mw / aspect
+        cands.append((mw * mh, cols, rows, mw, mh))
+    if not cands:
+        return [], 0, 0
+    # The largest cells, EXCEPT that a squarer grid wins when its cells are
+    # within GRID_BALANCE of the largest: four boards stacked in a tall
+    # column read as a list, four in a 2x2 as four views of one board -- the
+    # 1:1 sidebar's single column beat 2x2 by 22% on area and looked worse.
+    top = max(c[0] for c in cands)
+    near = [c for c in cands if c[0] >= GRID_BALANCE * top]
+    _a, cols, rows, mw, mh = min(near, key=lambda c: (abs(c[1] - c[2]),
+                                                      -c[0]))
+    cw, chh = int(mw), int(mh + caption_h)
+    gw = cols * cw + (cols - 1) * gap
+    x0 = box.x + (box.w - gw) // 2
+    boxes = []
+    for i in range(n):
+        r_, c_ = divmod(i, cols)
+        boxes.append((int(x0 + c_ * (cw + gap)),
+                      int(box.y + gap + r_ * (chh + gap)), cw, chh))
+    return boxes, n, rows * chh + (rows + 1) * gap
+
+
 def draw_layer_strip(d, box, *, bounds, segments, layers, palette, theme,
-                     caption_h=14, active=None) -> List[Cell]:
+                     caption_h=14, active=None, grid=False) -> List[Cell]:
     """Small multiples: one mini board per copper layer.
 
     Colour stops carrying layer identity here and POSITION carries it instead
@@ -152,7 +205,13 @@ def draw_layer_strip(d, box, *, bounds, segments, layers, palette, theme,
         import render_theme
         from route_render import load_font
         th = theme or render_theme.DARK
-        boxes, n = _cell_boxes(box, len(layers), caption_h=caption_h)
+        if grid:
+            _x0, _y0, _x1, _y1 = bounds
+            _asp = max(_x1 - _x0, 1e-6) / max(_y1 - _y0, 1e-6)
+            boxes, n, _gh = grid_boxes(box, len(layers), _asp,
+                                       caption_h=caption_h)
+        else:
+            boxes, n = _cell_boxes(box, len(layers), caption_h=caption_h)
         if not n:
             return []
         shown = layers[:n]

@@ -103,6 +103,16 @@ close-out, and a half that cannot spawn cannot verify itself. (The older
 wording here said a subagent cannot spawn a subagent. That is false in this
 harness and has been retired; the constraint is the agent *type*.)
 
+**A `fork` has reported that it cannot dispatch (#1040).** In run 32 all five
+placement halves spawned as `fork` returned "I am a fork and may not dispatch
+subagents". So every placement close-out was verified by a single agent, and
+the text above did not match what the harness did. Until that is settled,
+treat the half's hand-back as the evidence. If it says it could not dispatch
+its P-close verifier, **the outer loop dispatches that verifier itself** before
+L2, the same way L5 dispatches the routing lenses. A half that must verify
+itself can be spawned with `--delegate-mode fresh` (`claude`), which gives up
+the fork's inherited context.
+
 **The driver names the type in the tag it emits, so copy the tag verbatim.**
 `loop_driver.py` chooses `fork` and `--delegate-mode fresh` chooses `claude`;
 the reasoning is the paragraph below, and it is now a decision the tool takes
@@ -330,11 +340,27 @@ written out of turn.
    floor rides in the project; a board without it is ungradeable, #441). State
    its sha256 and which chain step produced it.
 2. **The movie** — over the chain boards. `place_route_loop` makes one by
-   default; a hand-driven chain does NOT, so build it explicitly:
+   default; a hand-driven chain does NOT, so build it explicitly. For a
+   place-and-route run, pass the KEPT boards in chain order: the input, each
+   accepted placement, then each routing step. One call films both halves:
 
    ```bash
-   python3 -X utf8 py_router/make_movie.py <work-dir> -o routing.mp4
+   python3 -X utf8 py_router/make_movie.py wk/input.kicad_pcb wk/placed.kicad_pcb \
+       wk/route.kicad_pcb -o wk/run.mp4 --panels xray+iso --layout split --aspect 16:9
    ```
+
+   When consecutive boards differ in part POSES, `make_movie` turns its camera
+   on by itself and glides the parts in before the routing starts, and it says
+   so on stderr (#1036). Each frame draws its own board's pads. Frames are
+   spooled to disk, so a long chain no longer runs out of memory; run 32's
+   in-memory run reached 29.5 GB. A route trace that would blow the film's
+   frame budget (`--max-frames`; 2400 frames unless `$KICAD_MOVIE_MAX_FRAMES`
+   says otherwise) falls back to the chunked reveal and prints
+   `TRACE OVER BUDGET`. The ledger beside the last board is drawn as
+   ONE attempts graph across both halves. `make_movie.py <work-dir>` still
+   works for a `place_route_loop` work dir. Do not use `make_film.py
+   --from-ledger` for the run film: under parallel lineages its last-accepted
+   spine is not the chain you kept (#1034).
 
    `KICAD_ROUTE_TRACE=1` gives the fine per-copper rip/restore animation and is
    **OFF unless you export it** (`py_router/route_trace.py`) — only the stress
@@ -865,6 +891,13 @@ Re-run the chain only when a **placement** changed (which invalidates every rout
 board downstream) or when you are producing the final artifact. Everything else is
 a scoped retry on the board that already failed.
 
+**On a board with pours, a scoped lap carries the POURED nets in `--nets`**,
+e.g. `--nets /D2 GND`. A lap without them has its in-run finalize exclude the
+pours, but the improvement gate still counts the plane pads that lap cut, so
+the lap is scored for damage it was not allowed to repair (#1032). Measured in
+run 32: laps started being accepted once GND rode in the net list. Keep doing
+it until #1032 is fixed.
+
 ##### 9.3b — READ THE ROUTER'S HINT. It names the flag and the nets.
 
 When `route.py` fails a net it prints the fix, and it is usually right:
@@ -920,7 +953,15 @@ learn:
    from the hint set before using it: rip a rail as collateral and every one of
    its pads opens at once (run 5: one collateral rail rip opened **19 pads** and
    cost the iteration). Rip leaf/2-pad nets by exact name; a rail that truly
-   blocks gets its own deliberate, single-net call.
+   blocks gets its own deliberate, single-net call. **That call is a rung of
+   its own, and agents skip it** (#1039): the rule above is about COLLATERAL
+   rips, so it is read as "never rip a rail". For each failing net, rip exactly
+   the ONE rail or protected pair its `Hint:` names, alone, in its own lap,
+   with that rail's `--power-nets` / `--power-nets-widths` in the same call
+   (rule 2). Name a protected pair exactly (`/IO_Banks/Z6_P`), because a glob
+   skips it (rule 4). Run 32: about 60 laps had accepted 1 between them, and
+   this lever took the oracle joins from 27 to 21 with 5 accepts in one
+   batch.
 2. **A ripped net returns at the CALLING command's parameters, not the ones it was
    originally routed with.** Ripping a 0.8 mm USB net from a plain signal call
    brings it back at 0.16 mm and silently destroys the spec geometry. **Whenever
@@ -968,6 +1009,19 @@ learn:
    override were removed in 5832e4eb (the empty-board 1c pour was the
    exempt case). Connect every pad first, or accept losing it. (Cross-ref:
    the routing skill's `## Important Notes` item 3, "Order matters" (#424), says the same from the other side.)
+
+**Two lineage lessons from run 32 (#1039).** Both are about what to try FIRST,
+and neither is a default.
+
+- **Order is a lineage.** Routing the fine-pitch bus between the BGA and the
+  QFN (U1↔U30) *before* the diff pairs cost 3 fewer joins (lineage L-C at 28
+  against L-A at 31). The protected pairs, routed first, had walled the bus in.
+  The price was that most Z-pairs ended single-ended. Try both orders as
+  separate lineages; do not assume the matcher's order.
+- **The plane map is a lineage, not a default.** On glasgow, the standard map
+  (+3V3 solid on In2) started 6 joins worse than the alternative at the same
+  stage (34 against 28). Fork a lineage per plausible map and let the ledger
+  decide.
 
 For plane-net pads that cannot reach their pour, the equivalent is
 `repair_planes --rip-blocker-nets` (out-of-chain only; it leaves the ripped
@@ -1185,6 +1239,21 @@ own `CMD:` line into `converge record --argv`" unsatisfiable for a routing lap
 — run 11 hand-wrote replay scripts instead, which is exactly the placeholder-
 argv failure the next paragraph exists to stop.
 
+**A lap is evidence only after its own `CMD:` line is checked** for the
+intended nets, rip set and grid (#1039). A batch driver re-reads the LOG's
+`CMD:` line, not the argv it believes it passed. Run 32 lost 24 laps this way.
+A lap script split a tab-separated spec with bash `read`, which collapses empty
+fields, so every one of those laps ran `--rip-existing-nets 0.025 --grid-step
+0.05`, with the grid value in the rip set. All 24 read as "rejected at 28", a
+plateau that did not exist.
+
+**Never expand a recorded argv unquoted.** `--argv $ARGV` lets bash glob
+`--nets *` into the repo's file names. Run 32's `--final` row stored exactly
+that, and the ledger is append-only, so it could not be fixed. Build the argv
+as a bash ARRAY (`--argv "${ARGV[@]}"`) or run `set -f` first, and read
+`lever_argv` back from the ledger before writing the closing entry. `record`
+does not refuse such an argv in this version; #1039 proposes that it should.
+
 **The argv must be real, and the close-out must name its stop condition —
 `record` now enforces both.** An `--argv` whose first token is neither an
 existing file nor on PATH is refused (exit 2, nothing written): run 7's
@@ -1311,8 +1380,12 @@ after the token or in `--stop-reason`, never instead of it.
    measurements**. Do not present it as finished.
 3. **Five RECORDED laps of one half — accepted or rejected — with the score not
    improving, after trying the rip lever, a finer grid, and a layer change on
-   the failing nets** → floorplan-limited or spec-limited. Say which, with the
-   number.
+   the failing nets, AND one whole-board `--nets '*'` pass from the best
+   board** → floorplan-limited or spec-limited. Say which, with the
+   number. The `'*'` pass is not optional (#1039). Scoped laps flatten
+   because each one re-routes a few nets into a board the others froze, and
+   one whole-board pass re-deals all of them. Run 32 was flat at 21 and one
+   pass took it to 19; the same move had earlier taken it from 31 to 30.
 
    **Do not count this by eye, and do not count `unrouted` and `broken`.**
    `converge.py verdict --flat 5` is what decides it, and it compares
@@ -1377,8 +1450,11 @@ pulling at you, write the next ledger entry instead:
 - **"I have written up the findings."** The report is not the deliverable while
   nets are unrouted. Finish the board, then write.
 - **"The last lever failed."** Revert and take the next one. The ladder has more
-  rungs than you have tried: rip set → grid → layer → via cost → width → order →
-  placement → hand-authored micro-copper.
+  rungs than you have tried: rip set → **the named blocker, alone** (9.3c rule
+  1) → grid → layer → via cost → width → order → placement → hand-authored
+  micro-copper. After a round of scoped laps accepts nothing, run one
+  whole-board `'*'` pass from the best board before concluding stop-3
+  (#1039).
 
 **Rung 8, hand-authored micro-copper, exists — with FIVE hard conditions.**
 

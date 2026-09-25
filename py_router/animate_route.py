@@ -77,6 +77,105 @@ def _board_rows(pcb, layers) -> Tuple[List[List], List[List]]:
     return seg_rows, via_rows
 
 
+class _OpLog(object):
+    """An append-only log of edits to one live-copper dict (#1036).
+
+    The lower box's layer strip needs the copper AS IT STOOD on each frame.
+    Keeping `tuple(live_s.values())` per frame cost O(frames x segments):
+    measured on run 32's 9:16 full-trace film, a 523 MB Python heap at 5797
+    frames. The log costs O(edits) instead, and a frame keeps only its
+    position in it (`_LiveRef`).
+    """
+    __slots__ = ('ops', '_state', '_at')
+
+    def __init__(self):
+        self.ops = []           # (key, value) = set;  (key, _GONE) = removed
+        self._state = {}
+        self._at = 0
+
+    def state_at(self, n):
+        """The dict's values after the first `n` edits, in insertion order.
+
+        Fast forward when frames are asked in order (the encoder streams them
+        that way); a backwards ask replays from the start, which is slower
+        but never wrong.
+        """
+        if n < self._at:
+            self._state, self._at = {}, 0
+        st = self._state
+        for k, v in self.ops[self._at:n]:
+            if v is _GONE:
+                st.pop(k, None)
+            else:
+                st[k] = v
+        self._at = n
+        return tuple(st.values())
+
+
+_GONE = object()
+
+
+class _LoggedDict(dict):
+    """A dict whose every edit is recorded into an `_OpLog`."""
+
+    def __init__(self, log):
+        super().__init__()
+        self._log = log
+
+    def __setitem__(self, k, v):
+        super().__setitem__(k, v)
+        self._log.ops.append((k, v))
+
+    def __delitem__(self, k):
+        super().__delitem__(k)
+        self._log.ops.append((k, _GONE))
+
+    def pop(self, k, *default):
+        had = k in self
+        out = super().pop(k, *default)
+        if had:
+            self._log.ops.append((k, _GONE))
+        return out
+
+    def clear(self):
+        for k in list(self):
+            self._log.ops.append((k, _GONE))
+        super().clear()
+
+    def update(self, *a, **kw):
+        for k, v in dict(*a, **kw).items():
+            self[k] = v
+
+    def setdefault(self, k, v=None):
+        if k not in self:
+            self[k] = v
+        return self[k]
+
+    def popitem(self):
+        k, v = super().popitem()
+        self._log.ops.append((k, _GONE))
+        return k, v
+
+
+class _LiveRef(object):
+    """A frame's copper: a position in an `_OpLog`, resolved at draw time."""
+    __slots__ = ('log', 'n')
+
+    def __init__(self, log, n):
+        self.log, self.n = log, n
+
+    def resolve(self):
+        return self.log.state_at(self.n)
+
+
+def _live(value):
+    """A chrome record's copper as a tuple, whether stored as a `_LiveRef`
+    or (from an older caller) as the tuple itself."""
+    if isinstance(value, _LiveRef):
+        return value.resolve()
+    return tuple(value or ())
+
+
 class Movie:
     """Accumulates animation frames over a shared, growing copper state.
 
@@ -146,8 +245,10 @@ class Movie:
         #: `{class: (seated, total)}` for the box's inventory content,
         #: computed ONCE over the board rather than per frame.
         self.inventory = {}
-        self.live_s: Dict[Tuple, _Seg] = {}
-        self.live_v: Dict[Tuple, _Via] = {}
+        #: Edit logs behind the live copper (#1036): see `_OpLog`.
+        self._log_s, self._log_v = _OpLog(), _OpLog()
+        self.live_s: Dict[Tuple, _Seg] = _LoggedDict(self._log_s)
+        self.live_v: Dict[Tuple, _Via] = _LoggedDict(self._log_v)
         self.frames: List = []
         # Plane fills revealed so far (dynamic_zones): a plane pours in on the
         # frame its taps first land, rather than being an always-on backdrop.
@@ -176,6 +277,10 @@ class Movie:
         """
         if not self.seen_events:
             return None
+        if self.split_caption:
+            # A layout with a RAIL carries the key there (#946 review): as
+            # a corner overlay it floated over the board's bottom-left.
+            return None
         from render_chrome import event_rows, draw_key
         rows = event_rows(self.theme, seen=self.seen_events)
 
@@ -194,13 +299,19 @@ class Movie:
                             # of showing the finished board from frame one.
                             # ONLY when a box exists to draw it in -- see
                             # `want_panel`.
-                            'live': (tuple(self.live_s.values())
+                            # Stored as a POSITION in the edit log (#1036),
+                            # not a copy: `_live()` resolves it at draw time.
+                            'live': (_LiveRef(self._log_s,
+                                              len(self._log_s.ops))
                                      if self.want_panel else ()),
-                            'live_v': (tuple(self.live_v.values())
+                            'live_v': (_LiveRef(self._log_v,
+                                                len(self._log_v.ops))
                                        if self.want_panel else ()),
                             'unplaced': self.unplaced,
                             'inventory': self.inventory,
-                            'active': self.active_layer})
+                            'active': self.active_layer,
+                            # the key's rows as of THIS frame, for the rail
+                            'seen': tuple(self.seen_events)})
 
     def _frame(self, hl_s, hl_v, color, label, mark='solid', base_s=None):
         """One frame. `base_s` overrides the live copper drawn under the
@@ -265,6 +376,33 @@ class Movie:
             st = assess_placement(pcb, path)
             self.unplaced = bool(st.unplaced)
             unseated = st.stacked_suspect_refs
+        except Exception:                                      # noqa: BLE001
+            pass
+        # A part ENTIRELY off the board is not placed either (#1036).
+        # `assess_placement` finds STACKED parts, and run 32's pile is laid out
+        # in rows beside the outline, not stacked: 247 of its 272 parts sit
+        # outside it, and the box read "272 of 272 placed" over the pile.
+        # ENTIRELY: the test is the part's pad extent against the outline, not
+        # its origin -- an edge connector whose origin overhangs the outline
+        # is placed, and read "N-1 of N" when the origin decided.
+        try:
+            bb = pcb.board_info.board_bounds
+            if bb:
+                x0, y0, x1, y1 = bb
+
+                def _off(fp):
+                    pads = fp.pads or ()
+                    if not pads:
+                        return not (x0 <= fp.x <= x1 and y0 <= fp.y <= y1)
+                    px0 = min(p.global_x - p.size_x / 2.0 for p in pads)
+                    px1 = max(p.global_x + p.size_x / 2.0 for p in pads)
+                    py0 = min(p.global_y - p.size_y / 2.0 for p in pads)
+                    py1 = max(p.global_y + p.size_y / 2.0 for p in pads)
+                    return px1 < x0 or px0 > x1 or py1 < y0 or py0 > y1
+                off = {ref for ref, fp in pcb.footprints.items()
+                       if _off(fp)}
+                if off:
+                    unseated = set(unseated or ()) | off
         except Exception:                                      # noqa: BLE001
             pass
         try:
@@ -622,7 +760,24 @@ def board_title(final, steps=(), hint=None):
     # only name there is.
     pre = re.compile(r'^(?:step|loop_round|round|iter)\d*[_-]?')
     if not pre.match(stem):
-        return stem
+        # NEVER A LATER BOARD'S NAME (#1036 review). A hand-named chain --
+        # glasgow_unplaced -> placed_v2 -> ... -> K3C_route -- used to title
+        # every frame with the FINAL stem, so the placement beats read
+        # "K3C_route" on the left beside "placed_v2" on the right. The film's
+        # name is the directory the chain lives in; boards spread over
+        # several directories fall back to the FIRST board, which is at worst
+        # a name from the past, never from the future.
+        stems = [os.path.splitext(os.path.basename(str(st[1])))[0]
+                 for st in steps if len(st) > 1]
+        if len(set(stems)) <= 1:
+            return stem
+        dirs = {os.path.dirname(os.path.abspath(str(st[1])))
+                for st in steps if len(st) > 1}
+        if len(dirs) == 1:
+            name = os.path.basename(dirs.pop())
+            if name:
+                return name
+        return stems[0] if stems else stem
     stems = [os.path.splitext(os.path.basename(str(st[1])))[0]
              for st in steps if len(st) > 1]
     tails = {pre.sub('', x) for x in stems}
@@ -633,11 +788,44 @@ def board_title(final, steps=(), hint=None):
     return os.path.basename(os.path.dirname(os.path.abspath(final))) or stem
 
 
+def trace_frame_estimate(trace, rip_hold=2):
+    """How many frames `Movie.play_trace` will emit for ``trace``, read off the
+    events alone -- before a single frame is drawn.
+
+    One frame per add event, `max(1, rip_hold)` per rip, plus the retract/grow
+    motion stages #1022 draws (bounded by `copper_motion`'s stage count, taken
+    here as 3 per rip and per restore). An ESTIMATE, and it is used only to
+    decide whether a trace fits the film's frame budget; it errs high, so a
+    trace that is played is never longer than it was allowed to be by much.
+    """
+    n = 0
+    motion = 3 if rip_hold > 0 else 0
+    for ev in (trace.get('events') or ()):
+        if ev.get('del_s') or ev.get('del_v'):
+            n += max(1, rip_hold) + (motion if ev.get('del_s') else 0)
+        if ev.get('add_s') or ev.get('add_v'):
+            n += 1
+            e = str(ev.get('event', '')).lower()
+            if 'reroute' in e or 'restore' in e or 'rescue' in e:
+                n += motion
+    return n
+
+
+class _OverBudget(Exception):
+    """A trace that does not fit the film's frame budget (#1036)."""
+
+
 def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                  marks=None, theme=None, layout=None, aspect=None,
-                 geom_out=None, title=None):
+                 geom_out=None, title=None, frames_sink=None,
+                 max_frames=None, notes=None, attempts_band=False,
+                 iso_panel=False, lands_out=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
     final board. ``build_run`` is this with the chain discovered from a run dir.
+
+    ``lands_out`` (#1042), a dict when passed, collects ``{normcased abs
+    board path: frame}`` -- the frame a GLIDE lands on, which is where the
+    placement panels change beat (a glide shows the SOURCE board until then).
 
     ``stage`` (movie_camera.Stage, #431) adds a camera and animates FOOTPRINT
     motion for placement rounds. With ``stage=None`` -- every existing caller --
@@ -649,10 +837,31 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     the boundaries back is the only way to keep ONE scale across the whole
     film; a per-segment call restarts from an empty board and re-reveals all
     the copper, which reads as the board redrawing itself between beats.
+
+    ``frames_sink`` (#1036), when given, replaces the in-memory frame list --
+    `make_movie` passes a `frame_spool.FrameSpool`, so a 6000-frame film costs
+    one frame of RAM instead of 29.5 GB. Every caller that passes nothing gets
+    the list it always got.
+
+    ``max_frames`` (#1036) is the film's FRAME BUDGET. A per-segment trace
+    whose estimated length does not fit its fair share of what is left
+    (`trace_frame_estimate`) is not played: its step falls back to the
+    board-to-board `reveal_delta(..., chunks)` reveal, and the fallback is
+    printed LOUDLY and appended to ``notes`` when a list is passed. ``None``
+    or 0 = no budget, today's behaviour.
+
+    ``attempts_band`` (#946/C4) reserves the attempts band INSIDE the planned
+    frame (`plan_frame(track_px=)`), so a declared ratio keeps its size. A
+    CALLABLE ``(frame_w, frame_h) -> px`` sizes it instead (#1042: the
+    placement panels' `movie_placement.band_px`); the
+    band's box is `geom_out[0].track` and `movie_attempts.attach(box=)` draws
+    into it. ``iso_panel`` asks the layout to split its panel so the 3D view
+    has a region of its own (`geom.panel_split[0]`); the layer strip then
+    draws into the other half.
     """
     from kicad_parser import parse_kicad_pcb
     if not final:
-        return []
+        return [] if frames_sink is None else frames_sink
     # dynamic_zones: plane pours reveal as each plane is created, rather than
     # sitting under every frame from the start. It is ALSO what lets a Stage
     # animate part motion: with it, frame() draws pads per frame from
@@ -681,14 +890,36 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     _geom = None
     if True:
         import frame_layout
-        _g = frame_layout.plan_frame(
-            r.pcb.board_info.board_bounds, layout=layout or 'legacy',
+        _plan_kw = dict(
+            layout=layout or 'legacy',
             ratio=frame_layout.parse_ratio(aspect), size=size,
             # A panel is reserved for every layout that declares one, EXCEPT
             # 'legacy' -- which has no chrome at all, because legacy means
             # today's frame and today's frame has no lower box.
             panel=(str(layout or 'legacy').lower() != 'legacy'),
-            legacy_size=(r.W, r.H))
+            legacy_size=(r.W, r.H), iso=bool(iso_panel))
+        _g = frame_layout.plan_frame(r.pcb.board_info.board_bounds,
+                                     **_plan_kw)
+        if attempts_band:
+            # The band's height is a fraction of the FRAME it sits in, so the
+            # frame is planned once to learn its size and once more with the
+            # band reserved. Two calls of pure arithmetic, no pixels.
+            try:
+                import movie_attempts
+                if callable(attempts_band):
+                    # #1042: the caller SIZES the band for this frame -- the
+                    # placement panels' `band_px`, which reserves room for
+                    # readable panels (plot >= PLOT_MIN_PX) beside or above
+                    # the verdict graph, or 0 when the frame cannot hold them.
+                    _bh = int(attempts_band(_g.frame.w, _g.frame.h) or 0)
+                    _bh -= _bh % 2
+                else:
+                    _bh = movie_attempts.band_height(_g.frame.w, _g.frame.h)
+            except Exception:                                  # noqa: BLE001
+                _bh = 0
+            if _bh:
+                _g = frame_layout.plan_frame(r.pcb.board_info.board_bounds,
+                                             track_px=_bh, **_plan_kw)
         # Only when the layout genuinely MOVES the board box. On 'legacy' the
         # box is the renderer's own size evened, and the evening is applied by
         # cropping the composed frame instead -- because
@@ -697,7 +928,10 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         # own falsifier: if the layout work needs a second aim, the layout work
         # is wrong.
         moved = (_g.board.w, _g.board.h) != (r.W, r.H)
-        if _g.layout != 'legacy' and moved:
+        # A legacy frame with a DECLARED ratio or a reserved band is not
+        # today's frame any more, so its board box is honoured too; the plain
+        # legacy frame keeps the one-set_view path the test pins.
+        if moved and (_g.layout != 'legacy' or aspect or _g.track):
             r.set_canvas(_g.board.w, _g.board.h)
         # `geom_out` is an OUTPUT collector, never the switch. It was both
         # until a full film was rendered twice: `build_boards(layout='split')`
@@ -709,11 +943,24 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         if geom_out is not None:
             geom_out.append(_g)
     m = Movie(r, layers, rip_hold=rip_hold)
+    if frames_sink is not None:
+        m.frames = frames_sink
+    # #1036: the frame budget, shared FAIRLY among the traced steps -- a
+    # greedy budget would let the first long trace eat the film and starve
+    # every later one into chunks, which is the opposite of what a viewer
+    # wants from the end of a run.
+    _budget = int(max_frames or 0)
+    _traced_left = sum(1 for _s in steps if len(_s) > 2 and _s[2])
     # #1020: the lower box's non-routing contents, decided ONCE. `want_panel`
     # also gates the per-frame copper snapshot, so a legacy film -- which has
     # no box -- retains nothing.
     m.want_panel = bool(_geom is not None and _geom.panel is not None
                         and _geom.panel.h > 0)
+    #: #946/C4: the iso view takes `panel_split[0]`; the strip draws into
+    #: `panel_split[1]`, and the iso half is left as panel ground for
+    #: `movie_panels.compose_two_panel(box=)` to fill.
+    m.iso_in_panel = bool(iso_panel and _geom is not None
+                          and _geom.panel_split)
     if m.want_panel:
         # Seeded from the chain's FIRST board, not its last: the opening
         # snapshot is of the board as it arrived, and a film of a seeding run
@@ -734,9 +981,23 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                     if mm})
     m.rail_left = board_title(final, steps, title)
     m.split_caption = bool(_geom is not None and _geom.rail.h > 0)
+    # #1036: the SUBSTRATE is each step's own board. The renderer is built
+    # from the FINAL board (it fixes the canvas and the scale), and until this
+    # change only a Stage re-pointed `r.pcb` per step -- so without one, the
+    # opening frame of a chain that starts from an unplaced pile showed the
+    # FINAL placement's pads under the first board's copper. `frame()` draws
+    # pads and zones per frame from `r.pcb` (dynamic_zones), so re-pointing it
+    # is the whole fix; it changes no frame geometry and builds no renderer.
+    if steps and os.path.abspath(steps[0][1]) != os.path.abspath(final):
+        try:
+            r.pcb = parse_kicad_pcb(steps[0][1])
+        except Exception:                                      # noqa: BLE001
+            pass
     if stage is not None:
         stage.attach(m, r, layers)
     m.snapshot("input")
+    #: The board the previous step left, for a glide's source inventory.
+    _prev_board = steps[0][1] if steps else None
     for _step in steps:
         _lbl = str(_step[0])
         _mm = re.match(r'round (\d+)', _lbl)
@@ -755,10 +1016,36 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         seg_rows, via_rows = _board_rows(pcb, layers)
         # #1020: this step's OWN board answers the box, so the inventory
         # empties as the board fills and a seeding beat is a seeding beat.
-        m.refresh_placement(pcb, board)
+        _gliding = (stage is not None and mode != 'revert'
+                    and stage.handles(board))
+        if _gliding and _prev_board:
+            # #1036: a glide is drawn from the board it LEAVES. The box's
+            # inventory follows the parts, so it reads the source board until
+            # the glide lands -- it read "272 of 272 placed" mid-glide, the
+            # destination's count, over parts still in the pile. The stage
+            # calls `on_arrive` right before its landing frame.
+            m.refresh_placement(r.pcb, _prev_board)
+
+            def _on_arrive(_p=pcb, _b=board):
+                m.refresh_placement(_p, _b)
+                # #1042: the placement panels read the SAME landing frame,
+                # so their beat changes with the inventory, not before it.
+                if lands_out is not None:
+                    lands_out.setdefault(
+                        os.path.normcase(os.path.abspath(_b)), len(m.frames))
+            stage.on_arrive = _on_arrive
+        else:
+            m.refresh_placement(pcb, board)
+        _prev_board = board
+        # Every step draws its OWN board's pads (#1036), stage or not. The
+        # board it REPLACES is handed to the stage, whose camera shots before
+        # a placement beat must show the parts where they WERE -- otherwise
+        # the establishing shot shows the finished placement, and the parts
+        # then jump back into the pile to glide out of it.
+        if stage is not None:
+            stage.prev_pcb = r.pcb
+        r.pcb = pcb
         if mode == 'revert':
-            if stage is not None:
-                r.pcb = pcb
             m.reconcile_to(seg_rows, via_rows, label)
             if len(m.frames) == _first:
                 # An attempt that only MOVED parts changes no copper, so the
@@ -769,8 +1056,6 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                 marks.append((label, board, _first, len(m.frames)))
             continue
         if stage is not None:
-            # The renderer draws footprints from THIS board from here on.
-            r.pcb = pcb
             if stage.enter_step(label, board, pcb, seg_rows, via_rows):
                 if marks is not None:
                     marks.append((label, board, _first, len(m.frames)))
@@ -780,8 +1065,24 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
         step_zone_nets = {z.net_id for z in (getattr(pcb, 'zones', None) or [])
                           if z.net_id and len(z.polygon) >= 3}
         if trace_path:
+            _traced_left = max(0, _traced_left - 1)
             try:
-                m.play_trace(load_trace(trace_path), label_prefix=f"{label}: ",
+                _tr = load_trace(trace_path)
+                if _budget:
+                    _left = max(0, _budget - len(m.frames))
+                    _share = _left // (_traced_left + 1)
+                    _est = trace_frame_estimate(_tr, rip_hold)
+                    if _est > _share:
+                        _msg = ('step %r trace needs ~%d frames, its share of '
+                                'the --max-frames %d budget is %d; revealing '
+                                'its delta in %d chunks instead'
+                                % (str(label), _est, _budget, _share, chunks))
+                        print('animate_route: TRACE OVER BUDGET -- ' + _msg,
+                              file=sys.stderr)
+                        if notes is not None:
+                            notes.append(_msg)
+                        raise _OverBudget(_msg)
+                m.play_trace(_tr, label_prefix=f"{label}: ",
                              only_new=True)
                 for _nid in step_zone_nets:
                     m.reveal_zone(_nid)
@@ -789,6 +1090,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
                 if marks is not None:
                     marks.append((label, board, _first, len(m.frames)))
                 continue
+            except _OverBudget:
+                pass            # already said, loudly; fall through to chunks
             except Exception as e:
                 print(f"animate_route: trace {trace_path} failed ({e}); "
                       f"revealing delta", file=sys.stderr)
@@ -800,8 +1103,7 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # final trueup (in case the graded final differs from the last step board)
     fpcb = parse_kicad_pcb(final)
     m.refresh_placement(fpcb, final)
-    if stage is not None:
-        r.pcb = fpcb
+    r.pcb = fpcb
     for _z in (getattr(fpcb, 'zones', None) or []):   # ensure every pour shows
         m.reveal_zone(_z.net_id)
     _before = len(m.frames)
@@ -825,7 +1127,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
     # In place, so peak memory stays about two frames rather than twice the
     # movie: the same reason `movie_panels.compose_two_panel` does it that way.
     if _geom is not None:
-        _compose_into_frame(m.frames, _geom, r, m.chrome)
+        _compose_into_frame(m.frames, _geom, r, m.chrome,
+                            iso_in_panel=getattr(m, 'iso_in_panel', False))
     return m.frames
 
 
@@ -851,16 +1154,50 @@ def _write_mp4(frames, out, fps) -> bool:
         # and we crop each frame to even W/H ourselves (drops at most 1 px).
         w = imageio.get_writer(out, fps=max(1, round(fps)), codec='libx264',
                                quality=8, macro_block_size=1, pixelformat='yuv420p')
-        for fr in frames:
-            a = np.asarray(fr.convert('RGB'))
-            h, wd = a.shape[0] & ~1, a.shape[1] & ~1
-            w.append_data(a[:h, :wd])
-        w.close()
-        return True
     except Exception as e:
         print(f"animate_route: mp4 encode failed ({e}); falling back to GIF",
               file=sys.stderr)
         return False
+    # PRODUCING a frame is not ENCODING it (#1036 review). A spooled film's
+    # frames are composed lazily as this loop pulls them, so an exception
+    # raised while pulling one is the film's own defect: re-raised as itself,
+    # never reported as "mp4 encode failed" and retried as a GIF that fails
+    # the same way. Only the encoder's own calls fall back.
+    it = iter(frames)
+    while True:
+        try:
+            fr = next(it)
+        except StopIteration:
+            break
+        except BaseException:
+            try:
+                w.close()
+            except Exception:                                   # noqa: BLE001
+                pass
+            try:
+                os.remove(out)          # a truncated film is not a film
+            except OSError:
+                pass
+            raise
+        try:
+            a = np.asarray(fr.convert('RGB'))
+            h, wd = a.shape[0] & ~1, a.shape[1] & ~1
+            w.append_data(a[:h, :wd])
+        except Exception as e:
+            try:
+                w.close()
+            except Exception:                                   # noqa: BLE001
+                pass
+            print(f"animate_route: mp4 encode failed ({e}); falling back to "
+                  f"GIF", file=sys.stderr)
+            return False
+    try:
+        w.close()
+    except Exception as e:
+        print(f"animate_route: mp4 encode failed ({e}); falling back to GIF",
+              file=sys.stderr)
+        return False
+    return True
 
 
 def _png_info(meta):
@@ -872,7 +1209,7 @@ def _png_info(meta):
     return info
 
 
-def _compose_into_frame(frames, geom, r, chrome=None):
+def _compose_into_frame(frames, geom, r, chrome=None, iso_in_panel=False):
     """Fit each board-box frame into its planned frame, IN PLACE.
 
     Two cases, and the first is the common one:
@@ -886,24 +1223,37 @@ def _compose_into_frame(frames, geom, r, chrome=None):
       the reserved regions are ground until #1019/#1020/#1021 fill them.
     """
     from PIL import Image
+    import frame_spool
     th = getattr(r, 'theme', None)
     bg = th.rgb('ground') if th is not None else (14, 16, 18)
     W, H = geom.frame.w, geom.frame.h
-    for i in range(len(frames)):
-        f = frames[i]
-        if f.size == (W, H):
-            continue
-        if f.width >= W and f.height >= H and geom.board.x == 0                 and geom.board.y == 0 and geom.panel is None:
-            frames[i] = f.crop((0, 0, W, H))
-            continue
-        canvas = Image.new('RGB', (W, H), bg)
-        canvas.paste(f, (geom.board.x, geom.board.y))
-        frames[i] = canvas
-    if chrome and geom.rail.h > 0:
-        _draw_chrome(frames, geom, r, chrome)
+    # #1036: one per-frame transform. On a spool it is applied lazily while
+    # the encoder streams; on a list it rewrites in place, as it always did.
+    chrome_fn = (_chrome_drawer(len(frames), geom, r, chrome,
+                                iso_in_panel=iso_in_panel)
+                 if chrome and geom.rail.h > 0 else None)
+
+    def _one(i, f):
+        if f.size != (W, H):
+            if (f.width >= W and f.height >= H and geom.board.x == 0
+                    and geom.board.y == 0 and geom.panel is None):
+                f = f.crop((0, 0, W, H))
+            else:
+                canvas = Image.new('RGB', (W, H), bg)
+                canvas.paste(f, (geom.board.x, geom.board.y))
+                f = canvas
+        if chrome_fn is not None:
+            f = chrome_fn(i, f)
+        return f
+    frame_spool.transform(frames, _one, out_size=(W, H))
 
 
-def _draw_panel(d, geom, r, c):
+#: The least spare height under the layer grid worth filling with the board's
+#: numbers; below it the grid is centred instead.
+STRIP_SUMMARY_MIN_PX = 90
+
+
+def _draw_panel(d, geom, r, c, iso_in_panel=False):
     """The lower box, whichever of its four contents this phase asks for.
 
     Four REAL contents, not one content and three captions: the phase-1
@@ -922,16 +1272,43 @@ def _draw_panel(d, geom, r, c):
         box = geom.panel
         d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
                     fill=th.rgb('chrome_panel') if th else (14, 14, 18))
+        if iso_in_panel and geom.panel_split:
+            # the iso half is filled later by compose_two_panel(box=)
+            box = geom.panel_split[1]
+        # THE GUTTER (#946 review): every content keeps the design system's
+        # inner margin from its box -- the 4:3 inventory's counts touched
+        # the frame's right edge.
+        import render_chrome
+        g = render_chrome.gutter_px(geom.frame.w)
+        box = box._replace(x=box.x + g, y=box.y + g,
+                           w=max(2, box.w - 2 * g), h=max(2, box.h - 2 * g))
         if phase == 'routing':
+            # Cells shaped like the BOARD, in a grid when the box is tall
+            # (the 1:1 sidebar gave 85x500 cells). The grid is centred; when
+            # there is room under it, the board's numbers go there.
+            _x0, _y0, _x1, _y1 = r.bounds
+            _asp = max(_x1 - _x0, 1e-6) / max(_y1 - _y0, 1e-6)
+            _b, _n, gh = render_panels.grid_boxes(
+                box, len(r.copper_layers), _asp)
+            spare = box.h - gh
+            if _n and spare >= STRIP_SUMMARY_MIN_PX:
+                strip = box._replace(h=gh)
+                render_panels.draw_summary(
+                    d, box._replace(y=box.y + gh, h=spare), theme=th,
+                    lines=render_panels.board_summary(
+                        r.pcb, _live(c.get('live')), _live(c.get('live_v'))))
+            else:
+                strip = box._replace(y=box.y + max(0, spare) // 2,
+                                     h=min(box.h, gh) if _n else box.h)
             render_panels.draw_layer_strip(
-                d, box, bounds=r.bounds, segments=c.get('live', ()),
+                d, strip, bounds=r.bounds, segments=_live(c.get('live')),
                 layers=list(r.copper_layers), palette=r.palette, theme=th,
-                active=c.get('active'))
+                active=c.get('active'), grid=True)
         elif phase == 'bookend':
             render_panels.draw_summary(
                 d, box, theme=th,
                 lines=render_panels.board_summary(
-                    r.pcb, c.get('live', ()), c.get('live_v', ())))
+                    r.pcb, _live(c.get('live')), _live(c.get('live_v'))))
         else:
             inv = c.get('inventory') or {}
             done = sum(a for a, _b in inv.values())
@@ -943,40 +1320,58 @@ def _draw_panel(d, geom, r, c):
 
 
 def _draw_chrome(frames, geom, r, chrome):
-    """Fill the reserved rail and foot (#1019).
+    """Fill the reserved rail and foot (#1019), on a list or a spool."""
+    import frame_spool
+    frame_spool.transform(frames, _chrome_drawer(len(frames), geom, r, chrome))
+
+
+def _chrome_drawer(n_frames, geom, r, chrome, iso_in_panel=False):
+    """``fn(i, frame) -> frame`` drawing the rail and foot for frame ``i``.
 
     Each region is sized for ITS OWN content and ellipsises inside itself, so a
     long event line can no longer push the totals off the edge of a strip that
-    still looks complete.
+    still looks complete. It needs only the frame COUNT, never the pixels of
+    another frame, which is what lets a spool apply it while streaming (#1036).
     """
-    from PIL import ImageDraw
-    import render_chrome
     th = getattr(r, 'theme', None)
-    n = max(1, len(frames) - 1)
+    n = max(1, n_frames - 1)
     ticks = tuple(sorted({c.get('lap_at') for c in chrome
                           if c.get('lap_at') is not None}))
-    for i, f in enumerate(frames):
-        c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
-        d = ImageDraw.Draw(f)
-        _draw_panel(d, geom, r, c)
-        render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
-                                c.get('rail_right', ''), theme=th,
-                                progress=i / float(n), ticks=ticks)
-        if geom.foot.h > 0:
-            d.rectangle([geom.foot.x, geom.foot.y,
-                         geom.foot.x + geom.foot.w - 1,
-                         geom.foot.y + geom.foot.h - 1],
-                        fill=th.rgb('chrome_panel') if th else (14, 14, 18))
-            render_chrome.draw_totals(d, geom.foot, c.get('totals', ''),
-                                      theme=th)
-            ev = c.get('event', '')
-            if ev:
-                from route_render import load_font
-                font = load_font(max(9, int(geom.foot.h * 0.34)))
-                d.text((geom.foot.x + 6, geom.foot.y + 3),
-                       render_chrome._fit(d, ev, font, geom.foot.w * 0.55),
-                       font=font,
-                       fill=th.rgb('chrome_text') if th else (240, 240, 240))
+
+    def _fn(i, f):
+        _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks, iso_in_panel)
+        return f
+    return _fn
+
+
+def _draw_chrome_one(f, i, n, geom, r, chrome, th, ticks,
+                     iso_in_panel=False):
+    from PIL import ImageDraw
+    import render_chrome
+    c = chrome[i] if i < len(chrome) else (chrome[-1] if chrome else {})
+    d = ImageDraw.Draw(f)
+    _draw_panel(d, geom, r, c, iso_in_panel=iso_in_panel)
+    _seen = c.get('seen') or ()
+    render_chrome.draw_rail(d, geom.rail, c.get('rail', ''),
+                            c.get('rail_right', ''), theme=th,
+                            progress=i / float(n), ticks=ticks,
+                            key_rows=(render_chrome.event_rows(th, seen=_seen)
+                                      if _seen and th is not None else None))
+    if geom.foot.h > 0:
+        d.rectangle([geom.foot.x, geom.foot.y,
+                     geom.foot.x + geom.foot.w - 1,
+                     geom.foot.y + geom.foot.h - 1],
+                    fill=th.rgb('chrome_panel') if th else (14, 14, 18))
+        render_chrome.draw_totals(d, geom.foot, c.get('totals', ''),
+                                  theme=th)
+        ev = c.get('event', '')
+        if ev:
+            from route_render import load_font
+            font = load_font(max(9, int(geom.foot.h * 0.34)))
+            d.text((geom.foot.x + 6, geom.foot.y + 3),
+                   render_chrome._fit(d, ev, font, geom.foot.w * 0.55),
+                   font=font,
+                   fill=th.rgb('chrome_text') if th else (240, 240, 240))
 
 
 def _pad_rgb(theme=None):
@@ -999,10 +1394,15 @@ def _uniform_or_pad(frames, theme=None):
     optional because `save_movie` is called with a bare frame list from
     several places; without one the pad falls back to the dark ground, which
     is what it always was.
+
+    A `frame_spool.FrameSpool` is checked from its recorded sizes and padded
+    by a lazy transform, so the check decodes no frame it does not have to.
     """
+    import frame_spool
+    sizes = frame_spool.frame_sizes(frames)
     try:
         import frame_layout
-        frame_layout.assert_frames_uniform([f.size for f in frames])
+        frame_layout.assert_frames_uniform(sorted(sizes))
         return frames
     except Exception as exc:                                    # noqa: BLE001
         if 'frame_layout' not in str(type(exc)) and not isinstance(exc, ValueError):
@@ -1010,19 +1410,31 @@ def _uniform_or_pad(frames, theme=None):
     from PIL import Image
     W, H = frames[0].size
     print('animate_route: MIXED FRAME SIZES -- %s' % (
-        [f.size for f in frames if f.size != (W, H)][:3],), file=sys.stderr)
+        sorted(sz for sz in sizes if sz != (W, H))[:3],), file=sys.stderr)
     print('animate_route: padding every frame to %dx%d. Pillow would NOT have '
           'raised: it writes a valid GIF in which every later frame has been '
           'silently resized to the first.' % (W, H), file=sys.stderr)
-    out = []
-    for f in frames:
+    ground = _pad_rgb(theme)
+
+    def _pad(_i, f):
         if f.size == (W, H):
-            out.append(f)
-            continue
-        pad = Image.new(f.mode, (W, H), _pad_rgb(theme))
+            return f
+        pad = Image.new(f.mode, (W, H), ground)
         pad.paste(f, ((W - f.width) // 2, (H - f.height) // 2))
-        out.append(pad)
-    return out
+        return pad
+    if frame_spool.is_spool(frames):
+        frames.map(_pad, out_size=(W, H))
+        return frames
+    return [_pad(i, f) for i, f in enumerate(frames)]
+
+
+#: #1036: the most frames a GIF is handed. Pillow's GIF writer keeps every
+#: frame it is given (it diffs each against the last), so a 6000-frame film
+#: would be held whole no matter how it was streamed in. Above this the GIF
+#: STRIDES, as the owner's `awx/evolve_movie.py` does (`n_frames // 260`),
+#: and each kept frame lasts `stride` frame-times so the film keeps its
+#: length. The .mp4 is never strided: imageio streams it frame by frame.
+GIF_MAX_FRAMES = 260
 
 
 def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
@@ -1031,11 +1443,17 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
     (imageio-ffmpeg; falls back to a sibling `.gif` if unavailable) or `.gif`
     (native Pillow, no dependency).
 
+    ``frames`` is a list of Pillow images or a `frame_spool.FrameSpool`
+    (#1036). A spool is STREAMED: the .mp4 and the PNG dump read one frame at
+    a time, so memory does not grow with the frame count. Pillow's GIF
+    writer holds every frame it is handed, so a GIF over `GIF_MAX_FRAMES` is
+    strided, and says so: its memory is bounded by the cap, not flat.
+
     ``frame_meta`` (#887), when given, is one dict per frame written into the
     dumped PNGs' text chunks. It is indexed against ``frames``, NOT against
-    the ``seq`` built below: ``seq`` appends the end-hold repeats, while the
-    PNG loop iterates ``frames``. A short list raises rather than silently
-    misattributing every frame after the gap.
+    the end-hold repeats appended after them, while the PNG loop iterates
+    ``frames``. A short list raises rather than silently misattributing every
+    frame after the gap.
 
     Only the PNG dump carries it. The .mp4 hands numpy arrays to imageio and
     Pillow's GIF writer has no per-frame text channel, so there is nowhere
@@ -1059,18 +1477,50 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
     # anywhere says a word. After this the film is produced, the defect is
     # AUDIBLE, and the distortion is a letterbox rather than a squash.
     frames = _uniform_or_pad(frames, theme)
-    hold = [frames[-1]] * max(1, int(end_hold * fps))
-    seq = frames + hold
+    n = len(frames)
+    n_hold = max(1, int(end_hold * fps))
+    W, H = frames[0].size
+
+    def _seq():
+        last = None
+        for f in frames:
+            last = f
+            yield f
+        for _ in range(n_hold):
+            yield last
     ext = os.path.splitext(out)[1].lower()
-    if ext == '.mp4' and _write_mp4(seq, out, fps):
-        print(f"animate_route: wrote {out} ({len(frames)} frames @ {fps:g}fps, "
-              f"{frames[0].size[0]}x{frames[0].size[1]}, h264)")
+    if ext == '.mp4' and _write_mp4(_seq(), out, fps):
+        print(f"animate_route: wrote {out} ({n} frames @ {fps:g}fps, "
+              f"{W}x{H}, h264)")
     else:
         if ext == '.mp4':
             out = os.path.splitext(out)[0] + '.gif'
         dur = max(20, int(1000 / max(0.1, fps)))
-        frames[0].save(out, save_all=True, append_images=seq[1:],
-                       duration=dur, loop=0, optimize=False)
+        if n > GIF_MAX_FRAMES:
+            # EXACTLY the cap (#1036 review: it kept 261): the first and the
+            # last frame and evenly spaced ones between, and the end hold is
+            # folded into the LAST frame's duration instead of appended as
+            # frames of its own.
+            cap = GIF_MAX_FRAMES
+            keep = sorted({int(round(i * (n - 1) / float(cap - 1)))
+                           for i in range(cap)})
+            step = (n - 1) / float(cap - 1)
+            fdur = max(20, int(round(dur * step)))
+            print(f"animate_route: GIF STRIDED -- {n} frames is over the "
+                  f"{cap}-frame GIF cap; keeping {len(keep)} evenly spaced "
+                  f"frames, {fdur}ms each. The .mp4 is never strided.",
+                  file=sys.stderr)
+            seq = [frames[i] for i in keep]
+            durs = [fdur] * len(seq)
+            durs[-1] += dur * n_hold
+            seq[0].save(out, save_all=True, append_images=seq[1:],
+                        duration=durs, loop=0, optimize=False)
+            dur = fdur
+        else:
+            seq = list(_seq())
+            seq[0].save(out, save_all=True, append_images=seq[1:],
+                        duration=dur, loop=0, optimize=False)
+        del seq
         # Count what LANDED, not what was handed to the encoder. Pillow's GIF
         # writer collapses runs of byte-identical frames into one frame with an
         # accumulated duration, and this film is full of such runs by
@@ -1079,7 +1529,7 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
         # 377 and wrote 348, and the gap was only found by counting the
         # delivered GIF by hand. A number nobody can reconcile against the
         # artifact is worse than no number.
-        _n = len(frames)
+        _n = n
         try:
             from PIL import Image as _PILImage, ImageSequence
             with _PILImage.open(out) as _chk:
@@ -1087,7 +1537,7 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
         except Exception:                                       # noqa: BLE001
             pass
         print(f"animate_route: wrote {out} ({_n} frames, {dur}ms each, "
-              f"{frames[0].size[0]}x{frames[0].size[1]})")
+              f"{W}x{H})")
     if png_dir:
         os.makedirs(png_dir, exist_ok=True)
         for i, fr in enumerate(frames):
@@ -1096,7 +1546,7 @@ def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None,
             fr.save(os.path.join(png_dir, f'frame_{i:05d}.png'),
                     pnginfo=(_png_info(frame_meta[i]) if frame_meta
                              else None))
-        print(f"animate_route: dumped {len(frames)} PNG frames to {png_dir}")
+        print(f"animate_route: dumped {n} PNG frames to {png_dir}")
     return True
 
 
@@ -1116,7 +1566,9 @@ def main() -> int:
                          '.gif (native, autoplays inline). Default: .gif')
     ap.add_argument('--size', type=int, default=1000)
     ap.add_argument('--supersample', type=int, default=1)
-    ap.add_argument('--layer-alpha', type=int, default=150)
+    ap.add_argument('--layer-alpha', type=int, default=None,
+                    help="per-layer copper opacity 1-255. Default: the "
+                         "theme's own measured alpha (dark 150, light 205)")
     ap.add_argument('--fps', type=float, default=6.0)
     ap.add_argument('--rip-hold', type=int, default=2)
     ap.add_argument('--end-hold', type=float, default=1.5)

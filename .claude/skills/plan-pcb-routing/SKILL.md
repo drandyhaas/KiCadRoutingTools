@@ -1510,6 +1510,30 @@ signatures:
   stitcher) — if a net still ships bare, check the rescue log lines
   before reaching for manual surgery.
 
+When the all-nets passes stop descending and you switch to SCOPED laps (a few
+named nets per call), five lessons from run 32 (#1039) apply. That run spent
+about 190 scoped laps, and most of the waste traced to these:
+
+1. **Carry the poured nets in `--nets`** on a board with pours (`--nets /D2
+   GND`). Without them the finalize excludes the pours, but the improvement
+   gate still counts the plane pads the lap cut (#1032).
+2. **Rip the named blocker alone.** For each failing net, rip only the rail or
+   protected pair its `Hint:` names, in its own lap, with that rail's
+   `--power-nets` / `--power-nets-widths` in the same call. Name a protected
+   pair exactly (`/IO_Banks/Z6_P`). This rung sits between "rip set" and
+   "grid". In run 32 it took the oracle joins from 27 to 21.
+3. **One `'*'` pass before concluding a plateau.** After a round of scoped
+   laps accepts nothing, run one whole-board pass from the best board. It took
+   run 32 from 21 to 19.
+4. **Check the lap's own `CMD:` line** for the intended nets, rip set and grid
+   before judging the lap. Run 32 had 24 laps whose grid value landed in the
+   rip set, and all 24 read as a fake plateau.
+5. **Never expand a recorded argv unquoted.** Use a bash array or `set -f`, so
+   `--nets *` is not globbed into file names, and read the recorded argv back.
+
+`.claude/skills/plan-pcb-placement-and-routing/SKILL.md` §9.3a, §9.3c rule 1,
+§9.4 and stop condition 3 carry the measurements behind each.
+
 #### Octolinear smoothing is ON by default -- leave it alone
 
 `route.py` collapses grid-A* staircase micro-jogs into octolinear shortcuts
@@ -2181,12 +2205,22 @@ leaves a `<board>_routetrace.json` beside each routed board; a step without one
 reveals its board-to-board delta in chunks instead — which is what a hand-driven
 run gets by default.
 
+A long trace no longer holds the film in memory: frames are spooled to disk,
+and a trace over its share of the `--max-frames` budget falls back to the
+chunked reveal, printing `TRACE OVER BUDGET` (#1036). If the chain starts with
+placement boards whose parts MOVE, `make_movie` turns its camera on by itself
+and glides the parts in first. `--camera off` keeps a copper-only film, and the
+movie then names the copper-free boards it skipped.
+
 Two optional panels, both off by default and both costing real time:
-`--panels xray+iso` stacks a 3D isometric `kicad-cli` render under the board
-view (~2-4 s per render, and it shows the parts and the board turning — copper
-is under soldermask, so the 3D view shows no routing progress), and a run wrapped
-in `tests/stress/tee_cmd.py` gets a run-clock overlay read from its
-`cmd_timing.jsonl`.
+`--panels xray+iso` adds a 3D isometric `kicad-cli` render (~2-4 s per render,
+and it shows the parts and the board turning — copper is under soldermask, so
+the 3D view shows no routing progress). With `--layout split`, `stacked` or
+`sidebar` it goes into the layout's own panel and the frame keeps its declared
+`--aspect`; otherwise it stacks under the board view. A run wrapped in
+`tests/stress/tee_cmd.py` gets a run-clock overlay read from its
+`cmd_timing.jsonl`. `--theme light` is for a figure going into a
+light-background document.
 
 ### Capture Logs for Analysis
 
@@ -2488,6 +2522,13 @@ copper comes back byte-identical. To change the geometry of copper the router is
 happy with you must **rip** it (`--rip-existing-nets <exact names>`) or route the
 whole board. Run 20 spent a lap discovering this — a targeted via fix produced
 vias at identical coordinates in both boards.
+
+**When the hint names a rail or a protected pair, rip THAT ONE, alone** (#1039),
+with its `--power-nets` / `--power-nets-widths` in the same call and a
+protected pair named exactly. It is a rung of its own between "rip set" and
+"grid". The rule against collateral rail rips is about rails ripped as a
+side effect, not about the one the hint names. And on a board with pours, the
+retry's `--nets` carries the poured nets too (#1032).
 
 **The hint's suggested values are an EXAMPLE, not a derivation — read its
 `(current: ...)` tail.** On a board already routing at 0.15/0.15 the box-in hint

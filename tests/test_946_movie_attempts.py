@@ -167,7 +167,13 @@ def test_three_producers_one_record_type():
             os.path.join(td, 'ledger.jsonl')))
         t3 = MA.attempts_from_evolve_ledger(_evolve(
             os.path.join(td, 'evolve_k51.json')))
-        for name, t, n in (('loop', t1, len(LOOP_ROWS)), ('converge', t2, 5),
+        # converge: 4, not 5 -- the fixture's one PLACEMENT row is off the
+        # verdict axis since #1042 (it scores the copper-free board), and
+        # the note says so.
+        if t2 is not None and 'placement lap' not in t2.note:
+            fail('the converge note does not say a placement lap was taken '
+                 'off the axis: %r' % t2.note)
+        for name, t, n in (('loop', t1, len(LOOP_ROWS)), ('converge', t2, 4),
                            ('evolve', t3, 5)):
             if t is None:
                 fail('%s: adapter returned None on its own fixture' % name)
@@ -588,9 +594,18 @@ def test_make_film_attaches_before_it_badges():
         if not off or not on:
             fail('no frames')
             return
-        if on[0].height <= off[0].height:
-            fail('the band did not reach build_film (%s vs %s)'
+        # #946/C4: a DECLARED layout reserves the band INSIDE its frame, so
+        # the banded film is the SAME size as the unbanded one -- it used to
+        # grow, which is how `--aspect 16:9` came out taller than 16:9. The
+        # band reached build_film when the pixels differ, not the size.
+        if on[0].size != off[0].size:
+            fail('the band changed a declared frame size (%s vs %s)'
                  % (on[0].size, off[0].size))
+        from PIL import ImageChops
+        if ImageChops.difference(on[-1].convert('RGB'),
+                                 off[-1].convert('RGB')).getbbox() is None:
+            fail('the band did not reach build_film: banded and unbanded '
+                 'films are pixel-identical')
         if len({f.size for f in on}) != 1:
             fail('the banded film has %d sizes' % len({f.size for f in on}))
         want = RT.default_theme().rgb('status_tried')
@@ -689,6 +704,83 @@ def test_a_placement_run_is_graded_on_the_ROUTED_result():
         print('  PASS: the judge is the routed result, not the screen')
 
 
+def test_place_and_route_is_one_graph():
+    """#946/C4: a place-and-route run leaves a converge ledger AND loop
+    sidecars; `discover` joins them into ONE track whose x-axis is laps across
+    both halves -- the first half keeps its indices, the second is shifted
+    past it, and the second half's root descends from the first half's last
+    accepted attempt."""
+    _mark = len(_FAIL)
+    with tempfile.TemporaryDirectory() as td:
+        _loop_dir(td)
+        _ledger(os.path.join(td, 'ledger.jsonl'))
+        t = MA.discover(td)
+    if t is None or t.source != 'converge+loop':
+        fail('discover did not join the halves: %r' % (t and t.source))
+        return
+    # 4 ledger laps on the axis: the fixture's placement row is off it (#1042)
+    n_led, n_loop = 4, len(LOOP_ROWS)
+    idx = [a.index for a in t.attempts]
+    # the ledger half keeps its OWN iteration numbers (lap 1, the placement
+    # lap, is off the axis and leaves its gap), the loop half follows it
+    want = [0, 2, 3, 4] + list(range(5, 5 + n_loop))
+    if idx != want:
+        fail('the joined x-axis is not %r: %r' % (want, idx))
+    first_loop = t.attempts[n_led]
+    last_acc_ledger = max(a.index for a in t.attempts[:n_led] if a.accepted)
+    if first_loop.parent != last_acc_ledger:
+        fail('the loop half does not descend from the ledger-half last kept '
+             'attempt: parent %r, expected %r'
+             % (first_loop.parent, last_acc_ledger))
+    shifted = [a.parent for a in t.attempts[n_led + 1:] if a.parent is not None]
+    if any(p < n_led for p in shifted):
+        fail('a loop parent was not shifted into the loop half: %r' % shifted)
+    if 'blocking' not in t.metric or 'failures' not in t.metric:
+        fail('the joined axis does not say it is both terms: %r' % t.metric)
+    # and the joined track DRAWS, record line and all
+    im = Image.new('RGB', (800, 160))
+    if not MA.draw_track(ImageDraw.Draw(im), FL.Box(0, 0, 800, 160), t):
+        fail('the joined track declined to draw')
+    if len(_FAIL) == _mark:
+        print('  PASS: %d ledger laps + %d loop rounds -> one axis 0..%d (%s)'
+              % (n_led, n_loop, idx[-1], t.note))
+
+
+def test_lineage_falls_back_to_last_accepted_and_says_so():
+    """Until `converge.py record` takes a parent explicitly (#1034), a row with
+    no `parent_sha` is drawn from the LAST ACCEPTED row before it -- the
+    loop's own rule -- and the note COUNTS those guesses, because under
+    parallel lineages the guess can be wrong."""
+    _mark = len(_FAIL)
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, 'ledger.jsonl')
+        rows = [(0, None, 'a', True, 9), (1, 'a', 'b', False, 12),
+                (2, 'a', 'c', True, 8), (3, None, 'd', True, 4),
+                (4, 'zzz-not-a-row', 'e', False, 7)]
+        with open(p, 'w', encoding='utf-8') as f:
+            for it, par, res, acc, b in rows:
+                f.write(json.dumps({'iteration': it, 'kind': 'completion',
+                                    'parent_sha': par, 'result_sha': res,
+                                    'accepted': acc,
+                                    'score': {'blocking': b}}) + '\n')
+        t = MA.attempts_from_converge_ledger(p)
+    par = {a.index: a.parent for a in t.attempts}
+    if par[0] is not None:
+        fail('the first row is not the root: %r' % par[0])
+    if par[1] != 0 or par[2] != 0:
+        fail('a recorded parent_sha was not followed: %r' % par)
+    if par[3] != 2:
+        fail('no parent_sha -> expected the last accepted row 2, got %r'
+             % par[3])
+    if par[4] != 3:
+        fail('an unresolvable parent_sha -> expected last accepted 3, got %r'
+             % par[4])
+    if '#1034' not in t.note or '2 parent(s)' not in t.note:
+        fail('the fallback is not disclosed and counted: %r' % t.note)
+    if len(_FAIL) == _mark:
+        print('  PASS: parent_sha followed; 2 fallbacks, said: %s' % t.note)
+
+
 TESTS = (
     test_three_producers_one_record_type,
     test_the_axis_is_the_accept_rule_and_is_never_mixed,
@@ -704,6 +796,8 @@ TESTS = (
     test_the_horizon_grows_with_the_film,
     test_make_film_attaches_before_it_badges,
     test_a_card_and_a_band_in_one_film_are_one_size,
+    test_place_and_route_is_one_graph,
+    test_lineage_falls_back_to_last_accepted_and_says_so,
 )
 
 
