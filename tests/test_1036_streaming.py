@@ -57,6 +57,16 @@ def fail(msg):
     print('  FAIL: %s' % msg)
 
 
+_TMPS = []
+
+
+def _mkdtemp(prefix):
+    """A temp dir `main()` removes when the run ends, pass or fail."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    _TMPS.append(d)
+    return d
+
+
 def _write_trace(board, n_events, path):
     """A synthetic per-segment trace: one `route` event per segment of the
     board's own copper, so replaying it builds the board a segment at a time
@@ -125,7 +135,7 @@ def test_make_movie_hands_save_movie_a_spool_and_a_list_still_saves():
         seen['n'] = len(frames)
         return saved(frames, out, *args, **kw)
     a.save_movie = _spy
-    tmp = tempfile.mkdtemp(prefix='t1036_')
+    tmp = _mkdtemp(prefix='t1036_')
     try:
         out = make_movie.make_movie([BOARD], out=os.path.join(tmp, 'm.gif'),
                                     size=300, quiet=True, attempts=False)
@@ -152,7 +162,7 @@ def test_make_movie_hands_save_movie_a_spool_and_a_list_still_saves():
 def test_gif_strides_over_its_cap():
     _mark = len(_FAIL)
     import animate_route as a
-    tmp = tempfile.mkdtemp(prefix='t1036g_')
+    tmp = _mkdtemp(prefix='t1036g_')
     n = a.GIF_MAX_FRAMES * 2 + 7
     with frame_spool.FrameSpool() as sp:
         for i in range(n):
@@ -333,7 +343,7 @@ def test_memory_is_bounded_in_the_frame_count():
 def test_a_trace_over_budget_falls_back_loudly():
     _mark = len(_FAIL)
     import animate_route as a
-    tmp = tempfile.mkdtemp(prefix='t1036b_')
+    tmp = _mkdtemp(prefix='t1036b_')
     import shutil
     board = os.path.join(tmp, 'b.kicad_pcb')
     shutil.copy(BOARD, board)
@@ -372,7 +382,7 @@ def test_the_spool_says_when_the_disk_cannot_hold_it():
     saved = frame_spool.disk_check
     frame_spool.disk_check = lambda d, n, px: (False, 10 ** 12, 10 ** 9)
     err = io.StringIO()
-    tmp = tempfile.mkdtemp(prefix='t1036d_')
+    tmp = _mkdtemp(prefix='t1036d_')
     try:
         with contextlib.redirect_stderr(err):
             make_movie.make_movie([BOARD], out=os.path.join(tmp, 'm.gif'),
@@ -407,7 +417,7 @@ def test_make_film_streams_through_a_spool():
         seen['n'] = len(frames)
         return saved(frames, out, *args, **kw)
     a.save_movie = _spy
-    tmp = tempfile.mkdtemp(prefix='t1036f_')
+    tmp = _mkdtemp(prefix='t1036f_')
     try:
         rc = make_film.main([BOARD, BOARD, '-o', os.path.join(tmp, 'f.gif'),
                              '--camera', 'off', '--quiet', '--size', '200',
@@ -438,9 +448,14 @@ def main():
         _child(int(sys.argv[2]), sys.argv[3],
                sys.argv[4] if len(sys.argv) > 4 else 'spool')
         return 0
-    for fn in TESTS:
-        print('%s:' % fn.__name__)
-        fn()
+    try:
+        for fn in TESTS:
+            print('%s:' % fn.__name__)
+            fn()
+    finally:
+        import shutil
+        for d in _TMPS:
+            shutil.rmtree(d, ignore_errors=True)
     if _FAIL:
         print('')
         print('%d FAILURE(S)' % len(_FAIL))

@@ -416,6 +416,8 @@ def test_the_encoded_film_is_the_declared_size_in_both_themes():
                 if corner == RT_theme(other).rgb('ground'):
                     fail('%s/%s/%s: the frame corner is the %s ground'
                          % (lk, rk, th, other))
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
     if len(_FAIL) == _mark:
         print('  PASS: %d films (5 layouts x 3 ratios x 2 themes) encoded at '
               'the declared size, band inside' % n)

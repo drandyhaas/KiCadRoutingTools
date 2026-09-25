@@ -68,15 +68,32 @@ def fail(msg):
     print('  FAIL: %s' % msg)
 
 
-def _spool_dirs():
-    return set(glob.glob(os.path.join(tempfile.gettempdir(),
-                                      'krt_frames_*')))
+def _spool_dirs(where):
+    return set(glob.glob(os.path.join(where, 'krt_frames_*')))
 
 
 def test_make_film_closes_its_spools_on_failure():
+    """Counted in a PRIVATE temp dir: the spools are made by
+    `tempfile.mkdtemp`, so pointing `tempfile.tempdir` at a directory this
+    test owns means another film rendering on the machine at the same time
+    cannot leave a `krt_frames_*` directory the count would blame on this
+    one."""
     _mark = len(_FAIL)
     import make_film
     tmp = tempfile.mkdtemp(prefix='t1036cr_')
+    private = os.path.join(tmp, 'spools')
+    os.makedirs(private)
+    saved_tempdir = tempfile.tempdir
+    tempfile.tempdir = private
+    try:
+        _closes_its_spools(make_film, tmp, private)
+    finally:
+        tempfile.tempdir = saved_tempdir
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _closes_its_spools(make_film, tmp, private):
+    _mark = len(_FAIL)
     argv = [BOARD, BOARD, '-o', os.path.join(tmp, 'f.gif'), '--size', '200',
             '--quiet', '--camera', 'off', '--no-attempts']
     orig = frame_spool.FrameSpool.append
@@ -92,7 +109,7 @@ def test_make_film_closes_its_spools_on_failure():
         frame_spool.FrameSpool.append = orig
     total = calls[0]
     for at in (2, total - 1):
-        before = _spool_dirs()
+        before = _spool_dirs(private)
         calls[0] = 0
 
         def _boom(self, img, at=at):
@@ -108,7 +125,7 @@ def test_make_film_closes_its_spools_on_failure():
             raised = True
         finally:
             frame_spool.FrameSpool.append = orig
-        left = _spool_dirs() - before
+        left = _spool_dirs(private) - before
         if not raised:
             fail('BROKEN: the injected failure at append %d never fired' % at)
         if left:
@@ -121,7 +138,6 @@ def test_make_film_closes_its_spools_on_failure():
         rc = e.code
     if rc != 0:
         fail('make_film --max-frames 5 exited %r' % rc)
-    shutil.rmtree(tmp, ignore_errors=True)
     if len(_FAIL) == _mark:
         print('  PASS: failures at append 2 and %d of %d leave no spool dir; '
               '--max-frames accepted' % (total - 1, total))
