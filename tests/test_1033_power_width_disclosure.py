@@ -247,9 +247,9 @@ def t_assign():
     check('full width: nothing recorded', len(ledger()) == n1)
 
 
-# ------------------------------------- 3a: the exact check at the pad
+# ------------------------------- the widen pass's exact check at the pad
 def t_exact_check():
-    """#1033 part 3a's zone check is the GRADER's pad copper (#1029): it must
+    """#1033: the widen pass's pad check is the GRADER's pad copper (#1029): it must
     never call clear what check_drc calls a graze, including a tilted rect
     whose corner a circle approximation misjudges; and a piece landing in an
     own pad is capped at the pad's narrow side."""
@@ -284,15 +284,15 @@ def t_exact_check():
                 disagree += 1
             if not ok and not graze:
                 loose += 1
-    check('3a exact check: never clears what check_drc grades as a pad graze '
+    check('widen exact check: never clears what check_drc grades as a pad graze '
           '(tilted rect, 180 cases)', disagree == 0, disagree)
-    check('3a exact check: and is not needlessly conservative beside it',
+    check('widen exact check: and is not needlessly conservative beside it',
           loose <= n * 0.1, (loose, n))
     # own-pad entry cap: a segment ending in U1's 0.2-wide pad
     s_ = make_seg(0.8, 0.0, 2.0, 0.0, width=0.127, net_id=1, layer='F.Cu')
     pieces = widen_segment(s_, 0.3, chk)
     at_pad = [p.width for p in pieces if max(p.start_x, p.end_x) > 1.9 - 1e-9]
-    check('3a own-pad entry: capped at the pad narrow side (0.2), wider before',
+    check('widen own-pad entry: capped at the pad narrow side (0.2), wider before',
           at_pad and max(at_pad) <= 0.2 + 1e-9
           and any(abs(p.width - 0.3) < 1e-9 for p in pieces),
           [(round(p.start_x, 3), round(p.end_x, 3), p.width) for p in pieces])
@@ -422,7 +422,7 @@ def t_end_to_end():
         check('end to end: no 0.127 run where 0.3 fits (under <= 10 of 22 mm)',
               und <= 10.0, (und, tot))
 
-        # #1033 part 3a: the PAD-NECK ZONE. U1's approach (x 4.5..6.5, free
+        # #1033 post-route widen: the PAD-NECK ZONE. U1's approach (x 4.5..6.5, free
         # space) used to be forced to the neck width for 2.5 mm; it now carries
         # 0.3 wherever that clears. J2's two SIG pads flank U2's approach at
         # x=24.5, 0.2 mm from the centreline: 0.3 does not fit between them
@@ -441,18 +441,18 @@ def t_end_to_end():
         free_wide = _len_where(lambda x: 4.6 < x < 6.4,
                                lambda w: abs(w - 0.3) < 1e-6)
         free_all = _len_where(lambda x: 4.6 < x < 6.4, lambda w: True)
-        check('3a: the pad approach in free space is WIDE (0.3) in the neck zone',
+        check('widen: the pad approach in free space is WIDE (0.3) in the neck zone',
               free_all > 1.0 and free_wide >= 0.9 * free_all,
               (round(free_wide, 3), round(free_all, 3)))
         flank_wide = _len_where(lambda x: 24.35 < x < 24.65,
                                 lambda w: w > 0.25)
         flank_all = _len_where(lambda x: 24.35 < x < 24.65, lambda w: True)
-        check('3a: between the flanking foreign pads it stays NECKED (< 0.3)',
+        check('widen: between the flanking foreign pads it stays NECKED (< 0.3)',
               flank_all > 0.1 and flank_wide < 1e-6,
               (round(flank_wide, 3), round(flank_all, 3)))
         into_u2 = [s_.width for s_ in segs
                    if max(s_.start_x, s_.end_x) > 25.5 + 1e-6]
-        check('3a: the entry into the 1 mm pad is no wider than the pad',
+        check('widen: the entry into the 1 mm pad is no wider than the pad',
               into_u2 and max(into_u2) <= 1.0 + 1e-9, into_u2)
         # ...and the widened copper is legal: DRC-clean at the routed
         # clearance, and still connected (connectivity is orthogonal to DRC).

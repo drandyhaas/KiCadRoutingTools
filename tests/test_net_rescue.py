@@ -173,7 +173,7 @@ def test_rescue_skips_connected_and_reports_unchanged():
 
 
 def _pinch_board():
-    """#1033 part 3b: VICTIM is a POWER net (0.4 requested) whose only way
+    """#1033: VICTIM is a POWER net (0.4 requested) whose only way
     across is a 1 mm long pinch at x 1..2 -- solid net-2 copper above and
     below it on both layers -- with free space on either side. Only a rung
     below the power width fits the pinch."""
@@ -207,9 +207,10 @@ def test_rescued_power_net_is_widened_where_it_fits():
     state = _state(pcb, cfg)
     summary = rescue_failed_nets(state, [('VICTIM', VICTIM)])
     assert summary is not None and summary['recovered'] == ['VICTIM'], summary
-    # The rescue itself lays its rung width -- no widening inside the
-    # routing loop (completion first, #1033 part 3 moved it out).
-    assert max(s.width for s in pcb.segments if s.net_id == VICTIM) < 0.2,         "the rescue must not widen in the loop any more"
+    # The rescue itself lays its rung width; widening is the post-route
+    # pass's job (completion first).
+    assert max(s.width for s in pcb.segments if s.net_id == VICTIM) < 0.2, \
+        "the rescue lays its rung width, not the power width"
     # The SHARED post-route cleanup pipeline (both fronts) widens it, judged
     # against the finished board at the run's clearance.
     from cleanup_pipeline import run_post_route_cleanup

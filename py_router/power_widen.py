@@ -1,4 +1,4 @@
-"""Post-route widening of power-net copper (#1033 part 3).
+"""Post-route widening of power-net copper (#1033).
 
 Routing lays a power net narrower than its ``--power-nets-widths`` in several
 places, each for a reason that holds while routing and not afterwards: the
@@ -9,11 +9,9 @@ K3C board, +3V3 force-reroute: ~200 of ~530 mm shipped under 0.3.
 
 ``widen_power_copper`` takes that width back ONCE, after routing, inside the
 shared cleanup pipeline (``cleanup_pipeline.run_post_route_cleanup``, so the
-CLI and the GUI both get it). Routing itself is unchanged -- completion comes
-first, and widening only uses space every other net has already left over.
-An earlier cut widened inside the routing loop and changed what later nets
-saw (esp_prog@dru lost /RTS); with the pass disabled the copper is
-segment-for-segment the pre-part-3 router's.
+CLI and the GUI both get it). It runs after every net is routed, so it never
+changes what a later net sees while routing -- completion comes first, and
+widening only uses space every other net has already left over.
 
 Each piece (~0.25 mm) takes the widest of the net's width and its ladder
 (width/2, /4, ...; plus an own pad's narrow side) that ``ExactWideCheck``
@@ -57,16 +55,18 @@ def reset_errors():
 
 
 def note_ctor_error(exc):
-    """Loud, one line: a raised constructor must not silently turn 3a off."""
+    """Loud, one line: a raised constructor must not silently turn the
+    widening off for a net."""
     ERRORS['ctor_errors'] += 1
     ERRORS['last'] = f"{type(exc).__name__}: {exc}"
     print(f"WARNING: power-width widen check could not be built "
-          f"({type(exc).__name__}: {exc}) -- this route keeps its neck/rescue "
-          f"width (#1033)")
+          f"({type(exc).__name__}: {exc}) -- this net keeps its routed "
+          f"widths (#1033)")
 
 
-# Piece length for the neck-zone / rescue widen-back. Finer than the trunk's
-# 0.5 mm because the neck zone is short (2.5 mm) and pad fields are dense.
+# Piece length for the post-route widen. Finer than _neck_pass's 0.5 mm
+# pieces because the pad-neck zone is short (neckdown_length) and pad fields
+# are dense.
 PIECE_MM = 0.25
 
 
@@ -84,7 +84,7 @@ def width_ladder(target: float, floor: float) -> List[float]:
 class ExactWideCheck:
     """Does a piece of net `net_id` copper clear everything foreign at width w?
 
-    Built once per call site (per route / per rescued gap). Every term is the
+    Built once per net by widen_power_copper. Every term is the
     exact measurement check_drc grades, at the pair clearance the router uses
     (config.obstacle_clearance, #498 layer rule applied)."""
 
@@ -367,17 +367,14 @@ def widen_segment(seg, target_w, check: ExactWideCheck,
 
 
 def widen_power_copper(results, pcb_data, config, scope_net_ids=None):
-    """#1033 part 3, AFTER routing: widen each power net's copper where its
+    """#1033, AFTER routing: widen each power net's copper where its
     requested width -- or a step of its ladder -- clears on exact geometry
     against the FINISHED board.
 
     One pass over every result's power-net copper, run by the shared cleanup
-    pipeline (so the CLI and the GUI both get it). It replaces the in-loop
-    neck-zone widening (3a) and rescue widening (3b): those changed what the
-    NEXT net saw while routing and cost esp_prog@dru its /RTS net through
-    divergence (one sample). Completion comes first -- routing now runs
-    exactly as before part 3, and widening only takes space that every other
-    net has left over.
+    pipeline (so the CLI and the GUI both get it). Completion comes first:
+    the pass runs after routing, so it only takes space that every other net
+    has left over.
 
     It covers whatever the run laid narrower than the net's width: the pad
     neck zone, rescue rungs, short-edge ladders and trunk pieces the grid fit
@@ -385,8 +382,9 @@ def widen_power_copper(results, pcb_data, config, scope_net_ids=None):
     map refused may widen now. Collinear pieces only; connectivity unchanged.
 
     Per net: decide every piece first, then rewrite that net's result lists
-    and the board ONCE (the 1f29b6cfe rule), so the next net's check sees the
-    widened copper. Returns {'nets': n, 'widened_mm': mm}."""
+    and the board ONCE, so every piece of a net is judged against the same
+    board and the next net's check sees the widened copper. Returns
+    {'nets': n, 'widened_mm': mm}."""
     pw = getattr(config, 'power_net_widths', None) or {}
     stats = {'nets': 0, 'widened_mm': 0.0}
     if not pw or not results:

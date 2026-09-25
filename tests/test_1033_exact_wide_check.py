@@ -202,7 +202,7 @@ def main():
           and st12['nets'] == 0 and r12[0]['new_segments'] == [s12])
 
     # 13. the post-route pass rewrites the board ONCE per net, after deciding
-    #     every piece (the 1f29b6cfe rule): several narrow segments across two
+    #     every piece: several narrow segments across two
     #     results, a foreign track to keep the check busy -- every one widens,
     #     both result lists and the board carry the pieces, nothing stale
     c13 = cfg()
