@@ -103,6 +103,30 @@ def placement_chain(work_dir):
     return steps, steps[-1][1]
 
 
+#: The film's frame budget when neither the caller nor $KICAD_MOVIE_MAX_FRAMES
+#: names one -- the env knob's own default (`env_knobs.MOVIE_MAX_FRAMES`).
+DEFAULT_MAX_FRAMES = 2400
+
+
+def resolve_max_frames(max_frames=None):
+    """The film's frame budget, resolved ONE way for every front end.
+
+    An explicit value wins (0 = no budget); else `$KICAD_MOVIE_MAX_FRAMES`;
+    else `DEFAULT_MAX_FRAMES`. `make_movie` and `make_film` both call this,
+    so the two cannot drift: `make_film` used to hand `None` straight to
+    `build_boards`, which reads it as "no budget", so its documented default
+    and the env knob were both no-ops on films.
+    """
+    if max_frames is not None:
+        return max(0, int(max_frames))
+    try:
+        import env_knobs
+        return max(0, int(getattr(env_knobs, 'MOVIE_MAX_FRAMES',
+                                  DEFAULT_MAX_FRAMES)))
+    except Exception:                                           # noqa: BLE001
+        return DEFAULT_MAX_FRAMES
+
+
 def spool_budget(spool, steps, size, max_frames, rip_hold, who='make_movie'):
     """The frame budget to render with, after checking the spool's DISK.
 
@@ -127,9 +151,7 @@ def spool_budget(spool, steps, size, max_frames, rip_hold, who='make_movie'):
                   'free' % (who, est, need / 1e9, spool.dir,
                             (free or 0) / 1e9), file=sys.stderr)
             if not max_frames:
-                import env_knobs as _ek3
-                max_frames = int(getattr(_ek3, 'MOVIE_MAX_FRAMES', 2400)
-                                 or 2400)
+                max_frames = resolve_max_frames(None) or DEFAULT_MAX_FRAMES
                 print('%s: falling back to a %d-frame budget so the spool '
                       'fits' % (who, max_frames), file=sys.stderr)
     except Exception:                                           # noqa: BLE001
@@ -422,12 +444,7 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
     _title = title or (os.path.basename(os.path.abspath(inputs[0]))
                        if len(inputs) == 1 and os.path.isdir(inputs[0])
                        else None)
-    if max_frames is None:
-        try:
-            import env_knobs as _ek2
-            max_frames = int(getattr(_ek2, 'MOVIE_MAX_FRAMES', 0) or 0)
-        except Exception:                                       # noqa: BLE001
-            max_frames = 0
+    max_frames = resolve_max_frames(max_frames)
     max_frames = spool_budget(spool, steps, size, max_frames, rip_hold,
                               who='make_movie')
     # #946/C4: THE ATTEMPTS ARE FOUND BEFORE THE FRAME IS PLANNED, so the

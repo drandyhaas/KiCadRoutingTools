@@ -338,6 +338,10 @@ def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
     spool comes back instead of a list (it indexes, iterates and has a
     `len`; the caller closes it). The default stays a list for in-process
     callers that edit frames in place.
+
+    `max_frames` is make_movie's frame budget, resolved by the same
+    `make_movie.resolve_max_frames`: None = $KICAD_MOVIE_MAX_FRAMES, else
+    2400; 0 = none.
     """
     import animate_route as a
     import render_theme
@@ -436,8 +440,12 @@ def _build_film_body(a, frame_spool, sink, steps, final, size, supersample,
                      aspect, _geom, attempts, iso_box, want_iso, iso_opts,
                      owner, shots, fps, boards, quiet, max_frames,
                      placement=None):
+    import make_movie as _mm
+    # the ONE resolver make_movie uses: an explicit budget, else
+    # $KICAD_MOVIE_MAX_FRAMES, else the default -- never None, which
+    # build_boards reads as "no budget"
+    max_frames = _mm.resolve_max_frames(max_frames)
     if sink is not None:
-        import make_movie as _mm
         max_frames = _mm.spool_budget(sink, steps, size, max_frames,
                                       rip_hold, who='make_film')
     # #1042: the placement panels, measured before the frame is planned so

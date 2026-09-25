@@ -5,6 +5,10 @@
      append that raises 'disk full', during the board frames and during
      assembly) -- it left two krt_frames_* directories behind; and it takes
      --max-frames.
+  1b. make_film resolves its frame budget exactly as make_movie does, through
+      the one `make_movie.resolve_max_frames`: None -> $KICAD_MOVIE_MAX_FRAMES
+      -> 2400, and an explicit value (0 = none) wins. It used to hand None to
+      build_boards, which reads it as "no budget".
   4. An invalid $KICAD_RENDER_THEME warns ONCE per film, not per frame; a
      caller's IsoOpts is not mutated.
   5a. A synthesised placement step that also lays copper plays that copper
@@ -115,6 +119,61 @@ def test_make_film_closes_its_spools_on_failure():
     if len(_FAIL) == _mark:
         print('  PASS: failures at append 2 and %d of %d leave no spool dir; '
               '--max-frames accepted' % (total - 1, total))
+
+
+def test_make_film_resolves_the_frame_budget_like_make_movie():
+    """Both front ends hand build_boards the SAME budget for the same ask."""
+    _mark = len(_FAIL)
+    import env_knobs
+    import make_film
+    import make_movie
+    seen = []
+
+    def _spy(*a, **kw):
+        seen.append(kw.get('max_frames'))
+        return []
+    orig = A.build_boards
+    old_env = os.environ.pop('KICAD_MOVIE_MAX_FRAMES', None)
+    tmp = tempfile.mkdtemp(prefix='t1036mf_')
+    A.build_boards = _spy
+    got = {}
+    try:
+        for env, flag, want in ((None, None, make_movie.DEFAULT_MAX_FRAMES),
+                                ('7', None, 7), ('7', 5, 5), ('7', 0, 0),
+                                ('0', None, 0)):
+            if env is None:
+                os.environ.pop('KICAD_MOVIE_MAX_FRAMES', None)
+            else:
+                os.environ['KICAD_MOVIE_MAX_FRAMES'] = env
+            env_knobs.refresh()
+            argv = [BOARD, BOARD, '-o', os.path.join(tmp, 'f.gif'),
+                    '--quiet', '--camera', 'off', '--no-attempts',
+                    '--no-placement-panel']
+            if flag is not None:
+                argv += ['--max-frames', str(flag)]
+            del seen[:]
+            with contextlib.redirect_stderr(io.StringIO()):
+                make_film.main(argv)
+                make_movie.make_movie([BOARD, BOARD],
+                                      out=os.path.join(tmp, 'm.gif'),
+                                      quiet=True, camera='off',
+                                      attempts=False, placement_panel=False,
+                                      max_frames=flag)
+            got[(env, flag)] = list(seen)
+            if seen != [want, want]:
+                fail('env %r, --max-frames %r: build_boards got %r from '
+                     '(make_film, make_movie), want %r for both'
+                     % (env, flag, seen, want))
+    finally:
+        A.build_boards = orig
+        if old_env is None:
+            os.environ.pop('KICAD_MOVIE_MAX_FRAMES', None)
+        else:
+            os.environ['KICAD_MOVIE_MAX_FRAMES'] = old_env
+        env_knobs.refresh()
+        shutil.rmtree(tmp, ignore_errors=True)
+    if len(_FAIL) == _mark:
+        print('  PASS: make_film and make_movie resolve one budget: %r' % got)
 
 
 def test_an_invalid_theme_warns_once_and_iso_opts_are_not_mutated():
@@ -337,6 +396,7 @@ def test_a_strided_gif_holds_exactly_the_cap():
 
 TESTS = (
     test_make_film_closes_its_spools_on_failure,
+    test_make_film_resolves_the_frame_budget_like_make_movie,
     test_an_invalid_theme_warns_once_and_iso_opts_are_not_mutated,
     test_a_placement_step_that_lays_copper_plays_it,
     test_duplicate_references_pair_by_uuid,
