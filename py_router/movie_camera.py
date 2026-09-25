@@ -884,6 +884,58 @@ def _move_floor_mm():
         return 0.5
 
 
+_FP_TOKEN = None
+
+
+def pose_signature(path):
+    """Every footprint's identity and pose read off the file TEXT, in file
+    order -- or None when the text cannot be read that way.
+
+    Per footprint: its header up to and including its own `(at x y rot)` (the
+    library id, layer, uuid/tstamp and the pose) and its reference. Two boards
+    with EQUAL signatures have every part where it was, so `synth_rounds`
+    needs to parse neither to know that nothing moved -- which is the answer
+    for every routing chain, and a parse of a large board costs about half a
+    second. Anything the reading is unsure of returns None, and the caller
+    parses: a footprint whose first `(at` is not before its first child (so
+    the pose read might be a child's), or a file with no footprint token.
+    """
+    import re
+    global _FP_TOKEN
+    if _FP_TOKEN is None:
+        _FP_TOKEN = (re.compile(r'\((?:footprint|module)\s'),
+                     re.compile(r'\(at\s[^()]*\)'),
+                     re.compile(r'\((?:property|fp_text|fp_line|fp_arc|'
+                                r'fp_circle|fp_rect|fp_poly|pad|model|attr)'
+                                r'[\s)]'),
+                     re.compile(r'\(property\s+"Reference"\s+'
+                                r'"((?:[^"\\]|\\.)*)"'
+                                r'|\(fp_text\s+reference\s+'
+                                r'("(?:[^"\\]|\\.)*"|[^\s()]+)'))
+    fp_re, at_re, child_re, ref_re = _FP_TOKEN
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            txt = f.read()
+    except OSError:
+        return None
+    starts = [m.start() for m in fp_re.finditer(txt)]
+    if not starts:
+        return None
+    sig = []
+    for k, s0 in enumerate(starts):
+        s1 = starts[k + 1] if k + 1 < len(starts) else len(txt)
+        at = at_re.search(txt, s0, s1)
+        if at is None:
+            return None
+        child = child_re.search(txt, s0 + 1, s1)
+        if child is not None and child.start() < at.start():
+            return None       # the first (at might be a child's: parse
+        ref = ref_re.search(txt, at.end(), s1)
+        sig.append((txt[s0:at.end()],
+                    (ref.group(1) or ref.group(2)) if ref else None))
+    return tuple(sig)
+
+
 def synth_rounds(boards, min_mm=None):
     """Round records for a chain that has NO loop_round*.json sidecars.
 
@@ -904,13 +956,32 @@ def synth_rounds(boards, min_mm=None):
     show rejected attempts should say so by passing them and labelling them,
     not by having them inferred here.
     """
-    from kicad_parser import parse_kicad_pcb
+    import kicad_parser
     out, prev = [], None
+    # THE CHEAP PATH (#1036 review): a board whose `pose_signature` equals the
+    # previous board's moved nothing, so it is not parsed -- and the previous
+    # board is parsed only when a later one DOES differ from it. A routing
+    # chain (every GUI recorder film) therefore costs no parse at all here.
+    prev_path, prev_sig = None, None
     for i, b in enumerate(boards):
+        sig = pose_signature(b)
+        if prev_path is None:
+            # the first board: parsed only if a later board differs from it
+            prev_path, prev_sig = b, sig
+            continue
+        if sig is not None and sig == prev_sig:
+            prev_path = b             # its poses are prev's poses
+            continue
         try:
-            pcb = parse_kicad_pcb(b)
+            pcb = kicad_parser.parse_kicad_pcb(b)
         except Exception:
             continue
+        if prev is None and prev_path is not None:
+            try:
+                prev = kicad_parser.parse_kicad_pcb(prev_path)
+            except Exception:
+                prev = None
+        prev_path, prev_sig = b, sig
         moved = []
         if prev is not None:
             # PAIRING (#1036 review). By uuid when the uuid names ONE block

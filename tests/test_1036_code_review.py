@@ -23,6 +23,9 @@
       counts as unplaced.
   7.  `leading_copper_free` ignores `(arc` inside a zone's `(pts ...)`.
   GIF: a strided GIF holds EXACTLY `GIF_MAX_FRAMES`.
+  Camera detection: a routing chain (no footprint pose changed) costs no
+      board parse to learn that, and keeps the camera off; a move or a
+      rotation alone still goes through the full diff.
   Lazy overlays: a frame the attempts band or the run clock fails to draw
       drops THAT overlay for the rest of the film, said once, and the film
       is still written, one size throughout; a frame that cannot be PRODUCED
@@ -526,6 +529,85 @@ def test_a_failing_overlay_costs_the_overlay_not_the_film():
               'an encoder error falls back')
 
 
+def test_a_routing_chain_costs_no_parse_to_find_nothing_moved():
+    """An unstated camera asks `synth_rounds` whether parts moved on EVERY
+    multi-board film -- the GUI recorder's `make_movie(boards, out,
+    quiet=True)` included. It used to parse every board to answer (about
+    0.5 s per glasgow-sized board). Boards whose footprint headers and poses
+    read the same off the text are not parsed; any difference, including a
+    rotation alone, still goes through the full diff."""
+    _mark = len(_FAIL)
+    import kicad_parser
+    import make_movie
+    import movie_camera as MC
+    sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
+    from placement.writer import write_placed_output
+    calls = [0]
+    orig = kicad_parser.parse_kicad_pcb
+
+    def _count(*a, **k):
+        calls[0] += 1
+        return orig(*a, **k)
+    lvds = os.path.join(KF, 'lvds_converter_dualclk.kicad_pcb')
+    gnd = os.path.join(KF, 'lvds_converter_dualclk_gnd.kicad_pcb')
+    big = os.path.join(KF, 'glasgow_revC.kicad_pcb')
+    tmp = tempfile.mkdtemp(prefix='t1036sg_')
+    kicad_parser.parse_kicad_pcb = _count
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = MC.synth_rounds([lvds, gnd])
+            if r or calls[0]:
+                fail('a routing pair (copper changed, no part moved) read '
+                     '%r with %d parse(s); want no rounds and no parse'
+                     % (r, calls[0]))
+            calls[0] = 0
+            r = MC.synth_rounds([big] * 4)
+            if r or calls[0]:
+                fail('four identical glasgow boards cost %d parse(s)'
+                     % calls[0])
+            # a moved part, and a ROTATION alone, still diff in full
+            pcb = orig(lvds)
+            ref = sorted(pcb.footprints)[0]
+            f0 = pcb.footprints[ref]
+            for tag, place in (
+                    ('moved', {'new_x': f0.x + 3.0, 'new_y': f0.y,
+                               'new_rotation': f0.rotation or 0}),
+                    ('rotated', {'new_x': f0.x, 'new_y': f0.y,
+                                 'new_rotation': (f0.rotation or 0) + 90})):
+                v = os.path.join(tmp, tag + '.kicad_pcb')
+                write_placed_output(lvds, v, [dict(place, reference=ref)])
+                calls[0] = 0
+                r = MC.synth_rounds([lvds, v])
+                got = [m['reference'] for rd in r for m in rd['moved']]
+                if got != [ref] or not calls[0]:
+                    fail('%s %s: rounds %r after %d parse(s)'
+                         % (tag, ref, got, calls[0]))
+    finally:
+        kicad_parser.parse_kicad_pcb = orig
+        shutil.rmtree(tmp, ignore_errors=True)
+    # the GUI recorder's call, on a routing pair: no camera
+    tmp = tempfile.mkdtemp(prefix='t1036gr_')
+    old_env = os.environ.pop('KICAD_MOVIE_CAMERA', None)
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            got = make_movie.make_movie([lvds, gnd],
+                                        out=os.path.join(tmp, 'r.gif'),
+                                        quiet=True, size=200)
+    finally:
+        if old_env is not None:
+            os.environ['KICAD_MOVIE_CAMERA'] = old_env
+        shutil.rmtree(tmp, ignore_errors=True)
+    if not got:
+        fail('the routing pair made no film: %r' % err.getvalue()[-300:])
+    if 'move parts -- camera auto' in err.getvalue():
+        fail('a routing film turned the placement camera on: %r'
+             % err.getvalue()[-300:])
+    if len(_FAIL) == _mark:
+        print('  PASS: routing chains cost no parse and keep the camera off; '
+              'a move and a rotation alone are still diffed')
+
+
 def test_an_overhanging_part_is_placed():
     _mark = len(_FAIL)
 
@@ -613,6 +695,7 @@ TESTS = (
     test_duplicate_references_pair_by_uuid,
     test_a_shared_uuid_is_not_an_identity,
     test_a_failing_overlay_costs_the_overlay_not_the_film,
+    test_a_routing_chain_costs_no_parse_to_find_nothing_moved,
     test_an_overhanging_part_is_placed,
     test_leading_copper_free_ignores_arcs_inside_pts,
     test_a_strided_gif_holds_exactly_the_cap,
