@@ -4227,8 +4227,10 @@ KEEPOUT_COPPER_BASIS = (
     "obstacle_map.add_rule_area_keepout_obstacles). A pad is ILLEGAL when "
     "every copper layer it occupies is covered and no LANDING clears every "
     "covering area together by the band -- landings are the router's own "
-    "(net_queries.pad_landing_extent: the shrunk rect, the inscribed ellipse "
-    "for circle/oval pads, the centre only for a tilted pad) -- and its net "
+    "CELLS on its default grid (routing_defaults.GRID_STEP): the pad's "
+    "centre cell, and the cells of net_queries.pad_landing_extent (the "
+    "shrunk rect, the inscribed ellipse for circle/oval pads, none for a "
+    "tilted pad) -- and its net "
     "needs a connection (net with 2+ pads, not served by a same-net pour on "
     "those layers where pour is allowed AND a same-net zone outline reaches "
     "the pad copper at the pose). A through-hole pad is reported in "
@@ -4262,10 +4264,11 @@ class RuleAreaKeepouts:
     """
 
     def __init__(self, pcb_data, clearance: float, track_width: float,
-                 track_source: str = ''):
+                 track_source: str = '', grid_step: float = None):
         from check_drc import _point_on_board, _point_to_rings_distance, \
             pad_copper_layers, _point_in_poly
         from net_queries import expand_pad_layers
+        import routing_defaults
         self._in_poly = _point_in_poly
         self._pad_layers = pad_copper_layers
         self._on_region = _point_on_board
@@ -4274,6 +4277,10 @@ class RuleAreaKeepouts:
         self.clearance = float(clearance)
         self.track_width = float(track_width)
         self.track_source = track_source
+        # The router lands a track on grid CELLS only (see `landings`). Its
+        # default grid; the finer default rungs (0.05, 0.025) contain every
+        # cell of it, so a landing here is a landing there too.
+        self.grid_step = float(grid_step or routing_defaults.GRID_STEP)
         self.band = self.clearance + self.track_width / 2.0
         board_info = getattr(pcb_data, 'board_info', None)
         self.board_copper = list(getattr(board_info, 'copper_layers', None)
@@ -4411,28 +4418,55 @@ class RuleAreaKeepouts:
         return -d if self._on_region(x, y, a['outer'], a['holes']) else d
 
     def _near(self, ai: int, rect) -> bool:
-        """Can area `ai` reach this rect at all (bbox + band)?"""
+        """Can area `ai` reach this rect's landings at all?
+
+        Every landing lies within `reach` of the rect's centre: the rect's
+        half-diagonal, or half a cell's diagonal for the centre cell a tiny
+        pad lands on. So a bbox miss by `band + grid_step` is no reach, and
+        -- exactly, since a signed distance moves no faster than its point --
+        neither is a centre that clears the area by `band + reach`. The
+        second test is what spares every pad of a whole-board edge ring (its
+        bbox is the board) the landing walk."""
         bx = self.areas[ai]['bbox']
-        band = self.band
+        m = self.band + self.grid_step
         x0, y0, x1, y1 = rect[:4]
-        return not (x1 < bx[0] - band or x0 > bx[2] + band
-                    or y1 < bx[1] - band or y0 > bx[3] + band)
+        if (x1 < bx[0] - m or x0 > bx[2] + m
+                or y1 < bx[1] - m or y0 > bx[3] + m):
+            return False
+        reach = max(math.hypot(x1 - x0, y1 - y0),
+                    self.grid_step * math.sqrt(2.0)) / 2.0
+        return self._clear(self.areas[ai], (x0 + x1) / 2.0,
+                           (y0 + y1) / 2.0) < self.band + reach + 1e-9
 
     def landings(self, rect, pad=None, delta: float = 0.0) -> list:
-        """The points on pad copper `rect` where the router may land a track.
+        """The grid CELLS on pad copper `rect` where the router may land a
+        track.
 
-        The router's own rule, `net_queries.pad_landing_extent` (shared with
-        `single_ended_routing._free_on_pad_cells`): the centre ONLY for a pad
-        tilted off-axis -- its file tilt plus the pose's rotation delta -- or
-        too small to hold the track; else the shrunk rect, clipped to the
-        inscribed ellipse for circle and oval pads. Sampled on a 5x5 lattice
-        (rect) or two rings of 16 plus the centre (ellipse): every sample lies
-        inside the router's region, so a missed landing can only REJECT a pose
-        the router would accept, never accept one it would not.
+        The router ends a route only on a cell of its grid: the pad's centre
+        cell (`GridCoord.to_grid`), and, when that one is blocked, the free
+        cells of the landing region (`single_ended_routing._free_on_pad_cells`,
+        #479). The region is the router's own rule,
+        `net_queries.pad_landing_extent`: none for a pad tilted off-axis --
+        its file tilt plus the pose's rotation delta -- or too small to hold
+        the track; else the shrunk rect, clipped to the inscribed ellipse for
+        circle and oval pads.
+
+        A point of that region is not a landing unless it is a cell: a pad
+        whose inward edge clears the band while no cell does cannot be
+        reached at the nominal geometry. So a 5x5 lattice (rect) or two rings
+        of 16 (ellipse) over the region is snapped, point by point, to the
+        nearest cell no farther from the centre on either axis, and a cell is
+        kept only when `_free_on_pad_cells`' own test admits it. Every landing
+        is therefore a router cell, so a missed one can only REJECT a pose the
+        router would accept, never accept one it would not.
         """
         from net_queries import pad_landing_extent
         x0, y0, x1, y1 = rect[:4]
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        g = self.grid_step
+        inv = 1.0 / g
+        # the router's terminal cell, GridCoord.to_grid's own arithmetic
+        out = [(round(cx * inv) * g, round(cy * inv) * g)]
         tilt = ((getattr(pad, 'rect_rotation', 0.0) or 0.0) + (delta or 0.0)) % 90.0
         tilt = min(tilt, 90.0 - tilt)
         ext = pad_landing_extent(x1 - x0, y1 - y0,
@@ -4440,18 +4474,40 @@ class RuleAreaKeepouts:
                                  tilt if tilt > 1e-6 else 0.0,
                                  self.track_width)
         if ext is None:
-            return [(cx, cy)]
+            return out
         hx, hy, rnd = ext
+        rx, ry = max(hx, 1e-9), max(hy, 1e-9)
+
+        def admits(px, py):
+            # _free_on_pad_cells' test, expression for expression
+            if abs(px - cx) > hx or abs(py - cy) > hy:
+                return False
+            return not (rnd and ((px - cx) / rx) ** 2
+                        + ((py - cy) / ry) ** 2 > 1.0)
+
+        def toward(v, c):
+            # the cell index nearest v on c's side, then one step further in
+            i = math.floor(v * inv) if v >= c else math.ceil(v * inv)
+            return (i, i - 1) if v >= c else (i, i + 1)
+
         if rnd:
-            pts = [(cx, cy)]
-            for s in (0.5, 1.0):
-                for k in range(16):
-                    t = 2.0 * math.pi * k / 16.0
-                    pts.append((cx + s * hx * math.cos(t),
-                                cy + s * hy * math.sin(t)))
-            return pts
-        return [(cx + i * hx / 2.0, cy + j * hy / 2.0)
-                for i in (-2, -1, 0, 1, 2) for j in (-2, -1, 0, 1, 2)]
+            pts = [(cx + s * hx * math.cos(2.0 * math.pi * k / 16.0),
+                    cy + s * hy * math.sin(2.0 * math.pi * k / 16.0))
+                   for s in (0.5, 1.0) for k in range(16)]
+        else:
+            pts = [(cx + i * hx / 2.0, cy + j * hy / 2.0)
+                   for i in (-2, -1, 0, 1, 2) for j in (-2, -1, 0, 1, 2)]
+        seen = {out[0]}
+        for px, py in pts:
+            for ix in toward(px, cx):
+                cell = next(((ix * g, iy * g) for iy in toward(py, cy)
+                             if admits(ix * g, iy * g)), None)
+                if cell is not None:
+                    if cell not in seen:
+                        seen.add(cell)
+                        out.append(cell)
+                    break
+        return out
 
     def _amount(self, area_idxs, pts) -> float:
         """`band -` the best landing's clearance, where a landing's clearance
@@ -4476,12 +4532,12 @@ class RuleAreaKeepouts:
         """How far pad copper `rect` falls short of a track landing against
         area `ai` alone, in mm (see `landings` and `_amount`).
 
-        The router lands a track on any free cell of `landings`, and a track
-        cell is free only `band` or more from the keep-out region, so the pad
-        is reachable exactly when some landing clears it. Reading "any copper
-        within the band" instead flags a human reference whose pad reaches
-        the band with its far edge only (glasgow_revC R4.1). rp2350's C6.2 IS
-        still named (0.1028 mm at clearance 0.2, fixed-default track): a
+        Every landing is a router cell, and a track cell is free only `band`
+        or more from the keep-out region, so a landing that clears it is a
+        cell the router can end on. Reading "any copper within the band"
+        instead flags a human reference whose pad reaches the band with its
+        far edge only (glasgow_revC R4.1). rp2350's C6.2 IS still named
+        (0.1187 mm at clearance 0.2, fixed-default track): a
         designer's 0.2 x 0.07 mm F.Cu sliver overlaps that GND pad and no
         landing on it clears the sliver by the band.
 

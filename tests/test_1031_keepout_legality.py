@@ -497,11 +497,17 @@ def main():
               rc4 == 4 and 'keepout_copper_unmeasured(error)=1'
               in buf.getvalue(), 'rc=%s %s' % (rc4, buf.getvalue()[-300:]))
 
-        # 15 -- the landing set is the ROUTER's: a round pad lands only inside
-        # its inscribed ellipse, a tilted pad only at its centre. Against a
-        # 45-degree band edge the old 9-point box accepted both (0.0).
+        # 15 -- the landing set is the ROUTER's: a round pad lands only on
+        # cells inside its inscribed ellipse, a tilted pad only on its centre
+        # cell. Against a 45-degree band edge a box of pad points would read
+        # both as reachable (0.0); the amount is the router-true shortfall,
+        # recomputed here from EVERY cell the router would try.
         import math
         from types import SimpleNamespace as NS
+        from single_ended_routing import _free_on_pad_cells
+        from routing_config import GridCoord
+        cfg = NS(track_width=0.15)
+        free_obs = NS(is_blocked=lambda gx, gy, li: False)
         tri = [(-50.0, 50.0), (50.0, -50.0), (50.0, 50.0)]      # x + y > 0
         ko45 = {'polygon': tri, 'holes': [], 'layers': {'F.Cu'},
                 'tracks_allowed': False, 'vias_allowed': True,
@@ -526,57 +532,57 @@ def main():
                                     keepouts=[ko45]),
                       footprints={'U1': fp_, 'U2': fq_}, zones=[])
             k_ = legality.RuleAreaKeepouts(pcb_, 0.2, 0.15)
-            return k_.part_amount('U1', legality.PartPads(fp_, 0.2)
-                                  .pad_rects(0.0, 0.0, 0.0))
-        a_round = _amount45('circle', 0.0, 2.0, 0.9)
-        a_tilt = _amount45('rect', 45.0, 1.4, 0.3)
-        check('15. a 2 mm round pad across a 45-degree edge: 0.25 (the '
-              'router\'s ellipse), not 0', abs(a_round - 0.25) < 1e-3,
-              str(a_round))
-        check('15. a 1.4 mm square tilted 45 degrees: 0.575 (centre only)',
-              abs(a_tilt - 0.575) < 1e-3, str(a_tilt))
+            got = k_.part_amount('U1', legality.PartPads(fp_, 0.2)
+                                 .pad_rects(0.0, 0.0, 0.0))
+            co = GridCoord(k_.grid_step)
+            tries = [co.to_float(*co.to_grid(c, c))] + [
+                co.to_float(*q) for q in _free_on_pad_cells(
+                    fp_.pads[0], 0, cfg, free_obs, co)]
+            true = max(0.0, k_.band - max(k_._clear(k_.areas[0], qx, qy)
+                                          for qx, qy in tries))
+            return got, true
+        a_round, t_round = _amount45('circle', 0.0, 2.0, 0.9)
+        a_tilt, t_tilt = _amount45('rect', 45.0, 1.4, 0.3)
+        check('15. a 2 mm round pad across a 45-degree edge: the router-true '
+              'shortfall over its ellipse cells, not 0',
+              a_round > 0.1 and abs(a_round - t_round) < 1e-9,
+              str((a_round, t_round)))
+        check('15. a 1.4 mm square tilted 45 degrees: its centre cell only',
+              a_tilt > 0.1 and abs(a_tilt - t_tilt) < 1e-9,
+              str((a_tilt, t_tilt)))
 
         # 16 -- parity with the router's own landing cells
-        # (single_ended_routing._free_on_pad_cells) on sample pads: every
-        # landing we sample is a cell the router could use, and the router's
-        # cells span the same extent -- so the sampled set is the router's
-        # region, not a guess at it.
-        from single_ended_routing import _free_on_pad_cells
-        from routing_config import GridCoord
-        cfg = NS(track_width=0.15)
-        free_obs = NS(is_blocked=lambda gx, gy, li: False)
-        step = 0.01
-        coord = GridCoord(step)
+        # (single_ended_routing._free_on_pad_cells, plus the centre cell the
+        # router ends on first) on sample pads, on and off the grid: every
+        # landing is one of those cells, and they span the router's extent.
         kpar = legality.RuleAreaKeepouts.for_board(pcb, 0.2, bd)
-        for shape, sx, sy, rr in (('circle', 2.0, 2.0, 0.0),
-                                  ('oval', 2.0, 1.0, 0.0),
-                                  ('rect', 1.2, 0.8, 0.0),
-                                  ('roundrect', 1.0, 0.6, 0.0),
-                                  ('rect', 1.4, 1.4, 30.0)):
-            P = _npad('1', 10.0, 10.0, 1, shape, rr, sx, sy)
-            cells = _free_on_pad_cells(P, 0, cfg, free_obs, coord)
-            lands = kpar.landings((10 - sx / 2, 10 - sy / 2, 10 + sx / 2,
-                                   10 + sy / 2), P, 0.0)
+        coord = GridCoord(kpar.grid_step)
+        for (shape, sx, sy, rr), (px_, py_) in [
+                (s_, c_) for s_ in (('circle', 2.0, 2.0, 0.0),
+                                    ('oval', 2.0, 1.0, 0.0),
+                                    ('rect', 1.2, 0.8, 0.0),
+                                    ('roundrect', 1.0, 0.6, 0.0),
+                                    ('rect', 1.4, 1.4, 30.0))
+                for c_ in ((10.0, 10.0), (10.037, 9.964))]:
+            P = _npad('1', px_, py_, 1, shape, rr, sx, sy)
+            cells = {coord.to_float(*q)
+                     for q in _free_on_pad_cells(P, 0, cfg, free_obs, coord)}
+            centre = coord.to_float(*coord.to_grid(px_, py_))
+            lands = kpar.landings((px_ - sx / 2, py_ - sy / 2, px_ + sx / 2,
+                                   py_ + sy / 2), P, 0.0)
             if rr:
-                ok = cells == [] and lands == [(10.0, 10.0)]
+                ok = not cells and lands == [centre]
             else:
-                xs = [g[0] * step for g in cells]
-                ys = [g[1] * step for g in cells]
-                hx = sx / 2 - 0.075
-                hy = sy / 2 - 0.075
-                rnd = shape in ('circle', 'oval')
-                inside = all(
-                    (((qx - 10) / hx) ** 2 + ((qy - 10) / hy) ** 2
-                     <= 1 + 1e-9) if rnd else
-                    (abs(qx - 10) <= hx + 1e-9 and abs(qy - 10) <= hy + 1e-9)
-                    for qx, qy in lands)
-                span = (abs(min(xs) - min(q[0] for q in lands)) <= step
-                        and abs(max(xs) - max(q[0] for q in lands)) <= step
-                        and abs(min(ys) - min(q[1] for q in lands)) <= step
-                        and abs(max(ys) - max(q[1] for q in lands)) <= step)
-                ok = bool(cells) and inside and span
-            check('16. landings match the router\'s cells: %s %sx%s rot %s'
-                  % (shape, sx, sy, rr), ok)
+                # on the grid the extremes match exactly; off it, an ellipse
+                # may miss its extreme row by one cell (a false REJECT only)
+                tol = coord.grid_step * (1e-6 if px_ == 10.0 else 1.000001)
+                ok = (bool(cells) and set(lands) <= cells | {centre}
+                      and all(abs(f(q[i] for q in lands)
+                                  - f(q[i] for q in cells)) <= tol
+                              for f in (min, max) for i in (0, 1)))
+            check('16. landings are the router\'s cells: %s %sx%s rot %s '
+                  'at (%s, %s)' % (shape, sx, sy, rr, px_, py_), ok,
+                  str(sorted(set(lands) - cells - {centre}))[:200])
         # 16b -- the end-of-run reconciliation hands the router
         # connectivity._EndpointStub terminals: zero size and no `shape`.
         # They must yield no cells, not raise (a raise skipped watchy's
@@ -759,6 +765,81 @@ def main():
                    str(out7[0]), '19', '--rot', str(out7[1])], accept=True)
         check('20. ...and place_pose accepts the move out of the band',
               os.path.exists(posed7))
+
+        # 21 -- a landing is a router CELL, not a point of the pad. Against
+        # the router's own obstacle map (add_rule_area_keepout_obstacles at
+        # the default grid, clearance 0.2, track 0.15): R8.1's inward
+        # landing edge sits at x = 2.28, clearing the band (x < 2 + 0.275)
+        # by 5 um, but the nearest cell inside it is x = 2.2, which does not.
+        # The router cannot land there at the nominal geometry, so the pad
+        # is named; one grid step further in, a cell clears and it is not.
+        # Then a seeded sweep of pads of every shape at random poses near a
+        # straight and a 30-degree band edge: no pose is accepted that the
+        # router has no landing cell for.
+        import random
+        from kicad_parser import PCBData, BoardInfo
+        from routing_config import GridRouteConfig
+        from obstacle_map import (GridObstacleMap,
+                                  add_rule_area_keepout_obstacles)
+        wedge = [(20.0, 10.0), (30.0, 10.0),
+                 (30.0, 10.0 + 10.0 * math.tan(math.radians(30)))]
+        kos8 = [dict(pcb.board_info.keepouts[0], layers={'F.Cu'}),
+                {'polygon': wedge, 'holes': [], 'layers': {'F.Cu'},
+                 'tracks_allowed': False, 'vias_allowed': True,
+                 'copper_pour_allowed': True, 'in_footprint': False}]
+        rcfg = GridRouteConfig()
+        rcfg.layers = ['F.Cu', 'B.Cu']
+        rcfg.clearance, rcfg.track_width, rcfg.via_size = 0.2, 0.15, 0.5
+        rbi = BoardInfo(layers={0: 'F.Cu', 31: 'B.Cu'},
+                        copper_layers=['F.Cu', 'B.Cu'],
+                        board_bounds=(0.0, 0.0, 40.0, 30.0))
+        rbi.keepouts = kos8
+        rcfg.grid_step = legality.RuleAreaKeepouts(
+            NS(board_info=rbi, footprints={}, zones=[]), 0.2, 0.15).grid_step
+        robs = GridObstacleMap(2)
+        add_rule_area_keepout_obstacles(
+            robs, PCBData(board_info=rbi, nets={}, footprints={}, vias=[],
+                          segments=[], pads_by_net={}), rcfg)
+        rco = GridCoord(rcfg.grid_step)
+        far8 = NS(reference='U2', pads=[_npad('1', 35, 15, 1, 'rect')],
+                  x=35, y=15, rotation=0.0, layer='F.Cu')
+
+        def _verdicts(P):
+            fp_ = NS(reference='U1', pads=[P], x=P.global_x, y=P.global_y,
+                     rotation=0.0, layer='F.Cu')
+            k8 = legality.RuleAreaKeepouts(
+                NS(board_info=rbi, footprints={'U1': fp_, 'U2': far8},
+                   zones=[]), 0.2, 0.15)
+            amt = k8.part_amount('U1', legality.PartPads(fp_, 0.2).pad_rects(
+                P.global_x, P.global_y, 0.0))
+            cg = rco.to_grid(P.global_x, P.global_y)
+            lands = (not robs.is_blocked(cg[0], cg[1], 0)
+                     or bool(_free_on_pad_cells(P, 0, rcfg, robs, rco)))
+            return amt, lands
+        a8, l8 = _verdicts(_npad('1', 1.955, 12.0, 1, 'rect', 0.0, 0.8, 0.9))
+        check('21. an inward edge that clears the band by 5 um with no cell '
+              'that does: the router cannot land, and the pad is named',
+              not l8 and a8 > 0.05, str((a8, l8)))
+        a9, l9 = _verdicts(_npad('1', 2.055, 12.0, 1, 'rect', 0.0, 0.8, 0.9))
+        check('21. ...one grid step in, a cell clears: it lands, not named',
+              l9 and a9 == 0.0, str((a9, l9)))
+        rng = random.Random(1031)
+        false_accepts = []
+        for _ in range(400):
+            shape = rng.choice(('rect', 'roundrect', 'circle', 'oval'))
+            sx = rng.uniform(0.3, 2.5)
+            sy = sx if shape == 'circle' else rng.uniform(0.3, 2.5)
+            rr = rng.choice((0.0, 0.0, 0.0, 30.0))
+            px_, py_ = ((rng.uniform(1.0, 3.8), rng.uniform(5, 25))
+                        if rng.random() < 0.6 else
+                        (rng.uniform(19, 31), rng.uniform(8, 18)))
+            P = _npad('1', px_, py_, 1, shape, rr, sx, sy)
+            amt, lands = _verdicts(P)
+            if amt <= 1e-9 and not lands:
+                false_accepts.append((shape, round(sx, 3), round(sy, 3), rr,
+                                      round(px_, 4), round(py_, 4)))
+        check('21. 400 random pads: none accepted that the router cannot '
+              'land on', not false_accepts, str(false_accepts[:5]))
 
         # 7 -- inert without a keep-out
         pcb0 = parse_kicad_pcb(clean)
