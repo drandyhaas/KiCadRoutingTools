@@ -803,9 +803,13 @@ same images.
 The attempts band keeps the routed VERDICT on its axis. A converge ledger's
 placement lap scores the copper-free board, where `blocking` is every net
 unrouted: run 32's accepted placement rows read 267 → 251 → 239 on that axis
-while the laps moved floorplan errors 41 → 11. So placement laps are taken OFF
-the verdict axis, and the caption counts them. Placement gets three panels of
-its own beside the band (`py_router/movie_placement.py`):
+while the laps moved floorplan errors 41 → 11. So when the ledger also holds
+graded routing laps, or loop rounds supply the routing half, placement laps are
+taken OFF the verdict axis and the caption counts them. A placement-only ledger
+has no routed verdict to protect: its laps are the whole search, so the band
+draws them, as `make_film --from-ledger` does for the placement skill's film.
+Placement gets three panels of its own beside the band
+(`py_router/movie_placement.py`):
 
 | panel | y | series | instrument |
 |---|---|---|---|

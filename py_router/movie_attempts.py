@@ -289,13 +289,32 @@ def attempts_from_loop_dir(work_dir: str) -> Optional[Track]:
                  gate_record=use_accept)
 
 
-def attempts_from_converge_ledger(path: str) -> Optional[Track]:
+def _is_placement_row(e) -> bool:
+    return str(e.get('kind') or '') == 'placement'
+
+
+def _graded(e) -> bool:
+    sc = e.get('score') if isinstance(e.get('score'), dict) else None
+    return bool(sc) and sc.get('blocking') is not None
+
+
+def attempts_from_converge_ledger(path: str,
+                                  drop_placement=None) -> Optional[Track]:
     """A converge JSONL ledger -> a Track, ranked on `score.blocking`.
 
     `_score_key`'s own comment is the rule this follows: "`blocking == None` is
     NOT zero -- it means a component that was asked for could not answer". So a
     null-scored row keeps its node and is drawn ungraded, never plotted at the
     bottom of the axis as though it were perfect.
+
+    `drop_placement` decides whether `kind == placement` laps are on this
+    axis. None (the default) drops them only when the ledger ALSO holds a
+    graded routing row: then the axis is the routed verdict, and a copper-free
+    placement lap's `blocking` (every net unrouted) says nothing on it -- those
+    laps belong to the placement panels (#1042). A PLACEMENT-ONLY ledger (the
+    placement skill's `make_film --from-ledger` film) has no routed verdict to
+    protect, and its laps are the whole search, so they stay on the axis.
+    `discover` passes True when loop rounds will supply the routing half.
     """
     rows_in = []
     try:
@@ -322,6 +341,9 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
     for i, e in enumerate(rows_in):
         if e.get('result_sha'):
             by_sha.setdefault(e['result_sha'], e.get('iteration', i))
+    if drop_placement is None:
+        drop_placement = any(not _is_placement_row(e) and _graded(e)
+                             for e in rows_in)
     rows = []
     # LINEAGE. A row's parent is the row that produced its `parent_sha`. A row
     # that names none (or names a board no row produced) is drawn from the
@@ -336,13 +358,14 @@ def attempts_from_converge_ledger(path: str) -> Optional[Track]:
         sc = e.get('score') if isinstance(e.get('score'), dict) else None
         b = sc.get('blocking') if sc else None
         idx = int(e.get('iteration', i))
-        if str(e.get('kind') or '') == 'placement':
-            # OFF THE VERDICT AXIS (#1042). A placement lap scores the
-            # COPPER-FREE board, where `blocking` is every net unrouted:
-            # run 32's accepted placement rows read 267 -> 251 -> 239 ... on
-            # this axis while the laps moved floorplan errors 41 -> 11. They
-            # belong to the placement panels (`movie_placement`), in their
-            # own currency; here they are counted and said, never plotted.
+        if drop_placement and _is_placement_row(e):
+            # OFF THE VERDICT AXIS (#1042) when there IS a routed verdict. A
+            # placement lap scores the COPPER-FREE board, where `blocking` is
+            # every net unrouted: run 32's accepted placement rows read
+            # 267 -> 251 -> 239 ... on this axis while the laps moved
+            # floorplan errors 41 -> 11. They belong to the placement panels
+            # (`movie_placement`), in their own currency; here they are
+            # counted and said, never plotted.
             n_place += 1
             if e.get('accepted'):
                 last_acc = idx
@@ -523,7 +546,10 @@ def discover(hint: str) -> Optional[Track]:
     for name in ('ledger.jsonl', 'converge.jsonl'):
         p = os.path.join(d, name)
         if os.path.isfile(p):
-            led = attempts_from_converge_ledger(p)
+            # loop rounds are a routing half: then the ledger's placement laps
+            # are off the joined axis whatever else the ledger holds
+            led = attempts_from_converge_ledger(
+                p, drop_placement=True if loop else None)
             if led:
                 led_path = p
                 break

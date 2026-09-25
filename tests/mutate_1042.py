@@ -41,7 +41,7 @@ T946 = os.path.join(_TESTS, 'test_946_movie_attempts.py')
 #: (name, target, old, new, tests, expect)
 ROWS = [
     ('placement-laps-back-on-the-axis', 'ma',
-     "        if str(e.get('kind') or '') == 'placement':",
+     "        if drop_placement and _is_placement_row(e):",
      "        if False:",
      (T1042, T946), 'KILLED'),
     ('a-point-per-frame-not-per-board', 'mp',

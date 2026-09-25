@@ -333,6 +333,76 @@ def test_placement_rows_are_off_the_verdict_axis():
         print('  PASS: %r on the axis; %s' % (scores, t.note))
 
 
+def test_a_placement_only_ledger_keeps_its_band():
+    """Placement laps leave the axis only when a ROUTED verdict is there to
+    protect. A placement-only ledger -- the placement skill's film,
+    `make_film --from-ledger wk/ledger.jsonl` (placement_driver.py) -- has
+    none, and its laps are the whole search: before #1042 the band drew them
+    all, and it must still."""
+    _mark = len(_FAIL)
+    import make_film
+    import movie_attempts as MA
+    sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
+    from board_store import BoardStore
+    d = tempfile.mkdtemp(prefix='t1042p_')
+    try:
+        p = os.path.join(d, 'plain.jsonl')
+        rows = [(0, 'placement', 267, True), (1, 'placement', 251, True),
+                (2, 'placement', 260, False), (3, 'placement', 239, True),
+                # an ungraded row is not a routed verdict
+                (4, 'classification', None, False)]
+        with open(p, 'w', encoding='utf-8') as f:
+            for it, kind, b, acc in rows:
+                f.write(json.dumps({'iteration': it, 'kind': kind,
+                                    'accepted': acc,
+                                    'score': {'blocking': b}}) + '\n')
+        t = MA.attempts_from_converge_ledger(p)
+        got = sorted(a.score for a in (t.attempts if t else ())
+                     if a.score is not None)
+        if got != [239.0, 251.0, 260.0, 267.0]:
+            fail('a placement-only ledger lost its laps: %r' % got)
+        if t is not None and 'off this axis' in t.note:
+            fail('a placement-only ledger says its laps are off the axis: %r'
+                 % t.note)
+        # ...and the joined case still drops them: loop rounds are the
+        # routing half, so `discover` asks for them off the axis
+        tj = MA.attempts_from_converge_ledger(p, drop_placement=True)
+        if tj is not None and any(a.kind == 'placement'
+                                  for a in tj.attempts):
+            fail('drop_placement=True kept placement laps: %r'
+                 % [a.kind for a in tj.attempts])
+        # THE SKILL'S FILM: make_film --from-ledger over a placement-only
+        # ledger whose boards are in the converge store
+        store = BoardStore(os.path.join(d, 'boards'))
+        sa, sb = store.put(SEED), store.put(PLACED)
+        led = os.path.join(d, 'ledger.jsonl')
+        with open(led, 'w', encoding='utf-8') as f:
+            for it, sha, par, b, acc in ((0, sa, None, 267, True),
+                                         (1, sb, sa, 251, True),
+                                         (2, sa, sb, 262, False)):
+                f.write(json.dumps({'iteration': it, 'kind': 'placement',
+                                    'result_sha': sha, 'parent_sha': par,
+                                    'accepted': acc,
+                                    'score': {'blocking': b}}) + '\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = make_film.main(['--from-ledger', led, '-o',
+                                 os.path.join(d, 'place.gif'), '--size',
+                                 '400', '--no-placement-panel'])
+        e = err.getvalue()
+        if rc != 0:
+            fail('make_film --from-ledger exited %r: %s' % (rc, e[-400:]))
+        if 'attempts band: 3 attempts from converge' not in e:
+            fail('the placement film has no attempts band: %s'
+                 % [ln for ln in e.splitlines() if 'attempts' in ln])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    if len(_FAIL) == _mark:
+        print('  PASS: a placement-only ledger keeps all its laps, and '
+              'make_film --from-ledger draws its band')
+
+
 def test_the_panels_say_when_placement_is_settled():
     _mark = len(_FAIL)
     ok, _d, rec, _im = _draw(_track(), 2, routing=True)
@@ -845,6 +915,7 @@ TESTS = (
     test_one_point_per_board_and_nothing_before_the_first,
     test_unmeasured_is_said_never_zero,
     test_placement_rows_are_off_the_verdict_axis,
+    test_a_placement_only_ledger_keeps_its_band,
     test_the_panels_say_when_placement_is_settled,
     test_no_subprocess_and_cheap_gates_first,
     test_run_time_is_the_shared_x_axis,
