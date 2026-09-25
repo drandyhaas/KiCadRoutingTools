@@ -16,7 +16,9 @@
   5b. Stage keys boards by resolved absolute path: two chain boards with one
       basename are not one round.
   5c. Duplicate-reference `~N` keys: pairing by uuid; an ordinal whose block
-      count changed is not read as a move.
+      count changed is not read as a move. A uuid two blocks SHARE is no
+      identity: those pair by reference, so cap_chain against itself moves
+      nothing.
   6.  A part overhanging the outline is placed; only a part entirely off it
       counts as unplaced.
   7.  `leading_copper_free` ignores `(arc` inside a zone's `(pts ...)`.
@@ -315,6 +317,44 @@ def test_duplicate_references_pair_by_uuid():
         print('  PASS: uuid pairing, and a changed block count is no move')
 
 
+def test_a_shared_uuid_is_not_an_identity():
+    """Two blocks sharing one uuid (a text-editor copy: cap_chain's C1/C2 and
+    J1/J2 do) pair by REFERENCE, as before #1036 -- pairing on the shared uuid
+    matched C1 to C2 and read a board compared with itself as moving parts,
+    which turned the camera on for a film in which nothing moved."""
+    _mark = len(_FAIL)
+    import kicad_parser
+    import movie_camera as MC
+    cap = os.path.join(KF, 'cap_chain.kicad_pcb')
+    with contextlib.redirect_stdout(io.StringIO()):
+        pcb = kicad_parser.parse_kicad_pcb(cap)
+        _u = [f.uuid for f in pcb.footprints.values() if f.uuid]
+        if len(set(_u)) == len(_u):
+            fail('BROKEN: cap_chain no longer carries a shared footprint '
+                 'uuid, so this test pins nothing')
+        rounds = MC.synth_rounds([cap, cap])
+    if rounds:
+        fail('cap_chain against itself reports moves: %r'
+             % [m for rd in rounds for m in rd['moved']])
+    # ...and a REAL move of a part whose uuid is shared is still seen, by ref
+    boards = {
+        'a': _Pcb({'C1': _Fp(0, 0, 'dup'), 'C2': _Fp(5, 0, 'dup')}),
+        'b': _Pcb({'C1': _Fp(0, 0, 'dup'), 'C2': _Fp(5, 9, 'dup')}),
+    }
+    orig = kicad_parser.parse_kicad_pcb
+    kicad_parser.parse_kicad_pcb = lambda path, *a, **k: boards[path]
+    try:
+        r = MC.synth_rounds(['a', 'b'], min_mm=0.5)
+    finally:
+        kicad_parser.parse_kicad_pcb = orig
+    got = sorted(m['reference'] for rd in r for m in rd['moved'])
+    if got != ['C2']:
+        fail('a shared-uuid pair where only C2 moved read as %r' % got)
+    if len(_FAIL) == _mark:
+        print('  PASS: a shared uuid pairs by reference: cap_chain vs itself '
+              'moves nothing, and a real move is still C2 alone')
+
+
 def test_an_overhanging_part_is_placed():
     _mark = len(_FAIL)
 
@@ -400,6 +440,7 @@ TESTS = (
     test_an_invalid_theme_warns_once_and_iso_opts_are_not_mutated,
     test_a_placement_step_that_lays_copper_plays_it,
     test_duplicate_references_pair_by_uuid,
+    test_a_shared_uuid_is_not_an_identity,
     test_an_overhanging_part_is_placed,
     test_leading_copper_free_ignores_arcs_inside_pts,
     test_a_strided_gif_holds_exactly_the_cap,

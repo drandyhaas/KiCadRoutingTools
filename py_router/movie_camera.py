@@ -913,12 +913,26 @@ def synth_rounds(boards, min_mm=None):
             continue
         moved = []
         if prev is not None:
-            # PAIRING (#1036 review). By uuid when the board has them; else by
-            # key -- except a duplicate reference's `~N` ordinal key when the
-            # number of blocks sharing that reference changed, because the
-            # ordinals are file order and then name different parts.
+            # PAIRING (#1036 review). By uuid when the uuid names ONE block
+            # on BOTH boards; else by key -- except a duplicate reference's
+            # `~N` ordinal key when the number of blocks sharing that
+            # reference changed, because the ordinals are file order and then
+            # name different parts. A uuid two blocks share (a footprint
+            # copy-pasted in a text editor, as kicad_files/cap_chain does)
+            # identifies neither: pairing on it matched C1 to C2 and reported
+            # a board compared with ITSELF as moving parts.
+            def _uuid_counts(p):
+                c = {}
+                for f in p.footprints.values():
+                    u = getattr(f, 'uuid', '')
+                    if u:
+                        c[u] = c.get(u, 0) + 1
+                return c
+            _uprev, _ucur = _uuid_counts(prev), _uuid_counts(pcb)
             by_uuid = {f.uuid: f for f in prev.footprints.values()
-                       if getattr(f, 'uuid', '')}
+                       if getattr(f, 'uuid', '')
+                       and _uprev.get(f.uuid) == 1
+                       and _ucur.get(f.uuid) == 1}
 
             def _base_counts(p):
                 c = {}
