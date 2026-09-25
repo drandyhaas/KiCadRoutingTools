@@ -585,8 +585,8 @@ def main():
                   str(sorted(set(lands) - cells - {centre}))[:200])
         # 16b -- the end-of-run reconciliation hands the router
         # connectivity._EndpointStub terminals: zero size and no `shape`.
-        # They must yield no cells, not raise (a raise skipped watchy's
-        # final reconciliation and changed its copper).
+        # They must yield no cells, not raise: a raise there aborts
+        # route.py's reconciliation pass and changes the copper it ships.
         from connectivity import _EndpointStub
         try:
             stub_cells = _free_on_pad_cells(_EndpointStub(10.0, 10.0, 'F.Cu'), 0,

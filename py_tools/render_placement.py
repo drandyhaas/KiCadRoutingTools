@@ -2653,7 +2653,7 @@ def main(argv=None):
             'a_off_outline.keepout_copper':
                 len(doc['checklist']['a_off_outline']['keepout_copper']),
             # a keep-out census that could not be BUILT is not a clean one
-            # (#1031 review): its error row fails the gate like a finding
+            # (#1031): its error row fails the gate like a finding
             'a_off_outline.keepout_copper_unmeasured(error)':
                 sum(1 for _u in doc['checklist']['a_off_outline'].get(
                     'keepout_copper_unmeasured') or ()

@@ -4259,8 +4259,9 @@ class RuleAreaKeepouts:
     listed in `unmeasured` rather than graded at a stale position. Intent
     keep-outs (floorplan.py, #701) are a different, declared thing.
 
-    One instance per board; `pad_amount` is pose-free, so the search context
-    and the file-pose grade share it.
+    One instance per board. The per-pad metadata (`pad_meta`) is pose-free
+    and `part_rows` / `part_amount` take the pad rects at a pose, so the
+    search context and the file-pose grade share it.
     """
 
     def __init__(self, pcb_data, clearance: float, track_width: float,
@@ -4327,8 +4328,8 @@ class RuleAreaKeepouts:
         # Same-net zones: a pad is served by FILL CONTACT, not a track, only
         # where its own net's zone outline on the pad's layer actually reaches
         # the pad copper at the pose, and no rule area forbidding pour covers
-        # that point (`_pour_reaches`). A (net, layer) key alone let a 4x4 mm
-        # zone 30 mm away exempt a pad in the band.
+        # that point (`_pour_reaches`). The (net, layer) match only NOMINATES
+        # zones; a same-net zone elsewhere on the layer serves nothing here.
         self._zones: List[tuple] = []
         for z in getattr(pcb_data, 'zones', None) or ():
             nid = getattr(z, 'net_id', 0) or 0

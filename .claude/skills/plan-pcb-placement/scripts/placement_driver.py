@@ -959,7 +959,7 @@ def p_close(a):
     if not _cok:
         return err(_cwhy)
     # The two off-board gate waivers this stage honours, ECHOED and PERSISTED
-    # (#1031 review) the way P3 records its lock waivers: a waiver that
+    # (#1031) the way P3 records its lock waivers: a waiver that
     # clears a gate and leaves no trace is a flag that made a finding vanish.
     # Written into the waivers.json beside the render, merged under
     # `closeout` so P3's own keys survive.
