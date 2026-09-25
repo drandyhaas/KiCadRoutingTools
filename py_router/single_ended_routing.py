@@ -5511,23 +5511,25 @@ def _assign_wide_route_widths(segments, config: GridRouteConfig, net_id: int,
                               obstacles, coord: GridCoord, layer_names,
                               track_margin, necked_down, uniform_width,
                               neck_start: bool):
-    """Give a wide (power / impedance) route its final widths, then DISCLOSE
-    what shipped below the requested width (#1033).
+    """Give a wide (power / impedance) route its final widths (#1033).
 
     `necked_down` (a long trunk re-routed at the neck floor) goes through
-    _apply_neckdown_widths; `uniform_width` (a short edge that only routed at a
-    stepped-down width, #180) sets every segment to that width so the obstacle
-    map (reads seg.width) and the output match. Both used to shrink a power
-    net silently: the `design_rules` ledger recorded rescue and terminal-neck
-    narrowing but not these two, which are where most of a bulk route's
-    under-width power copper comes from (run 32 +3V3 scoped: 9 long-trunk
-    neck-downs, 21 short edges at 0.127/0.15 of a requested 0.3).
+    _apply_neckdown_widths, which necks the pad ends and keeps the net's width
+    wherever it fits. `uniform_width` (a short edge that only routed at a
+    stepped-down width, #180) is laid at the net's own width and necked to
+    `uniform_width` only where the full width does not fit. Anything else is
+    returned unchanged.
+
+    It records nothing in the `design_rules` ledger: it runs per routing
+    ATTEMPT (retries, rescues) and before the post-route widen pass, so a row
+    here would count attempts rather than shipped copper. route.py records one
+    row per power net from the shipped board instead
+    (fab_tiers.replace_power_track_rows).
     """
     if necked_down:
         segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
                                           coord, layer_names, track_margin,
                                           neck_start=neck_start)
-        site = 'power neck-down (long trunk)'
     elif uniform_width is not None:
         # #1033: the stepped-down width is the width the WHOLE edge could be
         # routed at, not the width every piece of it needs. Lay it at the
@@ -5542,14 +5544,6 @@ def _assign_wide_route_widths(segments, config: GridRouteConfig, net_id: int,
                                           coord, layer_names, track_margin,
                                           neck_start=neck_start,
                                           neck_w=uniform_width)
-        site = 'power short edge'
-    else:
-        return segments
-    # #1033: no ledger row here any more. This runs per routing ATTEMPT
-    # (retries, rescues) and before the post-route widen pass, so it counted
-    # attempts, not shipped copper; route.py records one row per power net
-    # from the shipped board instead (fab_tiers.replace_power_track_rows).
-    del site
     return segments
 
 
