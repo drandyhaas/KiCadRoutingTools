@@ -4,14 +4,16 @@
 #   -> polish (whole_polish: the audit's own measures met in board xy)
 #   -> audit (whole_audit through whole_gate: what the router will be handed)
 #   -> side flips the polish could not avoid (an island it found no room beside, or one holding a lane's approach off
-#      its stub): the geometry again on the SAME solve, before anything is snapped
+#      its stub): the geometry again on the SAME solve, before anything is snapped -- or, when the round has cuts as
+#      well, the solve again with them and the geometry with the flips, in one round
 #   -> a smooth plan that passes: its PAIRS laid first as the pair router moves (whole_snap --pairs), the singles
 #      fitted round them (whole_polish, the pairs held) and SNAPPED onto the router's grid (whole_snap); audited, gated
 #      and linted (the pair router's turning radius and straight dives) -- done
 #   -> else the island / via cuts the geometry could not meet, and the via cuts of the pair dives the polish could not
 #      lay straight: the solve again (warm, every cut so far)
 # The bench from BENCH / NETS / DEST (whole_ctx), under the chain's plan environment (set below).
-# SEED_FLIPS / SEED_CUTS: comma lists of earlier polish / geometry JSONs to start from.
+# SEED_FLIPS / SEED_CUTS: comma lists of earlier polish / geometry JSONs to start from. Stages already run on the same
+# inputs with the same code are restored from awx/tmp/stage_cache (stage_cache.py); STAGE_CACHE=0 runs every one.
 # A loop that is NOT CONVERGING stops: each round's smooth plan is measured by its audit findings (dive, static,
 # shape, swim, pitch in the plan, and any length outside its band), and two rounds in a row that fail to beat the
 # best so far end it -- flips and cuts that only move the findings about are not getting there, and every cut round
@@ -22,6 +24,9 @@ HERE=${0:A:h}
 cd $HERE
 export PLAN_PAGES=1 PLAN_JUDGE=count PLAN_JUDGE_LEN=lane BRAID_PAIRS=1 PLAN_PAIRS=1 BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2
 solve=${1:A}; out=${2:A}; rounds=${3:-6}
+# every expensive stage through stage_cache.py: a stage whose script, arguments, environment and every file it read
+# are unchanged is restored, not run (STAGE_CACHE=0 runs them all)
+ST=(python3 stage_cache.py)
 mkdir -p $out
 flips="${SEED_FLIPS:-}"; cuts="${SEED_CUTS:-}"
 nflips() { python3 -c "import json,sys; print(len(json.load(open(sys.argv[1])).get('flips', [])))" $1; }
@@ -36,9 +41,9 @@ PATIENCE=2                                 # rounds in a row without a new best
 best=-1; best_i=0; stall=0
 for i in $(seq 1 $rounds); do
   echo "=== round $i: geometry of $(basename $solve)${flips:+ (flips from $(basename ${flips##*,}))}"
-  GEO_FLIPS_FROM=$flips python3 whole_geo.py $solve $out/g$i.json > $out/g$i.log 2>&1 || { tail -3 $out/g$i.log; exit 1; }
-  python3 whole_polish.py $out/g$i.json $out/p$i.json > $out/p$i.log 2>&1 || { tail -3 $out/p$i.log; exit 1; }
-  python3 whole_audit.py $out/p$i.json > $out/p$i.audit 2>&1 || { tail -3 $out/p$i.audit; exit 1; }
+  GEO_FLIPS_FROM=$flips $ST --out $out/g$i.json -- whole_geo.py $solve $out/g$i.json > $out/g$i.log 2>&1 || { tail -3 $out/g$i.log; exit 1; }
+  $ST --out $out/p$i.json -- whole_polish.py $out/g$i.json $out/p$i.json > $out/p$i.log 2>&1 || { tail -3 $out/p$i.log; exit 1; }
+  $ST -- whole_audit.py $out/p$i.json > $out/p$i.audit 2>&1 || { tail -3 $out/p$i.audit; exit 1; }
   gl=$(python3 whole_gate.py $out/p$i.json $out/p$i.audit)
   echo "$gl" | sed 's/^/  smooth: /'
   f=$(findings "$gl")
@@ -49,36 +54,56 @@ for i in $(seq 1 $rounds); do
   fi
   before=$([ -n "$flips" ] && nflips ${flips##*,} || echo 0)
   after=$(nflips $out/p$i.json)
+  # the round's cuts -- the geometry's islands and via cuts, the polish's via cuts -- less an island cut that one of
+  # the round's NEW flips answers (the flip puts that lane on the island's other side; the geometry has not tried it)
+  n=$(python3 - "$out/g$i.json" "$out/p$i.json" "${flips##*,}" "$out/c$i.json" <<'PY'
+import json, sys
+g, p = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+old = {tuple(x) for x in json.load(open(sys.argv[3])).get('flips', [])} if sys.argv[3] else set()
+new = {tuple(x) for x in p.get('flips', [])} - old
+cuts = [c for c in g.get('cuts', []) if (c['lane'], c['island']) not in new]
+vcuts = g.get('vcuts', []) + p.get('vcuts', [])
+json.dump({'cuts': cuts, 'vcuts': vcuts}, open(sys.argv[4], 'w'))
+print(len(cuts) + len(vcuts))
+PY
+)
   if [ "$after" -gt "$before" ]; then
     flips=$out/p$i.json                    # the polish output carries every flip so far
-    echo "=== round $i: $((after - before)) new side flip(s) -> the geometry again on the same solve"
+    if [ "$n" = "0" ]; then
+      echo "=== round $i: $((after - before)) new side flip(s) -> the geometry again on the same solve"
+      continue
+    fi
+    # flips AND cuts: both at once -- the solve with the cuts, then the geometry with the flips (one round, not two)
+    cuts="${cuts:+$cuts,}$out/c$i.json"
+    echo "=== round $i: $((after - before)) new side flip(s) and $n cut(s) -> the solve again, then the geometry with the flips"
+    HINT=$solve CUTS=$cuts $ST --out $out/s$((i + 1)).json -- whole_solve.py $out/s$((i + 1)).json 2>&1 | grep -E "whole_solve|vias|check" | sed 's/^/  /'
+    solve=$out/s$((i + 1)).json
     continue
   fi
   if python3 whole_gate.py $out/p$i.json $out/p$i.audit > /dev/null; then
     # the PAIRS first, laid as the pair router moves (its turning radius, its straight dives), then the singles
     # fitted round them (the polish, the pairs held) and snapped
     echo "=== round $i: the smooth plan passes -> the pairs laid first"
-    python3 whole_snap.py $out/p$i.json $out/pairs$i.json --pairs > $out/pairs$i.log 2>&1
+    $ST --out $out/pairs$i.json -- whole_snap.py $out/p$i.json $out/pairs$i.json --pairs > $out/pairs$i.log 2>&1
     grep -E "^snap:|FAILED" $out/pairs$i.log | sed 's/^/  /'
     grep -q "^SNAP FAILED" $out/pairs$i.log && { echo "=== round $i: a pair cannot be laid"; exit 1; }
-    python3 whole_polish.py $out/pairs$i.json $out/q$i.json > $out/q$i.log 2>&1 || { tail -3 $out/q$i.log; exit 1; }
-    python3 whole_audit.py $out/q$i.json > $out/q$i.audit 2>&1 || { tail -3 $out/q$i.audit; exit 1; }
+    $ST --out $out/q$i.json -- whole_polish.py $out/pairs$i.json $out/q$i.json > $out/q$i.log 2>&1 || { tail -3 $out/q$i.log; exit 1; }
+    $ST -- whole_audit.py $out/q$i.json > $out/q$i.audit 2>&1 || { tail -3 $out/q$i.audit; exit 1; }
     python3 whole_gate.py $out/q$i.json $out/q$i.audit | sed 's/^/  pairs held: /'
     python3 whole_gate.py $out/q$i.json $out/q$i.audit > /dev/null || { echo "=== round $i: the singles do not fit round the pairs"; exit 1; }
-    python3 whole_snap.py $out/q$i.json $out/plan.json > $out/snap.log 2>&1
+    $ST --out $out/plan.json -- whole_snap.py $out/q$i.json $out/plan.json > $out/snap.log 2>&1
     grep -E "^snap:|FAILED" $out/snap.log | sed 's/^/  /'
-    python3 whole_audit.py $out/plan.json > $out/plan.audit 2>&1 || { tail -3 $out/plan.audit; exit 1; }
+    $ST -- whole_audit.py $out/plan.json > $out/plan.audit 2>&1 || { tail -3 $out/plan.audit; exit 1; }
     python3 whole_gate.py $out/plan.json $out/plan.audit | sed 's/^/  snapped: /'
     lint=$(python3 whole_lint.py $out/plan.json | tail -1)
     echo "  snapped: $lint"
     python3 whole_gate.py $out/plan.json $out/plan.audit > /dev/null && [ "$lint" = "LINT clean" ] && { echo "=== the plan passes: $out/plan.json"; exit 0; }
     echo "=== round $i: the snapped plan does not pass"; exit 1
   fi
-  n=$(python3 -c "import json; d=json.load(open('$out/g$i.json')); p=json.load(open('$out/p$i.json')); print(len(d.get('cuts', [])) + len(d.get('vcuts', [])) + len(p.get('vcuts', [])))")
   if [ "$n" = "0" ]; then echo "=== round $i: no flips and no cuts left"; exit 1; fi
-  cuts="${cuts:+$cuts,}$out/g$i.json,$out/p$i.json"
+  cuts="${cuts:+$cuts,}$out/c$i.json"
   echo "=== round $i: $n cut(s) -> the solve again"
-  HINT=$solve CUTS=$cuts python3 whole_solve.py $out/s$((i + 1)).json 2>&1 | grep -E "whole_solve|vias|check" | sed 's/^/  /'
+  HINT=$solve CUTS=$cuts $ST --out $out/s$((i + 1)).json -- whole_solve.py $out/s$((i + 1)).json 2>&1 | grep -E "whole_solve|vias|check" | sed 's/^/  /'
   solve=$out/s$((i + 1)).json
 done
 echo "=== no round passed"

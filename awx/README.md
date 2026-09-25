@@ -915,7 +915,14 @@ rules, and only then hands it on.
   opposite-hands pair's crossover (both poses on the grid, each leg changing
   layer at its own barrel, the legs swapping sides). `whole_loop.sh` stops a
   loop that is NOT CONVERGING: two rounds that do not beat the best count
-  of findings so far.
+  of findings so far. A round with new side flips and cuts takes both at
+  once -- the solve with the cuts, then the geometry with the flips (a cut
+  on a newly flipped island dropped). The polish's rounds stop once a round
+  moves no vertex further than a nanometre (KiCad's own unit). Every
+  expensive stage runs through `stage_cache.py`: a stage whose script,
+  arguments, environment and every file it read -- its code and its data,
+  by content -- are unchanged is restored, not run (`STAGE_CACHE=0` runs
+  them all).
 - **The route** (`route_lanes.py --plan`). The router on the installed
   plan, every lane in its band (post-passes off), a pair's end connectors
   and crossover laid as given and the pair router run between them
@@ -927,12 +934,13 @@ rules, and only then hands it on.
 On the human's ends (`HHe`, K51: 51 nets, 45 singles and 3 pairs, 48 lanes)
 the plan passes every check with nothing waived, and it ROUTES. From the
 human's board, by the commands above: the bench, the solve (about three
-minutes), then `whole_loop.sh` in three rounds (about eighteen more) -- the
-first polish flips SCAS to the far side of C6; the geometry cannot lay
-SDQS1's dive straight 0.8 mm from its berth, and its via cut moves the
-dive 1.4 mm back into the trunk; the third smooth plan passes, the pairs
-are laid (SCK with its crossover), the singles fitted round them and
-snapped, the lint clean. Every step writes the same bytes on every run
+minutes), then `whole_loop.sh` in two rounds (about fourteen more) -- the
+first polish flips SCAS to the far side of C6, and the geometry cannot lay
+SDQS1's dive straight 0.8 mm from its berth: the solve again with that via
+cut moves the dive 1.4 mm back into the trunk, and the second smooth plan
+passes; the pairs are laid (SCK with its crossover), the singles fitted
+round them and snapped, the lint clean. The loop again on the same inputs
+restores every stage from the cache in seconds (3 s). Every step writes the same bytes on every run
 (the geometry and the polish checked again under a second Python hash
 seed). The plan changes layer 36 times where the human's copper does 38 between
 the same ends (a pair's dive counted once; on the board, 39 vias against
@@ -1132,6 +1140,7 @@ is byte-inert on the H3 bench (K28: 34 vias, 786 segments, as recorded).*
 | `plan_audit.py`, `route_lanes.py` | a plan checked before routing (reservation pitch, via sites, static clearance, shape, bands, swimmers, what is reserved near a point); chosen lanes routed one at a time in band, with renders and a refused search's frontiers |
 | `whole_solve.py`, `whole_geo.py`, `whole_polish.py`, `whole_snap.py`, `whole_loop.sh` | the whole-route plan: the crossing and layer solve, the geometry LP, the polish, the snap onto the router's grid, the loop that drives them |
 | `whole_audit.py`, `whole_gate.py`, `whole_lint.py`, `whole_render.py`, `whole_ctx.py` | a whole-route plan installed and audited, gated (complete and clean), linted, drawn; the bench they share |
+| `stage_cache.py` | a whole-route stage run, or restored when its script, arguments, environment and every file it read are unchanged |
 | `wall_probe.py`, `pinch_gate.py`, `judge_gate.py`, `floor_survey.py`, `ledger_cal.py`, `cut_ledger.py`, `rule_table.py`, `solve_curve.py`, `modal_curve.py` | probes and gates: a lane's walls, the braid's refusals, the plan judge, the floor per net, a corridor's cut, the length rule over arms, the CP-SAT's convergence |
 | `modal_k.py`, `arms.example.json`, `arms.rec51.json` | cloud arms, one container per (arm, K); `return_board`, `return_files` bring artifacts back |
 
@@ -1294,9 +1303,6 @@ First, the whole-route plan (`whole_*.py`):
   nothing against its hard rules, so where those conflict it can zigzag
   (SDQS1 at its dive, before the via cut moved it); at most 45 degrees per
   column, as an elastic rule, would make such a conflict a paid row instead.
-- **Flips and cuts in one round.** `whole_loop.sh` applies a round's side
-  flips and leaves its cuts to the next round; applying both at once (a cut
-  on a flipped island dropped) saves a round.
 - **The crossover in the pose router** (#1055): an opposite-hands pair
   swapping its legs at any dive the pose search finds room for, not only
   where a plan puts it.
@@ -1306,15 +1312,13 @@ First, the whole-route plan (`whole_*.py`):
   rendering and near-point sizes, the pair step's `PAIR_SLACKS`,
   `PAIR_FANIN`, `PAIR_FANIN_BAND` and `WRAP_REACH`, `pairs.GAP`'s margin,
   and the `whole_geo` / `whole_solve` sentinels that stand for infinity.
-- **Speed.** The polish could stop when only findings it cannot move are
-  left; a stage could be reused when its inputs and code are unchanged; the
-  geometry's second pass could build its rows lazily; a warm re-solve
-  could use fewer batches (with a check that its quality holds).
+- **Speed.** The geometry's second LP pass is about 40% of a loop; one
+  elastic column per pitch rule, rather than one per tangent cut of it,
+  would shrink it.
 
 - **Calibrate `WHOLE_SOLVE_BATCHES`.** The default (100 batches, about
   four minutes on four workers) reaches 36 layer changes on the bench, the
-  objective within 0.03% of its bound; what less buys, and what more, is
-  unmeasured.
+  objective within 0.03% of its bound; what more buys is unmeasured.
 
 - **The ladder after the braid planner changes.** The tables above
   predate the berth rows, the rings' order and dips, the directional pair

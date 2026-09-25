@@ -41,6 +41,8 @@ geo = json.load(open(sys.argv[1]))
 OUT = sys.argv[2]
 ROUNDS = 12
 CYCLES = 3                         # rounds, then the shape measures; at most this many times
+STILL = 1e-6                       # mm: a round moving no vertex further than this (KiCad's own unit, a nanometre)
+                                   # has settled -- the rounds after it change no board
 ctx, cs = whole_ctx.plan()
 cfg = ctx.cfg
 TRUST = 2 * cfg.grid_step          # the most a vertex moves in one round
@@ -879,6 +881,7 @@ for cycle in range(1, CYCLES + 1):
     cnt, bad = measure(rows)
     log(f'round 0: {sum(cnt.values())} short ({dict(cnt)})')
     for rd in range(1, ROUNDS + 1):
+        before_ = {n: ln['X'].copy() for n, ln in LANES.items()}
         out = solve_round(rows, TRUST)
         if out is None:
             break
@@ -888,6 +891,10 @@ for cycle in range(1, CYCLES + 1):
         log(f'round {rd}: moved {nv} vertices against {na} rules; {sum(cnt.values())} short ({dict(cnt)})'
             + (f'; the LP paid {len(paid)} (max {max(p[0] for p in paid):.3f})' if paid else ''))
         if not bad:
+            break
+        if all(LANES[n]['X'].shape == X0.shape and float(np.max(np.abs(LANES[n]['X'] - X0), initial=0.0)) <= STILL
+               for n, X0 in before_.items()):
+            log(f'round {rd} moved no vertex more than {STILL * 1e6:.0f} nm: the rounds have settled')
             break
     dr = drop_faults()
     if not dr:
