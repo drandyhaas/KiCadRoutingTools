@@ -1154,16 +1154,50 @@ def _write_mp4(frames, out, fps) -> bool:
         # and we crop each frame to even W/H ourselves (drops at most 1 px).
         w = imageio.get_writer(out, fps=max(1, round(fps)), codec='libx264',
                                quality=8, macro_block_size=1, pixelformat='yuv420p')
-        for fr in frames:
-            a = np.asarray(fr.convert('RGB'))
-            h, wd = a.shape[0] & ~1, a.shape[1] & ~1
-            w.append_data(a[:h, :wd])
-        w.close()
-        return True
     except Exception as e:
         print(f"animate_route: mp4 encode failed ({e}); falling back to GIF",
               file=sys.stderr)
         return False
+    # PRODUCING a frame is not ENCODING it (#1036 review). A spooled film's
+    # frames are composed lazily as this loop pulls them, so an exception
+    # raised while pulling one is the film's own defect: re-raised as itself,
+    # never reported as "mp4 encode failed" and retried as a GIF that fails
+    # the same way. Only the encoder's own calls fall back.
+    it = iter(frames)
+    while True:
+        try:
+            fr = next(it)
+        except StopIteration:
+            break
+        except BaseException:
+            try:
+                w.close()
+            except Exception:                                   # noqa: BLE001
+                pass
+            try:
+                os.remove(out)          # a truncated film is not a film
+            except OSError:
+                pass
+            raise
+        try:
+            a = np.asarray(fr.convert('RGB'))
+            h, wd = a.shape[0] & ~1, a.shape[1] & ~1
+            w.append_data(a[:h, :wd])
+        except Exception as e:
+            try:
+                w.close()
+            except Exception:                                   # noqa: BLE001
+                pass
+            print(f"animate_route: mp4 encode failed ({e}); falling back to "
+                  f"GIF", file=sys.stderr)
+            return False
+    try:
+        w.close()
+    except Exception as e:
+        print(f"animate_route: mp4 encode failed ({e}); falling back to GIF",
+              file=sys.stderr)
+        return False
+    return True
 
 
 def _png_info(meta):

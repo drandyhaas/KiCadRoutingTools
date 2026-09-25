@@ -793,13 +793,16 @@ def compose_two_panel(frames, marks, final_board, opts=None, box=None):
             def _into(i, f):
                 f.paste(panels[frame_to_shot[i]], (int(box.x), int(box.y)))
                 return f
-            frames = frame_spool.transform(frames, _into, out_size=(_W0, _H0))
+            frames = frame_spool.transform(
+                frames, _into, out_size=(_W0, _H0), optional='iso panel',
+                ground=_colours(opts.theme)[0])
         else:
             frames = frame_spool.transform(
                 frames,
                 lambda i, f: stack(f, panels[frame_to_shot[i]],
                                    theme=opts.theme),
-                out_size=(_W0, _H0 + H_iso))
+                out_size=(_W0, _H0 + H_iso), optional='iso panel',
+                ground=_colours(opts.theme)[0])
 
         rep = _report('ran', '', shots=[{'board': s.board, 'yaw': s.rotate[2],
                                          'first': s.first, 'last': s.last,

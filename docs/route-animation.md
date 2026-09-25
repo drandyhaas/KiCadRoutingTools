@@ -213,6 +213,14 @@ reached 29.5 GB before this change. `tests/test_1036_streaming.py` measures it:
 with 6x the frames, peak RSS stays flat, while the same frames held in a list
 grow by about 300 MB.
 
+**An overlay that fails costs the overlay, not the film.** The attempts band,
+the run clock and the iso panel are drawn while the encoder streams, so a frame
+one of them cannot draw would otherwise surface in the encoder. That overlay is
+instead dropped from that frame to the end of the film, `movie: <overlay>
+DROPPED` is printed once, and the film is still written at one size. A frame
+that cannot be composed at all is re-raised as its own error. It is never
+reported as `mp4 encode failed`.
+
 **The spool uses disk instead.** A spooled 1400 px frame is about 1.27 MB,
 so a 6000-frame film spools about 7.6 GB into the temp directory. Before
 drawing, `make_movie` estimates the film and checks the free space

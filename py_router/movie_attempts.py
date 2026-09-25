@@ -1127,7 +1127,9 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None,
                         fill=bg)
             draw_track(d, box, track, upto=up, theme=th)
             return f
-        frames = frame_spool.transform(frames, _into, out_size=(W, H))
+        frames = frame_spool.transform(frames, _into, out_size=(W, H),
+                                       optional='attempts band',
+                                       ground=bg)
     elif drew:
         def _band(i, f):
             canvas = Image.new('RGB', (W, H + bh), bg)
@@ -1135,7 +1137,10 @@ def attach(frames, track: Optional[Track], *, theme=None, marks=None,
             up = horizons[i] if horizons else (lo + (hi - lo) * (i / float(n)))
             draw_track(ImageDraw.Draw(canvas), box, track, upto=up, theme=th)
             return canvas
-        frames = frame_spool.transform(frames, _band, out_size=(W, H + bh))
+        frames = frame_spool.transform(frames, _band,
+                                       out_size=(W, H + bh),
+                                       optional='attempts band',
+                                       ground=bg)
     if not drew:
         report.update(drawn=False, band_px=bh,
                       why='the band is %d px, too short for its own plot; '

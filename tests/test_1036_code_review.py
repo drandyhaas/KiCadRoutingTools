@@ -23,6 +23,10 @@
       counts as unplaced.
   7.  `leading_copper_free` ignores `(arc` inside a zone's `(pts ...)`.
   GIF: a strided GIF holds EXACTLY `GIF_MAX_FRAMES`.
+  Lazy overlays: a frame the attempts band or the run clock fails to draw
+      drops THAT overlay for the rest of the film, said once, and the film
+      is still written, one size throughout; a frame that cannot be PRODUCED
+      is re-raised as itself, never reported as "mp4 encode failed".
 
 Needs Pillow; small in-repo boards, no kicad-cli.
 """
@@ -355,6 +359,157 @@ def test_a_shared_uuid_is_not_an_identity():
               'moves nothing, and a real move is still C2 alone')
 
 
+def _two_attempts_track():
+    import movie_attempts as MA
+    return MA.Track(tuple(MA.Attempt(i, 'r%d' % i, 'round',
+                                     (i - 1) if i else None, True, False,
+                                     float(10 - i), False, 'b')
+                          for i in range(4)), 'failures', 'loop', 'x')
+
+
+def _gif_frames(path):
+    with Image.open(path) as im:
+        return [fr.size for fr in ImageSequence.Iterator(im)]
+
+
+def test_a_failing_overlay_costs_the_overlay_not_the_film():
+    """The post-passes run LAZILY, while the encoder streams. One frame an
+    overlay failed to draw used to raise out of the encoder -- past the
+    `try` that registered the overlay -- and lose the whole film."""
+    _mark = len(_FAIL)
+    import cmd_timing
+    import make_movie
+    import movie_attempts as MA
+    clock = os.path.join(_TESTS, 'fixtures', 'cmd_timing',
+                         'synthetic_run.jsonl')
+    tmp = tempfile.mkdtemp(prefix='t1036ov_')
+
+    def _film(name, **kw):
+        err = io.StringIO()
+        out = os.path.join(tmp, name + '.gif')
+        got = None
+        with contextlib.redirect_stderr(err):
+            # 400 px: at 200 the band declines (over its share of the frame)
+            try:
+                got = make_movie.make_movie([BOARD], out=out, size=400,
+                                            quiet=True, camera='off',
+                                            placement_panel=False, **kw)
+            except Exception as exc:                            # noqa: BLE001
+                # the regression itself: the overlay's error escaped
+                err.write(' RAISED %s: %s' % (type(exc).__name__, exc))
+        return got, err.getvalue()
+
+    try:
+        # the attempts band: the probe draw passes, frame 2's draw raises
+        ok_path, _e = _film('band_ok', attempts=_two_attempts_track())
+        orig, calls = MA.draw_track, [0]
+
+        def _boom(*a, **k):
+            calls[0] += 1
+            if calls[0] >= 3:
+                raise RuntimeError('band draw failed (injected)')
+            return orig(*a, **k)
+        MA.draw_track = _boom
+        try:
+            got, err = _film('band', attempts=_two_attempts_track())
+        finally:
+            MA.draw_track = orig
+        # the run clock: frame 2's band raises
+        c_ok, _e2 = _film('clock_ok', attempts=False, timing=clock)
+        c_orig, c_calls = cmd_timing.add_clock_band, [0]
+
+        def _cboom(*a, **k):
+            c_calls[0] += 1
+            if c_calls[0] >= 3:
+                raise RuntimeError('clock draw failed (injected)')
+            return c_orig(*a, **k)
+        cmd_timing.add_clock_band = _cboom
+        try:
+            c_got, c_err = _film('clock', attempts=False, timing=clock)
+        finally:
+            cmd_timing.add_clock_band = c_orig
+        for what, path, e, ctl in (('attempts band', got, err, ok_path),
+                                   ('run clock', c_got, c_err, c_ok)):
+            if not (path and os.path.isfile(path)):
+                fail('%s: a failed overlay frame lost the film: %r'
+                     % (what, e[-300:]))
+                continue
+            n = e.count('%s DROPPED' % what)
+            if n != 1:
+                fail('%s: said %d times, want once: %r' % (what, n, e[-300:]))
+            if 'mp4 encode failed' in e or 'MIXED FRAME SIZES' in e:
+                fail('%s: the drop was misreported: %r' % (what, e[-300:]))
+            sizes = set(_gif_frames(path))
+            want = set(_gif_frames(ctl))
+            if len(sizes) != 1 or sizes != want:
+                fail('%s: frames %r, the undamaged film is %r'
+                     % (what, sorted(sizes), sorted(want)))
+        if c_calls[0] < 3:
+            fail('BROKEN: the run clock was never drawn, so its arm pins '
+                 'nothing')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # A frame that cannot be PRODUCED is the film's defect: re-raised as
+    # itself, not "mp4 encode failed" and a GIF retry. An ENCODER error still
+    # falls back. A stand-in imageio, so this runs without imageio-ffmpeg.
+    import types
+    state = {'appended': 0, 'closed': 0, 'raise_on_append': False}
+
+    class _W(object):
+        def append_data(self, _a):
+            if state['raise_on_append']:
+                raise IOError('encoder broke (injected)')
+            state['appended'] += 1
+
+        def close(self):
+            state['closed'] += 1
+    fake = types.ModuleType('imageio')
+    fake_v2 = types.ModuleType('imageio.v2')
+    fake_v2.get_writer = lambda *a, **k: _W()
+    fake.v2 = fake_v2
+    saved = {k: sys.modules.get(k) for k in ('imageio', 'imageio.v2')}
+    sys.modules['imageio'], sys.modules['imageio.v2'] = fake, fake_v2
+    tmp2 = tempfile.mkdtemp(prefix='t1036mp_')
+    try:
+        def _frames():
+            yield Image.new('RGB', (8, 8))
+            raise ValueError('frame 1 could not be composed (injected)')
+        err = io.StringIO()
+        raised = None
+        with contextlib.redirect_stderr(err):
+            try:
+                A._write_mp4(_frames(), os.path.join(tmp2, 'p.mp4'), 6)
+            except ValueError as exc:
+                raised = exc
+        if raised is None:
+            fail('a frame that could not be produced was swallowed')
+        if 'mp4 encode failed' in err.getvalue():
+            fail('a frame-production error was reported as an encoder '
+                 'failure: %r' % err.getvalue())
+        if not state['closed']:
+            fail('the writer was left open after the frame error')
+        state['raise_on_append'] = True
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ok = A._write_mp4(iter([Image.new('RGB', (8, 8))]),
+                              os.path.join(tmp2, 'q.mp4'), 6)
+        if ok is not False or 'mp4 encode failed' not in err.getvalue():
+            fail('an encoder failure did not fall back: %r, %r'
+                 % (ok, err.getvalue()))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        shutil.rmtree(tmp2, ignore_errors=True)
+    if len(_FAIL) == _mark:
+        print('  PASS: a failed band or clock frame drops that overlay once '
+              'and the film is written one size; a frame error is re-raised, '
+              'an encoder error falls back')
+
+
 def test_an_overhanging_part_is_placed():
     _mark = len(_FAIL)
 
@@ -441,6 +596,7 @@ TESTS = (
     test_a_placement_step_that_lays_copper_plays_it,
     test_duplicate_references_pair_by_uuid,
     test_a_shared_uuid_is_not_an_identity,
+    test_a_failing_overlay_costs_the_overlay_not_the_film,
     test_an_overhanging_part_is_placed,
     test_leading_copper_free_ignores_arcs_inside_pts,
     test_a_strided_gif_holds_exactly_the_cap,

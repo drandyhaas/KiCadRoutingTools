@@ -606,7 +606,8 @@ def _make_movie(inputs, out, size, fps, supersample, layer_alpha, rip_hold,
                     frames,
                     lambda i, f: cmd_timing.add_clock_band(
                         f, all_lines[i], band, theme=theme),
-                    out_size=None)
+                    out_size=None, optional='run clock',
+                    ground=theme.rgb('chrome_band'), grow_px=band)
                 frame_meta = [clock.meta(i) for i in range(len(frames))]
                 if not quiet:
                     unmapped = clock.unmapped()

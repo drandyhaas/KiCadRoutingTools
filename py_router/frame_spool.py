@@ -177,13 +177,59 @@ def is_spool(frames):
     return isinstance(frames, FrameSpool)
 
 
-def transform(frames, fn, out_size=None):
+def optional_pass(fn, name, out_size=None, ground=None, grow_px=0):
+    """``fn`` as an OPTIONAL per-frame pass: a failure costs the pass, never
+    the film.
+
+    A lazy pass runs while the encoder streams, long after the caller's own
+    ``try`` around registering it has returned -- so without this, one frame
+    that an overlay (the attempts band, the run clock, the iso panel) failed
+    to draw raised out of the encoder and lost the whole film, where the eager
+    pass it replaced only lost the overlay. The first frame ``fn`` raises on
+    drops the pass for THAT frame and every later one, said ONCE on stderr.
+    A pass that grows the frame keeps growing it, with plain ``ground``, so
+    the film stays one size: to ``out_size`` when the pass declares one, else
+    by ``grow_px`` rows (the run clock, whose output size is not declared).
+    """
+    state = {'dropped': False}
+
+    def _pass(i, img):
+        if not state['dropped']:
+            try:
+                return fn(i, img)
+            except Exception as exc:                            # noqa: BLE001
+                state['dropped'] = True
+                import sys
+                print('movie: %s DROPPED -- it failed on frame %d (%s: %s); '
+                      'that frame and every later one are written without it'
+                      % (name, i, type(exc).__name__, exc), file=sys.stderr)
+        want = (tuple(out_size) if out_size else
+                (img.width, img.height + int(grow_px)) if grow_px else None)
+        if want and tuple(img.size) != want:
+            from PIL import Image
+            canvas = Image.new(img.mode, want,
+                               tuple(ground) if ground else (14, 16, 18))
+            canvas.paste(img, (0, 0))
+            return canvas
+        return img
+    return _pass
+
+
+def transform(frames, fn, out_size=None, optional=None, ground=None,
+              grow_px=0):
     """Apply ``fn(i, img) -> img`` to every frame of ``frames``.
 
     A spool registers it lazily (nothing decoded now); a list is rewritten IN
     PLACE, one frame at a time, exactly as every post-pass did before -- so an
     in-process caller holding a list sees what it always saw.
+
+    ``optional`` names a pass the film can lose without losing itself (see
+    `optional_pass`); ``ground`` and ``grow_px`` say how a dropped
+    frame-growing pass keeps the film one size.
     """
+    if optional:
+        fn = optional_pass(fn, optional, out_size=out_size, ground=ground,
+                           grow_px=grow_px)
     if is_spool(frames):
         frames.map(fn, out_size=out_size)
         return frames
