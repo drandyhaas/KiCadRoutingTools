@@ -19,7 +19,7 @@ pitch is the rules' track plus the pair gap.
 import math
 import os
 import re
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import rules as _rules
 
@@ -155,6 +155,15 @@ def end_run(cfg, tips, u=None) -> float:
     lays it as drawn and the router takes over there, handover_setback), then the router's straight probe past the
     pose (probe_len). A plan lays that stretch straight."""
     return end_connector(cfg, tips) + handover_setback(cfg) + probe_len(cfg, u)
+
+
+def opposite_hands(ctx, n) -> bool:
+    """An OPPOSITE-HANDS pair: P on one side of its travel at its tooth, on the other arriving at its berth (hand) --
+    its legs must swap sides once, at a dive (a crossover): it cannot be laid with no layer change."""
+    (tp, tn), (sp, sn) = ctx.pair_ends[n]
+    a = hand(ctx.tooth_dir.get(n), tp, tn)
+    b = hand(ctx.stub_dir.get(n), sp, sn, arriving=True)
+    return a != 0 and b != 0 and a != b
 
 
 def dive_room(cfg, tips, u=None) -> float:
@@ -444,7 +453,6 @@ def offset_polyline(pts: Sequence[Pt], h: float) -> List[Pt]:
 def _chain(segs, start: Pt, tol: float = 0.01):
     """Order the envelope's segments from `start` into runs per layer:
     [(layer, [pts...]), ...] with a via between consecutive runs."""
-    key = lambda x, y: (round(x, 3), round(y, 3))
     left = list(segs)
     runs: List[Tuple[str, List[Pt]]] = []
     cur = start

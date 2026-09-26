@@ -434,6 +434,13 @@ def check_dives(ctx, corridors, show_all=False):
     name = lambda i: (ctx.pcb.nets[i].name.split('/')[-1] if i in ctx.pcb.nets else str(i))
     pads = [(fp.reference, pd) for fp in ctx.pcb.footprints.values() for pd in fp.pads
             if pd.pad_type != 'np_thru_hole' and any(L.endswith('.Cu') for L in pd.layers)]
+    # an unplated hole has no copper, but a via's drill keeps the hole-to-hole rule from it, as the router keeps it
+    holes = [(fp.reference, pd) for fp in ctx.pcb.footprints.values() for pd in fp.pads
+             if pd.pad_type == 'np_thru_hole' and (pd.drill or 0) > 0]
+    # static copper that can come within a via's bars, by its centre: the largest pad's half diagonal and the bars (a
+    # stub is measured by its whole length, wherever it starts)
+    REACH_ = (max([math.hypot(pd.size_x, pd.size_y) / 2 for _r, pd in pads] + [pd.drill / 2 for _r, pd in holes] + [0.0])
+              + max(VR + CL, c2c) + TW + 2 * g)
     fail = collections.Counter()
     n_sites = 0
     for c in corridors:
@@ -454,12 +461,17 @@ def check_dives(ctx, corridors, show_all=False):
         half_ = _pairs.pitch(TW) / 2
         ring = {om: _pairs.via_ring(cfg, half_ if om in pairs else 0.0) for om in M}
         ring_lines = {om: (centre([om]) if om in pairs else lines[om]) for om in M}
+        # ...and a pair's COPPER itself -- its legs, its end legs, its crossover's legs, each a track: where a pair's
+        # tips stand wider than its pitch, its end legs stand outside its centreline's ring, and the router keeps a via
+        # a track's ring from them
+        ring_one = _pairs.via_ring(cfg, 0.0)
+        leg_lines = {om: [tuple(lg[:3]) for lg in lines[om]] for om in M if om in pairs}
         for nm in M:
             for s in sites[nm]:
                 n_sites += 1
                 hits = []
                 for (x, y) in barrels[nm][s]:
-                    near = lambda px, py: abs(px - x) < 2 and abs(py - y) < 2
+                    near = lambda px, py: abs(px - x) < REACH_ and abs(py - y) < REACH_
                     vo = boff(nm, x, y)
                     need_static = VR + CL + g2 * vo
                     # (distance, its bar, what): a via's bar is the via-to-via
@@ -468,11 +480,14 @@ def check_dives(ctx, corridors, show_all=False):
                               for ref, pd in pads if pd.net_id not in own[nm] and near(pd.global_x, pd.global_y)]
                              + [(dseg(x, y, (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)) - s_.width / 2,
                                  need_static, f'{s_.layer[0]} copper {name(s_.net_id)}')
-                                for s_ in ctx.base_segments if s_.net_id not in own[nm] and near(s_.start_x, s_.start_y)]
+                                for s_ in ctx.base_segments if s_.net_id not in own[nm]]     # a stub by its length
                              + [(math.hypot(v.x - x, v.y - y),
                                  max(VR + v.size / 2 + CL, cfg.via_drill / 2 + v.drill / 2 + h2h) + g2 * vo,
                                  f'via {name(v.net_id)}')
-                                for v in ctx.base_vias if v.net_id not in own[nm] and near(v.x, v.y)],
+                                for v in ctx.base_vias if v.net_id not in own[nm] and near(v.x, v.y)]
+                             + [(math.hypot(pd.global_x - x, pd.global_y - y),
+                                 cfg.via_drill / 2 + pd.drill / 2 + h2h + g2 * vo, f'hole {ref}.{pd.pad_number}')
+                                for ref, pd in holes if near(pd.global_x, pd.global_y)],
                              key=lambda r: r[0] - r[1], default=(9, 0, ''))
                     if st[0] < st[1] - 1e-6:
                         hits.append(f'static {st[0]:+.3f}/{st[1]:.3f} ({st[2]})')
@@ -484,8 +499,10 @@ def check_dives(ctx, corridors, show_all=False):
                     # site is not yet placed -- half a step, the allowance the polish leaves it)
                     voff = (math.hypot(x - round(x / g) * g, y - round(y / g) * g)
                             if _pt_on_grid(s[0], s[1], g) or s in exact_b[nm] else g2)
-                    ln = min(((dseg(x, y, p, q), ring[om] + voff + g2 * (0 if _on_grid(p, q, g) else 1), om, L)
-                              for om in M if om != nm for (p, q, L) in ring_lines[om]),
+                    ln = min([(dseg(x, y, p, q), ring[om] + voff + g2 * (0 if _on_grid(p, q, g) else 1), om, L)
+                              for om in M if om != nm for (p, q, L) in ring_lines[om]]
+                             + [(dseg(x, y, p, q), ring_one + voff + g2 * (0 if _on_grid(p, q, g) else 1), om, L)
+                                for om in leg_lines if om != nm for (p, q, L) in leg_lines[om]],
                              key=lambda r: r[0] - r[1], default=(9, 0, '', ''))
                     if ln[0] < ln[1] - 1e-6:
                         hits.append(f'lane {ln[0]:.3f}/{ln[1]:.3f} ({ln[2]} {ln[3][0]})')
@@ -744,7 +761,7 @@ def check_bands(ctx, corridors, only=None, png_dir=None):
             tot_out += out
             fl = _flood(ok, xs, ys, layers, a, ctx.tooth_layer[nm], b, ctx.dest_layer[nm], G)
             gaps = [r for r in runs if r[0] == '-' * len(layers) and r[2] - r[1] > 2 * G]
-            print(f'BAND {nm:7s} {kind:5s} plan {s:5.1f} mm  outside {out:4.1f} mm  {fl:9s} '
+            print(f'BAND {nm:7s} {kind:5s} plan {s:5.1f} mm  outside {out:6.3f} mm  {fl:9s} '
                   + ' '.join(f'out:{r[1]:.1f}-{r[2]:.1f}' for r in gaps))
             if png_dir:
                 from route_render import BoardRenderer
@@ -769,7 +786,7 @@ def check_bands(ctx, corridors, only=None, png_dir=None):
                 r.frame(segments=[], vias=[], overlays=[ov],
                         label=f'{nm} {kind} band: F only green, B only magenta, both blue | plan white | '
                               f'tooth red, berth blue | {fl}').save(os.path.join(png_dir, f'{nm}.png'))
-    print(f'BAND total planned length outside its band: {tot_out:.1f} mm')
+    print(f'BAND total planned length outside its band: {tot_out:.3f} mm')      # a grid step (0.025) must show
     return tot_out
 
 
@@ -900,7 +917,7 @@ def main(argv=None):
     ap.add_argument('args', nargs='*', help='near: NET X,Y [R]')
     ap.add_argument('--board', required=True)
     ap.add_argument('--nets', required=True, help='N1,N2,.. or @FILE')
-    ap.add_argument('--dest', default='DU1')
+    ap.add_argument('--dest', required=True, help="the destination part's reference")
     ap.add_argument('--only', default='', help='bands, swim, shape: these lanes only')
     ap.add_argument('--png', default='')
     ap.add_argument('--all', action='store_true', help='dives: print every site, not only the failing ones')

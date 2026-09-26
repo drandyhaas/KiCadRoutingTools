@@ -331,12 +331,8 @@ def via_clear(x, y, net, n, near):
 
 
 def is_crossed(n):
-    """an OPPOSITE-HANDS pair: P on one side of its travel at its tooth, on the other arriving at its berth (pairs.hand)
-    -- its legs must swap sides once, at a dive"""
-    (tp, tn), (sp, sn) = ctx.pair_ends[n]
-    a = _pairs.hand(ctx.tooth_dir.get(n), tp, tn)
-    b = _pairs.hand(ctx.stub_dir.get(n), sp, sn, arriving=True)
-    return a != 0 and b != 0 and a != b
+    """an OPPOSITE-HANDS pair (pairs.opposite_hands): its legs must swap sides once, at a dive"""
+    return _pairs.opposite_hands(ctx, n)
 
 
 def crossover_at(n, V, d, hand0, L1, L2):
@@ -488,6 +484,38 @@ def build(n):
     st_trk, st_via = static_masks(n, i0, j0, band)
     for L in bad:
         bad[L] |= st_trk[L]
+    if n in prs:
+        # the board's static copper round a pair's window, the pair's own nets aside: its legs and its barrels are
+        # measured against it as the audit measures them (plan_audit.check_static, check_dives)
+        own_n = {ctx.byname[n][0]} | {ctx.byname[leg][0] for leg in prs[n] if leg in ctx.byname}
+        big = max([max(pd.size_x, pd.size_y) for fp in ctx.pcb.footprints.values() for pd in fp.pads] or [0.0])
+        SNEAR = static_around(((xs[0] + xs[-1]) / 2, (ys[0] + ys[-1]) / 2),
+                              math.hypot(xs[-1] - xs[0], ys[-1] - ys[0]) / 2 + big + VX[n] + 2 * VR + CL + g)
+        # each LEG against it on the leg's layer, as the audit bars a leg off the grid (a track's half, the clearance
+        # and half a step), from the centreline cell at the legs' reach at the snap's 45-degree corners: the router's
+        # pair map leaves them at a track's half and the clearance on a straight, a hair inside it at a corner
+        leg_bar = HALF_SNAP + TW / 2 + CL + g / 2
+        pads_, segs_, vias_ = SNEAR
+        for L in bad:
+            for pd, Ls_, kind in pads_:
+                if pd.net_id in own_n or L not in Ls_:
+                    continue
+                gx, gy = pd.global_x, pd.global_y
+                if kind == 'hole':
+                    mark(bad[L], (gx, gy, gx, gy), leg_bar + (pd.drill or 0) / 2, pt_d(gx, gy))
+                    continue
+                hx, hy, cr = pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd)
+                mark(bad[L], (gx - hx, gy - hy, gx + hx, gy + hy), leg_bar,
+                     (lambda gx, gy, hx, hy, cr: lambda Xs, Ys: _pairs.pad_distance(Xs - gx, Ys - gy, hx, hy, cr))(
+                         gx, gy, hx, hy, cr))
+            for s_ in segs_:
+                if s_.net_id in own_n or s_.layer != L:
+                    continue
+                p_, q_ = (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)
+                mark(bad[L], box(p_, q_), leg_bar + s_.width / 2, seg_d(p_, q_))
+            for v_ in vias_:
+                if v_.net_id not in own_n:
+                    mark(bad[L], (v_.x, v_.y, v_.x, v_.y), leg_bar + v_.size / 2, pt_d(v_.x, v_.y))
     # placed copper: a single lane's centreline; a pair's two LEGS (its corners' mitres are wider than its pitch); every
     # placed via as its barrels (a pair's two, across the way it arrived)
     placed = [(e_[0], e_[1], e_[2], e_[3], hw[e_[0]], OFFG[e_[0]]) for e_ in PLACED if e_[0] not in prs] + \
@@ -503,6 +531,9 @@ def build(n):
         rx, ry = round(bx_ / g) * g, round(by_ / g) * g
         for L in bad:
             mark(bad[L], (rx, ry, rx, ry), ring_n + math.hypot(bx_ - rx, by_ - ry), pt_d(rx, ry))
+            # ...and about the barrel itself, as the audit measures it (plan_audit.check_dives): a barrel leaning off
+            # its grid point toward a track passes the router's ring round the point and fails the audit's round it
+            mark(bad[L], (bx_, by_, bx_, by_), ring_n + math.hypot(bx_ - rx, by_ - ry), pt_d(bx_, by_))
     # the lanes not yet placed keep their SHARE of every gap: a cell is n's only where its distance to the neighbour's
     # smooth line exceeds its distance to n's own by the bar (the smooth plan stands its lines a bar and a grid step
     # apart, so each share holds at least one grid row). Left to a soft price, SDQ6 and SDQ7 drifted to 0.225 of
@@ -529,6 +560,11 @@ def build(n):
         for (m, L, p_, q_) in PLACED:
             mark(vb, box(p_, q_), (RING_PAIR if m in prs else RING) + boff + (0 if on_grid(p_, q_) else g / 2),
                  seg_d(p_, q_), ox, oy)
+        # ...and a placed pair's COPPER, each leg a track (its body's legs, its end legs, its crossover's): where its
+        # tips stand wider than its pitch its end legs leave its centreline's ring, and the router keeps a via a
+        # track's ring from them -- the audit's bar, which read the centreline alone, left them a track's bar
+        for (m, L, p_, q_) in LEGS:
+            mark(vb, box(p_, q_), RING + boff + (0 if on_grid(p_, q_) else g / 2), seg_d(p_, q_), ox, oy)
         for (m, bx_, by_) in PVIAS:
             mark(vb, (bx_, by_, bx_, by_), VVB + g / 2 * (OFFG[n] + OFFG[m]), pt_d(bx_, by_), ox, oy)
         for m in unplaced:
@@ -568,6 +604,37 @@ def build(n):
     if n in prs:
         # a pair dives as two barrels across the way it ARRIVES (as the audit draws them): one field per axis; and
         # the pair router checks its centre and SPC cells either way across that heading (pfield)
+        # each BARREL against the board's static copper as the audit bars it (plan_audit.check_dives): the router's
+        # via map tests the dive at its centre and the cells either side, inboard of the barrels (on an axis heading
+        # 0.056 inside them) -- a pad's copper as drawn, a stub's, at a via, the clearance and the half step a barrel
+        # off the grid takes; another via by the via-to-via rule; a hole by its drill. Not the pair's own nets
+        need_s = VR + CL + g / 2
+
+        def sfield(ox, oy):
+            sb = np.zeros(X.shape, bool)
+            pads_, segs_, vias_ = SNEAR
+            for pd, _Ls, kind in pads_:
+                if pd.net_id in own_n:
+                    continue
+                gx, gy = pd.global_x, pd.global_y
+                if kind == 'hole':
+                    mark(sb, (gx, gy, gx, gy), cfg.via_drill / 2 + (pd.drill or 0) / 2 + h2h, pt_d(gx, gy), ox, oy)
+                    continue
+                hx, hy, cr = pd.size_x / 2, pd.size_y / 2, _pairs.pad_corner_radius(pd)
+                mark(sb, (gx - hx, gy - hy, gx + hx, gy + hy), need_s,
+                     (lambda gx, gy, hx, hy, cr: lambda Xs, Ys: _pairs.pad_distance(Xs - gx, Ys - gy, hx, hy, cr))(
+                         gx, gy, hx, hy, cr), ox, oy)
+            for s_ in segs_:
+                if s_.net_id in own_n:
+                    continue
+                p_, q_ = (s_.start_x, s_.start_y), (s_.end_x, s_.end_y)
+                mark(sb, box(p_, q_), need_s + s_.width / 2, seg_d(p_, q_), ox, oy)
+            for v_ in vias_:
+                if v_.net_id in own_n:
+                    continue
+                mark(sb, (v_.x, v_.y, v_.x, v_.y),
+                     max(VR + v_.size / 2 + CL, cfg.via_drill / 2 + v_.drill / 2 + h2h) + g / 2, pt_d(v_.x, v_.y), ox, oy)
+            return sb
         vbad = []
         P0 = pfield(0.0, 0.0)
         for a in range(4):
@@ -575,7 +642,8 @@ def build(n):
             ul = math.hypot(ux, uy)
             ox, oy = VX[n] * ux / ul, VX[n] * uy / ul
             px, py = ux * SPC * g, uy * SPC * g
-            vbad.append(vfield(ox, oy) | vfield(-ox, -oy) | st_via[a] | P0 | pfield(px, py) | pfield(-px, -py))
+            vbad.append(vfield(ox, oy) | vfield(-ox, -oy) | st_via[a] | P0 | pfield(px, py) | pfield(-px, -py)
+                        | sfield(ox, oy) | sfield(-ox, -oy))
     else:
         vbad = [vfield(0.0, 0.0) | st_via[0]] * 4
     # (a pair's window: the cells within a via's room of a single not yet laid, where a crossover's barrels would take
@@ -688,6 +756,11 @@ def route(n, strict=True):
     # router's straight from the pose into the via)
     room0 = _pairs.dive_room(cfg, ctx.pair_ends[n][0], a_out) if no90 else 0.0
     room1 = _pairs.dive_room(cfg, ctx.pair_ends[n][1], a_in) if no90 else 0.0
+    # a pair's dive room from each end AT THE DIVE'S OWN HEADING, as the audit measures it: the router's straight into
+    # a via is longer on a diagonal (a diagonal dive by its stub's axis room stood 0.093 short)
+    unit = lambda d: (DIRS[d][0] / math.hypot(*DIRS[d]), DIRS[d][1] / math.hypot(*DIRS[d]))
+    ROOM0 = [_pairs.dive_room(cfg, ctx.pair_ends[n][0], unit(d)) if no90 else 0.0 for d in range(8)]
+    ROOM1 = [_pairs.dive_room(cfg, ctx.pair_ends[n][1], unit(d)) if no90 else 0.0 for d in range(8)]
     # the search reads its maps as plain lists: the same values, without numpy's cost per element
     bandL, arcL, distL = band.tolist(), arc.tolist(), dist.tolist()
     badL = {L_: m_.tolist() for L_, m_ in bad.items()}
@@ -721,8 +794,9 @@ def route(n, strict=True):
                 break
             L = lays[k]
             # a via here: the next layer, near the plan's via, where a via clears
-            if cross and k < K:
-                if sc[0] <= 0 and sc[1] >= XS[d][0] and room0 <= arcL[i][j] <= total - room1 \
+            # an opposite-hands pair swaps its legs ONCE: its first dive is the crossover, any later one a plain dive
+            if cross and k == 0 and K >= 1:
+                if sc[0] <= 0 and sc[1] >= XS[d][0] and ROOM0[d] <= arcL[i][j] <= total - ROOM1[d] \
                         and not badL[lays[k + 1]][i][j] and xo(i, j, d) is not None:
                     x_, y_ = (i + i0) * g, (j + j0) * g
                     dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
@@ -732,7 +806,7 @@ def route(n, strict=True):
                         if nc < best.get(nst, math.inf) - 1e-12:
                             best[nst] = nc; prev[nst] = st
                             heapq.heappush(pq, (nc + h(i, j), nc, nst))
-            elif k < K and not vbadL[d % 4][i][j] and sc[0] <= 0 and sc[1] >= ST and room0 <= arcL[i][j] <= total - room1:
+            elif k < K and not vbadL[d % 4][i][j] and sc[0] <= 0 and sc[1] >= ST and ROOM0[d] <= arcL[i][j] <= total - ROOM1[d]:
                 x_, y_ = (i + i0) * g, (j + j0) * g
                 dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
                 if dv <= RVIA and not badL[lays[k + 1]][i][j]:
@@ -870,7 +944,6 @@ def route(n, strict=True):
 
 # ------------------------------------------------------------------ one lane at a time
 order = [n for n in M if n in prs] + [n for n in M if n not in prs]
-DONE = set()
 res = {'lanes': {}, 'vias': [], 'conflicts': [], 'pairs': sorted(n for n in M if n in prs),
        'rules': {'grid': g, 'track': TW, 'clear': CL, 'lane_min': bd.LANE_MIN,
                  'pair_turn_steps': _pairs.turn_straight_steps(cfg), 'pair_via_steps': _pairs.via_straight_steps(cfg)}}
@@ -899,13 +972,15 @@ def place(n, out):
             for pts, L in v_:
                 for a_, b_ in zip(pts, pts[1:]):
                     LEGS.append((n, L, tuple(map(float, a_)), tuple(map(float, b_))))
+    others = vias
     if cross:
         for (x_, y_, _k) in cross['vias']:
             PVIAS.append((n, x_, y_))
-    else:
-        for v in vias:
-            for b_ in (_pairs.dive_barrels(v, pieces, VX[n]) if n in prs else [v]):
-                PVIAS.append((n, b_[0], b_[1]))
+        # its other dives (a crossed pair with more than one change) are plain dives, two barrels each
+        others = [v for v in vias if math.hypot(v[0] - cross['at'][0], v[1] - cross['at'][1]) > 1e-6]
+    for v in others:
+        for b_ in (_pairs.dive_barrels(v, pieces, VX[n]) if n in prs else [v]):
+            PVIAS.append((n, b_[0], b_[1]))
     res['lanes'][n] = {'xy': [list(pieces[0][0])] + [list(p[1]) for p in pieces],
                        'pieces': [[a_[0], a_[1], b_[0], b_[1], L] for (a_, b_, L) in pieces], 'vias': [list(v) for v in vias]}
     if ends:
@@ -952,7 +1027,6 @@ for n in lay:
         if out is not None:
             folded[n] = why
             why = why2 + ' (NO approach within 90 degrees of a stub: laid folding, named)'
-    DONE.add(n)
     if out is None:
         failed[n] = why
         log(f'  {n:7s} FAILED: {why}')
@@ -1006,6 +1080,7 @@ if PAIRS_ONLY:
     for k_ in ('flips', 'cuts', 'vcuts', 'paid'):
         if k_ in plan:
             res[k_] = plan[k_]
+res['opposite'] = sorted(n for n in M if n in prs and is_crossed(n))     # the lint holds each to its crossover
 res['vias'] = [[n, v[0], v[1]] for n, L_ in res['lanes'].items() for v in L_['vias']]
 res['tdir'] = {n: [list(end_dirs(n)[0]), [-v for v in end_dirs(n)[1]], list(LANE[n]['pts'][0]), list(LANE[n]['pts'][-1])]
                for n in M}

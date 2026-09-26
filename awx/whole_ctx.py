@@ -2,10 +2,10 @@
 
 The whole-route tools read one bench from the environment, like the rest of the
 chain: BENCH (the board, fanned out: teeth and berths laid), NETS (N1,N2,.. or
-@FILE) and DEST (the destination part's reference). Under the chain's own plan
-environment -- PLAN_PAGES=1 PLAN_JUDGE=count PLAN_JUDGE_LEN=lane BRAID_PAIRS=1
-PLAN_PAIRS=1 BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2 -- plan() returns the
-corridors exactly as braid.run and plan_audit plan them.
+@FILE) and DEST (the destination part's reference). Under the braid's plan
+environment the planning reads -- BRAID_PAIRS=1 BRAID_EXACT_PAGES=0
+PLAN_PAGES_SIDERS=2 (whole_loop.sh sets it) -- plan() returns the corridors
+exactly as braid.run and plan_audit plan them.
 
 install(ctx, corridor, geo) puts a whole-route plan (a geometry, a polish or a snap: per-lane board polylines with
 per-piece layers, via sites) in place of the braid's own, through the things the router and plan_audit read from a
@@ -24,7 +24,6 @@ import math
 import os
 import pickle
 import sys
-import time
 import types
 
 import numpy as np
@@ -71,35 +70,47 @@ def plan(quiet=True):
     """(ctx, corridors): the braid's plan of the bench -- planned once, and SAVED: every whole_* stage plans the same
     bench (4.5 s of each, a fifth of a loop), so the plan is kept under tmp/ctx_cache, keyed as a stage is
     (stage_cache: the environment, which names the bench and its nets, by content) and restored while every file the
-    planning read -- the board, its siblings, every module of this repository loaded -- is unchanged, as a stage is.
+    planning read -- the board, its siblings, every module loaded -- is unchanged and every file it looked for and did
+    not find is still absent, as a stage is.
     STAGE_CACHE=0 plans every time."""
     board, nets, dest = bench()
     if os.environ.get('STAGE_CACHE', '1') == '0':
-        return _plan(board, nets, dest, quiet)
+        return _guard(_plan(board, nets, dest, quiet), nets, dest)
     import stage_cache as sc
     key = hashlib.sha256(json.dumps({'py': [sys.version, sys.executable], 'env': sc.env_key(STAGE_VARS)},
                                     sort_keys=True).encode()).hexdigest()[:24]
     pk, mt = os.path.join(CTX_CACHE, key + '.pkl'), os.path.join(CTX_CACHE, key + '.json')
-    if os.path.isfile(mt) and os.path.isfile(pk):
-        meta = json.load(open(mt))
-        if all(os.path.isfile(p) and sc.signature(p) == h for p, h in meta['read'].items()):
-            with open(pk, 'rb') as f_:
-                return pickle.load(f_)
-    global _READ
-    _READ, t0 = set(), time.time_ns()
-    try:
+    if os.path.isfile(mt) and os.path.isfile(pk) and sc.still(json.load(open(mt))):
+        with open(pk, 'rb') as f_:
+            return _guard(pickle.load(f_), nets, dest)
+    with sc.recording() as rec:
         out = _plan(board, nets, dest, quiet)
-        read = _READ
-    finally:
-        _READ = None
-    files = {p for p in read | sc.repo_modules() if os.path.isfile(p) and not p.startswith(CTX_CACHE + os.sep)}
-    if not any(os.stat(p).st_mtime_ns >= t0 for p in files):       # a file changed under it: not saved
+    ev = sc.evidence(rec)
+    if ev is not None:          # (None: a file it read changed while it planned -- not saved)
         os.makedirs(CTX_CACHE, exist_ok=True)
+        if os.path.exists(mt):  # the old meta out first: a half-written entry is never restored
+            os.remove(mt)
         with open(pk + '.tmp', 'wb') as f_:
             _Pickler(f_, protocol=pickle.HIGHEST_PROTOCOL).dump(out)
-        json.dump({'read': {p: sc.signature(p) for p in sorted(files)}}, open(mt + '.tmp', 'w'), indent=0)
         os.replace(pk + '.tmp', pk)
+        json.dump(ev, open(mt + '.tmp', 'w'), indent=0)
         os.replace(mt + '.tmp', mt)
+    return _guard(out, nets, dest)
+
+
+def _guard(out, nets, dest):
+    """the plan, on a bench the whole route is written for -- else a stop that says why: the CANONICAL FRAME (the run's
+    source-to-destination direction along +x, so the trunk arrives at the destination's west face and the rings run
+    north and south of it: flow_frame.py turns a board into it) and TWO copper layers (a lane's layer is one bit)"""
+    ctx, _cs = out
+    import flow_frame
+    k, _cx, _cy = flow_frame.quarter_of(ctx.pcb, dest, set(nets))
+    if k != 0:
+        raise SystemExit(f'whole route: the bench is not in the canonical frame (its source-to-destination direction '
+                         f'is a quarter turn {k} from +x) -- turn it with flow_frame.py first')
+    cu = list(ctx.pcb.board_info.copper_layers)
+    if sorted(cu) != ['B.Cu', 'F.Cu']:
+        raise SystemExit(f'whole route: the bench has copper layers {cu} -- the whole route plans two (F.Cu, B.Cu)')
     return out
 
 
@@ -120,17 +131,6 @@ CTX_CACHE = os.path.join(HERE, 'tmp', 'ctx_cache')
 # what the loop hands one stage and not the next, read only by whole_solve and whole_geo once the bench is planned:
 # not in the plan's key, or each stage would plan the same bench again
 STAGE_VARS = ('HINT', 'CUTS', 'HIST', 'GEO_FLIPS_FROM', 'SEED_FLIPS', 'SEED_CUTS', 'SEED_HIST', 'WHOLE_SOLVE_BATCHES')
-_READ = None
-
-
-def _record_reads(event, a):
-    if _READ is not None and event == 'open' and a and isinstance(a[0], (str, bytes, os.PathLike)):
-        mode = a[1] if len(a) > 1 and isinstance(a[1], str) else 'r'
-        if not any(c in mode for c in 'wax+'):
-            _READ.add(os.path.abspath(os.fsdecode(a[0])))
-
-
-sys.addaudithook(_record_reads)
 
 
 class _NoCell:
@@ -252,8 +252,9 @@ def install(ctx, c, geo):
     # runs pose to pose (its end connectors and a crossover are laid as drawn): its body, its poses, and the end cells
     # of the legs it takes over from (the pair step checks those against the band)
     g = ctx.cfg.grid_step
-    snapped = {n for n, v in geo['lanes'].items()
-               if all(pa._on_grid(np.array(p_[:2], float), np.array(p_[2:4], float), g) for p_ in v['pieces'][1:-1])}
+    snapped = {n for n, v in geo['lanes'].items()                  # (a lane of its two joins alone is not snapped)
+               if len(v['pieces']) > 2
+               and all(pa._on_grid(np.array(p_[:2], float), np.array(p_[2:4], float), g) for p_ in v['pieces'][1:-1])}
 
     def narrow(nm, slack, open_layers):
         segs, vias = P.get(nm, []), V.get(nm, [])

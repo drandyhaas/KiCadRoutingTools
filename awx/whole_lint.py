@@ -148,6 +148,10 @@ for n in [n for n in geo['lanes'] if geo['lanes'][n].get('ends')]:
                    + [_ps(p_, a_, b_) for p_ in N_ for a_, b_ in zip(P_, P_[1:])])
         if dmin < TW + RU['clear'] - 1e-6:
             bad['ends'].append((n, k_, f'legs {dmin:.3f} apart (need {TW + RU["clear"]:.3f})'))
+# an OPPOSITE-HANDS pair (whole_snap records them) must swap its legs: laid without a crossover it arrives crossed
+for n in geo.get('opposite', []):
+    if n in geo['lanes'] and not geo['lanes'][n].get('cross'):
+        bad['cross'].append((n, 'an opposite-hands pair laid without its crossover'))
 # a crossed pair's CROSSOVER: what the snap promises of it (the pair step lays it as drawn)
 octi_ok = lambda dx, dy: min(math.degrees(math.atan2(dy, dx)) % 45, 45 - math.degrees(math.atan2(dy, dx)) % 45) < 1e-3
 for n in [n for n in geo['lanes'] if geo['lanes'][n].get('cross')]:

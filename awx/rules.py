@@ -114,7 +114,7 @@ installing.
 DEBT THIS FILE DOES NOT PAY (recorded, not fixed)
 -------------------------------------------------
   * ``braid.BLOCK_GAP`` 0.45, ``LEG_W``, ``LEG_REQ``, ``LEG_O``,
-    ``CROSS_TUBE``, ``HEAD_RUN`` are constants with no formula behind them;
+    ``HEAD_RUN`` are constants with no formula behind them;
     only the lane-slice floors of the two pitches are modelled.
   * the 0.025 routing grid in ``braid.setup`` is sized against the fanout's
     0.25 stub packing ("the legal minimum, track + clearance = 0.227, plus

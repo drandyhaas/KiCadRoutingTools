@@ -27,13 +27,15 @@
 HERE=${0:A:h}
 solve=${1:A}; out=${2:A}; rounds=${3:-6}
 cd $HERE
-export PLAN_PAGES=1 PLAN_JUDGE=count PLAN_JUDGE_LEN=lane BRAID_PAIRS=1 PLAN_PAIRS=1 BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2
+# the braid's plan environment the planning reads (a pages-first sidecar's paging, its pairs)
+export BRAID_PAIRS=1 BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2
 # every expensive stage through stage_cache.py: a stage whose script, arguments, environment and every file it read
 # are unchanged is restored, not run (STAGE_CACHE=0 runs them all)
 ST=(python3 stage_cache.py)
 mkdir -p $out
 flips="${SEED_FLIPS:-}"; cuts="${SEED_CUTS:-}"; hist="${SEED_HIST:-}"
-nflips() { python3 -c "import json,sys; print(len(json.load(open(sys.argv[1])).get('flips', [])))" $1; }
+# the side flips in a comma list of polish outputs, every file's (a SEED_FLIPS list names several)
+nflips() { python3 -c "import json,sys; print(len({tuple(x) for f in sys.argv[1].split(',') if f for x in json.load(open(f)).get('flips', [])}))" "$1"; }
 # the findings in a gate line (whole_gate's summary): dive, static, shape, swim, pitch in the plan, band outside (0/1);
 # a gate line without its counts (an audit that did not run to its end) counts as many
 findings() { python3 -c "
@@ -42,6 +44,7 @@ s = sys.argv[1]
 try:
     n = sum(int(re.search(k + r' (\d+)', s).group(1)) for k in ('dive', 'static', 'shape', 'swim'))
     n += int(re.search(r'pitch (\d+) in the plan', s).group(1))
+    n += int(re.search(r'band broken (\d+)', s).group(1)) if 'band broken' in s else 0
     print(n + (1 if float(re.search(r'band ([\d.]+) mm', s).group(1)) > 0 else 0))
 except AttributeError:
     print(999)" "$1"; }
@@ -51,10 +54,21 @@ addhot() {
   [ "$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['hot']))" $3)" = "0" ] && return 1
   hist="${hist:+$hist,}$3"
 }
-# the solve again, warm, with every cut and every audit's history so far
+# the solve again, warm, with every cut and every audit's history so far -- less an island cut a side flip has
+# answered since (the flip puts that lane on the island's other side; the cut would keep holding it off the island)
 resolve() {
   local s2=$out/s$((i + 1)).json
-  HINT=$solve CUTS=$cuts HIST=$hist $ST --out $s2 -- whole_solve.py $s2 > ${s2%.json}.log 2>&1 || { tail -3 ${s2%.json}.log; exit 1; }
+  python3 - "$cuts" "$flips" "$out/cuts$((i + 1)).json" <<'PY'
+import json, sys
+flipped = {tuple(x) for f in sys.argv[2].split(',') if f for x in json.load(open(f)).get('flips', [])}
+cuts, vcuts = [], []
+for f in [f for f in sys.argv[1].split(',') if f]:
+    c = json.load(open(f))
+    cuts += [x for x in c.get('cuts', []) if (x['lane'], x['island']) not in flipped]
+    vcuts += c.get('vcuts', [])
+json.dump({'cuts': cuts, 'vcuts': vcuts}, open(sys.argv[3], 'w'))
+PY
+  HINT=$solve CUTS=$out/cuts$((i + 1)).json HIST=$hist $ST --out $s2 -- whole_solve.py $s2 > ${s2%.json}.log 2>&1 || { tail -3 ${s2%.json}.log; exit 1; }
   grep -E "whole_solve|vias|check|history" ${s2%.json}.log | sed 's/^/  /'
   solve=$s2
 }
@@ -76,14 +90,14 @@ for i in $(seq 1 $rounds); do
   gl=$(python3 whole_gate.py $out/p$i.json $out/p$i.audit)
   echo "$gl" | sed 's/^/  smooth: /'
   f=$(findings "$gl")
-  before=$([ -n "$flips" ] && nflips ${flips##*,} || echo 0)
+  before=$([ -n "$flips" ] && nflips "$flips" || echo 0)
   after=$(nflips $out/p$i.json)
   # the round's cuts -- the geometry's islands and via cuts, the polish's via cuts -- less an island cut that one of
   # the round's NEW flips answers (the flip puts that lane on the island's other side; the geometry has not tried it)
-  n=$(python3 - "$out/g$i.json" "$out/p$i.json" "${flips##*,}" "$out/c$i.json" <<'PY'
+  n=$(python3 - "$out/g$i.json" "$out/p$i.json" "$flips" "$out/c$i.json" <<'PY'
 import json, sys
 g, p = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
-old = {tuple(x) for x in json.load(open(sys.argv[3])).get('flips', [])} if sys.argv[3] else set()
+old = {tuple(x) for f in sys.argv[3].split(',') if f for x in json.load(open(f)).get('flips', [])}
 new = {tuple(x) for x in p.get('flips', [])} - old
 cuts = [c for c in g.get('cuts', []) if (c['lane'], c['island']) not in new]
 vcuts = g.get('vcuts', []) + p.get('vcuts', [])

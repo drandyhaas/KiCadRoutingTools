@@ -28,23 +28,18 @@ import braid as bd
 import pairs as _pairs
 
 # every length below is in the design rules' own units: track, clearance, via size, a via's room, the lane pitch
-G = 2 * bd.LANE_MIN / 5                 # a column: two of the solve's time steps
 P_MIN = bd.LANE_MIN
 P_COMF = bd.LANE_MIN + bd.TRACK           # a comfortable pitch: a track's width of air more
 TW, CL = bd.TRACK, bd.CLEAR
 B_M = TW / 2                            # a lane's copper outside the pad box line
 VIA_R = bd.VIA_NEED
-GRID2 = 0.0                              # half the router's grid step, set from ctx below (the router's bar)
 VIA_VV = bd.VIA_SIZE + CL
 VIA_ST = bd.VIA_SIZE / 2 + CL
-M_VIA = VIA_ST
 LANE_ST = TW / 2 + CL
 PP = _pairs.pitch(TW)
 K_MAX = 8.0                              # the steepest a lane runs to its spine
-HOLD = max(1, int(round(TW / G)))        # a tooth / west-face berth stub held straight a track's width
-EXC = max(2, int(math.ceil(bd.LANE_MIN / G)))   # the box margin waived a lane pitch from the lane's own terminal
-XW = 2 * bd.LANE_MIN
-D_X = TW / 2                            # different-layer neighbours never touch away from their crossing                       # a different-layer pair may close up within XW of its own crossing
+XW = 2 * bd.LANE_MIN                    # a different-layer pair may close up within XW of its own crossing
+D_X = TW / 2                            # different-layer neighbours never touch away from their crossing
 W_LEN, W_BEND, W_COMF, W_HARD = 1.0, 3.0, 0.5, 1e4
 W_COMF_X = 1.0                           # the soft gap between different-layer neighbours
 TANG = [0.0, 1.0, -1.0, 2.5, -2.5, 5.0, -5.0]
@@ -62,14 +57,14 @@ OUT = sys.argv[2] if len(sys.argv) > 2 else '/dev/null'
 ctx, cs = whole_ctx.plan()
 c = cs[0]
 M = list(c.members)
-GRID2 = ctx.cfg.grid_step / 2
+GRID2 = ctx.cfg.grid_step / 2             # half the router's grid step (the router's bar for a line off the grid)
 G = 4 * ctx.cfg.grid_step                 # a column: four router grid steps
 # a pair's straight run either side of its via (the longer, diagonal one, and a grid step) and a turn's own straight
 # run, in columns
 W_DIVE = int(math.ceil((_pairs.via_straight(ctx.cfg, (math.sqrt(0.5), math.sqrt(0.5))) + ctx.cfg.grid_step) / G - 1e-9))
 W_TURN = int(math.ceil(_pairs.turn_straight_steps(ctx.cfg) * ctx.cfg.grid_step / G - 1e-9))
-HOLD = max(1, int(round(TW / G)))
-EXC = max(2, int(math.ceil(bd.LANE_MIN / G)))
+HOLD = max(1, int(round(TW / G)))                 # a tooth / west-face berth stub held straight a track's width
+EXC = max(2, int(math.ceil(bd.LANE_MIN / G)))     # the box margin waived a lane pitch from the lane's own terminal
 P_MIN = max(P_MIN, TW + CL + 2 * GRID2)      # two planned lines: each lands up to half a grid step off (the router's bar)
 # the comfort penalty is GRADED (convex): a millimetre below the midpoint between the minimum and the comfortable pitch
 # costs four times one above it, so the LP spreads the tightest neighbours first rather than letting a few pairs take
@@ -79,7 +74,10 @@ W_COMF_TIGHT = 3 * W_COMF
 from fab_tiers import min_via_center_distance
 VIA_VV = min_via_center_distance(bd.VIA_SIZE, CL, ctx.cfg.via_drill, getattr(ctx.cfg, 'hole_to_hole_clearance', 0.0) or 0.0)
 VIA_VV += 2 * GRID2; VIA_ST += GRID2; LANE_ST += GRID2     # planned vs planned a whole step, vs static half
-VIA_R = max(VIA_R, bd.VIA_SIZE / 2 + CL + TW / 2 + 2 * GRID2)
+# a via's room off a lane's line: the router's RING round it (pairs.via_ring) and half a step for each of the two, the
+# via and the line, off the grid -- the audit's bar (plan_audit.check_dives) and the polish's; the via's copper and the
+# clearance alone left the polish 8 um to find at every via
+VIA_R = max(VIA_R, _pairs.via_ring(ctx.cfg) + 2 * GRID2)
 M_VIA = VIA_ST
 bo = c.branch_of or {}
 prs = getattr(ctx, 'pairs', {}) or {}
@@ -88,7 +86,9 @@ li = {n: i for i, n in enumerate(J['launch'])}
 cross = {frozenset(k.split('|')): v['u'] for k, v in J['cross'].items()}
 chg = {n: sorted(v) for n, v in J['changes'].items()}
 tl = {n: F(ctx.tooth_layer[n]) for n in M}
-hw = {n: (PP / 2 if n in prs else 0.0) for n in M}
+# a pair's half width: its legs' reach at the snap's 45-degree corners and the half step its off-grid legs take, as the
+# polish and the audit price it (half its pitch alone left the polish 23 um a side to find)
+hw = {n: (PP / 2 / math.cos(math.pi / 8) + GRID2 if n in prs else 0.0) for n in M}
 VS = {n: (VIA_R + PP / 2 if n in prs else VIA_R) for n in M}
 # a pair's dive is TWO barrels, pairs.dive_offset either side of its centreline across the lane (where both pair
 # routers stand them): its room is a single via's along the lane, widened across by that offset
@@ -844,9 +844,13 @@ def static_sides(sol):
 
 log('pass 1')
 sol = build_and_solve([])
+if sol is None:
+    sys.exit('whole_geo: the first pass LP failed (its status above)')
 log('pass 2 (static sides)')
 SIDES2 = static_sides(sol)
-sol = build_and_solve(SIDES2, prev=sol['o']) or sol
+sol = build_and_solve(SIDES2, prev=sol['o'])
+if sol is None:          # every rule is elastic: a failure is the solver's, and pass 1 has no static sides or flips
+    sys.exit('whole_geo: the second pass LP failed (its status above) -- no geometry without its static sides')
 
 
 # ---------------------------------------------------------------- output
@@ -935,10 +939,21 @@ for f in FR:
     for st_ in STATIC:
         (x0, y0, x1, y1, Ls, lab) = st_[:6]
         so = [sp.project_pt(q) for q in ((x0, y0), (x0, y1), (x1, y0), (x1, y1))]
-        bxs[f][lab] = (min(q[0] for q in so), max(q[0] for q in so))
+        lo_, hi_ = min(q[0] for q in so), max(q[0] for q in so)
+        if lab in bxs[f]:           # a part with pads on one layer and on both is two islands of one label: both spans
+            lo_, hi_ = min(lo_, bxs[f][lab][0]), max(hi_, bxs[f][lab][1])
+        bxs[f][lab] = (lo_, hi_)
+vcuts, vseen = [], set()
 for q in sol['paid'].get('static', []):
     _v, f, k, n, what = q[:5]
-    lab = what[4:] if what.startswith('via ') else what
+    if what.startswith('via '):
+        # a CHANGE the island would not give its room: the change moves (a via cut), not the lane's crossings
+        for (f2, n2, cu, kc) in sol['vias']:
+            if f2 == f and n2 == n and abs(kc - k) * G <= VS[n] + G and (n, round(cu, 3)) not in vseen:
+                vseen.add((n, round(cu, 3)))
+                vcuts.append({'lane': n, 'u': cu, 'w': VS[n]})
+        continue
+    lab = what
     if lab.startswith(('end ', 'stub ', 'svia ')) or lab not in bxs[f] or (n, f, lab) in seen:
         continue
     seen.add((n, f, lab))
@@ -946,7 +961,6 @@ for q in sol['paid'].get('static', []):
     g = LANE_ST + hw[n] + P_MIN
     cuts.append({'lane': n, 'island': lab, 'u_lo': FR[f]['u'](sa - g), 'u_hi': FR[f]['u'](sb + g)})
 res['cuts'] = cuts
-vcuts, vseen = [], set()
 for q in sol['paid'].get('via', []):
     _v, f, k, n, nb = q[:5]
     for (f2, n2, cu, kc) in sol['vias']:

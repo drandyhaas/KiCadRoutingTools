@@ -51,6 +51,13 @@ h2h = getattr(cfg, 'hole_to_hole_clearance', 0.0) or 0.0
 prs = getattr(ctx, 'pairs', {}) or {}
 HALF = _pairs.pitch(TW) / 2
 OFF = _pairs.dive_offset(cfg, HALF) if prs else 0.0
+# how far off its grid point a barrel of a dive not yet laid can stand, once the snap lays the dive on the grid: OFF
+# across each of the router's eight headings, the worst of them -- the snap bars it twice that (the router rings the
+# point it rounds to), so a bar here of that and a grid step leaves the snap its row (half a step, the old allowance,
+# is short of it on a diagonal)
+_goff = lambda v: abs(v - round(v / cfg.grid_step) * cfg.grid_step)
+VX_OFF = 2 * max(math.hypot(_goff(OFF * -dy / math.hypot(dx, dy)), _goff(OFF * dx / math.hypot(dx, dy)))
+                 for dx, dy in [(1, 0), (1, 1), (0, 1), (-1, 1)]) if prs else 0.0
 # the audit's bars (plan_audit) for items OFF the grid, as every piece of a smooth plan is: planned vs planned a whole
 # grid step, planned vs static half
 BLOCK = TW + CL + 2 * g2
@@ -71,7 +78,6 @@ SPC = _pairs.pose_via_cells(cfg, HALF)
 R_LINE = VR + TW / 2 + CL + HALF
 R_VIA = 2 * VR + CL
 hw = {n: (HALF_SNAP + g2 if n in prs else 0.0) for n in geo['lanes']}
-LNAME = {'F': 'F.Cu', 'B': 'B.Cu'}
 log = lambda *a: print(*a, flush=True)
 
 
@@ -250,8 +256,9 @@ for s in ctx.base_segments:
 for v in ctx.base_vias:
     STATIC.append(('circ', {'F.Cu', 'B.Cu'}, v.net_id, (v.x, v.y, v.size / 2), 'via'))
 # a held pair's END LEGS are laid where they are drawn: copper the singles are fitted round -- and a crossed pair's
-# crossover, its legs and its two barrels
-for n in HELD:
+# crossover, its legs and its two barrels (in name order: a set's would follow the hash seed, and this order is the
+# static list's and so the LP's rows')
+for n in sorted(HELD):
     for e_ in geo['lanes'][n].get('ends', []):
         for pts, leg in zip(e_['legs'], prs[n]):
             for a_, b_ in zip(pts, pts[1:]):
@@ -320,7 +327,7 @@ def static_near(P, L, own):
     return out
 
 
-def mitre(n, i, s_hint=None):
+def mitre(n, i):
     """half a pair's pitch, grown at a bend to where the INNER leg's mitre stands (HALF / cos(turn / 2)), over the
     two vertices of segment i -- at least where it stands at the snap's 45-degree corners, plus the half step its
     off-grid legs take; 0 for a single"""
@@ -508,7 +515,7 @@ def gather():
             # how far the barrel stands off the grid point the router rounds it to: a laid (held) pair's exactly; a
             # pair's not yet laid half a step (its barrels stay off the grid when the snap lays its dive)
             vx = (math.hypot(B[0] - round(B[0] / (2 * g2)) * 2 * g2, B[1] - round(B[1] / (2 * g2)) * 2 * g2)
-                  if n in HELD else g2 if n in prs else 0.0)
+                  if n in HELD else VX_OFF if n in prs else 0.0)
             for (m, j) in near_segs(B, RING_PAIR + vx + 2 * g2 + MARGIN):
                 if m == n:
                     continue
@@ -576,7 +583,7 @@ def gather():
     # barrels are: each other lane's line kept outside the router's ring round it, the barrel's own offset from its
     # grid point and a grid step -- as static copper alone they stood at the via-to-track clearance, a ring short
     # (SA6 0.306 from SCK's barrel where the audit asks 0.325)
-    for n in HELD:
+    for n in sorted(HELD):
         xo = geo['lanes'][n].get('cross')
         for vx_, vy_, _k in (xo['vias'] if xo else []):
             B = np.array([vx_, vy_], float)
@@ -732,8 +739,8 @@ def pair_approaches():
     (pairs.end_connector) along the stub's own way, then the straight the pair router probes past its pose, within
     max_setback_angle of that way (the chord's own direction, turned into that cone when it lies outside). A connector
     at an angle leaves the pose off the plan (SDQS1's berth run left at 45 degrees; in a band that follows the plan its
-    pose had no cell); a whole end run along the stub pinned the lanes round SCK's ends (four pitch findings round 1,
-    not converging). Without a stub's way, the chord's own direction, straight. At a ring berth the frame runs across
+    pose had no cell); along the stub for its connector and probe only, not its whole end run, which pins the lanes
+    round a pair's ends. Without a stub's way, the chord's own direction, straight. At a ring berth the frame runs across
     the stub (SCK came along the ring and turned 90 degrees into its berth), which no frame offset can express."""
     laid = []
     cone = math.radians(cfg.max_setback_angle)
@@ -963,14 +970,29 @@ for n, ln in LANES.items():
         res['lanes'][n] = dict(geo['lanes'][n])          # laid as it was given (its ends and joins with it)
     for i in via_idx(n):
         res['vias'].append((n, float(X[i][0]), float(X[i][1])))
-# the lane-island clearances the polish could not meet on the side the geometry chose: fed back as side flips
+# the lane-island clearances the polish could not meet on the side the geometry chose: fed back as side flips -- of the
+# parts the geometry holds lanes to one side of (whole_geo's islands: every part's pads and holes but the source's and
+# the destination's; a flip of either would change nothing and cost a round)
+_SRC = collections.Counter(ctx.src_ref[n] for n in geo['lanes']).most_common(1)[0][0]
+_DST = __import__('os').environ['DEST']
+
+
+def island_of(lab):
+    """the island a static label names ('pad REF.N ...', 'hole REF.N'), or None"""
+    for pre in ('pad ', 'hole '):
+        if lab.startswith(pre):
+            ref = lab[len(pre):].split('.')[0]
+            return ref if ref not in (_SRC, _DST) else None
+    return None
+
+
 flips = {tuple(x) for x in geo.get('flips', [])}
 for r in bad:
     if r[2] != 'static':
         continue
     lane_, _, what = r[3].replace(' inside ', '~').partition('~')
-    if what.startswith('pad '):
-        flips.add((lane_, what[4:].split('.')[0]))
+    if island_of(what):
+        flips.add((lane_, island_of(what)))
 # ...and a stub join the polish could not meet: the pad island nearest the lane's end stretch holds its approach off
 # the stub on this side (SCAS ran north of C6 and could only descend into its berth; south of it, up through the
 # pads' gap, it arrives the stub's way)
@@ -984,9 +1006,9 @@ for r in bad:
     for i in range(len(X)):
         if (s[i] < 2 * W_SCALE) if end == '<' else (s[-1] - s[i] < 2 * W_SCALE):
             L = Ls[min(i, len(Ls) - 1)]
-            near += [(dd, lab) for dd, _q, lab in static_near(X[i], L, OWN[lane_]) if lab.startswith('pad ')]
+            near += [(dd, island_of(lab)) for dd, _q, lab in static_near(X[i], L, OWN[lane_]) if island_of(lab)]
     if near:
-        flips.add((lane_, min(near)[1][4:].split('.')[0]))
+        flips.add((lane_, min(near)[1]))
 res['flips'] = sorted(flips)
 if flips - {tuple(x) for x in geo.get('flips', [])}:
     log(f'side flips for the next geometry: {sorted(flips - {tuple(x) for x in geo.get("flips", [])})}')

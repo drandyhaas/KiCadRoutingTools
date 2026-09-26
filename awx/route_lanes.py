@@ -221,7 +221,7 @@ def main(argv=None):
     ap.add_argument('only', help='the lanes to route (N1,N2,..) or all')
     ap.add_argument('--board', required=True)
     ap.add_argument('--nets', required=True, help='the bench nets: N1,N2,.. or @FILE')
-    ap.add_argument('--dest', default='DU1')
+    ap.add_argument('--dest', required=True, help="the destination part's reference")
     ap.add_argument('--mode', choices=('alone', 'seq'), default='alone')
     ap.add_argument('--png', default='', help='a directory: one render per lane')
     ap.add_argument('--probe', default='', help="X,Y;X,Y;.. or 'stops'")
@@ -255,6 +255,7 @@ def main(argv=None):
         os.makedirs(a.png, exist_ok=True)
     routed = set()
     n_ok = n_free = v_tot = v_plan = 0
+    errors = []                 # lanes whose routing RAISED: a crash, not a routing result
     print(f'{a.mode}: {len(chosen)} lane(s), branch={bd.BRANCH}')
     for (c, nm) in chosen:
         if a.mode == 'alone':
@@ -289,7 +290,8 @@ def main(argv=None):
                 res = c.route_lane(nm, c.virtual_of(unrouted), c.virtual_vias_of(unrouted))
         except Exception as ex:
             res = None
-            print(f'{nm:7s} ERROR {ex}')
+            errors.append(nm)
+            print(f'{nm:7s} ERROR {type(ex).__name__}: {ex}')
         calls = rec.calls[k0:]
         kind = ('pair' if nm in getattr(ctx, 'pairs', {})
                 else 'swim' if c.sched_cur.page.get(nm) is None else 'page')
@@ -355,9 +357,11 @@ def main(argv=None):
         if a.png and calls:
             render(ctx, c, nm, calls[-1], segs_nm, vias_nm, os.path.join(a.png, f'{nm}.png'), box)
     print(f'SUMMARY {a.mode}: {n_ok}/{len(chosen)} in band' + (f' (+{n_free} free)' if n_free else '')
-          + f', {v_tot} vias (plan {v_plan} for those)')
+          + f', {v_tot} vias (plan {v_plan} for those)' + (f'; {len(errors)} ERROR(S): {errors}' if errors else ''))
     if a.write:
         write(ctx, a.board, a.write, base_s, base_v)
+    if errors:
+        sys.exit(1)
 
 
 def write(ctx, board, out, base_s, base_v):

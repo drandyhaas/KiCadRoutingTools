@@ -1,7 +1,8 @@
 """whole_gate.py PLAN.json AUDIT.txt [--hot OUT.json] -- exit 0 when the plan is COMPLETE and passes the audit: every corridor member
 laid (a plan with a lane missing, or one its maker marked failed, fails here -- audited lane by lane, a missing lane
 has nothing to fail on; so does one the snap could only lay folding against its stub), no dive, static, shape or swim
-failure, no planned length outside its band, and no pitch failure. (A lane's terminal join is graded as the router
+failure, no planned length outside its band, every lane's band joining its tooth to its berth (the router is confined
+to it: a band BROKEN, or not reaching its tooth or its berth, fails), and no pitch failure. (A lane's terminal join is graded as the router
 lays it -- plan_audit._router_terminals -- so two teeth closer than the plan's own bar are measured, not waived.)
 
 The audit is read by its own summary lines, and an audit that lacks one did not run to its end (a crash leaves a
@@ -36,6 +37,11 @@ for line in aud:
         if m:
             found[k] = m.group(1)
 members = {m.group(1) for line in aud for m in [re.match(r'^BAND (\S+)\s', line)] if m and m.group(1) != 'total'}
+# a lane whose band does not join its tooth to its berth (BROKEN, TOOTH-OUT, BERTH-OUT) fails, whatever length of it
+# lies outside: the router is confined to the band
+broken = sorted(m.group(1) for line in aud
+                for m in [re.match(r'^BAND (\S+)\s+\S+\s+plan\s+[\d.]+ mm\s+outside\s+[\d.]+ mm\s+(\S+)', line)]
+                if m and m.group(2) != 'connected')
 unplanned = {m.group(1) for line in aud for m in [re.match(r'^BAND (\S+)\s+no planned line', line)] if m}
 lost = sorted(k for k in SUMMARY if k not in found) + (['the corridor members'] if not members else [])
 if lost:
@@ -53,11 +59,12 @@ for line in aud:
         plan.append(f'{m.group(1)}/{m.group(2)} {float(m.group(3)):.3f}')
 unread = int(found['PITCH']) - len(plan)
 folded = geo.get('folded', [])
-bad = geo.get('failed') or missing or unread or folded
+bad = geo.get('failed') or missing or unread or folded or broken
 print(('INCOMPLETE: ' + (f'{len(missing)} lane(s) missing: {", ".join(missing)}; ' if missing else '')
        + ('its maker marked it failed; ' if geo.get('failed') else '') if (geo.get('failed') or missing) else '')
       + (f'UNREAD: {unread} pitch line(s) the gate could not parse; ' if unread else '')
       + (f'FOLDED: {", ".join(folded)} laid with no approach within 90 degrees of a stub; ' if folded else '')
       + f'audit: dive {fails["DIVE"]}, static {fails["STATIC"]}, shape {fails["SHAPE"]}, swim {fails["SWIM"]}, '
-        f'band {fails["BAND"]:.1f} mm, pitch {len(plan)} in the plan' + (f': {plan}' if plan else ''))
+        f'band {fails["BAND"]:.3f} mm' + (f', band broken {len(broken)}: {broken}' if broken else '')
+      + f', pitch {len(plan)} in the plan' + (f': {plan}' if plan else ''))
 sys.exit(0 if not bad and not plan and not any(fails.values()) else 1)

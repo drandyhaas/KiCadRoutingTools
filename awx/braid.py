@@ -132,10 +132,7 @@ DIST_O = 0.2                   # distinct offsets for head-on classification
 HEAD_RUN = 3.0                 # a head-on stub's straight run-in that must
                                # be clear of static copper (its own row of
                                # balls, when it sits on a flank)
-CROSS_TUBE = 1.0               # a lane's freedom through a crossing region
 RESERVE = 0.3                  # room after the last column
-W_FREE = 0.18                  # pitch of a FREE column (two page lanes
-                               # crossing: no via, only the lanes' slope)
 W_XING = 0.02                  # two-page: pitch of a column with no layer
                                # change in it -- a crossing of two lanes
                                # on different layers costs no length,
@@ -178,8 +175,6 @@ HW_COL = 0.15                  # half-width of a constrained column's
                                # required-layer stretch (the converging
                                # part where two lanes are too close for
                                # one layer)
-VIA_ROOM = 0.30                # room for a via between two required
-                               # stretches (0.25 dia + clearances)
 SLOPE_PITCH = True             # slot pitch scaled by the lane's angle to
                                # the spine (see Corridor.offsets); paper-
                                # checked before it is switched on
@@ -1599,16 +1594,6 @@ class Corridor:
         # ball row (K11 SDQ13 sent to the bottom face by the order
         # model: refused by its own band, the band being the row).
         run_from = sp.xy(s_i - HEAD_RUN, o_i)
-        # NB a "direct B exit" branch was tried here (2026-08-31:
-        # dest_layer B -> check the straight arrival against real
-        # B copper instead of the F ball field) and measured a
-        # NO-OP: every south-face stub except the westernmost
-        # fails the UPSTREAM-STUB test above first -- face-line
-        # stubs share one offset, so the o-crowding check, not
-        # this pad-field check, is what decides the excursion.
-        # Removing the excursion for B-delivered stubs therefore
-        # needs a different head-on MODEL (arrival along the face
-        # line, ordered by s), not a different clearance test.
         return ctx.pad_obs.seg_clear(run_from, stub_nm)
 
     def _need_at(self, om, s, sched):

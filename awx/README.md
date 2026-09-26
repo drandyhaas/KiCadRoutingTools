@@ -803,8 +803,12 @@ rules, and only then hands it on.
   pair whose launch and berth orders disagree crosses once; the braid rule
   holds over every triple; a lane's crossings keep a pitch along a stayer
   and less along a mover's sweep; up to four layer changes per lane, each a
-  via's room from its own crossings and a via from the next lane's; crossing
-  lanes on different layers. A pair's end keeps crossings out of its END
+  via's room from its own crossings and, along the route, far enough from
+  any other lane's that two on neighbouring lanes clear the via-to-via rule;
+  crossing lanes on different layers; an opposite-hands pair at least one
+  change, where its tooth and berth share a layer (elsewhere the berth rule
+  asks one already -- a constraint that binds nothing still moves CP-SAT to
+  another of its equal optima). A pair's end keeps crossings out of its END
   CONNECTOR (`pairs.end_connector`: its legs converging at 45 degrees from
   its tips onto a pose on the grid) and its own layer changes beyond its
   DIVE ROOM (`pairs.dive_room`: that connector, then the pair router's
@@ -864,7 +868,10 @@ rules, and only then hands it on.
   snap may make there -- so its grid path cannot fold where lane and stub
   meet. A lane held off an island's side -- no room for its clearance, or no
   approach to its stub -- is FLIPPED, and the geometry runs again with the
-  flip before anything is snapped. A pair's dive it cannot lay straight
+  flip before anything is snapped (only a part the geometry holds lanes to
+  one side of: never the source or the destination). A dive not yet laid is
+  priced at the worst offset off the grid its barrels can take once laid
+  (0.033 on a diagonal heading, where half a step left the snap 4 um). A pair's dive it cannot lay straight
   without folding the lane, and a change the rounds cannot give its room,
   go to the solve as VIA CUTS, with the geometry's. A held pair's crossover
   barrels are kept off the other lanes as its dive barrels are -- the
@@ -897,9 +904,14 @@ rules, and only then hands it on.
   other nets' stubs and vias, holes, the board edge) over each lane's
   window, a pair's with the pair's extra clearance; placed copper at the
   audit's bars (a pair as its two mitred legs, a via by the ring the router
-  stamps round it, a piece off the grid -- a join onto an off-grid
-  terminal -- half a step wider, both ways); a pair's dive where the pair router tests it, and no
-  nearer either end than its dive room. A lane not
+  stamps round it -- round the grid point it rounds to, as the router, and
+  round the barrel itself, as the audit -- a piece off the grid -- a join
+  onto an off-grid terminal -- half a step wider, both ways; a single's via
+  a track's ring from every placed pair's legs, its end legs and crossover's
+  among them); a pair's dive where the pair router tests it, each barrel
+  and each leg clear of static copper at the audit's own bars, and no
+  nearer either end than its dive room at the dive's own heading. An
+  opposite-hands pair crosses over at its first dive only. A lane not
   yet placed keeps its SHARE of every gap -- the side of the midline nearer
   its own smooth line, less half a bar, for its track and for its via -- so
   the lanes laid first cannot take the room the later ones need. An off-grid
@@ -927,8 +939,13 @@ rules, and only then hands it on.
   and crossover as its exact copper, the crossover's barrels one each; a
   pair's dive also for its straight runs and its room from both ends, and
   every pose for the straight the router probes past it; bands sampled on
-  the router's grid, pose to pose. `whole_gate.py` passes a plan only when it is COMPLETE
-  (every corridor member laid) and clean on every check -- nothing waived.
+  the router's grid, pose to pose; a via against a pair's own legs (a
+  track's ring) as well as its centreline, against unplated holes by the
+  hole-to-hole rule, and against every stub by its whole length.
+  `whole_gate.py` passes a plan only when it is COMPLETE (every corridor
+  member laid) and clean on every check -- nothing waived, a band's length
+  outside it read to the micron and every lane's band joining its tooth to
+  its berth.
   `whole_lint.py` checks what the snap promises: grid points, 0/45/90
   pieces, continuity, no reversal, a via at every layer change, a pair's
   turns and dives as the pair router makes them, its end connectors, and an
@@ -941,34 +958,40 @@ rules, and only then hands it on.
   best score so far (how far the plan got -- smooth, the pairs held,
   snapped -- then its findings there). A round with new side flips and cuts
   or findings takes both at once -- the solve with them, then the geometry
-  with the flips (a cut on a newly flipped island dropped). The polish's
+  with the flips (an island cut a flip has since answered dropped from the
+  solve, whichever round made it). The polish's
   rounds stop once a round moves no vertex further than a nanometre
   (KiCad's own unit). Every expensive stage runs through `stage_cache.py`:
   a stage whose script, arguments, environment (the agent's and the
   terminal's own session variables aside) and every file it read -- its
-  code and its data, by content -- are unchanged is restored, not run; a
-  stage that a file it read changed under while it ran is not recorded
-  (`STAGE_CACHE=0` runs them all). The bench every stage plans is planned
+  code and its data, by content -- are unchanged, and every file it looked
+  for and did not find still absent, is restored, not run; a stage that a
+  file it read changed under while it ran is not recorded, and an entry's
+  meta is written last and whole (`STAGE_CACHE=0` runs them all). The bench every stage plans is planned
   once and saved (`whole_ctx.plan`, under `tmp/ctx_cache`, keyed and
   checked the same way; the braid's closures saved by value), so a stage
-  loads it in a third of a second.
+  loads it in a third of a second. A bench outside the canonical frame
+  (`flow_frame.py`) or with more than two copper layers is refused, not
+  misread.
 - **The route** (`route_lanes.py --plan`). The router on the installed
   plan, every lane in its band (post-passes off), a pair's end connectors
   and crossover laid as given and the pair router run between them
   (`connect.connect_pair`'s `a_given` / `b_given` / `x_given`): each alone, or all in
   order (`--mode seq`), the board written for `check_connected` and
   `check_drc` (`--write`) -- a lane the router reports routed is not proof
-  its net connects.
+  its net connects; a lane whose routing raised is named, and the run exits
+  1.
 
 On the human's ends (`HHe`, K51: 51 nets, 45 singles and 3 pairs, 48 lanes)
 the plan passes every check with nothing waived, and it ROUTES. From the
-human's board, by the commands above: the bench, the solve (17 s), then
-`whole_loop.sh` in two rounds (185 s more) -- the first polish flips SCAS
-to the far side of C6 and finds SDQ13 short of its pitch to SDQ15 and to
-SDQM0, and the geometry cannot keep SA8 off C4 or C3, nor give SDQ10's
-change its room, nor lay SDQS1's dive straight: the solve again with those
-cuts and those two places priced (16 s, both solves 36 layer changes), the
-geometry with the flip, and the second smooth plan passes; the pairs are
+human's board, by the commands above: the bench, the solve (16 s), then
+`whole_loop.sh` in two rounds (169 s more) -- the first polish flips SCAS
+to the far side of C6 and finds SDQ15 short of its pitch to SDQS1 and
+SCKE0 of its to SCKE1 and SA6, and the geometry cannot keep SA8 off C4 or
+C3, nor lay SDQS1's dive straight, nor give SCK's change its room: the
+solve again with those cuts and those places priced (28 s, both solves 36
+layer changes), the geometry with the flip, and the second smooth plan
+passes; the pairs are
 laid (SCK with its crossover), the singles fitted round them and snapped,
 the lint clean. The loop again on the same inputs restores every stage
 from the cache (1.4 s). Every step writes the same bytes on every run
@@ -980,7 +1003,7 @@ zero widening, 3 of 3 in their bands; each lane alone, 48 of 48; ALL AT
 ONCE, 48 of 48 in their bands, `check_connected` all 51 nets connected,
 `check_drc` clean at the route's clearance. Over the whole board on the 51
 nets: 86 vias against the human's 88, no net over two (the human has none
-either), and 1239 mm of copper against 1337 -- the human's includes its
+either), and 1257 mm of copper against 1337 -- the human's includes its
 length-matching meanders, and this route matches no lengths.
 
 <img src="img/k51_whole_route.png" alt="K51 routed from the whole-route plan, beside the human's" width="900">
@@ -1342,7 +1365,7 @@ First, the whole-route plan (`whole_*.py`):
   planning distances the whole route starts from (`BLOCK_GAP`, `ROW_O`,
   `TOL_S`, `DIST_O`, `HEAD_RUN`, `RING_DIP`) and the snap's `W_DEV` (per mm)
   are still millimetres where they should be the rules' units.
-- **Speed.** A K51 loop is 185 s, half of it the geometry's LP in HiGHS
+- **Speed.** A K51 loop is under three minutes, half of it the geometry's LP in HiGHS
   itself: one elastic column per pitch rule, rather than one per tangent cut
   of it, would shrink it. A pair's grid search (its pose counters, its
   crossover) is still Python.

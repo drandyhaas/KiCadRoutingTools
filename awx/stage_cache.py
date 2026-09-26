@@ -4,17 +4,21 @@
 A stage's outputs are a function of its script, its arguments, its environment, and every file it reads -- the code it
 imports and the data it opens. The first run records all of that, by content, beside its outputs and its console log:
 the script, the arguments (a named file by its content; a declared output by its place in the list, so the same stage
-into another directory is the same stage), the environment (a file a variable names by its content), every module
-file of this repository the stage loaded, and every other file it opened for reading. A later run whose script,
-arguments and environment match restores the outputs and replays the log when every recorded file is unchanged, and
-runs the stage otherwise. Nothing is guessed: a change to anything the stage read runs it again. A stage that fails is
-not recorded, nor one a file it read changed under while it ran (its content by then is not what the stage read).
+into another directory is the same stage), the environment (a file a variable names by its content, the session's own
+variables aside), every module file the stage loaded, every other file it opened for reading, and every path it looked
+for and did not find. A later run whose script, arguments and environment match restores the outputs and replays the
+log when every recorded file is unchanged and every missing one still missing, and runs the stage otherwise. Nothing
+is guessed: a change to anything the stage read, or a file appearing where it looked, runs it again. A stage that fails
+is not recorded, nor one a file it read changed under while it ran (its content by then is not what the stage read);
+an entry's meta is written last and whole, so an interrupted recording is never restored. What it cannot see: a
+directory listing, a subprocess's reads.
 
     python3 stage_cache.py --out g1.json -- whole_geo.py solve.json g1.json
 
 STAGE_CACHE=0 runs the stage and records nothing; STAGE_CACHE_DIR is where entries live (default awx/tmp/stage_cache).
 """
 import atexit
+import contextlib
 import hashlib
 import io
 import json
@@ -22,6 +26,7 @@ import os
 import runpy
 import shutil
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -72,10 +77,73 @@ def env_key(leave_out=()):
             if k not in VOLATILE and k not in leave_out and not k.startswith(VOLATILE_PREFIX)}
 
 
-def repo_modules():
-    """the files of every module of this repository this process has loaded"""
+def modules():
+    """the files of every module this process has loaded"""
     return {os.path.abspath(m.__file__) for m in list(sys.modules.values())
-            if getattr(m, '__file__', None) and os.path.abspath(m.__file__).startswith(REPO + os.sep)}
+            if isinstance(getattr(m, '__file__', None), str)}
+
+
+# ---- what a run READ: every file it opened for reading, every path it looked for and did not find (a file that
+# appears later changes what it does as surely as one that changes: a board's plan sidecar, its rules file), and
+# every module it loaded (its source: an edited module outside the repository keeps its old .pyc until it is imported)
+_RECORDERS = []
+
+
+def _record_open(event, a):
+    if not _RECORDERS or event != 'open' or not a or not isinstance(a[0], (str, bytes, os.PathLike)):
+        return
+    mode = a[1] if len(a) > 1 and isinstance(a[1], str) else 'r'
+    if 'r' in mode or ('+' in mode and 'w' not in mode):
+        p = os.path.abspath(os.fsdecode(a[0]))
+        for r_ in _RECORDERS:
+            r_['read'].add(p)
+
+
+sys.addaudithook(_record_open)
+
+
+@contextlib.contextmanager
+def recording():
+    """{'read', 'absent', 't0'} of what runs inside: files opened for reading, paths probed and not found (os.stat,
+    which os.path.exists / isfile and pathlib ask)"""
+    rec = {'read': set(), 'absent': set(), 't0': time.time_ns()}
+    _RECORDERS.append(rec)
+    real_stat = os.stat
+
+    def stat(path, *a, **k):
+        try:
+            return real_stat(path, *a, **k)
+        except FileNotFoundError:
+            if isinstance(path, (str, bytes, os.PathLike)):
+                p = os.path.abspath(os.fsdecode(path))
+                for r_ in _RECORDERS:
+                    r_['absent'].add(p)
+            raise
+    os.stat = stat
+    try:
+        yield rec
+    finally:
+        os.stat = real_stat
+        _RECORDERS.remove(rec)
+
+
+def evidence(rec, skip=()):
+    """a recording as an entry keeps it -- {'read': {path: signature}, 'absent': [path]}: every module loaded and
+    every file read (less skip, a stage's own outputs, and this cache) by content, every path looked for and not
+    found; None when a file it read changed while it ran (its content NOW is not what it read)"""
+    skip = {os.path.abspath(p) for p in skip}
+    keep = lambda p: p not in skip and not p.startswith(CACHE + os.sep)
+    files = {p for p in (modules() | rec['read']) if keep(p) and os.path.isfile(p)}
+    if any(os.stat(p).st_mtime_ns >= rec['t0'] for p in files):
+        return None
+    absent = sorted(p for p in (rec['absent'] | rec['read']) if keep(p) and not os.path.exists(p))
+    return {'read': {p: signature(p) for p in sorted(files)}, 'absent': absent}
+
+
+def still(ev):
+    """every file of an entry's evidence as it was, and every path it did not find still absent"""
+    return (all(os.path.isfile(p) and signature(p) == h for p, h in ev['read'].items())
+            and not any(os.path.exists(p) for p in ev.get('absent', ())))
 
 
 def stage_key(script, sargs, outs):
@@ -99,17 +167,10 @@ class Tee(io.TextIOBase):
         self.real.flush()
 
 
-def run(script, sargs, record=None):
-    """the stage in this process, as `python3 SCRIPT ARG...` runs it: its exit code, and (record) the files it read"""
+def run(script, sargs):
+    """the stage in this process, as `python3 SCRIPT ARG...` runs it: its exit code"""
     sys.argv = [script] + list(sargs)
     sys.path.insert(0, os.path.dirname(os.path.abspath(script)))
-    if record is not None:
-        def hook(event, a):
-            if event == 'open' and a and isinstance(a[0], (str, bytes, os.PathLike)):
-                mode = a[1] if len(a) > 1 and isinstance(a[1], str) else 'r'
-                if not any(c in mode for c in 'wax+'):
-                    record.add(os.path.abspath(os.fsdecode(a[0])))
-        sys.addaudithook(hook)
     try:
         runpy.run_path(script, run_name='__main__')
         return 0
@@ -133,43 +194,39 @@ def main():
     meta_p = os.path.join(entry, 'meta.json')
     if os.path.isfile(meta_p):
         meta = json.load(open(meta_p))
-        if all(os.path.isfile(p) and signature(p) == h for p, h in meta['read'].items()):
+        if still(meta):
             for i, o in enumerate(outs):
                 shutil.copyfile(os.path.join(entry, f'out{i}'), o)
             sys.stdout.write(open(os.path.join(entry, 'log')).read())
             sys.stdout.write(f'stage_cache: {os.path.basename(script)} restored ({len(meta["read"])} files unchanged)\n')
             sys.exit(0)
-    read = set()
-    t_start = __import__('time').time_ns()
     log = io.StringIO()
     real, real_err = sys.stdout, sys.stderr
     sys.stdout, sys.stderr = Tee(real, log), Tee(real_err, log)
     try:
-        rc = run(script, sargs, record=read)
-        atexit._run_exitfuncs()                 # what the stage prints on its way out belongs to its log too
+        with recording() as rec:
+            rc = run(script, sargs)
+            atexit._run_exitfuncs()             # what the stage prints on its way out belongs to its log too
     finally:
         sys.stdout.flush(); sys.stderr.flush()
         sys.stdout, sys.stderr = real, real_err
     if rc != 0 or not all(os.path.isfile(o) for o in outs):
         sys.exit(rc or 1)
-    # what the stage read: every module of this repository it loaded, and every other file it opened -- less its
-    # own outputs and this cache
-    mods = repo_modules()
-    outs_ = {os.path.abspath(o) for o in outs}
-    files = {p for p in (mods | read) if os.path.isfile(p) and p not in outs_ and not p.startswith(CACHE + os.sep)}
-    # a file changed while the stage ran is recorded by its content NOW, which is not what the stage read: record
-    # nothing (the outputs stand; the next run runs it again)
-    moved = sorted(p for p in files if os.stat(p).st_mtime_ns >= t_start)
-    if moved:
-        print(f'stage_cache: {os.path.basename(script)} not recorded -- {len(moved)} file(s) it read changed while it '
-              f'ran: {", ".join(os.path.relpath(p, REPO) for p in moved[:3])}', file=sys.stderr)
+    ev = evidence(rec, skip=outs)
+    if ev is None:              # a file it read changed while it ran: the outputs stand, the next run runs it again
+        print(f'stage_cache: {os.path.basename(script)} not recorded -- a file it read changed while it ran',
+              file=sys.stderr)
         sys.exit(0)
+    # the entry: its old meta out first, so a half-written entry is never restored; the outputs and the log; the meta
+    # last, whole
     os.makedirs(entry, exist_ok=True)
+    if os.path.exists(meta_p):
+        os.remove(meta_p)
     for i, o in enumerate(outs):
         shutil.copyfile(o, os.path.join(entry, f'out{i}'))
     open(os.path.join(entry, 'log'), 'w').write(log.getvalue())
-    json.dump({'script': script, 'args': sargs, 'read': {p: signature(p) for p in sorted(files)}},
-              open(meta_p, 'w'), indent=0)
+    json.dump({'script': script, 'args': sargs, **ev}, open(meta_p + '.tmp', 'w'), indent=0)
+    os.replace(meta_p + '.tmp', meta_p)
     sys.exit(0)
 
 

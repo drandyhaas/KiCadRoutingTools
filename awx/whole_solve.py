@@ -24,13 +24,12 @@ import pairs as _pairs
 TRK, CLR, VIA, VNEED, PITCH = bd.TRACK, bd.CLEAR, bd.VIA_SIZE, bd.VIA_NEED, bd.LANE_MIN
 OUT = sys.argv[1] if len(sys.argv) > 1 else '/dev/null'
 LEGROOM = PITCH                        # a peeling leg crosses, then still runs a pitch to its berth
-VR_STAY, VR_MOVE = 1.1, 1.0            # a change's room from a crossing: a stayer's via is passed at an angle
+VR_STAY = 1.1                          # a change's room from a stayer's crossing: its via is passed at an angle
 KMAX = 4                               # layer changes per lane at most
 G = PITCH / 5                          # the solve's time grid: a fifth of the lane pitch
 MARG = CLR                             # a crossing starts a clearance past both lanes' terminals (a lane leaving its tooth may cross at once)
-DELTA = PITCH
 # a crossing's room along each lane: a STAYER's crossings a pitch apart, a MOVER's (a sweep crossing a bundle nearly
-# across the spine, its slope up to K_SWEEP) DELTA / sqrt(1 + K^2) apart along s; the geometry keeps the real pitch
+# across the spine, its slope up to K_SWEEP) PITCH / sqrt(1 + K^2) apart along s; the geometry keeps the real pitch
 K_SWEEP = 4.0
 W_V = 1e6                              # per via: vias first
 SOLVE_BATCHES = int(os.environ.get('WHOLE_SOLVE_BATCHES', '100'))  # CP-SAT interleaved batches: the work budget
@@ -231,21 +230,20 @@ for key in t:
     for n in key: ev[n].append(key)
 P_STAY = PITCH                        # along a STAYER two crossings sit a pitch apart (its crossers are parallel there)
 MV = {}
-if True:                              # (the mover / stayer model)
-    # every crossing has a MOVER (the steep lane, crossing over) and a STAYER; along a stayer its crossings are
-    # P_STAY apart in s, along a mover DELTA / sqrt(1 + K_SWEEP^2) (a sweep): the mover chosen by the solve
-    ivs_of = collections.defaultdict(list)
-    w_move, w_stay = max(1, QU(PITCH / math.sqrt(1 + K_SWEEP ** 2))), max(1, QU(P_STAY))
-    for key in t:
-        a, b = key
-        mv = m.NewBoolVar('')                           # True: a moves, b stays
-        MV[key] = mv
-        ivs_of[a].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_move, mv, ''))
-        ivs_of[a].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_stay, mv.Not(), ''))
-        ivs_of[b].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_move, mv.Not(), ''))
-        ivs_of[b].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_stay, mv, ''))
-    for n, ivs in ivs_of.items():
-        m.AddNoOverlap(ivs)
+# (the mover / stayer model) every crossing has a MOVER (the steep lane, crossing over) and a STAYER; along a stayer
+# its crossings are P_STAY apart in s, along a mover PITCH / sqrt(1 + K_SWEEP^2) (a sweep): the mover chosen by the solve
+ivs_of = collections.defaultdict(list)
+w_move, w_stay = max(1, QU(PITCH / math.sqrt(1 + K_SWEEP ** 2))), max(1, QU(P_STAY))
+for key in t:
+    a, b = key
+    mv = m.NewBoolVar('')                           # True: a moves, b stays
+    MV[key] = mv
+    ivs_of[a].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_move, mv, ''))
+    ivs_of[a].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_stay, mv.Not(), ''))
+    ivs_of[b].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_move, mv.Not(), ''))
+    ivs_of[b].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_stay, mv, ''))
+for n, ivs in ivs_of.items():
+    m.AddNoOverlap(ivs)
 # ---- layer changes
 cost = []
 chg, tot = {}, {}
@@ -258,8 +256,8 @@ for n in M:
         if k:
             m.Add(cs_[k] >= cs_[k - 1] + Q(Dv[n])).OnlyEnforceIf(act[k]); m.AddImplication(act[k], act[k - 1])
     # a change's room from each of its lane's crossings, along s: a STAYER's via is passed by a steep mover at an
-    # angle (VR_STAY x the room), a MOVER's via sits on its own steep track (VR_MOVE x)
-    h_st, h_mv = QU(VR_STAY * Dv[n] / 2), QU(VR_MOVE * Dv[n] / 2)      # a room rounds UP to the grid
+    # angle (VR_STAY x the room), a MOVER's via sits on its own steep track (the room itself)
+    h_st, h_mv = QU(VR_STAY * Dv[n] / 2), QU(Dv[n] / 2)                # a room rounds UP to the grid
     before = {}
     for key in ev[n]:
         if key in MV:
@@ -281,25 +279,37 @@ for n in M:
     m.AddBoolXOr(act + ([m.NewConstant(1)] if tl[n] == dl[n] else []))
     tot[n] = sum(act); chg[n] = (cs_, act)
     ev[n] = before
-STAGGER = VIA                          # two lanes' changes a via apart along one frame
-if STAGGER > 0:
-    fr_ivs = collections.defaultdict(list)
-    w_s = max(1, Q(STAGGER))
-    for n in M:
-        cs_, act = chg[n]
-        for x, a_ in zip(cs_, act):
-            if n in bname:
-                # its frame is the trunk before the handoff, its ring after
-                inT, inR = m.NewBoolVar(''), m.NewBoolVar('')
-                m.Add(x <= Q(H0)).OnlyEnforceIf(inT); m.Add(x > Q(H0)).OnlyEnforceIf(inR)
-                m.AddBoolOr([inT.Not(), a_]); m.AddBoolOr([inR.Not(), a_])
-                m.Add(inT + inR == 1).OnlyEnforceIf(a_); m.Add(inT + inR == 0).OnlyEnforceIf(a_.Not())
-                fr_ivs['T'].append(m.NewOptionalFixedSizeIntervalVar(x, w_s, inT, ''))
-                fr_ivs[bname[n]].append(m.NewOptionalFixedSizeIntervalVar(x, w_s, inR, ''))
-            else:
-                fr_ivs['T'].append(m.NewOptionalFixedSizeIntervalVar(x, w_s, a_, ''))
-    for ivs in fr_ivs.values():
-        m.AddNoOverlap(ivs)
+# an OPPOSITE-HANDS pair (pairs.opposite_hands) swaps its legs at a dive, a crossover: it changes layer at least once.
+# Where its tooth and berth are on different layers the berth rule's parity already asks an odd number; only where they
+# share one could it plan none (and be laid uncrossed) -- the rule is added there alone, since an added constraint that
+# binds nothing still moves the solver to another of its equal optima
+for n in M:
+    if n in prs and tl[n] == dl[n] and _pairs.opposite_hands(ctx, n):
+        m.Add(chg[n][1][0] == 1)
+# two lanes' changes apart along one frame far enough that two on NEIGHBOURING lanes -- a lane pitch across -- clear
+# the via-to-via rule as the geometry plans it (a grid step over it): a via apart along left them 0.36 where the rule
+# is 0.38, for the geometry to spread
+from fab_tiers import min_via_center_distance
+_VV = min_via_center_distance(VIA, CLR, ctx.cfg.via_drill, getattr(ctx.cfg, 'hole_to_hole_clearance', 0.0) or 0.0) \
+    + ctx.cfg.grid_step
+STAGGER = max(VIA, math.sqrt(max(_VV * _VV - PITCH * PITCH, 0.0)))
+fr_ivs = collections.defaultdict(list)
+w_s = max(1, Q(STAGGER))
+for n in M:
+    cs_, act = chg[n]
+    for x, a_ in zip(cs_, act):
+        if n in bname:
+            # its frame is the trunk before the handoff, its ring after
+            inT, inR = m.NewBoolVar(''), m.NewBoolVar('')
+            m.Add(x <= Q(H0)).OnlyEnforceIf(inT); m.Add(x > Q(H0)).OnlyEnforceIf(inR)
+            m.AddBoolOr([inT.Not(), a_]); m.AddBoolOr([inR.Not(), a_])
+            m.Add(inT + inR == 1).OnlyEnforceIf(a_); m.Add(inT + inR == 0).OnlyEnforceIf(a_.Not())
+            fr_ivs['T'].append(m.NewOptionalFixedSizeIntervalVar(x, w_s, inT, ''))
+            fr_ivs[bname[n]].append(m.NewOptionalFixedSizeIntervalVar(x, w_s, inR, ''))
+        else:
+            fr_ivs['T'].append(m.NewOptionalFixedSizeIntervalVar(x, w_s, a_, ''))
+for ivs in fr_ivs.values():
+    m.AddNoOverlap(ivs)
 for key in t:
     a, b = key
     # crossing lanes DIFFER: tl_a ^ tl_b ^ Ca ^ Cb == 1, i.e. XOR(parity bits [+ 1 when the teeth differ]) == 1
@@ -406,7 +416,7 @@ sv.parameters.share_glue_clauses = False
 sv.parameters.share_binary_clauses = False
 st = sv.Solve(m)
 print(f'whole_solve: {len(t)} crossings ({sum(1 for k in t if same(*k))} same-branch), {nt} triples, K<={KMAX}, '
-      f'mover/stayer (stay {P_STAY}), stagger {STAGGER}, MARG {MARG}: [{sv.StatusName(st)}] {sv.WallTime():.0f}s', end=' ')
+      f'mover/stayer (stay {P_STAY}), stagger {STAGGER:.3f}, MARG {MARG}: [{sv.StatusName(st)}] {sv.WallTime():.0f}s', end=' ')
 if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
     print(); sys.exit(1)
 per = {n: int(sv.Value(tot[n])) for n in M}
