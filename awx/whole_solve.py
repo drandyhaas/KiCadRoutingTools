@@ -379,7 +379,7 @@ if W_CONG:
             return G * ok.sum()
         reach = np.zeros(len(OS), dtype=bool)
         for n in pres:
-            lo_, hi_ = -99.0, 99.0
+            lo_, hi_ = -math.inf, math.inf
             if fr == 'T':
                 st_s, st_o = TOOTH[n]
                 d = max(0.0, s_ - st_s)

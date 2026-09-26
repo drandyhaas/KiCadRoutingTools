@@ -1306,12 +1306,9 @@ First, the whole-route plan (`whole_*.py`):
 - **The crossover in the pose router** (#1055): an opposite-hands pair
   swapping its legs at any dive the pose search finds room for, not only
   where a plan puts it.
-- **Units.** Some whole-route and pair-step numbers are still millimetres
-  where they should be the rules' units: `whole_snap`'s base-map window
-  margin, `whole_polish`'s static search radius, `plan_audit`'s band
-  rendering and near-point sizes, the pair step's `PAIR_SLACKS`,
-  `PAIR_FANIN`, `PAIR_FANIN_BAND` and `WRAP_REACH`, `pairs.GAP`'s margin,
-  and the `whole_geo` / `whole_solve` sentinels that stand for infinity.
+- **Units.** The pair step's `PAIR_SLACKS`, `PAIR_FANIN`, `PAIR_FANIN_BAND`,
+  `PAIR_DIVE_EXTRA`, `PAIR_APPROACH` and `WRAP_REACH`, and `pairs.GAP`'s
+  margin, are still millimetres where they should be the rules' units.
 - **Speed.** The geometry's second LP pass is about 40% of a loop; one
   elastic column per pitch rule, rather than one per tangent cut of it,
   would shrink it.

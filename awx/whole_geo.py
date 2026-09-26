@@ -473,7 +473,7 @@ def build_and_solve(sides, prev=None):
                             le(terms, -need * al, ('via', f, k, n, nb))
     for i, (f, n, cu, kc) in enumerate(vias):
         for (f2, m_, cu2, kc2) in vias[i + 1:]:
-            ds = abs(FR[f]['s'](cu) - FR[f2]['s'](cu2)) if f2 == f else 9.0
+            ds = abs(FR[f]['s'](cu) - FR[f2]['s'](cu2)) if f2 == f else math.inf
             if f2 != f or m_ == n or ds >= VIA_VV:
                 continue
             h = math.sqrt(VIA_VV ** 2 - ds ** 2) + VX[n] + VX[m_]     # a pair's barrels stand VX across

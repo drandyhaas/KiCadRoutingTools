@@ -51,7 +51,7 @@ step away. Static copper stays where it is.
           two or three steps over segments shorter than that is one fold. The
           pitch and dives audits measure one lane against another and cannot
           see either.
-  near NET X,Y [R]   every other lane's reservation within R (0.45) of (X, Y),
+  near NET X,Y [R]   every other lane's reservation within R (two lane pitches) of (X, Y),
           and the plan facts of NET and of those lanes (page, layers, slots,
           layer profile).
 
@@ -99,7 +99,7 @@ def dseg(x, y, p, q):
     return math.hypot(x - p[0] - t * dx, y - p[1] - t * dy)
 
 
-def _samples(segs, L, step=0.025):
+def _samples(segs, L, step):
     out = []
     for p, q, L_ in segs:
         if L_ != L:
@@ -280,13 +280,13 @@ def check_pitch(ctx, corridors, png=None):
 
         def ov(dr, rr):
             for v in V_all.values():
-                rr._draw_segments(dr, [_S(p[0], p[1], q[0], q[1], 0.04, L, 0) for p, q, L in v if L == 'F.Cu'],
+                rr._draw_segments(dr, [_S(p[0], p[1], q[0], q[1], bd.TRACK / 3, L, 0) for p, q, L in v if L == 'F.Cu'],
                                   color=(230, 200, 60))
-                rr._draw_segments(dr, [_S(p[0], p[1], q[0], q[1], 0.04, L, 0) for p, q, L in v if L != 'F.Cu'],
+                rr._draw_segments(dr, [_S(p[0], p[1], q[0], q[1], bd.TRACK / 3, L, 0) for p, q, L in v if L != 'F.Cu'],
                                   color=(80, 160, 255))
             for h in hits:
                 xy = h[4]
-                rr._draw_segments(dr, [_S(xy[0] - 0.12, xy[1], xy[0] + 0.12, xy[1], 0.24, 'F.Cu', 0)],
+                rr._draw_segments(dr, [_S(xy[0] - bd.TRACK, xy[1], xy[0] + bd.TRACK, xy[1], 2 * bd.TRACK, 'F.Cu', 0)],
                                   color=(255, 0, 0))
         r.frame(segments=[], vias=[], overlays=[ov],
                 label=f'reservations F yellow, B blue | red: two lanes within {block:.3f} mm on one layer '
@@ -599,7 +599,7 @@ def check_static(ctx, corridors, only=None):
                 RR = [(np.array(p, float), np.array(q, float), L_) for p, q, L_ in R]
                 on_ = [s for s in RR if is_on(s)]
                 off_ = [s for s in RR if not is_on(s)]
-                P_on, P_off = _samples(on_, L), _samples(off_, L)
+                P_on, P_off = _samples(on_, L, g), _samples(off_, L, g)
                 P = np.concatenate([P_on, P_off]) if len(P_on) and len(P_off) else (P_on if len(P_on) else P_off)
                 # each sample's bar: track/2 + clearance, plus half a grid step where its piece is off the grid
                 NEED = np.concatenate([np.full(len(P_on), TW / 2 + CL), np.full(len(P_off), need)])[:len(P)]
@@ -757,20 +757,23 @@ def check_bands(ctx, corridors, only=None, png_dir=None):
                     both = ok[layers[0]] & ok[layers[1]]
                     for L, col in zip(layers, ((0, 150, 60), (170, 40, 170))):
                         bi, bj = np.nonzero(ok[L] & ~both)
-                        rr._draw_segments(d, [_S(xs[i], ys[j], xs[i] + 0.001, ys[j], 0.03, 'F.Cu', 0)
+                        rr._draw_segments(d, [_S(xs[i], ys[j], xs[i] + bd.TRACK / 100, ys[j], bd.TRACK / 4, 'F.Cu', 0)
                                               for i, j in zip(bi, bj)], color=col)
                     bi, bj = np.nonzero(both)
-                    rr._draw_segments(d, [_S(xs[i], ys[j], xs[i] + 0.001, ys[j], 0.03, 'F.Cu', 0)
+                    rr._draw_segments(d, [_S(xs[i], ys[j], xs[i] + bd.TRACK / 100, ys[j], bd.TRACK / 4, 'F.Cu', 0)
                                           for i, j in zip(bi, bj)], color=(90, 110, 160))
-                    rr._draw_segments(d, [_S(p[0], p[1], q[0], q[1], 0.05, 'F.Cu', 0) for p, q in zip(w, w[1:])],
+                    rr._draw_segments(d, [_S(p[0], p[1], q[0], q[1], 0.4 * bd.TRACK, 'F.Cu', 0) for p, q in zip(w, w[1:])],
                                       color=(255, 255, 255))
                     for p, col in ((a, (255, 80, 80)), (b, (80, 160, 255))):
-                        rr._draw_segments(d, [_S(p[0] - 0.08, p[1], p[0] + 0.08, p[1], 0.16, 'F.Cu', 0)], color=col)
+                        rr._draw_segments(d, [_S(p[0] - 0.6 * bd.TRACK, p[1], p[0] + 0.6 * bd.TRACK, p[1], 1.2 * bd.TRACK, 'F.Cu', 0)], color=col)
                 r.frame(segments=[], vias=[], overlays=[ov],
                         label=f'{nm} {kind} band: F only green, B only magenta, both blue | plan white | '
                               f'tooth red, berth blue | {fl}').save(os.path.join(png_dir, f'{nm}.png'))
     print(f'BAND total planned length outside its band: {tot_out:.1f} mm')
     return tot_out
+
+
+TINY = bd.TRACK / 25         # a piece shorter than this (5 um) is the writers' rounding, not a piece
 
 
 def _polyline(run):
@@ -779,7 +782,7 @@ def _polyline(run):
     has: a collinear vertex between two sharp turns hid SDQ13's notch from the polish, then the audit found it"""
     pts = [run[0]]
     for q in run[1:]:
-        if math.hypot(q[0] - pts[-1][0], q[1] - pts[-1][1]) > 0.005:
+        if math.hypot(q[0] - pts[-1][0], q[1] - pts[-1][1]) > TINY:
             pts.append(q)
     out = [pts[0]]
     start = pts[0]
@@ -867,7 +870,8 @@ def check_shape(ctx, corridors, only=None):
     return hits
 
 
-def show_near(ctx, corridors, nm, P, R=0.45):
+def show_near(ctx, corridors, nm, P, R=None):
+    R = 2 * bd.LANE_MIN if R is None else R
     c = next((c for c in corridors if nm in c.members), None)
     if c is None:
         print(f'{nm} is not planned')
@@ -918,7 +922,7 @@ def main(argv=None):
         if len(a.args) < 2:
             ap.error('near: NET X,Y [R]')
         show_near(ctx, corridors, a.args[0], tuple(map(float, a.args[1].split(','))),
-                  float(a.args[2]) if len(a.args) > 2 else 0.45)
+                  float(a.args[2]) if len(a.args) > 2 else None)
 
 
 if __name__ == '__main__':

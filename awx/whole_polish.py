@@ -297,16 +297,12 @@ def static_near(P, L, own):
             continue
         if kind == 'circ':
             cx, cy, r = d
-            if abs(P[0] - cx) > 1.5 or abs(P[1] - cy) > 1.5:
-                continue
             v = P - np.array([cx, cy]); dd = np.linalg.norm(v)
             if dd < 1e-9:
                 continue
             out.append((dd - r, np.array([cx, cy]) + v / dd * r, lab))
         elif kind == 'rect':
             cx, cy, hx, hy = d
-            if abs(P[0] - cx) > hx + 1.5 or abs(P[1] - cy) > hy + 1.5:
-                continue
             q = np.array([min(max(P[0], cx - hx), cx + hx), min(max(P[1], cy - hy), cy + hy)])
             dd = np.linalg.norm(P - q)
             if dd < 1e-9:
@@ -315,8 +311,6 @@ def static_near(P, L, own):
             out.append((dd, q, lab))
         else:
             x0, y0, x1, y1, r = d
-            if min(x0, x1) - 1.5 > P[0] or P[0] > max(x0, x1) + 1.5 or min(y0, y1) - 1.5 > P[1] or P[1] > max(y0, y1) + 1.5:
-                continue
             a, b = np.array([x0, y0]), np.array([x1, y1]); ab = b - a; l2 = ab @ ab
             t = 0.0 if l2 < 1e-12 else max(0.0, min(1.0, ((P - a) @ ab) / l2))
             c = a + ab * t; v = P - c; dd = np.linalg.norm(v)

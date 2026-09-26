@@ -103,8 +103,9 @@ def static_masks(n, i0, j0, band):
     NI, NJ = band.shape
     R = SPC if n in prs else 0
     x0, y0, x1, y1 = (i0 - R) * g, (j0 - R) * g, (i0 + NI + R) * g, (j0 + NJ + R) * g
-    # the window's own edge is stamped as a board edge: keep it well clear of every cell read
-    win = make_local_window(ctx.pcb, (x0 + x1) / 2, (y0 + y1) / 2, max(x1 - x0, y1 - y0) / 2 + 1.0)
+    # the window's own edge is stamped as a board edge: keep it well clear of every cell read (a few lane pitches, as
+    # the audit's static windows)
+    win = make_local_window(ctx.pcb, (x0 + x1) / 2, (y0 + y1) / 2, max(x1 - x0, y1 - y0) / 2 + 4 * bd.LANE_MIN)
     own = sorted(OWN[n])
     obs = build_base_obstacle_map(win, cfg, own, HALF if n in prs else 0.0, static_base=True)
     _add_free_via_positions(obs, win, own, cfg)
