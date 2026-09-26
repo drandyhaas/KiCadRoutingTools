@@ -6,12 +6,12 @@ start) to its berth leg; a head lane's trunk s to its berth. Every inverted pair
 (a pair in one branch may cross on the ring, up to the earlier leg); the braid triple rule over ALL triples;
 each lane's crossings a pitch apart along its track (a stayer), or less for a sweep (a mover); up to
 KMAX changes per lane, each a via's half-room from its own crossings and a via's room apart; tooth layer at the
-start, berth layer at the end. Objective: vias first, then CONGESTION (the copper area packed crossings and
-vias add, priced by how full the lane's stretch of route already is).
+start, berth layer at the end. Objective: the nets over two vias first, then the vias, then HISTORY congestion (the
+crossings and changes in the places earlier rounds' audits found the plan short, HIST).
 
 The bench from BENCH / NETS / DEST (whole_ctx). HINT=SOLVE.json warm-starts from an earlier solve; CUTS=GEO.json,..
 adds the geometry's cuts (whole_geo: the islands a lane could not be kept off, the changes it could not give their
-room). The solve is bounded in WORK, not time: a count of CP-SAT's interleaved batches, its workers pinned and
+room). HIST=HOT.json,.. prices the places earlier audits found short (whole_gate --hot). The solve is bounded in WORK, not time: a count of CP-SAT's interleaved batches, its workers pinned and
 sharing no clauses, so the same model gives the same answer on every run, later on a slower machine.
 WHOLE_SOLVE_BATCHES sets the budget."""
 import sys, os, itertools, collections, json, math
@@ -33,9 +33,6 @@ DELTA = PITCH
 # across the spine, its slope up to K_SWEEP) DELTA / sqrt(1 + K^2) apart along s; the geometry keeps the real pitch
 K_SWEEP = 4.0
 W_V = 1e6                              # per via: vias first
-W_CONG = 1.0                           # congestion: copper area (extra track from packed crossings + via patches) x local price
-LB = 2 * PITCH                         # congestion bin: two lane pitches of route
-K_REACH = 1.0                          # a lane reaches a stretch of route from its terminals at this slope
 SOLVE_BATCHES = int(os.environ.get('WHOLE_SOLVE_BATCHES', '100'))  # CP-SAT interleaved batches: the work budget
 SOLVE_WORKERS = 4
 ctx, cs = whole_ctx.plan()
@@ -321,138 +318,55 @@ for vc_ in sorted({(c_['lane'], round(c_['u'], 3), round(c_['w'], 3)) for c_ in 
         m.AddBoolOr([lo_b, hi_b, a_.Not()])
 if VCUTS:
     print(f'   via cuts: {len(VCUTS)}')
-# ---- congestion
-CONG = {}
-if W_CONG:
-    P_L, A_V = bd.LANE_MIN, 2 * (2 * bd.VIA_NEED) ** 2
-    bx = []
-    for r_, pts_ in ((SRC_REF, [ctx.ends[n][0] for n in M]), (DST_REF, [ctx.ends[n][1] for n in M])):
-        f_ = ctx.pcb.footprints[r_]
-        xs2 = [p_.global_x for p_ in f_.pads]; ys2 = [p_.global_y for p_ in f_.pads]
-        dd = [max(min(xs2) - x, x - max(xs2), min(ys2) - y, y - max(ys2)) for (x, y) in pts_]
-        mg_ = float(np.median([d for d in dd if d > 0])) if any(d > 0 for d in dd) else 0.0    # where the stubs end
-        bx.append((min(xs2) - mg_, min(ys2) - mg_, max(xs2) + mg_, max(ys2) + mg_))
-    BX0, BY0, BX1, BY1 = ctx.pcb.board_info.board_bounds
-    EDGE = (float(getattr(ctx.cfg, 'board_edge_clearance', 0.0) or 0.0) or ctx.cfg.clearance) + TRK / 2
-    def usable(x, y):
-        if not (BX0 + EDGE <= x <= BX1 - EDGE and BY0 + EDGE <= y <= BY1 - EDGE): return False
-        return not any(b_[0] <= x <= b_[2] and b_[1] <= y <= b_[3] for b_ in bx)
-    _span = max(BX1 - BX0, BY1 - BY0)
-    OS = np.arange(-_span, _span + 1e-9, G)
-    def width(sp_, s_, piece):
-        ok = np.array([usable(*map(float, sp_.xy(s_, o_))) for o_ in OS])
-        if not piece: return G * ok.sum()
-        i0 = int(np.argmin(np.abs(OS)))
-        if not ok[i0]: return G * ok.sum()
-        lo_, hi_ = i0, i0
-        while lo_ > 0 and ok[lo_ - 1]: lo_ -= 1
-        while hi_ < len(OS) - 1 and ok[hi_ + 1]: hi_ += 1
-        return G * (hi_ - lo_ + 1)
-    brobj = ring_of
-    TOOTH = {n: c.st[n] for n in M}                      # (s, o) in the trunk frame
-    BERTH = {n: {k: ring_of[k].spine.project_pt(bend[n]) for k in ring_of} for n in M}
-    DB = (x0, y0, x1, y1)                                  # the destination's pad box grown to its berths
-    _outer = {}
-    def box_o(sp_, s_):
-        """the offset where this ring's normal line meets the destination's box, or None"""
-        hits = [o_ for o_ in OS if DB[0] <= sp_.xy(s_, o_)[0] <= DB[2] and DB[1] <= sp_.xy(s_, o_)[1] <= DB[3]]
-        if not hits:
-            return None
-        return min(hits, key=abs)
-    def ring_outer(sp_, s_, fr):
-        key = (fr, round(s_, 3))
-        if key not in _outer:
-            ob = box_o(sp_, s_)
-            if ob is None:                                  # before the box: its edge extended back along the ring
-                s2 = s_
-                while ob is None and s2 < sp_.L:
-                    s2 += PITCH
-                    ob = box_o(sp_, s2)
-            cx, cy = (DB[0] + DB[2]) / 2, (DB[1] + DB[3]) / 2
-            side = np.sign(sp_.project_pt((cx, cy))[1]) or 1.0
-            _outer[key] = (OS * side < ob * side) if ob is not None else np.ones(len(OS), dtype=bool)
-        return _outer[key]
-    def reach_width(sp_, s_, pres, fr):
-        """usable length of the o-line at s_ that some lane present can reach from its terminals at K_REACH"""
-        ok = np.array([usable(*map(float, sp_.xy(s_, o_))) for o_ in OS])
-        if not pres:
-            return G * ok.sum()
-        reach = np.zeros(len(OS), dtype=bool)
-        for n in pres:
-            lo_, hi_ = -math.inf, math.inf
-            if fr == 'T':
-                st_s, st_o = TOOTH[n]
-                d = max(0.0, s_ - st_s)
-                lo_, hi_ = st_o - K_REACH * d - PITCH, st_o + K_REACH * d + PITCH
-                if n not in bname:                          # a west-face lane ends at its berth in this frame
-                    e_s, e_o = c.se[n]
-                    d2 = max(0.0, e_s - s_)
-                    lo_, hi_ = max(lo_, e_o - K_REACH * d2 - PITCH), min(hi_, e_o + K_REACH * d2 + PITCH)
-            else:
-                e_s, e_o = BERTH[n][fr]
-                d2 = max(0.0, e_s - s_)
-                lo_, hi_ = e_o - K_REACH * d2 - PITCH, e_o + K_REACH * d2 + PITCH
-            reach |= (OS >= lo_) & (OS <= hi_)
-        if fr != 'T':
-            ok &= ring_outer(sp_, s_, fr)
-        return G * (ok & reach).sum()
-    # frame of a point on the route: ('T', k) trunk, (branch, k) ring; k = floor((u - H0) / LB)
-    kof = lambda u: int(math.floor((u - H0) / LB + 1e-9))
-    bins = {}
-    def price(fr, k):
-        if (fr, k) in bins: return bins[(fr, k)][2]
-        u_c = H0 + (k + 0.5) * LB
-        if fr == 'T':
-            pres = [n for n in M if entry[n] <= u_c <= tend[n]]
-            w_ = reach_width(c.spine, u_c, pres, 'T')
-        else:
-            pres = [n for n in M if bname.get(n) == fr and H0 <= u_c <= end[n]]
-            w_ = reach_width(brobj[fr].spine, u_c - H0 + rs[fr], pres, fr)
-        npres = len(pres)
-        base = npres * LB * P_L
-        rho = min(0.9, base / max(2 * w_ * LB, 1e-6))
-        bins[(fr, k)] = (npres, w_, 1.0 / (1.0 - rho), base, 2 * w_ * LB)
-        return bins[(fr, k)][2]
-    SC = 1000.0 * W_CONG
-    ext = lambda n_: LB * (math.sqrt(1 + (n_ * P_L / LB) ** 2) - 1)     # extra track length, n crossings in LB
-    NMAX = 10
-    cnt = collections.defaultdict(list)                               # (lane, frame, k) -> membership bools
-    xmem = {}
+# ---- HISTORY congestion (negotiated, as PathFinder prices a resource that was overused before): HIST=HOT.json,.. are
+# the audits' findings of earlier rounds (whole_gate --hot: where a plan was short -- a dive, a pitch, a static, a
+# shape), one file per audit. A finding marks the bins of route within a via's room of it, on the frame whose spine is
+# nearest; a bin's price is the number of audits it was hot in. Only those bins carry terms: a crossing in one pays a
+# crossing's copper area (a pitch across, a pitch along), a change a via's patch (a pair's two) -- after the vias and
+# the nets over two, so it moves crossings and changes out of the places the plan could not fit, never adds a via
+LB = 2 * PITCH                         # a history bin: two lane pitches of route
+R_HOT = 2 * VNEED                      # a finding marks the bins within a via's room of it
+SC = 1000.0                            # objective units per mm^2 of copper area
+A_V, A_X = 2 * (2 * VNEED) ** 2, PITCH * PITCH
+kof = lambda u: int(math.floor((u - H0) / LB + 1e-9))
+HOT = collections.Counter()
+HFILES = [x for x in os.environ.get('HIST', '').split(',') if x]
+for fn_ in HFILES:
+    marked = set()
+    for x_, y_, _k in json.load(open(fn_)).get('hot', []):
+        fr_u = [('T',) + tuple(c.spine.project_pt((x_, y_)))]
+        fr_u += [(k_,) + (lambda so: (H0 + so[0] - rs[k_], so[1]))(ring_of[k_].spine.project_pt((x_, y_))) for k_ in ring_of]
+        fr, u, _o = min(fr_u, key=lambda e_: abs(e_[2]))
+        marked |= {(fr, k) for k in range(kof(u - R_HOT), kof(u + R_HOT) + 1)}
+    HOT.update(marked)
+
+
+def in_bin(v_, u0, u1, lit=None):
+    """a bool that is 1 whenever v_ lies in [u0, u1) (and lit holds): it carries a positive price, so it is 1 only then"""
+    x_, lo_b, hi_b = m.NewBoolVar(''), m.NewBoolVar(''), m.NewBoolVar('')
+    m.Add(v_ >= Q(u0)).OnlyEnforceIf(lo_b); m.Add(v_ < Q(u0)).OnlyEnforceIf(lo_b.Not())
+    m.Add(v_ < Q(u1)).OnlyEnforceIf(hi_b); m.Add(v_ >= Q(u1)).OnlyEnforceIf(hi_b.Not())
+    m.AddBoolOr([lo_b.Not(), hi_b.Not(), x_] + ([lit.Not()] if lit is not None else []))
+    return x_
+
+
+nh_x = nh_v = 0
+for (fr, k), h_ in sorted(HOT.items(), key=lambda e_: (str(e_[0][0]), e_[0][1])):
+    u0, u1 = H0 + k * LB, H0 + (k + 1) * LB
     for key, (lo, hi) in win.items():
         a, b = key
-        ks = []
-        for k in range(kof(lo), kof(hi) + 1):
-            u0, u1 = H0 + k * LB, H0 + (k + 1) * LB
-            fr = (bname[a] if (same(a, b) and u0 >= H0 - 1e-9) else 'T')
-            ks.append((fr, k, u0, u1))
-        xs3 = []
-        for fr, k, u0, u1 in ks:
-            x = m.NewBoolVar('')
-            m.Add(t[key] >= Q(u0)).OnlyEnforceIf(x); m.Add(t[key] < Q(u1)).OnlyEnforceIf(x)
-            xs3.append(x)
-            for n in key: cnt[(n, fr, k)].append(x)
-        m.AddExactlyOne(xs3)
-        xmem[key] = list(zip(ks, xs3))
-    for (n, fr, k), xs3 in cnt.items():
-        pr = price(fr, k)
-        nv = m.NewIntVar(0, NMAX, '')
-        m.Add(nv == sum(xs3))
-        cv = m.NewIntVar(0, 10 ** 9, '')
-        m.AddElement(nv, [int(round(SC * P_L * ext(j) * pr)) for j in range(NMAX + 1)], cv)
-        cost.append(cv)
+        if hi < u0 or lo >= u1 or fr != (bname[a] if (same(a, b) and u0 >= H0 - 1e-9) else 'T'):
+            continue
+        cost.append(int(round(SC * A_X * h_)) * in_bin(t[key], u0, u1)); nh_x += 1
     for n in M:
+        if end[n] < u0 or entry[n] >= u1 or fr != (bname[n] if (n in bname and u0 >= H0 - 1e-9) else 'T'):
+            continue
         cs_, act = chg[n]
-        for k_, (cv_, a_) in enumerate(zip(cs_, act)):
-            xs4 = []
-            for k in range(kof(entry[n]), kof(end[n]) + 1):
-                u0, u1 = H0 + k * LB, H0 + (k + 1) * LB
-                fr = bname[n] if (n in bname and u0 >= H0 - 1e-9) else 'T'
-                x = m.NewBoolVar('')
-                m.Add(cv_ >= Q(u0)).OnlyEnforceIf(x); m.Add(cv_ < Q(u1)).OnlyEnforceIf(x)
-                cost.append(int(round(SC * A_V * (2 if n in prs else 1) * price(fr, k))) * x)
-                xs4.append(x)
-            m.Add(sum(xs4) == a_)
-    CONG = bins
+        for cv_, a_ in zip(cs_, act):
+            cost.append(int(round(SC * A_V * (2 if n in prs else 1) * h_)) * in_bin(cv_, u0, u1, a_)); nh_v += 1
+if HFILES:
+    print(f'   history: {len(HFILES)} audit(s), {len(HOT)} hot bin(s) (hottest {max(HOT.values(), default=0)}), '
+          f'{nh_x} crossing and {nh_v} change terms')
 if os.environ.get('HINT'):
     Hj = json.load(open(os.environ['HINT']))
     nh = 0

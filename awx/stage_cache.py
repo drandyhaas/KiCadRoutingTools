@@ -8,7 +8,7 @@ into another directory is the same stage), the environment (a file a variable na
 file of this repository the stage loaded, and every other file it opened for reading. A later run whose script,
 arguments and environment match restores the outputs and replays the log when every recorded file is unchanged, and
 runs the stage otherwise. Nothing is guessed: a change to anything the stage read runs it again. A stage that fails is
-not recorded.
+not recorded, nor one a file it read changed under while it ran (its content by then is not what the stage read).
 
     python3 stage_cache.py --out g1.json -- whole_geo.py solve.json g1.json
 
@@ -26,9 +26,12 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 CACHE = os.environ.get('STAGE_CACHE_DIR') or os.path.join(HERE, 'tmp', 'stage_cache')
-# variables that change from one shell to the next and name nothing a stage reads
+# variables that change from one shell (or agent session, or terminal) to the next and name nothing a stage reads --
+# with them in the key a new session restored nothing, and one named the agent's 217 MB binary, hashed every stage
 VOLATILE = {'_', 'OLDPWD', 'PWD', 'SHLVL', 'TERM_SESSION_ID', 'SECURITYSESSIONID', 'COLUMNS', 'LINES',
-            'STAGE_CACHE', 'STAGE_CACHE_DIR'}
+            'STAGE_CACHE', 'STAGE_CACHE_DIR', 'SSH_AUTH_SOCK', 'LaunchInstanceID', 'AI_AGENT', 'COLORTERM',
+            'OSLogRateLimit', 'GIT_EDITOR'}
+VOLATILE_PREFIX = ('CLAUDE', '__CF', 'XPC_', 'TERM_PROGRAM')
 
 
 def file_sha(path):
@@ -65,7 +68,7 @@ def named(value):
 def stage_key(script, sargs, outs):
     outs_ = [os.path.abspath(o) for o in outs]
     args = [['out', outs_.index(os.path.abspath(a))] if os.path.abspath(a) in outs_ else named(a) for a in sargs]
-    env = {k: named(v) for k, v in sorted(os.environ.items()) if k not in VOLATILE}
+    env = {k: named(v) for k, v in sorted(os.environ.items()) if k not in VOLATILE and not k.startswith(VOLATILE_PREFIX)}
     blob = json.dumps({'script': file_sha(script), 'name': os.path.basename(script), 'args': args, 'env': env},
                       sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -124,6 +127,7 @@ def main():
             sys.stdout.write(f'stage_cache: {os.path.basename(script)} restored ({len(meta["read"])} files unchanged)\n')
             sys.exit(0)
     read = set()
+    t_start = __import__('time').time_ns()
     log = io.StringIO()
     real, real_err = sys.stdout, sys.stderr
     sys.stdout, sys.stderr = Tee(real, log), Tee(real_err, log)
@@ -141,6 +145,13 @@ def main():
             if getattr(m, '__file__', None) and os.path.abspath(m.__file__).startswith(REPO + os.sep)}
     outs_ = {os.path.abspath(o) for o in outs}
     files = {p for p in (mods | read) if os.path.isfile(p) and p not in outs_ and not p.startswith(CACHE + os.sep)}
+    # a file changed while the stage ran is recorded by its content NOW, which is not what the stage read: record
+    # nothing (the outputs stand; the next run runs it again)
+    moved = sorted(p for p in files if os.stat(p).st_mtime_ns >= t_start)
+    if moved:
+        print(f'stage_cache: {os.path.basename(script)} not recorded -- {len(moved)} file(s) it read changed while it '
+              f'ran: {", ".join(os.path.relpath(p, REPO) for p in moved[:3])}', file=sys.stderr)
+        sys.exit(0)
     os.makedirs(entry, exist_ok=True)
     for i, o in enumerate(outs):
         shutil.copyfile(o, os.path.join(entry, f'out{i}'))

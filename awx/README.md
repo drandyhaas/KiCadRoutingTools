@@ -814,9 +814,13 @@ rules, and only then hands it on.
   onto an end whose stub stands more than its connector's 45 degrees off
   the route there (built-in via cuts). First no net over two vias on the
   board (its stubs' own and its lane's changes, a pair's leg a barrel a
-  dive: a preference, never a cap), then the fewest vias, then congestion
-  (the copper packed crossings and vias add, priced by how full that
-  stretch of route already is). Bounded in work, not time: a count of CP-SAT's interleaved
+  dive: a preference, never a cap), then the fewest vias, then HISTORY
+  congestion, as a negotiated router prices a place overused before: every
+  place an earlier round's audit found the plan short (`whole_gate --hot`),
+  the route within a via's room of it priced by how many audits found it so
+  -- a crossing there a lane pitch square of copper, a change a via's patch.
+  Only those places carry terms, so the first solve prices nothing and is
+  proven optimal in seconds (K51: 17 s). Bounded in work, not time: a count of CP-SAT's interleaved
   batches, the workers sharing no clauses (`WHOLE_SOLVE_BATCHES`) -- bounded
   by deterministic time, or sharing clauses, one model gave a different
   answer on every run.
@@ -837,7 +841,10 @@ rules, and only then hands it on.
   its sideways shift onto its terminal comes before the dive, never between
   the two (elastic, as the other rules). What it had to pay becomes CUTS for
   the solve: an island a lane could not be kept off, a change it could not
-  give its room, a pair's dive it could not lay straight.
+  give its room, a pair's dive it could not lay straight. The LP goes to
+  SciPy's HiGHS as its DUAL -- a row per column, every elastic slack a plain
+  inequality -- and the lanes are read back from the dual's multipliers: the
+  same optimum, six times faster (K51's second pass 30 s, not 188).
 - **The polish** (`whole_polish.py`). The audit's own measures -- pitch, via
   rooms, static clearance, turns -- met in board xy by small vertex moves,
   one LP per round, each bar the snap's plus a grid step, so every gap the
@@ -859,7 +866,9 @@ rules, and only then hands it on.
   approach to its stub -- is FLIPPED, and the geometry runs again with the
   flip before anything is snapped. A pair's dive it cannot lay straight
   without folding the lane, and a change the rounds cannot give its room,
-  go to the solve as VIA CUTS, with the geometry's.
+  go to the solve as VIA CUTS, with the geometry's. A held pair's crossover
+  barrels are kept off the other lanes as its dive barrels are -- the
+  router's ring round each, not a via's copper alone.
 - **The snap** (`whole_snap.py`). The smooth plan made octilinear on the
   router's grid, one lane at a time: a grid search in a band round each
   lane's smooth line (length, bends, distance from the line). The PAIRS
@@ -921,16 +930,22 @@ rules, and only then hands it on.
   pieces, continuity, no reversal, a via at every layer change, a pair's
   turns and dives as the pair router makes them, its end connectors, and an
   opposite-hands pair's crossover (both poses on the grid, each leg changing
-  layer at its own barrel, the legs swapping sides). `whole_loop.sh` stops a
-  loop that is NOT CONVERGING: two rounds that do not beat the best count
-  of findings so far. A round with new side flips and cuts takes both at
-  once -- the solve with the cuts, then the geometry with the flips (a cut
-  on a newly flipped island dropped). The polish's rounds stop once a round
-  moves no vertex further than a nanometre (KiCad's own unit). Every
-  expensive stage runs through `stage_cache.py`: a stage whose script,
-  arguments, environment and every file it read -- its code and its data,
-  by content -- are unchanged is restored, not run (`STAGE_CACHE=0` runs
-  them all).
+  layer at its own barrel, the legs swapping sides). `whole_loop.sh` sends
+  the solve every audit's findings as HISTORY with the cuts, so a round the
+  geometry has no cut for -- a pitch, a shape, the singles not fitting round
+  the held pairs, a snapped plan short -- solves again rather than stopping;
+  it stops a loop that is NOT CONVERGING: two rounds that do not beat the
+  best score so far (how far the plan got -- smooth, the pairs held,
+  snapped -- then its findings there). A round with new side flips and cuts
+  or findings takes both at once -- the solve with them, then the geometry
+  with the flips (a cut on a newly flipped island dropped). The polish's
+  rounds stop once a round moves no vertex further than a nanometre
+  (KiCad's own unit). Every expensive stage runs through `stage_cache.py`:
+  a stage whose script, arguments, environment (the agent's and the
+  terminal's own session variables aside) and every file it read -- its
+  code and its data, by content -- are unchanged is restored, not run; a
+  stage that a file it read changed under while it ran is not recorded
+  (`STAGE_CACHE=0` runs them all).
 - **The route** (`route_lanes.py --plan`). The router on the installed
   plan, every lane in its band (post-passes off), a pair's end connectors
   and crossover laid as given and the pair router run between them
@@ -941,17 +956,16 @@ rules, and only then hands it on.
 
 On the human's ends (`HHe`, K51: 51 nets, 45 singles and 3 pairs, 48 lanes)
 the plan passes every check with nothing waived, and it ROUTES. From the
-human's board, by the commands above: the bench, the solve (about three
-minutes), then `whole_loop.sh` in four rounds (under half an hour more),
-each of the first three sending the solve what it measured -- the first
-polish flips SCAS to the far side of C6, and the geometry cannot keep SBA1
-off R5 or SA3 off C12, nor lay SDQS1's dive straight; the second flips SA3
-round C12 and sends back three singles' changes it could not give their
-room; the third keeps SA10 off R4 and moves SCK's change. Every solve keeps
-36 layer changes. The fourth smooth plan passes; the pairs are laid (SCK
-with its crossover), the singles fitted round them and snapped, the lint
-clean. The loop again on the same inputs
-restores every stage from the cache in seconds (3 s). Every step writes the same bytes on every run
+human's board, by the commands above: the bench, the solve (17 s), then
+`whole_loop.sh` in two rounds (258 s more) -- the first polish flips SCAS
+to the far side of C6 and finds SDQ13 short of its pitch to SDQ15 and to
+SDQM0, and the geometry cannot keep SA8 off C4 or C3, nor give SDQ10's
+change its room, nor lay SDQS1's dive straight: the solve again with those
+cuts and those two places priced (16 s, both solves 36 layer changes), the
+geometry with the flip, and the second smooth plan passes; the pairs are
+laid (SCK with its crossover), the singles fitted round them and snapped,
+the lint clean. The loop again on the same inputs restores every stage
+from the cache (1.4 s). Every step writes the same bytes on every run
 (the geometry and the polish checked again under a second Python hash
 seed). The plan changes layer 36 times where the human's copper does 38 between
 the same ends (a pair's dive counted once; on the board, 39 vias against
@@ -960,15 +974,15 @@ zero widening, 3 of 3 in their bands; each lane alone, 48 of 48; ALL AT
 ONCE, 48 of 48 in their bands, `check_connected` all 51 nets connected,
 `check_drc` clean at the route's clearance. Over the whole board on the 51
 nets: 86 vias against the human's 88, no net over two (the human has none
-either), and 1237 mm of copper against 1337 -- the human's includes its
+either), and 1239 mm of copper against 1337 -- the human's includes its
 length-matching meanders, and this route matches no lengths.
 
 <img src="img/k51_whole_route.png" alt="K51 routed from the whole-route plan, beside the human's" width="900">
 
 *K51 on the human's fanout, one frame: left, the whole-route plan routed
 all at once (86 vias); right, the human (88). The three pairs are yellow.
-SCK's legs swap sides at a crossover on its southern run (bottom
-centre). The human's meanders match lengths.*
+SCK's legs swap sides at a crossover just past its tooth end (lower
+left). The human's meanders match lengths.*
 
 ## The chain's other pieces
 
@@ -1322,13 +1336,12 @@ First, the whole-route plan (`whole_*.py`):
   planning distances the whole route starts from (`BLOCK_GAP`, `ROW_O`,
   `TOL_S`, `DIST_O`, `HEAD_RUN`, `RING_DIP`) and the snap's `W_DEV` (per mm)
   are still millimetres where they should be the rules' units.
-- **Speed.** The geometry's second LP pass is about 40% of a loop; one
-  elastic column per pitch rule, rather than one per tangent cut of it,
-  would shrink it.
-
-- **Calibrate `WHOLE_SOLVE_BATCHES`.** The default (100 batches, about
-  four minutes on four workers) reaches 36 layer changes on the bench, the
-  objective within 0.03% of its bound; what more buys is unmeasured.
+- **Speed.** A K51 loop is 258 s: the geometry's LP a third of it, in
+  HiGHS itself (one elastic column per pitch rule, rather than one per
+  tangent cut of it, would shrink it); the snap's grid search a quarter, in
+  pure Python (a native search would take seconds); and every stage plans
+  the bench again (4.5 s each, a fifth of the loop) because the planned
+  context carries closures and cannot be saved for the next stage to load.
 
 - **The ladder after the braid planner changes.** The tables above
   predate the berth rows, the rings' order and dips, the directional pair

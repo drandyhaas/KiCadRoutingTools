@@ -612,13 +612,16 @@ def route(n, strict=True):
     # barrel by the audit's bar: the ring, the barrel's own offset, and half a step for the join, off the grid
     ring_n = RING_PAIR if n in prs else RING
 
+    OB = [(bx_, by_) for (m_, bx_, by_) in PVIAS if m_ != n]
+    OBX, OBY = np.array([b_[0] for b_ in OB], float), np.array([b_[1] for b_ in OB], float)
+    OBAR = np.array([ring_n + math.hypot(bx_ - round(bx_ / g) * g, by_ - round(by_ / g) * g) + g / 2 - 1e-9
+                     for bx_, by_ in OB], float)
+
     def join_clear(t_, i, j):
         c_ = (i * g, j * g)
-        if on_grid(t_, c_):
+        if on_grid(t_, c_) or not OB:
             return True
-        return all(float(seg_pts_dist(t_, c_, np.array([bx_]), np.array([by_]))[0])
-                   >= ring_n + math.hypot(bx_ - round(bx_ / g) * g, by_ - round(by_ / g) * g) + g / 2 - 1e-9
-                   for (m_, bx_, by_) in PVIAS if m_ != n)
+        return bool(np.all(seg_pts_dist(t_, c_, OBX, OBY) >= OBAR))
     free_ = lambda L_, t_: (lambda i, j: 0 <= i - i0 < NI and 0 <= j - j0 < NJ and not bad[L_][i - i0, j - j0]
                             and join_clear(t_, i, j))
     s_ = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
@@ -681,11 +684,19 @@ def route(n, strict=True):
     # router's straight from the pose into the via)
     room0 = _pairs.dive_room(cfg, ctx.pair_ends[n][0], a_out) if no90 else 0.0
     room1 = _pairs.dive_room(cfg, ctx.pair_ends[n][1], a_in) if no90 else 0.0
+    # the search reads its maps as plain lists: the same values, without numpy's cost per element
+    bandL, arcL, distL = band.tolist(), arc.tolist(), dist.tolist()
+    badL = {L_: m_.tolist() for L_, m_ in bad.items()}
+    vbadL = [m_.tolist() for m_ in vbad]
+    BENDT = [[min(abs(nd - d), 8 - abs(nd - d)) for nd in range(8)] for d in range(8)]     # 45-degree steps of a turn
+    STEPT = [g * (math.sqrt(2) if di and dj else 1.0) for di, dj in DIRS]                   # a move's length
+
     def search(S, d0, E, dN, poses=False):
         """the A* from grid cell S, leaving on heading d0, to E: its states, or (None, states searched). poses: S and E
         are a pair's POSES past its end runs, not terminal joins -- no join rules, E reached on its heading dN and
         clear of everything"""
         h = lambda i, j: math.hypot(i - E[0], j - E[1]) * g
+        E0, E1 = E
         # from a pose, the pair router looks pairs.pose_probe_steps straight ahead before it accepts it: that many
         # straight steps owed at the start, and taken into the far pose
         PR = _pairs.pose_probe_steps(cfg) if poses else 0
@@ -707,8 +718,8 @@ def route(n, strict=True):
             L = lays[k]
             # a via here: the next layer, near the plan's via, where a via clears
             if cross and k < K:
-                if sc[0] <= 0 and sc[1] >= XS[d][0] and room0 <= arc[i, j] <= total - room1 \
-                        and not bad[lays[k + 1]][i, j] and xo(i, j, d) is not None:
+                if sc[0] <= 0 and sc[1] >= XS[d][0] and room0 <= arcL[i][j] <= total - room1 \
+                        and not badL[lays[k + 1]][i][j] and xo(i, j, d) is not None:
                     x_, y_ = (i + i0) * g, (j + j0) * g
                     dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
                     if dv <= RVIA:
@@ -717,22 +728,22 @@ def route(n, strict=True):
                         if nc < best.get(nst, math.inf) - 1e-12:
                             best[nst] = nc; prev[nst] = st
                             heapq.heappush(pq, (nc + h(i, j), nc, nst))
-            elif k < K and not vbad[d % 4][i, j] and sc[0] <= 0 and sc[1] >= ST and room0 <= arc[i, j] <= total - room1:
+            elif k < K and not vbadL[d % 4][i][j] and sc[0] <= 0 and sc[1] >= ST and room0 <= arcL[i][j] <= total - room1:
                 x_, y_ = (i + i0) * g, (j + j0) * g
                 dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
-                if dv <= RVIA and not bad[lays[k + 1]][i, j]:
+                if dv <= RVIA and not badL[lays[k + 1]][i][j]:
                     nst = (i, j, d, k + 1, (ST, 0))
                     nc = c_ + W_VIA * dv
                     if nc < best.get(nst, math.inf) - 1e-12:
                         best[nst] = nc; prev[nst] = st
                         heapq.heappush(pq, (nc + h(i, j), nc, nst))
             for nd in range(8):
-                bend = min(abs(nd - d), 8 - abs(nd - d))
+                bend = BENDT[d][nd]
                 if bend >= 3 or (no90 and bend >= 2) or (bend and sc[0] > 0):
                     continue
                 di, dj = DIRS[nd]
                 ni, nj = i + di, j + dj
-                if not ok(ni, nj) or not band[ni, nj]:
+                if not (0 <= ni < NI and 0 <= nj < NJ) or not bandL[ni][nj]:
                     continue
                 if not poses:
                     # no fold at either end: the first move within 90 degrees of the join out of the tooth, the last
@@ -749,13 +760,13 @@ def route(n, strict=True):
                         continue
                     if strict and k == K and math.hypot(ni - E[0], nj - E[1]) * g <= TW and DIRS[nd][0] * a_in[0] + DIRS[nd][1] * a_in[1] < -1e-9:
                         continue
-                if ((ni, nj) != E or poses) and bad[L][ni, nj]:
+                if ((ni, nj) != E or poses) and badL[L][ni][nj]:
                     continue
-                a_ = arc[ni, nj]
+                a_ = arcL[ni][nj]
                 if not (gate[k][0] <= a_ <= gate[k][1]):
                     continue
-                step = g * (math.sqrt(2) if di and dj else 1.0)
-                nc = c_ + step * (1 + W_DEV * dist[ni, nj]) + W_BEND * bend
+                step = STEPT[nd]
+                nc = c_ + step * (1 + W_DEV * distL[ni][nj]) + W_BEND * bend
                 if (ni, nj) == E:
                     eb = min(abs(nd - dN), 8 - abs(nd - dN))
                     if (no90 and eb >= 2) or (poses and eb):
@@ -764,7 +775,7 @@ def route(n, strict=True):
                 nst = (ni, nj, nd, k, ((max(sc[0] - 1, 0), min(sc[1] + 1, CAP)) if not bend else (RT, 1)) if no90 else (0, 0))
                 if nc < best.get(nst, math.inf) - 1e-12:
                     best[nst] = nc; prev[nst] = st
-                    heapq.heappush(pq, (nc + h(ni, nj), nc, nst))
+                    heapq.heappush(pq, (nc + math.hypot(ni - E0, nj - E1) * g, nc, nst))
         if goal is None:
             return None, npop
         path = [goal]
@@ -877,6 +888,19 @@ def place(n, out):
         res['lanes'][n]['cross'] = json.loads(json.dumps(cross))
 
 
+ROUTED = {}
+
+
+def route_memo(n, strict=True):
+    """route(n, strict), asked again on the same board, answered as before: a lane's route reads only the lanes placed
+    (res['lanes'], in the order they were laid) and what never changes -- so a sweep that finds a lane's board as it
+    left it (SCK after SDQS0 and SDQS1 are laid again exactly where they were) does not search it again"""
+    key = (n, strict or n in prs, json.dumps(res['lanes']))       # a pair searches pose to pose: strict is a single's
+    if key not in ROUTED:
+        ROUTED[key] = route(n, strict)
+    return ROUTED[key]
+
+
 def lift(m):
     """take lane m's copper off the board (a sweep lays it again)"""
     PLACED[:] = [e_ for e_ in PLACED if e_[0] != m]
@@ -894,11 +918,11 @@ for n in [n for n in order if n in HELD]:
 lay = [n for n in order if n not in HELD and (n in prs or not PAIRS_ONLY)]
 for n in lay:
     t0 = time.time()
-    out, why = route(n)
+    out, why = route_memo(n)
     if out is None:
         # no approach to a stub within 90 degrees of it (SCAS: its berth between a capacitor's pads, reachable at this
         # clearance only descending into it): laid without that rule, and NAMED -- the lint reports the fold
-        out, why2 = route(n, strict=False)
+        out, why2 = route_memo(n, strict=False)
         if out is not None:
             folded[n] = why
             why = why2 + ' (NO approach within 90 degrees of a stub: laid folding, named)'
@@ -917,9 +941,9 @@ for sw in range(SWEEPS):
     # not yet laid might need, and where a gap holds just one row a turn can close it (SDQ0 at SA4's share)
     relaid = []
     for n in [n for n in lay if n in failed]:
-        out, why = route(n)
+        out, why = route_memo(n)
         if out is None:
-            out, why2 = route(n, strict=False)
+            out, why2 = route_memo(n, strict=False)
             if out is not None:
                 folded[n] = why
         if out is not None:
@@ -933,9 +957,10 @@ for sw in range(SWEEPS):
         if n not in res['lanes'] or n in failed:
             continue
         keep = res['lanes'][n]
-        old = ([(tuple(p_[0:2]), tuple(p_[2:4]), p_[4]) for p_ in keep['pieces']], [tuple(v) for v in keep['vias']])
+        old = ([(tuple(p_[0:2]), tuple(p_[2:4]), p_[4]) for p_ in keep['pieces']], [tuple(v) for v in keep['vias']],
+               {'ends': keep.get('ends'), 'cross': keep.get('cross')})     # a pair's end connectors and crossover too
         lift(n)
-        out, why = route(n, strict=n not in folded)
+        out, why = route_memo(n, strict=n not in folded)
         place(n, out if out is not None else old)
     nb1 = sum(len(L_['pieces']) for L_ in res['lanes'].values())
     log(f'  sweep {sw + 1}: pieces {nb0} -> {nb1}')

@@ -21,7 +21,8 @@ give their room). The bench from BENCH / NETS / DEST (whole_ctx)."""
 import sys, os, json, math, collections, functools, time
 import numpy as np
 from scipy.optimize import linprog
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix, hstack
+from types import SimpleNamespace
 import whole_ctx
 import braid as bd
 import pairs as _pairs
@@ -614,7 +615,7 @@ def build_and_solve(sides, prev=None):
     for j, b in bounds.items():
         bnd[j] = b
     tb = time.time()
-    res = linprog(cost, A_ub=Aub, b_ub=np.array(rhs), bounds=bnd, method='highs-ipm')
+    res = lp_by_dual(cost, Aub, np.array(rhs), bnd)
     if res.status != 0:
         log(f'  LP status {res.status}: {res.message}')
         return None
@@ -627,6 +628,34 @@ def build_and_solve(sides, prev=None):
     log(f'  joint LP: {len(PIECE)} pieces, {nv} o-vars, {len(rhs)} rows, build {tb - t0:.0f}s solve {time.time() - tb:.0f}s, '
         f'obj {res.fun:.1f}; elastic paid: ' + (', '.join(f'{k} {len(v)} (max {max(q[0] for q in v):.3f})' for k, v in paid.items()) or 'none'))
     return dict(o=o, paid=paid, vias=vias, orders=orders)
+
+
+def lp_by_dual(c, A, b, bnd):
+    """min c'x subject to A x <= b and the column bounds bnd, solved as its DUAL by the same solver (scipy's HiGHS
+    interior point) and x read back from the dual's multipliers: the same optimum. This LP has more rows than columns
+    and an elastic slack on most rows; its dual has a row per column, and every slack's is a plain inequality --
+    HiGHS's interior point takes it six times faster (K51 pass 2: 31 s, not 188). The LP has many optima; the dual
+    lands on one of them, as the primal does."""
+    lo = np.array([-np.inf if l_ is None else l_ for l_, _h in bnd], float)
+    hi = np.array([np.inf if h_ is None else h_ for _l, h_ in bnd], float)
+    A = A.tocsc()
+    n = A.shape[1]
+    plain = (lo == 0) & ~np.isfinite(hi)                    # x >= 0 alone: its dual row an inequality
+    bj = np.flatnonzero(~plain)                             # the rest: an equality, a multiplier per finite bound
+    fl, fh = bj[np.isfinite(lo[bj])], bj[np.isfinite(hi[bj])]
+    AT = (-A.T).tocsr()
+    pos = np.full(n, -1)
+    pos[bj] = np.arange(len(bj))
+    U = coo_matrix((np.ones(len(fl)), (pos[fl], np.arange(len(fl)))), shape=(len(bj), len(fl)))
+    W = coo_matrix((-np.ones(len(fh)), (pos[fh], np.arange(len(fh)))), shape=(len(bj), len(fh)))
+    res = linprog(np.concatenate([b, -lo[fl], hi[fh]]),
+                  A_ub=hstack([AT[plain], csr_matrix((int(plain.sum()), len(fl) + len(fh)))]).tocsr(), b_ub=c[plain],
+                  A_eq=hstack([AT[bj], U, W]).tocsr(), b_eq=c[bj], bounds=(0, None), method='highs-ipm')
+    x = np.zeros(n)
+    if res.status == 0:
+        x[plain] = -res.ineqlin.marginals
+        x[bj] = -res.eqlin.marginals
+    return SimpleNamespace(status=res.status, message=res.message, x=x, fun=float(c @ x))
 
 
 ROOMLESS = {}

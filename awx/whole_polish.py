@@ -334,10 +334,17 @@ def mitre(n, i, s_hint=None):
     return max(HALF / max(math.cos(math.radians(min(worst, 120.0)) / 2), 0.3), HALF_SNAP) + g2
 
 
-def static_seg(p0, p1, L, own):
+def static_seg(p0, p1, L, own, cut=math.inf):
     """(edge distance, parameter on p0p1, the object's nearest point) for other nets' static copper on L near the
-    segment p0p1 -- exact: circles and stubs by segment-segment distance, rectangles by their four edges"""
+    segment p0p1 -- exact: circles and stubs by segment-segment distance, rectangles by their four edges. An object
+    whose bounding box stands further than cut from the segment's is further still, and left out"""
     out = []
+    sx0, sy0, sx1, sy1 = min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1])
+    cut2 = (cut + 1e-9) ** 2
+
+    def far(bx0, by0, bx1, by1, grow):
+        gx, gy = max(0.0, bx0 - grow - sx1, sx0 - bx1 - grow), max(0.0, by0 - grow - sy1, sy0 - by1 - grow)
+        return gx * gx + gy * gy > cut2
     mid = (p0 + p1) / 2
     reach = np.linalg.norm(p1 - p0) / 2 + SREACH
     ks = set()
@@ -349,12 +356,16 @@ def static_seg(p0, p1, L, own):
         if L not in Ls or net in own:
             continue
         if kind == 'circ':
+            if far(d[0], d[1], d[0], d[1], d[2]):
+                continue
             c = np.array([d[0], d[1]])
             dd, s, _t = seg_seg(p0, p1, c, c)
             P = p0 + (p1 - p0) * s
             v = P - c; nv_ = np.linalg.norm(v)
             out.append((dd - d[2], s, (c + v / nv_ * d[2]) if nv_ > 1e-9 else None, lab))
         elif kind == 'seg':
+            if far(min(d[0], d[2]), min(d[1], d[3]), max(d[0], d[2]), max(d[1], d[3]), d[4]):
+                continue
             a, b = np.array([d[0], d[1]]), np.array([d[2], d[3]])
             dd, s, t_ = seg_seg(p0, p1, a, b)
             P, C = p0 + (p1 - p0) * s, a + (b - a) * t_
@@ -362,6 +373,8 @@ def static_seg(p0, p1, L, own):
             out.append((dd - d[4], s, (C + v / nv_ * d[4]) if nv_ > 1e-9 else None, lab))
         else:
             cx, cy, hx, hy = d
+            if far(cx - hx, cy - hy, cx + hx, cy + hy, 0.0):
+                continue
             corners = [np.array(q) for q in ((cx - hx, cy - hy), (cx + hx, cy - hy), (cx + hx, cy + hy), (cx - hx, cy + hy))]
             inside = [s for s in (0.0, 0.5, 1.0) if abs((p0 + (p1 - p0) * s)[0] - cx) <= hx and abs((p0 + (p1 - p0) * s)[1] - cy) <= hy]
             if inside:
@@ -452,6 +465,11 @@ def gather():
         return sorted(out)          # the LP's row order: a set's would follow the hash seed
 
     seen = set()
+    # each segment's bounding box and its mitre, once: a pair of segments whose boxes stand further apart than its bar
+    # (and the margin) is further apart still, and needs no closer look
+    BOX = {n: [(min(X_[i][0], X_[i + 1][0]), min(X_[i][1], X_[i + 1][1]), max(X_[i][0], X_[i + 1][0]),
+                max(X_[i][1], X_[i + 1][1])) for i in range(len(X_) - 1)] for n, X_ in ((n, ln['X'].tolist()) for n, ln in LANES.items())}
+    MIT = {n: [mitre(n, i) for i in range(len(ln['X']) - 1)] for n, ln in LANES.items()}
     # pitch: same-layer lane segments
     for n, ln in LANES.items():
         X, Ls = ln['X'], ln['L']
@@ -460,11 +478,16 @@ def gather():
                 continue
             mid = (X[i] + X[i + 1]) / 2
             r = np.linalg.norm(X[i + 1] - X[i]) / 2 + BLOCK + 2 * (HALF_SNAP + g2) + MARGIN
+            ax0, ay0, ax1, ay1 = BOX[n][i]
             for (m, j) in near_segs(mid, r):
                 if m <= n or LANES[m]['L'][j] != Ls[i]:
                     continue
+                need = BLOCK + MIT[n][i] + MIT[m][j]
+                bx0, by0, bx1, by1 = BOX[m][j]
+                gx, gy = max(0.0, bx0 - ax1, ax0 - bx1), max(0.0, by0 - ay1, ay0 - by1)
+                if gx * gx + gy * gy > (need + MARGIN + 1e-9) ** 2:
+                    continue
                 Y = LANES[m]['X']
-                need = BLOCK + mitre(n, i, s_hint=None) + mitre(m, j, s_hint=None)
                 d, s, t = seg_seg(X[i], X[i + 1], Y[j], Y[j + 1])
                 if d >= need + MARGIN or d < 1e-9:
                     continue
@@ -549,6 +572,27 @@ def gather():
                         continue
                     nv = (B - C) / d
                     rows.append(([(n, i, nv), (m, k, -nv)], need + EPS - d, 'dive-via', f'{n}~{m}', d - need))
+    # a held pair's CROSSOVER barrels (laid where drawn; no vertex of the lane stands for them) are vias as its dive
+    # barrels are: each other lane's line kept outside the router's ring round it, the barrel's own offset from its
+    # grid point and a grid step -- as static copper alone they stood at the via-to-track clearance, a ring short
+    # (SA6 0.306 from SCK's barrel where the audit asks 0.325)
+    for n in HELD:
+        xo = geo['lanes'][n].get('cross')
+        for vx_, vy_, _k in (xo['vias'] if xo else []):
+            B = np.array([vx_, vy_], float)
+            vx = math.hypot(B[0] - round(B[0] / (2 * g2)) * 2 * g2, B[1] - round(B[1] / (2 * g2)) * 2 * g2)
+            for (m, j) in near_segs(B, RING_PAIR + vx + 2 * g2 + MARGIN):
+                if m == n:
+                    continue
+                Y = LANES[m]['X']
+                d, _s, t = seg_seg(B, B, Y[j], Y[j + 1])
+                need = (RING_PAIR if m in prs else RING) + vx + 2 * g2
+                if d >= need + MARGIN or d < 1e-9:
+                    continue
+                Q = Y[j] + (Y[j + 1] - Y[j]) * t
+                nv = (B - Q) / d
+                rows.append(([(m, j, -nv * (1 - t)), (m, j + 1, -nv * t)], need + EPS - d, 'via-lane', f'{n}~{m}',
+                             d - need))
     # the joins: a single's last W_SCALE at either end runs inside the arc of router directions that each keep within
     # 90 degrees of its stub (two half-planes per segment) -- the moves the snap may make there. Within 90 degrees of
     # the stub alone is not enough: SDQ4's stub runs 14 degrees off north, and a line heading east-north-east is
@@ -569,7 +613,7 @@ def gather():
         for i in range(len(X) - 1):
             if i in ln['NC']:
                 continue
-            for dd, s, q, lab in static_seg(X[i], X[i + 1], Ls[i], OWN[n]):
+            for dd, s, q, lab in static_seg(X[i], X[i + 1], Ls[i], OWN[n], cut=NEED_ST + hw[n] + MARGIN):
                 need = NEED_ST + hw[n]
                 if dd >= need + MARGIN:
                     continue

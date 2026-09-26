@@ -1,17 +1,29 @@
-"""whole_gate.py PLAN.json AUDIT.txt -- exit 0 when the plan is COMPLETE and passes the audit: every corridor member
+"""whole_gate.py PLAN.json AUDIT.txt [--hot OUT.json] -- exit 0 when the plan is COMPLETE and passes the audit: every corridor member
 laid (a plan with a lane missing, or one its maker marked failed, fails here -- audited lane by lane, a missing lane
 has nothing to fail on; so does one the snap could only lay folding against its stub), no dive, static, shape or swim
 failure, no planned length outside its band, and no pitch failure. (A lane's terminal join is graded as the router
 lays it -- plan_audit._router_terminals -- so two teeth closer than the plan's own bar are measured, not waived.)
 
 The audit is read by its own summary lines, and an audit that lacks one did not run to its end (a crash leaves a
-traceback and no counts): that fails too, as does a pitch count the per-pair lines do not add up to."""
+traceback and no counts): that fails too, as does a pitch count the per-pair lines do not add up to.
+
+--hot OUT.json writes where the audit found the plan short -- every dive, pitch, static and shape finding's position,
+{"hot": [[x, y, kind], ...]} -- the history the solve prices (whole_solve, HIST)."""
 import json
 import re
 import sys
 
 geo = json.load(open(sys.argv[1]))
 aud = open(sys.argv[2]).read().splitlines()
+if '--hot' in sys.argv:
+    NUM_ = r'(-?\d+(?:\.\d+)?)'
+    hot = []
+    for line in aud:
+        k = line.split(' ', 1)[0]
+        m = re.search(rf'\(\s*{NUM_},\s*{NUM_}\)', line) if k in ('DIVE', 'PITCH', 'STATIC', 'SHAPE') else None
+        if m:
+            hot.append([float(m.group(1)), float(m.group(2)), k])
+    json.dump({'hot': hot}, open(sys.argv[sys.argv.index('--hot') + 1], 'w'))
 lanes = set(geo['lanes'])
 
 SUMMARY = {'PITCH': r'^PITCH (\d+) pair\(s\) short', 'DIVE': r'^DIVE \d+ planned via sites.*failing: (\{.*\})',

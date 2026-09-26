@@ -2567,7 +2567,7 @@ class Corridor:
             # lift keeps every room the floor gave -- and the lane's first
             # point, where it arrives from the trunk, held
             ix = np.where(np.isfinite(u2))[0]
-            v = u2[ix].copy()
+            v = u2[ix].tolist()                 # plain floats: the same doubles, without numpy's per-element cost
             for i in range(1, len(v)):
                 v[i] = max(v[i], v[i - 1] - ds)
             for i in range(len(v) - 2, 0, -1):
@@ -2599,7 +2599,7 @@ class Corridor:
                     while b_ < r_ and v[b_ + 1] < level - 1e-9:
                         b_ += 1
                     if b_ - a_ + 1 <= n_dip:
-                        v[a_:b_ + 1] = level
+                        v[a_:b_ + 1] = [level] * (b_ - a_ + 1)
                         changed = True
                     i = b_ + 1
                 if not changed:
