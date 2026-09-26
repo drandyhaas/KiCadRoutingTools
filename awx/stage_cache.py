@@ -65,10 +65,23 @@ def named(value):
     return parts
 
 
+def env_key(leave_out=()):
+    """the environment as a key sees it: every variable but the session's own (and leave_out), a file it names by
+    its content"""
+    return {k: named(v) for k, v in sorted(os.environ.items())
+            if k not in VOLATILE and k not in leave_out and not k.startswith(VOLATILE_PREFIX)}
+
+
+def repo_modules():
+    """the files of every module of this repository this process has loaded"""
+    return {os.path.abspath(m.__file__) for m in list(sys.modules.values())
+            if getattr(m, '__file__', None) and os.path.abspath(m.__file__).startswith(REPO + os.sep)}
+
+
 def stage_key(script, sargs, outs):
     outs_ = [os.path.abspath(o) for o in outs]
     args = [['out', outs_.index(os.path.abspath(a))] if os.path.abspath(a) in outs_ else named(a) for a in sargs]
-    env = {k: named(v) for k, v in sorted(os.environ.items()) if k not in VOLATILE and not k.startswith(VOLATILE_PREFIX)}
+    env = env_key()
     blob = json.dumps({'script': file_sha(script), 'name': os.path.basename(script), 'args': args, 'env': env},
                       sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -141,8 +154,7 @@ def main():
         sys.exit(rc or 1)
     # what the stage read: every module of this repository it loaded, and every other file it opened -- less its
     # own outputs and this cache
-    mods = {os.path.abspath(m.__file__) for m in list(sys.modules.values())
-            if getattr(m, '__file__', None) and os.path.abspath(m.__file__).startswith(REPO + os.sep)}
+    mods = repo_modules()
     outs_ = {os.path.abspath(o) for o in outs}
     files = {p for p in (mods | read) if os.path.isfile(p) and p not in outs_ and not p.startswith(CACHE + os.sep)}
     # a file changed while the stage ran is recorded by its content NOW, which is not what the stage read: record

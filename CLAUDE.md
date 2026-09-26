@@ -48,7 +48,7 @@ a `build_router.py --from-source` rebuild, and re-distributing prebuilt per-plat
 binaries via GitHub Releases — heavy overhead. When a feature seems to need a Rust
 change, surface that cost early and check for a Python-only approach first.
 
-**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **The crate is 0.20.1 and the 0.20.1 binaries ARE now published, in the v0.20.2 release** (2026-08-09; verified — the published `grid_router-macos-arm64.so` reports `__version__ == 0.20.1`). v0.20.2 is a python-only release, so `Cargo.toml` correctly stayed at 0.20.1 while `/VERSION` went to 0.20.2, and the release built the crate as it stands: a plain `python3 build_router.py` now **downloads and keeps** the prebuilt instead of paying a wasted download and rebuilding from source. (The older hazard, for reference: the v0.20.1 release carried 0.20.0-built assets. `build_router.py` handles that case on its own — it skips the download when Cargo.toml is ahead of the release tag, and when the tag matches but the asset inside is stale it detects the version mismatch after install and rebuilds from source. Both checks verify in a fresh subprocess: an in-process re-import of a compiled extension reports the previously-loaded library. `--from-source` just skips the lookup. 0.20.1 removes the `block_vias` parameter from `add_stub_proximity_costs_batch`, so the 0.20.0 binary is API-incompatible with current Python besides the version gate.) **Note this is why `/VERSION` can lead `Cargo.toml`** — a python-only release still republishes the current crate binaries, which is the cheapest way to unstick a stale-asset release.
+**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **`/VERSION` can lead `Cargo.toml`**: a python-only release bumps only `/VERSION`'s patch and still republishes the current crate's binaries -- which is also the cheapest way to unstick a release whose assets were built from an older crate. A plain `python3 build_router.py` downloads and keeps the release's prebuilt binary when it matches `Cargo.toml`; it skips the download when `Cargo.toml` is ahead of the release tag, and when the tag matches but the asset inside is stale it detects the version mismatch after install and rebuilds from source. Both checks verify in a fresh subprocess: an in-process re-import of a compiled extension reports the previously-loaded library. `--from-source` just skips the lookup.
 
 ## Testing & Verification
 
@@ -155,7 +155,7 @@ Validate routed boards against the *real* spec, with the right checker — most
     `routing_defaults.CLEARANCE` 0.25; classes preserved.
   - **In a CHAIN, pass `--clearance-ceiling <floor>`, not `--clearance`.** The
     ceiling reading (`min(project's Default class, value)` for the run, every
-    class capped) is what 0.21.4 did for a bare `--clearance`, and a late step
+    class capped) is what a bare `--clearance` did before #530, and a late step
     saying 0.2 on a project an earlier step lowered to 0.1 then keeps routing
     at 0.1. A bare `--clearance 0.2` now routes at 0.2 there, which is wider
     than the chain's own floor -- measured on the sets 1-5 corpus as +28 real

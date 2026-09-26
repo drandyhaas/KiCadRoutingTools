@@ -41,6 +41,10 @@ from plane_pad_tap import make_local_window
 from obstacle_map import (build_base_obstacle_map, add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
                           same_net_pad_via_keepout_cells)
 from routing_context import _add_free_via_positions
+try:                     # a single's search in Rust (grid_router >= 0.23); an older binary searches in Python
+    from grid_router import lane_search as _lane_search
+except ImportError:
+    _lane_search = None
 
 plan = json.load(open(sys.argv[1]))
 OUT = sys.argv[2]
@@ -783,6 +787,28 @@ def route(n, strict=True):
             path.append(prev[path[-1]])
         return path[::-1], npop
 
+    def search_native():
+        """search(S, d0, E, dN) for a single, by grid_router.lane_search: the same search, the same path. What it
+        cannot form exactly itself -- a via's distance from the plan's via site, math.hypot of two non-integers -- is
+        a table filled here the way search() forms it, within reach of each site (+inf beyond: out of RVIA)"""
+        LN = list(bad)
+        dv = np.full((K, NI, NJ), np.inf)
+        rc = int(math.ceil(RVIA / g)) + 2
+        for k_, (vx_, vy_) in enumerate(vpts[:K]):
+            ci, cj = int(round(vx_ / g)) - i0, int(round(vy_ / g)) - j0
+            for i_ in range(max(0, ci - rc), min(NI, ci + rc + 1)):
+                for j_ in range(max(0, cj - rc), min(NJ, cj + rc + 1)):
+                    dv[k_, i_, j_] = math.hypot((i_ + i0) * g - vx_, (j_ + j0) * g - vy_)
+        ok = lambda v_: [not (DIRS[nd][0] * v_[0] + DIRS[nd][1] * v_[1] < -1e-9) for nd in range(8)]
+        p_, npop_ = _lane_search(
+            np.ascontiguousarray(band, bool), np.ascontiguousarray(np.stack([bad[L_] for L_ in LN]), bool),
+            np.ascontiguousarray(np.stack(vbad), bool), np.ascontiguousarray(arc, np.float64),
+            np.ascontiguousarray(dist, np.float64), dv, (int(S[0]), int(S[1])), (int(E[0]), int(E[1])), int(d0),
+            int(dN), [LN.index(L_) for L_ in lays], [(float(a_), float(b_)) for a_, b_ in gate], float(room0),
+            float(total - room1), float(RVIA), float(W_VIA), float(W_DEV), float(W_BEND), float(g), float(TW),
+            list(STEPT), ok(jS), ok(jE), ok(a_out), ok(a_in), bool(strict))
+        return ([(i_, j_, d_, k_, (0, 0)) for (i_, j_, d_, k_) in p_] if p_ is not None else None), npop_
+
     # a PAIR's two ends are its END CONNECTORS (pairs.end_legs): from its tips, two legs to a POSE on the grid where the
     # pair router takes over, heading along a router direction -- the pair step lays these legs as they are and runs
     # the pair router from the pose (no end search of its own), so the plan and the router share one end. Each end's
@@ -805,7 +831,7 @@ def route(n, strict=True):
             return None, (f'no end connector with a body between them ({len(cands[0])} x {len(cands[1])} candidate '
                           f'poses, {len(combos)} tried)')
     else:
-        path, npop = search(S, d0, E, dN)
+        path, npop = search_native() if _lane_search is not None else search(S, d0, E, dN)
     if path is None:
         return None, f'no path in its band ({npop} states searched)'
     cross_out = None

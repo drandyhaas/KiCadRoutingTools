@@ -910,7 +910,10 @@ rules, and only then hands it on.
   laid without that rule and named, and the gate fails it. Two sweeps then
   lay every lane again against the others' real copper -- one the first
   pass could not lay first -- which turns the staircases the shares force
-  into clean jogs.
+  into clean jogs. A single's search runs in the router's Rust core
+  (`grid_router.lane_search`: the same search, the same path; an older
+  binary searches in Python), and a lane asked again on a board unchanged
+  since it was laid is answered as before.
 - **The audit and the gate.** `whole_ctx.install` puts a plan in the
   planned corridor as the router gets it -- reservations, via sites, bands,
   layer runs, search windows; a SNAPPED lane's band is its own grid line
@@ -945,7 +948,10 @@ rules, and only then hands it on.
   terminal's own session variables aside) and every file it read -- its
   code and its data, by content -- are unchanged is restored, not run; a
   stage that a file it read changed under while it ran is not recorded
-  (`STAGE_CACHE=0` runs them all).
+  (`STAGE_CACHE=0` runs them all). The bench every stage plans is planned
+  once and saved (`whole_ctx.plan`, under `tmp/ctx_cache`, keyed and
+  checked the same way; the braid's closures saved by value), so a stage
+  loads it in a third of a second.
 - **The route** (`route_lanes.py --plan`). The router on the installed
   plan, every lane in its band (post-passes off), a pair's end connectors
   and crossover laid as given and the pair router run between them
@@ -957,7 +963,7 @@ rules, and only then hands it on.
 On the human's ends (`HHe`, K51: 51 nets, 45 singles and 3 pairs, 48 lanes)
 the plan passes every check with nothing waived, and it ROUTES. From the
 human's board, by the commands above: the bench, the solve (17 s), then
-`whole_loop.sh` in two rounds (258 s more) -- the first polish flips SCAS
+`whole_loop.sh` in two rounds (185 s more) -- the first polish flips SCAS
 to the far side of C6 and finds SDQ13 short of its pitch to SDQ15 and to
 SDQM0, and the geometry cannot keep SA8 off C4 or C3, nor give SDQ10's
 change its room, nor lay SDQS1's dive straight: the solve again with those
@@ -1336,12 +1342,10 @@ First, the whole-route plan (`whole_*.py`):
   planning distances the whole route starts from (`BLOCK_GAP`, `ROW_O`,
   `TOL_S`, `DIST_O`, `HEAD_RUN`, `RING_DIP`) and the snap's `W_DEV` (per mm)
   are still millimetres where they should be the rules' units.
-- **Speed.** A K51 loop is 258 s: the geometry's LP a third of it, in
-  HiGHS itself (one elastic column per pitch rule, rather than one per
-  tangent cut of it, would shrink it); the snap's grid search a quarter, in
-  pure Python (a native search would take seconds); and every stage plans
-  the bench again (4.5 s each, a fifth of the loop) because the planned
-  context carries closures and cannot be saved for the next stage to load.
+- **Speed.** A K51 loop is 185 s, half of it the geometry's LP in HiGHS
+  itself: one elastic column per pitch rule, rather than one per tangent cut
+  of it, would shrink it. A pair's grid search (its pose counters, its
+  crossover) is still Python.
 
 - **The ladder after the braid planner changes.** The tables above
   predate the berth rows, the rings' order and dips, the directional pair

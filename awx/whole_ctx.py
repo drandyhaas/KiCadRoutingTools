@@ -15,10 +15,17 @@ line), layer_profile (its layer runs) and lane_xy (its search window); every lan
 audit (whole_audit) and the router (route_lanes --plan) install the same plan the same way."""
 import collections
 import contextlib
+import hashlib
+import importlib
 import io
+import json
+import marshal
 import math
 import os
+import pickle
 import sys
+import time
+import types
 
 import numpy as np
 
@@ -61,14 +68,102 @@ def stub_dir(ctx, net, pt, layer):
 
 
 def plan(quiet=True):
-    """(ctx, corridors): the braid's plan of the bench"""
+    """(ctx, corridors): the braid's plan of the bench -- planned once, and SAVED: every whole_* stage plans the same
+    bench (4.5 s of each, a fifth of a loop), so the plan is kept under tmp/ctx_cache, keyed as a stage is
+    (stage_cache: the environment, which names the bench and its nets, by content) and restored while every file the
+    planning read -- the board, its siblings, every module of this repository loaded -- is unchanged, as a stage is.
+    STAGE_CACHE=0 plans every time."""
     board, nets, dest = bench()
+    if os.environ.get('STAGE_CACHE', '1') == '0':
+        return _plan(board, nets, dest, quiet)
+    import stage_cache as sc
+    key = hashlib.sha256(json.dumps({'py': [sys.version, sys.executable], 'env': sc.env_key(STAGE_VARS)},
+                                    sort_keys=True).encode()).hexdigest()[:24]
+    pk, mt = os.path.join(CTX_CACHE, key + '.pkl'), os.path.join(CTX_CACHE, key + '.json')
+    if os.path.isfile(mt) and os.path.isfile(pk):
+        meta = json.load(open(mt))
+        if all(os.path.isfile(p) and sc.signature(p) == h for p, h in meta['read'].items()):
+            with open(pk, 'rb') as f_:
+                return pickle.load(f_)
+    global _READ
+    _READ, t0 = set(), time.time_ns()
+    try:
+        out = _plan(board, nets, dest, quiet)
+        read = _READ
+    finally:
+        _READ = None
+    files = {p for p in read | sc.repo_modules() if os.path.isfile(p) and not p.startswith(CTX_CACHE + os.sep)}
+    if not any(os.stat(p).st_mtime_ns >= t0 for p in files):       # a file changed under it: not saved
+        os.makedirs(CTX_CACHE, exist_ok=True)
+        with open(pk + '.tmp', 'wb') as f_:
+            _Pickler(f_, protocol=pickle.HIGHEST_PROTOCOL).dump(out)
+        json.dump({'read': {p: sc.signature(p) for p in sorted(files)}}, open(mt + '.tmp', 'w'), indent=0)
+        os.replace(pk + '.tmp', pk)
+        os.replace(mt + '.tmp', mt)
+    return out
+
+
+def _plan(board, nets, dest, quiet):
     if quiet:
         with contextlib.redirect_stdout(io.StringIO()):
             ctx, cs, _logs = pa.plan(board, nets, dest)
     else:
         ctx, cs, _logs = pa.plan(board, nets, dest)
     return ctx, cs
+
+
+# ---- saving the plan: pickle, with the functions pickle cannot name (the braid's closures, a lambda) saved BY VALUE --
+# their code, and their cells filled once the function exists, so a closure that refers back to itself or to what
+# holds it comes back whole. The plan fills only caches as it goes (the braid's obstacle models, the taut memo's
+# shards: pure functions of their keys, rebuilt when asked), so a restored plan is the plan.
+CTX_CACHE = os.path.join(HERE, 'tmp', 'ctx_cache')
+# what the loop hands one stage and not the next, read only by whole_solve and whole_geo once the bench is planned:
+# not in the plan's key, or each stage would plan the same bench again
+STAGE_VARS = ('HINT', 'CUTS', 'HIST', 'GEO_FLIPS_FROM', 'SEED_FLIPS', 'SEED_CUTS', 'SEED_HIST', 'WHOLE_SOLVE_BATCHES')
+_READ = None
+
+
+def _record_reads(event, a):
+    if _READ is not None and event == 'open' and a and isinstance(a[0], (str, bytes, os.PathLike)):
+        mode = a[1] if len(a) > 1 and isinstance(a[1], str) else 'r'
+        if not any(c in mode for c in 'wax+'):
+            _READ.add(os.path.abspath(os.fsdecode(a[0])))
+
+
+sys.addaudithook(_record_reads)
+
+
+class _NoCell:
+    """an empty closure cell, in a saved function"""
+
+
+def _fn_new(code, module, name, ncells):
+    return types.FunctionType(marshal.loads(code), importlib.import_module(module).__dict__, name, None,
+                              tuple(types.CellType() for _ in range(ncells)))
+
+
+def _fn_fill(fn, state):
+    defaults, kwdefaults, cells, fdict, qualname = state
+    fn.__defaults__, fn.__kwdefaults__, fn.__qualname__ = defaults, kwdefaults, qualname
+    for c_, v_ in zip(fn.__closure__ or (), cells):
+        if v_ is not _NoCell:
+            c_.cell_contents = v_
+    fn.__dict__.update(fdict)
+
+
+class _Pickler(pickle.Pickler):
+    def reducer_override(self, obj):
+        if isinstance(obj, types.FunctionType) and '<' in obj.__qualname__:
+            cells = []
+            for c_ in obj.__closure__ or ():
+                try:
+                    cells.append(c_.cell_contents)
+                except ValueError:
+                    cells.append(_NoCell)
+            return (_fn_new, (marshal.dumps(obj.__code__), obj.__module__, obj.__name__, len(obj.__closure__ or ())),
+                    (obj.__defaults__, obj.__kwdefaults__, tuple(cells), dict(obj.__dict__), obj.__qualname__),
+                    None, None, _fn_fill)
+        return NotImplemented
 
 
 def _seg_dist(X, Y, p, q):
