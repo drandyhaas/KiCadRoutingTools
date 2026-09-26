@@ -967,7 +967,10 @@ rules, and only then hands it on.
   code and its data, by content -- are unchanged, and every file it looked
   for and did not find still absent, is restored, not run; a stage that a
   file it read changed under while it ran is not recorded, and an entry's
-  meta is written last and whole (`STAGE_CACHE=0` runs them all). The bench every stage plans is planned
+  meta is written last and whole. A cache for a HARNESS that redoes the
+  same bench: off by default -- a user's run writes nothing beside the code
+  -- and on in `whole_loop.sh` (`STAGE_CACHE=1`, as the braid's taut memo is
+  `TAUT_MEMO=1`; `=0` turns either off there). The bench every stage plans is planned
   once and saved (`whole_ctx.plan`, under `tmp/ctx_cache`, keyed and
   checked the same way; the braid's closures saved by value), so a stage
   loads it in a third of a second. A bench outside the canonical frame

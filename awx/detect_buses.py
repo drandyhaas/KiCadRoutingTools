@@ -47,6 +47,15 @@ Pt = Tuple[float, float]
 # two-digit shard of the layout before (256 files, a stage's 48 lookups
 # parsed 43 of them, 167 MB, 2 s) is split into its three-digit shards
 # the first time one of them is touched, and renamed.
+# ON DISK ONLY WHEN ASKED (TAUT_MEMO=1): it serves a harness that plans the same bench again and again (a fanout loop,
+# a population search, a whole-route loop), and it would otherwise grow without bound beside the code on the machine
+# of anyone routing their own board. Off, the memo lives in the process: a string is still relaxed once per run.
+_TAUT_DISK = os.environ.get('TAUT_MEMO', '0') not in ('', '0')
+
+
+def memo_on_disk():
+    """True when the taut strings are kept on disk (TAUT_MEMO=1: a harness), False when they live in the process"""
+    return _TAUT_DISK
 _TAUT_MEMO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'tmp', 'taut_memo')
 _TAUT_MEMO_LEGACY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -75,7 +84,7 @@ def memo_stats():
 
 def _memo_report():
     n, b, asked, hit = memo_stats()
-    if n:
+    if n and _TAUT_DISK:
         print(f'taut memo: {n} shard(s) resident, {b / 1048576:.0f} MB on disk, '
               f'{asked} lookups, {hit} hits', flush=True)
 
@@ -156,7 +165,7 @@ def _memo_migrate():
     """The single-file memo into shards, once: every entry it holds is
     still a valid answer, and a board that has been run pays nothing."""
     global _TAUT_MIGRATED
-    if _TAUT_MIGRATED:
+    if _TAUT_MIGRATED or not _TAUT_DISK:
         return
     _TAUT_MIGRATED = True
     if not os.path.exists(_TAUT_MEMO_LEGACY):
@@ -200,6 +209,8 @@ def _memo_load():
 
 def _memo_shard(prefix):
     d = _TAUT_SHARDS.get(prefix)
+    if d is None and not _TAUT_DISK:
+        d = _TAUT_SHARDS[prefix] = {}
     if d is None:
         _memo_migrate()
         d = _TAUT_SHARDS[prefix] = _read_shard(prefix)
@@ -244,6 +255,9 @@ def _memo_save(force=False):
     one write a minute (the memo is a cache: a crash loses new strings,
     nothing else); `force` writes now, and atexit forces the last one."""
     import time as _t
+    if not _TAUT_DISK:
+        _TAUT_DIRTY.clear()
+        return
     if not _TAUT_DIRTY:
         return
     if not force and _TAUT_SINCE_SAVE[0] < _TAUT_SAVE_EVERY_N:

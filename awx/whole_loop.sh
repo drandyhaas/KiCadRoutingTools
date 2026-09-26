@@ -15,9 +15,10 @@
 #      found it so, whole_solve HIST). A finding with no cut to send -- a pitch, a shape, a dive with the pairs held or
 #      snapped -- is still sent: its place, priced.
 # The bench from BENCH / NETS / DEST (whole_ctx), under the chain's plan environment (set below).
-# SEED_FLIPS / SEED_CUTS / SEED_HIST: comma lists of earlier polish / geometry / hot JSONs to start from. Stages
-# already run on the same inputs with the same code are restored from awx/tmp/stage_cache (stage_cache.py);
-# STAGE_CACHE=0 runs every one.
+# SEED_FLIPS / SEED_CUTS / SEED_HIST: comma lists of earlier polish / geometry / hot JSONs to start from. A HARNESS
+# that runs the same bench again and again: it turns on the caches the router leaves off (STAGE_CACHE=1: a stage
+# already run on the same inputs with the same code restored from awx/tmp/stage_cache, stage_cache.py; TAUT_MEMO=1:
+# the braid's taut strings kept under awx/tmp/taut_memo) -- STAGE_CACHE=0 / TAUT_MEMO=0 run it without them.
 # A loop that is NOT CONVERGING stops: each round is scored by how far its plan got (smooth, the pairs held, snapped)
 # and its audit findings there (dive, static, shape, swim, pitch in the plan, any length outside its band), and two
 # rounds in a row that fail to beat the best so far end it -- flips, cuts and prices that only move the findings about
@@ -30,7 +31,8 @@ cd $HERE
 # the braid's plan environment the planning reads (a pages-first sidecar's paging, its pairs)
 export BRAID_PAIRS=1 BRAID_EXACT_PAGES=0 PLAN_PAGES_SIDERS=2
 # every expensive stage through stage_cache.py: a stage whose script, arguments, environment and every file it read
-# are unchanged is restored, not run (STAGE_CACHE=0 runs them all)
+# are unchanged is restored, not run -- on here, a harness's cache (STAGE_CACHE=0 runs them all)
+export STAGE_CACHE=${STAGE_CACHE:-1} TAUT_MEMO=${TAUT_MEMO:-1}
 ST=(python3 stage_cache.py)
 mkdir -p $out
 flips="${SEED_FLIPS:-}"; cuts="${SEED_CUTS:-}"; hist="${SEED_HIST:-}"

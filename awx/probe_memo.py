@@ -23,8 +23,10 @@ process that runs at that K):
 Every key carries the CODE HASH (every .py of awx/ and py_router/, the
 router binary's version) and the KNOB HASH (the BRAID_/PROBE_/PLAN_/
 TAUT_ environment), so an edit to anything that lays or judges copper
-starts a cold memo rather than serving a stale verdict. PROBE_MEMO=0
-turns the whole thing off; PROBE_MEMO_DIR moves the store.
+starts a cold memo rather than serving a stale verdict. OFF BY DEFAULT:
+PROBE_MEMO=1 turns it on (a harness that probes the same bench again and
+again -- evolve.py and the chain scripts set it); PROBE_MEMO_DIR moves the
+store.
 """
 import glob
 import hashlib
@@ -35,7 +37,7 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENABLED = os.environ.get('PROBE_MEMO', '1') != '0'
+ENABLED = os.environ.get('PROBE_MEMO', '0') not in ('', '0')    # a harness's (evolve.py, the chains): off by default
 MEMO_DIR = os.environ.get('PROBE_MEMO_DIR') or os.path.join(HERE, 'tmp', 'memo')
 KNOB_PREFIXES = ('BRAID_', 'PROBE_', 'PLAN_', 'TAUT_')
 KNOB_NAMES = ('DST_CLIMB', 'SRC_CLIMB')

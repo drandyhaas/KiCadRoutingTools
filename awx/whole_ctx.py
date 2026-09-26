@@ -71,12 +71,12 @@ def plan(quiet=True):
     bench (4.5 s of each, a fifth of a loop), so the plan is kept under tmp/ctx_cache, keyed as a stage is
     (stage_cache: the environment, which names the bench and its nets, by content) and restored while every file the
     planning read -- the board, its siblings, every module loaded -- is unchanged and every file it looked for and did
-    not find is still absent, as a stage is.
-    STAGE_CACHE=0 plans every time."""
+    not find is still absent, as a stage is. Only with STAGE_CACHE=1 (a harness redoing the bench); without it every
+    stage plans the bench itself."""
     board, nets, dest = bench()
-    if os.environ.get('STAGE_CACHE', '1') == '0':
-        return _guard(_plan(board, nets, dest, quiet), nets, dest)
     import stage_cache as sc
+    if not sc.enabled():
+        return _guard(_plan(board, nets, dest, quiet), nets, dest)
     key = hashlib.sha256(json.dumps({'py': [sys.version, sys.executable], 'env': sc.env_key(STAGE_VARS)},
                                     sort_keys=True).encode()).hexdigest()[:24]
     pk, mt = os.path.join(CTX_CACHE, key + '.pkl'), os.path.join(CTX_CACHE, key + '.json')

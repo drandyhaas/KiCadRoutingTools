@@ -15,7 +15,8 @@ directory listing, a subprocess's reads.
 
     python3 stage_cache.py --out g1.json -- whole_geo.py solve.json g1.json
 
-STAGE_CACHE=0 runs the stage and records nothing; STAGE_CACHE_DIR is where entries live (default awx/tmp/stage_cache).
+OFF BY DEFAULT: STAGE_CACHE=1 turns it on (a test harness redoing the same bench -- whole_loop.sh sets it); without it
+the stage runs and nothing is recorded. STAGE_CACHE_DIR is where entries live (default awx/tmp/stage_cache).
 """
 import atexit
 import contextlib
@@ -37,6 +38,12 @@ VOLATILE = {'_', 'OLDPWD', 'PWD', 'SHLVL', 'TERM_SESSION_ID', 'SECURITYSESSIONID
             'STAGE_CACHE', 'STAGE_CACHE_DIR', 'SSH_AUTH_SOCK', 'LaunchInstanceID', 'AI_AGENT', 'COLORTERM',
             'OSLogRateLimit', 'GIT_EDITOR'}
 VOLATILE_PREFIX = ('CLAUDE', '__CF', 'XPC_', 'TERM_PROGRAM')
+
+
+def enabled():
+    """the cache is ON only when asked (STAGE_CACHE=1): it serves a harness that runs the same stages on the same inputs
+    again and again, and would otherwise fill a user's disk beside the code"""
+    return os.environ.get('STAGE_CACHE', '0') not in ('', '0')
 
 
 def file_sha(path):
@@ -187,7 +194,7 @@ def main():
     if not args or args[0] != '--' or len(args) < 2:
         sys.exit(__doc__)
     script, sargs = args[1], args[2:]
-    if os.environ.get('STAGE_CACHE', '1') == '0':
+    if not enabled():
         sys.exit(run(script, sargs))
     key = stage_key(script, sargs, outs)
     entry = os.path.join(CACHE, key[:24])

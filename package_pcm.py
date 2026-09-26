@@ -85,6 +85,9 @@ IGNORE_PATTERNS = shutil.ignore_patterns(
     ".git", ".github", ".gitignore", ".DS_Store",
     "__pycache__", "*.pyc", "dist",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".venv",
+    "venv",  # a local virtualenv (python -m venv venv) is not the plugin's
+    "tmp",   # scratch and caches (awx/tmp: run records, the harness caches) -- git-ignored, so a CI zip never has them,
+             # but a zip built from a working tree would
     "target",  # rust_router/target/ is the cargo build dir
     "grid_router.so", "grid_router.pyd", "grid_router.abi3.so",
     "Cargo.lock",

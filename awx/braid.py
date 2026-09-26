@@ -6872,8 +6872,9 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     except OSError:
         pass
     _cached = {}
-    if planned:
-        _tc_key = None      # the cache keys on the board's own ends
+    if planned or not db.memo_on_disk():
+        _tc_key = None      # the cache keys on the board's own ends; and it is a harness's (TAUT_MEMO=1), not a
+        #                     user's: nothing written beside their board
     if _tc_key is not None and os.path.exists(_tc_path):
         try:
             with open(_tc_path, encoding='utf-8') as _f:
