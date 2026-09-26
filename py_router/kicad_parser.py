@@ -5570,6 +5570,23 @@ def _pcbnew_unmodelled_copper(live_fps, live_keys, get_layer_name) -> List[dict]
     return out
 
 
+def pcbnew_copper_layer_names() -> Dict[int, str]:
+    """{pcbnew layer id: CANONICAL copper name} -- 'F.Cu', 'In1.Cu', ...,
+    'B.Cu', the names the .kicad_pcb file and every engine layer list use.
+
+    Never map a live board's copper through board.GetLayerName(): it returns
+    the user's display name once a layer is renamed in Board Setup (In1.Cu ->
+    "GND"), which matches nothing the engine emits. The Planes tab did, and
+    every pour for a renamed layer landed on its F.Cu fallback (#1056)."""
+    import pcbnew
+    names = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
+    for i in range(1, 31):
+        layer_id = getattr(pcbnew, f'In{i}_Cu', None)
+        if layer_id is not None:
+            names[layer_id] = f'In{i}.Cu'
+    return names
+
+
 def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                               keepout_layer: str = "User.2") -> PCBData:
     """Build PCBData directly from a pcbnew board object (no file I/O).
@@ -5606,11 +5623,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # pad '*.Cu' wildcard collapse iterate this; mixing non-copper tokens in
     # broke both. id_to_name (below) adds the non-copper tokens for
     # get_layer_name.
-    copper_id_to_name = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
-    for i in range(1, 31):
-        layer_id = getattr(pcbnew, f'In{i}_Cu', None)
-        if layer_id is not None:
-            copper_id_to_name[layer_id] = f'In{i}.Cu'
+    copper_id_to_name = pcbnew_copper_layer_names()
     id_to_name = dict(copper_id_to_name)
 
     # Non-copper layers: the .kicad_pcb s-expression always uses the CANONICAL
@@ -5634,7 +5647,17 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     def get_layer_name(layer_id):
         if layer_id in id_to_name:
             return id_to_name[layer_id]
-        return board.GetLayerName(layer_id)
+        # Anything else (User.1..User.N, ...) by its FILE token too: the
+        # display name is the user's, and a User.1 renamed "In1.Cu" read back
+        # through it became copper here and not in the text parse (#1056).
+        # LSET.Name is the token (probed, KiCad 10); display name as a last
+        # resort for a binding without it, or one that returns no str.
+        try:
+            token = pcbnew.LSET.Name(layer_id)
+        except Exception:
+            token = None
+        return token if isinstance(token, str) and token \
+            else board.GetLayerName(layer_id)
 
     # --- Pad shape mapping ---
     pad_shape_map = {}
@@ -5740,7 +5763,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             lname = id_to_name.get(lid)
             if lname is None:
                 try:
-                    lname = board.GetLayerName(lid)
+                    lname = get_layer_name(lid)
                 except Exception:
                     lname = None
             if lname is not None:

@@ -1433,12 +1433,12 @@ class PlanesTab(wx.Panel):
         # re-apply the create run's swaps (#508 finding 19's shape).
         self._reconnect_swap_data = {}
 
-        # Get layer name to ID mapping
-        name_to_id = {}
-        for i in range(pcbnew.PCB_LAYER_ID_COUNT):
-            name = board.GetLayerName(i)
-            if name:
-                name_to_id[name] = i
+        # Get layer name to ID mapping -- the CANONICAL names the engine emits.
+        # This used to be keyed by board.GetLayerName(), a renamed layer's
+        # DISPLAY name, so a board whose In1.Cu is called "GND" poured every
+        # plane onto the F.Cu fallback below (#1056).
+        from .swig_gui import _build_layer_mappings
+        name_to_id, id_to_name = _build_layer_mappings()
 
         def get_layer_id(layer_name):
             return name_to_id.get(layer_name, pcbnew.F_Cu)
@@ -1505,7 +1505,10 @@ class PlanesTab(wx.Panel):
                     except Exception:
                         existing_net = ''
                     try:
-                        existing_layer = board.GetLayerName(existing_zone.GetLayer())
+                        # Canonical, to compare with zone_data['layer']: the
+                        # display name never matched a renamed layer, so a
+                        # re-run duplicated every pour on it (#1056).
+                        existing_layer = id_to_name.get(existing_zone.GetLayer(), '')
                     except Exception:
                         existing_layer = ''
                     existing_zone_keys.add((existing_net, existing_layer))

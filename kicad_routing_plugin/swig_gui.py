@@ -65,15 +65,13 @@ def _build_layer_mappings():
 
     Returns:
         tuple: (name_to_id dict, id_to_name dict)
+
+    CANONICAL copper names only -- never board.GetLayerName(), which returns
+    a renamed layer's display name (#1056).
     """
-    import pcbnew
-    name_to_id = {'F.Cu': pcbnew.F_Cu, 'B.Cu': pcbnew.B_Cu}
-    id_to_name = {pcbnew.F_Cu: 'F.Cu', pcbnew.B_Cu: 'B.Cu'}
-    for i in range(1, 31):
-        layer_id = getattr(pcbnew, f'In{i}_Cu', None)
-        if layer_id is not None:
-            name_to_id[f'In{i}.Cu'] = layer_id
-            id_to_name[layer_id] = f'In{i}.Cu'
+    from kicad_parser import pcbnew_copper_layer_names
+    id_to_name = pcbnew_copper_layer_names()
+    name_to_id = {name: layer_id for layer_id, name in id_to_name.items()}
     return name_to_id, id_to_name
 
 
@@ -3840,7 +3838,7 @@ class RoutingDialog(wx.Dialog):
         debug_lines_added = 0
 
         # Get layer mappings
-        name_to_id, _ = _build_layer_mappings()
+        name_to_id, id_to_name = _build_layer_mappings()
 
         def get_layer_id(layer_name):
             """Convert layer name to pcbnew layer ID."""
@@ -3878,7 +3876,9 @@ class RoutingDialog(wx.Dialog):
                      round(pcbnew.ToMM(track.GetStart().y), POSITION_DECIMALS))
                 b = (round(pcbnew.ToMM(track.GetEnd().x), POSITION_DECIMALS),
                      round(pcbnew.ToMM(track.GetEnd().y), POSITION_DECIMALS))
-                key = (frozenset((a, b)), board.GetLayerName(track.GetLayer()),
+                # Canonical layer name, as s.layer is: a renamed layer's
+                # display name matched no key and left ripped copper (#1056).
+                key = (frozenset((a, b)), id_to_name.get(track.GetLayer()),
                        track.GetNetCode())
                 if key in remove_keys:
                     board.RemoveNative(track)

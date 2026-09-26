@@ -350,6 +350,15 @@ skip cleanly without KiCad python). Run any directly:
   the fab copper-to-edge floor; GUI and CLI place identical vias. On the
   pre-2026-09-24 code it fails 9 checks, CLI included (its rules lookup read
   the output's not-yet-copied `.kicad_dru`).
+- `test_1056_renamed_layers_gui.py` -- a board whose In1.Cu/In2.Cu are
+  renamed "GND"/"+5V" in Board Setup (#1056). `board.GetLayerName()` returns
+  that display name, so every live-board site that mapped through it missed:
+  the Planes tab poured In1/In2 planes onto its F.Cu fallback and duplicated
+  them on a second Create, the Route tab's rip strip left the ripped track,
+  `live_fill_islands` keyed `('GND', 'GND')`, and the builder read a User.1
+  renamed "In1.Cu" as copper. Real Planes/Route tabs, each arm with a
+  negative control (the display-name mapping patched back in). On the
+  pre-fix code the pour lands on F.Cu and a re-apply doubles it.
 - `test_movie_recorder.py` -- the Advanced tab's **Make routing movie** debug
   checkbox (#506): default OFF and inert while off; one routing step renders
   ONE movie; a plan run (`begin_group`/`end_group`, what the AI tab's Run

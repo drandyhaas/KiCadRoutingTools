@@ -702,8 +702,10 @@ def board_minima_from_live(board):
                 fp_v = None
             for pad in fp.Pads():
                 try:
-                    if not any(str(l).endswith('.Cu') for l in
-                               [board.GetLayerName(i) for i in pad.GetLayerSet().Seq()]):
+                    # IsCopperLayer, not the display name: a renamed copper
+                    # layer ("GND") does not end in '.Cu' (#1056).
+                    if not any(pcbnew.IsCopperLayer(i)
+                               for i in pad.GetLayerSet().Seq()):
                         continue
                     v = pad.GetLocalClearance()
                     pv = v.value() if hasattr(v, 'has_value') and v.has_value() else (

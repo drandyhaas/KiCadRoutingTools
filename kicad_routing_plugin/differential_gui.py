@@ -1244,7 +1244,7 @@ class DifferentialTab(wx.Panel):
         tracks_removed = 0
 
         # Get layer mappings
-        name_to_id, _ = _build_layer_mappings()
+        name_to_id, id_to_name = _build_layer_mappings()
 
         def get_layer_id(layer_name):
             return name_to_id.get(layer_name, pcbnew.F_Cu)
@@ -1267,7 +1267,9 @@ class DifferentialTab(wx.Panel):
                      round(pcbnew.ToMM(track.GetStart().y), POSITION_DECIMALS))
                 b = (round(pcbnew.ToMM(track.GetEnd().x), POSITION_DECIMALS),
                      round(pcbnew.ToMM(track.GetEnd().y), POSITION_DECIMALS))
-                key = (frozenset((a, b)), board.GetLayerName(track.GetLayer()),
+                # Canonical layer name, as s.layer is: a renamed layer's
+                # display name matched no key and left ripped copper (#1056).
+                key = (frozenset((a, b)), id_to_name.get(track.GetLayer()),
                        track.GetNetCode())
                 if key in remove_keys:
                     board.RemoveNative(track)

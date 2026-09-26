@@ -56,6 +56,13 @@ Build the same `PCBData` structure directly from a live `pcbnew.BOARD`
 object (inside KiCad's Python console or an action plugin). Much faster than
 saving and re-parsing, and reflects unsaved edits.
 
+Layer names are the file's canonical tokens (`In1.Cu`, `User.1`), as
+`parse_kicad_pcb` reads them, even when Board Setup gives a layer a display
+name (In1.Cu shown as "GND"). Map a live board's layers the same way:
+`pcbnew_copper_layer_names()` returns `{pcbnew layer id: 'F.Cu' | 'In1.Cu' |
+... | 'B.Cu'}`. `board.GetLayerName()` returns the display name, which matches
+nothing the engine emits (#1056).
+
 ```python
 # Inside KiCad's scripting console:
 import pcbnew

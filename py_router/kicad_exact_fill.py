@@ -287,6 +287,11 @@ def live_fill_islands(board):
     derived data KiCad refreshes on any fill action anyway.
     """
     import pcbnew
+    from kicad_parser import pcbnew_copper_layer_names
+    # Keyed by the CANONICAL name, as refill_islands' file parse is: the
+    # display name of a renamed layer ("GND" for In1.Cu) matches no engine
+    # lookup (#1056).
+    copper_names = pcbnew_copper_layer_names()
     zones = board.Zones()
     pcbnew.ZONE_FILLER(board).Fill(zones)
     out: Dict = {}
@@ -297,7 +302,7 @@ def live_fill_islands(board):
         for lid in z.GetLayerSet().Seq():
             if not pcbnew.IsCopperLayer(lid):
                 continue
-            lname = board.GetLayerName(lid)
+            lname = copper_names.get(lid) or board.GetLayerName(lid)
             sps = z.GetFilledPolysList(lid)
             for i in range(sps.OutlineCount()):
                 ol = sps.Outline(i)
