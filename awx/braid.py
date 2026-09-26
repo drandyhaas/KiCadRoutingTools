@@ -90,6 +90,7 @@ SPEC_CLEARANCE = _rules.DEFAULT.clearance
                          # grades at, and what the output PROJECT records (CLEAR
                          # is the router's private margin over it, not a rule)
 VIA_SIZE = _rules.DEFAULT.via_size
+GRID = _rules.DEFAULT.grid        # the routing grid (rules.GRID)
 VIA_DRILL = _rules.DEFAULT.via_drill
 
 MINP = _rules.DEFAULT.exit_pitch   # lane pitch floor at the exits
@@ -128,7 +129,6 @@ LEG_O = 0.2                    # ...and beyond its two ends in o: a leg
                                # the law there, the band only a guide
 TOL_S = 0.5                    # "at the same s" for head-on classification
 DIST_O = 0.2                   # distinct offsets for head-on classification
-WRAP_REACH = 2.5               # how far past a far-face stub its leg may be placed
 HEAD_RUN = 3.0                 # a head-on stub's straight run-in that must
                                # be clear of static copper (its own row of
                                # balls, when it sits on a flank)
@@ -186,6 +186,7 @@ SLOPE_PITCH = True             # slot pitch scaled by the lane's angle to
 VIA_NEED = VIA_SIZE / 2 + CLEAR + TRACK / 2 + 0.03   # a via's room to a
                                # neighbouring track centre, plus a cell
 LANE_MIN = TRACK + CLEAR + 0.02    # the least centreline pitch two lanes are PLANNED at (ring floor, block squeeze, a leg's room)
+WRAP_REACH = 10 * LANE_MIN     # how far past a far-face stub its leg may be placed
 BIRTH_W = 0.2                  # place_dives: a bound birth dive's layer-change window, either side of its site
 RING_DIP = 0.5                 # _order_ring: a lifted ring lane's dip narrower than this is filled level
 PACK_MODE = int(os.environ.get('BRAID_PACK', '0') or 0)  # pack.py at write time (opt-in)
@@ -3730,7 +3731,7 @@ class Corridor:
         where the band opens both layers -- at a single's dive gap it fits
         nowhere (zynq K44: both pairs refused at the launch, boxed
         0.6 mm past the tips where the band closed the tooth's layer).
-        BRAID_PAIR_DIVE_EXTRA, mm each side of a change."""
+        BRAID_PAIR_DIVE_EXTRA, pair pitches each side of a change."""
         if nm not in (getattr(self.ctx, 'pairs', None) or {}):
             return 0.0
         return PAIR_DIVE_EXTRA
@@ -5940,17 +5941,21 @@ def main(argv=None):
 # reserved, its layers the schedule's; then free in a window as the last
 # resort. Its copper is protected and the singles are routed by the same
 # plan around it.
-PAIR_SLACKS = [float(v) for v in os.environ.get('BRAID_PAIR_SLACKS', '0.6,1.2').split(',') if v.strip()]
-PAIR_FANIN = float(os.environ.get('BRAID_PAIR_FANIN', '2.5') or 0)
+# the pair step's reaches and widenings in the rules' units: PAIR PITCHES (a pair's own track + gap, PP) and LANE
+# pitches; each BRAID_PAIR_* override is in the same unit
+PP = _pairs.pitch(TRACK)
+PAIR_SLACKS = [float(v) * PP for v in os.environ.get('BRAID_PAIR_SLACKS', '2,4').split(',') if v.strip()]
+PAIR_FANIN = float(os.environ.get('BRAID_PAIR_FANIN', '10') or 0) * LANE_MIN
 # BRAID_PAIR_CROSS_FANIN (1): the cross-corridor reservation under the pair's fan-in rule
 PAIR_CROSS_FANIN = int(os.environ.get('BRAID_PAIR_CROSS_FANIN', '1') or 0)
-PAIR_DIVE_EXTRA = float(os.environ.get('BRAID_PAIR_DIVE_EXTRA', '0.6') or 0)
-# BRAID_PAIR_FANIN_BAND (mm, 0 = off): the convergence zone's extra half-width
+PAIR_DIVE_EXTRA = float(os.environ.get('BRAID_PAIR_DIVE_EXTRA', '2') or 0) * PP
+# BRAID_PAIR_FANIN_BAND (pair pitches, 0 = off): the convergence zone's extra half-width
 # beyond the ends' separation (Corridor._pair_fanin_band)
-PAIR_FANIN_BAND = float(os.environ.get('BRAID_PAIR_FANIN_BAND', '0.6') or 0)
-# BRAID_PAIR_APPROACH (mm): how far in front of a pair's tips a neighbour's
-# exit stub may not be reserved (the connector's setback ladder reaches 1.09)
-PAIR_APPROACH = float(os.environ.get('BRAID_PAIR_APPROACH', '1.2') or 0)
+PAIR_FANIN_BAND = float(os.environ.get('BRAID_PAIR_FANIN_BAND', '2') or 0) * PP
+# BRAID_PAIR_APPROACH (pair pitches): how far in front of a pair's tips a neighbour's
+# exit stub may not be reserved (the pair router's setback ladder reaches four pair pitches -- twice its four-spacing
+# setback -- and this is half a pitch more)
+PAIR_APPROACH = float(os.environ.get('BRAID_PAIR_APPROACH', '4.5') or 0) * PP
 
 
 def _in_boxes(pt, boxes, grow=0.0):
@@ -6967,7 +6972,7 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     if edge and edge > CLEAR:
         kw['board_edge_clearance'] = float(edge)
     ctx.cfg = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL,
-                             grid_step=0.025, **kw)
+                             grid_step=GRID, **kw)
     ctx.base_segments = list(pcb.segments)
     ctx.base_vias = list(pcb.vias)
     # each net's FANOUT copper, as it came: what a rip resets to

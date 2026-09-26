@@ -44,6 +44,12 @@ THE QUANTITIES, and the formula that produced each literal
     fan_clear  = clearance. The fanout lays at the spec; there is no second
                        clearance.
     via_size / via_drill  0.25 / 0.15
+    grid       0.025   the routing grid the chain plans and routes on (``braid.GRID``, the
+                       config's ``grid_step``).
+    pair_gap   = hug + a grid diagonal  (``pairs.GAP``) -- a pair's P-to-N edge
+                       gap. The pose router's short test (``gap < clearance``)
+                       runs on the legs it GENERATES on the grid, and at a
+                       corner the inner leg lands up to a grid diagonal closer.
     lane_slice 0.232   = track + hug -- one
                        lane's centre-to-centre slice: two parallel tracks of
                        width w at clearance c sit at pitch w + c.
@@ -121,6 +127,7 @@ DEBT THIS FILE DOES NOT PAY (recorded, not fixed)
 """
 
 KRT_TOOL = {'scope': [], 'kind': 'utility'}   # #937: a research tool (awx), catalogued, shown at no door
+import math
 import os
 import sys
 from dataclasses import dataclass, field
@@ -132,6 +139,7 @@ TRACK = 0.127             # the braid's lane track (5 mil)
 HUG_OVER = 0.005          # ...and the hug's 5 um over the spec
 VIA_SIZE = 0.25
 VIA_DRILL = 0.15
+GRID = 0.025              # the routing grid the chain plans and routes on (braid.setup)
 FAN_TRACK = 0.1           # the production engine's fanout stub width
 LANE_PITCH = 0.35         # braid.LPITCH
 EXIT_PITCH = 0.38         # braid.MINP
@@ -156,6 +164,7 @@ class Rules:
     track: float = TRACK
     via_size: float = VIA_SIZE
     via_drill: float = VIA_DRILL
+    grid: float = GRID
     hole_to_hole: float = None
     edge_clearance: float = None
     fan_track: float = FAN_TRACK
@@ -175,6 +184,12 @@ class Rules:
     def fan_clear(self):
         """``source_realize.FAN_CLEAR``: the fanout lays at the spec."""
         return self.clearance
+
+    @property
+    def pair_gap(self):
+        """A pair's P-to-N edge gap: the hug and a grid diagonal (the inner leg of a turn the pose router
+        generates on the grid lands up to that much closer). ``pairs.GAP``."""
+        return _r(self.hug + math.sqrt(2) * self.grid)
 
     @property
     def lane_slice(self):
@@ -258,6 +273,7 @@ class Rules:
             track=track,
             via_size=_r(via_size) if via_size is not None else VIA_SIZE,
             via_drill=_r(via_drill) if via_drill is not None else VIA_DRILL,
+            grid=_r(get('grid_step')) if get('grid_step') is not None else GRID,
             hole_to_hole=get('hole_to_hole_clearance'),
             edge_clearance=get('board_edge_clearance'),
             fan_track=_r(fan_track) if fan_track is not None else track,
@@ -272,13 +288,14 @@ class Rules:
         """One line per quantity -- what a stage prints, so the numbers it
         is using are visible rather than assumed."""
         out = [f'rules ({self.source}):']
-        for k in ('clearance', 'track', 'via_size', 'via_drill',
+        for k in ('clearance', 'track', 'via_size', 'via_drill', 'grid',
                   'hole_to_hole', 'edge_clearance', 'fan_track',
                   'lane_pitch', 'exit_pitch'):
             v = getattr(self, k)
             out.append(f'  {k:16s} {"-" if v is None else v}')
         out.append(f'  {"hug (derived)":16s} {self.hug}   clearance + {HUG_OVER}')
         out.append(f'  {"lane_slice":16s} {self.lane_slice}   track + hug')
+        out.append(f'  {"pair_gap":16s} {self.pair_gap}   hug + a grid diagonal')
         for n in self.notes:
             out.append(f'  note: {n}')
         return '\n'.join(out)
@@ -366,6 +383,11 @@ def install(rules, verbose=False):
     put('braid', 'END_KEEP', rules.end_keep)
     put('braid', 'LPITCH', rules.lane_pitch)
     put('braid', 'MINP', rules.exit_pitch)
+    put('braid', 'GRID', rules.grid)
+
+    # pairs: the pair gap (unless the invocation set its own, BRAID_PAIR_GAP)
+    if not float(os.environ.get('BRAID_PAIR_GAP', '0') or 0):
+        put('pairs', 'GAP', rules.pair_gap)
 
     # source_realize: the production engine's fanout geometry
     put('source_realize', 'FAN_TRACK', rules.fan_track)

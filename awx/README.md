@@ -686,7 +686,8 @@ not, coupled fraction at the inferred pitch, skew, barrels);
 end's connectors and a map probe (centre / P / N cells, via mark, the other
 layer, WHY blocked) and writes `tmp/pairdbg_<pair>_<n>.png` with the band,
 the pieces, the reserved vias and the poses. Knobs: `BRAID_PAIR_GAP`
-(default hug + 0.04), `BRAID_PAIR_SEP`, `PLAN_PAIR_SWIM`.
+(default the hug plus a grid diagonal, `rules.pair_gap`), `BRAID_PAIR_SEP`,
+`PLAN_PAIR_SWIM`.
 
 ## On the human's ends (`human_ends_bench.py`)
 
@@ -823,7 +824,12 @@ rules, and only then hands it on.
   rings, columns four grid steps apart: each lane's offset per column in the
   solve's order on its solved layers, same-layer neighbours a bar apart
   (slope-corrected), a via's room round every change, inside the board and
-  off the pad boxes. A second pass holds each lane to one side of every piece
+  off the pad boxes. Softly, the length each column's sideways move adds
+  (from below by tangent cuts, so a small move costs next to nothing and a
+  lane takes the comfortable pitch -- a track more than the bar -- wherever
+  there is room, as the human's lanes do), the bends, and every neighbour
+  short of that comfortable pitch, four times as steeply below halfway to
+  the bar, so the tightest are spread first. A second pass holds each lane to one side of every piece
   of static copper near it: one split per island and layer, in the lane
   order, pinned by the lanes' own ends. A pair runs straight for the pair
   router's straight run either side of each dive, and where a dive falls
@@ -874,14 +880,16 @@ rules, and only then hands it on.
   out to its barrel and dives, the other jogs at 45 degrees over the first's
   new-layer leg to its barrel just beyond, both barrels on one side,
   staggered by the least whole grid steps that keep a via's pitch and each
-  jog's clearance. It is laid as drawn; the search reserves its half-span
+  jog's clearance -- on the side where the singles not yet laid leave
+  room for its barrels. It is laid as drawn; the search reserves its half-span
   and the router's probe on each side, and the pair router routes the two
   one-hand spans either side of it. Static copper is read
   from the router's own base map (its pad stamps with their corner buffers,
   other nets' stubs and vias, holes, the board edge) over each lane's
   window, a pair's with the pair's extra clearance; placed copper at the
   audit's bars (a pair as its two mitred legs, a via by the ring the router
-  stamps round it); a pair's dive where the pair router tests it, and no
+  stamps round it, a piece off the grid -- a join onto an off-grid
+  terminal -- half a step wider, both ways); a pair's dive where the pair router tests it, and no
   nearer either end than its dive room. A lane not
   yet placed keeps its SHARE of every gap -- the side of the midline nearer
   its own smooth line, less half a bar, for its track and for its via -- so
@@ -934,12 +942,15 @@ rules, and only then hands it on.
 On the human's ends (`HHe`, K51: 51 nets, 45 singles and 3 pairs, 48 lanes)
 the plan passes every check with nothing waived, and it ROUTES. From the
 human's board, by the commands above: the bench, the solve (about three
-minutes), then `whole_loop.sh` in two rounds (about fourteen more) -- the
-first polish flips SCAS to the far side of C6, and the geometry cannot lay
-SDQS1's dive straight 0.8 mm from its berth: the solve again with that via
-cut moves the dive 1.4 mm back into the trunk, and the second smooth plan
-passes; the pairs are laid (SCK with its crossover), the singles fitted
-round them and snapped, the lint clean. The loop again on the same inputs
+minutes), then `whole_loop.sh` in four rounds (under half an hour more),
+each of the first three sending the solve what it measured -- the first
+polish flips SCAS to the far side of C6, and the geometry cannot keep SBA1
+off R5 or SA3 off C12, nor lay SDQS1's dive straight; the second flips SA3
+round C12 and sends back three singles' changes it could not give their
+room; the third keeps SA10 off R4 and moves SCK's change. Every solve keeps
+36 layer changes. The fourth smooth plan passes; the pairs are laid (SCK
+with its crossover), the singles fitted round them and snapped, the lint
+clean. The loop again on the same inputs
 restores every stage from the cache in seconds (3 s). Every step writes the same bytes on every run
 (the geometry and the polish checked again under a second Python hash
 seed). The plan changes layer 36 times where the human's copper does 38 between
@@ -949,15 +960,15 @@ zero widening, 3 of 3 in their bands; each lane alone, 48 of 48; ALL AT
 ONCE, 48 of 48 in their bands, `check_connected` all 51 nets connected,
 `check_drc` clean at the route's clearance. Over the whole board on the 51
 nets: 86 vias against the human's 88, no net over two (the human has none
-either), and 1232 mm of copper against 1337 -- the human's includes its
+either), and 1237 mm of copper against 1337 -- the human's includes its
 length-matching meanders, and this route matches no lengths.
 
 <img src="img/k51_whole_route.png" alt="K51 routed from the whole-route plan, beside the human's" width="900">
 
 *K51 on the human's fanout, one frame: left, the whole-route plan routed
 all at once (86 vias); right, the human (88). The three pairs are yellow.
-SCK's legs swap sides at a crossover beside its tooth end (lower left);
-the human takes it round the south. The human's meanders match lengths.*
+SCK's legs swap sides at a crossover on its southern run (bottom
+centre). The human's meanders match lengths.*
 
 ## The chain's other pieces
 
@@ -1306,9 +1317,11 @@ First, the whole-route plan (`whole_*.py`):
 - **The crossover in the pose router** (#1055): an opposite-hands pair
   swapping its legs at any dive the pose search finds room for, not only
   where a plan puts it.
-- **Units.** The pair step's `PAIR_SLACKS`, `PAIR_FANIN`, `PAIR_FANIN_BAND`,
-  `PAIR_DIVE_EXTRA`, `PAIR_APPROACH` and `WRAP_REACH`, and `pairs.GAP`'s
-  margin, are still millimetres where they should be the rules' units.
+- **Units.** `rules.py`'s margins on `via_need`, `lane_min` and `end_keep`
+  (a "cell" of 0.03 and 0.02 / 0.05 mm, rather than the grid), the braid's
+  planning distances the whole route starts from (`BLOCK_GAP`, `ROW_O`,
+  `TOL_S`, `DIST_O`, `HEAD_RUN`, `RING_DIP`) and the snap's `W_DEV` (per mm)
+  are still millimetres where they should be the rules' units.
 - **Speed.** The geometry's second LP pass is about 40% of a loop; one
   elastic column per pitch rule, rather than one per tangent cut of it,
   would shrink it.

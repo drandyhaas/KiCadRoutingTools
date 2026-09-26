@@ -35,6 +35,7 @@ import numpy as np
 import whole_ctx
 import braid as bd
 import pairs as _pairs
+import plan_audit as _pa
 from fab_tiers import min_via_center_distance
 from plane_pad_tap import make_local_window
 from obstacle_map import (build_base_obstacle_map, add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
@@ -62,6 +63,7 @@ VX = {n: (_pairs.dive_offset(cfg, HALF) if n in prs else 0.0) for n in M}
 OFFG = {n: (1 if n in prs else 0) for n in M}             # a pair's legs are off the grid: half a step on its bars
 VVB = min_via_center_distance(cfg.via_size, CL, cfg.via_drill, h2h)
 RING, RING_PAIR = _pairs.via_ring(cfg), _pairs.via_ring(cfg, HALF)      # a via's reach into a track's grid cells
+on_grid = lambda p_, q_: _pa._on_grid(p_, q_, g)        # the audit's test: a piece the router lays exactly
 EPS = 1e-3                                                 # a diagonal between two grid points, a hair of room
 BAND = 2 * bd.LANE_MIN                                     # how far a lane may stray from its smooth line
 RVIA = 2 * bd.LANE_MIN                                     # how far a via may move from the plan's
@@ -339,6 +341,10 @@ def crossover_at(n, V, d, hand0, L1, L2):
     pn, nn = prs[n]
     ids = {'P': ctx.byname[pn][0], 'N': ctx.byname[nn][0]}
     near = static_around(V, 4 * bd.LANE_MIN)
+    # of the two that clear everything laid, the one that leaves the singles not yet laid the most room: its barrels
+    # and legs as far outside their bars from those lanes' smooth lines as they stand (a crossover's barrels are all on
+    # one side of the pair -- put them where there is room for them)
+    best = None
     for first in ('P', 'N'):
         c = _pairs.crossover(V, DIRS[d], hand0, HALF, cfg.via_size, VX[n], TW, CL, g, L1, L2, first=first,
                              floor=_pairs.handover_setback(cfg))
@@ -350,8 +356,26 @@ def crossover_at(n, V, d, hand0, L1, L2):
             c['at'] = [V[0], V[1]]
             c['heading'] = list(DIRS[d])
             c['layers'] = [L1, L2]
-            return c
-    return None
+            room = room_left(c)
+            if best is None or room > best[0]:
+                best = (room, c)
+    return best[1] if best else None
+
+
+XROOM = {}          # the lane being laid's window: its cells within a via's room of a single not yet laid (build)
+
+
+def room_left(c):
+    """how many of a crossover's barrels stand clear of every single not yet laid (its smooth line, a via's room
+    either side, on any layer): the lookup in the window's mask"""
+    m, i0_, j0_ = XROOM.get('mask'), XROOM.get('i0', 0), XROOM.get('j0', 0)
+    if m is None:
+        return 0
+    ok = 0
+    for x, y, _k in c['vias']:
+        i, j = int(round(x / g)) - i0_, int(round(y / g)) - j0_
+        ok += int(not (0 <= i < m.shape[0] and 0 <= j < m.shape[1] and m[i, j]))
+    return ok
 
 
 def pair_end_cands(n, end, W, esc):
@@ -495,10 +519,12 @@ def build(n):
         vb = np.zeros(X.shape, bool)
         # a via stands outside the RING of every other lane's track (pairs.via_ring about the grid point the via
         # rounds to: the single's round a single's line, the pair's round a pair's centreline) -- whichever routes
-        # later meets it that way; a barrel off the grid by its own offset, twice (the router rings its rounded point)
+        # later meets it that way; a barrel off the grid by its own offset, twice (the router rings its rounded point);
+        # a placed piece OFF the grid (a join onto an off-grid terminal) half a step more, as the audit bars it
         boff = 2 * math.hypot(ox - round(ox / g) * g, oy - round(oy / g) * g)
         for (m, L, p_, q_) in PLACED:
-            mark(vb, box(p_, q_), (RING_PAIR if m in prs else RING) + boff, seg_d(p_, q_), ox, oy)
+            mark(vb, box(p_, q_), (RING_PAIR if m in prs else RING) + boff + (0 if on_grid(p_, q_) else g / 2),
+                 seg_d(p_, q_), ox, oy)
         for (m, bx_, by_) in PVIAS:
             mark(vb, (bx_, by_, bx_, by_), VVB + g / 2 * (OFFG[n] + OFFG[m]), pt_d(bx_, by_), ox, oy)
         for m in unplaced:
@@ -548,7 +574,16 @@ def build(n):
             vbad.append(vfield(ox, oy) | vfield(-ox, -oy) | st_via[a] | P0 | pfield(px, py) | pfield(-px, -py))
     else:
         vbad = [vfield(0.0, 0.0) | st_via[0]] * 4
-    return dict(i0=i0, j0=j0, xs=xs, ys=ys, dist=dist, arc=arc, band=band, bad=bad, vbad=vbad)
+    # (a pair's window: the cells within a via's room of a single not yet laid, where a crossover's barrels would take
+    # that single's line -- crossover_at puts its barrels on the side clear of them)
+    xroom = None
+    if n in prs:
+        xroom = np.zeros(X.shape, dtype=bool)
+        for m in [m for m in M if m not in prs and m not in res['lanes']]:
+            Pm = LANE[m]['pts']
+            for p_, q_ in zip(Pm, Pm[1:]):
+                mark(xroom, box(p_, q_), RING + g, seg_d(p_, q_))       # the router's via ring and the audit's step
+    return dict(i0=i0, j0=j0, xs=xs, ys=ys, dist=dist, arc=arc, band=band, bad=bad, vbad=vbad, xroom=xroom)
 
 
 def via_arcs(n):
@@ -566,17 +601,31 @@ def route(n, strict=True):
     """A* over (cell, direction, vias taken): the lane's octilinear grid path, or None. strict: every move within a
     track width of an end runs within 90 degrees of its stub's own way"""
     W = build(n)
+    XROOM.clear()
+    XROOM.update(mask=W.get('xroom'), i0=W['i0'], j0=W['j0'])
     i0, j0, band, bad, vbad, dist, arc = W['i0'], W['j0'], W['band'], W['bad'], W['vbad'], W['dist'], W['arc']
     NI, NJ = band.shape
     a_out, a_in = end_dirs(n)
     P = LANE[n]['pts']
     L_s, L_e = LANE[n]['lays'][0], LANE[n]['lays'][-1]
-    free_ = lambda L_: (lambda i, j: 0 <= i - i0 < NI and 0 <= j - j0 < NJ and not bad[L_][i - i0, j - j0])
+    # a terminal's grid point is free where an on-grid track fits and the JOIN onto the terminal clears every placed
+    # barrel by the audit's bar: the ring, the barrel's own offset, and half a step for the join, off the grid
+    ring_n = RING_PAIR if n in prs else RING
+
+    def join_clear(t_, i, j):
+        c_ = (i * g, j * g)
+        if on_grid(t_, c_):
+            return True
+        return all(float(seg_pts_dist(t_, c_, np.array([bx_]), np.array([by_]))[0])
+                   >= ring_n + math.hypot(bx_ - round(bx_ / g) * g, by_ - round(by_ / g) * g) + g / 2 - 1e-9
+                   for (m_, bx_, by_) in PVIAS if m_ != n)
+    free_ = lambda L_, t_: (lambda i, j: 0 <= i - i0 < NI and 0 <= j - j0 < NJ and not bad[L_][i - i0, j - j0]
+                            and join_clear(t_, i, j))
     s_ = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
     w0 = P[min(int(np.searchsorted(s_, W_SCALE)), len(P) - 1)] - P[0]            # the lane's own way at each end,
     w1 = P[-1] - P[max(int(np.searchsorted(s_, s_[-1] - W_SCALE)) - 1, 0)]      # over the audit's scale for a turn
-    si, sj = term_cell(tuple(P[0]), a_out, w0, True, n, L_s, free_(L_s))
-    ei, ej = term_cell(tuple(P[-1]), a_in, w1, False, n, L_e, free_(L_e))
+    si, sj = term_cell(tuple(P[0]), a_out, w0, True, n, L_s, free_(L_s, tuple(P[0])))
+    ei, ej = term_cell(tuple(P[-1]), a_in, w1, False, n, L_e, free_(L_e, tuple(P[-1])))
     d0, dN = dir_index(a_out), dir_index(a_in)
     lays = [LANE[n]['L0']]
     for _v in LANE[n]['vias']:

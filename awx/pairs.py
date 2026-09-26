@@ -30,12 +30,12 @@ Pt = Tuple[float, float]
 # the pair router rejects a pair whose legs sit closer than the config's
 # clearance as a short (measured: gap 0.100 against clearance 0.105,
 # SDQS0 refused after a found route). Overridable per invocation.
-GAP = float(os.environ.get('BRAID_PAIR_GAP', '0') or 0) or round(_rules.DEFAULT.hug + 0.04, 6)
-# (the hug plus 40 um: the pose router's short test is `gap < clearance`
-# on the legs it GENERATES, and at a corner the inner leg's gap shrinks --
-# measured 0.102, 0.1035 and 0.092 against 0.105 at turns on three pairs, and
-# 0.1050 against 0.1050 was rejected on float rounding alone; the human's
-# pairs run at 0.32 mm pitch, this is 0.272)
+GAP = float(os.environ.get('BRAID_PAIR_GAP', '0') or 0) or _rules.DEFAULT.pair_gap
+# (the hug plus a grid diagonal, rules.pair_gap: the pose router's short test
+# is `gap < clearance` on the legs it GENERATES on the grid, and at a corner
+# the inner leg's gap shrinks -- measured 0.102, 0.1035 and 0.092 against
+# 0.105 at turns on three pairs, and 0.1050 against 0.1050 was rejected on
+# float rounding alone)
 # the farthest apart a pair's two teeth (or two berths) may stand for the
 # pair to be routed as ONE lane: beyond it the legs are singles, and the
 # log says so (the plan chose the ends apart -- the joint menu's job)

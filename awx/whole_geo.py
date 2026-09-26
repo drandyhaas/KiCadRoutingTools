@@ -12,7 +12,7 @@ solved crossing) and each lane's LAYER (flipped at each solved change; both laye
   from a change, changes a via pitch apart; inside the board and outside both pad boxes grown by a track's
   clearance (a via: grown by its static room), waived near the lane's own terminals; static copper to one side
   (from a first pass); the slope capped at K_MAX.
-  soft: o-travel, bends, neighbours short of P_COMF (a different-layer pair only away from its own crossing).
+  soft: the length a lane's sideways moves add, bends, neighbours short of P_COMF (a different-layer pair only away from its own crossing).
 Two passes: the second holds every lane to ONE side of each piece of static copper near it (static_sides: one split
 per island and layer, in the lane order, pinned by the lanes' own ends), and a lane the polish found no room for on
 its side is flipped to the other (GEO_FLIPS_FROM=POLISH.json,..: data the polish measured, never typed). What the
@@ -47,6 +47,7 @@ D_X = TW / 2                            # different-layer neighbours never touch
 W_LEN, W_BEND, W_COMF, W_HARD = 1.0, 3.0, 0.5, 1e4
 W_COMF_X = 1.0                           # the soft gap between different-layer neighbours
 TANG = [0.0, 1.0, -1.0, 2.5, -2.5, 5.0, -5.0]
+LEN_T = [0.5, -0.5, 1.0, -1.0, 2.0, -2.0, 4.0, -4.0]   # the slopes a column's added length is cut at
 # the tangent cuts under-state sqrt(1 + k^2) between their tangent points: the SLOPED ones are scaled by the set's own
 # worst ratio (the flat cut stays exact, so a flat pair is not over-held)
 _kk = np.linspace(0.0, K_MAX, 4001)
@@ -69,6 +70,11 @@ W_TURN = int(math.ceil(_pairs.turn_straight_steps(ctx.cfg) * ctx.cfg.grid_step /
 HOLD = max(1, int(round(TW / G)))
 EXC = max(2, int(math.ceil(bd.LANE_MIN / G)))
 P_MIN = max(P_MIN, TW + CL + 2 * GRID2)      # two planned lines: each lands up to half a grid step off (the router's bar)
+# the comfort penalty is GRADED (convex): a millimetre below the midpoint between the minimum and the comfortable pitch
+# costs four times one above it, so the LP spreads the tightest neighbours first rather than letting a few pairs take
+# all the squeeze
+P_MID = (P_MIN + P_COMF) / 2
+W_COMF_TIGHT = 3 * W_COMF
 from fab_tiers import min_via_center_distance
 VIA_VV = min_via_center_distance(bd.VIA_SIZE, CL, ctx.cfg.via_drill, getattr(ctx.cfg, 'hole_to_hole_clearance', 0.0) or 0.0)
 VIA_VV += 2 * GRID2; VIA_ST += GRID2; LANE_ST += GRID2     # planned vs planned a whole step, vs static half
@@ -425,6 +431,9 @@ def build_and_solve(sides, prev=None):
                             le(terms, -sep * al, ('pitch', f, k, a, b, Ly))
                     e = newvar(W_COMF * G)
                     le([(ja, 1.0), (jb, -1.0), (e, -1.0)], -(P_COMF + hw[a] + hw[b]))
+                    # ...and steeper below the midpoint to the minimum: the tightest pairs are spread first
+                    e = newvar(W_COMF_TIGHT * G)
+                    le([(ja, 1.0), (jb, -1.0), (e, -1.0)], -(P_MID + hw[a] + hw[b]))
     # vias
     vias = []
     for (f, n), v in PIECE.items():
@@ -519,8 +528,13 @@ def build_and_solve(sides, prev=None):
             a, b = var[(f, n, k)], var[(f, n, k + 1)]
             le([(b, 1.0), (a, -1.0)], K_MAX * G, ('slope', f, k, n))
             le([(a, 1.0), (b, -1.0)], K_MAX * G, ('slope', f, k, n))
+            # the LENGTH a column's sideways move adds, G (sqrt(1 + k^2) - 1) for its slope k, from below by tangent
+            # cuts: a small move costs next to nothing (it is quadratic), so a lane takes the comfortable pitch
+            # wherever the room is -- priced as |move|, a lane gave its pitch up to save a move that added no length
             d = newvar(W_LEN)
-            le([(b, 1.0), (a, -1.0), (d, -1.0)], 0.0); le([(a, 1.0), (b, -1.0), (d, -1.0)], 0.0)
+            for t_ in LEN_T:
+                r_ = math.sqrt(1 + t_ * t_)
+                le([(b, t_ / r_), (a, -t_ / r_), (d, -1.0)], -G * (1 / r_ - 1))
             if k > v['k0']:
                 p = var[(f, n, k - 1)]
                 d2 = newvar(W_BEND)
