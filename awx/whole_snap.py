@@ -73,6 +73,7 @@ BAND = 2 * bd.LANE_MIN                                     # how far a lane may 
 RVIA = 2 * bd.LANE_MIN                                     # how far a via may move from the plan's
 W_BEND = 4 * g                                             # a 45-degree bend, in mm of length
 W_DEV = 0.5                                                # per mm of length, per mm from the smooth line
+W_SHARE = 1.0                                              # a pair laid first: a step in a single's share costs its length again
 SWEEPS = 2                                                 # clean-up sweeps against the others' real copper
 W_VIA = 1.0                                                # per mm a via stands from the plan's
 W_SCALE = TW + CL                                          # the audit measures a turn over this much lane
@@ -655,7 +656,18 @@ def build(n):
             Pm = LANE[m]['pts']
             for p_, q_ in zip(Pm, Pm[1:]):
                 mark(xroom, box(p_, q_), RING + g, seg_d(p_, q_))       # the router's via ring and the audit's step
-    return dict(i0=i0, j0=j0, xs=xs, ys=ys, dist=dist, arc=arc, band=band, bad=bad, vbad=vbad, xroom=xroom)
+    # a PAIR laid before the singles goes where it needs to -- the singles are fitted round it -- but a single's SHARE
+    # of a gap (as the singles' own snap keeps it) costs it its length again: it takes a single's room where its turns
+    # and dives need it, not where the cost happened to be flat (K15: SDQS0 strayed most of a lane pitch into SDQ0's
+    # room beside SDQM0's berth stub, and SDQ0 could not be fitted there)
+    soft = None
+    if n in prs and PAIRS_ONLY:
+        soft = {L: np.zeros(X.shape, bool) for L in bad}
+        for m in [m for m in M if m != n and m not in prs and m not in res['lanes']]:
+            Pm, Lm = LANE[m]['pts'], LANE[m]['lays']
+            for (p_, q_), L in zip(zip(Pm, Pm[1:]), Lm):
+                share(soft[L], lane_bar(n, m), seg_d(p_, q_), box(p_, q_))
+    return dict(i0=i0, j0=j0, xs=xs, ys=ys, dist=dist, arc=arc, band=band, bad=bad, vbad=vbad, xroom=xroom, soft=soft)
 
 
 def via_arcs(n):
@@ -676,6 +688,7 @@ def route(n, strict=True):
     XROOM.clear()
     XROOM.update(mask=W.get('xroom'), i0=W['i0'], j0=W['j0'])
     i0, j0, band, bad, vbad, dist, arc = W['i0'], W['j0'], W['band'], W['bad'], W['vbad'], W['dist'], W['arc']
+    softL = {L_: m_.tolist() for L_, m_ in W['soft'].items()} if W.get('soft') is not None else None
     NI, NJ = band.shape
     a_out, a_in = end_dirs(n)
     P = LANE[n]['pts']
@@ -845,6 +858,8 @@ def route(n, strict=True):
                     continue
                 step = STEPT[nd]
                 nc = c_ + step * (1 + W_DEV * distL[ni][nj]) + W_BEND * bend
+                if softL is not None and softL[L][ni][nj]:
+                    nc += W_SHARE * step
                 if (ni, nj) == E:
                     eb = min(abs(nd - dN), 8 - abs(nd - dN))
                     if (no90 and eb >= 2) or (poses and eb):

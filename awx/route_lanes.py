@@ -369,15 +369,20 @@ def write(ctx, board, out, base_s, base_v):
     stamps its own)"""
     from kicad_writer import add_tracks_and_vias_to_pcb
     from fix_kicad_drc_settings import fix_project_for_output
+    from bga_fanout.flip_frame import other_layer
     cfg = ctx.cfg
     old_s, old_v = set(map(id, base_s)), set(map(id, base_v))
     segs = [s_ for s_ in ctx.pcb.segments if id(s_) not in old_s]
     vias = [v_ for v_ in ctx.pcb.vias if id(v_) not in old_v]
+    # the copper back in the board's own frame, as braid.run writes it: the braid's setup turns a board of the other
+    # chirality over (ctx.M maps a point of the turned board back, and the layers swap), and every lane here was laid
+    # on the turned board -- written as laid, it lands mirrored (K15's own fanout: four nets open, a lane over a pad)
+    M, OL = (ctx.M, other_layer) if getattr(ctx, 'M', None) is not None else ((lambda x, y: (x, y)), (lambda L: L))
     add_tracks_and_vias_to_pcb(board, out,
-                               [dict(start=(s_.start_x, s_.start_y), end=(s_.end_x, s_.end_y), width=s_.width,
-                                     layer=s_.layer, net_id=s_.net_id) for s_ in segs],
-                               [dict(x=v_.x, y=v_.y, size=v_.size, drill=v_.drill, layers=list(v_.layers),
-                                     net_id=v_.net_id) for v_ in vias],
+                               [dict(start=M(s_.start_x, s_.start_y), end=M(s_.end_x, s_.end_y), width=s_.width,
+                                     layer=OL(s_.layer), net_id=s_.net_id) for s_ in segs],
+                               [dict(x=M(v_.x, v_.y)[0], y=M(v_.x, v_.y)[1], size=v_.size, drill=v_.drill,
+                                     layers=[OL(L_) for L_ in v_.layers], net_id=v_.net_id) for v_ in vias],
                                net_id_to_name={i: n.name for i, n in ctx.pcb.nets.items()})
     pro = os.path.splitext(board)[0] + '.kicad_pro'
     if os.path.exists(pro):

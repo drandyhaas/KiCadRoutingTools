@@ -324,7 +324,7 @@ resident worker processes (`--par=N`).
 | `--cross=STEM_B --cross-frac=F --seed=S` | the probe crossover |
 | env `DST_CLIMB`, `SRC_CLIMB` | the climb classes in the menus (the descent runs `DST_CLIMB=2`; the chain's solve cannot afford them) |
 | env `PROBE_LADDER` | `open` (default): a probe braid's rescue ladder starts at the rung that opens both layers; `full` is the full braid's ladder |
-| env `PROBE_MEMO`, `PROBE_MEMO_DIR`, `PROBE_MEMO_CODE` | the memo (`tmp/memo/k<K>/{probe,screen,closed}`), keyed on copper, move, code hash and knob hash; `0` off; a pinned code hash carries the memo across an edit known not to change copper |
+| env `PROBE_MEMO`, `PROBE_MEMO_DIR`, `PROBE_MEMO_CODE` | the memo (`tmp/memo/k<K>/{probe,screen,closed}`), keyed on copper, move, code hash and knob hash; off by default, `1` on (`evolve.py` and the chain scripts set it); a pinned code hash carries the memo across an edit known not to change copper |
 
 A probe's log line says what the engine laid (exact / in class / another
 class -- a substitute the engine lays instead of the ask is probed as the
@@ -881,8 +881,10 @@ rules, and only then hands it on.
   lane's smooth line (length, bends, distance from the line). The PAIRS
   first and alone (`--pairs`), moving as the pair router does -- 45-degree
   turns, a turning radius's straight run after each, a via only on a
-  straight run either side of it -- and then HELD: the polish fits the
-  singles round them, and the snap lays the singles. A pair's two ends are
+  straight run either side of it -- going where it needs to, but each step
+  inside a single's share of a gap costing its length again, so it takes a
+  single's room only where its turns and dives need it -- and then HELD:
+  the polish fits the singles round them, and the snap lays the singles. A pair's two ends are
   END CONNECTORS (`pairs.end_legs`): two legs from its tips to a POSE on the
   grid, on a router heading, turning 45 degrees at most -- at each end the
   shortest whose legs clear everything. The pair step lays them as drawn
@@ -983,7 +985,9 @@ rules, and only then hands it on.
   order (`--mode seq`), the board written for `check_connected` and
   `check_drc` (`--write`) -- a lane the router reports routed is not proof
   its net connects; a lane whose routing raised is named, and the run exits
-  1.
+  1. The copper is written back in the board's own frame: a board whose
+  pairs read the other chirality is turned over for the braid, and every
+  lane is laid on the turned board.
 
 On the human's ends (`HHe`, K51: 51 nets, 45 singles and 3 pairs, 48 lanes)
 the plan passes every check with nothing waived, and it ROUTES. From the
@@ -1015,6 +1019,12 @@ length-matching meanders, and this route matches no lengths.
 all at once (86 vias); right, the human (88). The three pairs are yellow.
 SCK's legs swap sides at a crossover just past its tooth end (lower
 left). The human's meanders match lengths.*
+
+On our OWN ends -- the chain's fanout (`chain_k.sh`: our teeth and our
+berths) of K15 on `fb_t2q_pairs` (15 nets, two of them pairs: 13 lanes) --
+the plan passes in one round (12 s) and routes all at once, 13 of 13 in
+their bands, all 15 nets connected, DRC-clean: 16 vias on the board against
+the chain braid's 18 on the same fanout and the human's 22.
 
 ## The chain's other pieces
 
@@ -1372,6 +1382,15 @@ First, the whole-route plan (`whole_*.py`):
   itself: one elastic column per pitch rule, rather than one per tangent cut
   of it, would shrink it. A pair's grid search (its pose counters, its
   crossover) is still Python.
+
+- **awx in production.** The harness commands turn the caches on
+  (`TAUT_MEMO`, `STAGE_CACHE`, `PROBE_MEMO`) and keep them under
+  `awx/tmp` -- inside the installed plugin once awx ships -- and with
+  `TAUT_MEMO=1` the braid writes `<board>.taut.json` beside the board;
+  `evolve.py`, `evolve_movie.py`, `pack.py` and `replan.py` write their
+  runs under `awx/tmp` too. A production route through awx needs its caches
+  off or in a per-user cache directory with a size cap, and its outputs
+  beside the board or per user, not in the install directory.
 
 - **The ladder after the braid planner changes.** The tables above
   predate the berth rows, the rings' order and dips, the directional pair
