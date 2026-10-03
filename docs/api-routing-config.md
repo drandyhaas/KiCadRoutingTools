@@ -435,6 +435,7 @@ search speed on proximity-heavy boards.
 | `net_clearances` | `{}` | `{net_id: class_clearance_mm}` — per-net **net-class** clearance for KiCad's cross-class rule (see below) |
 | `net_clearance_floor` | `None` | Routing-side floor (max class clearance among the nets being routed this call); set by `set_net_clearances()` |
 | `layer_clearances` | `{}` | `{layer_name: mm}` — per-layer clearance from the board's `.kicad_dru` custom rules (#498). **Replacement** semantics, mirroring KiCad's precedence: on a ruled layer the value replaces the net/class-resolved pair clearance for every pair there (it may tighten *or* relax); unruled layers keep the normal resolution. Auto-read engine-side from the sibling `.kicad_dru` by **every routing step** — `batch_route`/`batch_route_diff_pairs`, plane create/repair, BGA/QFN fanout, oracle sub-routes (`kicad_dru.install_layer_clearances`, fab-floor pinned; path discovery via `PCBData.source_path` where the engine signature has no `input_file`) — there is deliberately **no CLI flag and no GUI control**; the rules file is the single source of truth and `check_drc`/staged kicad-cli grade from the same file. Resolve via `layer_clearance(layer, fallback)`; stack-spanning pairs (via barrels) use `stack_clearance(fallback)` = max over the rules and the fallback. Empty map = byte-identical to no rules |
+| `board_copper_layers` | `[]` | The board's copper layer list the `layer_clearances` map was expanded over (#980), recorded by `kicad_dru.install_layer_clearances`. `pad_pair_clearance` resolves a `*.Cu` pad's shared layers over it, as `check_drc` does; `config.layers` stands in when it is empty. A routed subset is not enough there: a through-hole pad on an unrouted, unruled inner layer keeps its class value. |
 | `track_clearances` | `{}` | `{net_id: mm}` — the track-to-track channel (#735): the effective per-obstacle map computed from the board's `.kicad_dru` TRACK-scoped rules (`A.NetClass=='X' && B.NetClass!='X' && A.Type=='track' && B.Type=='track'`) over THIS call's routed set. Applied by `track_obstacle_clearance(net_id, resolved)` — **raise-only** over the fully-resolved pair value, seg-vs-seg obstacle expansion only (pads/vias exempt), per-layer like every segment stamp. Auto-read engine-side (`kicad_dru.install_track_clearances`, same no-flag convention as `layer_clearances`); an explicit dict (tests/GUI) wins and stops the auto-read. Empty map short-circuits to byte-identical behavior. The PLACEMENT side reads the same rules pair-EXACTLY rather than through this map (`kicad_dru.track_pair_clearance`, the resolver `check_drc` and `placement/fanout_clearance`'s connector gate both call since #735); `kicad_dru.board_track_rules(pcb_data)` is the quiet reader for an engine that has no `GridRouteConfig` |
 | `rules` | `None` | The board's design rules resolved in **KiCad's own order** (`design_rules.DesignRules`), which the three maps above are being migrated onto (#530). Installed engine-side by `kicad_dru.install_layer_clearances` for both fronts, from the sibling `.kicad_pro` + `.kicad_dru` (`DesignRules.from_project`) or the live board (`from_pcbnew`) — same no-flag convention as `layer_clearances`. Carries `board_min` (the board's `min_*` constraints), `classes`, per-net `memberships`, the parsed custom `rules`, and the active `fab_floor`. `floor(kind, net_id, layer, type=)` is the smallest value DRC accepts for a kind on that net/layer (fab floor applied, `None` when nothing declares one) and backs `config.size_floors(...)`; `draw_size(...)` is the size to DRAW (explicit CLI value, else resolved class/rule `opt`, clamped into `[min, max]`). **`None` means "no rules declared" and every consumer must treat it as such** — a board with neither sibling still builds a table rather than inventing a Default class. The #498/#530 clearance caps reach `rules.min_clearance` ONLY (#900): the net classes keep the clearance the board was routed to |
 
@@ -492,18 +493,24 @@ run. Every such check prices through these methods:
 
 - `pair_clearance(net_a, net_b, layer=None, *, kind='layer', base=None)` is
   `max(base, classA, classB)`, with `base` = `config.clearance` when None. Then:
-  - `kind='layer'` (two items meeting on one layer: track–via, track–pad) applies
-    the `.kicad_dru` rule for `layer`, which **replaces** the value.
+  - `kind='layer'` (two items meeting on one layer: track–via) applies the
+    `.kicad_dru` rule for `layer`, which **replaces** the value. A pad is always
+    `pad_pair_clearance`, because only it applies the pad's override.
   - `kind='track'` (track–track) does the same, then the #735 track rule raises it.
+    The router reads its per-obstacle-net over-approximation of that rule, and
+    prices nameless (net 0) copper at the widest track rule.
   - `kind='stack'` (via–via) takes the max over the stack's rules.
   These are `check_drc`'s `_pair_cl`, `_track_pair_cl` and `_stack_cl`.
 - `pad_pair_clearance(pad, other_net, layer=None, *, other_pad=None, base=None,
-  board_copper=None, override=True)` mirrors `check_drc._pad_pair_cl`. It takes the
-  pair value, then:
+  board_copper=None, override=True)` mirrors `check_drc._pad_pair_cl`. A `*.Cu`
+  pad's layers expand over `board_copper`, else `board_copper_layers` (the board's
+  copper list, recorded by `install_layer_clearances`), else `config.layers`.
+  It takes the pair value, then:
   - the rule on `layer` (pad vs track), or else `check_drc.pads_shared_layer_clearance`
     over the layers the two coppers share (pad vs via, pad vs pad);
   - then a pad / footprint override, which **replaces** the value, floored at the
-    board's `min_clearance`.
+    board's `min_clearance` once `install_layer_clearances` has installed the
+    board's rules (`config.rules`).
 - `max_pair_clearance(base=None)` is an upper bound over every pair, for a
   prefilter radius. `pair_clearance_inert()` is True when nothing is declared.
 - `net_clearances_by_name(nets)` returns the class map keyed by net name. The KiCad

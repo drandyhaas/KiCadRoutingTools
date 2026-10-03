@@ -49,6 +49,8 @@ BASE = 0.2
 TYPES = {
     'track': {'segment-segment', 'segment-crossing',
               'segment-segment-track-rule'},
+    'track_net0': {'segment-segment', 'segment-crossing',
+                   'segment-segment-track-rule'},
     'track_via': {'via-segment'},
     'via_via': {'via-via'},
     'pad_track': {'pad-segment'},
@@ -78,16 +80,28 @@ SHAPES = {
         dru=('(rule "w" (constraint clearance (min 0.5mm)) (condition '
              '"A.Type == \'track\' && B.Type == \'track\' && '
              'A.NetClass == \'W\'"))')),
+    # member-vs-NON-member only (#735 `other_only`): the router's map is
+    # per obstacle net and depends on which side the routed set is on
+    'track_rule_other_only': dict(
+        classes=[WIDE], patterns=[('A', 'W')],
+        dru=('(rule "w" (constraint clearance (min 0.5mm)) (condition '
+             '"A.Type == \'track\' && B.Type == \'track\' && '
+             'A.NetClass == \'W\' && B.NetClass != \'W\'"))')),
 }
 
 
-def _probe(kind, gap, pad_clr=None, layer='F.Cu', th=False):
+def _probe(kind, gap, pad_clr=None, layer='F.Cu', th=False, other_clr=None):
     """write_board geometry kwargs for one probe pair at edge gap `gap`.
     Net A (1) is the first item, net B (2) the second."""
     if kind == 'track':
         y2 = 10 + W + gap
         return dict(segments=[(5, 10, 15, 10, W, layer, 1),
                               (5, y2, 15, y2, W, layer, 2)])
+    if kind == 'track_net0':
+        # nameless copper: in no class, absent from the router's track map
+        y2 = 10 + W + gap
+        return dict(segments=[(5, 10, 15, 10, W, layer, 1),
+                              (5, y2, 15, y2, W, layer, 0)])
     if kind == 'track_via':
         # via (B) at (10, 10), size 0.6; a track (A) below it
         y = 10 + 0.3 + gap + W / 2
@@ -107,7 +121,8 @@ def _probe(kind, gap, pad_clr=None, layer='F.Cu', th=False):
                     vias=[(10, 10 + 0.5 + gap + 0.3, 0.6, 0.3, 2)])
     if kind == 'pad_pad':
         other = {'ref': 'U2', 'x': 10, 'y': 10 + 1.0 + gap, 'net_id': 2,
-                 'net_name': NETS[2], 'size': 1.0}
+                 'net_name': NETS[2], 'size': 1.0,
+                 'pad_clearance': other_clr}
         return dict(footprints=[pad, other])
     raise AssertionError(kind)
 
@@ -123,9 +138,10 @@ _TH_FP = '''
   )'''
 
 
-def _write(board, shape, kind, gap, pad_clr=None, layer='F.Cu', th=False):
+def _write(board, shape, kind, gap, pad_clr=None, layer='F.Cu', th=False,
+           other_clr=None, **_router_only):
     kw = dict(SHAPES[shape])
-    kw.update(_probe(kind, gap, pad_clr, layer, th))
+    kw.update(_probe(kind, gap, pad_clr, layer, th, other_clr))
     write_board(board, **kw)
     if th:
         # A through-hole `*.Cu` pad: write_board's footprints are SMD only.
@@ -136,19 +152,21 @@ def _write(board, shape, kind, gap, pad_clr=None, layer='F.Cu', th=False):
             fh.write(text[:cut] + _TH_FP + '\n)\n')
 
 
-def _router_config(board):
-    """The router's view of `board`, built by the production resolvers."""
+def _router_config(board, routed=(1,), cfg_layers=('F.Cu', 'B.Cu')):
+    """The router's view of `board`, built by the production resolvers, for a
+    call routing `routed` on `cfg_layers`."""
     from kicad_parser import parse_kicad_pcb
     from routing_config import GridRouteConfig
     from list_nets import net_clearance_map_by_id
     from kicad_dru import install_layer_clearances, install_track_clearances
     pcb = parse_kicad_pcb(board)
-    cfg = GridRouteConfig(clearance=BASE, layers=['F.Cu', 'B.Cu'])
+    cfg = GridRouteConfig(clearance=BASE, layers=list(cfg_layers))
     names = {nid: n.name for nid, n in pcb.nets.items() if n.name}
     cfg.set_net_clearances(net_clearance_map_by_id(board, names),
-                           routed_net_ids=[1])
+                           routed_net_ids=list(routed))
     install_layer_clearances(cfg, None, board, pcb)
-    install_track_clearances(cfg, None, board, pcb, routed_net_ids=[1])
+    install_track_clearances(cfg, None, board, pcb,
+                             routed_net_ids=list(routed))
     return cfg, pcb
 
 
@@ -156,15 +174,20 @@ def _pad(pcb, ref='U1'):
     return pcb.footprints[ref].pads[0]
 
 
-def _required(kind, shape, td, pad_clr=None, layer='F.Cu', th=False):
+def _required(kind, shape, td, pad_clr=None, layer='F.Cu', th=False,
+              other_clr=None, routed=(1,), cfg_layers=('F.Cu', 'B.Cu'),
+              no_cu=False):
     """The helper's answer for the row's pair, read off a probe board at a
-    nominal gap (the resolvers read rules, not geometry)."""
+    nominal gap (the resolvers read rules, not geometry). `no_cu` leaves
+    `board_copper` to the helper's own fallback."""
     board = os.path.join(td, 'resolve.kicad_pcb')
-    _write(board, shape, kind, 1.0, pad_clr, layer, th)
-    cfg, pcb = _router_config(board)
-    cu = list(pcb.board_info.copper_layers)
+    _write(board, shape, kind, 1.0, pad_clr, layer, th, other_clr)
+    cfg, pcb = _router_config(board, routed, cfg_layers)
+    cu = None if no_cu else list(pcb.board_info.copper_layers)
     if kind == 'track':
         return cfg.pair_clearance(1, 2, layer, kind='track')
+    if kind == 'track_net0':
+        return cfg.pair_clearance(1, 0, layer, kind='track')
     if kind == 'track_via':
         return cfg.pair_clearance(1, 2, layer)
     if kind == 'via_via':
@@ -206,6 +229,12 @@ ROWS = [
     ('track_dru_relaxes_below_class', 'track', 'dru_relaxes_f_below_class',
      0.15, {}),
     ('track_track_rule', 'track', 'track_rule', 0.5, {}),
+    ('track_rule_other_only_routed_member', 'track', 'track_rule_other_only',
+     0.5, {'routed': (1,)}),
+    ('track_rule_other_only_routed_non_member', 'track',
+     'track_rule_other_only', 0.5, {'routed': (2,)}),
+    ('track_rule_other_only_nameless_copper', 'track_net0',
+     'track_rule_other_only', 0.5, {'routed': (1,)}),
     ('track_via_inert', 'track_via', 'inert', 0.2, {}),
     ('track_via_class_on_b', 'track_via', 'class_on_b', 0.35, {}),
     ('track_via_dru_relaxes', 'track_via', 'dru_relaxes_f_below_class', 0.15,
@@ -229,10 +258,18 @@ ROWS = [
     ('pad_pad_class_on_both', 'pad_pad', 'class_on_both', 0.35, {}),
     ('pad_pad_override_replaces', 'pad_pad', 'class_on_both', 0.15,
      {'pad_clr': 0.15}),
+    ('pad_pad_override_on_the_other_pad', 'pad_pad', 'class_on_both', 0.15,
+     {'other_clr': 0.15}),
     ('th_pad_via_partial_rule', 'pad_via', 'dru_tightens_f', 0.3,
      {'th': True}),
     ('th_pad_track_unruled_layer', 'pad_track', 'dru_tightens_f', 0.2,
      {'th': True, 'layer': 'B.Cu'}),
+    # routing F.Cu only, no board_copper passed: the TH pad's layers are the
+    # BOARD's {F, B} (F ruled 0.15, B not -> the 0.35 class stands), not the
+    # routed {F} (all ruled -> 0.15)
+    ('th_pad_via_board_copper_not_routed_layers', 'pad_via',
+     'dru_relaxes_f_below_class', 0.35,
+     {'th': True, 'cfg_layers': ('F.Cu',), 'no_cu': True}),
 ]
 
 

@@ -556,6 +556,15 @@ def min_rule_clearance(board_path: str) -> Optional[float]:
     return min(lmap.values()) if lmap else None
 
 
+def _record_board_copper(config, pcb_data) -> None:
+    """#980: keep the board's copper list on `config` for
+    `GridRouteConfig.pad_pair_clearance`; untouched without a board."""
+    copper = list(getattr(getattr(pcb_data, 'board_info', None),
+                          'copper_layers', None) or [])
+    if copper:
+        config.board_copper_layers = copper
+
+
 def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None):
     """Resolve and install the #498 per-layer map on ``config``, engine-side so
     BOTH fronts inherit it (the CLI passes nothing; the GUI passes nothing --
@@ -568,6 +577,7 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
     if layer_clearances is not None:
         config.layer_clearances = dict(layer_clearances)
         _install_rules_quietly(config, input_file, pcb_data)
+        _record_board_copper(config, pcb_data)
         return
     if not input_file:
         # Engines whose signatures carry no input path (planes, fanout, oracle
@@ -586,6 +596,10 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
         floor = None
     lmap, notes = read_board_layer_clearances(input_file or "", copper,
                                               fab_clearance_floor=floor)
+    # #980: the copper list the map is expanded over, for the pad-pair
+    # resolver (a `*.Cu` pad's shared layers are the BOARD's, not the
+    # routed subset's).
+    config.board_copper_layers = list(copper)
     # One announcement per (board, map) per process -- plane/fanout runs build
     # several configs for the same board and would repeat it.
     _key = (os.path.abspath(input_file) if input_file else "",

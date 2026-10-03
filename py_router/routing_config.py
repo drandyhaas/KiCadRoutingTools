@@ -339,6 +339,12 @@ class GridRouteConfig:
     # the rules file is the one source of truth, and the graders (check_drc,
     # staged kicad-cli) read the same file.
     layer_clearances: Dict[str, float] = field(default_factory=dict)
+    # The BOARD's copper layer list the layer map above was expanded over
+    # (#980): `pad_pair_clearance` resolves a `*.Cu` pad's shared layers over
+    # it, as check_drc does. Set by kicad_dru.install_layer_clearances;
+    # `config.layers` stands in when empty (a routed subset is not enough: a
+    # pad on an unrouted, unruled inner layer keeps its class value).
+    board_copper_layers: List[str] = field(default_factory=list)
     # Track-to-track clearance from the board's .kicad_dru (#735),
     # {obstacle_net_id: mm} -- the EFFECTIVE per-obstacle map for this call's
     # routed set (kicad_dru.effective_track_clearances). RAISE-ONLY, applied
@@ -512,13 +518,17 @@ class GridRouteConfig:
         caller that was handed a clearance passes it), `self.clearance` when
         None. Then the two nets' classes (`max`), then:
 
-        * kind='layer' -- the two items meet on ONE layer (track vs via, track
-          vs pad): the #498 rule for `layer` REPLACES the value, as check_drc's
-          `_pair_cl(a, b, layer)` does;
+        * kind='layer' -- the two items meet on ONE layer (track vs via): the
+          #498 rule for `layer` REPLACES the value, as check_drc's
+          `_pair_cl(a, b, layer)` does. A PAD is `pad_pair_clearance`, which
+          also applies the pad's override;
         * kind='track' -- track vs track: 'layer', then the #735 track rule
           raises it (check_drc's `_track_pair_cl`). The router side reads the
           per-obstacle-net map the copper was routed against, as
-          `rip_restore._conflict_sweep` documents;
+          `rip_restore._conflict_sweep` documents -- an over-approximation of
+          check_drc's pair-exact rule. Nameless copper (net 0) is in no class
+          and missing from that map, so it is priced at the widest track rule
+          (check_drc binds a member-vs-non-member rule against it);
         * kind='stack' -- via vs via, which meet on every layer: the max over
           the stack (check_drc's `_stack_cl`).
 
@@ -542,6 +552,10 @@ class GridRouteConfig:
         if layer is not None:
             clr = self.layer_clearance(layer, clr)
         if kind == 'track' and self.track_clearances:
+            if not net_a or not net_b:
+                widest = max(self.track_clearances.values())
+                if widest > clr:
+                    clr = widest
             clr = max(self.track_obstacle_clearance(net_a, clr),
                       self.track_obstacle_clearance(net_b, clr))
         return clr
@@ -554,8 +568,9 @@ class GridRouteConfig:
         (`_pad_pair_cl`): the pair value, then the #498 rule on `layer` when
         the pad meets the other item on one layer (a track), or else check_drc's
         own `pads_shared_layer_clearance` over the layers the two coppers share
-        (a via, or `other_pad`) -- `*.Cu` expands over `board_copper`, the
-        config's layers when None. Last, a pad / footprint clearance OVERRIDE
+        (a via, or `other_pad`) -- `*.Cu` expands over `board_copper`, else
+        the board copper list `install_layer_clearances` recorded, else the
+        config's layers. Last, a pad / footprint clearance OVERRIDE
         replaces the value (`pad_override_clearance`); `override=False` returns
         the value before it, for a caller that keys a margin on whether one
         applied."""
@@ -565,7 +580,8 @@ class GridRouteConfig:
             eff = self.layer_clearance(layer, eff)
         elif self.layer_clearances:
             from check_drc import pads_shared_layer_clearance, pad_copper_layers
-            cu = list(board_copper) if board_copper else list(self.layers)
+            cu = list(board_copper or self.board_copper_layers
+                      or self.layers)
             eff = pads_shared_layer_clearance(
                 eff, self.layer_clearances, pad_copper_layers(pad, cu),
                 pad_copper_layers(other_pad, cu) if other_pad is not None
