@@ -1086,3 +1086,48 @@ rendered stage3d; there was never a dialog control or settings key for a
 layout or the iso panel, and settings_persistence is untouched. A retired
 knob still set in the environment is now said once on stderr
 (frame_layout.warn_retired_knobs) instead of choosing a layout.
+
+NOTE 2026-10-04 (#980 pairwise clearance + #1105 stage-3 jitter; not an
+audit, so the first token above is unchanged).
+
+The GUI-side changes on that branch:
+  * gui_utils.run_kicad_oracle_on_live_board takes net_clearances_by_name
+    and forwards it to oracle_reconnect. swig_gui hands it over from the
+    route payload's plane_finalize_oracle['net_clearances_by_name'], which
+    route.py posts. Every CLI oracle call passes the same map, keyed by
+    NAME because the GUI oracle re-parses a pcbnew save whose net ids
+    differ (94 of flat_hierarchy's 111). Pinned by
+    tests/test_980_oracle_class_map.py and test_980_oracle_behaviour.py.
+  * swig_gui._sync_pcb_data_from_board calls
+    rip_up_reroute.forget_input_copper, so each GUI step records the board
+    it was handed as its input copper, as a CLI step does by parsing the
+    previous step's file. Without the forget, the dialog's single pcb_data
+    kept the first step's record (test_980_restore_pairwise, mark case).
+  * batch_route and repair_planes gain an INTERNAL input_copper_keys kwarg.
+    Only the reconcile sub-run and the finalize hand-off set it; there is
+    no flag or control. test_engine_kwarg_parity: OK.
+  * #1105 is seeder-only: place_seed is a REFUSED tool in
+    manifest_to_plan, so it has no GUI surface.
+
+GATES RUN (Windows, KiCad 10.0.0, wx 4.2.2):
+  * test_gui_engine_parity: PARITY, with copper sets identical (802
+    segments, 128 vias). Both fronts: drc 0, fully connected, kicad
+    unconnected 0.
+  * test_gui_livechain_rp2350: PASS.
+  * test_engine_kwarg_parity: OK on both classes (class 2 run under
+    KiCad's python).
+  * test_cli_defaults_parity: 100 defaults, 0 disagreements.
+  * test_manifest_plan_parity: OK.
+  * test_cli_postpass_coverage: 14 registered, 22 in active use, 2
+    CLI-only, 0 failures.
+
+The first two graded NOTHING on this machine before this branch's commit
+"gui_parity: grade under KiCad's own python". Their graders
+ran as a `python3` child of KiCad's python, which inherits KiCad's
+PYTHONUSERBASE and cannot import numpy, so every board read drc=-1.
+
+An earlier entry above diagnosed the same trap for the live-chain gate and
+worked around it by hand. The gates now run their graders under
+sys.executable themselves, and test_gui_engine_parity had the same bug
+(it read conn_full=False as well). Re-run with the fix at upstream/main,
+both gates read the same as above.
