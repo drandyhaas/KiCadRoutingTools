@@ -1,0 +1,295 @@
+"""The #980 mutation battery: pricing foreign copper at check_drc's pairwise
+clearance, at every restore and admission check.
+
+One row per load-bearing line, each reverting it; every row names the test
+that must fail. **THE ROWS TO LOOK AT FIRST if this file ever goes red**
+restore a defect somebody measured:
+
+  * `restore-reverts-to-flat` -- #980 itself: a restore 0.25mm from a 0.35
+    class was admitted at the flat 0.2;
+  * `box-back-to-1mm` -- a 2mm power track's collision past the old fixed
+    1mm prefilter box was never tested;
+  * `board-copper-fallback` -- the phase verifier: a through-hole pad on a
+    board routed on a subset of its layers priced at a relax rule (0.15)
+    where check_drc grades its class (0.35).
+
+NOT named `test_*.py`, so `tests/run_all.py` does not collect it: it REWRITES
+the sources in place. One writer per tree. It refuses to start on a dirty
+target, and it runs every witness UNMUTATED first -- a witness that already
+fails would score every row as killed.
+
+    python3 tests/mutate_980.py
+    python3 tests/mutate_980.py --row restore-reverts-to-flat
+
+A row is KILLED by a failure or an error. An anchor that does not match
+EXACTLY ONCE is BROKEN, never skipped; `preflight()` runs right after `ROWS`.
+Edits are `str.replace(old, new, 1)`; anchors are LF and translated to the
+target's own ending.
+
+Not covered by a row, and why:
+  * the oracle's per-link `net_clearance_floor`: it only changes copper
+    inside a kicad-cli oracle run, which no unit test drives; the re-keying
+    it rests on is row `oracle-map-not-rekeyed`;
+  * `pair-args-swapped` SURVIVES by design: the pair value is symmetric in
+    its two nets, so swapping them is an equivalent mutant (a change
+    detector for the day it is not).
+"""
+from __future__ import annotations
+
+import argparse
+import io
+import os
+import subprocess
+import sys
+
+_TESTS = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_TESTS)
+_PR = os.path.join(_ROOT, 'py_router')
+_GUI = os.path.join(_ROOT, 'kicad_routing_plugin')
+
+TARGETS = {
+    'rc': os.path.join(_PR, 'routing_config.py'),
+    'kd': os.path.join(_PR, 'kicad_dru.py'),
+    'rr': os.path.join(_PR, 'rip_up_reroute.py'),
+    'route': os.path.join(_PR, 'route.py'),
+    'pbd': os.path.join(_PR, 'plane_blocker_detection.py'),
+    'ko': os.path.join(_PR, 'kicad_oracle.py'),
+    'lso': os.path.join(_PR, 'layer_swap_optimization.py'),
+    'dpm': os.path.join(_PR, 'diff_pair_multipoint.py'),
+    'lm': os.path.join(_PR, 'length_matching.py'),
+    'sls': os.path.join(_PR, 'stub_layer_switching.py'),
+    'nr': os.path.join(_PR, 'net_rescue.py'),
+    'rp': os.path.join(_PR, 'repair_planes.py'),
+    'gu': os.path.join(_GUI, 'gui_utils.py'),
+}
+
+
+def _t(name, *cases):
+    return (os.path.join(_TESTS, name),) + cases
+
+
+PAR = _t('test_980_pair_clearance_parity.py')
+RES = _t('test_980_restore_pairwise.py')
+ORC = _t('test_980_oracle_class_map.py')
+GATE = _t('test_980_no_flat_clearance_gate.py')
+T_ADM = 'test_980_admission_pairwise.py'
+
+# (name, target, old, new, tests, expect)
+ROWS = [
+    # ---- the helper (routing_config) ------------------------------------
+    ('class-term-dropped', 'rc',
+     "            if a is not None and a > clr:",
+     "            if False:",
+     (PAR,), 'KILLED'),
+    ('stack-rule-dropped', 'rc',
+     "            return self.stack_clearance(clr)",
+     "            return clr",
+     (PAR,), 'KILLED'),
+    ('layer-replacement-dropped', 'rc',
+     "            clr = self.layer_clearance(layer, clr)",
+     "            pass",
+     (PAR,), 'KILLED'),
+    ('track-raise-dropped', 'rc',
+     "        if kind == 'track' and self.track_clearances:",
+     "        if False:",
+     (PAR,), 'KILLED'),
+    ('nameless-copper-widest-dropped', 'rc',
+     "            if not net_a or not net_b:",
+     "            if False:",
+     (PAR,), 'KILLED'),
+    ('pad-override-dropped', 'rc',
+     "        return self.pad_override_clearance(eff, pad, other_pad) if override \\",
+     "        return eff if override \\",
+     (PAR,), 'KILLED'),
+    ('pad-shared-layers-dropped', 'rc',
+     "            eff = pads_shared_layer_clearance(",
+     "            eff = (lambda *a: a[0])(",
+     (PAR,), 'KILLED'),
+    ('board-copper-fallback', 'rc',
+     "            cu = list(board_copper or self.board_copper_layers",
+     "            cu = list(board_copper or self.layers or self.board_copper_layers",
+     (PAR,), 'KILLED'),
+    ('board-copper-not-recorded', 'kd',
+     "    config.board_copper_layers = list(copper)",
+     "    pass",
+     (PAR,), 'KILLED'),
+    # ---- the restore family ----------------------------------------------
+    ('restore-reverts-to-flat', 'rr',
+     "    _pc = getattr(config, 'pair_clearance', None)",
+     "    _pc = None",
+     (RES,), 'KILLED'),
+    ('restore-prices-by-first-own-net', 'rr',
+     "                else _clr(s.net_id, o.net_id, s.layer, 'track'))",
+     "                else _clr(next(iter(own)), o.net_id, s.layer, 'track'))",
+     (RES,), 'KILLED'),
+    ('box-back-to-1mm', 'rr',
+     "    margin = max(1.0, own_r + reach)",
+     "    margin = 1.0",
+     (RES,), 'KILLED'),
+    ('force-restore-loses-config', 'route',
+     "            skip_net_ids=_fr_new_copper, config=config)",
+     "            skip_net_ids=_fr_new_copper)",
+     (GATE,), 'KILLED'),
+    ('tap-piece-restore-flat', 'pbd',
+     "    if (_pc is None or piece_net is None or plane_net is None",
+     "    if (True or _pc is None or piece_net is None or plane_net is None",
+     (RES,), 'KILLED'),
+    # ---- the admission sweep ----------------------------------------------
+    ('sliver-weld-track-flat', 'ko',
+     "        need = reach + s.width / 2.0 + config.pair_clearance(",
+     "        need = reach + s.width / 2.0 + clr + 0 * config.pair_clearance(",
+     (_t(T_ADM, 'sliver'),), 'KILLED'),
+    ('stitch-via-pad-flat', 'ko',
+     "                    + config.pad_pair_clearance(pd2, net_id,",
+     "                    + config.clearance + 0 * config.pad_pair_clearance(pd2, net_id,",
+     (_t(T_ADM, 'stitching'),), 'KILLED'),
+    ('swap-via-track-flat', 'lso',
+     "            need = vr + sg.width / 2.0 + config.pair_clearance(",
+     "            need = vr + sg.width / 2.0 + config.clearance + 0 * config.pair_clearance(",
+     (_t(T_ADM, 'swap'),), 'KILLED'),
+    ('swap-via-margin-removed', 'lso',
+     "                v.net_id, sg.net_id, sg.layer) - margin",
+     "                v.net_id, sg.net_id, sg.layer)",
+     (_t(T_ADM, 'swap'),), 'KILLED'),
+    ('fans-fit-via-flat', 'dpm',
+     "        return (clearance if a == b",
+     "        return (clearance if True",
+     (_t(T_ADM, 'fans'),), 'KILLED'),
+    ('meander-track-flat', 'lm',
+     "                + config.pair_clearance(net_id, o_net, layer, kind='track')",
+     "                + config.clearance",
+     (_t(T_ADM, 'meander_amplitude'),), 'KILLED'),
+    ('meander-query-radius-narrow', 'lm',
+     "                _q_req + _FOREIGN_WIDTH_SLACK",
+     "                required_clearance + _FOREIGN_WIDTH_SLACK",
+     (_t(T_ADM, 'query_reaches'),), 'KILLED'),
+    ('stub-pads-config-width', 'sls',
+     "                if best < seg_half + config.pad_pair_clearance(",
+     "                if best < config.track_width / 2 + config.pad_pair_clearance(",
+     (_t(T_ADM, 'stub_pad_check'),), 'KILLED'),
+    ('rescue-leg-flat', 'nr',
+     "    _flat = config is None or config.pair_clearance_inert()",
+     "    _flat = True",
+     (_t(T_ADM, 'rescue_leg'),), 'KILLED'),
+    ('cap-conflicts-flat', 'nr',
+     "                        + config.pad_pair_clearance(p2, net_id,",
+     "                        + config.clearance + 0 * config.pad_pair_clearance(p2, net_id,",
+     (_t(T_ADM, 'cap_relocation'),), 'KILLED'),
+    # ---- the oracle and both fronts ----------------------------------------
+    ('oracle-map-not-rekeyed', 'ko',
+     "        c = by_name.get(getattr(net, 'name', None))",
+     "        c = by_name.get(nid)",
+     (ORC,), 'KILLED'),
+    ('gui-forward-dropped', 'gu',
+     "            net_clearances_by_name=net_clearances_by_name)",
+     "            net_clearances_by_name=None)",
+     (ORC,), 'KILLED'),
+    ('payload-key-dropped', 'route',
+     "                    'net_clearances_by_name':",
+     "                    'net_clearances_by_name_x':",
+     (ORC,), 'KILLED'),
+    ('repair-main-map-dropped', 'rp',
+     "                                net_clearances_by_name=LAST_NET_CLEARANCES_BY_NAME)",
+     "                                net_clearances_by_name=None)",
+     (ORC,), 'KILLED'),
+    # ---- a change detector ---------------------------------------------------
+    ('pair-args-swapped', 'ko',
+     "                + config.pair_clearance(net_id, s2.net_id, s2.layer)):",
+     "                + config.pair_clearance(s2.net_id, net_id, s2.layer)):",
+     (_t(T_ADM, 'stitching'),), 'SURVIVED'),
+]
+
+sys.path.insert(0, _TESTS)
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
+
+
+def _dirty(path):
+    p = subprocess.run(['git', 'status', '--porcelain', '--', path],
+                       capture_output=True, text=True, cwd=_ROOT)
+    return bool(p.stdout.strip())
+
+
+def _run_tests(tests):
+    failed = []
+    for t in tests:
+        p = subprocess.run([sys.executable, '-X', 'utf8', t[0]] + list(t[1:]),
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', timeout=2400, cwd=_ROOT)
+        if p.returncode != 0:
+            failed.append((os.path.basename(t[0]) + ':' + ','.join(t[1:]),
+                           p.returncode,
+                           [ln.strip()[:90] for ln in
+                            ((p.stdout or '') + (p.stderr or '')).splitlines()
+                            if 'FAIL' in ln or 'Error' in ln][:2]))
+    return failed
+
+
+def run(only=None):
+    rows = [r for r in ROWS if only is None or r[0] == only]
+    if not rows:
+        print('no row named %r' % only)
+        return 1
+    for path in TARGETS.values():
+        if _dirty(path):
+            print('REFUSING: %s has uncommitted changes. Commit or stash '
+                  'first -- this battery restores by overwriting.'
+                  % os.path.basename(path))
+            return 2
+    # THE UNMUTATED BASELINE: every witness must pass as the code stands,
+    # or a row it "kills" proves nothing.
+    witnesses = sorted({t for r in rows for t in r[4]})
+    base_fail = _run_tests(witnesses)
+    if base_fail:
+        print('REFUSING: witnesses fail UNMUTATED -- %s' % base_fail)
+        return 2
+    print('baseline: %d witnesses pass unmutated' % len(witnesses))
+    orig = {k: io.open(v, encoding='utf-8', newline='').read()
+            for k, v in TARGETS.items()}
+    results = []
+    try:
+        for name, tgt, old, new, tests, expect in rows:
+            path = TARGETS[tgt]
+            base = orig[tgt]
+            o, n = old, new
+            if '\r\n' in base:
+                o, n = o.replace('\n', '\r\n'), n.replace('\n', '\r\n')
+            if base.count(o) != 1 or o == n:
+                results.append((name, 'BROKEN', expect,
+                                ['anchor matched %d times' % base.count(o)]))
+                continue
+            io.open(path, 'w', encoding='utf-8', newline='').write(
+                base.replace(o, n, 1))
+            try:
+                failed = _run_tests(tests)
+            finally:
+                io.open(path, 'w', encoding='utf-8', newline='').write(base)
+            results.append((name, 'KILLED' if failed else 'SURVIVED',
+                            expect, [str(f)[:150] for f in failed[:2]]))
+            print('%-36s %s' % (name, results[-1][1]), flush=True)
+    finally:
+        for k, v in TARGETS.items():
+            io.open(v, 'w', encoding='utf-8', newline='').write(orig[k])
+    wrong = [r for r in results if r[1] != r[2]]
+    print('')
+    for name, verdict, expect, why in results:
+        print('%-36s %-9s%s' % (name, verdict, '' if verdict == expect else
+                                '   <-- WRONG, expected %s' % expect))
+        for w in why:
+            print('      %s' % w)
+    print('\n%d rows: %d killed, %d survived, %d broken'
+          % (len(results), sum(r[1] == 'KILLED' for r in results),
+             sum(r[1] == 'SURVIVED' for r in results),
+             sum(r[1] == 'BROKEN' for r in results)))
+    return 1 if wrong else 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap.add_argument('--row', default=None, help='run only this row')
+    a = ap.parse_args()
+    return run(a.row)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
