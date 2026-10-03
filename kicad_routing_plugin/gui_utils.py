@@ -996,7 +996,8 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                                    power_net_widths=None,
                                    net_track_widths=None,
                                    net_layer_widths=None,
-                                   progress_callback=None):
+                                   progress_callback=None,
+                                   net_clearances_by_name=None):
     """Staged-save kicad-oracle recheck against the LIVE pcbnew board.
 
     The CLI plane fronts (and route.py's plane finalize, #562) finish with
@@ -1010,6 +1011,10 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
     refill zones AFTER this returns (the routed links change the fill).
     Returns the oracle result dict, or None when skipped (no kicad-cli).
     Skips quietly on any error: the recheck is an earner, never a blocker.
+
+    `net_clearances_by_name` (#980) is the engine run's resolved class map by
+    net NAME, forwarded to the oracle, which re-keys it to the staged save's
+    own net ids.
     """
     try:
         import os
@@ -1099,7 +1104,8 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
             hole_to_hole_clearance=(hole_to_hole_clearance
                                     if hole_to_hole_clearance is not None
                                     else defaults.HOLE_TO_HOLE_CLEARANCE),
-            progress_callback=progress_callback)
+            progress_callback=progress_callback,
+            net_clearances_by_name=net_clearances_by_name)
         from copy_board import SIBLING_EXTS as _sib_exts
         for _p in (tmp,) + tuple(os.path.splitext(tmp)[0] + _e
                                  for _e in _sib_exts):

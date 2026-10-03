@@ -4903,12 +4903,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 power_net_widths=dict(
                                     getattr(config, 'power_net_widths',
                                             None) or {}))
+                            # #980: the board's .kicad_dru layer rules, as
+                            # the other oracle configs install them, and the
+                            # run's class map by name (the oracle re-parses).
+                            from kicad_dru import install_layer_clearances
+                            install_layer_clearances(_cap_cfg, None,
+                                                     input_file, None)
                             _orc_cap = oracle_reconnect(
                                 output_file, _mvnames, _cap_cfg,
                                 track_via_clearance=config.clearance,
                                 hole_to_hole_clearance=(
                                     config.hole_to_hole_clearance),
-                                project_from=input_file)
+                                project_from=input_file,
+                                net_clearances_by_name=(
+                                    config.net_clearances_by_name(
+                                        pcb_data.nets)))
                             # The FOURTH oracle_reconnect consumer, and the one
                             # #713 item 3's first pass missed. Without this it
                             # printed "0 link(s) welded, -1 remaining" for an
@@ -5435,6 +5444,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         getattr(config, 'net_track_widths', None) or {}),
                     'net_layer_widths': dict(
                         getattr(config, 'net_layer_widths', None) or {}),
+                    # #980: the run's resolved class map, by NAME -- the
+                    # applier's staged save numbers its nets afresh.
+                    'net_clearances_by_name':
+                        config.net_clearances_by_name(pcb_data.nets),
                 }
                 # Hands-off for the reconcile comes from the FILL-AWARE
                 # checker instead of the oracle verdict: zone nets the model
@@ -5545,7 +5558,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     hole_to_hole_clearance=config.hole_to_hole_clearance,
                     progress_callback=_opc9,
                     cancel_check=cancel_check,
-                    project_from=input_file)
+                    project_from=input_file,
+                    net_clearances_by_name=config.net_clearances_by_name(
+                        pcb_data.nets))
                 print(f"  [finalize timing] oracle leg: "
                       f"{_time9.time() - _t9:.1f}s")
                 # #713 item 3: this leg had NO summary key at all, so an

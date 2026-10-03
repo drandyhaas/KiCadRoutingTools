@@ -1566,6 +1566,18 @@ def _via_drill_radius(via, fallback: float) -> float:
     return d / 2.0
 
 
+def _oracle_class_map(pcb_data, by_name) -> dict:
+    """#980: a name-keyed class map re-keyed to `pcb_data`'s own net ids --
+    the ids of the board this oracle round just parsed, which need not be the
+    caller's."""
+    out = {}
+    for nid, net in pcb_data.nets.items():
+        c = by_name.get(getattr(net, 'name', None))
+        if c:
+            out[nid] = c
+    return out
+
+
 def _stitch_via_clear(pcb_data, net_id, x, y, config, h2h) -> bool:
     """#649b: may a stitching via of `net_id` (config.via_size /
     config.via_drill, every routed layer) go at (x, y)? False when it would
@@ -1618,9 +1630,19 @@ def oracle_reconnect(board_file: str, net_names, config,
                      verbose: bool = False,
                      progress_callback=None,
                      cancel_check=None,
-                     project_from: str = None) -> dict:
+                     project_from: str = None,
+                     net_clearances_by_name: dict = None) -> dict:
     """Route the exact missing links kicad-cli reports for `net_names` on
     `board_file`, in place, until KiCad is satisfied or no progress.
+
+    `net_clearances_by_name` (#980) is the caller's resolved net-class map
+    ({net name: mm}, after its --clearance-ceiling clamp). It is keyed by NAME
+    because this function re-parses `board_file` every round and, on the GUI
+    path, that file is a pcbnew save whose nets are numbered afresh -- an
+    id-keyed map would land on the wrong nets. It is re-keyed after each
+    parse, so the welds' obstacle maps and admission checks price each
+    foreign net at its class (`pair_clearance`), and each link's own floor
+    is its net's class. None or {}: the flat clearance, as before.
 
     progress_callback(current, total, label) fires per round (0, 0, label:
     the kicad-cli DRC run is indeterminate) and per link (k, N, label) --
@@ -1694,6 +1716,12 @@ def oracle_reconnect(board_file: str, net_names, config,
             config = replace(config, board_edge_clearance=_eff_edge)
     except Exception:
         pass
+
+    _ncl_by_name = dict(net_clearances_by_name or {})
+    if _ncl_by_name:
+        # A private copy: the per-round map and the per-link floor below are
+        # mutated, and the caller's config must not carry them away.
+        config = replace(config)
 
     names = set(net_names)
     routed = failed = rounds = cross_board = 0
@@ -1888,6 +1916,8 @@ def oracle_reconnect(board_file: str, net_names, config,
 
         pcb_data = parse_kicad_pcb(board_file)
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
+        if _ncl_by_name:
+            config.net_clearances = _oracle_class_map(pcb_data, _ncl_by_name)
         routing_layers = pcb_data.board_info.copper_layers
         layer_map = {name: i for i, name in enumerate(routing_layers)}
 
@@ -2053,6 +2083,14 @@ def oracle_reconnect(board_file: str, net_names, config,
             if net_id is None:
                 failed += 1
                 continue
+            if _ncl_by_name:
+                # This link's own class is the floor its obstacle map prices
+                # every foreign net from -- the pair value, max(own, foreign)
+                # -- and `_obs_key` below carries net_id, so a map built for
+                # one net's floor is never reused for another's.
+                config.net_clearance_floor = max(
+                    config.clearance,
+                    config.net_clearances.get(net_id, 0.0))
             _key = (net_name, round(ax, 2), round(ay, 2),
                     round(bx, 2), round(by, 2))
             _attempt = attempted.get(_key, 0)
@@ -3074,6 +3112,8 @@ def oracle_reconnect(board_file: str, net_names, config,
     if links and rounds == 0:
         pcb_data = parse_kicad_pcb(board_file)
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
+        if _ncl_by_name:
+            config.net_clearances = _oracle_class_map(pcb_data, _ncl_by_name)
     # NOT `if rounds and links` (#659 audit): `rounds` counts rounds the weld
     # loop ran on ITS OWN scope nets, and it is 0 whenever those were already
     # complete -- the common healthy case. daisho step 9 printed "KiCad

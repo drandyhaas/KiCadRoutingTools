@@ -68,6 +68,11 @@ import re
 # (#347); read by main() for the JSON_SUMMARY. None = no reconnect ran.
 LAST_RIPPED_RECONNECT: Optional[Dict] = None
 
+# #980: the class map this run resolved (after the --clearance-ceiling clamp),
+# keyed by net NAME, for main()'s oracle leg: the oracle re-parses its board,
+# so an id-keyed map could land on the wrong nets. {} = flat clearance.
+LAST_NET_CLEARANCES_BY_NAME: Dict[str, float] = {}
+
 # Casualty nets that ship STILL OPEN -- ripped to clear a corridor, not
 # reconnected, and not restorable. Run-7 finding A10: this state reached a red
 # log line and nothing else. The JSON_SUMMARY carried counts without names, and
@@ -813,6 +818,8 @@ def repair_planes(
     Returns:
         Tuple of (total_routes_added, total_regions_connected)
     """
+    global LAST_NET_CLEARANCES_BY_NAME
+    LAST_NET_CLEARANCES_BY_NAME = {}   # #980: this run's, set below
     # zone_clearance=None means "follow the routed clearance": the GUI planes
     # tab's zone-clearance "auto" checkbox (ON by default) passes None, as does
     # any caller that leaves it unset. create_plane resolves this (via
@@ -990,6 +997,7 @@ def repair_planes(
                           for nid, c in net_clearances.items()}
     if net_clearances:
         config.net_clearances = dict(net_clearances)
+    LAST_NET_CLEARANCES_BY_NAME = config.net_clearances_by_name(pcb_data.nets)
     # Publish the SAME map to the fill model (#483 item 5): KiCad refills a
     # zone at max(zone clearance, pairwise netclass), so on honor-classes
     # chains a looser foreign class carves copper the model would otherwise
@@ -3649,7 +3657,8 @@ Examples:
                                 track_via_clearance=args.track_via_clearance,
                                 hole_to_hole_clearance=args.hole_to_hole_clearance,
                                 verbose=args.verbose,
-                                project_from=args.input_file)
+                                project_from=args.input_file,
+                                net_clearances_by_name=LAST_NET_CLEARANCES_BY_NAME)
         try:
             import json as _json
             print('JSON_ORACLE: ' + _json.dumps(
