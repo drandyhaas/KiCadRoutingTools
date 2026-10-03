@@ -252,6 +252,159 @@ def test_an_inherited_graze_is_not_a_collision_the_run_made():
           "in, or a graze under the flat clearance, still refuses")
 
 
+def _is_seg(x):
+    return hasattr(x, 'start_x')
+
+
+def _restore_after_rip(own, foreign, input_items, c):
+    """Restore `own` (net 1) against `foreign`, on a board whose input held
+    `input_items`, with `own` ripped out (the state a restore is checked in)."""
+    b = NS(segments=[x for x in input_items if _is_seg(x)],
+           vias=[x for x in input_items if not _is_seg(x)])
+    rr.mark_input_copper(b)
+    b.segments = [foreign] if _is_seg(foreign) else []
+    b.vias = [] if _is_seg(foreign) else [foreign]
+    sv = saved([own], []) if _is_seg(own) else saved([], [own])
+    return rr._saved_route_collides(sv, b, [1], 0.2, config=c)
+
+
+def test_the_inherited_carve_out_for_every_pair_kind():
+    """Each of the four hit sites carves out an inherited graze beyond the
+    flat threshold, and only then. A graze under the flat clearance, a
+    restored item the RUN laid against foreign input copper, and foreign
+    copper the run laid against a restored input item all still refuse."""
+    c = cfg_with({2: 0.35})
+    cases = {   # own, foreign at edge gap 0.25, foreign at edge gap 0.15
+        'track-track': (seg(0, 0, 5, 0, 0.2, 1), seg(0, 0.45, 5, 0.45, 0.2, 2),
+                        seg(0, 0.35, 5, 0.35, 0.2, 2)),
+        'track-via': (seg(0, 0, 5, 0, 0.2, 1), via(2.5, 0.65, 0.6, 2),
+                      via(2.5, 0.55, 0.6, 2)),
+        'via-via': (via(0, 0, 0.6, 1), via(0, 0.85, 0.6, 2),
+                    via(0, 0.75, 0.6, 2)),
+        'via-track': (via(0, 0, 0.6, 1), seg(-2, 0.65, 2, 0.65, 0.2, 2),
+                      seg(-2, 0.55, 2, 0.55, 0.2, 2)),
+    }
+    for kind, (own, near, tight) in cases.items():
+        # both on the input: the class graze was inherited -> admitted
+        assert not _restore_after_rip(own, near, [own, near], c), kind
+        # ...but not under the flat clearance
+        assert _restore_after_rip(own, tight, [own, tight], c), kind
+        # the run laid the restored item: its graze is the run's own
+        assert _restore_after_rip(own, near, [near], c), kind
+        # the run laid the foreign item: it moved in
+        assert _restore_after_rip(own, near, [own], c), kind
+        # control: with no config the flat check admits the 0.25 graze
+        assert not _restore_after_rip(own, near, [near], None), kind
+    print(f"  PASS: {', '.join(cases)}: an inherited class graze is "
+          f"admitted; under flat, or with either side laid by the run, it "
+          f"refuses")
+
+
+def test_the_mark_is_each_steps_own_input():
+    """copper_key is identity by value; the record is the step's input on
+    both fronts: a parsed board is recorded, a board handed in keeps its
+    caller's record, a forwarded record is installed, and the GUI forgets the
+    record when it re-syncs (the next step records its own)."""
+    import ast
+    a = seg(0, 0, 5, 0, 0.2, 1)
+    k = rr.copper_key
+    assert k(a) == k(seg(5, 0, 0, 0, 0.2, 1))             # direction-free
+    for other in (seg(0, 0, 5, 0, 0.2, 2), seg(0, 0, 5, 0, 0.25, 1),
+                  seg(0, 0, 5, 0, 0.2, 1, 'B.Cu'), seg(0, 0, 5, 0.01, 0.2, 1)):
+        assert k(a) != k(other), other
+    assert k(via(0, 0, 0.6, 1)) != k(via(0, 0, 0.6, 2))
+    assert k(via(0, 0, 0.6, 1)) != k(via(0, 0, 0.8, 1))
+    b = board([a])
+    rr.mark_input_copper(b)
+    k1 = b._input_copper_keys
+    assert k1 == {k(a)}
+    b.segments.append(seg(0, 3, 5, 3, 0.2, 3))
+    rr.mark_input_copper(b)
+    assert b._input_copper_keys is k1                     # kept
+    rr.mark_input_copper(b, force=True)
+    assert len(b._input_copper_keys) == 2                 # re-recorded
+    rr.mark_input_copper(b, keys=k1)
+    assert b._input_copper_keys == k1                     # forwarded
+    rr.forget_input_copper(b)
+    assert b._input_copper_keys is None
+    rr.mark_input_copper(b)
+    assert len(b._input_copper_keys) == 2                 # the next step's
+
+    # route.batch_route, for real: what it hands the record
+    import tempfile
+    sys.path.insert(0, os.path.join(ROOT, 'tests', 'oracle'))
+    from constraint_agreement import write_board
+    from kicad_parser import parse_kicad_pcb
+    import route
+    calls = []
+    real = rr.mark_input_copper
+
+    def spy(pcb_data, force=False, keys=None):
+        real(pcb_data, force=force, keys=keys)
+        calls.append((force, keys, pcb_data._input_copper_keys))
+    rr.mark_input_copper = spy
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, 'b.kicad_pcb')
+            write_board(path, segments=[(5, 10, 10, 10, 0.2, 'F.Cu', 1),
+                                        (5, 12, 18, 12, 0.2, 'F.Cu', 2)])
+            run = dict(skip_routing=True, return_results=True)
+            route.batch_route(path, '', ['A'], **run)
+            pcb = parse_kicad_pcb(path)
+            want = frozenset(k(s) for s in pcb.segments)
+            assert calls[-1] == (True, None, want), calls[-1]
+            pcb._input_copper_keys = frozenset({('marker',)})
+            route.batch_route(path, '', ['A'], pcb_data=pcb, **run)
+            assert calls[-1] == (False, None, frozenset({('marker',)}))
+            fwd = frozenset({('fwd',)})
+            route.batch_route(path, '', ['A'], input_copper_keys=fwd, **run)
+            assert calls[-1][2] == fwd, calls[-1]
+    finally:
+        rr.mark_input_copper = real
+
+    # the sub-runs that RE-PARSE the step's output get the step's record
+    def tree(rel):
+        with open(os.path.join(ROOT, rel), encoding='utf-8') as fh:
+            return ast.parse(fh.read())
+    rt = tree(os.path.join('py_router', 'route.py'))
+    br = next(n for n in rt.body if isinstance(n, ast.FunctionDef)
+              and n.name == 'batch_route')
+    fwd_set = [n for n in ast.walk(br) if isinstance(n, ast.Assign)
+               and any(isinstance(t, ast.Subscript)
+                       and isinstance(t.value, ast.Name)
+                       and t.value.id == '_reconcile_kwargs'
+                       and isinstance(t.slice, ast.Constant)
+                       and t.slice.value == 'input_copper_keys'
+                       for t in n.targets)]
+    assert len(fwd_set) == 1, len(fwd_set)
+    fin = [c for c in ast.walk(br) if isinstance(c, ast.Call)
+           and isinstance(c.func, ast.Name) and c.func.id == '_rdp_engine'
+           and any(kw.arg == 'pcb_data' and isinstance(kw.value, ast.Name)
+                   and kw.value.id == '_live9' for kw in c.keywords)]
+    assert len(fin) == 1, len(fin)
+    assert any(kw.arg == 'input_copper_keys' for kw in fin[0].keywords)
+    rp = tree(os.path.join('py_router', 'repair_planes.py'))
+    eng = next(n for n in rp.body if isinstance(n, ast.FunctionDef)
+               and n.name == 'repair_planes')
+    marks = [c for c in ast.walk(eng) if isinstance(c, ast.Call)
+             and isinstance(c.func, ast.Name)
+             and c.func.id == 'mark_input_copper']
+    assert len(marks) == 1 and any(
+        kw.arg == 'keys' and isinstance(kw.value, ast.Name)
+        and kw.value.id == 'input_copper_keys' for kw in marks[0].keywords), \
+        [ast.unparse(c) for c in marks]
+    # ...and the GUI forgets the record on every re-sync
+    gui = tree(os.path.join('kicad_routing_plugin', 'swig_gui.py'))
+    sync = next(n for n in ast.walk(gui) if isinstance(n, ast.FunctionDef)
+                and n.name == '_sync_pcb_data_from_board')
+    assert any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+               and c.func.id == 'forget_input_copper'
+               for c in ast.walk(sync)), 'the GUI sync keeps a stale record'
+    print("  PASS: copper_key tells net/width/layer/size apart; batch_route "
+          "records a parsed board, keeps a handed-in record, installs a "
+          "forwarded one; reconcile + finalize forward it; the GUI forgets it")
+
+
 def test_kinds_under_layer_and_track_rules():
     """Which kind / layer each pair takes only shows under a .kicad_dru rule:
     via-via is the STACK, a restored track meets a via on the track's layer,
@@ -315,6 +468,8 @@ TESTS = [
     test_the_plane_twin,
     test_an_inherited_graze_is_not_a_collision_the_run_made,
     test_kinds_under_layer_and_track_rules,
+    test_the_inherited_carve_out_for_every_pair_kind,
+    test_the_mark_is_each_steps_own_input,
 ]
 
 

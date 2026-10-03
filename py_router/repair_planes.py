@@ -777,6 +777,10 @@ def repair_planes(
     # clearance. None (default) auto-reads the persisted .kicad_pro record;
     # explicit values win (the #562 finalize forwards its resolved value).
     same_net_pad_clearance: Optional[float] = None,
+    # #980: the enclosing route step's input copper keys
+    # (rip_up_reroute.copper_key), so a finalize that re-parses the file the
+    # step wrote does not record the step's own copper as input. INTERNAL.
+    input_copper_keys: Optional[frozenset] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -848,9 +852,10 @@ def repair_planes(
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
     # #980: the copper this step was handed, before any rip -- unless an
-    # enclosing route step already recorded its own (the in-run finalize).
+    # enclosing route step already recorded its own (the in-run finalize:
+    # on its live board, or forwarded when it re-parses the file).
     from rip_up_reroute import mark_input_copper
-    mark_input_copper(pcb_data)
+    mark_input_copper(pcb_data, keys=input_copper_keys)
 
     # #513 item 5: snapshot each net's dominant routed width BEFORE any rip
     # mutates pcb_data, so the end-of-run reconnect of ripped blockers can

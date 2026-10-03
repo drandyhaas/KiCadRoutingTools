@@ -27,12 +27,15 @@ Edits are `str.replace(old, new, 1)`; anchors are LF and translated to the
 target's own ending.
 
 Not covered by a row, and why:
-  * the oracle's ESCALATION weld (`_attempt_edge(..., config.net_clearances
-    or None)`, two calls): it runs only after the main weld ladder fails,
-    which the KiCad-free oracle harness does not force;
-  * which config each engine records its input copper on
-    (`mark_input_copper` in batch_route / batch_route_diff_pairs /
-    repair_planes): the carve-out it feeds is row `inherited-graze-refused`;
+  * what the oracle's ESCALATION weld does with the map it is handed: it
+    runs only after the main weld ladder fails, which the KiCad-free oracle
+    harness does not force. That it is HANDED the map is row
+    `escalation-map-dropped` (statically);
+  * route_diff's `mark_input_copper` call: route_diff has no sub-run that
+    re-parses its output, and its call is the same shape as batch_route's
+    (rows `route-mark-*`);
+  * the oracle's SECOND `_rekey` call (after the round's re-parse): nothing
+    reads `config` after it, so dropping it is an equivalent mutant today;
   * `pair-args-swapped` SURVIVES by design: the pair value is symmetric in
     its two nets, so swapping them is an equivalent mutant (a change
     detector for the day it is not).
@@ -66,6 +69,7 @@ TARGETS = {
     'gu': os.path.join(_GUI, 'gui_utils.py'),
     'se': os.path.join(_PR, 'single_ended_routing.py'),
     'dpr': os.path.join(_PR, 'diff_pair_routing.py'),
+    'sg': os.path.join(_GUI, 'swig_gui.py'),
 }
 
 
@@ -308,6 +312,73 @@ ROWS = [
      "                        net_clearances_by_name=config.net_clearances_by_name(",
      "                        net_clearances_by_name={}, _unused=config.net_clearances_by_name(",
      (ORC,), 'KILLED'),
+    # ---- the inherited-graze carve-out and the step's input record ----------
+    ('inherited-mine-not-checked', 'rr',
+     "                and copper_key(mine) in _inherited",
+     "                and True",
+     (_t('test_980_restore_pairwise.py', 'every_pair_kind'),), 'KILLED'),
+    ('inherited-track-via-flat-dropped', 'rr',
+     "                    s, v, _d, hw + v.size / 2.0 + clearance):",
+     "                    s, v, _d, hw + v.size / 2.0):",
+     (_t('test_980_restore_pairwise.py', 'every_pair_kind'),), 'KILLED'),
+    ('inherited-via-via-flat-dropped', 'rr',
+     "                    vv, v, _d, vr + v.size / 2.0 + clearance):",
+     "                    vv, v, _d, vr + v.size / 2.0):",
+     (_t('test_980_restore_pairwise.py', 'every_pair_kind'),), 'KILLED'),
+    ('inherited-via-track-flat-dropped', 'rr',
+     "                    vv, o, _d, vr + o.width / 2.0 + clearance):",
+     "                    vv, o, _d, vr + o.width / 2.0):",
+     (_t('test_980_restore_pairwise.py', 'every_pair_kind'),), 'KILLED'),
+    ('copper-key-no-net', 'rr',
+     "        return ('s', item.net_id, item.layer, round(item.width, 4),",
+     "        return ('s', 0, item.layer, round(item.width, 4),",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('copper-key-no-width', 'rr',
+     "        return ('s', item.net_id, item.layer, round(item.width, 4),",
+     "        return ('s', item.net_id, item.layer, 0,",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('mark-force-ignored', 'rr',
+     "        if (not force",
+     "        if (True",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('mark-keys-ignored', 'rr',
+     "        if keys is not None:",
+     "        if False:",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('route-mark-dropped', 'route',
+     "    mark_input_copper(pcb_data, force=_parsed_here, keys=input_copper_keys)",
+     "    pass",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('route-mark-not-forced', 'route',
+     "    mark_input_copper(pcb_data, force=_parsed_here, keys=input_copper_keys)",
+     "    mark_input_copper(pcb_data, force=False, keys=input_copper_keys)",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('reconcile-record-not-forwarded', 'route',
+     "    _reconcile_kwargs['input_copper_keys'] = getattr(",
+     "    _unforwarded_keys = getattr(",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('finalize-record-not-forwarded', 'route',
+     "                        input_copper_keys=getattr(",
+     "                        _unforwarded_keys=getattr(",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('repair-record-not-installed', 'rp',
+     "    mark_input_copper(pcb_data, keys=input_copper_keys)",
+     "    mark_input_copper(pcb_data)",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('gui-sync-keeps-a-stale-record', 'sg',
+     "        forget_input_copper(self.pcb_data)",
+     "        pass",
+     (_t('test_980_restore_pairwise.py', 'mark_is_each'),), 'KILLED'),
+    ('escalation-map-dropped', 'ko',
+     "                        pcb_data, net_id, _gap, config,\n"
+     "                        config.net_clearances or None,",
+     "                        pcb_data, net_id, _gap, config,\n"
+     "                        None,",
+     (_t('test_980_oracle_class_map.py', 'escalation'),), 'KILLED'),
+    ('cap-config-rules-without-board', 'route',
+     "                                                     input_file, pcb_data)",
+     "                                                     input_file, None)",
+     (_t('test_980_oracle_class_map.py', 'escalation'),), 'KILLED'),
     # ---- a change detector ---------------------------------------------------
     ('pair-args-swapped', 'ko',
      "                + config.pair_clearance(net_id, s2.net_id, s2.layer)):",

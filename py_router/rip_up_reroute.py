@@ -353,21 +353,41 @@ def copper_key(item) -> tuple:
             round(getattr(item, 'size', 0.0) or 0.0, 4))
 
 
-def mark_input_copper(pcb_data, force: bool = False) -> None:
+def mark_input_copper(pcb_data, force: bool = False,
+                      keys=None) -> None:
     """#980: record the copper a routing step was HANDED, as `copper_key`s on
     `pcb_data._input_copper_keys`, before anything is ripped. The restore
     check reads it to tell a graze the input board already had (two pieces of
     input copper a wider net class puts too close) from a collision the run
-    created. `force` re-records; otherwise an existing record stands (a
-    nested engine call keeps the step's own input)."""
-    if not force and getattr(pcb_data, '_input_copper_keys', None) is not None:
-        return
+    created. `keys` installs a record an enclosing step forwarded (a sub-run
+    that re-parses the step's own output); `force` re-records from the board;
+    otherwise an existing record stands (a nested engine call handed the
+    step's board keeps the step's own input)."""
     try:
+        if keys is not None:
+            pcb_data._input_copper_keys = frozenset(keys)
+            return
+        if (not force
+                and getattr(pcb_data, '_input_copper_keys', None) is not None):
+            return
         pcb_data._input_copper_keys = frozenset(
             [copper_key(s) for s in (pcb_data.segments or ())]
             + [copper_key(v) for v in (pcb_data.vias or ())])
     except AttributeError:
         pass        # a read-only stand-in board: nothing is recorded
+
+
+def forget_input_copper(pcb_data) -> None:
+    """#980: drop the input record, so the next routing step records its own.
+    The GUI keeps ONE pcb_data for the whole dialog session and re-syncs its
+    copper from the live board before each step; without this the first
+    step's record would stand for every later one, and copper an earlier step
+    laid would never count as a later step's input (as it does on the CLI,
+    where every step parses the previous step's file)."""
+    try:
+        pcb_data._input_copper_keys = None
+    except AttributeError:
+        pass
 
 
 def _saved_route_collides(saved_result: dict, pcb_data: PCBData,

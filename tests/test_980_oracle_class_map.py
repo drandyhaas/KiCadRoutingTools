@@ -151,14 +151,52 @@ def test_repair_planes_main_passes_the_published_map():
     print("  PASS: repair_planes main() passes LAST_NET_CLEARANCES_BY_NAME")
 
 
+def test_the_escalation_and_the_cap_config_carry_the_rules():
+    """The weld escalation builds its own obstacle map (`_attempt_edge`'s
+    fifth argument is the class map it prices foreign nets with), and
+    route.py's #678 cap config installs the layer rules WITH the board, so
+    they are read for the board's own copper layers, not the default two."""
+    orc = _tree(os.path.join('py_router', 'kicad_oracle.py'))
+    esc = list(_calls(orc, '_attempt_edge'))
+    assert len(esc) >= 2, len(esc)
+    for c in esc:
+        assert len(c.args) >= 5, (c.lineno, ast.unparse(c))
+        arg = c.args[4]
+        assert not isinstance(arg, ast.Constant), (c.lineno, ast.unparse(c))
+        assert 'net_clearances' in ast.unparse(arg), (c.lineno,
+                                                      ast.unparse(arg))
+    route = _tree(os.path.join('py_router', 'route.py'))
+    cap = [c for c in _calls(route, 'install_layer_clearances')
+           if c.args and isinstance(c.args[0], ast.Name)
+           and c.args[0].id == '_cap_cfg']
+    assert len(cap) == 1, len(cap)
+    board = (cap[0].args[3] if len(cap[0].args) > 3
+             else getattr(_kw(cap[0], 'pcb_data'), 'value', None))
+    assert board is not None and not (isinstance(board, ast.Constant)
+                                      and board.value is None), \
+        ast.unparse(cap[0])
+    print(f"  PASS: {len(esc)} escalation call(s) pass the class map; the "
+          f"cap config installs its layer rules with the board")
+
+
 TESTS = [test_the_map_is_rekeyed_by_name,
          test_every_oracle_call_passes_the_map,
          test_the_gui_payload_carries_it_and_both_fronts_forward_it,
-         test_repair_planes_main_passes_the_published_map]
+         test_repair_planes_main_passes_the_published_map,
+         test_the_escalation_and_the_cap_config_carry_the_rules]
 
 
 if __name__ == '__main__':
+    only = sys.argv[1:]
+    ran = 0
     for t in TESTS:
+        if only and not any(o in t.__name__ for o in only):
+            continue
         print(f"--- {t.__name__}")
         t()
+        ran += 1
+    if only and not ran:
+        # a misspelt witness filter would otherwise pass vacuously
+        print(f"NO TEST matches {only}")
+        sys.exit(2)
     print('ALL PASS')

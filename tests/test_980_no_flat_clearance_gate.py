@@ -8,18 +8,30 @@ pricing a foreign track, via or pad at one flat `config.clearance`. Each was
 found by accident; this gate is what keeps a new one from shipping
 unnoticed. It reads the code SHAPE (an AST), never comments or prose:
 
-A. In every swept function, every READ of a flat clearance -- `config.
-   clearance` on any config-like name (`config`, `tap_config`, `cfg`,
-   `*_cfg`, `self.config`), `getattr(x, 'clearance')`, or the stamp helper
-   `obstacle_clearance(...)` -- in ANY form (a sum, a comparison, an alias
-   `clr = config.clearance`, a call argument) must be on ALLOWED_READS, and a
-   bare `clearance` / `clr` name used as a `+`/`-` term, a comparison operand
-   or an augmented assignment must be on ALLOWED_TERMS -- each keyed by the
-   expression's code with its count, and each with the reason it is not a
-   foreign pair: the meander search's inert-path and board-edge scalars, an
-   NPTH hole, same-net copper, the restore check's flat threshold for an
-   inherited graze, and an intra-pair floor (the P/N checks are a separate
-   follow-up).
+A. In every swept function, every READ of a flat clearance must be on
+   ALLOWED_READS, in ANY form: a sum, a comparison, an alias
+   `clr = config.clearance`, or a call argument. A read is:
+   - `config.clearance` on any config-like name (`config`, `tap_config`,
+     `cfg`, `*_cfg`, `self.config` / `self._config`, or a local alias
+     `c = config`);
+   - `getattr(x, 'clearance')`;
+   - the stamp helper `obstacle_clearance(...)`.
+
+   A flat VALUE is used when a bare `clearance` / `clr`, or a local alias of
+   it or of a read (`flat = clearance`), appears as:
+   - an operand of any arithmetic,
+   - a comparison operand,
+   - an augmented assignment,
+   - an argument of `max` / `min` / `float` / `abs` / `int` / `round`.
+
+   Every such use must be on ALLOWED_TERMS. Both lists are keyed by the
+   expression's code and its count, and each entry gives the reason it is
+   not a foreign pair:
+   - the meander search's inert-path and board-edge scalars;
+   - an NPTH hole;
+   - same-net copper;
+   - the restore check's flat threshold for an inherited graze;
+   - an intra-pair floor (the P/N checks are a separate follow-up).
 B. Every swept function prices through `pair_clearance` /
    `pad_pair_clearance` (directly, through a `getattr(config,
    'pair_clearance')` handle, or through `_pair_floor`, which hands the
@@ -28,8 +40,21 @@ C. Every call of the restore predicate (and its aliases), of
    `partition_force_restores`, of the plane twin, and of the rescue leg /
    cap relocation passes `config=` -- the plane twin also both nets.
 
-A negative control runs rules A and B over the pre-#980 restore predicate
-and the pre-#980 sliver weld, and requires both to fail.
+A negative control requires rules A and B to fail on each of these:
+- the pre-#980 restore predicate and the pre-#980 sliver weld;
+- every flat spelling two verifiers slipped past earlier versions of this
+  gate.
+
+What it CANNOT see (the behavioural tests in test_980_restore_pairwise /
+test_980_admission_pairwise are the guard there):
+- an allowlisted expression moved to a new line. The key is the code and
+  the count, so hoisting `hw + o.width / 2.0 + clearance` into a variable
+  and using it for the hit test still reads as the one allowed term;
+- exotic spellings: `vars(config)['clearance']`, `__dict__`,
+  `operator.attrgetter`, `functools.partial`, a lambda or parameter default
+  bound to the flat value, and a config alias whose name looks like nothing
+  above (`settings`);
+- any function not in SITES.
 
     python3 tests/test_980_no_flat_clearance_gate.py
 """
@@ -103,6 +128,13 @@ _INHERIT = ('the FLAT threshold the restore check compares a pair-value hit '
             'collision the run made')
 #: (file, function, the expression's code) -> (count, why)
 ALLOWED_TERMS = {
+    ('py_router/diff_pair_multipoint.py', '_fans_fit',
+     "max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)"):
+        (1, 'a SAME-net pad, which keeps the flat max(clearance, override)'),
+    ('py_router/diff_pair_multipoint.py', '_fans_fit',
+     'pad_clr == pad_base'):
+        (1, 'whether the pad keeps the 0.05 grading margin: true only when '
+            'no override raised the value, flat or pair alike'),
     ('py_router/kicad_oracle.py', '_direct_sliver_weld',
      'reach + pad.drill / 2.0 + clr'):
         (1, 'an NPTH hole has no net: copper keeps the flat clearance from '
@@ -118,17 +150,23 @@ ALLOWED_TERMS = {
 }
 
 
-def _cfgish(v):
+_CFG_NAMES = ('config', 'tap_config', 'cfg')
+_CFG_ATTRS = ('config', 'cfg', '_config', '_cfg')
+#: builtins a flat value can be folded through without a + / - / compare
+_FOLDS = ('max', 'min', 'float', 'abs', 'int', 'round')
+
+
+def _cfgish(v, aliases=()):
     return ((isinstance(v, ast.Name)
-             and (v.id in ('config', 'tap_config', 'cfg')
+             and (v.id in _CFG_NAMES or v.id in aliases
                   or v.id.endswith('_cfg') or v.id.endswith('config')))
-            or (isinstance(v, ast.Attribute) and v.attr in ('config', 'cfg')))
+            or (isinstance(v, ast.Attribute) and v.attr in _CFG_ATTRS))
 
 
-def _flat_read(n):
+def _flat_read(n, aliases=()):
     """A read of a flat clearance in any spelling the sweep met."""
     if (isinstance(n, ast.Attribute) and n.attr == 'clearance'
-            and isinstance(n.ctx, ast.Load) and _cfgish(n.value)):
+            and isinstance(n.ctx, ast.Load) and _cfgish(n.value, aliases)):
         return True
     if isinstance(n, ast.Call):
         f = n.func
@@ -141,29 +179,50 @@ def _flat_read(n):
     return False
 
 
-def _bare(n):
-    return (isinstance(n, ast.Name) and n.id in ('clearance', 'clr')
-            and isinstance(n.ctx, ast.Load))
+def _names(fn):
+    """(config aliases, flat-value names) assigned inside `fn`: `c = config`
+    makes `c.clearance` a flat read, and `flat = clearance` /
+    `x = config.clearance` make `flat` / `x` a flat value like `clearance`."""
+    cfg, flat = set(), {'clearance', 'clr'}
+    for _ in range(3):                       # aliases of aliases
+        for n in ast.walk(fn):
+            if not (isinstance(n, ast.Assign) and len(n.targets) == 1
+                    and isinstance(n.targets[0], ast.Name)):
+                continue
+            t, v = n.targets[0].id, n.value
+            if _cfgish(v, cfg):
+                cfg.add(t)
+            elif (_flat_read(v, cfg)
+                  or (isinstance(v, ast.Name) and v.id in flat)):
+                flat.add(t)
+    return cfg, flat
 
 
 def _census(fn):
     """({reading expression: count}, {bare-term expression: count})."""
     from collections import Counter
+    cfg, flat = _names(fn)
+
+    def bare(n):
+        return (isinstance(n, ast.Name) and n.id in flat
+                and isinstance(n.ctx, ast.Load))
     parents = {}
     for p_ in ast.walk(fn):
         for c in ast.iter_child_nodes(p_):
             parents[c] = p_
     reads, terms = Counter(), Counter()
     for n in ast.walk(fn):
-        if _flat_read(n):
+        if _flat_read(n, cfg):
             reads[ast.unparse(parents[n])] += 1
-        if (isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub))
-                and (_bare(n.left) or _bare(n.right))):
+        if isinstance(n, ast.BinOp) and (bare(n.left) or bare(n.right)):
             terms[ast.unparse(n)] += 1
         elif isinstance(n, ast.Compare) and (
-                _bare(n.left) or any(_bare(c) for c in n.comparators)):
+                bare(n.left) or any(bare(c) for c in n.comparators)):
             terms[ast.unparse(n)] += 1
-        elif isinstance(n, ast.AugAssign) and _bare(n.value):
+        elif isinstance(n, ast.AugAssign) and bare(n.value):
+            terms[ast.unparse(n)] += 1
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+              and n.func.id in _FOLDS and any(bare(a) for a in n.args)):
             terms[ast.unparse(n)] += 1
     return reads, terms
 
@@ -336,14 +395,21 @@ def test_negative_control():
                    '    need = self.config.clearance + vr',
                    '    need = config.obstacle_clearance(n) + vr',
                    '    ok = d < clr',
-                   '    need += clearance'):
+                   '    need += clearance',
+                   # the second verifier's spellings
+                   '    ok = d < max(clearance, w)',
+                   '    ok = dsq < clearance * clearance',
+                   '    flat = clearance\n    need = vr + flat',
+                   '    need = vr + float(clearance)',
+                   '    c = config\n    need = vr + c.clearance',
+                   '    need = vr + self._config.clearance'):
         src = ('def _stitch_via_clear(pcb_data, net_id, x, y, config, h2h):\n'
                '    q = config.pair_clearance(1, 2)\n' + sneaky + '\n')
         p3, _u = _rules_ab('py_router/kicad_oracle.py', src,
                            '_stitch_via_clear')
         assert any('flat clearance' in p for p in p3), (sneaky, p3)
     print("  PASS: the pre-#980 restore predicate and sliver weld fail the "
-          "gate, and so do ten other flat spellings")
+          "gate, and so does every other flat spelling listed")
 
 
 TESTS = [test_rules_a_and_b, test_rule_c_every_call_passes_config,

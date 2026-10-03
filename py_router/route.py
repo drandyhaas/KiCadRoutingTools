@@ -915,7 +915,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # places and same-net SMD pads. None (default) -> auto-read
                 # the persisted .kicad_pro record; > 0 activates (and is
                 # persisted for later chain steps); 0 / -1 explicitly OFF.
-                same_net_pad_clearance: Optional[float] = None) -> Tuple[int, int, float]:
+                same_net_pad_clearance: Optional[float] = None,
+                # #980: the copper keys (rip_up_reroute.copper_key) of the
+                # STEP's input board, forwarded by the outer run into its
+                # reconciliation sub-run -- which re-parses the file the step
+                # wrote, and would otherwise record the step's own copper as
+                # input. INTERNAL: deliberately no CLI flag or GUI control.
+                input_copper_keys: Optional[frozenset] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -1101,8 +1107,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     from rip_up_reroute import mark_input_copper
     # A board this call parsed is the step's input; a board handed in keeps
     # the record its caller made (a repair sub-run must not relabel the
-    # parent run's own copper as input).
-    mark_input_copper(pcb_data, force=_parsed_here)
+    # parent run's own copper as input) -- and a reconciliation sub-run that
+    # re-parses the step's output gets the step's record forwarded.
+    mark_input_copper(pcb_data, force=_parsed_here, keys=input_copper_keys)
+    _reconcile_kwargs['input_copper_keys'] = getattr(
+        pcb_data, '_input_copper_keys', None)
 
     # KICAD_DUP_TRAP=1: report the call site that re-appends the SAME copper
     # object to pcb_data. Inert otherwise. Armed here so it covers the whole
@@ -5353,6 +5362,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # the exact defect that commit set out to close.
                         layer_costs=list(config.layer_costs or []) or None,
                         pcb_data=_live9,
+                        input_copper_keys=getattr(
+                            pcb_data, '_input_copper_keys', None),
                         progress_callback=_pcb9)
                 print(f"  [finalize timing] engine leg: "
                       f"{_time9.time() - _t9:.1f}s")

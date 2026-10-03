@@ -285,6 +285,10 @@ class RoutingDialog(wx.Dialog):
         """
         # Clear connectivity cache since board state is changing
         self._connectivity_cache = {}
+        # #980: the next routing step records the synced board as ITS input
+        # (as a CLI step parses the previous step's file)
+        from rip_up_reroute import forget_input_copper
+        forget_input_copper(self.pcb_data)
 
         try:
             import pcbnew
