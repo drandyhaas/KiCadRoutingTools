@@ -1040,7 +1040,8 @@ def restore_ripped_net(
     # (unrouted beats shorted); the bookkeeping below still runs so the net
     # is tracked either way.
     from rip_up_reroute import _saved_route_collides
-    if _saved_route_collides(ripped_saved, pcb_data, list(ripped_ids), config.clearance):
+    if _saved_route_collides(ripped_saved, pcb_data, list(ripped_ids),
+                             config.clearance, config=config):
         names = [pcb_data.nets[r].name if r in pcb_data.nets else str(r) for r in ripped_ids]
         print(f"    restore of {'/'.join(names)} would collide with copper routed "
               f"meanwhile -- leaving unrouted for reroute (#134 guard)")

@@ -243,7 +243,9 @@ def _point_to_segment_dist_sq(px: float, py: float,
 
 def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
                              plane_vias: List[Dict], plane_segments: List[Dict],
-                             via_size: float, clearance: float) -> bool:
+                             via_size: float, clearance: float,
+                             config=None, piece_net: Optional[int] = None,
+                             plane_net: Optional[int] = None) -> bool:
     """Issue #88.1: return True if a to-be-restored segment or via would
     overlap newly-placed plane copper (plane vias/segments placed this run).
 
@@ -253,13 +255,33 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
     tested against plane segments on the same layer. Collision-free pieces are
     restored verbatim; colliding pieces are left ripped (so the net falls into
     the ripped-nets set to be re-routed rather than shorted onto plane copper).
+
+    #980: given `config` and both nets -- the restored piece's (`piece_net`)
+    and the plane copper's (`plane_net`) -- each pair is priced at
+    `config.pair_clearance`, KiCad's max(classA, classB) and the .kicad_dru
+    layer rule, floored at `clearance`. Without them every pair is priced at
+    the flat `clearance`, as before.
     """
     via_r = via_size / 2.0
+    _pc = getattr(config, 'pair_clearance', None)
+    if (_pc is None or piece_net is None or plane_net is None
+            or config.pair_clearance_inert()):
+        _pc = None                      # the flat path
+    _memo = {}
+
+    def _clr(layer, kind):
+        k = (layer, kind)
+        v = _memo.get(k)
+        if v is None:
+            v = _memo[k] = _pc(piece_net, plane_net, layer, kind=kind,
+                               base=clearance)
+        return v
 
     if via is not None:
         # Restored via vs plane vias (via-via, all layers).
         vr = via.get('size', via_size) / 2.0
-        thresh = via_r + vr + clearance
+        thresh = via_r + vr + (clearance if _pc is None
+                               else _clr(None, 'stack'))
         thresh_sq = thresh * thresh
         for pv in plane_vias:
             if (via['x'] - pv['x']) ** 2 + (via['y'] - pv['y']) ** 2 < thresh_sq:
@@ -272,7 +294,8 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
         # (glasgow /IO_Banks/DA2, 0707b wave set1).
         for ps in plane_segments:
             ps_half_w = ps.get('width', 0.2) / 2.0
-            v_thresh = vr + ps_half_w + clearance
+            v_thresh = vr + ps_half_w + (clearance if _pc is None
+                                         else _clr(ps.get('layer'), 'layer'))
             if _point_to_segment_dist_sq(via['x'], via['y'],
                                          ps['start'][0], ps['start'][1],
                                          ps['end'][0], ps['end'][1]) < v_thresh * v_thresh:
@@ -284,7 +307,8 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
         sx1, sy1 = seg['end'][0], seg['end'][1]
         half_w = seg.get('width', 0.2) / 2.0
         # Restored segment vs plane vias (via copper, all layers).
-        thresh = via_r + half_w + clearance
+        thresh = via_r + half_w + (clearance if _pc is None
+                                   else _clr(seg.get('layer'), 'layer'))
         thresh_sq = thresh * thresh
         for pv in plane_vias:
             if _point_to_segment_dist_sq(pv['x'], pv['y'], sx0, sy0, sx1, sy1) < thresh_sq:
@@ -295,7 +319,8 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
             if ps.get('layer') != seg_layer:
                 continue
             ps_half_w = ps.get('width', 0.2) / 2.0
-            s_thresh = half_w + ps_half_w + clearance
+            s_thresh = half_w + ps_half_w + (clearance if _pc is None
+                                             else _clr(seg_layer, 'track'))
             s_thresh_sq = s_thresh * s_thresh
             # Endpoint sampling covers the short axis-overlap case; an X
             # CROSSING has all four endpoints far apart, so also test true

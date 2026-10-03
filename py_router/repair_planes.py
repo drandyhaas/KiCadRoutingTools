@@ -497,14 +497,18 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                           'end': (s.end_x, s.end_y),
                           'width': s.width, 'layer': s.layer}
                     if _restored_piece_collides(sd, None, new_vias, new_segs,
-                                                via_size, clr):
+                                                via_size, clr, config=tap_config,
+                                                piece_net=blocker,
+                                                plane_net=net_id):
                         dropped += 1
                     else:
                         keep_segs.append(s)
                 for v in rvias:
                     vd = {'x': v.x, 'y': v.y, 'size': v.size}
                     if _restored_piece_collides(None, vd, new_vias, new_segs,
-                                                via_size, clr):
+                                                via_size, clr, config=tap_config,
+                                                piece_net=blocker,
+                                                plane_net=net_id):
                         dropped += 1
                     else:
                         keep_vias.append(v)
@@ -570,11 +574,11 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             keep_segs = [s for s in rsegs
                          if not _saved_route_collides(
                              {'new_segments': [s], 'new_vias': []},
-                             pcb_data, _own, clr)]
+                             pcb_data, _own, clr, config=tap_config)]
             keep_vias = [v for v in rvias
                          if not _saved_route_collides(
                              {'new_segments': [], 'new_vias': [v]},
-                             pcb_data, _own, clr)]
+                             pcb_data, _own, clr, config=tap_config)]
             dropped = (len(rsegs) - len(keep_segs)) + (len(rvias) - len(keep_vias))
             dropped += drop_orphan_restore_pieces(
                 keep_segs, keep_vias, blocker, pcb_data)
@@ -1794,7 +1798,7 @@ def repair_planes(
                 if not _osegs4 and not _ovias4:
                     continue
                 if _src517({'new_segments': _osegs4, 'new_vias': _ovias4},
-                           pcb_data, [_cid], clearance):
+                           pcb_data, [_cid], clearance, config=config):
                     _rf['blocked'] += 1
                     continue
                 pcb_data.segments.extend(_osegs4)
@@ -2014,7 +2018,7 @@ def repair_planes(
                       from rip_up_reroute import _saved_route_colliders
                       _culprits = _saved_route_colliders(
                           {'new_segments': _osegs, 'new_vias': _ovias},
-                          pcb_data, [_cid], clearance)
+                          pcb_data, [_cid], clearance, config=config)
                       if _culprits:
                           print(f"  {YELLOW}REFUSED restore of {_nm}: copper "
                                 f"routed meanwhile occupies its corridor; "

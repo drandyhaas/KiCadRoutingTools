@@ -2826,11 +2826,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             keep_segs = [sg for sg in (saved.get('new_segments') or [])
                          if not _saved_route_collides(
                              {'new_segments': [sg], 'new_vias': []},
-                             pcb_data, [nid], config.clearance)]
+                             pcb_data, [nid], config.clearance,
+                             config=config)]
             keep_vias = [v for v in (saved.get('new_vias') or [])
                          if not _saved_route_collides(
                              {'new_segments': [], 'new_vias': [v]},
-                             pcb_data, [nid], config.clearance)]
+                             pcb_data, [nid], config.clearance,
+                             config=config)]
             from pcb_modification import drop_orphan_restore_pieces
             drop_orphan_restore_pieces(keep_segs, keep_vias, nid, pcb_data)
             if not keep_segs and not keep_vias:
@@ -3001,7 +3003,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 if _pe_connected(_rid):
                     continue  # reroute genuinely landed
                 if _pe_collides(_orig_pe[0], pcb_data, [_rid],
-                                config.clearance):
+                                config.clearance, config=config):
                     # The corridor was taken while this victim was ripped --
                     # but WHOSE copper took it decides whether that matters.
                     # Copper belonging to a net that is ITSELF still open is a
@@ -3022,7 +3024,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # refused, exactly as before.
                     _blk = {getattr(_o, 'net_id', None) for _k, _o in
                             _pe_colliders(_orig_pe[0], pcb_data, [_rid],
-                                          config.clearance)}
+                                          config.clearance, config=config)}
                     _blk.discard(None)
                     _blk.discard(_rid)
                     _worthless = {_b for _b in _blk
@@ -3046,7 +3048,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                               f"'{_pe_ripped_reg.get(_b, _b)}' partial copper "
                               f"(it connects nothing) to free the corridor")
                     if _pe_collides(_orig_pe[0], pcb_data, [_rid],
-                                    config.clearance):
+                                    config.clearance, config=config):
                         continue  # something else holds it after all
                 _, _, _wir_par = _pe_rip(
                     _rid, pcb_data, routed_net_ids, routed_net_paths,
@@ -3161,7 +3163,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         from rip_up_reroute import partition_force_restores
         _fr_ids, _fr_refused_ids = partition_force_restores(
             force_ripped, pcb_data, config.clearance,
-            skip_net_ids=_fr_new_copper)
+            skip_net_ids=_fr_new_copper, config=config)
 
         def _fr_name(_nid):
             return (pcb_data.nets[_nid].name

@@ -186,6 +186,8 @@ For a failing net, the router escalates through rip-up rounds (`reroute_loop.py`
 
 A history set of `(net, frozenset(ripped blockers))` combinations (recorded when a combination *succeeds*) prevents pointlessly re-ripping a combo that already worked once for this net; together with the N cap this guarantees termination. If all rounds fail, every ripped net is restored unchanged and the net is reported as failed.
 
+A restore is collision-checked first (#134). If copper routed while the net was out now sits in its corridor, the saved copper is refused rather than shipped as a short. The check prices each pair of nets the way `check_drc` grades it, through `GridRouteConfig.pair_clearance` (#980): KiCad's `max(classA, classB)`, then the board's `.kicad_dru` layer rule. It does not use one flat clearance. A restore beside a wider-class net is refused at that class, and a layer rule that relaxes the clearance admits what the flat value would refuse. `rip_restore`'s terminal restore (#468) instead keeps the floor-inflated stamp value (`obstacle_clearance`) on purpose, so that it prices a restore exactly as the router stamped the copper it restores.
+
 On success, the ripped nets are appended to the **reroute queue**.
 
 ## Ripped-Corridor Avoidance

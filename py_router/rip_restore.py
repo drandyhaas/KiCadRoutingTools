@@ -48,7 +48,12 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
     boolean-speed path `_copper_conflicts` wraps); collect=True sweeps the
     whole board and returns every conflicting owner. Pads are not
     re-checked: the saved copper was DRC-clean against them before the rip
-    and pads do not move; only copper routed SINCE the rip can conflict."""
+    and pads do not move; only copper routed SINCE the rip can conflict.
+
+    Priced at `obstacle_clearance`, the STAMP value (floored at the widest
+    class routed in the call), on purpose: this restore prices copper the
+    way the router stamped it. `rip_up_reroute._saved_route_colliders`, the
+    #134 restore, prices the exact KiCad pair (`pair_clearance`, #980)."""
     from geometry_utils import point_to_segment_distance
     clr_of = (config.obstacle_clearance
               if hasattr(config, 'obstacle_clearance') else lambda n: config.clearance)
