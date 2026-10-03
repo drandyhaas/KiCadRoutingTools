@@ -496,7 +496,11 @@ def get_safe_amplitude_at_point(
         return v
 
     def _pad_clr(pad):
-        if _pc_inert or pad.net_id == net_id:
+        # A pad's own clearance override is honoured whatever else the board
+        # declares, as at every other swept check (it REPLACES the pair
+        # value, #530); an own-net pad keeps the flat value.
+        if pad.net_id == net_id or (
+                _pc_inert and not getattr(pad, 'local_clearance', 0)):
             return net_half + config.clearance + corner_margin
         return (net_half + config.pad_pair_clearance(pad, net_id, layer=layer)
                 + corner_margin)
@@ -2687,7 +2691,7 @@ def get_safe_amplitude_for_diff_pair(
         return v
 
     def _pad_clr(pad):
-        if _pc_inert:
+        if _pc_inert and not getattr(pad, 'local_clearance', 0):
             return net_half + config.clearance + corner_margin + diff_pair_extra
         pc = max(config.pad_pair_clearance(pad, p_net_id, layer=layer_name),
                  config.pad_pair_clearance(pad, n_net_id, layer=layer_name))

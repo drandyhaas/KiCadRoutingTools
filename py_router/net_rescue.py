@@ -793,11 +793,17 @@ def _find_cap_relocation(pcb_data, fp, extra_avoid_vias, extra_avoid_segs,
     own_ids = {p.net_id for p in fp.pads}
     cu = getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
     _memo = {}
+    _inert = config is None or config.pair_clearance_inert()
 
     def _clr(pad, other_net, layer=None, other_pad=None):
         """The pair clearance, memoised per pad / net / layer: the candidate
-        ring re-asks the same pairs at every position."""
-        if config is None:
+        ring re-asks the same pairs at every position. Nothing declared and no
+        override on either pad: `clearance` itself, with no lookup at all (this
+        runs per candidate x pad x item)."""
+        if config is None or (
+                _inert and not getattr(pad, 'local_clearance', 0)
+                and not (other_pad is not None
+                         and getattr(other_pad, 'local_clearance', 0))):
             return clearance
         k = (id(pad), other_net, layer, id(other_pad) if other_pad else None)
         v = _memo.get(k)

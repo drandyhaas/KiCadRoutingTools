@@ -610,6 +610,26 @@ def _foreign_via_arrays(pcb_data):
     return cache[1]
 
 
+def _pair_floor(config, net_id, layer=None):
+    """`(base_clearance, net_clearances)` for the foreign-distance helpers
+    above, so their uniform `dist >= base + w/2` check enforces the clearance
+    check_drc grades each pair at (#980): the moving net's OWN class floor
+    (`pair_clearance(net, net)`, KiCad's max(global, own class) -- not the
+    run-wide routed floor) with each foreign net's class excess folded in; on
+    a layer a .kicad_dru rule governs, the rule REPLACES the pair value, so
+    the base is the rule and no class excess is folded. With nothing
+    declared this is `(config.clearance, None)` -- the arguments these
+    callers always passed."""
+    pc = getattr(config, 'pair_clearance', None)
+    if pc is None:
+        return config.clearance, None
+    own = pc(net_id, net_id)
+    rules = getattr(config, 'layer_clearances', None) or {}
+    if layer is not None and layer in rules:
+        return config.layer_clearance(layer, own), None
+    return own, (getattr(config, 'net_clearances', None) or None)
+
+
 def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           net_clearances=None, base_clearance=0.0):
     """Min edge distance from a segment to any OTHER-net VIA (body), exact point-to-
@@ -775,10 +795,12 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     emitted 0.45 via grazed it by 39um). Try the registered size first, then
     the fab-floor ladder's smaller vias (shrink-to-fit, same spirit as #189's
     escalation); return the first that clears foreign copper mm-exactly, or
-    None when nothing fits (caller keeps the registered size -- honest DRC)."""
+    None when nothing fits (caller keeps the registered size -- honest DRC).
+
+    Each foreign item is priced at the clearance check_drc grades the pair at
+    (#980, `_pair_floor`): per layer for tracks and pads, the stack for vias."""
     from fab_tiers import escalation_rungs
     import routing_defaults as defaults
-    clearance = config.clearance
     eps = defaults.UNBLOCK_REFIT_MARGIN_MM
     layers = [l for l in (pcb_data.board_info.copper_layers or []) if l.endswith('.Cu')]
     ncu = len(layers) or 2
@@ -790,18 +812,28 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
         pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
         if pair[0] < rec[0] - 1e-9 and pair not in cands:
             cands.append(pair)
+    _own, _ncl = _pair_floor(config, net_id)
+    _stack = (config.stack_clearance(_own)
+              if hasattr(config, 'stack_clearance') else _own)
     for vs, dr in cands:
-        need = vs / 2.0 + clearance - eps
         ok = True
         for layer in layers:
-            if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
+            _base, _lncl = _pair_floor(config, net_id, layer)
+            need = vs / 2.0 + _base - eps
+            if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer,
+                                     net_clearances=_lncl,
+                                     base_clearance=_base) < need:
                 ok = False
                 break
             if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer,
-                                    base_clearance=clearance) < need:
+                                    base_clearance=_base,
+                                    net_clearances=_lncl) < need:
                 ok = False
                 break
-        if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
+        if ok and _seg_foreign_via_dist(
+                pcb_data, net_id, x, y, x, y,
+                layers[0] if layers else 'F.Cu', net_clearances=_ncl,
+                base_clearance=_stack) < vs / 2.0 + _stack - eps:
             ok = False
         # #671: _seg_foreign_via_dist is FOREIGN-only, and copper clearance
         # should be -- two same-net barrels may touch. The DRILL hole-to-hole
@@ -999,12 +1031,16 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     fx, fy = pts[term_idx]
     if abs(ox - fx) < 1e-9 and abs(oy - fy) < 1e-9:
         return False  # exact endpoint already is the grid cell
-    margin = config.clearance + config.get_net_track_width(net_id, ol) / 2.0
+    # #980: the pair value check_drc grades, folded per foreign pad.
+    _base, _ncl = _pair_floor(config, net_id, ol)
+    margin = _base + config.get_net_track_width(net_id, ol) / 2.0
     if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol,
-                            base_clearance=config.clearance) >= margin:
+                            base_clearance=_base,
+                            net_clearances=_ncl) >= margin:
         return False  # grid cell already clear -> nothing to fix
     if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol,
-                            base_clearance=config.clearance) < margin:
+                            base_clearance=_base,
+                            net_clearances=_ncl) < margin:
         return False  # exact endpoint also too close (placement) -> can't fix here
     nx, ny = pts[neighbor_idx]
     # Only relocate the endpoint of a SHORT terminal segment. simplify_path (caller,
@@ -1016,7 +1052,8 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     if math.hypot(nx - fx, ny - fy) > 1.5 * config.grid_step:
         return False  # long terminal segment -> keep grid end + short stub
     if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol,
-                             base_clearance=config.clearance) < margin - 1e-6:
+                             base_clearance=_base,
+                             net_clearances=_ncl) < margin - 1e-6:
         return False  # merged terminal segment would graze -> keep grid + stub
     pts[term_idx] = (ox, oy)
     return True

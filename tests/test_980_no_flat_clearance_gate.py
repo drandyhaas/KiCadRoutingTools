@@ -15,8 +15,9 @@ A. In every swept function, a `+`/`-` term that is a bare flat clearance
    (the value a board with nothing declared reads, byte-identical) and an
    NPTH hole (a hole has no net).
 B. Every swept function prices through `pair_clearance` /
-   `pad_pair_clearance` (directly, or through a `getattr(config,
-   'pair_clearance')` handle).
+   `pad_pair_clearance` (directly, through a `getattr(config,
+   'pair_clearance')` handle, or through `_pair_floor`, which hands the
+   foreign-distance helpers the base and class map they fold it from).
 C. Every call of the restore predicate (and its aliases), of
    `partition_force_restores`, of the plane twin, and of the rescue leg /
    cap relocation passes `config=` -- the plane twin also both nets.
@@ -46,6 +47,9 @@ SITES = {
         'stub_clear_of_foreign_tracks'],
     'py_router/net_rescue.py': ['_leg_clear', '_via_site_clear',
                                 '_find_cap_relocation', '_cap_conflicts'],
+    'py_router/single_ended_routing.py': ['_unblock_via_refit',
+                                          '_merge_terminal_to_exact'],
+    'py_router/diff_pair_routing.py': ['_collapse_leg_attach_join'],
 }
 
 _INERT = ('the inert-path scalar: what the search reads when nothing is '
@@ -111,6 +115,10 @@ def _prices_pairwise(fn):
                     and len(c.args) >= 2
                     and isinstance(c.args[1], ast.Constant)
                     and c.args[1].value == 'pair_clearance'):
+                return True
+            # single_ended_routing._pair_floor: the (base, class map) pair
+            # its foreign-distance helpers fold the pair value from
+            if isinstance(f, ast.Name) and f.id == '_pair_floor':
                 return True
     return False
 

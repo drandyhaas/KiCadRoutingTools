@@ -3600,11 +3600,13 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
     if after < intra - 1e-6 or after <= before + 1e-9:
         return leg_segs  # collapse doesn't help (or makes it worse)
     if pcb_data is not None:
-        from single_ended_routing import _seg_foreign_pad_dist
-        fmargin = config.clearance + w / 2.0
+        from single_ended_routing import _seg_foreign_pad_dist, _pair_floor
+        # #980: the pair value check_drc grades, folded per foreign pad.
+        _base, _ncl = _pair_floor(config, net_id, pen.layer)
+        fmargin = _base + w / 2.0
         if _seg_foreign_pad_dist(pcb_data, net_id, pen.start_x, pen.start_y,
-                                 ax, ay, pen.layer,
-                                 base_clearance=config.clearance) < fmargin - 1e-6:
+                                 ax, ay, pen.layer, base_clearance=_base,
+                                 net_clearances=_ncl) < fmargin - 1e-6:
             return leg_segs  # collapsed segment would graze a foreign pad
     pen.end_x, pen.end_y = ax, ay
     del leg_segs[-1]

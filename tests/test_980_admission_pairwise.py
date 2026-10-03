@@ -364,13 +364,215 @@ def test_rescue_cap_relocation_and_conflicts():
           "pad net's class")
 
 
+# ---- rows the phase-6 verifier found missing ------------------------------
+
+def test_pad_overrides_replace_and_key_the_margin():
+    """At the swap and fan pad checks a pad's override REPLACES its class
+    value (check_drc's #530 rule) -- they used max(class, override) -- and the
+    grading margin applies only where the override does not govern."""
+    import layer_swap_optimization as lso
+    from diff_pair_multipoint import _fans_fit
+    v = make_via(0.0, 0.0, net_id=OWN, size=0.6)
+    # pad edge 0.45 from the via centre: needs 0.3 + clearance
+    ovr = pcb(pads=[make_pad(FOREIGN, 0.0, 0.70, local_clearance=0.1)])
+    plain = pcb(pads=[make_pad(FOREIGN, 0.0, 0.70)])
+    c = cfg(True)
+    assert lso._bare_pad_pair_vias_fit(ovr, [v], c)[0]
+    assert not lso._bare_pad_pair_vias_fit(plain, [v], c)[0]
+    assert _fans_fit(ovr, [(v, None)], [], c)
+    assert not _fans_fit(plain, [(v, None)], [], c)
+    # no margin when the override governs: 0.003 inside its 0.4 requirement
+    tight = pcb(pads=[make_pad(FOREIGN, 0.0, 0.647, local_clearance=0.1)])
+    assert not lso._bare_pad_pair_vias_fit(tight, [v], c)[0]
+    assert not _fans_fit(tight, [(v, None)], [], c)
+    print("  PASS: a 0.1 override below a 0.35 class replaces it at the swap "
+          "and fan checks, with no grading margin")
+
+
+def test_meander_index_and_extra_paths():
+    from length_matching import get_safe_amplitude_at_point as amp
+    from length_matching import ClearanceIndex
+
+    def idx(board, conf):
+        i = ClearanceIndex()
+        i.build(board, conf, None, None)
+        return i
+    vb = pcb(vias=[make_via(5.0, 1.65, net_id=FOREIGN, size=0.6)])
+    pb = pcb(pads=[make_pad(FOREIGN, 5.0, 1.6)])
+    for label, board in (('via', vb), ('pad', pb)):
+        a_flat = amp(pcb_data=board, net_id=OWN, config=cfg(),
+                     clearance_index=idx(board, cfg()), **_AMP)
+        a_wide = amp(pcb_data=board, net_id=OWN, config=cfg(True),
+                     clearance_index=idx(board, cfg(True)), **_AMP)
+        assert a_flat > a_wide, (label, a_flat, a_wide)
+    empty = pcb()
+    xs = [make_seg(0, 1.6, 10, 1.6, net_id=FOREIGN, width=0.2)]
+    xv = [make_via(5.0, 1.65, net_id=FOREIGN, size=0.6)]
+    for label, kw in (('extra_segments', {'extra_segments': xs}),
+                      ('extra_vias', {'extra_vias': xv})):
+        a_flat = amp(pcb_data=empty, net_id=OWN, config=cfg(), **kw, **_AMP)
+        a_wide = amp(pcb_data=empty, net_id=OWN, config=cfg(True), **kw,
+                     **_AMP)
+        assert a_flat > a_wide, (label, a_flat, a_wide)
+    print("  PASS: the meander prices the pair through the index (via, pad) "
+          "and on the extra_segments / extra_vias paths")
+
+
+
+def test_meander_honours_a_pad_override_on_an_inert_board():
+    """A pad's own clearance override reaches the meander search even when
+    the board declares no class or rule -- as at every other swept check."""
+    from length_matching import get_safe_amplitude_at_point as amp
+    plain = pcb(pads=[make_pad(FOREIGN, 5.0, 1.75)])
+    ovr = pcb(pads=[make_pad(FOREIGN, 5.0, 1.75, local_clearance=0.5)])
+    a_plain = amp(pcb_data=plain, net_id=OWN, config=cfg(), **_AMP)
+    a_ovr = amp(pcb_data=ovr, net_id=OWN, config=cfg(), **_AMP)
+    assert a_plain > a_ovr, (a_plain, a_ovr)
+    print(f"  PASS: a 0.5 pad override shrinks the meander {a_plain} -> "
+          f"{a_ovr} with nothing else declared")
+
+def test_meander_via_query_reaches_a_wide_class():
+    """The index's VIA query reaches the widest pair too (a 5mm class, the
+    via 6mm out: past the flat query and the index's own build margin)."""
+    from length_matching import get_safe_amplitude_at_point as amp
+    from length_matching import ClearanceIndex
+    board = pcb(vias=[make_via(5.0, 6.0, net_id=FOREIGN, size=0.6)])
+    c = cfg()
+    c.set_net_clearances({FOREIGN: 5.0}, routed_net_ids=[OWN])
+    i = ClearanceIndex()
+    i.build(board, c, None, None)
+    with_idx = amp(pcb_data=board, net_id=OWN, config=c, clearance_index=i,
+                   **_AMP)
+    assert with_idx == amp(pcb_data=board, net_id=OWN, config=c, **_AMP)
+    assert with_idx < 1.0, with_idx
+    print(f"  PASS: a via under a 5mm class shrinks the meander to "
+          f"{with_idx} through the index as without it")
+
+
+def test_diff_pair_meander_via_pad_and_either_half():
+    from length_matching import get_safe_amplitude_for_diff_pair as damp
+    import inspect
+    params = set(inspect.signature(damp).parameters)
+    base = dict(cx=5.0, cy=0.0, ux=1.0, uy=0.0, px=0.0, py=1.0, direction=1,
+                max_amplitude=1.0, min_amplitude=0.1, layer=0,
+                p_net_id=OWN, n_net_id=P2, spacing_mm=0.3)
+
+    def a(board, conf):
+        kw = {k: v for k, v in dict(base, pcb_data=board).items()
+              if k in params}
+        return damp(config=conf, **kw)
+    seg_b = pcb(segs=[make_seg(0, 1.8, 10, 1.8, net_id=FOREIGN, width=0.2)])
+    # the class on the N half alone still prices the pair (max of P and N)
+    n_class = cfg(True, nets=(P2,))
+    assert a(seg_b, cfg()) > a(seg_b, n_class), 'the N half is priced'
+    found = {}
+    for label, board in (
+            ('via', lambda y: pcb(vias=[make_via(5.0, y, net_id=FOREIGN,
+                                                  size=0.6)])),
+            ('pad', lambda y: pcb(pads=[make_pad(FOREIGN, 5.0, y)]))):
+        for y in (1.7, 1.8, 1.9, 2.0, 2.1, 2.2):
+            if a(board(y), cfg()) > a(board(y), cfg(True)):
+                found[label] = y
+                break
+        assert label in found, label
+    print(f"  PASS: the diff-pair meander prices either half and a via / pad "
+          f"(first separating offsets {found})")
+
+
+def test_rescue_cap_relocation_via_and_pad():
+    from net_rescue import _find_cap_relocation
+    import math
+    for label, extra in (
+            ('via', dict(vias=[make_via(0.5, 0.75, net_id=FOREIGN,
+                                        size=0.6)])),
+            ('pad', dict(pads=[make_pad(FOREIGN, 0.5, 0.72, ref='U7')]))):
+        cap = _cap()
+        fps = {'C1': cap}
+        if 'pads' in extra:
+            fps['U7'] = NS(reference='U7', pads=extra['pads'], locked=False)
+        board = pcb(vias=extra.get('vias', ()), footprints=fps)
+        flat = _find_cap_relocation(board, cap, [], [], 0.2, config=cfg())
+        wide = _find_cap_relocation(board, cap, [], [], 0.2,
+                                    config=cfg(True))
+        assert flat is not None and wide is not None, (label, flat, wide)
+        assert math.hypot(*wide) > math.hypot(*flat) + 1e-9, \
+            (label, flat, wide)
+    print("  PASS: cap relocation prices a foreign via and a foreign pad at "
+          "the class")
+
+
+def test_kind_and_layer_under_a_layer_rule():
+    """Which kind / layer each site prices with only shows on a board with a
+    .kicad_dru layer rule: via-vs-via is the STACK (every rule), a stub swapped
+    to B.Cu is priced on B.Cu, a via barrel meets a track on the track's
+    layer."""
+    from kicad_oracle import _stitch_via_clear
+    import stub_layer_switching as sls
+    tight_f = cfg(layer_clearances={'F.Cu': 0.3})
+    via_b = pcb(vias=[make_via(0.0, 0.85, net_id=FOREIGN, size=0.6)])
+    assert _stitch_via_clear(via_b, OWN, 0.0, 0.0, cfg(), 0.2)
+    assert not _stitch_via_clear(via_b, OWN, 0.0, 0.0, tight_f, 0.2)
+    tight_b = cfg(layer_clearances={'B.Cu': 0.3})
+    pad_b = pcb(pads=[make_pad(FOREIGN, 0.0, 0.6, layers=('B.Cu',))])
+    stub = [make_seg(-1, 0, 1, 0, net_id=OWN, width=0.2, layer='F.Cu')]
+    assert sls.stub_clear_of_foreign_pads(stub, 'B.Cu', OWN, pad_b, cfg(),
+                                          set())[0]
+    assert not sls.stub_clear_of_foreign_pads(stub, 'B.Cu', OWN, pad_b,
+                                              tight_b, set())[0]
+    relax_b = cfg(layer_clearances={'B.Cu': 0.15})
+    trk_b = pcb(segs=[make_seg(-2, 0.58, 2, 0.58, net_id=FOREIGN,
+                               layer='B.Cu')])
+    assert not sls.via_barrel_clear_of_foreign_copper(
+        0.0, 0.0, OWN, trk_b, cfg(), set())[0]
+    assert sls.via_barrel_clear_of_foreign_copper(
+        0.0, 0.0, OWN, trk_b, relax_b, set())[0]
+    print("  PASS: via-via takes the stack's rule, a swapped stub its "
+          "destination layer's, a via barrel the track's layer's")
+
+
+def test_unblock_via_refit():
+    from single_ended_routing import _unblock_via_refit
+    board = pcb(segs=[make_seg(-2, 0.65, 2, 0.65, net_id=FOREIGN)])
+    flat = _unblock_via_refit(board, OWN, 0.0, 0.0, (0.6, 0.3), cfg())
+    wide = _unblock_via_refit(board, OWN, 0.0, 0.0, (0.6, 0.3), cfg(True))
+    assert flat == (0.6, 0.3), flat
+    assert wide != (0.6, 0.3), wide
+    print(f"  PASS: a 0.6 unblock via 0.25mm from a 0.35-class track keeps "
+          f"its size flat and is refitted at the class ({wide})")
+
+
+def test_merge_terminal_to_exact():
+    from single_ended_routing import _merge_terminal_to_exact
+    board = pcb(pads=[make_pad(FOREIGN, -0.6, 0.0)])
+
+    def merged(conf):
+        conf.grid_step = 0.1
+        pts = [(0.0, 0.0), (0.1, 0.0)]
+        ok = _merge_terminal_to_exact([(0, 0, 0), (1, 0, 0)], 0, 1,
+                                      (0.12, 0.0, 'F.Cu'), pts, board, OWN,
+                                      conf, ['F.Cu', 'B.Cu'])
+        return ok
+    assert merged(cfg()) is False      # the grid cell already clears 0.2
+    assert merged(cfg(True)) is True   # at the class it does not; exact does
+    print("  PASS: the terminal merges to its exact endpoint only when the "
+          "class puts the grid cell inside the pad's pair clearance")
+
+
 TESTS = [test_sliver_weld, test_stitching_via, test_swap_via_fit,
          test_fans_fit, test_meander_amplitude,
          test_meander_query_reaches_a_wide_class,
          test_diff_pair_meander_amplitude, test_stub_validators,
          test_stub_pad_check_reads_the_stub_width,
          test_rescue_leg_and_via_site,
-         test_rescue_cap_relocation_and_conflicts]
+         test_rescue_cap_relocation_and_conflicts,
+         test_pad_overrides_replace_and_key_the_margin,
+         test_meander_index_and_extra_paths,
+         test_meander_honours_a_pad_override_on_an_inert_board,
+         test_meander_via_query_reaches_a_wide_class,
+         test_diff_pair_meander_via_pad_and_either_half,
+         test_rescue_cap_relocation_via_and_pad,
+         test_kind_and_layer_under_a_layer_rule,
+         test_unblock_via_refit, test_merge_terminal_to_exact]
 
 
 if __name__ == '__main__':
