@@ -603,6 +603,21 @@ class GridRouteConfig:
                     v = mv
         return v
 
+    def pad_clearance_bound(self, pad, mp: Optional[float] = None) -> float:
+        """An upper bound of `pad_pair_clearance` against `pad` (its override,
+        floored at the board minimum, included): the radius a prefilter must
+        reach around that pad. `mp` is `max_pair_clearance()`, precomputed by
+        a caller that bounds many pads (it walks every map)."""
+        v = self.max_pair_clearance() if mp is None else mp
+        lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+        if lc > 0:
+            rules = self.rules
+            bm = (rules.board_min.get('min_clearance', 0.0)
+                  if rules is not None and getattr(rules, 'board_min', None)
+                  else 0.0)
+            v = max(v, lc, bm)
+        return v
+
     def net_clearances_by_name(self, nets) -> Dict[str, float]:
         """The class map keyed by NET NAME, for a consumer that re-parses a
         board whose net ids may differ from this run's (the KiCad oracle reads

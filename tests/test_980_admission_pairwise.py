@@ -558,6 +558,77 @@ def test_merge_terminal_to_exact():
           "class puts the grid cell inside the pad's pair clearance")
 
 
+def test_stub_windows_reach_a_wide_class():
+    """The stub-swap checks prefilter foreign copper by a window that was a
+    fixed 1.5 mm (tracks, vias, pads) or 2.0 mm (the via barrel's pads), so a
+    class wider than that was cut down to the window. Each window now reaches
+    the widest pair value (and a pad's own override), never less than before.
+    A 2.0 mm class: every geometry below is inside its pair value, and outside
+    the old window."""
+    import stub_layer_switching as sls
+    HV = 2.0
+    c = GridRouteConfig(clearance=0.2, track_width=0.2, via_size=0.6,
+                        via_drill=0.3, layers=['F.Cu', 'B.Cu'], grid_step=0.05)
+    c.set_net_clearances({FOREIGN: HV}, routed_net_ids=[OWN])
+    stub = [make_seg(0, 0, 1, 0, net_id=OWN, width=0.2)]
+    for y in (1.8, 2.1):           # need 0.1 + 0.1 + 2.0 = 2.2
+        b = pcb(segs=[make_seg(-1, y, 2, y, net_id=FOREIGN, width=0.2)])
+        assert not sls.stub_clear_of_foreign_tracks(
+            stub, 'F.Cu', OWN, b, c, set())[0], ('track', y)
+        assert sls.stub_clear_of_foreign_tracks(
+            stub, 'F.Cu', OWN, b, cfg(), set())[0], ('track flat', y)
+    b = pcb(vias=[make_via(0.5, 1.8, net_id=FOREIGN, size=0.6)])
+    assert not sls.stub_clear_of_foreign_tracks(stub, 'F.Cu', OWN, b, c,
+                                                set())[0]
+    b = pcb(pads=[make_pad(FOREIGN, 0.5, 1.8)])
+    assert not sls.stub_clear_of_foreign_pads(stub, 'F.Cu', OWN, b, c,
+                                              set())[0]
+    assert sls.stub_clear_of_foreign_pads(stub, 'F.Cu', OWN, b, cfg(),
+                                          set())[0]
+    b = pcb(pads=[make_pad(FOREIGN, 0.0, 2.4)])
+    assert not sls.via_barrel_clear_of_foreign_copper(
+        0.0, 0.0, OWN, b, c, set())[0]
+    assert sls.via_barrel_clear_of_foreign_copper(
+        0.0, 0.0, OWN, b, cfg(), set())[0]
+    # a pad's own override widens its window on an otherwise inert board
+    ov = make_pad(FOREIGN, 0.5, 1.8)
+    ov.local_clearance = 1.8
+    assert not sls.stub_clear_of_foreign_pads(stub, 'F.Cu', OWN, pcb(pads=[ov]),
+                                              cfg(), set())[0]
+    ov2 = make_pad(FOREIGN, 0.0, 2.4)
+    ov2.local_clearance = 2.4
+    assert not sls.via_barrel_clear_of_foreign_copper(
+        0.0, 0.0, OWN, pcb(pads=[ov2]), cfg(), set())[0]
+    print("  PASS: a 2.0 class refuses a track at 1.8/2.1, a via and a pad "
+          "at 1.8 from a stub, and a pad at 2.4 from a via barrel -- all "
+          "outside the old windows; a pad override widens its own window")
+
+
+def test_the_pad_bound_is_a_bound():
+    """`pad_clearance_bound` is what the swap-via pad check and the stub
+    windows prefilter with: it must never be below `pad_pair_clearance`, with
+    or without an override, a class or a layer rule, or the prefilter would
+    drop a pad the real value flags."""
+    import itertools
+    worst = 0.0
+    for classes, rule, lc in itertools.product(
+            ({}, {FOREIGN: 0.35}, {OWN: 0.5}),
+            ({}, {'F.Cu': 0.15}, {'F.Cu': 0.6}),
+            (0.0, 0.1, 0.9)):
+        c = GridRouteConfig(clearance=0.2, layers=['F.Cu', 'B.Cu'])
+        if classes:
+            c.set_net_clearances(classes, routed_net_ids=[OWN])
+        c.layer_clearances = dict(rule)
+        pad = make_pad(FOREIGN, 0.0, 0.0)
+        pad.local_clearance = lc
+        real = c.pad_pair_clearance(pad, OWN)
+        ub = c.pad_clearance_bound(pad)
+        assert ub >= real - 1e-12, (classes, rule, lc, real, ub)
+        worst = max(worst, real - ub)
+    print(f"  PASS: 27 class/rule/override combinations, the bound never "
+          f"below the pair value (max excess {worst:+.3f})")
+
+
 TESTS = [test_sliver_weld, test_stitching_via, test_swap_via_fit,
          test_fans_fit, test_meander_amplitude,
          test_meander_query_reaches_a_wide_class,
@@ -572,7 +643,8 @@ TESTS = [test_sliver_weld, test_stitching_via, test_swap_via_fit,
          test_diff_pair_meander_via_pad_and_either_half,
          test_rescue_cap_relocation_via_and_pad,
          test_kind_and_layer_under_a_layer_rule,
-         test_unblock_via_refit, test_merge_terminal_to_exact]
+         test_unblock_via_refit, test_merge_terminal_to_exact,
+         test_stub_windows_reach_a_wide_class, test_the_pad_bound_is_a_bound]
 
 
 if __name__ == '__main__':

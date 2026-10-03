@@ -72,6 +72,10 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
     # adjacent N PAD is a real short).
     pair_nets = {v.net_id for v in new_vias}
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+    _mp = config.max_pair_clearance()
+
+    def _pad_ub(pad):
+        return config.pad_clearance_bound(pad, _mp)
 
     for i, v in enumerate(new_vias):
         # vs the partner net's new pad via (the P/N via-via at the pad pitch).
@@ -109,13 +113,19 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
                 # slack when the override governs: the post-route via-nudge
                 # cannot fix a via boxed between two long override pads
                 # (moving off one worsens the other), so a margin-graze ships.
-                pad_base = config.pad_pair_clearance(
-                    pad, v.net_id, board_copper=board_copper, override=False)
-                pad_clr = config.pad_override_clearance(pad_base, pad)
-                pad_margin = margin if pad_clr == pad_base else 0.0
+                # Priced only for a FOREIGN pad the via could reach at the
+                # largest value it can take (`_pad_ub`): the flag is monotone
+                # in the clearance, so a miss there is a miss at the real one.
                 if pad_net != v.net_id and check_pad_via_overlap(
-                        pad, v, pad_clr, routing_layers, pad_margin)[0]:
-                    return False, "pad via grazes a foreign pad (pad-via)"
+                        pad, v, _pad_ub(pad), routing_layers, 0.0)[0]:
+                    pad_base = config.pad_pair_clearance(
+                        pad, v.net_id, board_copper=board_copper,
+                        override=False)
+                    pad_clr = config.pad_override_clearance(pad_base, pad)
+                    pad_margin = margin if pad_clr == pad_base else 0.0
+                    if check_pad_via_overlap(
+                            pad, v, pad_clr, routing_layers, pad_margin)[0]:
+                        return False, "pad via grazes a foreign pad (pad-via)"
                 # drills: net-independent (same-net THT pad drill still conflicts)
                 if check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
                     return False, "pad via drill grazes a pad drill (hole-to-hole)"

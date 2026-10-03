@@ -234,8 +234,11 @@ def _dump_engine_config(engine, cfg):
         # progress_callback is skipped by NAME, not just callable(): the CLI
         # passes None (not callable, would dump as null) while the GUI passes
         # a function (skipped) -- a phantom key diff in the parity harness.
+        # input_copper_keys (#980) is the board's copper as a set, not a
+        # config value: megabytes of repr in a hash-seed-dependent order.
         if k in ('input_file', 'output_file', 'pcb_data',
-                 'progress_callback', 'cancel_check') or callable(v):
+                 'progress_callback', 'cancel_check',
+                 'input_copper_keys') or callable(v):
             continue
         try:
             _json.dumps(v)
@@ -1046,7 +1049,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _dump = {}
         for _k, _v in sorted(_reconcile_kwargs.items()):
             if callable(_v) or _k in ('cancel_check',
-                                      'progress_callback'):
+                                      'progress_callback',
+                                      # #980: board copper, not config
+                                      'input_copper_keys'):
                 continue
             try:
                 _json.dumps(_v)
