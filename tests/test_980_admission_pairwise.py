@@ -204,13 +204,15 @@ def test_meander_amplitude():
 
 
 def test_meander_query_reaches_a_wide_class():
-    """The spatial index is queried at the WIDEST pair clearance: a 2.5 mm
-    class is past the 2 mm slack the query used to add to the flat value."""
+    """The spatial index is queried at the WIDEST pair clearance. A 5 mm
+    class is past the flat value plus the 2 mm slack the query used to add;
+    with the index's 2 mm cells (each track registered 1.4 mm wide) the track
+    6 mm out sits in cells the flat query never visits."""
     from length_matching import get_safe_amplitude_at_point as amp
     from length_matching import ClearanceIndex
-    board = pcb(segs=[make_seg(0, 3.5, 10, 3.5, net_id=FOREIGN, width=0.2)])
+    board = pcb(segs=[make_seg(0, 6.0, 10, 6.0, net_id=FOREIGN, width=0.2)])
     c = cfg()
-    c.set_net_clearances({FOREIGN: 2.5}, routed_net_ids=[OWN])
+    c.set_net_clearances({FOREIGN: 5.0}, routed_net_ids=[OWN])
     def _idx(conf):
         i = ClearanceIndex()
         i.build(board, conf, None, None)
@@ -221,7 +223,7 @@ def test_meander_query_reaches_a_wide_class():
     assert with_idx == no_idx, (with_idx, no_idx)
     assert with_idx < amp(pcb_data=board, net_id=OWN, config=cfg(),
                           clearance_index=_idx(cfg()), **_AMP)
-    print(f"  PASS: a 2.5mm class shrinks the meander to {with_idx} through "
+    print(f"  PASS: a 5mm class shrinks the meander to {with_idx} through "
           f"the index as without it")
 
 
