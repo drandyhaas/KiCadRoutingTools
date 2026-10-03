@@ -27,9 +27,12 @@ Edits are `str.replace(old, new, 1)`; anchors are LF and translated to the
 target's own ending.
 
 Not covered by a row, and why:
-  * the oracle's per-link `net_clearance_floor`: it only changes copper
-    inside a kicad-cli oracle run, which no unit test drives; the re-keying
-    it rests on is row `oracle-map-not-rekeyed`;
+  * the oracle's ESCALATION weld (`_attempt_edge(..., config.net_clearances
+    or None)`, two calls): it runs only after the main weld ladder fails,
+    which the KiCad-free oracle harness does not force;
+  * which config each engine records its input copper on
+    (`mark_input_copper` in batch_route / batch_route_diff_pairs /
+    repair_planes): the carve-out it feeds is row `inherited-graze-refused`;
   * `pair-args-swapped` SURVIVES by design: the pair value is symmetric in
     its two nets, so swapping them is an equivalent mutant (a change
     detector for the day it is not).
@@ -73,6 +76,7 @@ def _t(name, *cases):
 PAR = _t('test_980_pair_clearance_parity.py')
 RES = _t('test_980_restore_pairwise.py')
 ORC = _t('test_980_oracle_class_map.py')
+OBH = _t('test_980_oracle_behaviour.py')
 GATE = _t('test_980_no_flat_clearance_gate.py')
 T_ADM = 'test_980_admission_pairwise.py'
 
@@ -266,6 +270,43 @@ ROWS = [
     ('repair-main-map-dropped', 'rp',
      "                                net_clearances_by_name=LAST_NET_CLEARANCES_BY_NAME)",
      "                                net_clearances_by_name=None)",
+     (ORC,), 'KILLED'),
+    # ---- the phase-5 and phase-7 verifiers' rows -----------------------------
+    ('inherited-graze-refused', 'rr',
+     "    _inherited = (getattr(pcb_data, '_input_copper_keys', None)",
+     "    _inherited = (None and getattr(pcb_data, '_input_copper_keys', None)",
+     (_t('test_980_restore_pairwise.py', 'inherited'),), 'KILLED'),
+    ('restore-via-via-layer-kind', 'rr',
+     "                else _clr(vv.net_id, v.net_id, None, 'stack'))",
+     "                else _clr(vv.net_id, v.net_id, None, 'layer'))",
+     (_t('test_980_restore_pairwise.py', 'kinds'),), 'KILLED'),
+    ('restore-track-via-layer-dropped', 'rr',
+     "                else _clr(s.net_id, v.net_id, s.layer, 'layer'))",
+     "                else _clr(s.net_id, v.net_id, None, 'layer'))",
+     (_t('test_980_restore_pairwise.py', 'kinds'),), 'KILLED'),
+    ('restore-track-rule-dropped', 'rr',
+     "                else _clr(s.net_id, o.net_id, s.layer, 'track'))",
+     "                else _clr(s.net_id, o.net_id, s.layer, 'layer'))",
+     (_t('test_980_restore_pairwise.py', 'kinds'),), 'KILLED'),
+    ('plane-twin-via-via-layer-kind', 'pbd',
+     "                               else _clr(None, 'stack'))",
+     "                               else _clr(None, 'layer'))",
+     (_t('test_980_restore_pairwise.py', 'kinds'),), 'KILLED'),
+    ('oracle-rekey-dropped', 'ko',
+     "            config.net_clearances = _oracle_class_map(pcb, _ncl_by_name)",
+     "            pass",
+     (OBH,), 'KILLED'),
+    ('oracle-private-copy-dropped', 'ko',
+     "        config = replace(config)",
+     "        pass",
+     (OBH,), 'KILLED'),
+    ('oracle-link-floor-dropped', 'ko',
+     "                config.net_clearance_floor = max(",
+     "                config.net_clearance_floor = None and max(",
+     (OBH,), 'KILLED'),
+    ('aliased-oracle-call-map-dropped', 'route',
+     "                        net_clearances_by_name=config.net_clearances_by_name(",
+     "                        net_clearances_by_name={}, _unused=config.net_clearances_by_name(",
      (ORC,), 'KILLED'),
     # ---- a change detector ---------------------------------------------------
     ('pair-args-swapped', 'ko',

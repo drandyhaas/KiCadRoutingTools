@@ -8,12 +8,18 @@ pricing a foreign track, via or pad at one flat `config.clearance`. Each was
 found by accident; this gate is what keeps a new one from shipping
 unnoticed. It reads the code SHAPE (an AST), never comments or prose:
 
-A. In every swept function, a `+`/`-` term that is a bare flat clearance
-   (`config.clearance`, `tap_config.clearance`, `cfg.clearance`, or a
-   `clearance` / `clr` name) must be on the ALLOWED list below, each entry
-   with the reason it is not a pair: the meander search's inert-path scalars
-   (the value a board with nothing declared reads, byte-identical) and an
-   NPTH hole (a hole has no net).
+A. In every swept function, every READ of a flat clearance -- `config.
+   clearance` on any config-like name (`config`, `tap_config`, `cfg`,
+   `*_cfg`, `self.config`), `getattr(x, 'clearance')`, or the stamp helper
+   `obstacle_clearance(...)` -- in ANY form (a sum, a comparison, an alias
+   `clr = config.clearance`, a call argument) must be on ALLOWED_READS, and a
+   bare `clearance` / `clr` name used as a `+`/`-` term, a comparison operand
+   or an augmented assignment must be on ALLOWED_TERMS -- each keyed by the
+   expression's code with its count, and each with the reason it is not a
+   foreign pair: the meander search's inert-path and board-edge scalars, an
+   NPTH hole, same-net copper, the restore check's flat threshold for an
+   inherited graze, and an intra-pair floor (the P/N checks are a separate
+   follow-up).
 B. Every swept function prices through `pair_clearance` /
    `pad_pair_clearance` (directly, through a `getattr(config,
    'pair_clearance')` handle, or through `_pair_floor`, which hands the
@@ -29,7 +35,6 @@ and the pre-#980 sliver weld, and requires both to fail.
 """
 import ast
 import os
-import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -55,53 +60,112 @@ SITES = {
 _INERT = ('the inert-path scalar: what the search reads when nothing is '
           'declared (pair_clearance_inert), kept in its term order so such a '
           'board is byte-identical; foreign items take the pair value')
-#: (file, function, the term's code) -> why a flat clearance is right there
-ALLOWED = {
+_EDGE = 'the board-edge keep-out, not a pair of nets'
+_MEANDER = 'py_router/length_matching.py'
+
+#: (file, function, the reading expression's code) -> (count, why)
+ALLOWED_READS = {
+    ('py_router/kicad_oracle.py', '_direct_sliver_weld',
+     'clr = config.clearance'):
+        (1, 'used ONLY for an NPTH hole, which has no net (see ALLOWED_TERMS)'),
+    ('py_router/diff_pair_multipoint.py', '_fans_fit',
+     'clearance = config.clearance'):
+        (1, 'used ONLY for SAME-net vias and pads, which check_drc grades at '
+            'no pair value'),
+    (_MEANDER, 'get_safe_amplitude_at_point',
+     'net_half + config.track_width / 2 + config.clearance'):
+        (2, _INERT + ' (required_clearance, paired_clearance)'),
+    (_MEANDER, 'get_safe_amplitude_at_point',
+     'config.via_size / 2 + net_half + config.clearance'): (1, _INERT),
+    (_MEANDER, 'get_safe_amplitude_at_point',
+     'net_half + config.clearance'): (1, _INERT + ' (and an OWN-net pad)'),
+    (_MEANDER, 'get_safe_amplitude_at_point',
+     'config.board_edge_clearance if config.board_edge_clearance > 0 else '
+     'config.clearance'): (1, _EDGE),
+    (_MEANDER, 'get_safe_amplitude_for_diff_pair',
+     'net_half + config.track_width / 2 + config.clearance'): (1, _INERT),
+    (_MEANDER, 'get_safe_amplitude_for_diff_pair',
+     'config.via_size / 2 + net_half + config.clearance'): (1, _INERT),
+    (_MEANDER, 'get_safe_amplitude_for_diff_pair',
+     'net_half + config.clearance'): (1, _INERT),
+    (_MEANDER, 'get_safe_amplitude_for_diff_pair',
+     'config.board_edge_clearance if config.board_edge_clearance > 0 else '
+     'config.clearance'): (1, _EDGE),
+    ('py_router/diff_pair_routing.py', '_collapse_leg_attach_join',
+     'min(config.clearance, config.diff_pair_gap)'):
+        (1, 'the INTRA-pair floor (P against N); the P/N checks are a '
+            'separate follow-up, since a pair-class value there moves '
+            'diff-pair routing wherever the gap is below the class'),
+}
+
+_INHERIT = ('the FLAT threshold the restore check compares a pair-value hit '
+            'against, to tell an inherited graze (mark_input_copper) from a '
+            'collision the run made')
+#: (file, function, the expression's code) -> (count, why)
+ALLOWED_TERMS = {
     ('py_router/kicad_oracle.py', '_direct_sliver_weld',
      'reach + pad.drill / 2.0 + clr'):
-        'an NPTH hole has no net: copper keeps the flat clearance from it',
-    ('py_router/length_matching.py', 'get_safe_amplitude_at_point',
-     'net_half + config.track_width / 2 + config.clearance'): _INERT,
-    ('py_router/length_matching.py', 'get_safe_amplitude_at_point',
-     'config.via_size / 2 + net_half + config.clearance'): _INERT,
-    ('py_router/length_matching.py', 'get_safe_amplitude_at_point',
-     'net_half + config.clearance'): _INERT + ' (and an OWN-net pad)',
-    ('py_router/length_matching.py', 'get_safe_amplitude_for_diff_pair',
-     'net_half + config.track_width / 2 + config.clearance'): _INERT,
-    ('py_router/length_matching.py', 'get_safe_amplitude_for_diff_pair',
-     'config.via_size / 2 + net_half + config.clearance'): _INERT,
-    ('py_router/length_matching.py', 'get_safe_amplitude_for_diff_pair',
-     'net_half + config.clearance'): _INERT,
-}
-
-#: Rule C: function name -> keywords every call must pass
-CALLS = {
-    '_saved_route_collides': ('config',),
-    '_saved_route_colliders': ('config',),
-    'partition_force_restores': ('config',),
-    '_restored_piece_collides': ('config', 'piece_net', 'plane_net'),
-    '_leg_clear': ('config',),
-    '_find_cap_relocation': ('config',),
+        (1, 'an NPTH hole has no net: copper keeps the flat clearance from '
+            'it'),
+    ('py_router/rip_up_reroute.py', '_saved_route_colliders',
+     'hw + o.width / 2.0 + clearance'): (1, _INHERIT),
+    ('py_router/rip_up_reroute.py', '_saved_route_colliders',
+     'hw + v.size / 2.0 + clearance'): (1, _INHERIT),
+    ('py_router/rip_up_reroute.py', '_saved_route_colliders',
+     'vr + v.size / 2.0 + clearance'): (1, _INHERIT),
+    ('py_router/rip_up_reroute.py', '_saved_route_colliders',
+     'vr + o.width / 2.0 + clearance'): (1, _INHERIT),
 }
 
 
-def _flat(n):
-    return ((isinstance(n, ast.Attribute) and n.attr == 'clearance'
-             and isinstance(n.value, ast.Name)
-             and n.value.id in ('config', 'tap_config', 'cfg'))
-            or (isinstance(n, ast.Name) and n.id in ('clearance', 'clr')))
+def _cfgish(v):
+    return ((isinstance(v, ast.Name)
+             and (v.id in ('config', 'tap_config', 'cfg')
+                  or v.id.endswith('_cfg') or v.id.endswith('config')))
+            or (isinstance(v, ast.Attribute) and v.attr in ('config', 'cfg')))
 
 
-def _flat_terms(fn):
-    """Every BinOp(+/-) in `fn` with a bare flat clearance operand, as the
-    smallest such expression's code (an outer sum that merely CONTAINS it is
-    not repeated)."""
-    out = set()
-    for b in ast.walk(fn):
-        if isinstance(b, ast.BinOp) and isinstance(b.op, (ast.Add, ast.Sub)) \
-                and (_flat(b.left) or _flat(b.right)):
-            out.add((b.lineno, ast.unparse(b)))
-    return out
+def _flat_read(n):
+    """A read of a flat clearance in any spelling the sweep met."""
+    if (isinstance(n, ast.Attribute) and n.attr == 'clearance'
+            and isinstance(n.ctx, ast.Load) and _cfgish(n.value)):
+        return True
+    if isinstance(n, ast.Call):
+        f = n.func
+        if (isinstance(f, ast.Name) and f.id == 'getattr' and len(n.args) >= 2
+                and isinstance(n.args[1], ast.Constant)
+                and n.args[1].value == 'clearance'):
+            return True
+        if isinstance(f, ast.Attribute) and f.attr == 'obstacle_clearance':
+            return True
+    return False
+
+
+def _bare(n):
+    return (isinstance(n, ast.Name) and n.id in ('clearance', 'clr')
+            and isinstance(n.ctx, ast.Load))
+
+
+def _census(fn):
+    """({reading expression: count}, {bare-term expression: count})."""
+    from collections import Counter
+    parents = {}
+    for p_ in ast.walk(fn):
+        for c in ast.iter_child_nodes(p_):
+            parents[c] = p_
+    reads, terms = Counter(), Counter()
+    for n in ast.walk(fn):
+        if _flat_read(n):
+            reads[ast.unparse(parents[n])] += 1
+        if (isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub))
+                and (_bare(n.left) or _bare(n.right))):
+            terms[ast.unparse(n)] += 1
+        elif isinstance(n, ast.Compare) and (
+                _bare(n.left) or any(_bare(c) for c in n.comparators)):
+            terms[ast.unparse(n)] += 1
+        elif isinstance(n, ast.AugAssign) and _bare(n.value):
+            terms[ast.unparse(n)] += 1
+    return reads, terms
 
 
 def _prices_pairwise(fn):
@@ -128,36 +192,55 @@ def _rules_ab(rel, src, fn_name):
     fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                and n.name == fn_name), None)
     if fn is None:
-        return [f'{rel}: {fn_name} is gone -- update SITES']
+        return [f'{rel}: {fn_name} is gone -- update SITES'], set()
     probs = []
-    for lineno, code in sorted(_flat_terms(fn)):
-        if (rel, fn_name, code) not in ALLOWED:
-            probs.append(f'{rel}:{lineno} {fn_name}: flat clearance term '
-                         f'`{code}`')
+    reads, terms = _census(fn)
+    used = set()
+    for table, found, what in ((ALLOWED_READS, reads, 'flat clearance read'),
+                               (ALLOWED_TERMS, terms, 'flat clearance term')):
+        for code, n in sorted(found.items()):
+            key = (rel, fn_name, code)
+            used.add(key)
+            want = table.get(key, (0, None))[0]
+            if n != want:
+                probs.append(f'{rel} {fn_name}: {what} `{code}` x{n} '
+                             f'(allowed x{want})')
     if not _prices_pairwise(fn):
         probs.append(f'{rel}: {fn_name} never calls pair_clearance / '
                      f'pad_pair_clearance')
-    return probs
+    return probs, used
 
 
 def test_rules_a_and_b():
     probs = []
-    seen = set()
+    used = set()
     for rel, fns in SITES.items():
         with open(os.path.join(ROOT, rel), encoding='utf-8') as fh:
             src = fh.read()
         for fn in fns:
-            probs += _rules_ab(rel, src, fn)
-            tree = ast.parse(src)
-            node = next(n for n in ast.walk(tree)
-                        if isinstance(n, ast.FunctionDef) and n.name == fn)
-            seen |= {(rel, fn, code) for _l, code in _flat_terms(node)}
+            p_, u = _rules_ab(rel, src, fn)
+            probs += p_
+            used |= u
     assert not probs, '\n'.join(probs)
-    stale = sorted(set(ALLOWED) - seen)
-    assert not stale, f'ALLOWED entries that match nothing: {stale}'
+    stale = sorted((set(ALLOWED_READS) | set(ALLOWED_TERMS)) - used)
+    assert not stale, f'allowlist entries that match nothing: {stale}'
     n = sum(len(v) for v in SITES.values())
-    print(f"  PASS: {n} functions price pairwise; {len(ALLOWED)} flat "
-          f"term(s), each allowed by name")
+    print(f"  PASS: {n} functions price pairwise; "
+          f"{sum(c for c, _w in ALLOWED_READS.values())} flat read(s) and "
+          f"{sum(c for c, _w in ALLOWED_TERMS.values())} flat term(s), each "
+          f"allowed by name and count")
+
+
+#: Rule C: function name -> keywords every call must pass
+CALLS = {
+    '_saved_route_collides': ('config',),
+    '_saved_route_colliders': ('config',),
+    'partition_force_restores': ('config',),
+    '_restored_piece_collides': ('config', 'piece_net', 'plane_net'),
+    '_leg_clear': ('config',),
+    '_find_cap_relocation': ('config',),
+}
+
 
 
 def _aliases(tree):
@@ -234,15 +317,33 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config):
 
 
 def test_negative_control():
-    p1 = _rules_ab('py_router/rip_up_reroute.py', _PRE_980_RESTORE,
-                   '_saved_route_colliders')
-    p2 = _rules_ab('py_router/kicad_oracle.py', _PRE_980_WELD,
-                   '_direct_sliver_weld')
-    assert any('flat clearance term' in p for p in p1), p1
+    p1, _u = _rules_ab('py_router/rip_up_reroute.py', _PRE_980_RESTORE,
+                       '_saved_route_colliders')
+    p2, _u = _rules_ab('py_router/kicad_oracle.py', _PRE_980_WELD,
+                       '_direct_sliver_weld')
+    # (its one flat term reads like the inherited-graze threshold the
+    # current code keeps -- allowed x1 -- so rule B is what refuses it here;
+    # a second copy beside the real one would exceed the count)
     assert any('never calls' in p for p in p1), p1
-    assert any('flat clearance term' in p for p in p2), p2
-    print("  PASS: the pre-#980 restore predicate and sliver weld both fail "
-          "rules A and B")
+    assert any('flat clearance' in p for p in p2), p2
+    # the spellings the phase-7 verifier slipped past the first gate
+    for sneaky in ('    d = dist - vr - w / 2 < config.clearance',
+                   '    need += config.clearance',
+                   '    _c = config.clearance',
+                   '    need = max(config.clearance, x)',
+                   "    need = getattr(config, 'clearance')",
+                   '    need = rung_cfg.clearance + vr',
+                   '    need = self.config.clearance + vr',
+                   '    need = config.obstacle_clearance(n) + vr',
+                   '    ok = d < clr',
+                   '    need += clearance'):
+        src = ('def _stitch_via_clear(pcb_data, net_id, x, y, config, h2h):\n'
+               '    q = config.pair_clearance(1, 2)\n' + sneaky + '\n')
+        p3, _u = _rules_ab('py_router/kicad_oracle.py', src,
+                           '_stitch_via_clear')
+        assert any('flat clearance' in p for p in p3), (sneaky, p3)
+    print("  PASS: the pre-#980 restore predicate and sliver weld fail the "
+          "gate, and so do ten other flat spellings")
 
 
 TESTS = [test_rules_a_and_b, test_rule_c_every_call_passes_config,

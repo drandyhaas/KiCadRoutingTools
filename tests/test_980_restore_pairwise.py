@@ -216,6 +216,95 @@ def test_the_plane_twin():
           "without both nets")
 
 
+
+def test_an_inherited_graze_is_not_a_collision_the_run_made():
+    """Two pieces of copper the step was HANDED that a wider class puts too
+    close: refusing the restore would ship the net open where the input had
+    it connected. Counted only when the flat clearance flags it, or when the
+    foreign copper moved in during the run."""
+    own = seg(0, 0, 5, 0, 0.2, 1)
+    near = seg(0, 0.45, 5, 0.45, 0.2, 2)          # edge gap 0.25
+    c = cfg_with({2: 0.35})
+    # the input board had both; net 1 is ripped and comes back
+    board = board_ = NS(segments=[own, near], vias=[])
+    rr.mark_input_copper(board_)
+    board.segments = [near]
+    ok, bad = rr.partition_force_restores({1: ([own], [])}, board, 0.2,
+                                          config=c)
+    assert ok == [1] and bad == [], (ok, bad)
+    # control 1: the foreign copper MOVED IN during the run -> refused
+    board2 = NS(segments=[own], vias=[])
+    rr.mark_input_copper(board2)
+    board2.segments = [near]
+    ok, bad = rr.partition_force_restores({1: ([own], [])}, board2, 0.2,
+                                          config=c)
+    assert ok == [] and bad == [1], (ok, bad)
+    # control 2: an inherited graze under the FLAT clearance still refuses,
+    # as it did before #980
+    tight = seg(0, 0.35, 5, 0.35, 0.2, 2)         # edge gap 0.15 < 0.2
+    board3 = NS(segments=[own, tight], vias=[])
+    rr.mark_input_copper(board3)
+    board3.segments = [tight]
+    ok, bad = rr.partition_force_restores({1: ([own], [])}, board3, 0.2,
+                                          config=c)
+    assert ok == [] and bad == [1], (ok, bad)
+    print("  PASS: an inherited class graze is restored; copper that moved "
+          "in, or a graze under the flat clearance, still refuses")
+
+
+def test_kinds_under_layer_and_track_rules():
+    """Which kind / layer each pair takes only shows under a .kicad_dru rule:
+    via-via is the STACK, a restored track meets a via on the track's layer,
+    a restored via meets a track on the track's, track-track takes the #735
+    track rule. Each geometry is admitted flat and refused under the rule."""
+    def coll(saved_, board, c):
+        return rr._saved_route_collides(saved_, board, [1], 0.2, config=c)
+    vv = (saved(vias=[via(0, 0, 0.6, 1)]),
+          board(vias=[via(0, 0.9, 0.6, 2)]))        # gap 0.3
+    assert not coll(*vv, cfg_with())
+    assert coll(*vv, cfg_with(layers={'B.Cu': 0.5}))
+    tv = (saved([seg(0, 0, 5, 0, 0.2, 1)]),
+          board(vias=[via(2.5, 0.7, 0.6, 2)]))      # gap 0.3
+    assert not coll(*tv, cfg_with())
+    assert coll(*tv, cfg_with(layers={'F.Cu': 0.5}))
+    assert not coll(*tv, cfg_with(layers={'B.Cu': 0.5}))
+    vt = (saved(vias=[via(0, 0, 0.6, 1)]),
+          board([seg(-2, 0.7, 2, 0.7, 0.2, 2)]))    # gap 0.3
+    assert coll(*vt, cfg_with(layers={'F.Cu': 0.5}))
+    assert not coll(*vt, cfg_with(layers={'B.Cu': 0.5}))
+    tt = (saved([seg(0, 0, 5, 0, 0.2, 1)]),
+          board([seg(0, 0.5, 5, 0.5, 0.2, 2)]))     # gap 0.3
+    c = cfg_with()
+    c.track_clearances = {2: 0.5}
+    assert not coll(*tt, cfg_with())
+    assert coll(*tt, c)
+    # the plane twin: via-via is the stack, track-track the track rule
+    vd = {'x': 0, 'y': 0, 'size': 0.6}
+    pv = [{'x': 0, 'y': 0.9}]
+    args = dict(config=cfg_with(layers={'B.Cu': 0.5}), piece_net=1,
+                plane_net=7)
+    assert not _restored_piece_collides(None, vd, pv, [], 0.6, 0.2)
+    assert _restored_piece_collides(None, vd, pv, [], 0.6, 0.2, **args)
+    sd = {'start': (0, 0), 'end': (5, 0), 'width': 0.2, 'layer': 'F.Cu'}
+    ps = [{'start': (0, 0.5), 'end': (5, 0.5), 'width': 0.2,
+           'layer': 'F.Cu'}]
+    ct = cfg_with()
+    ct.track_clearances = {7: 0.5}
+    assert not _restored_piece_collides(sd, None, [], ps, 0.6, 0.2,
+                                        config=cfg_with(), piece_net=1,
+                                        plane_net=7)
+    assert _restored_piece_collides(sd, None, [], ps, 0.6, 0.2, config=ct,
+                                    piece_net=1, plane_net=7)
+    sv = [{'x': 2.5, 'y': 0.7}]
+    assert _restored_piece_collides(sd, None, sv, [], 0.6, 0.2,
+                                    config=cfg_with(layers={'F.Cu': 0.5}),
+                                    piece_net=1, plane_net=7)
+    assert not _restored_piece_collides(sd, None, sv, [], 0.6, 0.2,
+                                        config=cfg_with(layers={'B.Cu': 0.5}),
+                                        piece_net=1, plane_net=7)
+    print("  PASS: via-via takes the stack, track-via and via-track the "
+          "track's layer, track-track the track rule (and in the plane twin)")
+
 TESTS = [
     test_a_wider_foreign_class_refuses_the_restore,
     test_a_relaxing_layer_rule_admits,
@@ -224,6 +313,8 @@ TESTS = [
     test_the_prefilter_box_reaches_every_threshold,
     test_every_pre_980_call_shape,
     test_the_plane_twin,
+    test_an_inherited_graze_is_not_a_collision_the_run_made,
+    test_kinds_under_layer_and_track_rules,
 ]
 
 

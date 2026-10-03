@@ -424,11 +424,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(format_memory_stats("Initial memory", mem_start))
 
     # Load or use provided pcb_data
+    _parsed_here = pcb_data is None
     if pcb_data is None:
         print(f"Loading {input_file}...")
         pcb_data = parse_kicad_pcb(input_file, keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
+    # #980: the copper this step was handed, before any rip.
+    from rip_up_reroute import mark_input_copper
+    # A board this call parsed is the step's input; a board handed in keeps
+    # the record its caller made (a repair sub-run must not relabel the
+    # parent run's own copper as input).
+    mark_input_copper(pcb_data, force=_parsed_here)
     # #962: the input's vias as values, for the ship-time Type VII stamp
     from fab_notes import via_snapshot as _via_snapshot962
     _input_vias962 = _via_snapshot962(pcb_data.vias)

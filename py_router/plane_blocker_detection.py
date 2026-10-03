@@ -258,9 +258,10 @@ def _restored_piece_collides(seg: Optional[Dict], via: Optional[Dict],
 
     #980: given `config` and both nets -- the restored piece's (`piece_net`)
     and the plane copper's (`plane_net`) -- each pair is priced at
-    `config.pair_clearance`, KiCad's max(classA, classB) and the .kicad_dru
-    layer rule, floored at `clearance`. Without them every pair is priced at
-    the flat `clearance`, as before.
+    `config.pair_clearance`: KiCad's max(classA, classB) over the base
+    `clearance`, then the .kicad_dru layer rule, which replaces it (and may
+    be lower). Without them every pair is priced at the flat `clearance`, as
+    before.
     """
     via_r = via_size / 2.0
     _pc = getattr(config, 'pair_clearance', None)

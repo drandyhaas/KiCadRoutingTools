@@ -1089,12 +1089,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if debug_memory:
         print(format_memory_stats("Initial memory", mem_start))
 
+    _parsed_here = pcb_data is None
     if pcb_data is None:
         print(f"Loading {input_file}...")
         pcb_data = parse_kicad_pcb(input_file, guide_layer=guide_corridor_layer,
                                    keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
+    # #980: the copper this step was handed, before any rip (the restore
+    # check tells an inherited graze from one the run made).
+    from rip_up_reroute import mark_input_copper
+    # A board this call parsed is the step's input; a board handed in keeps
+    # the record its caller made (a repair sub-run must not relabel the
+    # parent run's own copper as input).
+    mark_input_copper(pcb_data, force=_parsed_here)
 
     # KICAD_DUP_TRAP=1: report the call site that re-appends the SAME copper
     # object to pcb_data. Inert otherwise. Armed here so it covers the whole
@@ -4908,7 +4916,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             # run's class map by name (the oracle re-parses).
                             from kicad_dru import install_layer_clearances
                             install_layer_clearances(_cap_cfg, None,
-                                                     input_file, None)
+                                                     input_file, pcb_data)
                             _orc_cap = oracle_reconnect(
                                 output_file, _mvnames, _cap_cfg,
                                 track_via_clearance=config.clearance,
@@ -6397,7 +6405,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                         hole_to_hole_clearance=config.hole_to_hole_clearance,
                         cancel_check=cancel_check,
-                        project_from=input_file)
+                        project_from=input_file,
+                        net_clearances_by_name=config.net_clearances_by_name(
+                            pcb_data.nets))
                 _pd678b = _pk678b(_file678)
                 _aud678c = _apo678b(_pd678b, _prom678, board_file=_file678,
                                     project_from=input_file,
@@ -6457,7 +6467,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 output_file, sorted(_scope10), _reaudit9[1],
                 track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                 hole_to_hole_clearance=config.hole_to_hole_clearance,
-                project_from=input_file)
+                project_from=input_file,
+                net_clearances_by_name=config.net_clearances_by_name(
+                    pcb_data.nets))
             try:
                 results_data['post_reconcile_oracle'] = _orc10
             except (NameError, UnboundLocalError):

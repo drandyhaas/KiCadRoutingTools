@@ -340,6 +340,36 @@ def _seg_seg_dist_sq(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> float:
     )
 
 
+def copper_key(item) -> tuple:
+    """A segment's or via's identity by VALUE (net, layer, rounded geometry),
+    so copper can be recognised across a rip and a restore whatever object
+    carries it."""
+    if hasattr(item, 'start_x'):
+        a = (round(item.start_x, 4), round(item.start_y, 4))
+        b = (round(item.end_x, 4), round(item.end_y, 4))
+        return ('s', item.net_id, item.layer, round(item.width, 4),
+                min(a, b), max(a, b))
+    return ('v', item.net_id, round(item.x, 4), round(item.y, 4),
+            round(getattr(item, 'size', 0.0) or 0.0, 4))
+
+
+def mark_input_copper(pcb_data, force: bool = False) -> None:
+    """#980: record the copper a routing step was HANDED, as `copper_key`s on
+    `pcb_data._input_copper_keys`, before anything is ripped. The restore
+    check reads it to tell a graze the input board already had (two pieces of
+    input copper a wider net class puts too close) from a collision the run
+    created. `force` re-records; otherwise an existing record stands (a
+    nested engine call keeps the step's own input)."""
+    if not force and getattr(pcb_data, '_input_copper_keys', None) is not None:
+        return
+    try:
+        pcb_data._input_copper_keys = frozenset(
+            [copper_key(s) for s in (pcb_data.segments or ())]
+            + [copper_key(v) for v in (pcb_data.vias or ())])
+    except AttributeError:
+        pass        # a read-only stand-in board: nothing is recorded
+
+
 def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
                           own_net_ids: List[int], clearance: float,
                           config: Optional[GridRouteConfig] = None) -> bool:
@@ -355,9 +385,10 @@ def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
     precisely the desync we want to refuse. Mirrors the plane fix (#88.1).
 
     `config` (#980) prices each pair of nets at the clearance check_drc grades
-    it at (`GridRouteConfig.pair_clearance`): KiCad's max(classA, classB) and
-    the board's .kicad_dru layer rule, floored at `clearance`. None keeps the
-    flat `clearance` for every pair.
+    it at (`GridRouteConfig.pair_clearance`): KiCad's max(classA, classB) over
+    the base `clearance`, then the board's .kicad_dru layer rule, which
+    replaces it (and may be lower). None keeps the flat `clearance` for every
+    pair.
     """
     return bool(_saved_route_colliders(saved_result, pcb_data, own_net_ids,
                                        clearance, first_only=True,
@@ -375,9 +406,15 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
 
     #980: with a `config`, a pair is priced at `config.pair_clearance` -- the
     RESTORED item's own net against the foreign item's net, so a P/N restore
-    prices each half at its own class -- with `clearance` as the floor. A
+    prices each half at its own class -- with `clearance` as the base. A
     config with nothing declared (or none) prices every pair at `clearance`,
     exactly as before.
+
+    A hit found only at the PAIR value, between restored copper and foreign
+    copper that were BOTH on the board this step was handed
+    (`mark_input_copper`), is not counted: that graze is the input's own, and
+    refusing the restore would ship the net open where the input had it
+    connected. A hit at the flat `clearance` is counted as it always was.
     """
     own = set(own_net_ids)
     segs = saved_result.get('new_segments', []) or []
@@ -396,6 +433,16 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
         if v is None:
             v = _memo[k] = _pc(a, b, layer, kind=kind, base=clearance)
         return v
+
+    _inherited = (getattr(pcb_data, '_input_copper_keys', None)
+                  if _pc is not None else None)
+
+    def _input_graze(mine, theirs, d_sq, flat_thr):
+        """A pair-value hit the input board already had: both items are input
+        copper and the flat clearance does not flag them."""
+        return (_inherited is not None and d_sq >= flat_thr * flat_thr
+                and copper_key(mine) in _inherited
+                and copper_key(theirs) in _inherited)
 
     # Bounding box of the saved route, expanded, to prefilter pcb_data copper.
     # #980: by the largest threshold any pair can reach -- the restored
@@ -449,8 +496,10 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             thr = hw + o.width / 2.0 + (
                 clearance if _pc is None
                 else _clr(s.net_id, o.net_id, s.layer, 'track'))
-            if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
-                                o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
+            _d = _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
+                                  o.start_x, o.start_y, o.end_x, o.end_y)
+            if _d < thr * thr and not _input_graze(
+                    s, o, _d, hw + o.width / 2.0 + clearance):
                 _hit('segment', o)
                 if first_only:
                     return hits
@@ -458,8 +507,10 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             thr = hw + v.size / 2.0 + (
                 clearance if _pc is None
                 else _clr(s.net_id, v.net_id, s.layer, 'layer'))
-            if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
-                               s.end_x, s.end_y) < thr * thr:
+            _d = _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
+                                 s.end_x, s.end_y)
+            if _d < thr * thr and not _input_graze(
+                    s, v, _d, hw + v.size / 2.0 + clearance):
                 _hit('via', v)
                 if first_only:
                     return hits
@@ -471,7 +522,9 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             thr = vr + v.size / 2.0 + (
                 clearance if _pc is None
                 else _clr(vv.net_id, v.net_id, None, 'stack'))
-            if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
+            _d = (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2
+            if _d < thr * thr and not _input_graze(
+                    vv, v, _d, vr + v.size / 2.0 + clearance):
                 _hit('via', v)
                 if first_only:
                     return hits
@@ -479,8 +532,10 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
             thr = vr + o.width / 2.0 + (
                 clearance if _pc is None
                 else _clr(vv.net_id, o.net_id, o.layer, 'layer'))
-            if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
-                               o.end_x, o.end_y) < thr * thr:
+            _d = _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
+                                 o.end_x, o.end_y)
+            if _d < thr * thr and not _input_graze(
+                    vv, o, _d, vr + o.width / 2.0 + clearance):
                 _hit('segment', o)
                 if first_only:
                     return hits

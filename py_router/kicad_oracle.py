@@ -1723,6 +1723,11 @@ def oracle_reconnect(board_file: str, net_names, config,
         # mutated, and the caller's config must not carry them away.
         config = replace(config)
 
+    def _rekey(pcb):
+        """Install the class map on the board just parsed, by its own ids."""
+        if _ncl_by_name:
+            config.net_clearances = _oracle_class_map(pcb, _ncl_by_name)
+
     names = set(net_names)
     routed = failed = rounds = cross_board = 0
     collapsed_dups = 0  # duplicate work entries dropped (see the round loop)
@@ -1916,8 +1921,7 @@ def oracle_reconnect(board_file: str, net_names, config,
 
         pcb_data = parse_kicad_pcb(board_file)
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
-        if _ncl_by_name:
-            config.net_clearances = _oracle_class_map(pcb_data, _ncl_by_name)
+        _rekey(pcb_data)
         routing_layers = pcb_data.board_info.copper_layers
         layer_map = {name: i for i, name in enumerate(routing_layers)}
 
@@ -2236,8 +2240,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                     from net_rescue import _attempt_edge
                     _gap2 = (math.hypot(_pb[0] - _pa[0], _pb[1] - _pa[1]),
                              _pa[0], _pa[1], _pb[0], _pb[1])
+                    # #980: the class map this round re-keyed (None when
+                    # none was handed in), so the escalation's obstacle
+                    # map prices foreign nets at their class as well
                     _esc2, _esc2_cfg = _attempt_edge(
-                        pcb_data, net_id, _gap2, config, None,
+                        pcb_data, net_id, _gap2, config,
+                        config.net_clearances or None,
                         strict_endpoints=True)
                 except Exception:
                     _esc2 = None
@@ -2575,8 +2583,10 @@ def oracle_reconnect(board_file: str, net_names, config,
                 try:
                     from net_rescue import _attempt_edge
                     _gap = (math.hypot(bx - ax, by - ay), ax, ay, bx, by)
+                    # #980: the round's re-keyed class map (see above)
                     _esc, _esc_cfg = _attempt_edge(
-                        pcb_data, net_id, _gap, config, None,
+                        pcb_data, net_id, _gap, config,
+                        config.net_clearances or None,
                         strict_endpoints=True)
                 except Exception as _ee:
                     if verbose:
@@ -3112,8 +3122,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     if links and rounds == 0:
         pcb_data = parse_kicad_pcb(board_file)
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
-        if _ncl_by_name:
-            config.net_clearances = _oracle_class_map(pcb_data, _ncl_by_name)
+        _rekey(pcb_data)
     # NOT `if rounds and links` (#659 audit): `rounds` counts rounds the weld
     # loop ran on ITS OWN scope nets, and it is 0 whenever those were already
     # complete -- the common healthy case. daisho step 9 printed "KiCad

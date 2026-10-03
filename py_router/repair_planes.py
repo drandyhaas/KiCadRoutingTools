@@ -847,6 +847,10 @@ def repair_planes(
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
+    # #980: the copper this step was handed, before any rip -- unless an
+    # enclosing route step already recorded its own (the in-run finalize).
+    from rip_up_reroute import mark_input_copper
+    mark_input_copper(pcb_data)
 
     # #513 item 5: snapshot each net's dominant routed width BEFORE any rip
     # mutates pcb_data, so the end-of-run reconnect of ripped blockers can

@@ -11,8 +11,9 @@ nets are numbered afresh. What each case pins:
 
 * `_oracle_class_map` re-keys a name map onto the ids of the board it is
   given, whatever ids the caller had;
-* every `oracle_reconnect(` call in py_router/ and kicad_routing_plugin/
-  passes the keyword (an AST walk, not a grep);
+* every `oracle_reconnect` call in py_router/ and kicad_routing_plugin/,
+  aliased imports included, passes the keyword with a real value (an AST
+  walk, not a grep);
 * route.py's GUI payload carries the map, `run_kicad_oracle_on_live_board`
   takes it and forwards it, and swig_gui hands it over from the payload;
 * repair_planes' main() passes the map its engine published.
@@ -70,16 +71,36 @@ def test_the_map_is_rekeyed_by_name():
           "keeps its 0.4")
 
 
+def _oracle_aliases(tree):
+    """Every local name `oracle_reconnect` is imported as in `tree`."""
+    names = {'oracle_reconnect'}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            for a in n.names:
+                if a.name == 'oracle_reconnect' and a.asname:
+                    names.add(a.asname)
+    return names
+
+
 def test_every_oracle_call_passes_the_map():
+    """Every call -- including the ones imported under another name (route.py's
+    #678 pour-promise weld and #589 re-audit) -- passes the map, and passes a
+    real one: a constant `{}` / `None` there is the map dropped."""
     seen = []
     for rel in SOURCES:
-        for c in _calls(_tree(rel), 'oracle_reconnect'):
-            seen.append((rel, c.lineno, _kw(c, 'net_clearances_by_name')))
-    assert len(seen) >= 4, seen
-    missing = [(r, ln) for r, ln, k in seen if k is None]
+        tree = _tree(rel)
+        for name in sorted(_oracle_aliases(tree)):
+            for c in _calls(tree, name):
+                seen.append((rel, c.lineno, name,
+                             _kw(c, 'net_clearances_by_name')))
+    assert len(seen) >= 6, [(r, ln, nm) for r, ln, nm, _k in seen]
+    missing = [(r, ln, nm) for r, ln, nm, k in seen if k is None]
     assert not missing, missing
-    print(f"  PASS: {len(seen)} oracle_reconnect call(s), every one passes "
-          f"net_clearances_by_name")
+    const = [(r, ln, nm) for r, ln, nm, k in seen
+             if isinstance(k.value, (ast.Constant, ast.Dict))]
+    assert not const, const
+    print(f"  PASS: {len(seen)} oracle_reconnect call(s) (aliases "
+          f"included), every one passes a real net_clearances_by_name")
 
 
 def test_the_gui_payload_carries_it_and_both_fronts_forward_it():
