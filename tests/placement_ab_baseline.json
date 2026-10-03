@@ -556,13 +556,13 @@
    "unseated": 0
   },
   "on": {
-   "body_advisory": 17,
+   "body_advisory": 19,
    "body_blocking": 0,
-   "crossings": 45,
+   "crossings": 44,
    "edge_facing_pads": 3,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 260.05,
+   "hpwl": 259.99,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "decap_distance": 1
@@ -601,11 +601,11 @@
   "on": {
    "body_advisory": 5,
    "body_blocking": 0,
-   "crossings": 3828,
+   "crossings": 3836,
    "edge_facing_pads": 10,
-   "health_block_displacement_max_mm": 22.643,
+   "health_block_displacement_max_mm": 22.5444,
    "health_bus_foreign_crossings": null,
-   "hpwl": 5399.3,
+   "hpwl": 5382.75,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "edge_connector": 1
@@ -641,20 +641,20 @@
    "unseated": 4
   },
   "on": {
-   "body_advisory": 14,
-   "body_blocking": 8,
-   "crossings": 4179,
+   "body_advisory": 21,
+   "body_blocking": 6,
+   "crossings": 4153,
    "edge_facing_pads": 4,
    "health_block_displacement_max_mm": 13.0365,
    "health_bus_foreign_crossings": null,
-   "hpwl": 2970.6,
+   "hpwl": 2990.73,
    "intent_errors": 10,
    "intent_errors_by_rule": {
     "decap_distance": 10
    },
    "intent_errors_enforced": 10,
    "intent_errors_other": 0,
-   "inversions": 655,
+   "inversions": 653,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 4
@@ -685,18 +685,18 @@
   "on": {
    "body_advisory": 2,
    "body_blocking": 0,
-   "crossings": 589,
+   "crossings": 568,
    "edge_facing_pads": 2,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 3172.1,
+   "hpwl": 3166.3,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "legality": 1
    },
    "intent_errors_enforced": 0,
    "intent_errors_other": 1,
-   "inversions": 189,
+   "inversions": 188,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 0
@@ -727,18 +727,18 @@
   "on": {
    "body_advisory": 1,
    "body_blocking": 0,
-   "crossings": 555,
+   "crossings": 547,
    "edge_facing_pads": 1,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 1575.21,
-   "intent_errors": 5,
+   "hpwl": 1546.63,
+   "intent_errors": 7,
    "intent_errors_by_rule": {
-    "decap_distance": 5
+    "decap_distance": 7
    },
-   "intent_errors_enforced": 5,
+   "intent_errors_enforced": 7,
    "intent_errors_other": 0,
-   "inversions": 212,
+   "inversions": 216,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 1
@@ -767,20 +767,20 @@
    "unseated": 2
   },
   "on": {
-   "body_advisory": 33,
+   "body_advisory": 27,
    "body_blocking": 0,
-   "crossings": 4424,
+   "crossings": 4418,
    "edge_facing_pads": 2,
-   "health_block_displacement_max_mm": 18.1521,
+   "health_block_displacement_max_mm": 17.6496,
    "health_bus_foreign_crossings": null,
-   "hpwl": 8368.76,
+   "hpwl": 8235.7,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "decap_distance": 1
    },
    "intent_errors_enforced": 1,
    "intent_errors_other": 0,
-   "inversions": 820,
+   "inversions": 813,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 2
@@ -812,19 +812,19 @@
   "on": {
    "body_advisory": 1,
    "body_blocking": 0,
-   "crossings": 177,
+   "crossings": 197,
    "edge_facing_pads": 1,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 779.78,
-   "intent_errors": 12,
+   "hpwl": 834.65,
+   "intent_errors": 13,
    "intent_errors_by_rule": {
     "decap_distance": 2,
-    "edge_connector": 10
+    "edge_connector": 11
    },
    "intent_errors_enforced": 2,
-   "intent_errors_other": 10,
-   "inversions": 85,
+   "intent_errors_other": 11,
+   "inversions": 84,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 0
@@ -853,20 +853,20 @@
    "unseated": 0
   },
   "on": {
-   "body_advisory": 17,
+   "body_advisory": 15,
    "body_blocking": 0,
-   "crossings": 44,
+   "crossings": 50,
    "edge_facing_pads": 3,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 254.04,
+   "hpwl": 256.51,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "decap_distance": 1
    },
    "intent_errors_enforced": 1,
    "intent_errors_other": 0,
-   "inversions": 14,
+   "inversions": 15,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 0
@@ -896,20 +896,20 @@
    "unseated": 0
   },
   "on": {
-   "body_advisory": 4,
+   "body_advisory": 5,
    "body_blocking": 0,
-   "crossings": 3654,
+   "crossings": 3738,
    "edge_facing_pads": 10,
-   "health_block_displacement_max_mm": 18.4137,
+   "health_block_displacement_max_mm": 18.2215,
    "health_bus_foreign_crossings": null,
-   "hpwl": 5164.72,
+   "hpwl": 5256.63,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "edge_connector": 1
    },
    "intent_errors_enforced": 0,
    "intent_errors_other": 1,
-   "inversions": 1746,
+   "inversions": 1754,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 0
@@ -938,20 +938,20 @@
    "unseated": 4
   },
   "on": {
-   "body_advisory": 19,
-   "body_blocking": 7,
-   "crossings": 3972,
+   "body_advisory": 18,
+   "body_blocking": 9,
+   "crossings": 4031,
    "edge_facing_pads": 4,
    "health_block_displacement_max_mm": 13.0365,
    "health_bus_foreign_crossings": null,
-   "hpwl": 2866.04,
-   "intent_errors": 6,
+   "hpwl": 2880.24,
+   "intent_errors": 5,
    "intent_errors_by_rule": {
-    "decap_distance": 6
+    "decap_distance": 5
    },
-   "intent_errors_enforced": 6,
+   "intent_errors_enforced": 5,
    "intent_errors_other": 0,
-   "inversions": 677,
+   "inversions": 654,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 3
@@ -982,18 +982,18 @@
   "on": {
    "body_advisory": 2,
    "body_blocking": 0,
-   "crossings": 547,
+   "crossings": 522,
    "edge_facing_pads": 2,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 3065.35,
+   "hpwl": 3013.49,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "legality": 1
    },
    "intent_errors_enforced": 0,
    "intent_errors_other": 1,
-   "inversions": 185,
+   "inversions": 186,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 0
@@ -1024,21 +1024,21 @@
   "on": {
    "body_advisory": 1,
    "body_blocking": 0,
-   "crossings": 484,
+   "crossings": 500,
    "edge_facing_pads": 1,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 1465.97,
-   "intent_errors": 3,
+   "hpwl": 1475.06,
+   "intent_errors": 2,
    "intent_errors_by_rule": {
-    "decap_distance": 3
+    "decap_distance": 2
    },
-   "intent_errors_enforced": 3,
+   "intent_errors_enforced": 2,
    "intent_errors_other": 0,
-   "inversions": 213,
+   "inversions": 208,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
-   "unseated": 2
+   "unseated": 1
   }
  },
  "decap-after-queue-ulx3s": {
@@ -1064,18 +1064,18 @@
    "unseated": 2
   },
   "on": {
-   "body_advisory": 28,
+   "body_advisory": 29,
    "body_blocking": 0,
-   "crossings": 4396,
+   "crossings": 4360,
    "edge_facing_pads": 2,
-   "health_block_displacement_max_mm": 17.215,
+   "health_block_displacement_max_mm": 17.078,
    "health_bus_foreign_crossings": null,
-   "hpwl": 8107.41,
+   "hpwl": 8187.84,
    "intent_errors": 0,
    "intent_errors_by_rule": {},
    "intent_errors_enforced": 0,
    "intent_errors_other": 0,
-   "inversions": 813,
+   "inversions": 809,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 2
@@ -1107,18 +1107,18 @@
   "on": {
    "body_advisory": 1,
    "body_blocking": 0,
-   "crossings": 182,
+   "crossings": 212,
    "edge_facing_pads": 1,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 776.9,
-   "intent_errors": 13,
+   "hpwl": 782.22,
+   "intent_errors": 12,
    "intent_errors_by_rule": {
-    "decap_distance": 1,
-    "edge_connector": 12
+    "decap_distance": 2,
+    "edge_connector": 10
    },
-   "intent_errors_enforced": 1,
-   "intent_errors_other": 12,
+   "intent_errors_enforced": 2,
+   "intent_errors_other": 10,
    "inversions": 81,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
@@ -1191,20 +1191,20 @@
    "unseated": 0
   },
   "on": {
-   "body_advisory": 3,
+   "body_advisory": 5,
    "body_blocking": 0,
-   "crossings": 3740,
+   "crossings": 3860,
    "edge_facing_pads": 10,
-   "health_block_displacement_max_mm": 21.3449,
+   "health_block_displacement_max_mm": 22.0882,
    "health_bus_foreign_crossings": null,
-   "hpwl": 5303.55,
+   "hpwl": 5265.53,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "edge_connector": 1
    },
    "intent_errors_enforced": 0,
    "intent_errors_other": 1,
-   "inversions": 1755,
+   "inversions": 1749,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 0
@@ -1233,20 +1233,20 @@
    "unseated": 4
   },
   "on": {
-   "body_advisory": 16,
-   "body_blocking": 2,
-   "crossings": 3966,
+   "body_advisory": 17,
+   "body_blocking": 4,
+   "crossings": 3890,
    "edge_facing_pads": 4,
    "health_block_displacement_max_mm": 13.0365,
    "health_bus_foreign_crossings": null,
-   "hpwl": 2924.52,
-   "intent_errors": 1,
+   "hpwl": 2926.54,
+   "intent_errors": 4,
    "intent_errors_by_rule": {
-    "decap_distance": 1
+    "decap_distance": 4
    },
-   "intent_errors_enforced": 1,
+   "intent_errors_enforced": 4,
    "intent_errors_other": 0,
-   "inversions": 663,
+   "inversions": 664,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 4
@@ -1254,7 +1254,7 @@
  },
  "decap-within-limit-splitflap_driver": {
   "board": "splitflap_driver.kicad_pcb",
-  "mark": "neutral",
+  "mark": "regress",
   "off": {
    "body_advisory": 2,
    "body_blocking": 0,
@@ -1277,18 +1277,18 @@
   "on": {
    "body_advisory": 2,
    "body_blocking": 0,
-   "crossings": 543,
+   "crossings": 648,
    "edge_facing_pads": 2,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 3054.43,
+   "hpwl": 3167.85,
    "intent_errors": 1,
    "intent_errors_by_rule": {
     "legality": 1
    },
    "intent_errors_enforced": 0,
    "intent_errors_other": 1,
-   "inversions": 185,
+   "inversions": 188,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 0
@@ -1319,21 +1319,21 @@
   "on": {
    "body_advisory": 1,
    "body_blocking": 0,
-   "crossings": 509,
+   "crossings": 503,
    "edge_facing_pads": 1,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 1540.56,
-   "intent_errors": 4,
+   "hpwl": 1548.44,
+   "intent_errors": 3,
    "intent_errors_by_rule": {
-    "decap_distance": 4
+    "decap_distance": 3
    },
-   "intent_errors_enforced": 4,
+   "intent_errors_enforced": 3,
    "intent_errors_other": 0,
    "inversions": 208,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
-   "unseated": 1
+   "unseated": 2
   }
  },
  "decap-within-limit-ulx3s": {
@@ -1359,18 +1359,20 @@
    "unseated": 2
   },
   "on": {
-   "body_advisory": 38,
+   "body_advisory": 31,
    "body_blocking": 0,
-   "crossings": 4456,
+   "crossings": 4445,
    "edge_facing_pads": 2,
-   "health_block_displacement_max_mm": 17.2512,
+   "health_block_displacement_max_mm": 17.6356,
    "health_bus_foreign_crossings": null,
-   "hpwl": 8318.89,
-   "intent_errors": 0,
-   "intent_errors_by_rule": {},
-   "intent_errors_enforced": 0,
+   "hpwl": 8240.74,
+   "intent_errors": 1,
+   "intent_errors_by_rule": {
+    "decap_distance": 1
+   },
+   "intent_errors_enforced": 1,
    "intent_errors_other": 0,
-   "inversions": 812,
+   "inversions": 817,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 2
@@ -1402,19 +1404,19 @@
   "on": {
    "body_advisory": 1,
    "body_blocking": 0,
-   "crossings": 147,
+   "crossings": 160,
    "edge_facing_pads": 1,
    "health_block_displacement_max_mm": null,
    "health_bus_foreign_crossings": null,
-   "hpwl": 742.94,
-   "intent_errors": 18,
+   "hpwl": 750.06,
+   "intent_errors": 13,
    "intent_errors_by_rule": {
-    "decap_distance": 6,
-    "edge_connector": 12
+    "decap_distance": 3,
+    "edge_connector": 10
    },
-   "intent_errors_enforced": 6,
-   "intent_errors_other": 12,
-   "inversions": 83,
+   "intent_errors_enforced": 3,
+   "intent_errors_other": 10,
+   "inversions": 79,
    "oob_keepout_copper_amount": 0.0,
    "oob_keepout_copper_count": 0,
    "unseated": 0

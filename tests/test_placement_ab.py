@@ -638,7 +638,6 @@ _AFTER_ICS_BOARDS = ('esp_prog', 'splitflap_driver', 'tigard', 'watchy',
 #: (family, board) -> the measured mark of a rejected row.
 _AFTER_ICS_MARKS = {
     ('decap-within-limit', 'esp_prog'): 'neutral',
-    ('decap-within-limit', 'splitflap_driver'): 'neutral',
     ('decap-after-queue', 'splitflap_driver'): 'neutral',
     ('decap-after-queue', 'tigard'): 'improve',
     ('decap-after-queue', 'glasgow_revC'): 'improve',

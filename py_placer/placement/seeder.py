@@ -4898,10 +4898,12 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # earlier (#1053: "the two paths cannot diverge"). The target, the jitter
     # draw, the ladder and the notes are stage 3's, in stage 3's order.
 
-    def _centroid_seat(ref):
-        """`(clearance or None, target, jx, jy)`; seats on success."""
+    def _centroid_seat(ref, jit=None):
+        """`(clearance or None, target, jx, jy)`; seats on success. `jit`
+        is a jitter drawn earlier for this ref (stage 3's `q_jit`); None
+        draws it here, as stage 2.4 does."""
         target = _partner_centroid(state, ref, placed) or center
-        jx, jy = _jitter()
+        jx, jy = _jitter() if jit is None else jit
         rot_before = state.parts[ref].rot
         clr = _try_place(state, ref, target[0] + jx, target[1] + jy,
                          unplaced - {ref},
@@ -5321,6 +5323,14 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                             'declined': [], 'reason': None}
     late_left = len(unplaced & decap_scope)
     late_from = None
+    # #1105: every queue entry's jitter, drawn HERE in queue order and before
+    # any reorder. A cap stage 3.5 claims skips its centroid turn, and
+    # `after_queue` moves the caps to the end; drawing at the turn shifted the
+    # RNG stream for every part after either, so the stage's A/B measured a
+    # re-roll of their targets as well as the claim. With the stage off every
+    # entry reaches its turn in this order, so the draws are the ones the
+    # inline `_jitter()` made -- the same values, bit for bit.
+    q_jit = {r: _jitter() for r in queue}
     if late_on and late_left and DECAP_LATE_AT == 'after_queue':
         queue = ([r for r in queue if r not in decap_scope]
                  + [r for r in queue if r in decap_scope])
@@ -5343,7 +5353,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 declined=late['declined'])
         if ref not in unplaced:
             continue    # #1105: claimed by stage 3.5 just above
-        clr, target, jx, jy = _centroid_seat(ref)
+        clr, target, jx, jy = _centroid_seat(ref, jit=q_jit[ref])
         if clr is None:
             unseated.append(ref)
             # setdefault: a zone member that failed its zone stage keeps THAT

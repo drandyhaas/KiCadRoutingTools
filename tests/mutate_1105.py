@@ -1,4 +1,5 @@
-"""The #1105 mutation battery: seeder stage 3.5 and the emitter's forecast.
+"""The #1105 mutation battery: seeder stage 3.5, stage 3's jitter draw, and the
+emitter's forecast.
 
 One row per load-bearing line, each reverting it; every row names the test
 case that must fail. **THE ROWS TO LOOK AT FIRST if this file ever goes red**
@@ -69,6 +70,10 @@ FLAGS = _t(T, 'flag_pair')
 DEFAULT = _t(T, 'default_is')
 LIMIT = _t(T, 'past_the_limit')
 T1051 = _t('test_1051_seed_arrays.py', 'zero_claim_reports_why')
+J = 'test_1105_stage3_jitter.py'
+JIT_SAME = _t(J, 'same_with_the_claim')
+JIT_OFF = _t(J, 'pre_1105_seeder')
+JIT_ANCHORS = _t(J, 'anchors_first')
 
 # (name, target, old, new, tests, expect)
 ROWS = [
@@ -134,6 +139,20 @@ ROWS = [
      "            _dcen['seeder_forecast'] = _seeder_forecast(doc, pcb, args.board,",
      "            _dcen['seeder_forecast_x'] = _seeder_forecast(doc, pcb, args.board,",
      (EMIT,), 'KILLED'),
+    # stage 3's jitter (#1105 sub-issue): drawn per queue entry, after the
+    # anchors-first reorder and before stage 3.5 can skip or reorder a turn
+    ('jitter-drawn-at-the-turn', 'seeder',
+     "        clr, target, jx, jy = _centroid_seat(ref, jit=q_jit[ref])",
+     "        clr, target, jx, jy = _centroid_seat(ref)",
+     (JIT_SAME, JIT_OFF), 'KILLED'),
+    ('jitter-drawn-before-anchors-first', 'seeder',
+     "    q_jit = {r: _jitter() for r in queue}",
+     "    q_jit = {r: _jitter() for r in _order(sorted(unplaced))}",
+     (JIT_ANCHORS,), 'KILLED'),
+    ('jitter-drawn-after-the-reorder', 'seeder',
+     "    q_jit = {r: _jitter() for r in queue}",
+     "    q_jit = {r: _jitter() for r in (sorted(queue, key=lambda r: r in decap_scope) if late_on and DECAP_LATE_AT == 'after_queue' else queue)}",
+     (JIT_SAME,), 'KILLED'),
 ]
 
 sys.path.insert(0, _TESTS)
