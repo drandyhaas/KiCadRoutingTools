@@ -135,7 +135,11 @@ def _drc_items(pcb, clr, baseline=True):
     paste openings, unprotected; they are the input's, not the chain's.
     """
     js = pcb + '.drc_items.json'
-    cmd = ['python3', os.path.join(REPO, 'py_router', 'check_drc.py'), pcb,
+    # THIS interpreter (KiCad's), as the CLI legs run. A 'python3' child of
+    # KiCad's python on Windows inherits its PYTHONUSERBASE (KiCad's 3rdparty
+    # dir), loses its own user site and cannot import numpy: every grade read
+    # -1 and the gate FAILED on both legs, whatever the copper.
+    cmd = [sys.executable, os.path.join(REPO, 'py_router', 'check_drc.py'), pcb,
            '--clearance', str(clr), '--hole-to-hole-clearance', '0.2',
            '--clearance-margin', '0.1', '--json', js]
     if baseline:

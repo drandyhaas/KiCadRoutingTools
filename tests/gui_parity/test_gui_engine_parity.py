@@ -248,7 +248,11 @@ def run_gui_leg(board_path, workdir):
 
 
 def grade(pcb, label):
-    py = shutil.which('python3') or sys.executable
+    # THIS interpreter (KiCad's). A 'python3' child of KiCad's python on
+    # Windows inherits its PYTHONUSERBASE (KiCad's 3rdparty dir), loses its
+    # own user site and cannot import numpy: both graders failed silently and
+    # every board read conn_full=False drc=-1, whatever the copper.
+    py = sys.executable
     conn = subprocess.run([py, '-X', 'utf8',
                            os.path.join(REPO, 'py_router', 'check_connected.py'), pcb],
                           capture_output=True, text=True)
