@@ -480,6 +480,58 @@ assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> 
   An explicit `--net-clearances` map is used as given (not capped). In the GUI, checking
   the **Min Clearance** override box is the "`--clearance` given" signal.
 
+#### Pairwise clearance for admit/refuse checks (#980)
+
+`obstacle_clearance` is the value a foreign obstacle is **stamped** at. It is floored
+at `net_clearance_floor`, the widest class routed in the call, which is what keeps
+the ADD and REMOVE stamps symmetric. A **verdict** about two specific nets (may this
+rolled-back route be restored here, may this via, weld, meander or stub go there)
+needs the value `check_drc` grades that pair at instead. Pricing a verdict at the
+stamp value refuses legal copper whenever a wider class is routed anywhere in the
+run. Every such check prices through these methods:
+
+- `pair_clearance(net_a, net_b, layer=None, *, kind='layer', base=None)` is
+  `max(base, classA, classB)`, with `base` = `config.clearance` when None. Then:
+  - `kind='layer'` (two items meeting on one layer: track–via, track–pad) applies
+    the `.kicad_dru` rule for `layer`, which **replaces** the value.
+  - `kind='track'` (track–track) does the same, then the #735 track rule raises it.
+  - `kind='stack'` (via–via) takes the max over the stack's rules.
+  These are `check_drc`'s `_pair_cl`, `_track_pair_cl` and `_stack_cl`.
+- `pad_pair_clearance(pad, other_net, layer=None, *, other_pad=None, base=None,
+  board_copper=None, override=True)` mirrors `check_drc._pad_pair_cl`. It takes the
+  pair value, then:
+  - the rule on `layer` (pad vs track), or else `check_drc.pads_shared_layer_clearance`
+    over the layers the two coppers share (pad vs via, pad vs pad);
+  - then a pad / footprint override, which **replaces** the value, floored at the
+    board's `min_clearance`.
+- `max_pair_clearance(base=None)` is an upper bound over every pair, for a
+  prefilter radius. `pair_clearance_inert()` is True when nothing is declared.
+- `net_clearances_by_name(nets)` returns the class map keyed by net name. The KiCad
+  oracle uses it because it re-parses a board whose net ids can differ.
+
+**Inert by construction.** With no class map, no layer rule and no track rule,
+`pair_clearance` returns `base` itself, untouched by arithmetic. A check that swaps
+its flat term for the call is therefore byte-identical on such a board.
+
+`tests/test_980_pair_clearance_parity.py` holds both methods to `check_drc` itself:
+each row writes a probe pair at the helper's value ±0.01 mm, and the grader must
+flag the first and pass the second.
+
+`rip_restore._conflict_sweep` keeps the floor-inflated stamp value on purpose
+(#735): it prices a restore the way the router stamped the copper it restores.
+
+```python
+from routing_config import GridRouteConfig
+cfg = GridRouteConfig(clearance=0.2)
+cfg.set_net_clearances({1: 0.4}, routed_net_ids=[1, 2])
+assert cfg.obstacle_clearance(3) == 0.4        # stamp: floored at the routed Wide class
+assert cfg.pair_clearance(2, 3) == 0.2         # verdict: KiCad's Default-vs-Default pair
+assert cfg.pair_clearance(1, 3) == 0.4         # verdict: the wider class of the two
+cfg.layer_clearances = {'F.Cu': 0.15}
+assert cfg.pair_clearance(1, 3, 'F.Cu') == 0.15          # a layer rule replaces
+assert cfg.pair_clearance(1, 3, kind='stack') == 0.4     # via-via: max over the stack
+```
+
 ### Strategies and recovery
 
 | Field | Default | Meaning |
