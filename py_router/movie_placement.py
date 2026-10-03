@@ -9,8 +9,11 @@ never on that axis. On the stage3d frame (the only film layout) they are the
 film's one band when there is no ledger for a benchmark band -- a placement
 chain made from boards alone:
 
-  1. **Legality** (log y): pads off the outline (parts), pad-conflict pairs,
-     overlap mm² -- with the floor the KiCad-locked parts set, in the legend.
+  1. **Legality** (log y): parts whose pad copper gates off the outline, the
+     grader's pad-clearance pairs, the courtyard census area -- render's
+     checklist, never the optimizer's box metrics (#1124) -- with the floor
+     the KiCad-locked parts set (those pairs with a locked member), in the
+     legend.
   2. **Arrangement** (a SCREEN, not the verdict): airwire crossings and hpwl
      as step lines, each on its own axis, with dashed benchmark lines when a
      benchmark board is given.
@@ -25,7 +28,8 @@ Plus **downstream-defect flags**: a ledger row `kind == classification`,
 pixel interpolation, not evaluated placements. Every number is measured on the
 film's own boards, IN PROCESS, by the named instruments' own functions
 (`render_placement.PlacementModel` / `legality_findings` -- the numbers
-`render_placement --json-out` writes -- and `check_floorplan.main`), cached per
+`render_placement --json-out` writes: its checklist for legality, its metrics
+for crossings and hpwl -- and `check_floorplan.main`), cached per
 board sha. Never a subprocess of `sys.executable`: inside KiCad that is the
 pcbnew binary, and a child built that way hangs
 (`kicad_routing_plugin/deps_check.py`).
@@ -104,12 +108,13 @@ class Beat(NamedTuple):
     board: str
     label: str
     first: int                  # the frame it is shown from (its landing)
-    off_outline: Optional[int]  # parts with pad copper off the outline
-    conflict_pairs: Optional[int]
-    overlap_mm2: Optional[float]
+    # The legality four are render's checklist (#1124, `_legality_census`):
+    off_outline: Optional[int]  # a_off_outline.pad_copper_gating, parts
+    conflict_pairs: Optional[int]   # b_pad_clearance_pairs
+    overlap_mm2: Optional[float]    # b_courtyard_overlap_mm2
     crossings: Optional[int]
     hpwl: Optional[float]
-    locked_pairs: Optional[int]  # metrics.locked_contact_pairs: the floor
+    locked_pairs: Optional[int]  # those pairs with a c_locked_refs member: the floor
     floorplan: Optional[int]
     floorplan_source: str        # FP_INSTRUMENT | 'ledger row N' | ''
     ledger_index: Optional[int]
@@ -168,6 +173,45 @@ def _tools_path():
 _CACHE: Dict[str, dict] = {}
 
 
+def _legality_census(model, fnd):
+    """The LEGALITY panel's four numbers, from render's checklist -- the
+    grader's census, never the optimizer's box metrics (#1124). Each is a key
+    `render_placement --json-out` writes:
+
+      off_outline     len(checklist.a_off_outline.pad_copper_gating)
+      conflict_pairs  len(checklist.b_pad_clearance_pairs)
+      locked_pairs    the b_pad_clearance_pairs rows with a member in
+                      checklist.c_locked_refs: the floor
+      overlap_mm2     checklist.b_courtyard_overlap_mm2 (every courtyard
+                      pair, waived included -- so not zeroed under a #1104
+                      project waiver, where metrics.overlap_area reads 0)
+
+    `metrics.pad_conflict_pairs` and `locked_contact_pairs` are the quench's
+    bounding-box currency: on glasgow_revC 10 pairs where render's checklist
+    names 1, and six locked FID/MK contacts the grader confirms none of.
+
+    It reads only what `legality_findings` already computed, so it costs
+    nothing. NOT MEASURED is None, never 0: without a legality context the
+    pad lists sit at their empty defaults (render's caption falls back for
+    the same reason), and with no outline there is nothing to be off.
+    """
+    ran = getattr(getattr(model, 'state', None), 'legality_ctx', None) \
+        is not None
+    pairs = fnd.get('pad_conflict_pairs_refs') or []
+    locked = set(fnd.get('locked_refs') or ())
+    return {
+        'off_outline': (len(fnd.get('oob_refs_pad_copper_gating') or [])
+                        if ran and not getattr(model, 'no_outline', False)
+                        else None),
+        'conflict_pairs': len(pairs) if ran else None,
+        'locked_pairs': (sum(1 for a, b, *_rest in pairs
+                             if a in locked or b in locked)
+                         if ran else None),
+        'overlap_mm2': (None if fnd.get('courtyard_census_error')
+                        else fnd.get('courtyard_overlap_mm2')),
+    }
+
+
 def measure_board(path, cache=None):
     """`render_placement`'s legality and arrangement numbers for one board,
     IN PROCESS -- the same `PlacementModel` and `legality_findings` its
@@ -203,14 +247,9 @@ def measure_board(path, cache=None):
                 else:
                     fnd = RP.legality_findings(model)
                     m = model.metrics
-                    off = fnd.get('oob_refs_pad_copper')
-                    res = {'off_outline': (len(off) if isinstance(off, list)
-                                           else None),
-                           'conflict_pairs': m.get('pad_conflict_pairs'),
-                           'overlap_mm2': m.get('overlap_area'),
-                           'crossings': m.get('crossings'),
-                           'hpwl': m.get('hpwl'),
-                           'locked_pairs': m.get('locked_contact_pairs')}
+                    res = dict(_legality_census(model, fnd),
+                               crossings=m.get('crossings'),
+                               hpwl=m.get('hpwl'))
     except Exception as exc:                                   # noqa: BLE001
         res = {'unmeasured': 'render_placement raised %s'
                % type(exc).__name__}
@@ -514,6 +553,15 @@ def _measure_draw():
 
 
 def _floor(track):
+    """The conflict count the KiCad-locked parts hold up, when every pair
+    left has a locked member. Both counts come from ONE census, the grader's
+    (#1124): locked pairs are a subset of the conflict pairs, so `conflict
+    <= locked` means they are equal. It used to compare two box counts:
+    every glasgow board counts six FID/MK box contacts (FID1-6 against
+    MK1/3/4) as locked, and wherever those six were every pair left --
+    run 32's placed boards and every board routed from them (placed,
+    placed_v2, placed_v3, placed_v3b, frozen, A_bga, C2_route, routed_c3)
+    -- it drew "floor 6" for pairs the grader confirms none of."""
     lb = track.beats[-1]
     if (lb.conflict_pairs is not None and lb.locked_pairs
             and lb.conflict_pairs <= lb.locked_pairs):

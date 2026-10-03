@@ -40,8 +40,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 DEFAULT_STRATEGIES: Tuple[str, ...] = ('jitter', 'poses', 'swap')
-# How many of the highest-pin-count free parts the `poses` strategy enumerates
-# rotation variants for. Rotations of multi-pin parts are where pin order lives
+# How many of the highest-pin-count free parts that have an angle to turn to
+# (#1121: a part at its single declared rotation has none) the `poses`
+# strategy enumerates rotation variants for. Rotations of multi-pin parts are where pin order lives
 # (the U3 rot-180 case: 9 forced inversions -> 0); a 2-pad passive's rotation
 # rarely changes anything the jitter cannot.
 POSES_TOP_PARTS = 6
@@ -347,8 +348,38 @@ def perturb_jitter(state, refs: Sequence[str], rng: random.Random,
     return poses
 
 
+def _pose_variants(part, claim) -> List[float]:
+    """The angles the `poses` strategy may turn `part` to (#1121).
+
+    Undeclared (`claim` None): its three quarter turns, as always. Declared
+    (a `rotations_for_ref` claim): the angles `floorplan.declared_ladder`
+    gives, in the author's order, other than the one the part already has --
+    the rule the quench's swap applies (`quench._declared_admits`): a turn
+    may go INTO the declaration, never out of it. So a part sitting at its
+    single declared angle has no variant at all, and one sitting off it is
+    offered that angle."""
+    if claim is None:
+        return [(part.rot + d) % 360 for d in (90.0, 180.0, 270.0)]
+    from placement.floorplan import declared_ladder
+    from placement.quench import _same_angle
+    return [a % 360 for a in declared_ladder(claim)
+            if not _same_angle(a, part.rot)]
+
+
+def _poses_ranked(state, refs: Sequence[str], declared) -> List[str]:
+    """The top `POSES_TOP_PARTS` multi-pin free parts that HAVE an angle to
+    turn to. Filtered before the cut, so a declared part that cannot turn
+    does not spend one of the slots; an undeclared part always has three
+    variants, so an undeclared board ranks exactly as before #1121."""
+    return sorted((r for r in refs
+                   if r in state.parts and state.parts[r].pin_count >= 2
+                   and _pose_variants(state.parts[r], declared.get(r))),
+                  key=lambda r: (-state.parts[r].pin_count, r))[:POSES_TOP_PARTS]
+
+
 def perturb_poses(state, refs: Sequence[str],
-                  variant_index: int) -> Optional[List[Dict]]:
+                  variant_index: int,
+                  declared: Optional[Dict] = None) -> Optional[List[Dict]]:
     """Deterministic rotation variant: one of the top multi-pin free parts
     turned to a legal rotation that does not RAISE its forced-crossing floor.
 
@@ -357,11 +388,15 @@ def perturb_poses(state, refs: Sequence[str],
     provably worse before any quench is paid (the U3 rot-180 story, run 5:
     the cost was indifferent, the inversion count was not). Returns None when
     `variant_index` runs past the legal variants: that strategy round is
-    barren, which the caller reports rather than papers over."""
+    barren, which the caller reports rather than papers over.
+
+    `declared` is the intent's rotation claims, `{ref: (rotation,
+    candidates)}` from `floorplan.rotations_for_ref` (#1121): a declared
+    part is turned only into its declaration (`_pose_variants`). None or {}
+    is the strategy exactly as it was."""
     from placement.pair_order import ref_inversions
-    ranked = sorted((r for r in refs
-                     if r in state.parts and state.parts[r].pin_count >= 2),
-                    key=lambda r: (-state.parts[r].pin_count, r))[:POSES_TOP_PARTS]
+    declared = declared or {}
+    ranked = _poses_ranked(state, refs, declared)
     variants: List[Tuple[str, float]] = []
     for ref in ranked:
         part = state.parts[ref]
@@ -371,8 +406,13 @@ def perturb_poses(state, refs: Sequence[str],
         if not state.candidate_valid(ref, part.x, part.y, part.rot):
             continue
         base_inv = ref_inversions(state, ref)
-        for delta in (90.0, 180.0, 270.0):
-            rot = (part.rot + delta) % 360
+        claim1121 = declared.get(ref)
+        for rot in _pose_variants(part, claim1121):
+            if claim1121 is not None:
+                # A declared angle need not be on the part's quarter-turn
+                # lattice; judge it on its own box, as the quench nudge does.
+                from placement.seeder import _materialise_rotation
+                rot = _materialise_rotation(part, rot)
             if not state.candidate_valid(ref, part.x, part.y, rot):
                 continue
             if ref_inversions(state, ref, part.x, part.y, rot) > base_inv:
@@ -580,6 +620,17 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
         board_edge_clearance=qkw.get('board_edge_clearance', 0.55),
         grid_step=qkw.get('grid_step', 0.1), ignore_ids=ids)
     origin = {ref: (p.x, p.y, p.rot) for ref, p in oracle.parts.items()}
+    # #1121: the SAME block claims the quench is gated with (its
+    # intent_gate), so the `poses` variant offers a block-declared part only
+    # an angle the quench would admit too. Not held here: an
+    # `arrays[].rotation` member, and a part the gate locks (`must_lock`,
+    # an edge claim) -- `free_refs` reads neither.
+    _declared = dict((qkw.get('intent_gate') or {}).get('rotations') or {})
+    _held = sorted(r for r in free if r in _declared)
+    if _held and 'poses' in strategies:
+        print("[portfolio] poses: %d free part(s) declare a rotation (%s); "
+              "each is turned only to an angle its declaration admits (#1121)"
+              % (len(_held), ', '.join(_held)))
 
     # #826: resolved ONCE, from the INPUT board, never from the oracle state.
     # `--only N` must regenerate candidate N byte-identically without running
@@ -630,7 +681,8 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
             poses = perturb_jitter(oracle, free, rng, radius,
                                    lattice=lattice)
         elif strategy == 'poses':
-            poses = perturb_poses(oracle, free, (i - 1) // len(strategies))
+            poses = perturb_poses(oracle, free, (i - 1) // len(strategies),
+                                  declared=_declared)
             if poses is None:
                 poses = []
                 note = ('poses: no rotation variant left at round '

@@ -422,6 +422,11 @@ def _areal_parts(geom):
     return out
 
 
+#: Public name for the placement graders (#1123, via
+#: `check_pads.custom_pad_copper`); the body stays where #1111 anchored it.
+areal_parts = _areal_parts
+
+
 def _inscribed_radius(poly) -> float:
     """Radius of the largest circle inside `poly`, to `THICKNESS_TOL_MM`.
     shapely 2.1 has `maximum_inscribed_circle`; before it, `polylabel` finds

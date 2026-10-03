@@ -129,8 +129,9 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   `python3 -X utf8 py_placer/rank_rotations.py <pile> --intent <intent.json> --out-dir wk/<run>/rot --probe --write-intent wk/<run>/intent_rot.json`
   then seed from the written intent. The seed holds that angle through its
   polish and re-seat: a part the re-seat cannot put back at it is named on a
-  `NOT repaired` line (`reseat_declined`) and the seed exits 4. Without
-  `--ref` it ranks the unlocked,
+  `NOT repaired` line (`reseat_declined`) and the seed exits 4, and
+  `place_portfolio --intent` turns it only within its declaration (#1121).
+  Without `--ref` it ranks the unlocked,
   undeclared part with the most connected pads. It costs one `place_seed`
   per angle plus one full-board probe per `--probe-top` angle (default 2).
   Run 39 found StickHub's U1 at 270 instead of the pile's 0 by hand: seed
@@ -139,9 +140,18 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   costs a via per net at every rotation. After rotating an IC, re-seat its
   caps: one rotation left a decap at 9.57 mm while crossings and hpwl both
   improved.
-- **`place_pose` "legal" is not "buildable".** It does not see a same-net pad
-  stacked on another part's pad (#1064). After every pose change, run
-  `check_assembly` and read `buildable`, not `blocking`.
+- **`place_pose` refuses a pad stack, but "legal" is still not
+  "buildable".** Two parts' pad copper overlapping, any net, is
+  `check_assembly`'s `pad_intersection`; `place_pose` measures it with
+  the same function (#1064), so `legal` and `no_worse` see it and
+  `--near` looks for a pose off it. A snap re-grades at most
+  `--snap-tries` ranked poses, then as many nearer lattice ones, so it
+  can refuse with a no-worse pose still in reach: when place_pose's snap
+  census shows `candidates_tried` short of its `ranked` + `lattice`
+  counts, raise `--snap-tries` / `--radius` before reading it as "stuck".
+  Courtyards, bodies and coincident origins are
+  still `check_assembly`'s alone: after every pose change, run it and
+  read `buildable`, not `blocking`.
 - **`render_placement`'s pad-clearance list is the grader's** (#1065): each
   pair is confirmed with `check_drc`'s exact pad check at the pose it
   draws, so it agrees with `grade_pad_legality`, and so does the caption's
@@ -174,7 +184,9 @@ Read `--help` before assuming a flag does not exist. Two runs declared
     also runs the pass without the gate and keeps whichever ends with fewer
     unresolved grazes, then fewer decap claims made worse (`Decap: ...`
     says which).
-    It prints the decap grade before and after.
+    It prints the decap grade before and after. It also holds the
+    intent's declared rotations in both passes (#1122); without
+    `--intent` it can turn a cap whose angle you declared.
     Without `--intent` it can move a cap past `decap_pin_distance`
     silently;
   - `place_seed --reseat`'s intent basis counts only the rules it prints

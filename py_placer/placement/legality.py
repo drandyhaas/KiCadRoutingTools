@@ -1481,7 +1481,12 @@ def occupancy_shape(fp, lb: 'LocalBounds', geom=None):
     already measures pad copper) rather than as their bbox: a stepped QFP
     courtyard hugs its pin rows, and the pad BBOX would put back the corners
     the drawing cut away (StickHub U1<->Y1, 2.01 mm2, which KiCad does not
-    report).
+    report). A CUSTOM pad is united as its parsed primitives
+    (`check_pads.custom_pad_copper`, #1123), not as its size box, which is
+    symmetric about the anchor and so covers whatever side the copper does
+    not reach; the box only where the parser could not draw the pad.
+    A pad on no copper layer (a paste-only aperture) is united too, as it
+    was before #1123: nothing here reads `pad.layers`.
     """
     from shapely.geometry import Polygon, box
     from shapely.ops import unary_union
@@ -1489,17 +1494,19 @@ def occupancy_shape(fp, lb: 'LocalBounds', geom=None):
     if court is None or lb.synthetic:
         return place_local_shape(box(*lb.local), fp.x, fp.y, fp.rotation)
     shape = place_local_shape(court, fp.x, fp.y, fp.rotation)
-    from check_pads import pad_outline_polygon
+    from check_pads import custom_pad_copper, pad_outline_polygon
     extra = []
     for pad in (fp.pads or ()):
         if getattr(pad, 'pad_type', '') == 'np_thru_hole':
             continue
         try:
-            pts = pad_outline_polygon(pad)
+            pp = custom_pad_copper(pad)
+            if pp is None:
+                pts = pad_outline_polygon(pad)
+                pp = Polygon(pts) if len(pts) >= 3 else None
         except Exception:                                    # noqa: BLE001
             continue
-        if len(pts) >= 3:
-            pp = Polygon(pts)
+        if pp is not None:
             if pp.is_valid and not shape.contains(pp):
                 extra.append(pp)
     return unary_union([shape] + extra) if extra else shape
@@ -1841,21 +1848,8 @@ def grade_body_overlap(pcb_data, clearance: float,
                         depth_mm=0.0))
 
     # -- pad_intersection channel (never waivable) ----------------------------
-    # AABB broad phase in the gate currency, then exact re-verification at
-    # clearance 0 (an intersection is a clearance-0 violation) so round or
-    # rotated pads produce no bbox phantoms in a BLOCKING claim.
-    parts = build_part_pads(fps, clearance)
-    pads_by_ref = {ref: [p for p in fp.pads] for ref, fp in fps.items()}
-    routing_layers = list(getattr(pcb_data.board_info, 'copper_layers', [])
-                          or [])
-    check_exact = None
-    try:
-        from check_drc import check_pad_pad_overlap
-        check_exact = check_pad_pad_overlap
-    except Exception:
-        check_exact = None
-    cell = 4.0
-    grid: Dict[Tuple[int, int], set] = {}
+    # #1064: lifted VERBATIM into `pad_intersection_pairs`, so place_pose
+    # and check_floorplan grade a pad stack with this channel's own code.
     # KiCad's own (locked yes) stamps, for the E6 channel below. Best-effort:
     # the file is optional here, and a missing or unreadable one simply means
     # no pair is marked locked.
@@ -1866,90 +1860,7 @@ def grade_body_overlap(pcb_data, clearance: float,
             locked_refs = set(extract_locked_refs(pcb_file) or ())
         except Exception:
             locked_refs = set()
-
-    def _pad_label(pads, idx):
-        try:
-            return pads[idx].pad_number or '?'
-        except Exception:
-            return '?'
-
-    entries = {}
-    for ref, pp in parts.items():
-        fp = fps[ref]
-        rects = pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)
-        entries[ref] = rects
-        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
-        if ext is None:
-            continue
-        for gx in range(int(ext[0] // cell), int(ext[2] // cell) + 1):
-            for gy in range(int(ext[1] // cell), int(ext[3] // cell) + 1):
-                grid.setdefault((gx, gy), set()).add(ref)
-    seen = set()
-    court_keys = {(p.a, p.b) for p in pairs}
-    for ref in sorted(parts):
-        fp = fps[ref]
-        pp = parts[ref]
-        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
-        if ext is None:
-            continue
-        near = set()
-        for gx in range(int(ext[0] // cell), int(ext[2] // cell) + 1):
-            for gy in range(int(ext[1] // cell), int(ext[3] // cell) + 1):
-                near |= grid.get((gx, gy), set())
-        near.discard(ref)
-        for other in near:
-            key = (ref, other) if ref <= other else (other, ref)
-            if key in seen:
-                continue
-            seen.add(key)
-            area = 0.0
-            side = ''
-            shorts = []
-            for ai, (a0, a1, a2, a3, na, sa) in enumerate(entries[ref]):
-                for bi, (b0, b1, b2, b3, nb, sb) in enumerate(entries[other]):
-                    if not _sides_interact(sa, sb):
-                        continue
-                    ov = rect_overlap_area((a0, a1, a2, a3),
-                                           (b0, b1, b2, b3))
-                    if ov <= EPS:
-                        continue
-                    if check_exact is not None:
-                        # check_pad_pad_overlap's perimeter distance clamps
-                        # at 0 for interior points, so clearance-0 can never
-                        # register an intersection. Ask at a tiny epsilon and
-                        # require the FULL-epsilon shortfall: over >= eps
-                        # <=> exact edge distance <= 0 <=> real intersection
-                        # (merely-near pads at 0 < gap < eps read over < eps
-                        # and are skipped).
-                        eps = 1e-3
-                        pa = _pad_with_copper(pads_by_ref[ref], ai, clearance)
-                        pb = _pad_with_copper(pads_by_ref[other], bi,
-                                              clearance)
-                        if pa is not None and pb is not None:
-                            hit, over, _pt = check_exact(
-                                pa, pb, eps, routing_layers,
-                                clearance_margin=0.0)
-                            if not (hit and over >= eps - 1e-9):
-                                continue
-                    if ov > area:
-                        area = ov
-                        side = sa if sa in ('F', 'B') else ''
-                    # Different-net copper touching is a SHORT on top of the
-                    # assembly defect. Record one example per pair so a reader
-                    # cannot mistake the pair for exempt same-net contact.
-                    if na and nb and na != nb and len(shorts) < 3:
-                        pa_num = _pad_label(pads_by_ref[ref], ai)
-                        pb_num = _pad_label(pads_by_ref[other], bi)
-                        shorts.append(f'{ref}.{pa_num}:{na} <-> '
-                                      f'{other}.{pb_num}:{nb}')
-            if area > EPS:
-                locked_ref = ' '.join(sorted(
-                    r for r in (key[0], key[1]) if r in locked_refs))
-                pairs.append(BodyOverlapPair(
-                    a=key[0], b=key[1], kind='pad_intersection',
-                    area_mm2=round(area, 4), side=side,
-                    waived=False, waiver='',
-                    shorts=tuple(shorts), locked_ref=locked_ref))
+    pairs.extend(pad_intersection_pairs(pcb_data, clearance, locked_refs))
 
     pairs.sort(key=lambda p: (p.waived, -p.area_mm2, p.a, p.b))
     blocking = [p for p in pairs if p.kind == 'pad_intersection']
@@ -2218,6 +2129,160 @@ def grade_body_overlap(pcb_data, clearance: float,
             'waivers_unused': sorted(
                 _waiver_row(p) for p in waiver_sets
                 if p not in _waivers_hit and all(r in fps for r in p))}
+
+
+def pad_intersection_pairs(pcb_data, clearance: float,
+                           locked_refs=frozenset(),
+                           totals=None) -> List[BodyOverlapPair]:
+    """check_assembly's BLOCKING channel as a function (#1064): two parts'
+    pad copper intersecting on a shared side, ANY net -- a pad stack.
+
+    `grade_body_overlap` reports these as its `pad_intersection` pairs, and
+    `pad_stack_census` (place_pose, check_floorplan) calls the same code, so
+    the three cannot disagree. Never waivable. `locked_refs` only labels a
+    pair's `locked_ref`. Same-net copper is measured like any other: two
+    caps on one pad cannot both be soldered, whatever their nets (esp_prog
+    C4 on Y1 and run 38's C15 on C19 are same-net, and place_pose accepted
+    both before #1064).
+
+    A pair's `area_mm2` is its DEEPEST pad-pair overlap, check_assembly's
+    number. `totals`, a dict the caller passes, receives each pair's
+    overlap summed over EVERY confirmed pad pair, keyed `(a, b)` -- so a
+    stack that spreads from one pad onto two reads worse even while its
+    deepest overlap shrinks.
+    """
+    fps = pcb_data.footprints or {}
+    out: List[BodyOverlapPair] = []
+    # AABB broad phase in the gate currency, then exact re-verification at
+    # clearance 0 (an intersection is a clearance-0 violation) so round or
+    # rotated pads produce no bbox phantoms in a BLOCKING claim.
+    parts = build_part_pads(fps, clearance)
+    pads_by_ref = {ref: [p for p in fp.pads] for ref, fp in fps.items()}
+    routing_layers = list(getattr(pcb_data.board_info, 'copper_layers', [])
+                          or [])
+    check_exact = None
+    try:
+        from check_drc import check_pad_pad_overlap
+        check_exact = check_pad_pad_overlap
+    except Exception:
+        check_exact = None
+    cell = 4.0
+    grid: Dict[Tuple[int, int], set] = {}
+
+    def _pad_label(pads, idx):
+        try:
+            return pads[idx].pad_number or '?'
+        except Exception:
+            return '?'
+
+    entries = {}
+    for ref, pp in parts.items():
+        fp = fps[ref]
+        rects = pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)
+        entries[ref] = rects
+        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+        if ext is None:
+            continue
+        for gx in range(int(ext[0] // cell), int(ext[2] // cell) + 1):
+            for gy in range(int(ext[1] // cell), int(ext[3] // cell) + 1):
+                grid.setdefault((gx, gy), set()).add(ref)
+    seen = set()
+    for ref in sorted(parts):
+        fp = fps[ref]
+        pp = parts[ref]
+        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+        if ext is None:
+            continue
+        near = set()
+        for gx in range(int(ext[0] // cell), int(ext[2] // cell) + 1):
+            for gy in range(int(ext[1] // cell), int(ext[3] // cell) + 1):
+                near |= grid.get((gx, gy), set())
+        near.discard(ref)
+        for other in near:
+            key = (ref, other) if ref <= other else (other, ref)
+            if key in seen:
+                continue
+            seen.add(key)
+            area = 0.0
+            side = ''
+            shorts = []
+            for ai, (a0, a1, a2, a3, na, sa) in enumerate(entries[ref]):
+                for bi, (b0, b1, b2, b3, nb, sb) in enumerate(entries[other]):
+                    if not _sides_interact(sa, sb):
+                        continue
+                    ov = rect_overlap_area((a0, a1, a2, a3),
+                                           (b0, b1, b2, b3))
+                    if ov <= EPS:
+                        continue
+                    if check_exact is not None:
+                        # check_pad_pad_overlap's perimeter distance clamps
+                        # at 0 for interior points, so clearance-0 can never
+                        # register an intersection. Ask at a tiny epsilon and
+                        # require the FULL-epsilon shortfall: over >= eps
+                        # <=> exact edge distance <= 0 <=> real intersection
+                        # (merely-near pads at 0 < gap < eps read over < eps
+                        # and are skipped).
+                        eps = 1e-3
+                        pa = _pad_with_copper(pads_by_ref[ref], ai, clearance)
+                        pb = _pad_with_copper(pads_by_ref[other], bi,
+                                              clearance)
+                        if pa is not None and pb is not None:
+                            hit, over, _pt = check_exact(
+                                pa, pb, eps, routing_layers,
+                                clearance_margin=0.0)
+                            if not (hit and over >= eps - 1e-9):
+                                continue
+                    if totals is not None:
+                        totals[key] = totals.get(key, 0.0) + ov
+                    if ov > area:
+                        area = ov
+                        side = sa if sa in ('F', 'B') else ''
+                    # Different-net copper touching is a SHORT on top of the
+                    # assembly defect. Record one example per pair so a reader
+                    # cannot mistake the pair for exempt same-net contact.
+                    if na and nb and na != nb and len(shorts) < 3:
+                        pa_num = _pad_label(pads_by_ref[ref], ai)
+                        pb_num = _pad_label(pads_by_ref[other], bi)
+                        shorts.append(f'{ref}.{pa_num}:{na} <-> '
+                                      f'{other}.{pb_num}:{nb}')
+            if area > EPS:
+                locked_ref = ' '.join(sorted(
+                    r for r in (key[0], key[1]) if r in locked_refs))
+                out.append(BodyOverlapPair(
+                    a=key[0], b=key[1], kind='pad_intersection',
+                    area_mm2=round(area, 4), side=side,
+                    waived=False, waiver='',
+                    shorts=tuple(shorts), locked_ref=locked_ref))
+    return out
+
+
+#: What `pad_stack_census` measured, published beside its numbers (#1064).
+PAD_STACK_BASIS = ("check_assembly's pad_intersection channel "
+                   "(legality.pad_intersection_pairs): two parts' pad copper "
+                   "intersecting on a shared side, any net, confirmed on the "
+                   "pads' outlines by check_drc's pad-pad check; never "
+                   "waivable")
+
+
+def pad_stack_census(pcb_data, clearance: float) -> Dict[str, object]:
+    """`pad_intersection_pairs` as the keys place_pose and check_floorplan
+    publish (#1064): `pad_stack_count`, `pad_stack_area` (every stacked pad
+    pair's overlap, SUMMED over pads and parts -- so a stack that deepens
+    while another holds, or spreads onto another pad while its deepest
+    overlap shrinks, still reads worse), `pad_stack_pairs` (`[a, b,
+    area_mm2, side]` with check_assembly's per-pair `area_mm2`, a < b,
+    sorted -- the channel's own order among pairs sharing a first ref
+    follows the hash seed) and `pad_stack_basis`. No `locked_ref`: a lock
+    does not make a stack buildable, and no consumer of these keys reads
+    one."""
+    totals: Dict[Tuple[str, str], float] = {}
+    pairs = pad_intersection_pairs(pcb_data, clearance, totals=totals)
+    rows = sorted([p.a, p.b, p.area_mm2, p.side] for p in pairs)
+    area1064 = sum(totals.get((p.a, p.b), 0.0) for p in pairs)
+    return {'pad_stack_count': len(rows),
+            'pad_stack_area': round(area1064, 4),
+            'pad_stack_pairs': rows,
+            'pad_stack_basis': PAD_STACK_BASIS}
 
 
 # --- pad + drill legality layer ----------------------------------------------
@@ -3892,6 +3957,35 @@ class _PosedPad:
                  'global_y', 'polygons', 'geometry_approximations')
 
 
+def _custom_box_at_pose(original, posed, delta):
+    """A CUSTOM pad's board-frame size box after a turn of `delta` (#1123).
+
+    The parser's box is symmetric about the anchor and encloses every
+    primitive, its stroke and the anchor (`kicad_parser.
+    _custom_pad_board_extent`). A QUARTER turn swaps its extents and a half
+    turn keeps them, exactly as a re-parse gives -- so both inherit whatever
+    the parser's box misses (up to 0.0236 mm2 of a pad's drawn shape on KiCad's
+    jetson demo, at file pose too: H1-H13's custom pads, which are paste-only
+    apertures, not copper). Any other angle takes the anchor-symmetric extent
+    of the posed polygon vertices, which encloses the posed shape by
+    construction and can differ from a re-parse either way: 0.29 mm WIDER
+    on those jetson pads at 33 degrees, where the parser's own box leaves
+    0.042 mm2 of the shape outside it, and 0.07 mm NARROWER on
+    RoyalBlue54L's U5 at 45, where the parser boxes a round anchor's
+    corners. #1123's census (865 custom pad x angle cases on 10 boards):
+    no pad shape outside the posed box at any oblique angle. A re-parse cannot
+    be reproduced here: `Pad` keeps the primitives' polygons, not their
+    text.
+    """
+    if abs(math.remainder(delta, 90.0)) <= 1e-9:
+        if int(round(delta / 90.0)) % 2:
+            return original.size_y, original.size_x
+        return original.size_x, original.size_y
+    pts = [pt for poly in posed.polygons for pt in poly]
+    return (2.0 * max(abs(u - posed.global_x) for u, _v in pts),
+            2.0 * max(abs(v - posed.global_y) for _u, v in pts))
+
+
 def pads_at_pose(fp, pose) -> List[_PosedPad]:
     """`fp.pads` as they would sit with the footprint at `pose`.
 
@@ -3904,11 +3998,17 @@ def pads_at_pose(fp, pose) -> List[_PosedPad]:
     advances by the same delta, and the size and residual tilt are re-resolved
     through the parser's own `_resolve_pad_rect` after undoing its near-90
     size bake, so the tilt keeps the sign the DRC sampler applies. Custom pad
-    polygons are transformed point by point; their size box is not read by
-    the grader and is carried unchanged.
+    polygons are transformed point by point, and their size box is re-derived
+    for the new angle (`_custom_box_at_pose`, #1123): the box IS read -- by
+    `check_pads.pad_outline_polygon` wherever the parser could not draw the
+    copper, by `pad_half_extents`, and by every trial-pose consumer of
+    `footprint_at_pose` -- and carried unchanged it missed copper after any
+    turn other than a half one (tigard JP1/JP2, 0.402 mm2 outside it at +90).
 
-    It agrees with writing the pose and re-parsing to within the parser's own
-    nanometre snap for poses the writer stores EXACTLY -- coordinates of a few
+    It agrees with writing the pose and re-parsing -- except a CUSTOM pad's
+    box at an oblique angle, which `_custom_box_at_pose` derives from the
+    copper and can differ from a re-parse either way -- to within the
+    parser's own nanometre snap for poses the writer stores EXACTLY -- coordinates of a few
     decimals (the seat ladder rounds to 3) and angles of at most six
     significant digits. The writer prints angles with `%g`, so a
     full-precision angle is written rounded (measured: 4.1e-5 mm at
@@ -3937,7 +4037,7 @@ def pads_at_pose(fp, pose) -> List[_PosedPad]:
         if polygons:
             pad.polygons = [[(x + c*(u-ox) + s*(v-oy), y - s*(u-ox) + c*(v-oy))
                              for u, v in poly] for poly in polygons]
-            pad.size_x, pad.size_y = original.size_x, original.size_y
+            pad.size_x, pad.size_y = _custom_box_at_pose(original, pad, delta)
             pad.rect_rotation = getattr(original, 'rect_rotation', 0.0)
         else:
             pad.polygons = polygons
@@ -3989,26 +4089,49 @@ def _on_board(gate, x, y) -> bool:
     return b is not None and b[0] <= x <= b[2] and b[1] <= y <= b[3]
 
 
+def _copper_vertices(geom) -> List[Tuple[float, float]]:
+    """The exterior vertices (closing point dropped) of every polygon part
+    of `geom` -- a custom pad's copper as the point list the outline gate
+    reads (#1123)."""
+    parts = [geom] if geom.geom_type == 'Polygon' else list(geom.geoms)
+    out: List[Tuple[float, float]] = []
+    for g in parts:
+        out.extend((float(x), float(y)) for x, y in list(g.exterior.coords)[:-1])
+    return out
+
+
 def pad_copper_overrun_mm(pads, gate) -> float:
     """How far `pads`' copper reaches past the outline, in mm: THE gating
     measure for pad copper off the board (#1096), shared by check_assembly
     (via `grade_pad_legality`) and render_placement's `--gate`.
 
     Each pad on its true outline (`check_pads.pad_outline_polygon`, arcs
-    sampled), so a round pad's bbox corner does not leave a curved board.
+    sampled), so a round pad's bbox corner does not leave a curved board; a
+    CUSTOM pad on the vertices of its parsed copper (#1123), not its size
+    box, whose empty corner can read as off the board when no copper is.
+    It stays a distance read at the vertices -- the farthest copper past a
+    convex outline is a vertex -- so check_assembly's "mm past the outline"
+    keeps its unit. A curved primitive is a polygon INSCRIBED in its curve,
+    so its reach can read short by the parser's sagitta: R(1 - cos(pi/32))
+    for a `gr_circle` (a 32-gon, 4.8 um per mm of radius), at most 1 um for
+    a `gr_arc` stroke, at most 5 um for a polygon's arc or a round anchor.
+    A pad on no copper layer (a paste-only aperture) is read like copper,
+    as it was before #1123: nothing here reads `pad.layers`.
     A CASTELLATED pad is exempt only while it STRADDLES the outline -- some
     of its copper on the board, as a half-hole on a module edge is; one
     wholly off the board counts like any other (a module parked off the
     board is not on its edge). NPTH pads carry no copper. A pad whose
     outline cannot be computed falls back to its rect, never to "clean".
     """
-    from check_pads import pad_outline_polygon
+    from check_pads import custom_pad_copper, pad_outline_polygon
     over = 0.0
     for p in pads or ():
         if getattr(p, 'pad_type', '') == 'np_thru_hole':
             continue
         try:
-            pts = pad_outline_polygon(p)
+            copper = custom_pad_copper(p)
+            pts = (_copper_vertices(copper) if copper is not None
+                   else pad_outline_polygon(p))
         except Exception:                                    # noqa: BLE001
             pts = []
         if len(pts) < 3:
@@ -4698,7 +4821,8 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                                      'checklist.a_off_outline.pad_copper). '
                                      'What gates is oob_pad_copper_gating_'
                                      'refs: pad_copper_overrun_mm, on true '
-                                     'pad outlines with an edge-straddling '
+                                     'pad outlines (a custom pad on its '
+                                     'parsed copper) with an edge-straddling '
                                      'castellated pad exempt'),
             # WHICH QUANTITY THIS IS. Three tools print "pad copper
             # off-board" for three different measurements. This one is the

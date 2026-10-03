@@ -41,7 +41,11 @@ the review sheet print, netclass- and `.kicad_dru`-aware (#697) -- taken on the
 candidate board and compared with the SAME grade on the input. A request is
 refused when it makes a category worse -- the counts (pad conflicts, hole
 conflicts, pads off-board) and their MAGNITUDES (`pad_shortfall`,
-`oob_pad_amount`) -- and never for damage the board already had. The magnitude
+`oob_pad_amount`) -- and never for damage the board already had. A PAD STACK
+(two parts' pad copper overlapping, ANY net) is graded too, by check_assembly's
+own `legality.pad_intersection_pairs` (#1064): the pad-conflict grade skips
+same-net pads, so a cap landed on another part's same-net pad used to pass
+here and read NOT BUILDABLE in check_assembly. The magnitude
 arms are not a nicety: on counts alone, and measured on flat_hierarchy, a part
 already 2.0 mm off the board could be moved to 204.66 mm off it, exit 0, with
 nothing in the summary saying so. The two verdicts are reported apart: `no_worse` is what this verb refuses
@@ -502,6 +506,15 @@ def _report(summary):
     for finding in edge['findings']:
         print("  %s: edge shortfall %.6g mm (required %g mm)" % (
             finding['pad_ref'], finding['shortfall_mm'], finding['required_mm']))
+    # #1064: same-net pads are not a pad CONFLICT above, and a stack of them
+    # is still unbuildable -- check_assembly's pad_intersection, measured by
+    # its own function.
+    print("pad stacks (two parts' pad copper overlapping, any net -- "
+          "check_assembly's pad_intersection): %s -> %s"
+          % (summary.get('pad_stack_count_before'),
+             summary.get('pad_stack_count_after')))
+    for a, b, area, side in (summary.get('pad_stack_pairs_after') or [])[:5]:
+        print("  %s/%s %.4fmm2 side %s" % (a, b, area, side or '-'))
     if summary['knobs']['clearance']['source'] == 'cli':
         # A refusing tool whose threshold is a flag has to say when the
         # threshold came from the caller: measured on esp_prog (no netclass),

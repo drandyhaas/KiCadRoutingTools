@@ -79,7 +79,11 @@ Examples:
     p.add_argument("--strategy", type=_parse_strategies,
                    default=('jitter', 'poses', 'swap'), metavar="LIST",
                    help="Comma list of perturbation strategies, allocated "
-                        "round-robin (default: jitter,poses,swap)")
+                        "round-robin (default: jitter,poses,swap). poses "
+                        "never turns a part away from a rotation an --intent "
+                        "BLOCK declares; a candidate set varies only within "
+                        "itself (#1121). An arrays[].rotation is not held "
+                        "here")
     p.add_argument("--radius", type=float, default=4.0,
                    help="Jitter amplitude in mm (default: 4.0). With the "
                         "quench's own --max-displacement this bounds total "
@@ -121,7 +125,8 @@ Examples:
     add_intent_arg(p, extra=(
         "Here it is ALSO the post-hoc hard rank gate (a candidate is "
         "ranked only if it grades error-free) and the source of the "
-        "health signals in the rank key."))
+        "health signals in the rank key. Its declared rotations bound the "
+        "poses strategy too (#1121)."))
     p.add_argument("--group-by", default="auto",
                    help="Block sources for swap moves and intent grading "
                         "(comma list of kicad/sheet/netprefix/decap; 'auto' = "

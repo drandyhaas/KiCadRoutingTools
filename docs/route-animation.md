@@ -694,7 +694,7 @@ placement laps into its one curve instead.
 
 | panel | y | series | instrument |
 |---|---|---|---|
-| LEGALITY | log | off-outline parts, conflict pairs, overlap mm² | `render_placement --json-out` |
+| LEGALITY | log | off-outline parts, conflict pairs, overlap mm² | `render_placement --json-out`'s checklist: `a_off_outline.pad_copper_gating`, `b_pad_clearance_pairs`, `b_courtyard_overlap_mm2` |
 | ARRANGEMENT (screen) | own axis each | airwire crossings (left), hpwl mm (right); dashed benchmark lines | `render_placement --json-out` |
 | INTENT | linear | floorplan errors | `check_floorplan --intent` on every board, else the ledger's `board_score` |
 
@@ -703,8 +703,19 @@ placement laps into its one curve instead.
   `legality_findings`, and `check_floorplan.main` runs in the same process.
   Nothing starts a subprocess of `sys.executable`: inside KiCad that is the
   pcbnew binary, and a child started that way hangs
-  (`kicad_routing_plugin/deps_check.py`). About 3 s per board for each
-  instrument, cached by board sha.
+  (`kicad_routing_plugin/deps_check.py`). Seconds per placed board for
+  each instrument (7.4 s on run 32's placed boards), about a minute for
+  render's census on the 272-part glasgow pile (68.7 s, the same before
+  #1124); cached by board sha.
+- **The grader's census, not the optimizer's (#1124).** LEGALITY reads
+  render's checklist: the parts whose pad copper gates off the outline,
+  the grader's pad-clearance pairs, and the courtyard census area. It
+  used to plot the quench's bounding-box metrics, so the film said 10
+  pairs on glasgow_revC where render's checklist, caption and `--gate`
+  name 1. Without a legality context the counts are unmeasured, never 0.
+  Render's caption still prints `overlap` from `metrics.overlap_area`
+  (the quench's rects: 70.05 mm² against the panel's 52.25 on
+  glasgow_revC).
 - **Cheap gates first.** Before anything is measured, the chain must have at
   least two copper-free boards and a part must have moved between them
   (poses are parsed, no instrument runs). A routing chain whose first
@@ -730,10 +741,14 @@ placement laps into its one curve instead.
   (`build_boards(lands_out=)`). Before
   the first beat lands, no point and no flag is drawn. Once the film is
   routing, the header says "placement settled".
-- **The floor is in the legend.** When the last board's conflict pairs are
-  all contacts between KiCad-locked parts (`metrics.locked_contact_pairs`),
-  the legend reads "floor N = locked parts", and a dashed line marks the
-  value.
+- **The floor is in the legend.** When every one of the last board's
+  `b_pad_clearance_pairs` has a member in `c_locked_refs` -- one census,
+  so the locked pairs are a subset of the pairs -- the legend reads
+  "floor N = locked parts", and a dashed line marks the value. Read off
+  the box metrics, every glasgow board counts six fiducial/marker
+  contacts as locked, and wherever those six were every pair left (run
+  32's placed boards and every board routed from them) it drew "floor 6"
+  for pairs the grader confirms none of.
 - **Defect flags.** A ledger row with `kind == classification` and
   `shape == placement` flags the first placement board after it. The flag is
   a numbered marker in a lane above the INTENT plot, off every series line.
@@ -762,10 +777,14 @@ On run 32's glasgow_revC chain (#1042) the panels read:
 
 | board | off-outline parts | conflict pairs | overlap mm² | crossings | hpwl mm | floorplan: `check_floorplan --intent` | floorplan: ledger |
 |---|---|---|---|---|---|---|---|
-| the pile | 243 | 3214 | 9503.03 | 10974 | 4834 | 131 | no row |
-| placed_v2 | 0 | 6 | 23.69 | 3740 | 5760 | 12 | 12 (row 9) |
-| placed_v3 | 0 | 6 | 23.69 | 3750 | 5743 | 11 | 11 (row 53) |
-| glasgow_revC (the human benchmark) | 0 | 10 | 70.05 | 1352 | 3641 | | |
+| the pile | 243 | 3164 | 9247.33 | 10974 | 4834 | 131 | no row |
+| placed_v2 | 0 | 0 | 12.65 | 3740 | 5760 | 12 | 12 (row 9) |
+| placed_v3 | 0 | 0 | 12.65 | 3750 | 5743 | 11 | 11 (row 53) |
+| glasgow_revC (the human benchmark) | 0 | 1 | 52.25 | 1352 | 3641 | | |
+
+(`tests/test_1042_placement_panels.py` pins it; before #1124 the box
+metrics read 3214 / 6 / 6 / 10 pairs and 9503.03 / 23.69 / 23.69 / 70.05
+mm².)
 
 ### The ghost and the arrow
 

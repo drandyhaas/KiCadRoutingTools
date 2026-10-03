@@ -131,6 +131,14 @@ Examples:
         "move may take a claim past its limit and further than the board as "
         "it stands, unless no clear pose keeps it; then the cap clears the "
         "foreign copper anyway and the claim it broke is NAMED (#1067). "
+        "Its declared rotations are held as well: a cap a block declares at "
+        "one angle is never turned away from it, one with "
+        "rotation_candidates turns only within them, on its own "
+        "quarter-turn lattice; two blocks declaring one part (any part, as "
+        "every intent gate refuses) at different angles exit 2 before "
+        "anything is written or recorded (#1122). A held cap can leave a "
+        "graze the free pass would clear; it stays on the Unresolved "
+        "line and in the unresolved key. "
         "Nothing else in the intent is read. The run prints the decap grade "
         "before and after, and a JSON_SUMMARY line. Omitted (the default), "
         "the run is identical to one without the flag, and can move a cap "
@@ -159,6 +167,21 @@ Examples:
             print(f"cannot load intent {args.intent}: its decap limits do "
                   f"not read as numbers: {exc}", file=sys.stderr)
             return 2
+    # #1122: a contradiction between the rotations two blocks declare needs
+    # the board to resolve, so the board is parsed here -- once, and reused
+    # below -- and only when the intent declares a rotation at all.
+    _pcb1122 = None
+    if intent is not None and any(
+            b.rotation is not None or b.rotation_candidates
+            for b in intent.blocks):
+        from placement import floorplan as _fp1122
+        from placement.fanout_clearance import declared_cap_rotations
+        _pcb1122 = parse_kicad_pcb(args.input_file)
+        try:
+            declared_cap_rotations(intent, _pcb1122)
+        except _fp1122.IntentError as exc:
+            print(f"cannot use intent {args.intent}: {exc}", file=sys.stderr)
+            return 2
     # This step mutates the board mid-pipeline (moves caps), so it must appear in
     # the stress-test redo manifest -- otherwise a pure redo_stress_test.py replay
     # breaks at the next step that reads the *_capopt board. No-op unless
@@ -174,7 +197,8 @@ Examples:
         print(f"Output file: {args.output_file}")
 
     print(f"Loading {args.input_file}...")
-    pcb_data = parse_kicad_pcb(args.input_file)
+    pcb_data = (_pcb1122 if _pcb1122 is not None
+                else parse_kicad_pcb(args.input_file))
     # #962: which vias are under solder BEFORE any cap moves. The engine pulls
     # cap pads onto same-net vias by design, and a via that lands under a pad
     # that way needs Type VII declared like any other via-in-pad.
@@ -215,6 +239,10 @@ Examples:
             'unresolved': list(result.get('unresolved') or ()),
             'via_resolved': list(result.get('via_resolved') or ()),
             'regrazed': list(result.get('regrazed') or ()),
+            # #1122: only when a cap's rotation is declared, so a run whose
+            # intent declares none prints what it printed before.
+            **({'declared_rotations': result['declared_rotations']}
+               if result.get('declared_rotations') else {}),
             'decap': result.get('decap')}, sort_keys=True, default=str))
 
     def _write_drc_floors():

@@ -140,12 +140,19 @@ EDGE_BAND_SANITY_MM = 5.0
 #: lattice, and the quench's swaps exchanged full poses, angles included.
 #: test_893 now reads every source tree for a `_try_place` call without a
 #: ladder, and the swap refuses an angle the declaration does not admit.
-#: Still NOT held, and so still ungraded: `place_portfolio --strategy
-#: poses` and `place_fanout_clearance`'s cap turns, neither of which reads
-#: a rotation declaration; stage 1's edge seat, which applies a declared
-#: `rotation` but not a `rotation_candidates` set, so an edge connector
-#: whose input angle is outside its set keeps it; and `place_pose`'s
-#: set/rotate/face, which take the caller's angle. An earlier draft
+#: Three more were held by #1120-#1122: stage 1's edge seat applies a
+#: `rotation_candidates` set (a member that fits the edge, or the part is
+#: left unturned and reported); `place_portfolio`'s `poses` strategy offers
+#: a declared part only angles its declaration admits; and
+#: `place_fanout_clearance --intent` turns a cap only within its claim, in
+#: the comparison run without the decap gate too. test_893's standing gate
+#: also reads `_seat_edge` and `perturb_poses` calls for their declaration.
+#: Still NOT held, and so still ungraded: `place_pose`'s set/rotate/face,
+#: which take the caller's angle; `arrays[].rotation`, which is not a block
+#: claim and so not in `rotations_for_ref`; and any actor run WITHOUT the
+#: intent (`place_optimize`, `place_portfolio`, `place_fanout_clearance` or
+#: the GUI cap pass with no intent path), which has no declaration to hold.
+#: An earlier draft
 #: of this comment claimed such a rule existed; it never did, and a
 #: justification naming a grader nobody wrote is worse than a shorter one. Contrast `blocks[].side`, which is declarable and
 #: whose rule docs/floorplan-intent.md calls "vacuous, not conservative"
@@ -2664,12 +2671,14 @@ def declared_ladder(claim) -> Optional[List[float]]:
     None for no claim -- which tells `seeder._try_place` to use its fallback
     lattice. The angles were normalised at load.
 
-    This is the ONE mapping every `_try_place` seat search uses (stage 1's
-    edge seat applies a declared single angle itself, before its slide). It
-    was a closure copied into `seed_from_intent` and `repair_placement`, and
-    `place_seed`'s post-polish re-seat had no copy at all, so it searched the
-    fallback lattice and could turn a part whose angle the intent declared
-    (#1117).
+    This is the ONE mapping every `_try_place` seat search, the portfolio's
+    `poses` strategy (#1121) and `place_fanout_clearance`'s cap turns
+    (#1122) read. Stage 1's edge seat does not call it: it walks the same
+    claim itself, its current angle first when that is a member that fits,
+    then the author's order (#1120). It was a closure copied into `seed_from_intent` and
+    `repair_placement`, and `place_seed`'s post-polish re-seat had no copy at
+    all, so it searched the fallback lattice and could turn a part whose
+    angle the intent declared (#1117).
     """
     if claim is None:
         return None
@@ -6334,6 +6343,13 @@ class GradeResult:
     #: #959: dispositions this plan writes that answer nothing (see
     #: `stale_dispositions`). Empty unless the roster was built.
     stale_dispositions: List[str] = field(default_factory=list)
+    #: #1064: `legality.pad_stack_census` -- check_assembly's exact
+    #: pad_intersection pairs (two parts' pad copper overlapping, ANY net),
+    #: PRINTED and never a rule. None when `grade(with_pad_stacks=True)` was
+    #: not asked, which a consumer must not read as "no stacks". The
+    #: `legality['pad_intersection_pairs']` key beside it is the optimizer's
+    #: bounding-box census and keeps that meaning.
+    pad_stacks: Optional[Dict[str, object]] = None
 
     @property
     def dark_undispositioned(self) -> List[str]:
@@ -7382,13 +7398,18 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
           with_health: bool = False, with_roster: bool = False,
           brief_fragment=None, mechanical=None,
           mechanical_skip: Sequence[str] = (),
-          reconciliation=None) -> GradeResult:
+          reconciliation=None,
+          with_pad_stacks: bool = False) -> GradeResult:
     """Measure a board against its declared floorplan intent.
 
     `with_roster` (#959) also builds the rule roster -- which rules the intent
     leaves dark and whether a disposition answers for each. Opt-in, because
     it costs a decap census and most callers (the seeder's self-grade, the
-    A/B harness) never read it."""
+    A/B harness) never read it.
+
+    `with_pad_stacks` (#1064) also measures check_assembly's exact pad
+    stacks into `GradeResult.pad_stacks`, for check_floorplan to PRINT. It
+    is not a rule and changes no verdict; opt-in for the same reason."""
     from . import placement_state
 
     ctx, outline, state, blocks, block_problems = _grade_ctx(
@@ -7486,9 +7507,18 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         stale = stale_dispositions(intent, roster, pcb_data,
                                    reconciliation=reconciliation)
 
+    pad_stacks = None
+    if with_pad_stacks:
+        from .legality import pad_stack_census
+        import routing_defaults as _defaults1064
+        pad_stacks = pad_stack_census(
+            pcb_data, clearance if clearance is not None
+            else _defaults1064.CLEARANCE)
+
     st = placement_state.assess_placement(pcb_data, pcb_file)
     return GradeResult(
         roster=roster, stale_dispositions=list(stale or ()),
+        pad_stacks=pad_stacks,
         intent=intent, board=pcb_file, violations=violations, blocks=blocks,
         legality={k: (round(float(v), 4) if isinstance(v, float) else v)
                   for k, v in ctx.legality.items()},
@@ -8724,6 +8754,21 @@ def format_text(r: GradeResult) -> str:
         for v in r.violations:
             tag = 'ERROR' if v.severity == ERROR else 'warn '
             lines.append(f"    [{tag}] {v.rule}: {v.message}")
+    # #1064: printed, never a rule -- a floorplan PASS says nothing about
+    # whether two parts' pads sit on each other, and check_assembly calls
+    # that NOT BUILDABLE whatever the nets.
+    if r.pad_stacks is not None:
+        _ps1064 = r.pad_stacks
+        lines.append(
+            f"  pad stacks: {_ps1064['pad_stack_count']} (two parts' pad "
+            f"copper overlapping, any net -- check_assembly's "
+            f"pad_intersection, exact; printed, not a floorplan rule)"
+            + (" -- check_assembly grades these NOT BUILDABLE"
+               if _ps1064['pad_stack_count'] else ''))
+        for a, b, area, side in _ps1064['pad_stack_pairs'][:5]:
+            lines.append(f"    {a} <-> {b}  {area:.4f}mm2  side {side or '-'}")
+        if _ps1064['pad_stack_count'] > 5:
+            lines.append(f"    ... {_ps1064['pad_stack_count'] - 5} more")
     # #1051: every declared array, formed or not, with what its order could
     # not place -- a partly resolved pin order is disclosed on a pass too.
     for a in r.array_measured:
@@ -9243,6 +9288,8 @@ def to_json(r: GradeResult) -> Dict:
         'n_footprints': r.n_footprints,
         **({'array_formation': r.array_measured} if r.array_measured
            else {}),
+        **({'pad_stacks': r.pad_stacks} if r.pad_stacks is not None
+           else {}),
     }
 
 
@@ -9291,6 +9338,10 @@ def summary(r: GradeResult) -> Dict:
         'edge_contours': r.outline['edge_contours'],
     }
     out.update(r.legality)
+    # #1064: the EXACT stack count, beside (not instead of) the bounding-box
+    # `pad_intersection_pairs` r.legality just contributed.
+    if r.pad_stacks is not None:
+        out['pad_stack_count'] = r.pad_stacks['pad_stack_count']
     for k in ('unplaced', 'partially_unplaced', 'has_copper',
               'duplicate_fraction', 'spread_ratio', 'outside_fraction'):
         out[f"state_{k}"] = r.state[k]

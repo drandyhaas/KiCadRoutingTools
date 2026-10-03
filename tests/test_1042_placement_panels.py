@@ -7,7 +7,10 @@
     human as-built benchmark (kicad_files/glasgow_revC). ONE instrument per
     intent line: `check_floorplan --intent` on every beat with an intent,
     the ledger's value only without one. Self-skipped, and SAID, when
-    wk/run32 is absent.
+    wk/run32 is absent; `KRT_RUN32_DIR` points it at another checkout's
+    (a worktree has none), and then absent boards FAIL. The legality
+    numbers are render's checklist since #1124 (the grader's pairs and
+    courtyard census), not the optimizer's box metrics.
   * **No subprocess of sys.executable, ever** -- inside KiCad that is the
     pcbnew binary and the child hangs. Every subprocess entry point is made
     to fail, and a real measurement (render_placement + check_floorplan)
@@ -72,7 +75,10 @@ SEED = os.path.join(KF, 'interf_u_unrouted.kicad_pcb')
 PLACED = os.path.join(KF, 'interf_u_unrouted_placed.kicad_pcb')
 ROUTED = os.path.join(KF, 'routed_output.kicad_pcb')
 BENCH = os.path.join(KF, 'glasgow_revC.kicad_pcb')
-RUN32 = os.path.join(ROOT, 'wk', 'run32')
+#: `KRT_RUN32_DIR` names another checkout's run-32 artifacts; set, a missing
+#: board is a FAILURE, because someone asked for the table explicitly.
+RUN32_ASKED = os.environ.get('KRT_RUN32_DIR')
+RUN32 = RUN32_ASKED or os.path.join(ROOT, 'wk', 'run32')
 
 _FAIL = []
 _NOTES = []
@@ -84,18 +90,24 @@ def fail(msg):
 
 
 #: #1042's table, for the boards present here: off-outline parts, conflict
-#: pairs, overlap mm2 (2 dp), crossings, hpwl mm (rounded); then floorplan
-#: errors by check_floorplan --intent, and by the ledger (None = no row).
-TABLE = {'glasgow_unplaced': (243, 3214, 9503.03, 10974, 4834, 131, None),
-         'placed_v2': (0, 6, 23.69, 3740, 5760, 12, 12),
-         'placed_v3': (0, 6, 23.69, 3750, 5743, 11, 11)}
-BENCH_ROW = (0, 10, 70.05, 1352, 3641)
+#: pairs, overlap mm2 (4 dp, render's own rounding), crossings, hpwl mm
+#: (rounded); then floorplan errors by check_floorplan --intent, and by the
+#: ledger (None = no row). The first three are render's checklist since
+#: #1124 -- before it they were the quench's box metrics (3214 / 6 / 6
+#: pairs, 9503.03 / 23.69 mm2, and a bench of 10 pairs where render named 1).
+TABLE = {'glasgow_unplaced': (243, 3164, 9247.3258, 10974, 4834, 131, None),
+         'placed_v2': (0, 0, 12.6475, 3740, 5760, 12, 12),
+         'placed_v3': (0, 0, 12.6475, 3750, 5743, 11, 11)}
+BENCH_ROW = (0, 1, 52.252, 1352, 3641)
 
 
 def test_run32_reproduces_the_table():
     _mark = len(_FAIL)
     boards = [os.path.join(RUN32, b + '.kicad_pcb') for b in TABLE]
     if not all(os.path.isfile(b) for b in boards):
+        if RUN32_ASKED:
+            fail('KRT_RUN32_DIR=%s has no run-32 boards' % RUN32_ASKED)
+            return
         _NOTES.append('run-32 table not reproduced: wk/run32 boards absent')
         print('    (wk/run32 absent: the table check did not run)')
         return
@@ -110,7 +122,7 @@ def test_run32_reproduces_the_table():
         return
     for bt, bt2 in zip(t.beats, t2.beats):
         want = TABLE[bt.label]
-        got = (bt.off_outline, bt.conflict_pairs, round(bt.overlap_mm2, 2),
+        got = (bt.off_outline, bt.conflict_pairs, round(bt.overlap_mm2, 4),
                bt.crossings, int(round(bt.hpwl)))
         if got != want[:5]:
             fail('%s: %r, the table says %r' % (bt.label, got, want[:5]))
@@ -136,7 +148,7 @@ def test_run32_reproduces_the_table():
                                          t2.floorplan_source))
     b = t.benchmark or {}
     got = (b.get('off_outline'), b.get('conflict_pairs'),
-           round(b.get('overlap_mm2') or 0, 2), b.get('crossings'),
+           round(b.get('overlap_mm2') or 0, 4), b.get('crossings'),
            int(round(b.get('hpwl') or 0)))
     if got != BENCH_ROW:
         fail('benchmark %r, the table says %r' % (got, BENCH_ROW))

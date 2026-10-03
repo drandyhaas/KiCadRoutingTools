@@ -140,6 +140,23 @@ def _copper_geometry(pad):
     return Polygon(_pad_outline_polygon(pad))
 
 
+def custom_pad_copper(pad):
+    """A CUSTOM pad's copper as one areal geometry, for the placement graders
+    (#1123): `_copper_geometry`'s union -- what #1111 measures here -- minus
+    the lines and points `make_valid` can leave beside the polygons. None
+    when the pad has no `polygons` (not custom, or a `gr_curve` the parser
+    could not draw) or they enclose no area; the caller then keeps the pad's
+    outline, its box, as `_overlaps_in` does."""
+    if not getattr(pad, 'polygons', None):
+        return None
+    from shapely.ops import unary_union
+    from geometry_utils import areal_parts
+    parts = areal_parts(_copper_geometry(pad))
+    if not parts:
+        return None
+    return parts[0] if len(parts) == 1 else unary_union(parts)
+
+
 def _custom_pair_depth(a, b):
     """How deep two pads' copper overlaps (mm) when at least one is a CUSTOM
     pad, measured on the copper itself (#1111); 0 when it does not touch.

@@ -1184,9 +1184,13 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             "(decaps.max_distance_mm, decaps.max_pin_distance_mm, graded at "
             "error) are held while caps move; a cap whose every clear pose "
             "breaks one clears the foreign copper anyway and the summary "
-            "names it. A relative path is read from the board's folder. "
-            "Empty = no intent, and a cap can be moved past a decap limit "
-            "silently.")
+            "names it. Its declared rotations are held too: a cap declared "
+            "at one angle is never turned away from it, one with "
+            "rotation_candidates turns only within them (#1122); a held "
+            "cap can leave a graze the free pass would clear, and the "
+            "summary names it. A relative path is read from "
+            "the board's folder. Empty = no intent, and a cap can be moved "
+            "past a decap limit, or turned, silently.")
         intent_sizer.Add(self.cap_intent_path, 1, wx.EXPAND | wx.RIGHT, 4)
         self.cap_intent_browse = wx.Button(self, label="…",
                                            style=wx.BU_EXACTFIT)
@@ -2271,6 +2275,11 @@ class FanoutTab(wx.Panel):
                 try:
                     _cap_intent = _fp1067.load_intent(_ip)
                     _fp1067.tether_gate_spec(_cap_intent)
+                    # #1122: two blocks declaring one part at different
+                    # angles is an IntentError (a ValueError): refused here,
+                    # before anything moves, as the CLI exits 2.
+                    from placement import fanout_clearance as _fc1122
+                    _fc1122.declared_cap_rotations(_cap_intent, pcb_data)
                 except (OSError, ValueError, TypeError) as exc:
                     return (f"{CAP_NOT_RUN}: cannot load intent "
                             f"{_ip}: {exc}")

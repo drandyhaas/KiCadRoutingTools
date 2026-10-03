@@ -282,6 +282,23 @@ param can actually REACH it. Verified as a change detector: removing
 `bga_options` from the cap step's owners makes it name all ten dropped
 params and exit 1.
 
+## Declared cap rotations (test_1122_cap_rotation_gui.py)
+
+Needs KiCad's python (wx + pcbnew); re-execs into it automatically, and
+exits 2 without it (a killer gate for `tests/mutate_1120_1121_1122.py`).
+
+    python3 tests/gui_parity/test_1122_cap_rotation_gui.py
+
+#1122: the cap pass reads the intent's rotation claims through
+`fanout_clearance.declared_cap_rotations`, which resolves the blocks
+against the PCBData the GUI built from pcbnew, so the CLI test cannot
+speak for this front. On the CLI test's fixture (the U30 crop, clearance
+0.1, budget 0.6 / 2.0, C24 declared at 270 -- the case in which the run
+KEPT is the one without the decap gate) it asserts that a contradictory
+declaration stops the step and moves nothing, that the live C24 keeps
+its angle, and that the GUI moves the caps the CLI moves, to the same
+poses.
+
 ## Class-2 post-pass coverage (test_cli_postpass_coverage.py)
 
 The converter gate above covers the plan->params translation; this one covers

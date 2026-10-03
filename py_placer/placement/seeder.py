@@ -49,14 +49,17 @@ reported UNSEATED in `rotation_unseated`, never quietly turned -- and
 author's order, because this search keeps the FIRST pose that fits. Every
 `_try_place` seat builds that ladder with `floorplan.declared_ladder` --
 including `place_seed`'s post-polish re-seat, which until #1117 searched the
-fallback lattice and could turn a declared part.
+fallback lattice and could turn a declared part. Stage 1's edge seat, which
+calls no seat search, applies a set itself since #1120: the part's own angle
+when that is a member that fits the edge, else the first member that does.
 
 Note what a declared rotation deliberately does NOT do: it does not lock the
 part. The advice this paragraph used to give -- lock it -- costs the part its
 POSITION too, because `_Part.locked` is one boolean covering both, and
 `place_seed` stamps it into the board. The angle is held by handing
 `_try_place` a one-element ladder instead. `place_portfolio`'s `poses`
-strategy is still how you EXPLORE rotations; this is how you FIX one.
+strategy is still how you EXPLORE rotations (within a declaration, since
+#1121); this is how you FIX one.
 
 Determinism: the only randomness is ``random.Random(f"{seed}")`` -- it breaks
 ties in the packing order and jitters non-spec targets, so different seeds
@@ -2521,7 +2524,7 @@ class _AtRotation:
         return self._part.rect(x, y, rot)
 
 
-def _stage1_geometry_rot(part, claim):
+def _stage1_geometry_rot(part, claim, fits=None):
     """#988: the rotation stage 1 measures an edge connector's geometry at.
 
     Stage 1 applies a DECLARED rotation (#893) only after it has converted the
@@ -2530,12 +2533,57 @@ def _stage1_geometry_rot(part, claim):
     (input 180, `center_on_edge` 1.0 mm) was written 10.00 mm off centre when
     declared at 0, 5.65 mm at 90 and 4.60 mm at 270, and a part that fits the
     edge only at its declared angle was refused as "wider than the edge". So:
-    the declared angle when one is declared, else the part's own. A candidate
-    SET is not applied by stage 1, so it measures at `part.rot` too.
+    the declared angle when one is declared, else the part's own.
+
+    #1120: a candidate SET is applied too. It used not to be, and no later
+    stage re-seats a connector stage 1 seats, so J5 declared `[0, 90]` was
+    written at its input 180, ungraded. The part's own angle when it is a
+    member that `fits` (stage 1 does not turn a part already at a member
+    that fits; one at a member that does not is turned to one that does),
+    else the first member in the AUTHOR's order that fits -- `fits(rot)`
+    is stage 1's own two pre-turn refusals (`_stage1_fits`). With no member
+    that fits, the first member: stage 1 then refuses the part at a declared
+    angle and leaves it unturned, and the later stages seat it at a member or
+    report it in `rotation_unseated`. `fits=None` admits every member.
     """
     if claim is not None and claim[0] is not None:
         return claim[0] % 360.0
+    if claim is not None and claim[1]:
+        set1120 = [c % 360.0 for c in claim[1]]
+        fit1120 = [r for r in set1120 if fits is None or fits(r)]
+        # quench._same_angle's tolerance, so a part `poses` reads as AT a
+        # member is not turned here (#1120 verifier: 1e-9 vs 1e-6).
+        if any(abs((r - part.rot + 180.0) % 360.0 - 180.0) < 1e-6
+               for r in fit1120):
+            return part.rot
+        return fit1120[0] if fit1120 else set1120[0]
     return part.rot
+
+
+def _stage1_fits(state, part, entry, bounds, edge, rot) -> bool:
+    """Would stage 1 seat `part` on `edge` at `rot`? Its two refusals before
+    any turn, repeated: the part is wider than the edge, or the declared
+    along-edge window does not intersect the legal one (#1120).
+
+    A second copy of two predicates is a second chance for them to drift, and
+    the originals are anchored lines, so they cannot be shared; test_983's
+    C10 pins that this answer and stage 1's own skip notes agree.
+    """
+    if rot != part.rot:
+        rot = _materialise_rotation(part, rot)
+    geo1120 = _AtRotation(part, rot)
+    lo1120, hi1120 = _edge_frac_bounds(geo1120, bounds, edge)
+    if lo1120 > hi1120:
+        return False
+    e_lo, e_hi, _ = _declared_edge_span(state, bounds, edge)
+    win1120 = _declared_frac_window(entry, e_hi - e_lo)
+    if win1120 is None:
+        return True
+    w_lo = declared_to_ladder_frac(geo1120, bounds, edge, e_lo, e_hi,
+                                   win1120[0])
+    w_hi = declared_to_ladder_frac(geo1120, bounds, edge, e_lo, e_hi,
+                                   win1120[1])
+    return max(lo1120, w_lo) <= min(hi1120, w_hi)
 
 
 def declared_to_ladder_frac(part, bounds, edge, e_lo, e_hi, declared):
@@ -4344,10 +4392,24 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # block has not been turned (`_stage1_geometry_rot` says why this
             # matters). An angle the part already has is read exactly as
             # before, cache and all: only a declared one is materialised.
-            _geo_rot = _stage1_geometry_rot(part, declared_rot.get(ref))
+            _geo_rot = _stage1_geometry_rot(
+                part, declared_rot.get(ref),
+                fits=lambda r: _stage1_fits(state, part, c, bounds, edge, r))
             if _geo_rot != part.rot:
                 _geo_rot = _materialise_rotation(part, _geo_rot)
             _geo = _AtRotation(part, _geo_rot)
+            _claim1120 = declared_rot.get(ref)
+            if (_claim1120 is not None and _claim1120[0] is None
+                    and _claim1120[1]
+                    and not _stage1_fits(state, part, c, bounds, edge,
+                                         _geo_rot)):
+                notes.append(
+                    f"edge connector {ref}: none of its declared "
+                    f"rotation_candidates "
+                    f"{[float(r) for r in _claim1120[1]]} fits the {edge} "
+                    f"edge, so stage 1 leaves it, unturned, to the later "
+                    f"stages -- which seat it only at one of them, or report "
+                    f"it in rotation_unseated")
             f_lo, f_hi = _edge_frac_bounds(_geo, bounds, edge)
             # #706/#712. A DECLARED position outranks the even distribution.
             # Stage 1 is the from-scratch path and it never calls `_seat_edge`,
@@ -4404,14 +4466,18 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # which is the same broken promise wearing a different face. Set it
             # first, so `_edge_pose` and `_edge_correct` compute the overhang
             # and the correction for the geometry that will actually be
-            # written. A candidate SET is not applied here (the edge ladder has
-            # no cost to choose by) -- and no later stage re-seats an edge
-            # connector THIS stage seats, so one whose input angle is outside
-            # its set is written at that input angle, ungraded (#1117's
-            # verifier). One this stage skips is seated later, ladder and all.
+            # written. A candidate SET is applied as well (#1120): `_geo_rot`
+            # is the member `_stage1_geometry_rot` chose -- the part's own
+            # angle when that is a member that fits, else the first member
+            # in the author's order that fits. It used not to be, and no
+            # later stage re-seats an edge connector THIS stage seats, so one
+            # whose input angle was outside its set was written at that input
+            # angle, ungraded. One this stage skips is seated later, ladder
+            # and all.
             _edge_decl = declared_rot.get(ref)
-            if _edge_decl is not None and _edge_decl[0] is not None:
-                _want = _edge_decl[0] % 360.0
+            if _edge_decl is not None:
+                _want = (_edge_decl[0] if _edge_decl[0] is not None
+                         else _geo_rot) % 360.0
                 if abs((part.rot % 360.0) - _want) > 1e-9:
                     if _want not in part.bounds_by_rot:
                         from placement.legality import rotate_local_bounds
@@ -4422,7 +4488,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                                 *part.tht_by_rot[0.0], _want)
                     notes.append(
                         f"edge connector {ref}: seated at the declared "
-                        f"rotation {_want:g}deg (input was {part.rot:g}deg)")
+                        f"rotation {_want:g}deg (input was {part.rot:g}deg)"
+                        + (f", the first of its rotation_candidates "
+                           f"{[float(r) for r in _edge_decl[1]]} that fits "
+                           f"the {edge} edge" if _edge_decl[0] is None
+                           else ''))
                     state.apply_move(ref, part.x, part.y, _want)
             # #701: SLIDE along the edge when a declared keep-out refuses the
             # even-distribution position, using the same ladder `_seat_edge`

@@ -189,7 +189,14 @@ The verdict is `placement.legality.grade_pad_legality` — the same numbers
 request is refused when it makes a category worse — the counts (pad conflicts,
 hole conflicts, pads off-board) **and their magnitudes** (`pad_shortfall`,
 `oob_pad_amount`; a count arm alone accepted a part moved from 2.0 mm off the
-board to 204.66 mm off it, measured on `flat_hierarchy`) — and **never for
+board to 204.66 mm off it, measured on `flat_hierarchy`) — plus **pad
+stacks** (#1064): two parts' pad copper overlapping on a shared side, ANY
+net, measured by check_assembly's own `legality.pad_intersection_pairs`
+(`pad_stack_count`, `pad_stack_area` summed over every stacked pad pair, and
+`pad_stack_pairs` as a
+set, so a new stack is refused when the totals tie). The pad-conflict grade
+skips same-net pads, so esp_prog's C4 put on Y1's same-net pad (0.0412 mm²)
+used to exit 0 here and read NOT BUILDABLE in check_assembly — and **never for
 damage the board already had**:
 an absolute gate is False for a large share of parts on a real board before
 anything moves, so it would refuse poses no worse than where the part already
@@ -643,7 +650,10 @@ so a pair involving one that overlaps on outlines is re-measured on the real cop
 the shared copper. A solder jumper's interleaved teeth (KiCad's StickHub demo, JP1:
 0.150 mm apart, 0.150 mm overlap on the boxes) no longer reads as a short, and the
 re-measure can only remove a pair the outlines found. A custom pad the parser could
-not draw (a `gr_curve` primitive) stays measured on its box. As in KiCad, two
+not draw (a `gr_curve` primitive) stays measured on its box. The placement
+graders read the same copper (`check_pads.custom_pad_copper`, #1123): a part's
+occupancy and its pad copper past the outline, at the file pose and at a
+trial pose, where the pad's box is re-derived for the new angle. As in KiCad, two
 copies of one UNCONNECTED pin (KiCad gives each its own `unconnected-(...)` net)
 and a footprint's `net_tie_pad_groups` are not shorts; two copies of one number
 on real nets are. An `F&B.Cu` pad is on both outer layers.

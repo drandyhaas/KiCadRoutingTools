@@ -580,8 +580,10 @@ def main():
                    'unseated_refs': s.get('unseated_refs') or [],
                    'rotation_unseated': s.get('rotation_unseated') or {},
                    # #1117: the parts the seed's post-polish re-seat could not
-                   # put back at their declared angle; `classify_row` makes the
-                   # ranked ref being one of them a hard failure.
+                   # put back at their declared angle. `classify_row` flags the
+                   # ranked ref being one of them, and `rotation_key` ranks such
+                   # an angle as a TIER -- after every angle whose seeds held
+                   # the part, never eliminated.
                    'reseat_declined': s.get('reseat_declined') or {},
                    'pad_conflicts_seeded': s.get('pad_conflicts_seeded'),
                    'decap_claimed': (s.get('decap_stage') or {}).get(

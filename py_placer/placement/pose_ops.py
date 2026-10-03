@@ -26,7 +26,9 @@ Two rules worth stating because getting either wrong is silent:
   mid-repair at all. The verdict here is `grade_pad_legality` on the candidate
   board against the same grade on the INPUT board: a request is refused when it
   makes a category WORSE, never for damage it inherited.
-* NO RULE IS RE-DERIVED. The pad geometry is `grade_pad_legality`'s, the face
+* NO RULE IS RE-DERIVED. The pad geometry is `grade_pad_legality`'s, the pad
+  stacks are check_assembly's own `legality.pad_intersection_pairs` (#1064),
+  the face
   rule is `escape.assign_faces` (#850), the ranking is `pose_score.rank_poses`,
   the writer is `placement.writer.write_placed_output`, the siblings are
   `portfolio.copy_siblings` (#441). This module is plumbing and arithmetic on
@@ -73,7 +75,8 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
                  'pad_edge_conflicts', 'pad_edge_unmeasured',
                  'oob_keepout_copper_count',
                  'oob_graphic_copper_count',
-                 'mating_keepout_count')
+                 'mating_keepout_count',
+                 'pad_stack_count')
 
 #: The MAGNITUDES, and they are not a nicety: a count arm alone accepts a
 #: request that keeps the tally and deepens the damage. Measured on the
@@ -86,12 +89,19 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count',
 #: The graphic-copper overrun is one for the same reason (#962).
 #: #1100: conflicting PAIRS, compared as sets -- a new pair is refused even
 #: when the counts tie.
-PAIR_KEYS = ('pad_conflict_pairs', 'hole_conflict_pairs')
+#: #1064: PAD STACKS -- two parts' pad copper overlapping, ANY net, which is
+#: check_assembly's never-waivable pad_intersection. `pad_conflict_pairs`
+#: skips same-net pads before it measures, so esp_prog's C4 on Y1 (one net)
+#: was no pair at all and this verb wrote a board check_assembly calls NOT
+#: BUILDABLE. The pairs are measured by check_assembly's own function.
+PAIR_KEYS = ('pad_conflict_pairs', 'hole_conflict_pairs',
+             'pad_stack_pairs')
 
 MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount', 'pad_edge_shortfall',
                   'oob_keepout_copper_amount',
                   'oob_graphic_copper_amount',
-                  'mating_keepout_amount')
+                  'mating_keepout_amount',
+                  'pad_stack_area')
 
 #: What `legal` does and does NOT cover, published with every summary (#962
 #: follow-up item 4). A partial claim must read as partial.
@@ -99,7 +109,9 @@ LEGAL_SCOPE = ('pad-pad clearance', 'hole-hole clearance', 'pad copper vs the '
                'outline', 'pad copper vs the edge-clearance floor',
                'footprint graphic copper vs the outline',
                'pad copper vs a board rule-area keep-out band (#1031)',
-               "part bodies vs a PCB-edge plug's mating region (#1098)")
+               "part bodies vs a PCB-edge plug's mating region (#1098)",
+               "two parts' pad copper overlapping on a shared side, ANY net "
+               "-- a pad stack, check_assembly's pad_intersection (#1064)")
 LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     '(disclosed as graphic_edge_shortfall_refs, not gated)',
                     'footprint copper the parser does not model: pad-less '
@@ -111,7 +123,9 @@ LEGAL_UNMEASURED = ('footprint graphic copper vs the edge-clearance floor '
                     'rule areas a footprint owns (listed in '
                     'keepout_copper_unmeasured)',
                     'solder paste and mask openings', 'component bodies / '
-                    'courtyards', 'routing', 'zone fill')
+                    'courtyards', 'routing', 'zone fill',
+                    "parts sharing an origin whose pads do not intersect "
+                    "(check_assembly's coincident_origins)")
 MAGNITUDE_EPS = 1e-6
 
 
@@ -405,11 +419,16 @@ def grade(pcb_data, board_path: str, clearance: float,
     would, and one that declares them is graded the way check_drc will.
     `declared_keepouts` is the intent's keep-outs (#1098): a declared
     `mating:<ref>` replaces the derived plug region, as in the seeder.
+    #1064: plus `pad_stack_census`, check_assembly's own pad_intersection
+    channel, because `grade_pad_legality` skips a same-net pad pair before it
+    measures anything and so never sees two parts' pads stacked on one net.
     """
-    from placement.legality import grade_pad_legality
-    return grade_pad_legality(pcb_data, clearance, pcb_file=board_path,
-                              edge_margin=board_edge_clearance,
-                              declared_keepouts=declared_keepouts)
+    from placement.legality import grade_pad_legality, pad_stack_census
+    g = grade_pad_legality(pcb_data, clearance, pcb_file=board_path,
+                           edge_margin=board_edge_clearance,
+                           declared_keepouts=declared_keepouts)
+    g.update(pad_stack_census(pcb_data, clearance))
+    return g
 
 
 def worsened(before: Dict, after: Dict) -> List[str]:
@@ -494,6 +513,9 @@ def _legality_row(before: Dict, after: Dict) -> Dict:
     row['keepout_copper_pads_after'] = after.get('keepout_copper_pads')
     row['keepout_copper_tht_refs_after'] = after.get('keepout_copper_tht_refs')
     row['keepout_copper_unmeasured_after'] = after.get('keepout_copper_unmeasured')
+    # #1064: which parts' pads are stacked, and what measured them.
+    row['pad_stack_pairs_after'] = after.get('pad_stack_pairs')
+    row['pad_stack_basis'] = after.get('pad_stack_basis')
     return row
 
 
@@ -999,9 +1021,10 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         summary['legal'] = is_clean(after)
         summary['legal_basis'] = (
             'legal = measured pad/hole/outline channels (pad copper AND '
-            'footprint graphic copper) are clean and edge coverage is '
-            'complete; no_worse = no measured category worsened relative to '
-            'the input board. Neither verifies what legal_unmeasured lists.')
+            'footprint graphic copper) are clean, no two parts\' pads are '
+            'stacked (any net), and edge coverage is complete; no_worse = no '
+            'measured category worsened relative to the input board. '
+            'Neither verifies what legal_unmeasured lists.')
         summary['legal_scope'] = list(LEGAL_SCOPE)
         summary['legal_unmeasured'] = list(LEGAL_UNMEASURED)
 
@@ -1344,6 +1367,11 @@ def _refusal_reason(bad, strict, before, after, summary) -> str:
         reason = ("this pose makes the board's placement legality WORSE (%s); "
                   "the board's inherited violations are not counted against you."
                   % parts)
+        if any(k.startswith('pad_stack_') for k in bad):
+            reason += (" A pad stack is two parts' pad copper overlapping on "
+                       "a shared side, whatever the nets (check_assembly's "
+                       "pad_intersection, never waivable); check_assembly "
+                       "grades a board with one NOT BUILDABLE.")
     else:
         reason = ("--strict-legal was asked for and the board is not clean at "
                   "this pose (%s)" % ', '.join(

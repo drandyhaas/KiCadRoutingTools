@@ -435,7 +435,8 @@ TP2, once TP2 is placed or declared) is still refused.
 **Courtyards are graded as drawn, at the project's own severity (#1094,
 #1095).** The courtyard and fab channels keep the part rects as their broad
 phase and measure an overlapping pair on the DRAWN outlines (courtyard united
-pad by pad with the copper), which is what KiCad measures: KiCad's StickHub
+pad by pad with the copper -- a custom pad's parsed primitives, not its box,
+since #1123), which is what KiCad measures: KiCad's StickHub
 demo, 39 parts at +-45/+-135 degrees, went from 74 phantom courtyard-blocking
 pairs and 6 phantom containments to 0. The fixed-pose seat above calls the
 same measure. A board whose own `.kicad_pro` sets `courtyards_overlap` to
@@ -516,7 +517,13 @@ refused. Either way the seat keeps its pose and the run's notes say it was
 "written outside its declared along-edge window". Stage 1 also reads the part's extents, the
 declared start and the window at the rotation it will WRITE. It used to read
 them at the input rotation and then apply a declared `rotation`, which put
-splitflap_driver's J5 10.00 mm off a centre claim at a declared 0°.
+splitflap_driver's J5 10.00 mm off a centre claim at a declared 0°. For a
+`rotation_candidates` set, the rotation it writes is the part's own angle
+when that is a member that fits the edge and its window, else the first
+member, in the author's order, that does (#1120); when none fits, stage 1
+leaves the part unturned, says so, and the later stages seat it at a member
+or report it in `rotation_unseated`. It used to apply no set at all, so J5
+declared `[0, 90]` was written at its input 180.
 
 **What a correction may not trade for its fix.** Both this step and the band
 settle below are compared with the pose they replace, and every count below
@@ -723,6 +730,20 @@ entry, so `allow: ["MH1", "MH01"]` still reports the typo. "Resolved" means the
 pattern matches *some* reference — deliberately not "the exemption changes an
 outcome", because a pattern naming a real part the keep-out would not have bound
 anyway (wrong side) is not a typo.
+
+### `pad stacks` (printed, not a rule)
+
+`check_floorplan` prints `pad stacks: N` -- two parts' pad copper overlapping
+on a shared side, ANY net, which check_assembly grades NOT BUILDABLE -- with
+up to five pairs, and carries the count as `pad_stack_count` in its
+`JSON_SUMMARY` (`--json` has the rows under `pad_stacks`). Each stack is
+confirmed on the pads' outlines, by check_assembly's own `legality.pad_intersection_pairs`
+(#1064), and its area is that channel's pad-rectangle overlap,
+and it is never a violation: a floorplan PASS still says nothing about it, and
+the line is there so a reader of the grade cannot miss it. The
+`pad_intersection_pairs` key beside it is a different number -- the
+optimizer's bounding-box census, kept in that currency because
+`docs/placement-predictors.md`'s tables were measured in it.
 
 ### `rules_run` and `rules_skipped`
 

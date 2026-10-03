@@ -271,8 +271,9 @@ def main():
     p.add_argument("--max-passes", type=int, default=30)
     from placement.cli_gates import add_intent_arg, load_intent_or_exit
     add_intent_arg(p, summary=(
-        "Its decap limits are held while caps move, exactly as "
-        "place_fanout_clearance.py --intent holds them (#1067). The GIF "
+        "Its decap limits and declared rotations are held while caps move, "
+        "exactly as place_fanout_clearance.py --intent holds them (#1067, "
+        "#1122). The GIF "
         "records the gated pass; when the run keeps the pass without the "
         "gate instead (its `Decap:` line says so), the GIF is not of the "
         "result kept."))
@@ -292,6 +293,16 @@ def main():
 
     print(f"Loading {args.input_file}...")
     pcb_data = parse_kicad_pcb(args.input_file)
+    if intent is not None:
+        # #1122: a part two blocks declare at different angles is refused
+        # before anything moves, as place_fanout_clearance refuses it.
+        from placement import floorplan as _fp1122
+        from placement.fanout_clearance import declared_cap_rotations
+        try:
+            declared_cap_rotations(intent, pcb_data)
+        except _fp1122.IntentError as exc:
+            print(f"cannot use intent {args.intent}: {exc}", file=sys.stderr)
+            return 2
 
     rec = _Recorder()
     repair_fanout_clearance(

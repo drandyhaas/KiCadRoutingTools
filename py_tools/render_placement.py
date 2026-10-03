@@ -1740,7 +1740,7 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
         # `pad_conflict_pairs_currency`),
         # so the caption printed "pad-conflicts 10" on a glasgow panel whose
         # checklist named one pair. The metric itself stays in the JSON: the
-        # quench moves on it, and the film plots it against its own floor.
+        # quench moves on it. The film plots the grader's list too (#1124).
         _ctx = getattr(getattr(spec.model, 'state', None), 'legality_ctx', None)
         _n = (len(legality_findings(spec.model)['pad_conflict_pairs_refs'])
               if _ctx is not None else m['pad_conflict_pairs'])

@@ -423,30 +423,70 @@ def _ladder_source_files():
     return sorted(out)
 
 
-def _try_place_calls(tree):
-    """Every call to `_try_place`, spelled bare or as an attribute
-    (`seeder._try_place`)."""
+def _try_place_calls(tree, callee='_try_place'):
+    """Every call to `callee` (default `_try_place`), spelled bare or as an
+    attribute (`seeder._try_place`)."""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
         name = (fn.id if isinstance(fn, ast.Name)
                 else fn.attr if isinstance(fn, ast.Attribute) else None)
-        if name == '_try_place':
+        if name == callee:
             yield node
 
 
-def _ladder_missing(call):
-    """Why `call` searches the fallback ladder, or None if it passes one. A
-    `**kw` call cannot be read, so it counts as missing."""
-    kws = {kw.arg: kw.value for kw in call.keywords}
-    if 'rotations' not in kws:
-        return 'no rotations=' + (' (**kw cannot be read)' if None in kws
-                                  else '')
-    v = kws['rotations']
+def _ladder_missing(call, kw='rotations'):
+    """Why `call` does not hand over its declaration keyword `kw` (default
+    `rotations`, the ladder), or None if it does. A `**kw` call cannot be
+    read, so it counts as missing."""
+    kws = {k.arg: k.value for k in call.keywords}
+    if kw not in kws:
+        return 'no %s=' % kw + (' (**kw cannot be read)' if None in kws
+                                else '')
+    v = kws[kw]
     if isinstance(v, ast.Constant) and v.value is None:
-        return 'rotations=None'
+        return '%s=None' % kw
     return None
+
+
+#: The other functions that take a rotation DECLARATION, the keyword they
+#: take it by, and the file whose production call must pass it (#1121).
+#: `perturb_poses` is the portfolio's `poses` strategy, which turned a
+#: declared part because nothing handed it the claims.
+_DECLARATION_CALLS = (
+    ('_seat_edge', 'rotations', 'py_placer/placement/seeder.py'),
+    ('perturb_poses', 'declared', 'py_placer/placement/portfolio.py'),
+)
+
+
+def test_every_declaration_taking_call_passes_it():
+    """The standing gate's shape, for every function in `_DECLARATION_CALLS`:
+    each production call passes the declaration, and the file that must
+    call it does."""
+    for callee, kw, home in _DECLARATION_CALLS:
+        missing, per_file = [], {}
+        for path in _ladder_source_files():
+            rel = os.path.relpath(path, ROOT).replace(os.sep, '/')
+            tree = ast.parse(io.open(path, encoding='utf-8').read(), path)
+            for call in _try_place_calls(tree, callee):
+                per_file[rel] = per_file.get(rel, 0) + 1
+                why = _ladder_missing(call, kw)
+                if why:
+                    missing.append('%s:%d (%s)' % (rel, call.lineno, why))
+        assert home in per_file, (
+            'no `%s` call in %s (%r) -- this gate is not looking at what it '
+            'thinks it is' % (callee, home, per_file))
+        assert not missing, (
+            '`%s` call(s) without %s=: %r. A caller that drops it lets the '
+            'function turn a part whose rotation was DECLARED.'
+            % (callee, kw, missing))
+        print('  every %s call passes %s= (%s)' % (
+            callee, kw, ', '.join('%s %d' % kv
+                                  for kv in sorted(per_file.items()))))
+
+
+TESTS.append(test_every_declaration_taking_call_passes_it)
 
 
 def test_the_ladder_gate_sees_what_slipped_past_it():
@@ -462,6 +502,13 @@ def test_the_ladder_gate_sees_what_slipped_past_it():
     assert [ln for ln, _ in got] == [1, 2, 3, 4], got
     assert got[0][1] == 'no rotations=' and got[1][1] == 'rotations=None', got
     assert got[2][1] and '**kw' in got[2][1] and got[3][1] is None, got
+    # #1121: the same gate, for the portfolio's declaration keyword.
+    src2 = ("portfolio.perturb_poses(st, free, 0)\n"
+            "perturb_poses(st, free, 0, declared=None)\n"
+            "perturb_poses(st, free, 0, declared=_declared)\n")
+    got2 = [_ladder_missing(c, 'declared')
+            for c in _try_place_calls(ast.parse(src2), 'perturb_poses')]
+    assert got2 == ['no declared=', 'declared=None', None], got2
     print('  the gate reports %d of 4 shapes and passes the good one'
           % sum(1 for _, w in got if w))
 

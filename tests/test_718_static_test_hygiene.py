@@ -75,6 +75,9 @@ _WK_DEPENDENT = {
     # kicad_files/ boards, and the absent case is SAID in the summary line,
     # not passed silently.
     'test_1042_placement_panels.py': ['wk/run32'],
+    # #1124 CORROBORATION only: the run-32 no-floor arm. Every other arm runs
+    # on tracked boards or a synthetic one, and the absent case is SAID.
+    'test_1124_film_grader_census.py': ['wk/run32'],
     # #887 CORROBORATION only. The regression lives in
     # test_887_cmd_timing_reader.py, against two small tracked fixtures, and
     # passes in full on a clean clone. This arm re-derives run 24's published
@@ -1077,8 +1080,11 @@ _UNRESOLVABLE = {}
 #: #1104 added `mutate_1104.py`; 65 before #1105, #1113 and #1067 added
 #: `mutate_1105.py`, `mutate_1113.py` and `mutate_1067.py`; 68 before #1117
 #: added `mutate_1117.py`; 69 before #1115 added `mutate_1115.py`; 70 before
-#: #1111 added `mutate_1111.py`; 71 before #1065 added `mutate_1065.py`.
-_BATTERY_COUNT = 72
+#: #1111 added `mutate_1111.py`; 71 before #1065 added `mutate_1065.py`; 72
+#: before #1064 added `mutate_1064.py`; 73 before #1120, #1121 and #1122 added
+#: `mutate_1120_1121_1122.py`; 74 before #1123 and #1124 added
+#: `mutate_1123_1124.py`.
+_BATTERY_COUNT = 75
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

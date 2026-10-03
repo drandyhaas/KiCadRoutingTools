@@ -3031,6 +3031,75 @@ def _decap_violations(intent, pcb_data, pcb_file, poses=None):
     return [v for v in g.violations if v.rule.startswith('decap_')]
 
 
+def declared_cap_rotations(intent, pcb_data, report: bool = False) -> Dict:
+    """{ref: (rotation, candidates)} the intent's blocks declare (#1122),
+    resolved the way the CLIs resolve an intent gate (`parse_sources('auto')`,
+    `cli_gates.resolve_intent_gate_for_cli`). {} with no intent. Raises
+    `floorplan.IntentError` when two blocks claim one ref (any part) at
+    different angles -- the CLI and the GUI ask before anything is written.
+
+    `report` prints, as the CLIs' gate does (#702), each block that DECLARES
+    a rotation and did not resolve whole -- once, with its problems: a
+    declaration that holds nothing must not look like one that holds
+    (#1122's verifier: a `group:` block naming no group ran silently, every
+    cap free to turn), and one whose `refs` resolved while its `group` did
+    not still holds those refs."""
+    if intent is None:
+        return {}
+    from . import floorplan
+    from .groups import parse_sources
+    blocks, problems = floorplan.resolve_blocks(intent, pcb_data,
+                                                parse_sources('auto'))
+    if report:
+        rot1122 = {z.name for z in intent.blocks
+                   if z.rotation is not None or z.rotation_candidates}
+        said1122: Dict[str, List] = {}
+        for v in problems:
+            if v.block in rot1122:
+                said1122.setdefault(v.block, []).append(v)
+        for name, vs in said1122.items():
+            held = ('the rotation it declares holds no part' if not
+                    blocks.get(name) else 'its rotation holds only %s'
+                    % ', '.join(blocks[name]))
+            print("  INTENT WARN %s -- %s (#1122)" % ('; '.join(
+                '[%s] %s' % (v.rule, v.message) for v in vs), held))
+    return floorplan.rotations_for_ref(intent, blocks)
+
+
+def _on_cap_lattice(cap, rot) -> bool:
+    """`_Cap` prices its pads only at quarter turns from its seed angle
+    (`_pad_cache_for` swaps half-extents), so a DECLARED angle off that
+    lattice cannot be priced here and is not offered. (An undeclared cap
+    is offered the absolute `ROTATIONS` as before #1122, on its lattice or
+    not.)"""
+    return abs((rot - cap.seed_rot + 45.0) % 90.0 - 45.0) <= 1e-6
+
+
+def _cap_rotations(cap, claim, allow_rotations, rotate) -> List[float]:
+    """The angles the descent and the via-clear fallback may try for `cap`.
+
+    Undeclared (`claim` None): `ROTATIONS` when turning is allowed and armed,
+    else the cap's own angle -- exactly as before #1122. Declared: the cap's
+    own angle, then its declaration's angles in the author's order
+    (`floorplan.declared_ladder`) that are on its lattice -- a turn may go
+    INTO the declaration, never out of it, the quench swap's rule. So a cap
+    at its single declared angle is never turned, and one in a candidate set
+    turns only within it.
+    """
+    if not (allow_rotations and rotate):
+        return [cap.rot]
+    if claim is None:
+        return ROTATIONS
+    from .floorplan import declared_ladder
+    out1122 = [cap.rot]
+    for a in declared_ladder(claim):
+        a %= 360.0
+        if _on_cap_lattice(cap, a) and not any(
+                abs((a - b + 180.0) % 360.0 - 180.0) < 1e-6 for b in out1122):
+            out1122.append(a)
+    return out1122
+
+
 def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             clearance: Optional[float] = None,
                             netclass_ceiling: Optional[float] = None,
@@ -3070,6 +3139,13 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     """
     kw = dict(locals())
     kw.pop('pcb_data')
+    # #1122: the intent's rotation claims, resolved ONCE and passed apart
+    # from `intent`, because the comparison run below drops `intent` (it is
+    # the pass WITHOUT the decap gate) and is the run kept when it ends
+    # better: a hold read from `intent` inside the pass would not be in the
+    # board that ships.
+    kw['declared_rotations'] = declared_cap_rotations(intent, pcb_data,
+                                                      report=True)
     if intent is None:
         return _repair_one_arm(pcb_data, **kw)
     import contextlib
@@ -3219,7 +3295,12 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                             # #1067: a `floorplan.Intent`; its decap limits
                             # (decap_distance, decap_pin_distance at ERROR)
                             # are held no worse per claim. None = no gate.
-                            intent=None) -> Dict:
+                            intent=None,
+                            # #1122: {ref: (rotation, candidates)} from
+                            # `declared_cap_rotations`; a declared cap turns
+                            # only within its claim. Kept apart from `intent`
+                            # so the ungated comparison run holds it too.
+                            declared_rotations=None) -> Dict:
     """Nudge near-BGA decoupling caps off foreign-net fanout copper (vias
     #130, escape tracks #278, component pads #275) and toward same-net balls.
     Run AFTER bga_fanout.py.
@@ -3361,6 +3442,23 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
     if intent is not None:
         decap_report = _arm_decap_gate(st, intent, pcb_data, pcb_file)
 
+    # #1122: a cap whose rotation the intent declares turns only within it.
+    claims1122 = {r: c for r, c in sorted((declared_rotations or {}).items())
+                  if r in st.caps}
+    if claims1122:
+        from .floorplan import declared_ladder as _ladder1122
+        _dropped1122 = {r: [a for a in _ladder1122(c)
+                            if not _on_cap_lattice(st.caps[r], a)]
+                        for r, c in claims1122.items()}
+        print("Declared rotations (intent): %d cap(s): %s" % (
+            len(claims1122), '; '.join(
+                '%s at %g' % (r, c[0]) if c[0] is not None
+                else '%s within %s' % (r, [float(a) for a in c[1]])
+                for r, c in claims1122.items()))
+              + ''.join(' (%s: %s not offered -- off its quarter-turn '
+                        'lattice)' % (r, ', '.join('%g' % a for a in d))
+                        for r, d in _dropped1122.items() if d))
+
     # Initial violators: any foreign-copper clearance shortfall (via #130,
     # track #278, pad #275) is a shipped DRC violation to fix.
     violators0 = [r for r, c in st.caps.items()
@@ -3461,8 +3559,8 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                         f"Cap optimize pass {pass_num}: {ref}")
                 cap = st.caps[ref]
                 current = st.cost(ref, cap, cap.x, cap.y, cap.rot)
-                rots = ROTATIONS if (allow_rotations and rotate[ref]) \
-                    else [cap.rot]
+                _c1122 = claims1122.get(ref)
+                rots = _cap_rotations(cap, _c1122, allow_rotations, rotate[ref])
                 best = (current, cap.x, cap.y, cap.rot)
                 for cx, cy in _candidate_positions(cap, budget[ref], step,
                                                    grid_step):
@@ -3495,7 +3593,13 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                 # violators
                 grown = False
                 for r in still:
-                    if not rotate[r] and allow_rotations:
+                    # #1122: arming the turn of a cap whose declaration
+                    # leaves it no other angle would spend a round on a
+                    # rotation it cannot make; grow its budget instead.
+                    if (not rotate[r] and allow_rotations
+                            and len(_cap_rotations(st.caps[r],
+                                                   claims1122.get(r),
+                                                   True, True)) > 1):
                         rotate[r] = True
                         grown = True
                     elif budget[r] < max_displacement_cap - EPS:
@@ -3527,14 +3631,14 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
                      if st.graze_penalty(r, st.caps[r], st.caps[r].x,
                                          st.caps[r].y,
                                          st.caps[r].rot) > EPS]
-            rots_all = ROTATIONS if allow_rotations else None
             for _fi, ref in enumerate(stuck):
                 if progress_callback:
                     progress_callback(
                         _fi + 1, len(stuck),
                         f"Cap optimize: via-clear fallback for {ref}")
                 cap = st.caps[ref]
-                rots = rots_all if rots_all is not None else [cap.rot]
+                _c1122 = claims1122.get(ref)
+                rots = _cap_rotations(cap, _c1122, allow_rotations, True)
 
                 def _best_clear(breaks=None):
                     """(best (cost, x, y, rot) or None, whether the decap
@@ -3753,6 +3857,10 @@ def _repair_one_arm(pcb_data: PCBData, pcb_file: str,
            'via_moves': via_moves, 'new_segments': new_segs,
            'via_resolved': via_resolved, 'regrazed': regrazed,
            'required': required, 'clearance_notes': list(st.clearance_notes)}
+    if claims1122:
+        out['declared_rotations'] = {
+            r: c[0] if c[0] is not None else [float(a) for a in c[1]]
+            for r, c in claims1122.items()}
     if decap_report is not None:
         _finish_decap_report(decap_report, st, intent, pcb_data, pcb_file,
                              placements, unresolved)

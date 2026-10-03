@@ -45,8 +45,24 @@ refusals) pin the function directly. A10 and B7 go through
           still made and said, which a read that turned the part would not.
       C4  the declared START is converted at the declared angle, on and off
           the 90-degree lattice (a 30 or 135 needs its box materialised).
-      C5  a rotation CANDIDATE set is measured at the part's own angle.
+      C5  (#1120) a rotation CANDIDATE set is APPLIED: the part's own angle
+          when it is a member that fits, else the first member in the
+          author's order that fits the edge; J5 declared [0, 90] used to be
+          written at its input 180.
       C6  an undeclared angle is read exactly as before, cache quirks and all.
+      C7  (#1120) a part that fits only at its set's second member is seated
+          there instead of being refused as wider than the edge.
+      C8  (#1120) a set none of whose members fits is left unturned by stage
+          1, named, and reported in `rotation_unseated` -- never written at
+          its undeclared input angle.
+      C9  (#1120) "fits" includes the declared along-edge window, not only
+          the width.
+      C10 (#1120) `_stage1_fits` agrees with stage 1's own skip notes.
+      C11 (#1120) a splitflap lattice: a connector stage 1 seats under a set
+          is written at a member, or reported unseated.
+      C12 (#1120) place_seed, end to end: the unseated set is named and the
+          run exits 4; a fitting member is written.
+      C13 (#1120) an off-lattice member is judged on its own box.
 """
 import os
 from pathlib import Path
@@ -156,7 +172,8 @@ class _Graded(unittest.TestCase):
 
 def input_rotation():
     """The blind twin of C: stage 1 measures at the input rotation again."""
-    return patch.object(seeder, '_stage1_geometry_rot', lambda part, claim: part.rot)
+    return patch.object(seeder, '_stage1_geometry_rot',
+                        lambda part, claim, fits=None: part.rot)
 
 
 class StageOneRotation(_Graded):
@@ -289,18 +306,203 @@ class StageOneRotation(_Graded):
                 pose = self.pose(self.stage1(path, intent_doc(entry)), 'J1')
                 self.assertEqual(tuple(round(v, 6) for v in pose), want)
 
-    def test_c5_a_candidate_set_is_measured_at_the_parts_own_angle(self):
-        # Stage 1 does not apply a candidate SET, so it must not measure at
-        # one of its members either: identical to measuring at the input.
-        claim = {'center_on_edge': {'tolerance_mm': 1.0}}
-        doc = intent_doc(dict(self.J5, **claim),
-                         blocks=[{'name': 'j5', 'refs': ['J5'], 'rotation_candidates': [0, 90]}])
-        res = self.stage1(SPLIT, doc, seed_refs={'J5'})
+    CENTRE = {'center_on_edge': {'tolerance_mm': 1.0}}
+
+    def seat_j5_set(self, cands, blind=False):
+        doc = intent_doc(dict(self.J5, **self.CENTRE),
+                         blocks=[{'name': 'j5', 'refs': ['J5'],
+                                  'rotation_candidates': list(cands)}])
+        if blind:
+            with input_rotation():
+                return self.stage1(SPLIT, doc, seed_refs={'J5'})
+        return self.stage1(SPLIT, doc, seed_refs={'J5'})
+
+    def seat_j5_single(self, rot=None):
+        blocks = ([{'name': 'j5', 'refs': ['J5'], 'rotation': rot}]
+                  if rot is not None else ())
+        doc = intent_doc(dict(self.J5, **self.CENTRE), blocks=blocks)
+        return self.pose(self.stage1(SPLIT, doc, seed_refs={'J5'}), 'J5')
+
+    def test_c5_a_candidate_set_is_applied(self):
+        # J5's input angle is 180. A set without 180 is written at its first
+        # member that fits, exactly where that member declared alone seats.
+        res = self.seat_j5_set([0, 90])
+        self.assertEqual(self.pose(res, 'J5'), self.seat_j5_single(0))
+        self.assertTrue([n for n in res['notes']
+                         if n.startswith('edge connector J5: seated at the declared rotation')
+                         and 'rotation_candidates' in n], res['notes'])
+        self.assertEqual(self.pose(self.seat_j5_set([270, 90]), 'J5'),
+                         self.seat_j5_single(270))   # the author's order, not sorted
+        # A set that holds the input angle does not turn the part, whatever
+        # its order: stage 1 does not turn a part already at a member that
+        # fits (one at a member that does not fit is turned -- see the unit
+        # case below).
+        undeclared = self.seat_j5_single()
+        self.assertEqual(self.pose(self.seat_j5_set([180, 90]), 'J5'), undeclared)
+        self.assertEqual(self.pose(self.seat_j5_set([90, 180]), 'J5'), undeclared)
+        # The blind twin is the defect: the input angle, outside the set.
+        blind = self.pose(self.seat_j5_set([0, 90], blind=True), 'J5')
+        self.assertAlmostEqual(blind[2] % 360.0, 180.0, delta=1e-9)
+        # The choice itself.
+        p180 = type('P', (), {'rot': 180.0})()
+        rot = seeder._stage1_geometry_rot
+        self.assertEqual(rot(p180, (None, (0.0, 90.0))), 0.0)
+        self.assertEqual(rot(p180, (None, (0.0, 90.0)), fits=lambda r: r != 0), 90.0)
+        self.assertEqual(rot(p180, (None, (0.0, 90.0)), fits=lambda r: False), 0.0)
+        self.assertEqual(rot(p180, (None, (90.0, 180.0))), 180.0)
+        self.assertEqual(rot(p180, (None, (90.0, 180.0)), fits=lambda r: r != 180), 90.0)
+        self.assertEqual(rot(p180, (270.0, None)), 270.0)
+        self.assertEqual(rot(p180, None), 180.0)
+
+    WIDE90 = WIDE.replace('(at 4 15 0)', '(at 4 15 90)')
+
+    def wide_set(self, board, cands):
+        path = self.write('w%d.kicad_pcb' % len(cands), board)
+        doc = intent_doc({'ref': 'J1', 'edge': 'north',
+                          'overhang_mm': {'min': 0.0, 'max': 1.0}},
+                         blocks=[{'name': 'j1', 'refs': ['J1'],
+                                  'rotation_candidates': list(cands)}])
+        return path, doc
+
+    def test_c7_a_part_that_fits_only_at_its_second_member_is_seated_there(self):
+        path, doc = self.wide_set(self.WIDE, [0, 90])
+        res = self.stage1(path, doc)
+        self.assertFalse([n for n in res['notes'] if 'wider than the north' in n], res['notes'])
+        pose = self.pose(res, 'J1')
+        self.assertAlmostEqual(pose[2] % 360.0, 90.0, delta=1e-9)
+        self.assertEqual(self.graded(path, {'J1': pose}, doc)['J1'], [])
         with input_rotation():
-            base = self.stage1(SPLIT, doc, seed_refs={'J5'})
-        self.assertEqual(self.pose(res, 'J5'), self.pose(base, 'J5'))
-        self.assertEqual(seeder._stage1_geometry_rot(
-            type('P', (), {'rot': 180.0})(), (None, (0.0, 90.0))), 180.0)
+            blind = self.stage1(path, doc)
+        self.assertTrue([n for n in blind['notes'] if 'wider than the north' in n],
+                        'the fixture must be refused at its input rotation, or C7 tests nothing')
+
+    def test_c8_a_set_none_of_whose_members_fits_is_reported_not_written(self):
+        # J1 sits at 90 -- the one angle that fits -- and declares {0, 180}.
+        path, doc = self.wide_set(self.WIDE90, [0, 180])
+        res = self.stage1(path, doc)
+        self.assertTrue([n for n in res['notes']
+                         if n.startswith('edge connector J1: none of its declared '
+                                         'rotation_candidates')], res['notes'])
+        self.assertFalse([n for n in res['notes']
+                          if n.startswith('edge connector J1: seated at the declared rotation')])
+        self.assertEqual(res.get('rotation_unseated'), {'J1': [0.0, 180.0]})
+        self.assertFalse([q for q in res['placements'] if q['reference'] == 'J1'
+                          and abs(q['new_rotation'] % 360.0 - 90.0) < 1e-9],
+                         'J1 written at its undeclared input angle')
+
+    LONG = ('(kicad_pcb (version 20241229) (generator "t983")\n'
+            '  (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 15 10 0)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_rect (start -6 -1) (end 6 1) (layer "F.CrtYd"))\n'
+            '    (pad "1" smd rect (at -4.5 0) (size .5 .5) (layers "F.Cu"))\n'
+            '    (pad "2" smd rect (at 4.5 0) (size .5 .5) (layers "F.Cu"))))\n')
+    BAND = {'ref': 'J1', 'edge': 'north', 'overhang_mm': {'min': 0.0, 'max': 1.0},
+            'along_edge_band': {'from': 0.9, 'to': 1.0}}
+
+    def test_c9_fit_includes_the_declared_window(self):
+        # On a 30 mm edge a 12 mm part's centre reaches only frac 0.8 at 0
+        # and 0.967 at 90, so the band [0.9, 1.0] admits 90 alone -- the
+        # width fits at both.
+        path = self.write('long.kicad_pcb', self.LONG)
+        cand = self.stage1(path, intent_doc(self.BAND, blocks=[
+            {'name': 'j1', 'refs': ['J1'], 'rotation_candidates': [0, 90]}]))
+        single = self.stage1(path, intent_doc(self.BAND, blocks=[
+            {'name': 'j1', 'refs': ['J1'], 'rotation': 90}]))
+        self.assertEqual(self.pose(cand, 'J1'), self.pose(single, 'J1'))
+        self.assertAlmostEqual(self.pose(cand, 'J1')[2] % 360.0, 90.0, delta=1e-9)
+
+    def test_c10_fits_agrees_with_stage_ones_own_refusals(self):
+        import pose_score
+        skip = ('wider than the', 'the declared along-edge window')
+        cases = ((self.write('w.kicad_pcb', self.WIDE), {'ref': 'J1', 'edge': 'north',
+                  'overhang_mm': {'min': 0.0, 'max': 1.0}}, 'J1', None),
+                 (self.write('l.kicad_pcb', self.LONG), self.BAND, 'J1', None),
+                 (SPLIT, dict(self.J5, **self.CENTRE), 'J5', {'J5'}),
+                 (SPLIT, dict(self.J5, along_edge_band={'from': 0.99, 'to': 1.0}),
+                  'J5', {'J5'}))
+        agreed = refused = 0
+        for path, entry, ref, seed_refs in cases:
+            st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=.25,
+                                       board_edge_clearance=.55)
+            for rot in (0.0, 90.0, 180.0, 270.0):
+                with self.subTest(path=os.path.basename(path), rot=rot):
+                    fits = seeder._stage1_fits(st, st.parts[ref], entry, st.board,
+                                               entry['edge'], rot)
+                    kw = {'seed_refs': seed_refs} if seed_refs else {}
+                    res = self.stage1(path, intent_doc(entry, blocks=[
+                        {'name': 'b', 'refs': [ref], 'rotation': rot}]), **kw)
+                    said = [n for n in res['notes']
+                            if n.startswith(f'edge connector {ref}: ')
+                            and any(k in n for k in skip)]
+                    self.assertEqual(fits, not said, (fits, said))
+                    agreed += 1
+                    refused += not fits
+        # Both answers occur, or the agreement is vacuous.
+        self.assertGreater(refused, 0)
+        self.assertLess(refused, agreed)
+
+    def test_c11_a_seated_connector_is_written_inside_its_set(self):
+        import pose_score
+        st = pose_score.make_state(parse_kicad_pcb(SPLIT), SPLIT)
+        refs = sorted(r for r in st.parts
+                      if r.startswith('J') and not st.parts[r].locked)[:3]
+        self.assertEqual(len(refs), 3, refs)
+        rows = seated = 0
+        for ref in refs:
+            r0 = st.parts[ref].rot % 360.0
+            for edge in ('north', 'south', 'east', 'west'):
+                for cands in ([(r0 + 90) % 360, (r0 + 270) % 360], [(r0 + 180) % 360]):
+                    with self.subTest(ref=ref, edge=edge, cands=cands):
+                        doc = intent_doc({'ref': ref, 'edge': edge,
+                                          'overhang_mm': {'min': 0.0, 'max': 1.0}},
+                                         blocks=[{'name': 'b', 'refs': [ref],
+                                                  'rotation_candidates': cands}])
+                        res = self.stage1(SPLIT, doc, seed_refs={ref})
+                        placed = [q for q in res['placements'] if q['reference'] == ref]
+                        if placed:
+                            seated += 1
+                            self.assertTrue(any(
+                                abs((placed[0]['new_rotation'] - c + 180) % 360 - 180) < 1e-6
+                                for c in cands), (placed[0]['new_rotation'], cands))
+                        else:
+                            self.assertIn(ref, res.get('rotation_unseated') or {})
+                        rows += 1
+        self.assertEqual(rows, 24)
+        # Not vacuous: a run that seated nothing would pass the loop above
+        # through its unseated branch alone (the code reviewer's finding).
+        self.assertGreater(seated, 0)
+
+    def test_c13_an_off_lattice_member_is_judged_on_its_own_box(self):
+        # WIDE's J1 is 12 mm on an 8 mm edge at 0, so 80 fits only on ITS
+        # OWN box. `_stage1_fits` must materialise it before measuring: on
+        # the 0-degree box 80 reads "wider than the edge" and the set falls
+        # through to 90 (measured: J1 seated at 90, y 6.05).
+        path, doc = self.wide_set(self.WIDE, [80, 90])
+        pose = self.pose(self.stage1(path, doc), 'J1')
+        self.assertAlmostEqual(pose[2] % 360.0, 80.0, delta=1e-9)
+
+    def test_c12_place_seed_names_an_unseated_set_and_writes_a_member(self):
+        import json
+        import run_utils
+        seed = str(ROOT / 'py_placer' / 'place_seed.py')
+        for board_text, cands, ok in ((self.WIDE90, [0, 180], False),
+                                      (self.WIDE, [0, 90], True)):
+            with self.subTest(cands=cands):
+                path, doc = self.wide_set(board_text, cands)
+                ip = str(self.root / ('i%d.json' % len(cands)))
+                with open(ip, 'w', encoding='utf-8') as fh:
+                    json.dump(doc, fh)
+                out = str(self.root / ('o_%s.kicad_pcb' % '_'.join(map(str, cands))))
+                argv = [sys.executable, '-X', 'utf8', seed, path, out, '--intent', ip,
+                        '--force', '--clearance', '.25', '--board-edge-clearance', '.55']
+                if ok:
+                    run_utils.check(argv, accept=True)
+                    fp = parse_kicad_pcb(run_utils.evidence(out)).footprints['J1']
+                    self.assertAlmostEqual(fp.rotation % 360.0, 90.0, delta=1e-9)
+                else:
+                    r = run_utils.check(argv, refuse='UNSEATED', code=4)
+                    self.assertIn('J1: declared [0.0, 180.0]', r.stdout)
 
 
 ISSUE_J1 = ('  (footprint "t" (layer "F.Cu") (at 14.15 9.0 270)\n'

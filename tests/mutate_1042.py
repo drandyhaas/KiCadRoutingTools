@@ -18,6 +18,8 @@ exits 2 rather than scoring every row KILLED.
 
 The table row needs wk/run32 (the ledger's floorplan); without it that row's
 killer self-reports the absence and the row SURVIVES -- expected only there.
+A worktree has no wk/; `KRT_RUN32_DIR=<checkout>/wk/run32` points test_1042
+at another checkout's run-32 boards, read only.
 """
 from __future__ import annotations
 

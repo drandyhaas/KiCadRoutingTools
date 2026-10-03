@@ -853,7 +853,8 @@ def main(argv=None):
                        with_health=args.health, with_roster=True,
                        brief_fragment=brief_fragment or None,
                        mechanical=mech, mechanical_skip=_lost,
-                       reconciliation=_rows)
+                       reconciliation=_rows,
+                       with_pad_stacks=True)
     except UntrustworthyOutline as exc:
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
         print("  Refused rather than graded: with no usable outline every "

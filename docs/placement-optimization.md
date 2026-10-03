@@ -743,7 +743,8 @@ it in the engine, which keeps both properties at once:
   (seeded disc offsets of the free parts), `poses` (rotation variants of the
   highest-pin free parts, pruned by `pair_order.ref_inversions` so a
   rotation that provably raises the forced-crossing floor is never even
-  quenched), `swap` (position exchanges inside a declared block, the move
+  quenched, and a part whose rotation a block declares is turned only
+  into that declaration, #1121 -- an `arrays[].rotation` is not held), `swap` (position exchanges inside a declared block, the move
   the quench's own displacement-capped swap phase cannot reach).
 - Every candidate is then quenched by the ORDINARY engine — `quench.py` is
   not modified, and a default `place_optimize.py` run is bit-identical with
