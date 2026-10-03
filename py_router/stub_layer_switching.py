@@ -728,16 +728,24 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
     the swap partner's nets are excluded - their copper is the connection or is
     moving with the swap.
 
+    Each foreign item is priced at the clearance check_drc grades the pair at
+    (#980): `config.pair_clearance` against a track (on its layer) or a via
+    (the stack), `config.pad_pair_clearance` against a pad. Inert on a board
+    that declares no class, rule or override.
+
     Returns (clear, reason).
     """
     exclude = set(exclude_net_ids) | {net_id}
     via_r = (via_size if via_size is not None else config.via_size) / 2
+    board_copper = getattr(getattr(pcb_data, 'board_info', None),
+                           'copper_layers', None)
     # Foreign tracks on ANY layer - the barrel passes through all of them.
     for seg in pcb_data.segments:
         if seg.net_id in exclude:
             continue
         dist = point_to_segment_distance_seg(pad_x, pad_y, seg)
-        if dist < via_r + config.clearance + seg.width / 2:
+        if dist < via_r + config.pair_clearance(net_id, seg.net_id,
+                                                seg.layer) + seg.width / 2:
             net = pcb_data.nets.get(seg.net_id)
             nm = net.name if net else f"net {seg.net_id}"
             return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would punch through "
@@ -747,7 +755,8 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
         if v.net_id in exclude:
             continue
         d = math.hypot(v.x - pad_x, v.y - pad_y)
-        if d < via_r + config.clearance + v.size / 2:
+        if d < via_r + config.pair_clearance(net_id, v.net_id,
+                                             kind='stack') + v.size / 2:
             net = pcb_data.nets.get(v.net_id)
             nm = net.name if net else f"net {v.net_id}"
             return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
@@ -767,7 +776,8 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
             if abs(pad.global_x - pad_x) > _reach or abs(pad.global_y - pad_y) > _reach:
                 continue
             d = point_to_pad_rect_dist(pad_x, pad_y, pad)
-            if d < via_r + config.clearance:
+            if d < via_r + config.pad_pair_clearance(
+                    pad, net_id, board_copper=board_copper):
                 net = pcb_data.nets.get(pnid)
                 nm = net.name if net else f"net {pnid}"
                 return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
@@ -908,12 +918,19 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
     pads only block their own layer, so this only bites on the swap's destination
     layer. Own net and the swap partner's nets are excluded.
 
+    The stub is sized at its OWN width (the config track width only when it
+    has none), as `stub_clear_of_foreign_tracks` sizes it, and each pad is
+    priced at the clearance check_drc grades the pair at
+    (`config.pad_pair_clearance`, #980). A stub narrower than the default track
+    used to be refused where it fits, and a wider one admitted where it grazes.
+
     Returns (clear, reason).
     """
     exclude = set(exclude_net_ids) | {net_id}
-    clear_dist = config.track_width / 2 + config.clearance
     step = max(config.grid_step / 2, 0.02)
     for seg in segments:
+        seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
+                    else config.track_width) / 2
         x1, y1, x2, y2 = seg.start_x, seg.start_y, seg.end_x, seg.end_y
         seg_len = math.hypot(x2 - x1, y2 - y1)
         n = max(2, int(seg_len / step) + 1)
@@ -941,7 +958,8 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
                     d = point_to_pad_rect_dist(qx, qy, pad)
                     if d < best:
                         best = d
-                if best < clear_dist:
+                if best < seg_half + config.pad_pair_clearance(
+                        pad, net_id, layer=dest_layer):
                     net = pcb_data.nets.get(pnid)
                     nm = net.name if net else f"net {pnid}"
                     return False, (f"stub on {dest_layer} would graze {nm} pad "
@@ -1007,7 +1025,9 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
 
     Mirrors stub_clear_of_foreign_pads but over pcb_data.segments (foreign tracks
     on dest_layer) and pcb_data.vias (through-hole, so all-layer like the obstacle
-    map). Own net and any swap-partner nets are excluded. Returns (clear, reason).
+    map). Own net and any swap-partner nets are excluded. Each foreign item is
+    priced at the clearance check_drc grades the pair at
+    (`config.pair_clearance`, #980). Returns (clear, reason).
     """
     exclude = set(exclude_net_ids) | {net_id}
     for seg in segments:
@@ -1034,7 +1054,8 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
                 continue
             other_half = (other.width if other.width > 0 else config.track_width) / 2
             d = segment_to_segment_distance_seg(seg, other)
-            if d < seg_half + other_half + config.clearance:
+            if d < seg_half + other_half + config.pair_clearance(
+                    net_id, other.net_id, dest_layer, kind='track'):
                 net = pcb_data.nets.get(other.net_id)
                 nm = net.name if net else f"net {other.net_id}"
                 return False, (f"stub on {dest_layer} would graze {nm} track "
@@ -1047,7 +1068,8 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
             if not (bminx <= via.x <= bmaxx and bminy <= via.y <= bmaxy):
                 continue
             d = point_to_segment_distance_seg(via.x, via.y, seg) - (via.size or 0) / 2
-            if d < seg_half + config.clearance:
+            if d < seg_half + config.pair_clearance(net_id, via.net_id,
+                                                    dest_layer):
                 net = pcb_data.nets.get(via.net_id)
                 nm = net.name if net else f"net {via.net_id}"
                 return False, (f"stub on {dest_layer} would graze {nm} via "

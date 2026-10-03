@@ -464,6 +464,54 @@ def get_safe_amplitude_at_point(
     required_clearance = net_half + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
     via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + corner_margin
     paired_clearance = net_half + config.track_width / 2 + config.clearance
+    # #980: a foreign item is priced at the clearance check_drc grades the
+    # pair at (`config.pair_clearance` / `pad_pair_clearance`): this net
+    # against the item's, with the .kicad_dru layer rule and a pad's
+    # override. Each value keeps its term order above, so a board that
+    # declares no class, rule or override reads exactly those scalars. The
+    # spatial queries reach the widest pair clearance.
+    _pc_inert = config.pair_clearance_inert()
+    _seg_memo, _via_memo = {}, {}
+
+    def _seg_clr(o_net):
+        if _pc_inert:
+            return required_clearance
+        v = _seg_memo.get(o_net)
+        if v is None:
+            v = _seg_memo[o_net] = (
+                net_half + config.track_width / 2
+                + config.pair_clearance(net_id, o_net, layer, kind='track')
+                + meander_clearance_margin + corner_margin)
+        return v
+
+    def _via_clr(o_net):
+        if _pc_inert:
+            return via_clearance
+        v = _via_memo.get(o_net)
+        if v is None:
+            v = _via_memo[o_net] = (
+                config.via_size / 2 + net_half
+                + config.pair_clearance(net_id, o_net, layer)
+                + meander_clearance_margin + corner_margin)
+        return v
+
+    def _pad_clr(pad):
+        if _pc_inert or pad.net_id == net_id:
+            return net_half + config.clearance + corner_margin
+        return (net_half + config.pad_pair_clearance(pad, net_id, layer=layer)
+                + corner_margin)
+
+    if not _pc_inert and paired_net_id is not None:
+        paired_clearance = (net_half + config.track_width / 2
+                            + config.pair_clearance(net_id, paired_net_id,
+                                                    layer, kind='track'))
+    _cmax = config.max_pair_clearance()
+    _q_req = (required_clearance if _pc_inert else
+              net_half + config.track_width / 2 + _cmax
+              + meander_clearance_margin + corner_margin)
+    _q_via = (via_clearance if _pc_inert else
+              config.via_size / 2 + net_half + _cmax
+              + meander_clearance_margin + corner_margin)
     if chamfer is None:
         chamfer = resolve_meander_chamfer(config, net_id, layer, own_width)
 
@@ -512,7 +560,7 @@ def get_safe_amplitude_at_point(
             # Query segments in the bump region
             nearby_segments = clearance_index.query_segments(
                 bump_min_x, bump_min_y, bump_max_x, bump_max_y,
-                required_clearance + _FOREIGN_WIDTH_SLACK
+                _q_req + _FOREIGN_WIDTH_SLACK
             )
 
             # Check each bump segment against nearby segments on the same layer
@@ -531,7 +579,7 @@ def get_safe_amplitude_at_point(
                     if other_seg.net_id == paired_net_id:
                         check_clearance = paired_clearance
                     else:
-                        check_clearance = required_clearance
+                        check_clearance = _seg_clr(other_seg.net_id)
                     # Foreign copper at its REAL width (#370 B1): a wide power
                     # trunk's edge extends (width - track_width)/2 beyond the
                     # generic keep-out. max() keeps the common case identical.
@@ -551,7 +599,7 @@ def get_safe_amplitude_at_point(
             if not conflict_found:
                 nearby_vias = clearance_index.query_vias(
                     bump_min_x, bump_min_y, bump_max_x, bump_max_y,
-                    via_clearance + _FOREIGN_WIDTH_SLACK
+                    _q_via + _FOREIGN_WIDTH_SLACK
                 )
 
                 for bx1, by1, bx2, by2 in bump_segs:
@@ -566,13 +614,13 @@ def get_safe_amplitude_at_point(
                         # via's real size when larger than the default (#370 B1).
                         dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
 
-                        if dist < via_clearance + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
+                        if dist < _via_clr(via.net_id) + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
                             conflict_found = True
                             break
 
             # Check bump segments against nearby pads (on same layer)
             if not conflict_found:
-                pad_clearance = net_half + config.clearance + corner_margin
+                pad_clearance = net_half + _cmax + corner_margin
                 nearby_pads = clearance_index.query_pads(
                     bump_min_x, bump_min_y, bump_max_x, bump_max_y, pad_clearance + 2.0
                 )
@@ -586,7 +634,7 @@ def get_safe_amplitude_at_point(
                         # Treat pad as circle with radius = max(size_x, size_y)/2
                         pad_radius = _pad_bounding_radius(pad)
                         dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
-                        if dist < pad_radius + pad_clearance:
+                        if dist < pad_radius + _pad_clr(pad):
                             conflict_found = True
                             break
 
@@ -607,7 +655,7 @@ def get_safe_amplitude_at_point(
                     if other_seg.net_id == paired_net_id:
                         check_clearance = paired_clearance
                     else:
-                        check_clearance = required_clearance
+                        check_clearance = _seg_clr(other_seg.net_id)
                     # Foreign copper at its REAL width (#370 B1).
                     check_clearance += max(0.0, (other_seg.width - config.track_width) / 2.0)
 
@@ -644,7 +692,7 @@ def get_safe_amplitude_at_point(
                         if other_seg.net_id == paired_net_id:
                             check_clearance = paired_clearance
                         else:
-                            check_clearance = required_clearance
+                            check_clearance = _seg_clr(other_seg.net_id)
                         # Foreign copper at its REAL width (#370 B1).
                         check_clearance += max(0.0, (other_seg.width - config.track_width) / 2.0)
 
@@ -670,7 +718,7 @@ def get_safe_amplitude_at_point(
                         dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
 
                         # The FOREIGN via's real size when larger (#370 B1).
-                        if dist < via_clearance + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
+                        if dist < _via_clr(via.net_id) + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
                             conflict_found = True
                             break
 
@@ -682,13 +730,12 @@ def get_safe_amplitude_at_point(
 
                             dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
 
-                            if dist < via_clearance + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
+                            if dist < _via_clr(via.net_id) + max(0.0, ((getattr(via, 'size', 0) or 0) - config.via_size) / 2.0):
                                 conflict_found = True
                                 break
 
             # Check bump segments against pads (on same layer)
             if not conflict_found:
-                pad_clearance = net_half + config.clearance + corner_margin
                 for bx1, by1, bx2, by2 in bump_segs:
                     if conflict_found:
                         break
@@ -703,7 +750,7 @@ def get_safe_amplitude_at_point(
                                 continue
                             pad_radius = _pad_bounding_radius(pad)
                             dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
-                            if dist < pad_radius + pad_clearance:
+                            if dist < pad_radius + _pad_clr(pad):
                                 conflict_found = True
                                 break
 
@@ -2605,6 +2652,46 @@ def get_safe_amplitude_for_diff_pair(
     corner_margin = net_half * CORNER_BLOAT_FACTOR
     required_clearance = net_half + config.track_width / 2 + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
     via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + diff_pair_extra + corner_margin
+    # #980: a foreign item is priced at the clearance check_drc grades it at
+    # against EITHER half of the pair (`config.pair_clearance` /
+    # `pad_pair_clearance`, the wider of P's and N's), each value keeping its
+    # term order above, so a board that declares no class, rule or override
+    # reads exactly those scalars.
+    _pc_inert = config.pair_clearance_inert()
+    _seg_memo, _via_memo = {}, {}
+
+    def _seg_clr(o_net):
+        if _pc_inert:
+            return required_clearance
+        v = _seg_memo.get(o_net)
+        if v is None:
+            pc = max(config.pair_clearance(p_net_id, o_net, layer_name,
+                                           kind='track'),
+                     config.pair_clearance(n_net_id, o_net, layer_name,
+                                           kind='track'))
+            v = _seg_memo[o_net] = (
+                net_half + config.track_width / 2 + pc
+                + meander_clearance_margin + diff_pair_extra + corner_margin)
+        return v
+
+    def _via_clr(o_net):
+        if _pc_inert:
+            return via_clearance
+        v = _via_memo.get(o_net)
+        if v is None:
+            pc = max(config.pair_clearance(p_net_id, o_net, layer_name),
+                     config.pair_clearance(n_net_id, o_net, layer_name))
+            v = _via_memo[o_net] = (
+                config.via_size / 2 + net_half + pc
+                + meander_clearance_margin + diff_pair_extra + corner_margin)
+        return v
+
+    def _pad_clr(pad):
+        if _pc_inert:
+            return net_half + config.clearance + corner_margin + diff_pair_extra
+        pc = max(config.pad_pair_clearance(pad, p_net_id, layer=layer_name),
+                 config.pad_pair_clearance(pad, n_net_id, layer=layer_name))
+        return net_half + pc + corner_margin + diff_pair_extra
     chamfer = CHAMFER_SIZE
 
     # Board-edge keep-out: bumps are generated at the pair CENTERLINE, but the P/N
@@ -2657,7 +2744,7 @@ def get_safe_amplitude_for_diff_pair(
                     continue
 
                 # Foreign copper at its REAL width (#370 B1).
-                check_clearance = required_clearance + max(
+                check_clearance = _seg_clr(other_seg.net_id) + max(
                     0.0, (other_seg.width - config.track_width) / 2.0)
 
                 # Quick distance check
@@ -2694,14 +2781,13 @@ def get_safe_amplitude_for_diff_pair(
                     dist = point_to_segment_distance(via.x, via.y, bx1, by1, bx2, by2)
 
                     # The FOREIGN via's real size when larger (#370 B1).
-                    if dist < via_clearance + max(0.0, ((getattr(via, 'size', 0) or 0)
+                    if dist < _via_clr(via.net_id) + max(0.0, ((getattr(via, 'size', 0) or 0)
                                                         - config.via_size) / 2.0):
                         conflict_found = True
                         break
 
         # Check bump segments against pads (on same layer)
         if not conflict_found:
-            pad_clearance = net_half + config.clearance + corner_margin + diff_pair_extra
             for bx1, by1, bx2, by2 in bump_segs:
                 if conflict_found:
                     break
@@ -2718,7 +2804,7 @@ def get_safe_amplitude_for_diff_pair(
                         # Treat pad as circle with radius = max(size_x, size_y)/2
                         pad_radius = _pad_bounding_radius(pad)
                         dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
-                        if dist < pad_radius + pad_clearance:
+                        if dist < pad_radius + _pad_clr(pad):
                             conflict_found = True
                             break
 

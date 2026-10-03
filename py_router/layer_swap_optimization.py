@@ -47,14 +47,21 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
     very thing we test for here via the new_vias[i+1:] pass). Mirrors
     diff_pair_multipoint._fans_fit, which already guards the multipoint relocation.
 
+    Every body clearance is the one check_drc grades the pair at (#980):
+    `config.pair_clearance` for a via against a via or a track, and
+    `config.pad_pair_clearance` for a via against a pad (its shared copper
+    layers, then its override). Inert on a board that declares no class, rule
+    or override.
+
     Returns (fit, reason).
     """
     from check_drc import (check_via_via_overlap, check_via_drill_overlap,
                             check_pad_via_overlap, check_pad_drill_via_overlap)
-    clearance = config.clearance
     h2h = config.hole_to_hole_clearance
     margin = _DRC_CLEARANCE_MARGIN
     routing_layers = [l for l in config.layers if l.endswith('.Cu')]
+    board_copper = (getattr(getattr(pcb_data, 'board_info', None),
+                            'copper_layers', None) or routing_layers)
     new_ids = {id(v) for v in new_vias}
     # The pair's own nets (P and N of a coupled diff pair). Used ONLY by the
     # foreign-SEGMENT check below: a coupled pair's partner stub converges toward
@@ -69,7 +76,8 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
     for i, v in enumerate(new_vias):
         # vs the partner net's new pad via (the P/N via-via at the pad pitch).
         for w in new_vias[i + 1:]:
-            if check_via_via_overlap(v, w, clearance, margin)[0]:
+            if check_via_via_overlap(v, w, config.pair_clearance(
+                    v.net_id, w.net_id, kind='stack'), margin)[0]:
                 return False, "P/N pad vias collide (via-via)"
             if check_via_drill_overlap(v, w, h2h, margin)[0]:
                 return False, "P/N pad via drills collide (hole-to-hole)"
@@ -80,7 +88,9 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
         for ev in pcb_data.vias:
             if id(ev) in new_ids:
                 continue
-            if ev.net_id != v.net_id and check_via_via_overlap(v, ev, clearance, margin)[0]:
+            if ev.net_id != v.net_id and check_via_via_overlap(
+                    v, ev, config.pair_clearance(v.net_id, ev.net_id,
+                                                 kind='stack'), margin)[0]:
                 return False, "pad via grazes a foreign via (via-via)"
             if check_via_drill_overlap(v, ev, h2h, margin)[0]:
                 return False, "pad via drill grazes a via drill (hole-to-hole)"
@@ -90,15 +100,19 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
         # short - the /SYZYGY1.C2P_CLK_P via-vs-C2P_CLK_N(J4.36) case.
         for pad_net, pads in pads_by_net.items():
             for pad in pads:
-                # Per-pad clearance override (#326/#513 item 2) wins where larger:
-                # a swap via validated at a relaxed/fine clearance can still graze
-                # a pad carrying its own (clearance ...) override, which KiCad
-                # grades at max(pair) -- pocat_comms LQFP/QFN 0.1524mm imports.
-                # No grading-margin slack when the override governs: the post-route
-                # via-nudge cannot fix a via boxed between two long override pads
+                # Per-pad clearance override (#326/#513 item 2): a swap via
+                # validated at a relaxed/fine clearance can still graze a pad
+                # carrying its own (clearance ...) override -- pocat_comms
+                # LQFP/QFN 0.1524mm imports. KiCad's override REPLACES the
+                # class/rule value, floored at the board minimum (#530), and the
+                # pair value before it is check_drc's (#980). No grading-margin
+                # slack when the override governs: the post-route via-nudge
+                # cannot fix a via boxed between two long override pads
                 # (moving off one worsens the other), so a margin-graze ships.
-                pad_clr = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-                pad_margin = margin if pad_clr == clearance else 0.0
+                pad_base = config.pad_pair_clearance(
+                    pad, v.net_id, board_copper=board_copper, override=False)
+                pad_clr = config.pad_override_clearance(pad_base, pad)
+                pad_margin = margin if pad_clr == pad_base else 0.0
                 if pad_net != v.net_id and check_pad_via_overlap(
                         pad, v, pad_clr, routing_layers, pad_margin)[0]:
                     return False, "pad via grazes a foreign pad (pad-via)"
@@ -121,7 +135,8 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
             # only rejected swaps the nudge would have fixed -- and the earlier
             # tightening was misattributed to cynthion MEZZANINE6, which is an
             # UNBLOCK via handled by the #339 refit, not a swap via.
-            need = vr + sg.width / 2.0 + clearance - margin
+            need = vr + sg.width / 2.0 + config.pair_clearance(
+                v.net_id, sg.net_id, sg.layer) - margin
             # cheap bbox reject before the exact distance
             if (v.x < min(sg.start_x, sg.end_x) - need or
                     v.x > max(sg.start_x, sg.end_x) + need or

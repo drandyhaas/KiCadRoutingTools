@@ -441,7 +441,13 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
     """True if every relocation fan via clears (at check_drc's clearance) the
     other fan vias, the existing vias, all foreign pads, and all foreign tracks.
     The via legitimately sits on its own relocated pad and connects to its own-net
-    stub, so own-net pads/segments are excluded."""
+    stub, so own-net pads/segments are excluded.
+
+    A foreign item is priced at the clearance check_drc grades the pair at
+    (#980): `config.pair_clearance` against a via or a track,
+    `config.pad_pair_clearance` against a pad. Same-net items keep the flat
+    `config.clearance` (check_drc grades no clearance between them). Inert on
+    a board that declares no class, rule or override."""
     from check_drc import (check_via_via_overlap, check_pad_via_overlap,
                            check_via_segment_overlap, check_via_drill_overlap,
                            check_pad_drill_via_overlap)
@@ -456,10 +462,17 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
     fan_ids = {id(v) for v in fan_vias}
     reloc_ids = {id(p) for p in relocated_pads}
     routing_layers = _routing_copper_layers(pcb_data, config)
+    board_copper = (getattr(getattr(pcb_data, 'board_info', None),
+                            'copper_layers', None) or routing_layers)
+
+    def _via_clr(a, b):
+        return (clearance if a == b
+                else config.pair_clearance(a, b, kind='stack'))
 
     for i, v in enumerate(fan_vias):
         for w in fan_vias[i + 1:]:
-            if check_via_via_overlap(v, w, clearance, margin)[0]:
+            if check_via_via_overlap(v, w, _via_clr(v.net_id, w.net_id),
+                                     margin)[0]:
                 return False
             if h2h and check_via_drill_overlap(v, w, h2h, margin)[0]:
                 return False
@@ -469,7 +482,8 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
         for ev in pcb_data.vias:
             if id(ev) in fan_ids:
                 continue
-            if check_via_via_overlap(v, ev, clearance, margin)[0]:
+            if check_via_via_overlap(v, ev, _via_clr(v.net_id, ev.net_id),
+                                     margin)[0]:
                 return False
             if h2h and check_via_drill_overlap(v, ev, h2h, margin)[0]:
                 return False
@@ -477,12 +491,22 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
             for pad in pads:
                 if id(pad) in reloc_ids:
                     continue  # the via legitimately sits on its own relocated pad
-                # Per-pad clearance override (#326/#513 item 2) wins where larger,
-                # mirroring _bare_pad_pair_vias_fit and check_drc's grading. No
-                # margin slack when the override governs (the via-nudge cannot fix
-                # a via boxed between two long override pads).
-                pad_clr = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-                pad_margin = margin if pad_clr == clearance else 0.0
+                # Per-pad clearance override (#326/#513 item 2), mirroring
+                # _bare_pad_pair_vias_fit and check_drc's grading: a foreign pad
+                # is priced at the pair value and its override REPLACES it
+                # (#530, #980). No margin slack when the override governs (the
+                # via-nudge cannot fix a via boxed between two long override
+                # pads). A same-net pad keeps the flat max(clearance, override).
+                if pad.net_id == v.net_id:
+                    pad_base = clearance
+                    pad_clr = max(clearance,
+                                  getattr(pad, 'local_clearance', 0.0) or 0.0)
+                else:
+                    pad_base = config.pad_pair_clearance(
+                        pad, v.net_id, board_copper=board_copper,
+                        override=False)
+                    pad_clr = config.pad_override_clearance(pad_base, pad)
+                pad_margin = margin if pad_clr == pad_base else 0.0
                 if check_pad_via_overlap(pad, v, pad_clr, routing_layers, pad_margin)[0]:
                     return False
                 if h2h and check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
@@ -490,7 +514,8 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
         for seg in pcb_data.segments:
             if seg.net_id == v.net_id:
                 continue  # own-net stub the via connects to
-            if check_via_segment_overlap(v, seg, clearance, margin)[0]:
+            if check_via_segment_overlap(v, seg, config.pair_clearance(
+                    v.net_id, seg.net_id, seg.layer), margin)[0]:
                 return False
     return True
 

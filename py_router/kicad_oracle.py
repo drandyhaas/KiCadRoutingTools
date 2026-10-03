@@ -1405,7 +1405,13 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
     whole segment is exact-checked against foreign copper with shape-aware
     pad distances (a circumscribed-radius test false-blocks every BGA
     corridor: 0.23mm pads at 0.25mm offset leave 8um of real margin that a
-    0.163mm circumradius eats). Returns a kicad_parser.Segment or None."""
+    0.163mm circumradius eats). Returns a kicad_parser.Segment or None.
+
+    Each foreign item is priced at the clearance check_drc grades the pair
+    at (`config.pair_clearance` / `pad_pair_clearance`, #980): the weld's
+    net against the item's, with the .kicad_dru layer rule and a pad's
+    override. An NPTH hole keeps the flat clearance (a hole has no net).
+    Inert on a board that declares no class, rule or override."""
     import math as _m
     from kicad_parser import Segment, pad_is_plated_through
     from geometry_utils import point_to_segment_distance
@@ -1460,7 +1466,8 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
     for s in pcb_data.segments:
         if s.net_id == net_id or s.layer != layer:
             continue
-        need = reach + s.width / 2.0 + clr
+        need = reach + s.width / 2.0 + config.pair_clearance(
+            net_id, s.net_id, layer, kind='track')
         for px, py in pts:
             if point_to_segment_distance(px, py, s.start_x, s.start_y,
                                          s.end_x, s.end_y) < need:
@@ -1468,7 +1475,8 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
     for v in pcb_data.vias:
         if v.net_id == net_id:
             continue
-        need = reach + v.size / 2.0 + clr
+        need = reach + v.size / 2.0 + config.pair_clearance(
+            net_id, v.net_id, layer)
         for px, py in pts:
             if _m.hypot(v.x - px, v.y - py) < need:
                 return None
@@ -1489,7 +1497,7 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
                 layer in expand_pad_layers(pad.layers, cu_layers)
             if not on_layer:
                 continue
-            need = reach + max(clr, getattr(pad, 'local_clearance', 0) or 0)
+            need = reach + config.pad_pair_clearance(pad, net_id, layer=layer)
             for px, py in pts:
                 if _pt_pad_dist(px, py, pad) < need:
                     return None
@@ -1556,6 +1564,50 @@ def _via_drill_radius(via, fallback: float) -> float:
     if not d or d <= 0:
         return 0.0
     return d / 2.0
+
+
+def _stitch_via_clear(pcb_data, net_id, x, y, config, h2h) -> bool:
+    """#649b: may a stitching via of `net_id` (config.via_size /
+    config.via_drill, every routed layer) go at (x, y)? False when it would
+    come within clearance of a foreign segment, via or pad, or within `h2h`
+    hole-to-hole of any drill.
+
+    Lifted out of `oracle_reconnect` unchanged except that each foreign item
+    is priced at the clearance check_drc grades the pair at (#980): the via's
+    net against the item's, through `config.pair_clearance` (a track meets
+    the via on the track's layer; via-via is the stack) and
+    `config.pad_pair_clearance` (the pad's shared copper layers and its
+    override). The pad test keeps its circumscribed radius. Inert on a board
+    that declares no class, rule or override."""
+    from geometry_utils import point_to_segment_distance
+    vr = config.via_size / 2.0
+    vdr = config.via_drill / 2.0
+    cu = getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
+    for s2 in pcb_data.segments:
+        if s2.net_id != net_id and point_to_segment_distance(
+                x, y, s2.start_x, s2.start_y, s2.end_x, s2.end_y) < (
+                vr + s2.width / 2
+                + config.pair_clearance(net_id, s2.net_id, s2.layer)):
+            return False
+    for v2 in pcb_data.vias:
+        d2 = math.hypot(v2.x - x, v2.y - y)
+        if d2 < vdr + _via_drill_radius(v2, config.via_drill) + h2h:
+            return False
+        if v2.net_id != net_id and d2 < (
+                vr + v2.size / 2
+                + config.pair_clearance(net_id, v2.net_id, kind='stack')):
+            return False
+    for fp2 in pcb_data.footprints.values():
+        for pd2 in fp2.pads:
+            d2 = math.hypot(pd2.global_x - x, pd2.global_y - y)
+            if pd2.net_id != net_id and d2 < (
+                    vr + max(pd2.size_x, pd2.size_y) / 2
+                    + config.pad_pair_clearance(pd2, net_id,
+                                                board_copper=cu)):
+                return False
+            if pd2.drill and pd2.drill > 0 and d2 < vdr + pd2.drill / 2 + h2h:
+                return False
+    return True
 
 
 def oracle_reconnect(board_file: str, net_names, config,
@@ -2622,41 +2674,9 @@ def oracle_reconnect(board_file: str, net_names, config,
                             _vx, _vy = _found
                     except Exception:
                         pass
-                    _vr = config.via_size / 2.0
-                    _vdr = config.via_drill / 2.0
                     _h2h = getattr(config, 'hole_to_hole_clearance', 0.2)
-                    from geometry_utils import (
-                        point_to_segment_distance as _p2s649)
-                    _ok649 = True
-                    for _s2 in pcb_data.segments:
-                        if _s2.net_id != net_id and _p2s649(
-                                _vx, _vy, _s2.start_x, _s2.start_y,
-                                _s2.end_x, _s2.end_y) <                                     _vr + _s2.width / 2 + config.clearance:
-                            _ok649 = False
-                            break
-                    if _ok649:
-                        for _v2 in pcb_data.vias:
-                            _d2 = math.hypot(_v2.x - _vx, _v2.y - _vy)
-                            if _d2 < _vdr + _via_drill_radius(
-                                    _v2, config.via_drill) + _h2h:
-                                _ok649 = False
-                                break
-                            if _v2.net_id != net_id and _d2 <                                         _vr + _v2.size / 2 + config.clearance:
-                                _ok649 = False
-                                break
-                    if _ok649:
-                        for _fp2 in pcb_data.footprints.values():
-                            for _pd2 in _fp2.pads:
-                                _d2 = math.hypot(_pd2.global_x - _vx,
-                                                 _pd2.global_y - _vy)
-                                if _pd2.net_id != net_id and _d2 < _vr +                                             max(_pd2.size_x, _pd2.size_y) / 2                                             + config.clearance:
-                                    _ok649 = False
-                                    break
-                                if _pd2.drill and _pd2.drill > 0 and                                             _d2 < _vdr + _pd2.drill / 2 + _h2h:
-                                    _ok649 = False
-                                    break
-                            if not _ok649:
-                                break
+                    _ok649 = _stitch_via_clear(pcb_data, net_id, _vx, _vy,
+                                               config, _h2h)
                     if _ok649:
                         from kicad_parser import Via as _Via649
                         _esc = {'failed': False, 'new_segments': [],
