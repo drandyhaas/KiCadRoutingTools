@@ -1324,34 +1324,45 @@ def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
     items = list(parts)
     for i, a in enumerate(items):
         for b in items[i + 1:]:
-            worst = 0.0
-            worst_side = ''
-            worst_geo = None
-            for s in (a.sides & b.sides):
-                ra = rect_on(s, a.side, a.rect, a.tht_rect)
-                rb = rect_on(s, b.side, b.rect, b.tht_rect)
-                if ra is None or rb is None:
-                    continue
-                if rect_overlap_area(ra, rb) <= EPS:
-                    continue
-                # The rects overlap: measure the pair on the drawn outlines
-                # (#1094), a rect standing in for a side that has none.
-                area, depth, ix, fa, fb = _pair_exact(a, b, s, ra, rb)
-                if area > worst:
-                    worst = area
-                    worst_side = s
-                    worst_geo = (depth, ix, fa, fb)
-            if worst > EPS:
-                depth, ix, fa, fb = worst_geo
-                out.append(BodyOverlapPair(
-                    a=min(a.ref, b.ref), b=max(a.ref, b.ref),
-                    kind='courtyard', area_mm2=round(worst, 4),
-                    side=worst_side, waived=False, waiver='',
-                    contained_frac=containment_frac_of_areas(worst, fa, fb),
-                    depth_mm=round(max(0.0, depth), 4),
-                    overlap_rect=tuple(round(v, 4) for v in ix)))
+            p = courtyard_pair(a, b)
+            if p is not None:
+                out.append(p)
     out.sort(key=lambda p: (-p.area_mm2, p.a, p.b))
     return out
+
+
+def courtyard_pair(a: GradedPart, b: GradedPart
+                   ) -> Optional[BodyOverlapPair]:
+    """One pair of `body_overlap_pairs`: the raw courtyard intersection of
+    `a` and `b` (kind='courtyard', unwaived), or None when they do not
+    overlap on any shared side."""
+    worst = 0.0
+    worst_side = ''
+    worst_geo = None
+    for s in (a.sides & b.sides):
+        ra = rect_on(s, a.side, a.rect, a.tht_rect)
+        rb = rect_on(s, b.side, b.rect, b.tht_rect)
+        if ra is None or rb is None:
+            continue
+        if rect_overlap_area(ra, rb) <= EPS:
+            continue
+        # The rects overlap: measure the pair on the drawn outlines
+        # (#1094), a rect standing in for a side that has none.
+        area, depth, ix, fa, fb = _pair_exact(a, b, s, ra, rb)
+        if area > worst:
+            worst = area
+            worst_side = s
+            worst_geo = (depth, ix, fa, fb)
+    if worst <= EPS:
+        return None
+    depth, ix, fa, fb = worst_geo
+    return BodyOverlapPair(
+        a=min(a.ref, b.ref), b=max(a.ref, b.ref),
+        kind='courtyard', area_mm2=round(worst, 4),
+        side=worst_side, waived=False, waiver='',
+        contained_frac=containment_frac_of_areas(worst, fa, fb),
+        depth_mm=round(max(0.0, depth), 4),
+        overlap_rect=tuple(round(v, 4) for v in ix))
 
 
 class LocalBounds(NamedTuple):
@@ -1624,6 +1635,413 @@ def courtyard_severity_of(pcb_file: Optional[str]) -> Tuple[Optional[str],
     return value, 'project'
 
 
+# --- check_assembly's courtyard channel, callable at ANY poses (fa10 P1) ----
+#
+# The waiver ladder, the blocking floors and the moved-vs-baseline gate lived
+# as closures inside `grade_body_overlap` and inline in check_assembly's
+# main(), so nothing could ask the grader's question about a pose nobody had
+# written. The seeder, `--repair`, `--reseat` and the floorplan budget each
+# answered it again on their own rects, and their answers disagreed with the
+# grader's (#1182, #1162). These are the same code, lifted; `CourtyardCensus`
+# is the one place it runs.
+
+_MARKER_CLASSES = ('mount_hole', 'fiducial', 'testpoint')
+_EDGE_CLASSES = ('edge_receptacle', 'edge_actuator')
+# Marker classes whose courtyard is NON-PHYSICAL and may keep the blanket
+# blocking exemption. A mount_hole is deliberately absent (run-23, user
+# finding #3): its courtyard is the SCREW-HEAD/standoff keepout -- J3's
+# header sat 1.47mm inside locked H2's courtyard behind the same
+# 'marker_class' label a fiducial gets, and a screw in H2 lands on J3's
+# pin row. Fiducials and testpoints have nothing above board level;
+# mounting holes do.
+_MARKER_NONPHYSICAL = ('fiducial', 'testpoint')
+
+
+def moved_refs(pcb_now, pcb_base, eps: float = 1e-3) -> set:
+    """Refs whose POSE differs from `pcb_base` (position, rotation mod 360, or
+    layer), the courtyard gate's currency: a pair is chargeable only when OUR
+    moves put a member there. Pair-membership ("new vs baseline") is NOT
+    enough -- run-23's RN3<->U5 existed in the damaged baseline (the staged
+    containment), the repair moved RN3 3.28mm and left the pair blocking, and
+    a membership test would have called it pre-existing. A ref absent from
+    the baseline counts as moved: something put it there."""
+    out = set()
+    for ref, fp in (pcb_now.footprints or {}).items():
+        bp = (pcb_base.footprints or {}).get(ref)
+        if bp is None:
+            out.add(ref)
+            continue
+        drot = ((fp.rotation or 0.0) - (bp.rotation or 0.0)) % 360.0
+        if (abs(fp.x - bp.x) > eps or abs(fp.y - bp.y) > eps
+                or min(drot, 360.0 - drot) > eps
+                or (fp.layer or '') != (bp.layer or '')):
+            out.add(ref)
+    return out
+
+
+def courtyard_gating(blocking_pairs, moved) -> list:
+    """The courtyard-blocking pairs that GATE: a member moved (run-23)."""
+    return [q for q in blocking_pairs if q.a in moved or q.b in moved]
+
+
+class PairWaivers:
+    """The waiver ladder check_assembly labels a body pair with, and the
+    subset of those labels that may excuse a courtyard pair from BLOCKING.
+
+    One instance per grade: it records which authored waivers fired, so the
+    caller can report the ones that resolved to nothing (#897). `rect_of`
+    returns a ref's courtyard rect at the poses being graded -- the edge
+    waiver is a claim about where the part IS, so it must read the pose the
+    grade is about, not the file's.
+    """
+
+    def __init__(self, pcb_data, *, intent_waivers: Sequence = (),
+                 containers=(), locked_refs=(), rect_of=None):
+        self.pcb_data = pcb_data
+        self.fps = pcb_data.footprints or {}
+        self.waiver_sets = {frozenset(p) for p in intent_waivers
+                            if len(p) == 2}
+        self.containers = set(containers)
+        self.locked_refs = set(locked_refs)
+        self.rect_of = rect_of or (lambda ref: None)
+        self.bb = getattr(getattr(pcb_data, 'board_info', None),
+                          'board_bounds', None)
+        self.hit: set = set()
+        self._classes: Dict[str, Optional[str]] = {}
+        self._edge_live: Dict[str, bool] = {}
+
+    def class_of(self, ref: str) -> Optional[str]:
+        if ref not in self._classes:
+            fp = self.fps.get(ref)
+            name = None
+            if fp is not None:
+                try:
+                    from placement.part_class import classify_part
+                    name = classify_part(fp, ref).name
+                except Exception:                            # noqa: BLE001
+                    name = None
+            self._classes[ref] = name
+        return self._classes[ref]
+
+    def label(self, a: str, b: str) -> str:
+        # AUTHORED FIRST (#897). An operator naming a pair in the intent's
+        # `overlap_waivers` outranks every class label -- which is what the
+        # consumers already assume: `blocking_waived` returns True for
+        # 'intent_declared' BEFORE it tests locked-ness, and `_GATE_EXEMPT`
+        # lists it. Testing it LAST meant a pair the intent explicitly waives
+        # never read 'intent_declared' whenever either part was a marker, an
+        # edge part or a container -- which is exactly the kind of pair anyone
+        # waives. Run 25: a fiducial inside USB1's pad box, both poses
+        # mechanical, both locked, waived in intent.json, carried the banner
+        # `BLOCKING, past the floors (1)` on every review sheet of the run
+        # while check_assembly --baseline called the same pair baseline's own.
+        # `waiver_sets` is empty on every caller but check_assembly --intent and
+        # place_reconstruct --intent, and this runs per PAIR per grade -- so do
+        # not build a frozenset for boards that declared no waivers at all.
+        if self.waiver_sets:
+            pair = frozenset((a, b))
+            if pair in self.waiver_sets:
+                self.hit.add(pair)
+                return 'intent_declared'
+        if a in self.containers or b in self.containers:
+            return 'container_class'
+        ca, cb = self.class_of(a), self.class_of(b)
+        if ca in _MARKER_CLASSES or cb in _MARKER_CLASSES:
+            return 'marker_class'
+        if ca in _EDGE_CLASSES or cb in _EDGE_CLASSES:
+            return 'edge_class'
+        return ''
+
+    def edge_live(self, ref: str) -> bool:
+        """An edge-class waiver is a claim that the part's shell or actuator
+        legitimately overhangs -- which is only TRUE of a part that is
+        actually AT an edge: overhanging the outline, or within SEAT_TOL_MM
+        of one. Run-23's SW2 sat 8.33mm INTERIOR behind this waiver."""
+        if ref in self._edge_live:
+            return self._edge_live[ref]
+        live = False
+        if self.class_of(ref) in _EDGE_CLASSES and self.bb:
+            rect = self.rect_of(ref)
+            if rect is not None:
+                try:
+                    from .part_class import SEAT_TOL_MM
+                    og = BoardOutlineGate(self.pcb_data.board_info, 0.0)
+                    live = (og.rect_outside_amount(rect) > EPS
+                            or og.edge_clearance(rect) <= SEAT_TOL_MM)
+                except Exception:                            # noqa: BLE001
+                    live = True     # unmeasurable geometry never UN-waives
+        self._edge_live[ref] = live
+        return live
+
+    def blocking_waived(self, p) -> bool:
+        if not p.waived:
+            return False
+        # An AUTHORED waiver outranks everything below: it is a recorded
+        # human decision about this exact pair.
+        if p.waiver == 'intent_declared':
+            return True
+        # #1095: the board declared KiCad's courtyard rule non-blocking. Its
+        # own DRC reports none of these pairs, locked or not, so neither do
+        # we; the pair stays in the census with its label.
+        if p.waiver.startswith(PROJECT_SEVERITY_WAIVER):
+            return True
+        # No CLASS waiver blesses contact with a KiCad-LOCKED part (the
+        # run-8 E6 principle, extended to the courtyard channel): a locked
+        # pose is a decision somebody made, and a class label chosen for
+        # unlocked parts does not apply to copper or courtyards landing on
+        # it. The pair still faces the floors + the moved gate like any
+        # unwaived pair.
+        if p.a in self.locked_refs or p.b in self.locked_refs:
+            return False
+        if p.waiver == 'marker_class':
+            return (self.class_of(p.a) in _MARKER_NONPHYSICAL
+                    or self.class_of(p.b) in _MARKER_NONPHYSICAL)
+        if p.waiver != 'edge_class':
+            return True
+        if not (self.edge_live(p.a) or self.edge_live(p.b)):
+            return False
+        # run-23 user finding #1: an edge-LIVE part's waiver covers its
+        # MATING ZONE, never its whole courtyard. The overhang story is
+        # about the strip at/over the outline; an overlap sitting INSIDE
+        # the board is under the part's BODY, whoever is at the edge --
+        # R5 sat 45.7% inside J1's interior courtyard behind this waiver.
+        # The overlap region must leave the outline or hug the edge
+        # (within SEAT_TOL_MM); unmeasurable geometry never UN-waives.
+        r = p.overlap_rect
+        if r is None or not self.bb:
+            return True
+        try:
+            from .part_class import SEAT_TOL_MM
+            og = BoardOutlineGate(self.pcb_data.board_info, 0.0)
+            return (og.rect_outside_amount(r) > EPS
+                    or og.edge_clearance(r) <= SEAT_TOL_MM)
+        except Exception:                                    # noqa: BLE001
+            return True
+
+    @staticmethod
+    def row(pair) -> List[str]:
+        """A declared pair as a LIST OF TWO refs, whatever it was authored as.
+
+        `waiver_sets` holds frozensets, so `["U1","U1"]` -- a rename typo, and
+        `floorplan.load_intent` accepts it because it checks the raw list's
+        LENGTH and not its distinctness -- collapses to one element. Every
+        consumer formats these as `a <-> b`; one crashed on the ragged row with
+        an IndexError, turning a mistyped intent into a broken instrument.
+        """
+        refs = sorted(pair)
+        return refs if len(refs) == 2 else [refs[0], refs[0]]
+
+    def unresolved(self) -> List[List[str]]:
+        return sorted(self.row(p) for p in self.waiver_sets
+                      if any(r not in self.fps for r in p))
+
+    def unused(self) -> List[List[str]]:
+        return sorted(self.row(p) for p in self.waiver_sets
+                      if p not in self.hit and all(r in self.fps for r in p))
+
+
+def courtyard_blocking(pairs, waivers: PairWaivers, *, synthetic_refs=(),
+                       silk_occupancy_refs=()) -> list:
+    """The courtyard pairs that BLOCK (run-23): unwaived, past both floors,
+    no synthetic member, no silk-sourced occupancy.
+
+    Both floors must trip -- area >= COURTYARD_BLOCKING_MIN_MM2 (or the
+    relative floor) and depth >= COURTYARD_BLOCKING_MIN_DEPTH_MM -- so
+    by-design slivers a healthy board carries stay advisory, and a synthetic
+    (+/-0.5mm fiction) courtyard never gates anything. A silk-sourced body
+    reports, it does not gate (#896): silk is the last rung and the least
+    trustworthy.
+    """
+    synthetic_refs = set(synthetic_refs)
+    silk = set(silk_occupancy_refs)
+    return [
+        p for p in pairs
+        if p.kind == 'courtyard' and not waivers.blocking_waived(p)
+        # ABSOLUTE floor or RELATIVE floor (user finding #2: 0.445mm2 was
+        # 25.5% of R21's courtyard and slid under the absolute floor).
+        and (p.area_mm2 >= COURTYARD_BLOCKING_MIN_MM2
+             or (p.contained_frac or 0.0) >= COURTYARD_BLOCKING_MIN_FRAC)
+        and p.depth_mm >= COURTYARD_BLOCKING_MIN_DEPTH_MM
+        and p.a not in synthetic_refs and p.b not in synthetic_refs
+        and not (p.a in silk or p.b in silk)]
+
+
+class CourtyardGrade(NamedTuple):
+    """One `CourtyardCensus.grade`: check_assembly's courtyard channel."""
+    parts: Dict[str, GradedPart]     # every graded part, at the graded poses
+    pairs: List[BodyOverlapPair]     # kind='courtyard', labelled
+    blocking: List[BodyOverlapPair]
+    gating: Optional[List[BodyOverlapPair]]   # None when `moved` was None
+    synthetic_refs: frozenset
+    silk_occupancy_refs: frozenset
+    containers: frozenset
+    severity: Optional[str]
+    severity_basis: str
+    severity_waiver: str
+    waivers: PairWaivers
+
+
+class CourtyardCensus:
+    """check_assembly's courtyard channel at any pose map.
+
+    Reads the board once (local bounds, drawn bodies, locks, the project's
+    courtyard severity), then grades whatever poses it is handed --
+    `grade()` with no poses grades the file exactly as `grade_body_overlap`
+    does, because `grade_body_overlap` calls it. A generator asking "would
+    the grader gate this pose" calls `grade(poses)` instead of rebuilding
+    the answer on its own rects; that rebuild is what #1182 and #1162 found
+    disagreeing with the grader.
+    """
+
+    def __init__(self, pcb_data, pcb_file: Optional[str] = None, *,
+                 intent_waivers: Sequence = (),
+                 courtyard_severity: Optional[str] = 'auto',
+                 locked_refs=None):
+        self.pcb_data = pcb_data
+        self.pcb_file = pcb_file
+        self.fps = pcb_data.footprints or {}
+        self.intent_waivers = tuple(tuple(p) for p in intent_waivers)
+        self.lbs, self.bodies = _part_local_bounds_and_bodies(pcb_data,
+                                                              pcb_file)
+        if courtyard_severity == 'auto':
+            self.severity, self.severity_basis = courtyard_severity_of(
+                pcb_file or getattr(pcb_data, 'source_path', None))
+        else:
+            self.severity, self.severity_basis = courtyard_severity, 'caller'
+        self.severity_waiver = (PROJECT_SEVERITY_WAIVER + self.severity
+                                if self.severity == 'ignore' else '')
+        if locked_refs is None:
+            # KiCad's own (locked yes) stamps. Best-effort: the file is
+            # optional here, and a missing or unreadable one simply means no
+            # pair is marked locked.
+            locked_refs = set()
+            if pcb_file:
+                try:
+                    from .parser import extract_locked_refs
+                    locked_refs = set(extract_locked_refs(pcb_file) or ())
+                except Exception:                            # noqa: BLE001
+                    locked_refs = set()
+        self.locked_refs = set(locked_refs)
+        self._parts: Dict[tuple, GradedPart] = {}
+        self.containers = frozenset(container_refs(
+            pcb_data, [self.graded_part(r) for r in self.lbs]))
+
+    def graded_part(self, ref: str, pose=None) -> GradedPart:
+        """`ref` as the grader sees it at `pose` (None: the file's pose)."""
+        key = (ref, None if pose is None else tuple(pose))
+        hit = self._parts.get(key)
+        if hit is not None:
+            return hit
+        fp = self.fps[ref]
+        lb = self.lbs[ref]
+        if pose is None:
+            x, y, rot = fp.x, fp.y, (fp.rotation or 0.0)
+            posed = fp
+        else:
+            x, y, rot = pose
+            posed = footprint_at_pose(fp, (x, y, rot))
+        lx0, ly0, lx1, ly1 = rotate_local_bounds(*lb.local, rot)
+        rect = (x + lx0, y + ly0, x + lx1, y + ly1)
+        tht = None
+        if lb.has_tht and lb.tht_local is not None:
+            tx0, ty0, tx1, ty1 = rotate_local_bounds(*lb.tht_local, rot)
+            tht = (x + tx0, y + ty0, x + tx1, y + ty1)
+        if pose is None:
+            poly = occupancy_shape(posed, lb, self.bodies.get(ref))
+        else:
+            try:
+                poly = occupancy_shape(posed, lb, self.bodies.get(ref))
+            except Exception:                                # noqa: BLE001
+                poly = None
+        gp = GradedPart(ref=ref, side=lb.side, rect=rect, tht_rect=tht,
+                        has_tht=lb.has_tht, synthetic=lb.synthetic,
+                        source=lb.source, poly=poly)
+        self._parts[key] = gp
+        return gp
+
+    def waivers(self, rect_of=None) -> PairWaivers:
+        return PairWaivers(self.pcb_data, intent_waivers=self.intent_waivers,
+                           containers=self.containers,
+                           locked_refs=self.locked_refs, rect_of=rect_of)
+
+    def grade(self, poses: Optional[Dict[str, tuple]] = None, *,
+              moved=None) -> CourtyardGrade:
+        """Grade the courtyard channel with `poses` overriding the file's
+        (refs not in `poses` stay where the file has them). `moved`, a ref
+        set, arms the gate (`courtyard_gating`)."""
+        poses = poses or {}
+        parts = {r: self.graded_part(r, poses.get(r)) for r in self.lbs}
+        return self._select(parts, body_overlap_pairs(list(parts.values())),
+                            moved)
+
+    def grade_ref(self, ref: str, pose, poses: Optional[Dict[str, tuple]]
+                  = None, *, moved=None) -> CourtyardGrade:
+        """`grade` restricted to the pairs `ref` is a member of, with `ref`
+        at `pose`: O(parts) instead of O(parts^2), for a caller asking about
+        one candidate seat. Every pair it returns is the pair `grade` would
+        return at the same poses (same pair function, same order of
+        members, same waivers and floors); it only omits pairs `ref` is
+        not in."""
+        poses = dict(poses or {})
+        poses[ref] = tuple(pose)
+        parts = {r: self.graded_part(r, poses.get(r)) for r in self.lbs}
+        me = parts.get(ref)
+        raw = []
+        if me is not None:
+            seen_me = False
+            for r, gp in parts.items():
+                if r == ref:
+                    seen_me = True
+                    continue
+                p = (courtyard_pair(gp, me) if not seen_me
+                     else courtyard_pair(me, gp))
+                if p is not None:
+                    raw.append(p)
+        return self._select(parts, raw, moved)
+
+    def _select(self, parts, raw, moved) -> CourtyardGrade:
+        from placement.body import SOURCE_SILK
+        waivers = self.waivers(
+            rect_of=lambda r: parts[r].rect if r in parts else None)
+        pairs = []
+        for p in raw:
+            waiver = waivers.label(p.a, p.b)
+            # #1095: the board's own severity outranks every inferred class
+            # label, and only an authored intent waiver outranks it.
+            if self.severity_waiver and waiver != 'intent_declared':
+                waiver = self.severity_waiver
+            pairs.append(p._replace(waived=bool(waiver), waiver=waiver))
+        pairs.sort(key=lambda p: (p.waived, -p.area_mm2, p.a, p.b))
+        synthetic = frozenset(r for r, g in parts.items() if g.synthetic)
+        silk = frozenset(r for r, g in parts.items()
+                         if g.source == SOURCE_SILK)
+        blocking = courtyard_blocking(pairs, waivers,
+                                      synthetic_refs=synthetic,
+                                      silk_occupancy_refs=silk)
+        gating = (None if moved is None
+                  else courtyard_gating(blocking, set(moved)))
+        return CourtyardGrade(
+            parts=parts, pairs=pairs, blocking=blocking, gating=gating,
+            synthetic_refs=synthetic, silk_occupancy_refs=silk,
+            containers=self.containers, severity=self.severity,
+            severity_basis=self.severity_basis,
+            severity_waiver=self.severity_waiver, waivers=waivers)
+
+
+def courtyard_census(pcb_data, pcb_file: Optional[str] = None, *,
+                     poses: Optional[Dict[str, tuple]] = None, moved=None,
+                     **kw) -> CourtyardGrade:
+    """The grader's own courtyard pairs, publicly (#1162's comment).
+
+    Rebuilding them from `graded_parts_from_file` + `pair_overlap_area`
+    answers a different question in a different universe -- rects instead
+    of drawn outlines, synthetic logo bodies counted, no waivers -- and an
+    agent discarded a legal layout on that reconstruction. Call this.
+    """
+    return CourtyardCensus(pcb_data, pcb_file, **kw).grade(poses,
+                                                            moved=moved)
+
+
 def grade_body_overlap(pcb_data, clearance: float,
                        intent_waivers: Sequence[Sequence[str]] = (),
                        pcb_file: Optional[str] = None,
@@ -1656,84 +2074,25 @@ def grade_body_overlap(pcb_data, clearance: float,
     courtyard rule and are graded as before: a severity is the board's word
     about courtyards, not about two bodies in one place.
     """
-    from placement.part_class import classify_part
-
-    if courtyard_severity == 'auto':
-        _cy_sev, _cy_basis = courtyard_severity_of(
-            pcb_file or getattr(pcb_data, 'source_path', None))
-    else:
-        _cy_sev, _cy_basis = courtyard_severity, 'caller'
-    _cy_waiver = (PROJECT_SEVERITY_WAIVER + _cy_sev
-                  if _cy_sev == 'ignore' else '')
-
     fps = pcb_data.footprints or {}
-    waiver_sets = {frozenset(p) for p in intent_waivers if len(p) == 2}
-    _MARKER = ('mount_hole', 'fiducial', 'testpoint')
-    _EDGE = ('edge_receptacle', 'edge_actuator')
-
-    def _class_of(ref: str) -> Optional[str]:
-        fp = fps.get(ref)
-        if fp is None:
-            return None
-        try:
-            return classify_part(fp, ref).name
-        except Exception:
-            return None
-
-    _graded = graded_parts_from_file(pcb_data, pcb_file)
+    # -- courtyard channel (advisory + the run-23 blocking policy below) ------
+    # The census is the channel, at the file's poses; the drawn-body and
+    # containment channels below share its waiver ladder (one instance, so
+    # every authored waiver that fires anywhere is recorded once).
+    _census = CourtyardCensus(pcb_data, pcb_file,
+                              intent_waivers=intent_waivers,
+                              courtyard_severity=courtyard_severity)
+    _cg = _census.grade()
+    _cy_sev = _cg.severity
+    _cy_basis = _cg.severity_basis
+    _cy_waiver = _cg.severity_waiver
+    _waivers = _cg.waivers
+    _waiver_for = _waivers.label
     # Refs whose courtyard rect is the zero-pad +/-0.5mm fiction: their pairs
     # may inform but must never gate (run-23's phantom G***<->J5).
-    _synthetic_refs = {g.ref for g in _graded if g.synthetic}
-    # `bb` stays bound here: the edge-waiver and off-board arms below read it.
-    bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
-    _containers = container_refs(pcb_data, _graded)
+    _synthetic_refs = set(_cg.synthetic_refs)
 
-    _waivers_hit = set()
-
-    def _waiver_row(pair):
-        """A declared pair as a LIST OF TWO refs, whatever it was authored as.
-
-        `waiver_sets` holds frozensets, so `["U1","U1"]` -- a rename typo, and
-        `floorplan.load_intent` accepts it because it checks the raw list's
-        LENGTH and not its distinctness -- collapses to one element. Every
-        consumer formats these as `a <-> b`; one crashed on the ragged row with
-        an IndexError, turning a mistyped intent into a broken instrument.
-        """
-        refs = sorted(pair)
-        return refs if len(refs) == 2 else [refs[0], refs[0]]
-
-    def _waiver_for(a: str, b: str) -> str:
-        # AUTHORED FIRST (#897). An operator naming a pair in the intent's
-        # `overlap_waivers` outranks every class label -- which is what the
-        # consumers already assume: `_blocking_waived` returns True for
-        # 'intent_declared' BEFORE it tests locked-ness, and `_GATE_EXEMPT`
-        # lists it. Testing it LAST meant a pair the intent explicitly waives
-        # never read 'intent_declared' whenever either part was a marker, an
-        # edge part or a container -- which is exactly the kind of pair anyone
-        # waives. Run 25: a fiducial inside USB1's pad box, both poses
-        # mechanical, both locked, waived in intent.json, carried the banner
-        # `BLOCKING, past the floors (1)` on every review sheet of the run
-        # while check_assembly --baseline called the same pair baseline's own.
-        # `waiver_sets` is empty on every caller but check_assembly --intent and
-        # place_reconstruct --intent, and this runs per PAIR per grade -- so do
-        # not build a frozenset for boards that declared no waivers at all.
-        if waiver_sets:
-            _pair = frozenset((a, b))
-            if _pair in waiver_sets:
-                _waivers_hit.add(_pair)
-                return 'intent_declared'
-        if a in _containers or b in _containers:
-            return 'container_class'
-        ca, cb = _class_of(a), _class_of(b)
-        if ca in _MARKER or cb in _MARKER:
-            return 'marker_class'
-        if ca in _EDGE or cb in _EDGE:
-            return 'edge_class'
-        return ''
-
-    from placement.body import SOURCE_SILK as _BODY_SILK_NAME
-
-    pairs: List[BodyOverlapPair] = []
+    pairs: List[BodyOverlapPair] = list(_cg.pairs)
     # Refs the DRAWN-BODY channel could not judge: no .Fab outline and no
     # usable silk either (#896 widened this from ".Fab only"). A board with no
     # readable source path leaves this empty AND judges nothing -- both are
@@ -1749,15 +2108,6 @@ def grade_body_overlap(pcb_data, clearance: float,
     silk_sourced: set = set()
     # #896. Seam inputs: every judged part's DRAWN body in board coordinates.
     seam_parts: list = []
-
-    # -- courtyard channel (advisory + the run-23 blocking policy below) ------
-    for p in body_overlap_pairs(_graded):
-        waiver = _waiver_for(p.a, p.b)
-        # #1095: the board's own severity outranks every inferred class
-        # label, and only an authored intent waiver outranks it.
-        if _cy_waiver and waiver != 'intent_declared':
-            waiver = _cy_waiver
-        pairs.append(p._replace(waived=bool(waiver), waiver=waiver))
 
     # -- DRAWN BODY channel (advisory) ----------------------------------------
     # Reads `placement.body`'s drawn-body ladder rather than calling
@@ -1864,16 +2214,9 @@ def grade_body_overlap(pcb_data, clearance: float,
     # -- pad_intersection channel (never waivable) ----------------------------
     # #1064: lifted VERBATIM into `pad_intersection_pairs`, so place_pose
     # and check_floorplan grade a pad stack with this channel's own code.
-    # KiCad's own (locked yes) stamps, for the E6 channel below. Best-effort:
-    # the file is optional here, and a missing or unreadable one simply means
-    # no pair is marked locked.
-    locked_refs = set()
-    if pcb_file:
-        try:
-            from .parser import extract_locked_refs
-            locked_refs = set(extract_locked_refs(pcb_file) or ())
-        except Exception:
-            locked_refs = set()
+    # KiCad's own (locked yes) stamps, for the E6 channel below -- read once,
+    # by the census.
+    locked_refs = _census.locked_refs
     pairs.extend(pad_intersection_pairs(pcb_data, clearance, locked_refs))
 
     pairs.sort(key=lambda p: (p.waived, -p.area_mm2, p.a, p.b))
@@ -1915,120 +2258,18 @@ def grade_body_overlap(pcb_data, clearance: float,
     # COURTYARD pair for that reason threw away findings silk had nothing to
     # do with -- measured, glasgow_revC's J1<->TP13, J1<->TP15, J3<->TP1 and
     # orangecrab's J5<->J6, all pre-existing.
-    _silk_occupancy = {g.ref for g in _graded if g.source == _BODY_SILK_NAME}
-
     def _silk_drawn_pair(p) -> bool:
         return p.a in silk_sourced or p.b in silk_sourced
-
-    def _silk_occupancy_pair(p) -> bool:
-        return p.a in _silk_occupancy or p.b in _silk_occupancy
     containment_blocking = [p for p in contained
                             if p.waiver not in _GATE_EXEMPT
                             and not _silk_drawn_pair(p)]
-    # Courtyard BLOCKING (run-23): the subset of courtyard pairs that gates.
-    # Both floors must trip -- area >= COURTYARD_BLOCKING_MIN_MM2 and depth
-    # >= COURTYARD_BLOCKING_MIN_DEPTH_MM -- so by-design slivers a healthy
-    # board carries stay advisory, and a synthetic (+/-0.5mm fiction)
-    # courtyard never gates anything.
-    #
-    # The waiver ladder applies WITH ONE GEOMETRY CONDITION on edge_class
-    # (the run-22 containment lesson, in its courtyard form): an edge-class
-    # waiver is a claim that the part's shell/actuator legitimately overhangs
-    # -- which is only TRUE of a part that is actually AT an edge. Run-23's
-    # board waived every SW1/SW2 collision this way (SW1<->U1 1.74mm2,
-    # FB1<->SW2 0.70mm2 with real body contact) while SW2 sat 8.33mm
-    # INTERIOR, where the overhang story is geometrically dead. The waiver
-    # now stands only for a member whose pose is edge-LIVE: overhanging the
-    # outline, or within SEAT_TOL_MM of an edge. J1<->SW1 stays waived (J1
-    # is a receptacle overhanging at the edge; its courtyard includes the
-    # mating volume); marker/container/intent waivers are untouched --
-    # geometry cannot invalidate "this is a fiducial" or an authored intent.
-    _EDGE_W = ('edge_receptacle', 'edge_actuator')
-    _edge_live_cache: Dict[str, bool] = {}
-
-    def _edge_waiver_live(ref: str) -> bool:
-        if ref in _edge_live_cache:
-            return _edge_live_cache[ref]
-        live = False
-        if _class_of(ref) in _EDGE_W and bb:
-            g = next((x for x in _graded if x.ref == ref), None)
-            if g is not None:
-                try:
-                    from .part_class import SEAT_TOL_MM
-                    _og = BoardOutlineGate(pcb_data.board_info, 0.0)
-                    live = (_og.rect_outside_amount(g.rect) > EPS
-                            or _og.edge_clearance(g.rect) <= SEAT_TOL_MM)
-                except Exception:                            # noqa: BLE001
-                    live = True     # unmeasurable geometry never UN-waives
-        _edge_live_cache[ref] = live
-        return live
-
-    # Marker classes whose courtyard is NON-PHYSICAL and may keep the blanket
-    # blocking exemption. A mount_hole is deliberately absent (run-23, user
-    # finding #3): its courtyard is the SCREW-HEAD/standoff keepout -- J3's
-    # header sat 1.47mm inside locked H2's courtyard behind the same
-    # 'marker_class' label a fiducial gets, and a screw in H2 lands on J3's
-    # pin row. Fiducials and testpoints have nothing above board level;
-    # mounting holes do.
-    _MARKER_NONPHYSICAL = ('fiducial', 'testpoint')
-
-    def _blocking_waived(p) -> bool:
-        if not p.waived:
-            return False
-        # An AUTHORED waiver outranks everything below: it is a recorded
-        # human decision about this exact pair.
-        if p.waiver == 'intent_declared':
-            return True
-        # #1095: the board declared KiCad's courtyard rule non-blocking. Its
-        # own DRC reports none of these pairs, locked or not, so neither do
-        # we; the pair stays in the census with its label.
-        if p.waiver.startswith(PROJECT_SEVERITY_WAIVER):
-            return True
-        # No CLASS waiver blesses contact with a KiCad-LOCKED part (the
-        # run-8 E6 principle, extended to the courtyard channel): a locked
-        # pose is a decision somebody made, and a class label chosen for
-        # unlocked parts does not apply to copper or courtyards landing on
-        # it. The pair still faces the floors + the moved gate like any
-        # unwaived pair.
-        if p.a in locked_refs or p.b in locked_refs:
-            return False
-        if p.waiver == 'marker_class':
-            return (_class_of(p.a) in _MARKER_NONPHYSICAL
-                    or _class_of(p.b) in _MARKER_NONPHYSICAL)
-        if p.waiver != 'edge_class':
-            return True
-        if not (_edge_waiver_live(p.a) or _edge_waiver_live(p.b)):
-            return False
-        # run-23 user finding #1: an edge-LIVE part's waiver covers its
-        # MATING ZONE, never its whole courtyard. The overhang story is
-        # about the strip at/over the outline; an overlap sitting INSIDE
-        # the board is under the part's BODY, whoever is at the edge --
-        # R5 sat 45.7% inside J1's interior courtyard behind this waiver.
-        # The overlap region must leave the outline or hug the edge
-        # (within SEAT_TOL_MM); unmeasurable geometry never UN-waives.
-        r = p.overlap_rect
-        if r is None or not bb:
-            return True
-        try:
-            from .part_class import SEAT_TOL_MM
-            _og = BoardOutlineGate(pcb_data.board_info, 0.0)
-            return (_og.rect_outside_amount(r) > EPS
-                    or _og.edge_clearance(r) <= SEAT_TOL_MM)
-        except Exception:                                    # noqa: BLE001
-            return True
-
-    courtyard_blocking = [
-        p for p in pairs
-        if p.kind == 'courtyard' and not _blocking_waived(p)
-        # ABSOLUTE floor or RELATIVE floor (user finding #2: 0.445mm2 was
-        # 25.5% of R21's courtyard and slid under the absolute floor).
-        and (p.area_mm2 >= COURTYARD_BLOCKING_MIN_MM2
-             or (p.contained_frac or 0.0) >= COURTYARD_BLOCKING_MIN_FRAC)
-        and p.depth_mm >= COURTYARD_BLOCKING_MIN_DEPTH_MM
-        and p.a not in _synthetic_refs and p.b not in _synthetic_refs
-        # #896, same rule as containment above: a silk-sourced body reports,
-        # it does not gate.
-        and not _silk_occupancy_pair(p)]
+    # Courtyard BLOCKING (run-23): the subset of courtyard pairs that gates --
+    # `courtyard_blocking`'s floors and `PairWaivers.blocking_waived`'s ladder,
+    # which carries the run-22/23 edge-LIVE geometry condition, the
+    # non-physical-marker rule and the locked refusal. The census already
+    # selected them, at these poses, with the same code every other caller of
+    # the channel runs.
+    courtyard_blocking = list(_cg.blocking)
     from placement.body import tightest_body_seam as _tbs
     _seam = _tbs(seam_parts)
     return {'courtyard_severity': _cy_sev,
@@ -2137,12 +2378,8 @@ def grade_body_overlap(pcb_data, clearance: float,
             # `load_intent` accepts it: it checks length, not distinctness)
             # collapses to one element. Pad it back out rather than emitting a
             # ragged row: a consumer formatting `a <-> b` crashed on it.
-            'waivers_unresolved': sorted(
-                _waiver_row(p) for p in waiver_sets
-                if any(r not in fps for r in p)),
-            'waivers_unused': sorted(
-                _waiver_row(p) for p in waiver_sets
-                if p not in _waivers_hit and all(r in fps for r in p))}
+            'waivers_unresolved': _waivers.unresolved(),
+            'waivers_unused': _waivers.unused()}
 
 
 def _exact_pad_stack(pa, pb, routing_layers) -> bool:

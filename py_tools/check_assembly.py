@@ -241,25 +241,10 @@ def main():
         base_keys = {(q.a, q.b, q.kind) for q in gb['pairs']}
         new_advisory = [q for q in g['advisory_pairs']
                         if (q.a, q.b, q.kind) not in base_keys]
-        # Refs whose POSE differs from the baseline (position, rotation mod
-        # 360, or layer). This is the courtyard gate's currency: a pair is
-        # chargeable only when OUR moves put a member there. Pair-membership
-        # ("new vs baseline") is NOT enough -- run-23's RN3<->U5 existed in
-        # the damaged baseline (the staged containment), the repair moved RN3
-        # 3.28mm and left the pair blocking, and a membership test would have
-        # called it pre-existing. A ref absent from the baseline counts as
-        # moved: something put it there.
-        moved_refs = set()
-        for _ref, _fp in pcb.footprints.items():
-            _bp = base_pcb.footprints.get(_ref)
-            if _bp is None:
-                moved_refs.add(_ref)
-                continue
-            _drot = ((_fp.rotation or 0.0) - (_bp.rotation or 0.0)) % 360.0
-            if (abs(_fp.x - _bp.x) > 1e-3 or abs(_fp.y - _bp.y) > 1e-3
-                    or min(_drot, 360.0 - _drot) > 1e-3
-                    or (_fp.layer or '') != (_bp.layer or '')):
-                moved_refs.add(_ref)
+        # Refs whose POSE differs from the baseline: the courtyard gate's
+        # currency (`legality.moved_refs` says why membership is not enough).
+        # The repair and board_score read the same function.
+        moved_refs = legality.moved_refs(pcb, base_pcb)
 
     print(f"Assembly audit of {args.board} (clearance {clearance}):")
     if dup_refs:
@@ -575,8 +560,8 @@ def main():
               f"--ignore-project-severity grades them at error.")
     courtyard_gating = []
     if g['courtyard_blocking'] and moved_refs is not None:
-        courtyard_gating = [q for q in g['courtyard_blocking_pairs']
-                            if q.a in moved_refs or q.b in moved_refs]
+        courtyard_gating = legality.courtyard_gating(
+            g['courtyard_blocking_pairs'], moved_refs)
     if g['courtyard_blocking']:
         _gate_note = (
             f"{len(courtyard_gating)} of {g['courtyard_blocking']} GATE "

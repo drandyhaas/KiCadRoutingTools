@@ -101,8 +101,8 @@ ROWS = [
      (T1094,), 'KILLED'),
     # --- #1095: the project's courtyard severity -----------------------------
     ('project-ignore-not-read', 'leg',
-     "                  if _cy_sev == 'ignore' else '')",
-     "                  if False else '')",
+     "                                if self.severity == 'ignore' else '')",
+     "                                if False else '')",
      (T1095,), 'KILLED'),
     ('project-ignore-stops-at-a-lock', 'leg',
      "        if p.waiver.startswith(PROJECT_SEVERITY_WAIVER):",
