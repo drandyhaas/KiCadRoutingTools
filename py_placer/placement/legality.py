@@ -1339,7 +1339,12 @@ def courtyard_pair(a: GradedPart, b: GradedPart
     worst = 0.0
     worst_side = ''
     worst_geo = None
-    for s in (a.sides & b.sides):
+    # SORTED: on an exact area tie between the two faces the first one wins
+    # (strict `>` below), and iterating a frozenset made that a function of
+    # PYTHONHASHSEED -- the pair's `side` and `contained_frac` (which feeds
+    # the relative blocking floor) changed from one run to the next on
+    # rp2350 and glasgow (fa10 P1 phase-0 verifier).
+    for s in sorted(a.sides & b.sides):
         ra = rect_on(s, a.side, a.rect, a.tht_rect)
         rb = rect_on(s, b.side, b.rect, b.tht_rect)
         if ra is None or rb is None:
@@ -1874,7 +1879,7 @@ class CourtyardGrade(NamedTuple):
     gating: Optional[List[BodyOverlapPair]]   # None when `moved` was None
     synthetic_refs: frozenset
     silk_occupancy_refs: frozenset
-    containers: frozenset
+    containers: frozenset            # at the GRADED poses
     severity: Optional[str]
     severity_basis: str
     severity_waiver: str
@@ -1923,8 +1928,18 @@ class CourtyardCensus:
                     locked_refs = set()
         self.locked_refs = set(locked_refs)
         self._parts: Dict[tuple, GradedPart] = {}
+        # At the FILE's poses. A grade re-derives them at the poses it grades:
+        # `container_refs` reads the rotated rect's area, so turning a part
+        # can make it a container or stop it being one, and a census that
+        # kept the file's answer waived pairs the written board gates
+        # (sonde_u's J1 at 135 degrees: 6 pairs) -- the phase-0 verifier.
         self.containers = frozenset(container_refs(
             pcb_data, [self.graded_part(r) for r in self.lbs]))
+
+    #: Cached GradedParts at poses other than the file's; the cache is
+    #: dropped when it reaches this, so a generator asking about many
+    #: candidate poses does not grow memory without bound.
+    POSE_CACHE_CAP = 20000
 
     def graded_part(self, ref: str, pose=None) -> GradedPart:
         """`ref` as the grader sees it at `pose` (None: the file's pose)."""
@@ -1932,6 +1947,9 @@ class CourtyardCensus:
         hit = self._parts.get(key)
         if hit is not None:
             return hit
+        if pose is not None and len(self._parts) > self.POSE_CACHE_CAP:
+            self._parts = {k: v for k, v in self._parts.items()
+                           if k[1] is None}
         fp = self.fps[ref]
         lb = self.lbs[ref]
         if pose is None:
@@ -1959,9 +1977,10 @@ class CourtyardCensus:
         self._parts[key] = gp
         return gp
 
-    def waivers(self, rect_of=None) -> PairWaivers:
+    def waivers(self, rect_of=None, containers=None) -> PairWaivers:
         return PairWaivers(self.pcb_data, intent_waivers=self.intent_waivers,
-                           containers=self.containers,
+                           containers=(self.containers if containers is None
+                                       else containers),
                            locked_refs=self.locked_refs, rect_of=rect_of)
 
     def grade(self, poses: Optional[Dict[str, tuple]] = None, *,
@@ -2001,8 +2020,11 @@ class CourtyardCensus:
 
     def _select(self, parts, raw, moved) -> CourtyardGrade:
         from placement.body import SOURCE_SILK
+        containers = frozenset(container_refs(self.pcb_data,
+                                              list(parts.values())))
         waivers = self.waivers(
-            rect_of=lambda r: parts[r].rect if r in parts else None)
+            rect_of=lambda r: parts[r].rect if r in parts else None,
+            containers=containers)
         pairs = []
         for p in raw:
             waiver = waivers.label(p.a, p.b)
@@ -2023,7 +2045,7 @@ class CourtyardCensus:
         return CourtyardGrade(
             parts=parts, pairs=pairs, blocking=blocking, gating=gating,
             synthetic_refs=synthetic, silk_occupancy_refs=silk,
-            containers=self.containers, severity=self.severity,
+            containers=containers, severity=self.severity,
             severity_basis=self.severity_basis,
             severity_waiver=self.severity_waiver, waivers=waivers)
 
@@ -3756,8 +3778,46 @@ def _circle_rect_penetration(cx, cy, r, rect) -> float:
 
 # Above this many pad-pair tests the per-pad loop is skipped and the pair is
 # gated on extents + its seed baseline alone (BGA-vs-BGA); the exact report
-# still surfaces anything a candidate loop misses.
+# still surfaces anything a candidate loop misses. The product is the
+# WINDOWED one (#1213, `_pad_windows`): only pads within reach of the other
+# part count, so a pair reaches the extent branch only when that many pads
+# genuinely face each other.
 PAIR_TEST_CAP = 4096
+
+
+def _rects_bbox(items):
+    """Bbox of `[(index, rect)]`'s rects."""
+    return (min(r[0] for _i, r in items), min(r[1] for _i, r in items),
+            max(r[2] for _i, r in items), max(r[3] for _i, r in items))
+
+
+def _pad_windows(rects_a, ea, rects_b, reach):
+    """`(wa, wb)`: `[(original index, rect)]` of each part's pads that can
+    interact with the other part within `reach` (#1213).
+
+    EXACT, not a heuristic: `rect_gap` never grows when its second rect grows
+    (each axis gap only shrinks), so a pad pair closer than `reach` has its
+    b-pad within reach of `ea` (which contains every a-pad), and its a-pad
+    within reach of the bbox of the surviving b-pads. Every pad pair the
+    sweep could charge -- `pad_short` needs a gap under the pair's floor, at
+    most `reach`; `stack` needs a negative gap -- therefore survives, in its
+    original order, and every dropped pair would have contributed nothing.
+
+    It exists for the hollow part: rp2350's U8 is a ring of 66 pins on the
+    board edge, and U6's 71 pads inside it made a 4686-pair product, so the
+    cap priced U6 against U8's EXTENT -- the whole board -- and no pose
+    anywhere was legal. Windowed, the product is 0.
+    """
+    wb = [(j, r) for j, r in enumerate(rects_b) if rect_gap(r, ea) < reach]
+    if not wb:
+        return [], []
+    bbb = _rects_bbox(wb)
+    wa = [(i, r) for i, r in enumerate(rects_a) if rect_gap(r, bbb) < reach]
+    if not wa:
+        return [], []
+    bba = _rects_bbox(wa)
+    wb = [(j, r) for j, r in wb if rect_gap(r, bba) < reach]
+    return wa, wb
 
 
 class LegalityContext:
@@ -3887,7 +3947,11 @@ class LegalityContext:
                                  _hole_shortfall(pa, xa, ya, ra, rects_b,
                                                  pb, xb, yb, rb, rects_a),
                                  False)
-        if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
+        # #1213: the sweep and the cap see only the pads that can interact
+        # (`_pad_windows` says why that loses nothing). The hole channel below
+        # stays on the FULL lists: a keep-out's reach is not `reach`'s.
+        wa, wb = _pad_windows(rects_a, ea, rects_b, reach)
+        if len(wa) * len(wb) > PAIR_TEST_CAP:
             # Extent-level verdict for the PAD channel only: charge the extent
             # shortfall as pad shortfall so the baseline comparison still
             # constrains the pair.
@@ -3946,9 +4010,9 @@ class LegalityContext:
         overlap = False
         stack = False
         clr = self.clearance
-        for ai, (a0, a1, a2, a3, na, sa) in enumerate(rects_a):
+        for ai, (a0, a1, a2, a3, na, sa) in wa:
             fa = floors_a[ai] if floors_a else None
-            for bi, (b0, b1, b2, b3, nb, sb) in enumerate(rects_b):
+            for bi, (b0, b1, b2, b3, nb, sb) in wb:
                 if not _sides_interact(sa, sb):
                     continue
                 g = rect_gap((a0, a1, a2, a3), (b0, b1, b2, b3))

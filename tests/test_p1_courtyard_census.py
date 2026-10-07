@@ -17,10 +17,11 @@ to hold for that to be worth anything:
     by -- can actually report a disagreement.
 """
 
-import copy
 import os
 import random
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 
@@ -68,41 +69,65 @@ class FilePoses(unittest.TestCase):
 
 class MovedPoses(unittest.TestCase):
     """At a moved pose the census answers what the grader answers on a board
-    with the part WRITTEN there."""
+    with the part WRITTEN there -- by the real writer, re-parsed, graded from
+    its own file. (A copy built with `footprint_at_pose` would share the pose
+    path's code and could not tell the two apart; the phase-0 verifier.)"""
 
-    def _written(self, pcb, ref, pose):
-        out = copy.copy(pcb)
-        out.footprints = dict(pcb.footprints)
-        out.footprints[ref] = legality.footprint_at_pose(pcb.footprints[ref],
-                                                         pose)
-        return out
+    @classmethod
+    def setUpClass(cls):
+        cls._td = tempfile.TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._td.cleanup()
+
+    def _written_grade(self, path, moves):
+        """`grade_body_overlap` of `path` with `moves` ({ref: pose}) written
+        by `write_placed_output`, and the poses as the written file reads
+        them back (the census is asked about exactly those)."""
+        from placement.writer import write_placed_output
+        out = os.path.join(self._td.name,
+                           f'w{len(os.listdir(self._td.name))}.kicad_pcb')
+        write_placed_output(path, out, [
+            {'reference': r, 'new_x': x, 'new_y': y, 'new_rotation': rot}
+            for r, (x, y, rot) in moves.items()])
+        for ext in ('.kicad_pro', '.kicad_dru'):
+            sib = os.path.splitext(path)[0] + ext
+            if os.path.exists(sib):
+                shutil.copyfile(sib, os.path.splitext(out)[0] + ext)
+        pcb = parse_kicad_pcb(out)
+        back = {r: (pcb.footprints[r].x, pcb.footprints[r].y,
+                    pcb.footprints[r].rotation or 0.0) for r in moves}
+        return legality.grade_body_overlap(pcb, 0.2, pcb_file=out), back
+
+    def _agree(self, census, path, moves, label):
+        g, back = self._written_grade(path, moves)
+        got = census.grade(back)
+        want = [_key(p) for p in g['pairs'] if p.kind == 'courtyard']
+        self.assertEqual([_key(p) for p in got.pairs], want, label)
+        self.assertEqual([_key(p) for p in got.blocking],
+                         [_key(p) for p in g['courtyard_blocking_pairs']],
+                         label)
+        return got, back
 
     def test_random_single_part_moves(self):
         rng = random.Random(1182)
         checked = nonempty = 0
-        for name in ('glasgow_revC', 'esp_prog'):
+        for name in ('glasgow_revC', 'esp_prog', 'sonde_u'):
             path = _board(name)
             pcb = parse_kicad_pcb(path)
             census = legality.CourtyardCensus(pcb, path)
             refs = sorted(census.lbs)
-            for _ in range(12):
+            for _ in range(8):
                 ref = rng.choice(refs)
                 fp = pcb.footprints[ref]
                 pose = (round(fp.x + rng.uniform(-3, 3), 3),
                         round(fp.y + rng.uniform(-3, 3), 3),
                         rng.choice((0.0, 90.0, 180.0, 270.0, 45.0)))
-                got = census.grade({ref: pose})
-                g = legality.grade_body_overlap(
-                    self._written(pcb, ref, pose), 0.2, pcb_file=path)
-                want = [_key(p) for p in g['pairs'] if p.kind == 'courtyard']
-                self.assertEqual([_key(p) for p in got.pairs], want,
-                                 f'{name} {ref} at {pose}')
-                self.assertEqual(
-                    [_key(p) for p in got.blocking],
-                    [_key(p) for p in g['courtyard_blocking_pairs']],
-                    f'{name} {ref} at {pose}')
+                got, back = self._agree(census, path, {ref: pose},
+                                        f'{name} {ref} at {pose}')
                 # grade_ref is grade restricted to the moved part.
-                one = census.grade_ref(ref, pose)
+                one = census.grade_ref(ref, back[ref])
                 self.assertEqual(
                     [_key(p) for p in one.pairs],
                     [_key(p) for p in got.pairs if ref in (p.a, p.b)],
@@ -111,6 +136,62 @@ class MovedPoses(unittest.TestCase):
                 nonempty += bool(one.pairs)
         # A sample that never produced a pair would compare nothing.
         self.assertGreaterEqual(nonempty, 3, f'{nonempty} of {checked}')
+
+    def test_a_turn_that_changes_container_status(self):
+        """sonde_u's J1 covers 0.29 of the board at its file pose and more
+        than half at 135 degrees, where its rotated rect grows: it becomes a
+        container. Graded at the file's container set, the census labelled
+        its pairs `edge_class` and BLOCKING where the written board waives
+        them; graded the other way (built on J1 at 45, graded at -90) it
+        waived 6 pairs the written board gates."""
+        path = _board('sonde_u')
+        pcb = parse_kicad_pcb(path)
+        census = legality.CourtyardCensus(pcb, path)
+        self.assertNotIn('J1', census.containers)
+        got, _b = self._agree(census, path, {'J1': (104.55, 88.019, 135.0)},
+                              'J1 at 135')
+        self.assertIn('J1', got.containers, 'the fixture no longer turns J1 '
+                      'into a container; this arm tests nothing')
+        g45, _b = self._written_grade(path, {'J1': (104.55, 88.019, 45.0)})
+        turned = os.path.join(self._td.name,
+                              f'w{len(os.listdir(self._td.name)) - 1}'
+                              '.kicad_pcb')
+        census45 = legality.CourtyardCensus(parse_kicad_pcb(turned), turned)
+        self.assertIn('J1', census45.containers)
+        got2, _b = self._agree(census45, turned,
+                               {'J1': (109.512, 77.103, -90.0)},
+                               'J1 back at -90')
+        self.assertTrue(got2.blocking, 'the dangerous direction: the written '
+                        'board gates pairs here')
+
+    def test_the_edge_waiver_reads_the_graded_pose(self):
+        """An edge-class waiver holds only for a part AT an edge, so it must
+        be judged where the part is being graded, not where the file has it:
+        ulx3s B1 moved inland loses its waiver (19 blocking pairs, not 18)."""
+        path = _board('ulx3s')
+        census = legality.CourtyardCensus(parse_kicad_pcb(path), path)
+        before = len(census.grade().blocking)
+        got, _b = self._agree(census, path, {'B1': (97.53, 81.36, 0.0)},
+                              'B1 inland')
+        self.assertNotEqual(len(got.blocking), before)
+
+    def test_grade_ref_takes_the_other_parts_poses(self):
+        """`grade_ref(ref, pose, poses)` grades the OTHER parts at `poses`
+        too: esp_prog's CON2 moved away must not still be paired with USB1
+        from its file pose."""
+        path = _board('esp_prog')
+        pcb = parse_kicad_pcb(path)
+        census = legality.CourtyardCensus(pcb, path)
+        u, c = pcb.footprints['USB1'], pcb.footprints['CON2']
+        pose = (u.x, u.y, u.rotation or 0.0)
+        away = (c.x + 15.0, c.y + 15.0, c.rotation or 0.0)
+        one = census.grade_ref('USB1', pose, {'CON2': away})
+        full = census.grade({'USB1': pose, 'CON2': away})
+        self.assertEqual([_key(p) for p in one.pairs],
+                         [_key(p) for p in full.pairs
+                          if 'USB1' in (p.a, p.b)])
+        self.assertFalse(any({'USB1', 'CON2'} == {p.a, p.b}
+                             for p in one.pairs))
 
 
 class Gating(unittest.TestCase):
@@ -125,8 +206,13 @@ class Gating(unittest.TestCase):
             'B': fp(1, 1, 450),           # 450 == 90 mod 360: not moved
             'C': fp(2, 2, 0, 'B.Cu'),     # flipped: moved
             'D': fp(3.01, 3),             # moved
-            'E': fp(9, 9)})               # absent from the baseline: moved
-        self.assertEqual(legality.moved_refs(now, base), {'C', 'D', 'E'})
+            'E': fp(9, 9),                # absent from the baseline: moved
+            'F': fp(4, 4, 0)})            # rotation-only, a NEGATIVE delta
+        base.footprints['F'] = fp(4, 4, 90)
+        base.footprints['G'] = fp(5, 5, 360)
+        now.footprints['G'] = fp(5, 5, 10)  # 10 vs 360: moved 10 degrees
+        self.assertEqual(legality.moved_refs(now, base),
+                         {'C', 'D', 'E', 'F', 'G'})
 
     def test_gate_matches_check_assembly_on_run23(self):
         placed = os.path.join(ROOT, 'tests', 'fixtures', 'run23',

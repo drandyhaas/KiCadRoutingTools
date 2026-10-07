@@ -1139,7 +1139,12 @@ Examples:
         decap_claim_after_ics=args.decap_claim_after_ics)
     for note in result['notes']:
         print(f"  NOTE: {note}")
-    print(f"Seeded {len(result['placements'])} part(s); "
+    # #1151: a STAGED part has a placement row (it is written off the board)
+    # and is still unseated, so it is not counted as seeded.
+    _n_staged = sum(1 for d in (result.get('unseated_disposition')
+                                or {}).values()
+                    if d.get('disposition') == 'staged')
+    print(f"Seeded {len(result['placements']) - _n_staged} part(s); "
           f"{len(result['unseated'])} unseated; "
           f"{len(result['lock_refs'])} to lock")
     # #893. A DECLARED rotation that could not be seated is a different fact
@@ -1156,6 +1161,16 @@ Examples:
 
     write_placed_output(args.input_file, args.output_file,
                         result['placements'])
+    # #1151: the parts the seed could not seat whose input pose was not legal
+    # against what it seated were moved off the board, and are written there.
+    # The polish below holds them: it would otherwise walk them back onto a
+    # board their own seat search had already refused.
+    _disp = result.get('unseated_disposition') or {}
+    _staged = sorted(r for r, d in _disp.items()
+                     if d.get('disposition') == 'staged')
+    if _staged:
+        print(f"  {len(_staged)} unseated part(s) STAGED off the board, "
+              f"not written on top of a neighbour: {', '.join(_staged)}")
     n_locked = seeder.stamp_locked(args.output_file, result['lock_refs'])
     copy_siblings(args.input_file, args.output_file)
     print(f"Stamped (locked yes) on {n_locked} part(s)")
@@ -1199,7 +1214,7 @@ Examples:
             board_edge_clearance=args.board_edge_clearance,
             crossing_penalty=30.0, length_weight=0.3, halo_base=0.5,
             halo_coef=0.15, halo_weight=2.0, edge_halo=2.0, edge_weight=2.0,
-            ignore_nets=args.ignore_nets,
+            ignore_nets=args.ignore_nets, lock_refs=_staged or None,
             metrics_out=ratsnest, intent_gate=_gate,
             corridor_weight=args.corridor_weight,
             corridor_specs=list((intent.health or {}).get('bus_corridors')
@@ -1243,8 +1258,11 @@ Examples:
         # what this net is for.
         if not args.no_polish:
             _repairable = ('zone_containment', 'keepout', 'zone_exclusive')
+            # #1151: a STAGED part was searched and refused already; it is
+            # off the board on purpose and this repair would search it again.
             broke = sorted({v.ref for v in graded.errors
-                            if v.rule in _repairable and v.ref})
+                            if v.rule in _repairable and v.ref
+                            and v.ref not in _staged})
             _rules = sorted({v.rule for v in graded.errors
                              if v.rule in _repairable and v.ref})
             if broke:
@@ -1461,11 +1479,14 @@ Examples:
               f"in a rule-area keep-out band: "
               + '; '.join(f"{r} ({a:.3f}mm)" for r, a in _band_seeded))
     after = ratsnest.get('after', {})
-    summary = {'placed': len(result['placements']),
+    summary = {'placed': len(result['placements']) - _n_staged,
                'unseated': len(result['unseated']),
                # NAMES, not just a count. #629's complaint is that a verdict
                # you cannot act on is a dead end, and a count names nobody.
                'unseated_refs': list(result['unseated']),
+               # #1151: where each of them was WRITTEN, and why --
+               # {ref: {disposition, input, written, refused_by}}.
+               'unseated_disposition': _disp,
                # #893: WHICH declared angle was refused, by ref. A caller that
                # sees only `unseated_refs` cannot tell a declaration it must
                # revisit from a board that is simply full.

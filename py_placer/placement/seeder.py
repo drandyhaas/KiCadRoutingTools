@@ -632,6 +632,12 @@ NO_POSE_VERDICTS = (
     'no_pair_lift_frees',       # ... and no PAIR of them frees one either
     'blocker_available',        # a lift WOULD free a pose; the depth said no
     'trade_reverted',           # a trade was tried and put back
+    # #1213. Before it, a part refused by a LOCKED neighbour's pads read
+    # `no_single_lift_frees` -- a sentence about the movable neighbours,
+    # which were all at 0 -- and never named the part that refused it:
+    # rp2350's U6 against U8, the locked Teensy frame. Measured, not
+    # inferred: the poses are recounted with each frozen neighbour lifted.
+    'frozen_blocks',
     # #701. Before it, a part a declared KEEP-OUT refuses reported
     # `no_movable_neighbour`, whose prose says "the outline, the zone or its
     # own size refuses it, not a neighbour" -- false, and the reader's next
@@ -673,7 +679,42 @@ def _empty_census() -> Dict:
             # other zone in this file -- the part's OWN zone, which is the
             # per-call `constraint` and is not a census channel at all.
             'zone_exclusive_joint': 0,
-            'zone_exclusive_freeing': {}}
+            'zone_exclusive_freeing': {},
+            # #1213: {frozen neighbour: poses freed by lifting it}, zeros
+            # included, so "censused and frees 0" is not "never censused".
+            # Filled only for a part with no pose at all. The rung still may
+            # not move these parts; the count says which one is refusing.
+            'frozen_lifted': {},
+            # #1213: {frozen neighbour: poses legal with it as the ONLY
+            # neighbour present}, against `open_poses` (every neighbour
+            # lifted). 0 of a non-zero `open_poses` means that part alone
+            # refuses every pose the outline and zone allow.
+            'frozen_alone': {},
+            'open_poses': 0,
+            'frozen_truncated': 0}
+
+
+def _frozen_refusers(census: Dict) -> List[Tuple[str, str]]:
+    """`[(frozen ref, how it refuses)]`, the strongest first (#1213).
+
+    A frozen neighbour refuses the part when lifting it frees poses
+    (`frozen_lifted` above `baseline`), or when it ALONE -- every other
+    neighbour lifted -- admits none of a non-zero `open_poses`. The second
+    is the rp2350 case: U8 refused U6 everywhere, but by U6's turn the frame
+    was full, so lifting U8 alone freed nothing."""
+    base = census.get('baseline', 0)
+    open_ = census.get('open_poses', 0)
+    out = []
+    for r, n in sorted((census.get('frozen_lifted') or {}).items(),
+                       key=lambda kv: (-kv[1], kv[0])):
+        if n > base:
+            out.append((r, f"frees {n} pose(s) when lifted"))
+    named = {r for r, _h in out}
+    if open_:
+        for r, n in sorted((census.get('frozen_alone') or {}).items()):
+            if n == 0 and r not in named:
+                out.append((r, f"alone refuses all {open_} open pose(s)"))
+    return out
 
 
 def _verdict_for(cands: Sequence[str], census: Dict) -> str:
@@ -703,6 +744,14 @@ def _verdict_for(cands: Sequence[str], census: Dict) -> str:
     elif not cands:
         v = ('immovable_given_frozen' if census.get('frozen')
              else 'no_movable_neighbour')
+    elif _frozen_refusers(census):
+        # #1213. Only where there ARE movable neighbours: there the old
+        # verdicts below are sentences about THEM -- "lifting any one frees
+        # no pose" -- and on rp2350 they were all at 0 while a frozen part
+        # (U8) refused the seat everywhere. With no movable neighbour at all,
+        # `immovable_given_frozen` (#699) already says the frozen ones are
+        # what is in the way, and its note carries these counts too.
+        v = 'frozen_blocks'
     else:
         v = ('no_pair_lift_frees' if census.get('pairs_censused')
              else 'no_single_lift_frees')
@@ -775,15 +824,46 @@ def _no_pose_note(ref: str, verdict: str, census: Dict,
         return (f"{ref}: no legal pose, and {what}. Add {ref} to the block "
                 f"that owns the zone, move the zone, or drop its `exclusive` "
                 f"flag")
+    if verdict == 'frozen_blocks':
+        refusers = _frozen_refusers(census)
+        f, how = refusers[0]
+        why = frozen.get(f, 'immovable')
+        step = ("unlock it, or check how it is modelled -- a frame's pin "
+                "ring is not its body" if why == 'file-locked'
+                else "relax the intent clause that froze it")
+        also = ''
+        if len(refusers) > 1:
+            also = '; also ' + ', '.join(f"{r} ({h})"
+                                         for r, h in refusers[1:])
+        # What the movable census found as well, in the words its own
+        # verdicts use, so this note never says less than they would.
+        if census.get('pairs_censused'):
+            movable = (f"censused {n} movable neighbour(s) and "
+                       f"{census.get('pairs_censused', 0)} pair(s); lifting "
+                       f"no one or two of them frees a pose")
+        else:
+            movable = (f"censused {n} movable neighbour(s); lifting any ONE "
+                       f"of them frees no pose"
+                       + ("; --evict-depth 2 also tries pairs"
+                          if evict_depth < 2 else
+                          "; fewer than two movable neighbours, so there is "
+                          "no pair to try" if n < 2 else ""))
+        return (f"{ref}: no legal pose; {f} ({why}) {how} -- {ref}/{f} is "
+                f"the refusing pair, and {f} is not this rung's to "
+                f"move{also}. Next: {step}. ({movable}{tail})")
     if verdict == 'no_movable_neighbour':
         return (f"{ref}: no legal pose, and NOTHING seated is near enough to "
                 f"be in the way -- the outline, the zone or its own size "
                 f"refuses it, not a neighbour")
     if verdict == 'immovable_given_frozen':
         who = ', '.join(f"{r} ({why})" for r, why in sorted(frozen.items()))
+        measured = _frozen_refusers(census)
+        tail = ('; measured: ' + ', '.join(f"{r} {how}"
+                                          for r, how in measured)
+                if measured else '')
         return (f"{ref}: no legal pose, and every neighbour that could be in "
                 f"the way is one this rung may not move: {who}. Immovable "
-                f"GIVEN those, not immovable")
+                f"GIVEN those, not immovable{tail}")
     if verdict == 'no_single_lift_frees':
         # Only suggest the depth the run is not already at -- at depth 2 with
         # fewer than two movable candidates there is no pair to try, and
@@ -801,6 +881,98 @@ def _no_pose_note(ref: str, verdict: str, census: Dict,
                 + (f" ({pt} further pair(s) not censused, cap "
                    f"EVICT_MAX_PAIRS={EVICT_MAX_PAIRS})" if pt else ""))
     return ""
+
+
+#: Dispositions of a part the seed could not seat (#1151).
+UNSEATED_DISPOSITIONS = ('locked_at_input', 'off_board', 'legal_at_input',
+                         'staged', 'not_modelled')
+
+#: Gap between the board (or the lowest part rect) and the staging row, and
+#: between staged parts on it, in mm.
+STAGING_GAP_MM = 5.0
+STAGING_PITCH_GAP_MM = 1.0
+
+
+def _dispose_unseated(state, refs: Sequence[str]) -> Dict[str, Dict]:
+    """Decide where each part the seed could not seat is WRITTEN (#1151).
+
+    A part with no seat used to keep the pose it came in with, while every
+    later seat excluded it as part of "the pile" -- so its neighbours were
+    packed onto copper that was then written exactly there. Measured: all six
+    of StickHub's OFF-seed `body_blocking` pairs involve J6, which the seed
+    never moved, and 14 of rp2350's 15 OFF-seed stacks involve U6.
+
+    The fix is applied AFTER the search, so every seated pose stays exactly
+    what the search chose. Making the input pose an obstacle instead was
+    measured worse (#982: ulx3s 20 -> 25 unseated over ten seeds, rp2350
+    1 -> 3). In sorted order, each part is:
+
+      * `locked_at_input` -- locked: never moved, whatever it touches;
+      * `off_board`       -- its rect is already wholly outside the board;
+      * `legal_at_input`  -- `pose_ok` admits its input pose against what was
+        seated and what was left before it: left where it is, harming nobody;
+      * `staged`          -- anything else: moved to a deterministic row below
+        the board, rotation kept, and written there;
+      * `not_modelled`    -- not a search part (nothing to decide).
+
+    Returns `{ref: {disposition, input, written, refused_by}}`; `refused_by`
+    is `candidate_veto`'s `(check, blocker)` at the input pose for a staged
+    part, the conjunct and the part that refused leaving it there. The
+    caller writes every `staged` part at `written`; the unseated count and
+    the exit code do not change -- a staged part is still unseated."""
+    from .legality import rect_overlap_area
+    out: Dict[str, Dict] = {}
+    todo = [r for r in sorted(set(refs))]
+    bb = getattr(getattr(state, 'pcb_data', None), 'board_info', None)
+    bb = getattr(bb, 'board_bounds', None)
+    staged: List[str] = []
+    for i, ref in enumerate(todo):
+        part = state.parts.get(ref)
+        if part is None:
+            out[ref] = {'disposition': 'not_modelled', 'input': None,
+                        'written': None, 'refused_by': None}
+            continue
+        pose = (part.seed_x, part.seed_y, part.orig_rot)
+        rec = {'input': [round(v, 4) for v in pose], 'written':
+               [round(v, 4) for v in pose], 'refused_by': None}
+        r = part.rect(*pose)
+        if part.locked:
+            rec['disposition'] = 'locked_at_input'
+        elif bb and rect_overlap_area(r, bb) <= 1e-9:
+            rec['disposition'] = 'off_board'
+        else:
+            # The parts still to decide are not obstacles yet; the ones
+            # already LEFT where they are now are, so two unseated parts are
+            # never both left on one spot.
+            undecided = set(todo[i + 1:]) | set(staged)
+            if pose_ok(state, ref, *pose, exclude=undecided):
+                rec['disposition'] = 'legal_at_input'
+            else:
+                veto = state.candidate_veto(ref, *pose, exclude=undecided)
+                rec['refused_by'] = list(veto) if veto else ['pose_ok', None]
+                rec['disposition'] = 'staged'
+                staged.append(ref)
+        if rec['disposition'] != 'staged' and (part.x, part.y, part.rot) \
+                != pose:
+            state.apply_move(ref, pose[0], pose[1], pose[2])
+        out[ref] = rec
+    if staged:
+        # Below the board AND below every part rect, so a staged part can
+        # never land on anything -- including a pile that sits off-board.
+        lowest = max(p.rect()[3] for p in state.parts.values())
+        floor = max(bb[3], lowest) if bb else lowest
+        cursor = bb[0] if bb else min(p.rect()[0]
+                                      for p in state.parts.values())
+        for ref in staged:
+            part = state.parts[ref]
+            rot = part.orig_rot
+            lx0, ly0, lx1, _ly1 = part.rect(0.0, 0.0, rot)
+            x = cursor - lx0
+            y = floor + STAGING_GAP_MM - ly0
+            state.apply_move(ref, x, y, rot)
+            out[ref]['written'] = [round(x, 4), round(y, 4), rot]
+            cursor = x + lx1 + STAGING_PITCH_GAP_MM
+    return out
 
 
 def _seated_violations(state, seated: Set[str]) -> Tuple[int, float]:
@@ -5777,6 +5949,41 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                                           base_excl | {b}, **zkw)
                      for b in cands}
             no_pose_blockers[ref] = dict(freed)
+            # #1213: the FROZEN neighbours, measured the same way and never
+            # moved. A part refused by a locked neighbour used to be told
+            # about its movable neighbours only, all at 0, and the census
+            # never named the part that refused it. Only for a part with no
+            # pose at all, nearest first, at the blocker cap.
+            #
+            # Two numbers per frozen part, because one is not enough. Lifting
+            # it ALONE (`frozen_lifted`) answers "would unlocking it seat the
+            # part now" -- and on rp2350 that is 0 for U8, because by U6's
+            # turn the other parts had filled the frame. `frozen_alone` asks
+            # the question the refusal is actually about: with EVERY other
+            # neighbour lifted, how many of the `open_poses` the outline and
+            # zone allow does this part still admit? U8 admitted none of
+            # them: it alone refused U6 everywhere.
+            frozen_lifted: Dict[str, int] = {}
+            frozen_alone: Dict[str, int] = {}
+            open_poses = 0
+            frozen_trunc = 0
+            _fz = cinfo.get('frozen') or {}
+            if not baseline and _fz:
+                _order = sorted(
+                    (f for f in _fz if f in state.parts),
+                    key=lambda f: (math.hypot(state.parts[f].x - tx,
+                                              state.parts[f].y - ty), f))
+                frozen_trunc = max(0, len(_order) - EVICT_MAX_BLOCKERS)
+                for _f in _order[:EVICT_MAX_BLOCKERS]:
+                    frozen_lifted[_f] = count_legal_poses(
+                        state, ref, tx, ty, base_excl | {_f}, **zkw)
+                _everyone = set(state.parts) - {ref}
+                open_poses = count_legal_poses(state, ref, tx, ty, _everyone,
+                                               **zkw)
+                if open_poses:
+                    for _f in _order[:EVICT_MAX_BLOCKERS]:
+                        frozen_alone[_f] = count_legal_poses(
+                            state, ref, tx, ty, _everyone - {_f}, **zkw)
             # Stored by reference on purpose: the pair sweep below fills
             # its `pairs_*` / `best_pair` into this same object.
             census = _empty_census()
@@ -5789,7 +5996,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                            'keepouts_freeing': keepouts_freeing,
                            'keepouts_joint': keepouts_joint,
                            'zone_exclusive_freeing': zx_freeing,
-                           'zone_exclusive_joint': zx_joint})
+                           'zone_exclusive_joint': zx_joint,
+                           'frozen_lifted': frozen_lifted,
+                           'frozen_alone': frozen_alone,
+                           'open_poses': open_poses,
+                           'frozen_truncated': frozen_trunc})
             no_pose_census[ref] = census
             useful = sorted((n, b) for b, n in freed.items() if n > baseline)
             if not evict_depth:
@@ -5946,10 +6157,23 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                              f"{list(baseline)} -> {list(after)}")
                 break
 
+    # #1151: where each part the seed could not seat is WRITTEN. After every
+    # seat above, so not one seated pose depends on it. A staged part gets a
+    # placement row; one left at its input pose needs none.
+    disposition = _dispose_unseated(
+        state, [r for r in set(unseated) | set(held) if r not in placed])
+    staged = {r for r, d in disposition.items()
+              if d['disposition'] == 'staged'}
+    for ref in sorted(staged):
+        notes.append(f"{ref}: unseated, and its input pose is not legal "
+                     f"against what was seated (refused: "
+                     f"{disposition[ref]['refused_by']}) -- STAGED off the "
+                     f"board at {disposition[ref]['written'][:2]} so it is "
+                     f"not written on top of a neighbour")
     placements = [{'reference': ref,
                    'new_x': state.parts[ref].x, 'new_y': state.parts[ref].y,
                    'new_rotation': state.parts[ref].rot}
-                  for ref in sorted(placed)]
+                  for ref in sorted(set(placed) | staged)]
     # Deduped: a zone member that also fails stage 3 is appended twice, and
     # `unseated: 2` for one part is a miscount every consumer inherits --
     # place_seed's summary, its exit code, and any gate reading the number.
@@ -5957,6 +6181,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # eviction rung, which has no target for it and must not trade for it.
     unseated = list(unseated) + sorted(held)
     return {'placements': placements,
+            # #1151: {ref: {disposition, input, written, refused_by}} for
+            # every part the seed could not seat (`UNSEATED_DISPOSITIONS`).
+            # `staged` ones are in `placements` at `written`; the rest are
+            # written where they came in.
+            'unseated_disposition': disposition,
             'lock_refs': sorted(set(lock_refs) | fixed_lock),
             'unseated': sorted(set(unseated)), 'notes': notes,
             # #1054: {ref: {x, y, rot, side, basis, how, rot_kept,

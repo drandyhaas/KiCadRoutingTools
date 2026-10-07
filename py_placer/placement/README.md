@@ -375,6 +375,7 @@ in the JSON_SUMMARY and as a NOTE:
 | --- | --- | --- |
 | `keepout_blocks` | a **declared keep-out** is what refuses it — measured, not inferred: the poses are recounted with that keep-out lifted (#701) | move the keep-out, or add the part to its `allow` list if it owns it |
 | `zone_exclusive_blocks` | a **declared exclusive zone** is what refuses it, and the part is not a member of the block that reserved it — measured the same way, by recounting with that zone lifted (#797) | add the part to the block that owns the zone, move the zone, or drop its `exclusive` flag. There is no `allow` list here — **membership is the allow list** |
+| `frozen_blocks` | movable neighbours were censused and none frees a pose, but a **locked or declared-immovable neighbour** is what refuses it — measured: it frees poses when lifted, or ALONE refuses every open pose (#1213: rp2350's U6 against U8, the locked Teensy frame). With no movable neighbour at all the verdict stays `immovable_given_frozen`, whose note then carries the same counts | unlock it or relax the intent clause that froze it — or, for a file-locked frame, check how it is modelled: a pin ring is not a body |
 | `no_movable_neighbour` | nothing seated is near enough to be in the way | the outline, the zone or the part's own size refuses it |
 | `immovable_given_frozen` | the only neighbours in the way are locked or declared edge connectors, **named with the decision that froze each** | relax that lock, or accept the pose |
 | `no_single_lift_frees` | movable neighbours censused; no single lift frees a pose | try `--evict-depth 2` |
@@ -387,9 +388,19 @@ in the JSON_SUMMARY and as a NOTE:
 `no_pose_census[ref]` carries the counts those verdicts came from — `boxed`,
 `movable`, `censused`, `frozen`, `truncated`, `baseline`, `pairs_total`,
 `pairs_censused`, `pairs_truncated`, `best_pair`, `keepouts_freeing`,
-`keepouts_joint`, `zone_exclusive_freeing`, `zone_exclusive_joint` — so a
-capped sweep can never
-read as a complete one. `keepouts_freeing` is `{keep-out name: poses freed by
+`keepouts_joint`, `zone_exclusive_freeing`, `zone_exclusive_joint`,
+`frozen_lifted`, `frozen_alone`, `open_poses`, `frozen_truncated` — so a
+capped sweep can never read as a complete one. `frozen_lifted` is `{frozen
+neighbour: poses freed by lifting it}`, zeros included, for a part with no
+pose at all, nearest first and capped at `EVICT_MAX_BLOCKERS`
+(`frozen_truncated` says how many were not censused). `frozen_alone` is
+`{frozen neighbour: poses legal with it as the ONLY neighbour present}`,
+against `open_poses`, the poses legal with every neighbour lifted: 0 of a
+non-zero `open_poses` means that part alone refuses every pose the outline and
+zone allow. Both are needed (#1213): rp2350's U8 refused U6 everywhere, but by
+U6's turn the other parts had filled the frame, so lifting U8 alone freed
+nothing. `frozen_blocks` is derived from these two counts, and the rung still
+never moves those parts. `keepouts_freeing` is `{keep-out name: poses freed by
 lifting it}`, filled only for a part with no pose at all and only over the
 keep-outs that bind it; it is the count `keepout_blocks` is derived from, so
 the verdict cannot drift from a differently-computed claim.

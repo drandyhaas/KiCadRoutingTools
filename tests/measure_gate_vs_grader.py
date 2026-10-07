@@ -15,8 +15,7 @@ pose (everything else stays where the file has it), and asks both:
   * generator: `pose_ok(state, ref, x, y, rot, exclude=set())`;
   * grader:    `census.grade_ref(ref, pose, moved={ref}).gating` -- the
                courtyard pairs check_assembly --baseline would GATE with
-               this part moved here (and, since the containers rule,
-               the pin_in_courtyard pairs).
+               this part moved here.
 
 and counts
 

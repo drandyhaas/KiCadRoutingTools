@@ -243,7 +243,7 @@ def main():
                         if (q.a, q.b, q.kind) not in base_keys]
         # Refs whose POSE differs from the baseline: the courtyard gate's
         # currency (`legality.moved_refs` says why membership is not enough).
-        # The repair and board_score read the same function.
+        # A function in legality, so a mover can ask the same question.
         moved_refs = legality.moved_refs(pcb, base_pcb)
 
     print(f"Assembly audit of {args.board} (clearance {clearance}):")

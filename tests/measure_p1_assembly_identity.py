@@ -42,7 +42,8 @@ def _grade(tree: str, board: str, intent: str, baseline: str,
         argv += ['--intent', intent]
     if baseline:
         argv += ['--baseline', baseline]
-    env = dict(os.environ, KRT_NO_BANNER='1')
+    # PYTHONHASHSEED pinned: a hash-ordered tie must not read as a change.
+    env = dict(os.environ, KRT_NO_BANNER='1', PYTHONHASHSEED='0')
     r = subprocess.run(argv, capture_output=True, text=True, cwd=tree,
                        env=env, encoding='utf-8', errors='replace')
     doc = None
@@ -107,9 +108,11 @@ def main(argv=None) -> int:
             rh, dh, eh = _grade(args.head, board, intent, baseline, oh)
             name = os.path.basename(board)
             if db is None or dh is None:
+                # A board neither tree could grade tested NOTHING -- a bad
+                # intent path once scored 44 such jobs as a pass.
                 same = db is None and dh is None and rb == rh
                 status = 'BOTH-FAILED' if same else 'ONE-FAILED'
-                worst = max(worst, 0 if same else 2)
+                worst = 2
                 diff = f"base rc {rb} {eb.strip()[-120:]!r} / head rc {rh} {eh.strip()[-120:]!r}"
             else:
                 diff = _first_diff(db, dh)
