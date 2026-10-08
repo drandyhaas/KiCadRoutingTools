@@ -2615,6 +2615,1247 @@
 "rot": 0.0,
 "side": "F"
 },
+"v10_c1_ctrl_r0_gap20001": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.5379 -1.8113) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.5531 -1.7983) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c1_p15_B_r15": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.53795 -1.81135) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 1.55315 -1.79835) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 15.0,
+"side": "B"
+},
+"v10_c1_p15_r15": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.53795 -1.81135) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.55315 -1.79835) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 15.0,
+"side": "F"
+},
+"v10_c1_p15b_B_r15": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.54435 -1.81735) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 1.55955 -1.80435) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 15.0,
+"side": "B"
+},
+"v10_c1_p15b_r15": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.54435 -1.81735) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.55955 -1.80435) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 15.0,
+"side": "F"
+},
+"v10_c1_p22_B_r22.5": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.53395 -1.82135) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 1.54915 -1.80835) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 22.5,
+"side": "B"
+},
+"v10_c1_p22_r22.5": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.53395 -1.82135) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.54915 -1.80835) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 22.5,
+"side": "F"
+},
+"v10_c1_p22b_B_r22.5": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.53415 -1.84955) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 1.54935 -1.83655) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 22.5,
+"side": "B"
+},
+"v10_c1_p22b_r22.5": {
+"courtyard": [
+"(fp_line (start -0.263987 -3.383831) (end 1.53415 -1.84955) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.54935 -1.83655) (end 3.383831 -0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 3.383831 -0.263987) (end 0.263987 3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.263987 3.383831) (end -3.383831 0.263987) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -3.383831 0.263987) (end -0.263987 -3.383831) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 22.5,
+"side": "F"
+},
+"v10_c1_r0_diag14142_half": {
+"courtyard": [
+"(fp_line (start -2.385808 -2.385808) (end 2 -2.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2.5) (end 2.5 2.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 2.5) (end -2.5 2.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.5 2.5) (end -2.39995 -2.39995) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c1_r0_diag14143_half": {
+"courtyard": [
+"(fp_line (start -2.385807 -2.385807) (end 2 -2.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2.5) (end 2.5 2.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 2.5) (end -2.5 2.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.5 2.5) (end -2.39995 -2.39995) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_exact_skew": {
+"courtyard": [
+"(fp_arc (start -1.2 0.8) (mid 1.2 0.8) (end -1.2 0.8) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_full_alone_B_r0": {
+"courtyard": [
+"(fp_arc (start 0 -2.3) (mid 0 2.3) (end 0 -2.3) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "B"
+},
+"v10_c2_full_alone_F_r0": {
+"courtyard": [
+"(fp_arc (start 0 -2.3) (mid 0 2.3) (end 0 -2.3) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_full_beside_square": {
+"courtyard": [
+"(fp_arc (start 0 -2.3) (mid 0 2.3) (end 0 -2.3) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 4.3 -2.1) (end 5.3 -2.1) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 5.3 -2.1) (end 5.3 -1.1) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 5.3 -1.1) (end 4.3 -1.1) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 4.3 -1.1) (end 4.3 -2.1) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_full_inside_square": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 0 -2.4) (mid 0 -0.8) (end 0 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_full_inside_square_B": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_arc (start 0 -2.4) (mid 0 -0.8) (end 0 -2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "B"
+},
+"v10_c2_near10_skew": {
+"courtyard": [
+"(fp_arc (start -1.2 0.8) (mid 1.2 0.8) (end -1.199993 0.800007) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_near198_skew": {
+"courtyard": [
+"(fp_arc (start -1.2 0.8) (mid 1.2 0.8) (end -1.19986 0.80014) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_near200_opp": {
+"courtyard": [
+"(fp_arc (start -0.0001 -2.3) (mid 0 2.3) (end 0.0001 -2.3) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_near49_skew": {
+"courtyard": [
+"(fp_arc (start -1.2 0.8) (mid 1.2 0.8) (end -1.199965 0.800035) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2_near50_opp": {
+"courtyard": [
+"(fp_arc (start -0.00002 -2.3) (mid 0 2.3) (end 0.00003 -2.3) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2h_arc_in_arc_pin": {
+"courtyard": [
+"(fp_arc (start 0 -2.3) (mid 0 2.3) (end 0 -2.3) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 0 -2.2) (mid 0 -1) (end 0 -2.2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2h_arc_ring": {
+"courtyard": [
+"(fp_arc (start 0 -2.3) (mid 0 2.3) (end 0 -2.3) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 0 -0.9) (mid 0 0.9) (end 0 -0.9) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2h_arc_strict": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 0 -2.2) (mid 0 -1) (end 0 -2.2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2h_arc_strict_B_r30": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_arc (start 0.8 -1.985641) (mid 0.8 -0.785641) (end 0.8 -1.985641) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 30.0,
+"side": "B"
+},
+"v10_c2h_circle_in_circle_pin": {
+"courtyard": [
+"(fp_circle (center 0 0) (end 2.3 0) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))",
+"(fp_circle (center 0 -1.6) (end 0.6 -1.6) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2h_circle_ring": {
+"courtyard": [
+"(fp_circle (center 0 0) (end 2.3 0) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))",
+"(fp_circle (center 0 0) (end 0.9 0) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2h_circle_strict": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_circle (center 0 -1.6) (end 0.6 -1.6) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2h_circle_strict_B_r30": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_circle (center 0.8 -1.385641) (end 1.4 -1.385641) (stroke (width 0.05) (type default)) (fill none) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 30.0,
+"side": "B"
+},
+"v10_c2h_circle_touch": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_circle (center 0 -1.6) (end 0.8 -1.6) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2t_arc_mid_on_edge": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 0 -0.8) (mid 0 -2.4) (end 0 -0.8) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2t_arc_start_on_corner": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start -2.4 -2.4) (mid 0 -0.8) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2t_arc_start_on_edge_r30": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 -2.4) (end 2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.4 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 0.8 -2.4) (mid 0.8 -0.371282) (end 0.8 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 30.0,
+"side": "F"
+},
+"v10_c2t_arc_start_on_right_edge": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 0.8 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.8 -2.4) (end 0.8 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.8 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 0.8 -1.6) (mid -0.8 -1.6) (end 0.8 -1.6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v10_c2t_circle_first_on_edge": {
+"courtyard": [
+"(fp_line (start -2.4 -2.4) (end 0.8 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.8 -2.4) (end 0.8 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.8 2.4) (end -2.4 2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.4 2.4) (end -2.4 -2.4) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_circle (center 0 -1.6) (end 0.8 -1.6) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_arcpiece_0.005_0.019": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 1.981 2) (mid 1.9785 2.001) (end 1.976 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.957 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_arcpiece_0.012_0.015": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 1.985 2) (mid 1.979 2.0024) (end 1.973 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.958 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_arcpiece_0.018_0.019": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 1.981 2) (mid 1.972 2.0036) (end 1.963 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.944 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_corner_piece_diag": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 1.985) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 1.998) (end 1.998 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.985 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_flat_rect_alone_pin1": {
+"courtyard": [
+"(fp_rect (start -1 -1.6) (end 1 -1.6) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_flat_rect_in": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 0 -1) (end 0 1) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_flat_rect_on_edge": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 2 -1) (end 2 1) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_flat_rect_out": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 3 -1) (end 3 1) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_flatish_rect_out": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 3 -1) (end 3.00004 1) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_iso_piece_in_0.012": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.5 0.5) (end 0.512 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_iso_piece_near_corner_in": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.99 1.99) (end 1.978 1.99) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_lone_piece_0.012_pin1": {
+"courtyard": [
+"(fp_line (start 0 -1.6) (end 0.012 -1.6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_lone_piece_0.012_pin1_holeedge": {
+"courtyard": [
+"(fp_line (start -0.006 -1.6) (end 0.006 -1.6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz50nm_snapdiff": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.50001 0.5) (end 2.50006 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz50nm_snapsame": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.50006 0.5) (end 2.50011 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_cornerout_0.0001": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end 2.0001 2.0001) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_cornerout_0.0005": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end 2.0005 2.0005) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_cornerout_0.001": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end 2.001 2.001) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_cornerout_0.005": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end 2.005 2.005) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_cornerout_1e-05": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end 2.00001 2.00001) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_cornerout_5e-05": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end 2.00005 2.00005) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_far_0.0001": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 6 6) (end 6.0001 6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_far_0.0005": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 6 6) (end 6.0005 6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_far_0.001": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 6 6) (end 6.001 6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_far_0.005": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 6 6) (end 6.005 6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_far_1e-05": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 6 6) (end 6.00001 6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_far_5e-05": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 6 6) (end 6.00005 6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_in_0.0001": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.5 0.5) (end 0.5001 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_in_0.0005": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.5 0.5) (end 0.5005 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_in_0.001": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.5 0.5) (end 0.501 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_in_0.005": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.5 0.5) (end 0.505 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_in_1e-05": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.5 0.5) (end 0.50001 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_in_5e-05": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 0.5 0.5) (end 0.50005 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_out_0.0001": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.5001 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_out_0.0005": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.5005 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_out_0.001": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.501 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_out_0.005": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.505 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_out_1e-05": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.50001 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_line_out_5e-05": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.50005 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_rect_out_0.5um": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 3 0) (end 3.0005 0.0005) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_nz_rect_out_5um": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 3 0) (end 3.005 0.005) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_offdiag_o0_d14140": {
+"courtyard": [
+"(fp_line (start -1.98586 -1.98586) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_offdiag_o37_d14130": {
+"courtyard": [
+"(fp_line (start -1.985833 -1.985833) (end 2.000037 -1.999963) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000037 -1.999963) (end 2.000037 2.000037) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000037 2.000037) (end -1.999963 2.000037) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -1.999963 2.000037) (end -1.999963 -1.999963) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_offdiag_o41_d14120": {
+"courtyard": [
+"(fp_line (start -1.985839 -1.985839) (end 2.000041 -1.999959) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000041 -1.999959) (end 2.000041 2.000041) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000041 2.000041) (end -1.999959 2.000041) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -1.999959 2.000041) (end -1.999959 -1.999959) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_offdiag_o46_d14100": {
+"courtyard": [
+"(fp_line (start -1.985854 -1.985854) (end 2.000046 -1.999954) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000046 -1.999954) (end 2.000046 2.000046) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000046 2.000046) (end -1.999954 2.000046) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -1.999954 2.000046) (end -1.999954 -1.999954) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_offdiag_o49_d14140": {
+"courtyard": [
+"(fp_line (start -1.985811 -1.985811) (end 2.000049 -1.999951) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000049 -1.999951) (end 2.000049 2.000049) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000049 2.000049) (end -1.999951 2.000049) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -1.999951 2.000049) (end -1.999951 -1.999951) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_offstraight_o44_g0.01993": {
+"courtyard": [
+"(fp_line (start -1.999956 -1.999956) (end 2.000044 -1.999956) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000044 -1.999956) (end 2.000044 2.000044) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000044 2.000044) (end -1.999956 2.000044) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -1.999956 2.000044) (end -1.999956 -1.980026) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_offstraight_o46_g0.01995": {
+"courtyard": [
+"(fp_line (start -1.999954 -1.999954) (end 2.000046 -1.999954) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000046 -1.999954) (end 2.000046 2.000046) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.000046 2.000046) (end -1.999954 2.000046) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -1.999954 2.000046) (end -1.999954 -1.980004) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_piece_bridging_gap_parallel": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -1.97) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.01 -1.99) (end -2.01 -1.98) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_piece_shared_end_0.012_0.015": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2) (end 1.988 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.973 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_snapz_rect_out": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 3 0) (end 3.00004 4e-05) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_threepieces_10_12": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.988 2) (end 1.978 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.966 2) (end 1.956 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.944 2) (end 1.934 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.922 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_tinypiece_r30_B": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 1.985 2) (end 1.973 2) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 1.958 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 30.0,
+"side": "B"
+},
+"v9_tinypiece_r45_F": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.982 2) (end 1.972 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.954 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 45.0,
+"side": "F"
+},
+"v9_twopieces_12_15": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.985 2) (end 1.973 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.958 2) (end 1.946 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.931 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_twopieces_3_19": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.981 2) (end 1.978 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.959 2) (end 1.956 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.937 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_twopieces_5_8": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.992 2) (end 1.987 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.979 2) (end 1.974 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 1.966 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": false,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_arc_mid_alone_pin1": {
+"courtyard": [
+"(fp_arc (start -1 -1.6) (mid 1 -1.6) (end -1 -1.6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_arc_mid_far": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 6 6) (mid 7 6) (end 6 6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_arc_mid_inside": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 0.5 0.5) (mid 1.0 0.5) (end 0.5 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_arc_mid_out_pin3": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_arc (start 4.3 -1.6) (mid 5.3 -1.6) (end 4.3 -1.6) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_circle_alone": {
+"courtyard": [
+"(fp_circle (center 0 -1.6) (end 0.0 -1.6) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_circle_in": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_circle (center 0.5 0.5) (end 0.5 0.5) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_circle_out": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_circle (center 3 0) (end 3.0 0) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_line_at_gap_end": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -1.99) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 -1.99) (end -2 -1.99) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_line_corner_r90_B": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2 2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 90.0,
+"side": "B"
+},
+"v9_z_line_far_gap0.019": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -1.981) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 5 5) (end 5 5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_line_in_gap_mid": {
+"courtyard": [
+"(fp_line (start -2 -2) (end 2 -2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 -2) (end 2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2 2) (end -2 2) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 2) (end -2 -1.99) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2 -1.995) (end -2 -1.995) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_line_out_r37_B": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.5 0.5) (stroke (width 0.05) (type default)) (layer \"B.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 37.0,
+"side": "B"
+},
+"v9_z_line_out_r37_F": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.5 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 37.0,
+"side": "F"
+},
+"v9_z_rect_corner": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 2 2) (end 2 2) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_rect_in": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_rect (start 0.5 0.5) (end 0.5 0.5) (stroke (width 0.05) (type default)) (fill none) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
+"v9_z_two_lines_out": {
+"courtyard": [
+"(fp_line (start -2.0 -2.0) (end 2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 -2.0) (end 2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.0 2.0) (end -2.0 2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start -2.0 2.0) (end -2.0 -2.0) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.5 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))",
+"(fp_line (start 2.5 0.5) (end 2.5 0.5) (stroke (width 0.05) (type default)) (layer \"F.CrtYd\"))"
+],
+"kicad_closed": true,
+"rot": 0.0,
+"side": "F"
+},
 "zero_arc_outside": {
 "courtyard": [
 "(fp_line (start -2.000000 -2.000000) (end 2.000000 -2.000000) (layer \"F.CrtYd\"))",

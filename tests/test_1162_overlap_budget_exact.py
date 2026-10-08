@@ -549,11 +549,12 @@ class TheZoneBoundsRotationClaims(unittest.TestCase):
     REFS = [f'B{i}' for i in range(7)]
 
     def _overfull(self, blocks, locked=False, rot=45, half=(5, 0.5),
-                  zone=(16, 16, 24, 24)):
+                  zone=(16, 16, 24, 24), extra=()):
         with tempfile.TemporaryDirectory() as td:
             path = _board(td, 'zr', [_bar(r, 20, 5 + 4 * i, rot, half,
                                           locked=locked)
-                                     for i, r in enumerate(self.REFS)])
+                                     for i, r in enumerate(self.REFS)]
+                          + list(extra))
             for b in blocks:
                 b.setdefault('refs', self.REFS)
             blocks[0]['zone'] = list(zone)
@@ -593,19 +594,37 @@ class TheZoneBoundsRotationClaims(unittest.TestCase):
             [{'name': 'z', 'rotation_candidates': [45]}], rot=0, half=(2, 2),
             zone=(16, 16, 21, 21)))
 
-    def test_contradictory_claims_stand_the_bound_down(self):
+    def test_contradictory_claims_bound_on_every_claimed_angle(self):
         """Two blocks declare the bars at 0 and at 90: the seeder refuses
         the intent (`rotations_for_ref` raises, naming both blocks). The
         bound must not refuse it first at the bars' own 45 degrees, an
-        angle the seeder never uses (final P1 verifier)."""
+        angle the seeder never uses: it reads every claimed angle, and the
+        bars fit the zone at neither (final P1 verifier)."""
         blocks = [{'name': 'z', 'rotation': 0}, {'name': 'r', 'rotation': 90}]
+        intent = floorplan.intent_from_dict({
+            'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+            'blocks': [dict(b, refs=self.REFS) for b in blocks]})
+        resolved = {b['name']: self.REFS for b in blocks}
         with self.assertRaises(floorplan.IntentError):
-            floorplan.rotations_for_ref(
-                floorplan.intent_from_dict({
-                    'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
-                    'blocks': [dict(b, refs=self.REFS) for b in blocks]}),
-                {b['name']: self.REFS for b in blocks})
+            floorplan.rotations_for_ref(intent, resolved)
+        seen = {}
+        floorplan.rotations_for_ref(intent, resolved, conflicts=seen)
+        self.assertEqual(seen['B0'], [(0.0, None), (90.0, None)])
         self.assertFalse(self._overfull(blocks))
+        # Not the first claim alone: at 45 they fit (overfull), at 0 not.
+        self.assertFalse(self._overfull([{'name': 'z', 'rotation': 45},
+                                         {'name': 'r', 'rotation': 0}]))
+
+    def test_an_unrelated_contradiction_keeps_the_bound(self):
+        """X1 is declared at 0 by one block and 90 by another; the bars'
+        zone declares nothing, so 70 mm2 in 64 at 45 degrees is still a
+        forced overlap and must still be named (the fix verifier: standing
+        the whole bound down hid it)."""
+        self.assertTrue(self._overfull(
+            [{'name': 'z'},
+             {'name': 'p', 'refs': ['X1'], 'rotation': 0},
+             {'name': 'q', 'refs': ['X1'], 'rotation': 90}],
+            extra=[_bar('X1', 5, 40, 0, (1, 1))]))
 
 
 if __name__ == '__main__':

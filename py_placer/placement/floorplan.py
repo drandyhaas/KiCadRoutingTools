@@ -2689,7 +2689,8 @@ def zone_covered_by_keepout(zone, keepouts, member_sides=None,
     return None
 
 
-def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]]
+def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]],
+                      conflicts: Optional[Dict[str, List[tuple]]] = None
                       ) -> Dict[str, Tuple[Optional[float],
                                            Optional[Tuple[float, ...]]]]:
     """{ref: (declared rotation, declared candidates)} over ALREADY-RESOLVED blocks.
@@ -2702,6 +2703,10 @@ def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]]
     author has to resolve, so it raises rather than picking one. Two blocks
     declaring the SAME angle is not a contradiction and is allowed -- globs
     overlap legitimately (`U*` and `U1`).
+
+    `conflicts`, when given, collects every claim on a contradicted ref
+    (`{ref: [claim, ...]}`) instead of raising -- for a caller that must
+    keep going (the plan check bounds such a ref on every claimed angle).
     """
     out: Dict[str, Tuple[Optional[float], Optional[Tuple[float, ...]]]] = {}
     owner: Dict[str, str] = {}
@@ -2711,6 +2716,11 @@ def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]]
         claim = (z.rotation, z.rotation_candidates)
         for ref in blocks.get(z.name, ()):
             prev = out.get(ref)
+            if prev is not None and prev != claim and conflicts is not None:
+                seen = conflicts.setdefault(ref, [prev])
+                if claim not in seen:
+                    seen.append(claim)
+                continue
             if prev is not None and prev != claim:
                 raise IntentError(
                     f"{ref} is claimed by blocks {owner[ref]!r} and {z.name!r} "
@@ -7385,16 +7395,19 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     # dropping them lost a zone a locked part already fills (round-2
     # verifier). A locked member outside its zone is `plan_fixed_outside_zone`.
     overlap_budget = (intent.legality_budget or {}).get('overlap_area')
-    try:
-        # The seeder's rotation claims, per ref, from every block.
-        _claims = rotations_for_ref(intent, blocks)
-    except IntentError:
-        # Two blocks declare one part at different angles. The seeder
-        # refuses the intent itself (its `rotations_for_ref` call raises,
-        # naming both blocks); a bound computed here at the part's own
-        # angle -- one the seeder never uses -- would refuse it first, as
-        # a zone overfull it is not (final P1 verifier).
-        _claims = None
+    # The seeder's rotation claims, per ref, from every block. A part two
+    # blocks declare at different angles is a contradiction the seeder
+    # refuses (its own `rotations_for_ref` call raises, naming both blocks);
+    # here it is bounded on EVERY angle a block claims for it, never on its
+    # own angle, which the seeder would not use (final P1 verifiers: the
+    # bound read 45-degree bars declared at 0 and at 90 as overfull at 45,
+    # and standing the whole bound down hid an unrelated zone's real one).
+    _conflicts: Dict[str, List[tuple]] = {}
+    _claims = rotations_for_ref(intent, blocks, conflicts=_conflicts)
+    for _r, _seen in _conflicts.items():
+        _claims[_r] = (None, tuple(sorted({
+            float(a) for rot, cands in _seen
+            for a in ((rot,) if rot is not None else (cands or ()))})))
     if getattr(state, 'courtyards_ignored', False):
         # The project waives KiCad's courtyard rule, so the grade prices no
         # courtyard overlap (#1104): no forced overlap can exceed the budget,
@@ -7402,7 +7415,7 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         # three circles ERRORed at 35.5 where the grade read 0).
         overlap_budget = None
     for z in intent.blocks:
-        if z.rect is None or _claims is None:
+        if z.rect is None:
             continue
         members = [r for r in blocks.get(z.name, ()) if r in state.parts]
         if any(frozenset((a_, b_)) in waived

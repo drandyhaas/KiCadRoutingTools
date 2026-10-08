@@ -123,6 +123,20 @@ def extract_locked_refs(pcb_file: str) -> Set[str]:
     return locked
 
 
+def _full_circle_arc(sx, sy, mx, my, ex, ey, grid=1e-6):
+    """`((cx, cy), r)` when an fp_arc's start and end coincide (in KiCad's
+    1 nm unit, `grid`) but its mid does not: KiCad draws that as a FULL
+    circle whose diameter is start-mid, and closes it (kicad-cli 10, final
+    P1 verifier: such an arc alone over a pin reports pth_inside_courtyard).
+    `_arc_to_segments` reads it as the zero-length chord start-end. None
+    otherwise -- ends a few nm apart are an ordinary (near-full) arc."""
+    def q(v):
+        return round(v / grid)
+    if (q(sx), q(sy)) != (q(ex), q(ey)) or (q(sx), q(sy)) == (q(mx), q(my)):
+        return None
+    return ((sx + mx) / 2.0, (sy + my) / 2.0), math.hypot(mx - sx, my - sy) / 2
+
+
 def _courtyard_points_by_side(fp_text: str,
                               _CRTYD_LAYER: str = _CRTYD_LAYER
                               ) -> Dict[str, list]:
@@ -155,6 +169,11 @@ def _courtyard_points_by_side(fp_text: str,
             r'\(end\s+' + _NUM + r'\s+' + _NUM + r'\)' + _FP_ELEMENT_GAP
             + _CRTYD_LAYER, fp_text, re.DOTALL):
         sx, sy, mx, my, ex, ey = (float(m.group(i)) for i in range(1, 7))
+        full = _full_circle_arc(sx, sy, mx, my, ex, ey)
+        if full is not None:
+            (cx, cy), r = full
+            add(m.group(7), (cx - r, cy - r), (cx + r, cy + r))
+            continue
         for seg in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
             add(m.group(7), *seg)
 
@@ -268,11 +287,18 @@ _OUTLINE_COVER_TOL_MM = 1e-3
 #: joined at this distance is also ACCEPTED at it (`tol` below): judged at
 #: `_OUTLINE_COVER_TOL_MM`, the joined shape's moved corner always failed,
 #: which is how glasgow J4's 8 um corner gap read open while kicad-cli
-#: closes it. The distance is measured AFTER the `_OUTLINE_SNAP_MM` snap,
-#: so a gap within ~0.14 um of 20 um can land on the other side of KiCad's
-#: verdict (final P1 verifier: a 19.98 um diagonal gap off the 0.1 um grid
-#: snaps to 20.08 and reads open; KiCad closes it).
+#: closes it.
 _OUTLINE_JOIN_MM = 0.02
+#: ...as far as it can be seen through the `_OUTLINE_SNAP_MM` grid: snapping
+#: both ends can grow a gap by up to sqrt(2) grid steps (final P1 verifiers:
+#: a 19.97 um diagonal gap off the grid snapped to 20.08 and read open, while
+#: KiCad closes it), and KiCad rounds a rotated footprint's ends to its 1 nm
+#: unit first, which can shrink a gap by up to sqrt(2) nm more (a 20.001 um
+#: gap at 15 degrees: KiCad 19.9999, closed). Generous, like the join
+#: itself: a gap between 20 and ~20.14 um closes here and not in KiCad
+#: (KNOWN_CONSERVATIVE in test_1212).
+_OUTLINE_JOIN_REACH_MM = _OUTLINE_JOIN_MM + math.sqrt(2) * (
+    _OUTLINE_SNAP_MM + 1e-6)
 OUTLINE_POLYGON = 'polygon'
 OUTLINE_HULL = 'hull'
 #: One read of a board's outlines per (path, mtime, size, layer): a single
@@ -353,13 +379,15 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
     lines: Dict[str, list] = {}
     areas: Dict[str, list] = {}
     verts: Dict[str, list] = {}
+    rings: Dict[str, list] = {}   # full-circle arcs: (circle, start)
 
     def seg(side, a, b):
-        # A zero-length element (a line or an arc whose ends meet) is no
-        # part of the outline: KiCad drops it (kicad-cli 10: a square plus
-        # a zero-length fp_line, fp_arc or fp_rect is NOT malformed, and a
-        # pin under the square is reported), so its point must not be a
-        # vertex the outline has to cover.
+        # A zero-length element (a line, or an arc whose start, mid and end
+        # coincide) is no part of the outline: KiCad drops it (kicad-cli 10:
+        # a square plus a zero-length fp_line, fp_arc or fp_rect is NOT
+        # malformed, and a pin under the square is reported), so its point
+        # must not be a vertex the outline has to cover. An arc whose ends
+        # meet but whose mid does not is a full circle (`_full_circle_arc`).
         a = (snap(a[0]), snap(a[1]))
         b = (snap(b[0]), snap(b[1]))
         if a == b:
@@ -388,6 +416,12 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
             r'\(end\s+' + _NUM + r'\s+' + _NUM + r'\)' + _FP_ELEMENT_GAP
             + layer_re, fp_text, re.DOTALL):
         sx, sy, mx, my, ex, ey = (float(m.group(i)) for i in range(1, 7))
+        ring = _full_circle_arc(sx, sy, mx, my, ex, ey)
+        if ring is not None:
+            c = Point(*ring[0]).buffer(ring[1], 32)
+            rings.setdefault(m.group(7), []).append((c, (snap(sx), snap(sy))))
+            verts.setdefault(m.group(7), []).extend(c.exterior.coords)
+            continue
         for a, b in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
             seg(m.group(7), a, b)
 
@@ -426,7 +460,7 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
     def joined(segs):
         """`segs` with each DANGLING end -- one no other end meets exactly
         -- moved onto the nearest other dangling end within
-        `_OUTLINE_JOIN_MM`, nearest pairs first: a chain's loose ends
+        `_OUTLINE_JOIN_REACH_MM`, nearest pairs first: a chain's loose ends
         bridged, the way KiCad chains a courtyard. Ends that already meet
         are left alone, so an arc's short chords and a side drawn in short
         pieces keep their shape (a 20 um merge of ALL ends collapsed a
@@ -449,7 +483,7 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
                     continue
                 d = math.hypot(ends[i][0] - ends[j][0],
                                ends[i][1] - ends[j][1])
-                if d <= _OUTLINE_JOIN_MM + 1e-9:
+                if d <= _OUTLINE_JOIN_REACH_MM + 1e-9:
                     cands.append((d, i, j))
         moved: Dict[int, tuple] = {}
         used: set = set()
@@ -466,14 +500,39 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
                 out.append(LineString((a, b)))
         return out
 
+    # A full-circle arc nests like any contour (a hole inside an outline)
+    # -- unless its START lies on another contour. KiCad decides hole or
+    # outline from a contour's FIRST point, and a point on an edge is not
+    # inside it: a circle drawn from the square's edge inward is outline,
+    # the same circle drawn from its far side (its mid on the edge) a hole
+    # (third fix verifier, kicad-cli 10). Such a circle is united here.
+    united: Dict[str, list] = {}
+    for side, rs in rings.items():
+        for k, (c, start) in enumerate(rs):
+            p = Point(start)
+            others = (list(lines.get(side, ()))
+                      + [a.boundary for a in areas.get(side, ())]
+                      + [o.boundary for j, (o, _s) in enumerate(rs) if j != k])
+            if any(g.distance(p) <= _OUTLINE_SNAP_MM for g in others):
+                united.setdefault(side, []).append(c)
+            else:
+                areas.setdefault(side, []).append(c)
+
     compose = _nested_even_odd if even_odd else unary_union
+
+    def composed(geoms, side):
+        g = compose(geoms) if geoms else None
+        if united.get(side):
+            g = unary_union(([g] if g is not None else []) + united[side])
+        return g
+
     out: Dict[str, tuple] = {}
     for side in set(verts) | set(areas):
         parts = list(areas.get(side, []))
         if lines.get(side):
             parts.extend(polygonize(unary_union(lines[side])))
         how = OUTLINE_POLYGON
-        shape = compose(parts) if parts else None
+        shape = composed(parts, side)
         pts = verts.get(side, [])
         tol = _OUTLINE_COVER_TOL_MM
         if pts and lines.get(side) and not covers(shape, pts):
@@ -497,7 +556,7 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
             # line read closed here while KiCad flags malformed_courtyard
             # (it still tests a pin against the contours that do close).
             # tests/fixtures/1212_courtyard_chaining.json holds kicad-cli's
-            # verdict on 101 drawings; the test asserts no drawing KiCad
+            # verdict on 178 drawings; the test asserts no drawing KiCad
             # closes reads open here. NOT modelled: a drawing that closes
             # plus debris no join absorbs (a stray piece outside it, a
             # there-and-back spike, a flat fp_rect or 2-point fp_poly)
@@ -507,14 +566,14 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
             import shapely
             from shapely.geometry import MultiLineString
             ml = MultiLineString([list(ln.coords) for ln in lines[side]])
-            for cand_lines in (shapely.snap(ml, ml, _OUTLINE_JOIN_MM),
+            for cand_lines in (shapely.snap(ml, ml, _OUTLINE_JOIN_REACH_MM),
                                joined(lines[side])):
                 retry = list(areas.get(side, [])) + list(
                     polygonize(unary_union(cand_lines)))
                 if retry:
-                    cand = compose(retry)
-                    if covers(cand, pts, _OUTLINE_JOIN_MM):
-                        shape, tol = cand, _OUTLINE_JOIN_MM
+                    cand = composed(retry, side)
+                    if covers(cand, pts, _OUTLINE_JOIN_REACH_MM):
+                        shape, tol = cand, _OUTLINE_JOIN_REACH_MM
                         break
         if pts and not covers(shape, pts, tol):
             from shapely.geometry import MultiPoint

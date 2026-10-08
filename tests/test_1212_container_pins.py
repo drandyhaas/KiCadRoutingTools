@@ -725,13 +725,15 @@ def _square(gap):
                                (-2, 2, -2, round(-2 + gap, 6)))]
 
 
-#: kicad-cli's verdict on 105 synthetic courtyard drawings (the verifiers'
-#: shapes: gaps at every chain position and across the 20 um boundary,
-#: crossings, stubs, T's, nested and corner-touching squares, fillets, arcs,
-#: subdivided sides, B side, rotations; zero-length elements, which KiCad
-#: drops; a piece shorter than the gaps around it; a three-way corner beside
-#: a loose end). Re-measure with `tests/measure_1212_kicad_pins.py
-#: --chaining`.
+#: kicad-cli's verdict on 214 synthetic courtyard drawings (the verifiers'
+#: shapes: gaps at every chain position and across the 20 um boundary, on
+#: and off the 0.1 um grid and on rotated footprints; crossings, stubs, T's,
+#: nested and corner-touching squares, fillets, arcs, subdivided sides, B
+#: side, rotations; zero-length and near-zero elements; a piece shorter
+#: than the gaps around it; a three-way corner beside a loose end; an arc
+#: whose ends meet, which KiCad draws as a full circle, alone, beside, inside
+#: and touching a square). Re-measure with
+#: `tests/measure_1212_kicad_pins.py --chaining`.
 CHAINING = os.path.join(ROOT, 'tests', 'fixtures',
                         '1212_courtyard_chaining.json')
 #: Drawings KiCad flags malformed_courtyard that the parser closes. KiCad
@@ -740,14 +742,38 @@ CHAINING = os.path.join(ROOT, 'tests', 'fixtures',
 #: contours are the drawing's own outline both grade the pin, and the two
 #: differ only in the flag; where they are not, the polygon here is the
 #: larger, conservative reading. A T or stub, a crossing, a duplicate or
-#: overlapping segment, and a gap KiCad rounds past 20 um only after
-#: rotation. Pinned, so a change of the model in EITHER direction shows
-#: here.
+#: overlapping segment, debris the join absorbs (near-zero lines, a flat
+#: rect inside), a gap KiCad rounds past 20 um only after rotation, gaps of
+#: 20 to ~20.14 um (the snap's reach, `parser._OUTLINE_JOIN_REACH_MM`), an
+#: arc whose ends miss by a few nm (KiCad flags it; here it is the near-full
+#: arc it draws), and a full circle started on a square's edge (flagged
+#: malformed by KiCad, its pin still reported -- as here). Pinned, so a
+#: change of the model in EITHER direction shows here.
 KNOWN_CONSERVATIVE = {
     'cross_0.015', 'cross_0.019', 'divider_exact', 'divider_short',
-    'dup_line', 'overlap_collinear', 'rot30_gap0.02', 'stub_in',
-    'stub_out_0.015', 'stub_tiny_0.015', 'tee_exact', 'tee_short',
-    'two_squares_gap'}
+    'dup_line', 'gap_0.0201', 'gapfirst_0.0201', 'gapmid_0.0201',
+    'overlap_collinear', 'rot30_gap0.02', 'stub_in', 'stub_out_0.015',
+    'stub_tiny_0.015', 'tee_exact', 'tee_short', 'two_squares_gap',
+    'v9_flat_rect_in', 'v9_flat_rect_on_edge', 'v9_iso_piece_in_0.012',
+    'v9_iso_piece_near_corner_in', 'v9_nz50nm_snapsame',
+    'v9_nz_line_cornerout_0.0001', 'v9_nz_line_cornerout_0.0005',
+    'v9_nz_line_cornerout_0.001', 'v9_nz_line_cornerout_0.005',
+    'v9_nz_line_cornerout_1e-05', 'v9_nz_line_cornerout_5e-05',
+    'v9_nz_line_far_1e-05', 'v9_nz_line_far_5e-05',
+    'v9_nz_line_in_0.0001', 'v9_nz_line_in_0.0005', 'v9_nz_line_in_0.001',
+    'v9_nz_line_in_0.005', 'v9_nz_line_in_1e-05', 'v9_nz_line_in_5e-05',
+    'v9_nz_line_out_1e-05', 'v9_nz_line_out_5e-05', 'v9_threepieces_10_12',
+    'v9_twopieces_5_8', 'v10_c1_ctrl_r0_gap20001', 'v10_c1_r0_diag14143_half',
+    'v10_c2_near10_skew', 'v10_c2_near198_skew', 'v10_c2_near49_skew',
+    'v10_c2t_arc_start_on_right_edge', 'v10_c2t_circle_first_on_edge'}
+#: Drawings with NO outline here (nothing of area to read), with KiCad's
+#: flag. A zero-radius circle: no courtyard in either. A lone 12 um piece or
+#: a lone flat fp_rect over a hole: KiCad flags malformed and STILL reports
+#: the pin; here no outline, so no pin is listed -- the disclosed class.
+KNOWN_NO_OUTLINE = {
+    'v9_z_circle_alone': True, 'v9_flat_rect_alone_pin1': False,
+    'v9_lone_piece_0.012_pin1': False,
+    'v9_lone_piece_0.012_pin1_holeedge': False}
 
 
 class KiCadsChaining(unittest.TestCase):
@@ -767,20 +793,67 @@ class KiCadsChaining(unittest.TestCase):
         from placement import parser
         with open(CHAINING, encoding='utf-8') as fh:
             cases = json.load(fh)['cases']
-        self.assertGreater(len(cases), 90)
-        fn, cons = [], set()
+        self.assertGreater(len(cases), 210)
+        fn, cons, none = [], set(), {}
         for name, c in sorted(cases.items()):
             r = parser._outline_shapes_by_side(
                 '\n'.join(c['courtyard']), parser._CRTYD_LAYER,
                 even_odd=True)
-            closed = bool(r) and all(v[1] == parser.OUTLINE_POLYGON
-                                     for v in r.values())
+            if not r:
+                none[name] = c['kicad_closed']
+                continue
+            closed = all(v[1] == parser.OUTLINE_POLYGON for v in r.values())
             if c['kicad_closed'] and not closed:
                 fn.append(name)
             if closed and not c['kicad_closed']:
                 cons.add(name)
         self.assertEqual(fn, [], 'drawings KiCad closes read OPEN here')
         self.assertEqual(cons, KNOWN_CONSERVATIVE)
+        self.assertEqual(none, KNOWN_NO_OUTLINE)
+
+    def test_a_full_circle_from_an_edge_is_outline(self):
+        """An fp_arc whose ends meet is a full circle in KiCad; inside a
+        square it is a hole -- unless its START lies on the square's edge,
+        because KiCad decides hole or outline from a contour's first point
+        (third fix verifier, kicad-cli 10: started on the edge, the pin
+        under it is reported; started inside with its mid on the edge,
+        none). The flag-level fixture cannot see this: both read closed."""
+        from placement import parser
+        sq = [f'(fp_line (start {a} {b}) (end {c} {d}) (layer "F.CrtYd"))'
+              for a, b, c, d in ((-2.4, -2.4, 2.4, -2.4), (2.4, -2.4, 2.4, 2.4),
+                                 (2.4, 2.4, -2.4, 2.4), (-2.4, 2.4, -2.4, -2.4))]
+
+        def area(start, mid):
+            arc = (f'(fp_arc (start 0 {start}) (mid 0 {mid}) (end 0 {start})'
+                   ' (layer "F.CrtYd"))')
+            g, how = parser._outline_shapes_by_side(
+                '\n'.join(sq + [arc]), parser._CRTYD_LAYER,
+                even_odd=True)['F']
+            self.assertEqual(how, parser.OUTLINE_POLYGON)
+            return g.area
+        self.assertAlmostEqual(area(-2.4, -0.8), 4.8 * 4.8, 3)    # outline
+        self.assertAlmostEqual(area(-0.8, -2.4), 4.8 * 4.8 - 2.0096, 2)  # hole
+
+    def test_the_bbox_bounds_the_outline(self):
+        """`extract_courtyard_sides`' bbox is the broad phase in front of the
+        outline `extract_courtyard_shapes` reads, so on every drawing it
+        must contain it -- an arc whose ends meet, read as its zero-length
+        chord, gave a one-point bbox around a full circle (fix verifier)."""
+        import json
+        from placement import parser
+        with open(CHAINING, encoding='utf-8') as fh:
+            cases = json.load(fh)['cases']
+        bad = []
+        for name, c in sorted(cases.items()):
+            text = '\n'.join(c['courtyard'])
+            pts = parser._courtyard_points_by_side(text)
+            for side, (g, _how) in parser._outline_shapes_by_side(
+                    text, parser._CRTYD_LAYER, even_odd=True).items():
+                bb, gb = parser._bbox(pts[side]), g.bounds
+                if not (gb[0] >= bb[0] - 1e-3 and gb[1] >= bb[1] - 1e-3
+                        and gb[2] <= bb[2] + 1e-3 and gb[3] <= bb[3] + 1e-3):
+                    bad.append((name, side, bb, gb))
+        self.assertEqual(bad, [])
 
 
 class TheThirdVerifiersCases(unittest.TestCase):
