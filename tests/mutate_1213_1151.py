@@ -32,7 +32,8 @@ _TESTS = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_TESTS)
 _PL = os.path.join(_ROOT, 'py_placer', 'placement')
 
-TARGETS = {'leg': os.path.join(_PL, 'legality.py'),
+TARGETS = {'pstate': os.path.join(_PL, 'placement_state.py'),
+           'leg': os.path.join(_PL, 'legality.py'),
            'seed': os.path.join(_PL, 'seeder.py'),
            'ps': os.path.join(_ROOT, 'py_placer', 'place_seed.py')}
 
@@ -92,8 +93,8 @@ ROWS = [
      "            if False:",
      (T1151,), 'KILLED'),
     ('a-left-part-is-no-obstacle', 'seed',
-     "            undecided = set(todo[i + 1:]) | set(staged)",
-     "            undecided = set(todo) - {ref}",
+     "            undecided = ({r for r in todo[i + 1:] if r in _pending_set}",
+     "            undecided = (set(todo) - {ref} if True else {r for r in todo[i + 1:] if r in _pending_set}",
      (T1151,), 'KILLED'),
     ('staged-parts-not-written', 'seed',
      "                  for ref in sorted(set(placed) | staged)]",
@@ -167,6 +168,35 @@ ROWS = [
     ('disposition-partners-unfiltered', 'seed',
      "                                 if c[1] not in undecided), None)",
      "                                 ), None)",
+     (T1151,), 'KILLED'),
+    # ---- the second phase-2 verifier's cases ------------------------------
+    ('undecided-includes-the-locked', 'seed',
+     "            undecided = ({r for r in todo[i + 1:] if r in _pending_set}",
+     "            undecided = ({r for r in todo[i + 1:]}",
+     (T1151,), 'KILLED'),
+    ('a-stack-across-faces', 'seed',
+     "                if o != r and _faces(r) & _faces(o):",
+     "                if o != r:",
+     (T1151,), 'KILLED'),
+    ('markers-are-stack-partners', 'seed',
+     "        parts = [r for r in grp['refs'] if not is_assembly_marker(pcb, r)]",
+     "        parts = list(grp['refs'])",
+     (T1151,), 'KILLED'),
+    ('the-projects-rules-left-behind', 'seed',
+     "        for ext in SIBLING_EXTS:",
+     "        for ext in ():",
+     (T1151,), 'KILLED'),
+    ('declared-keepouts-dropped', 'seed',
+     "                pcb, dst, declared=tuple(keepouts or ()))",
+     "                pcb, dst, declared=())",
+     (T1151,), 'KILLED'),
+    ('the-fallback-is-silent', 'seed',
+     "            rec['basis'] = ('check_assembly' if graded is not None else",
+     "            rec['basis'] = ('check_assembly' if True else",
+     (T1151,), 'KILLED'),
+    ('one-part-on-a-marker-is-a-stack', 'pstate',
+     "            if sum(1 for r in refs",
+     "            if sum(1 for r in refs + ['__marker__']",
      (T1151,), 'KILLED'),
 ]
 

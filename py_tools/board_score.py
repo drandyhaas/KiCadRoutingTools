@@ -487,9 +487,9 @@ def assembly_component(doc: dict, rc: int) -> dict:
     if not isinstance(buildable, bool):
         return skipped(
             "check_assembly published no `buildable` key: `blocking` alone is "
-            "1 of its 7 not_buildable conjuncts (check_assembly's "
+            "1 of its 8 not_buildable conjuncts (check_assembly's "
             "`not_buildable` line), and this component will not re-derive "
-            "the other six")
+            "the other seven")
     if (rc == 4) != (not buildable):
         return skipped(
             f"check_assembly contradicts itself: exit {rc} with "

@@ -472,6 +472,13 @@ class FarSide(tuple):
                                      max(b[2] for b in boxes),
                                      max(b[3] for b in boxes)))
         self.boxes = boxes
+        # Disjoint boxes sum exactly; overlapping ones (a far courtyard
+        # partly covering a cluster, or any box set off the lattice) would
+        # count their shared area twice, so `far_overlap_area` takes the
+        # union instead.
+        self.disjoint = not any(
+            rect_overlap_area(a, b) > EPS
+            for i, a in enumerate(boxes) for b in boxes[i + 1:])
         return self
 
     def __reduce__(self):
@@ -558,17 +565,19 @@ def far_gap(ra, rb) -> float:
 
 def far_overlap_area(ra, rb) -> float:
     """`rect_overlap_area` between two rects either of which may be a
-    `FarSide`, summed box pair by box pair. Exact at the orthogonal turns,
-    where a FarSide's cluster boxes are disjoint (more than
-    `FAR_SIDE_CLUSTER_GAP_MM` apart). At any other angle the rotated boxes
-    can overlap one another and the sum OVER-counts -- the stricter
-    direction (a DIP-16 at 45 degrees: 497.5 against an exact 389.7;
-    phase-2 verifier). No tracked board turns a multi-cluster part off the
-    lattice."""
+    `FarSide`: summed box pair by box pair while every FarSide's boxes are
+    disjoint (clusters at the orthogonal turns, more than
+    `FAR_SIDE_CLUSTER_GAP_MM` apart), else the area of the two UNIONS'
+    intersection -- a far courtyard partly covering a cluster, or boxes
+    turned off the lattice (a DIP-16 at 45 degrees summed 497.5 against an
+    exact 389.7; the phase-2 verifiers), would count their shared area
+    twice."""
     if not isinstance(ra, FarSide) and not isinstance(rb, FarSide):
         return rect_overlap_area(ra, rb)
-    return sum(rect_overlap_area(a, b)
-               for a in far_boxes(ra) for b in far_boxes(rb))
+    if all(getattr(r, 'disjoint', True) for r in (ra, rb)):
+        return sum(rect_overlap_area(a, b)
+                   for a in far_boxes(ra) for b in far_boxes(rb))
+    return far_geom(ra).intersection(far_geom(rb)).area
 
 
 def sides_occupied(side: str, has_tht: bool) -> frozenset:
@@ -1495,6 +1504,13 @@ class BodyOverlapPair(NamedTuple):
     contained: bool = False
     # #1212: see `shorts` above. ('16', '17') for SW1 over U8's pins.
     pins: Tuple[str, ...] = ()
+    # kind='pin_in_courtyard': 'pth' or 'npth' -- KiCad grades the two under
+    # separate rules (pth_ / npth_inside_courtyard), each with its own
+    # project severity -- and whether the other part's DRAWN courtyard was
+    # what the hole met ('courtyard'), or only its occupancy (a part that
+    # draws none, which KiCad cannot report: listed, never gating).
+    hole: str = ''
+    basis: str = ''
 
 
 def _pair_exact(a: GradedPart, b: GradedPart, s: str, ra, rb):
@@ -1924,11 +1940,14 @@ LEGACY_SEVERITY_PLAN_IGNORES = (
     'pth_inside_courtyard', 'solder_mask_bridge')
 
 
-def courtyard_severity_of(pcb_file: Optional[str]) -> Tuple[Optional[str],
-                                                          str]:
-    """`(severity, basis)`: the AUTHOR's `courtyards_overlap` severity for
-    the board, or None (no project, unset -- KiCad's default is error -- or
-    not the author's), and where it came from (#1095).
+def courtyard_severity_of(pcb_file: Optional[str],
+                          rule: str = 'courtyards_overlap'
+                          ) -> Tuple[Optional[str], str]:
+    """`(severity, basis)`: the AUTHOR's severity of KiCad DRC `rule`
+    (default `courtyards_overlap`) for the board, or None (no project,
+    unset -- KiCad's default is error -- or not the author's), and where it
+    came from (#1095). fa10 P1 reads `pth_inside_courtyard` and
+    `npth_inside_courtyard` the same way, for a pin frame's pins.
 
     An 'ignore' is only trusted as the author's. This repository's own
     tools wrote it too: before #856 every route step applied
@@ -1966,10 +1985,10 @@ def courtyard_severity_of(pcb_file: Optional[str]) -> Tuple[Optional[str],
            .get('rule_severities') or {})
     saved_all = ((doc.get('kicad_routing_tools') or {})
                  .get('saved_severities') or {})
-    saved = saved_all.get('courtyards_overlap')
+    saved = saved_all.get(rule)
     if saved is not None:
         return saved, "saved: the author's value, kept when a tool changed it"
-    value = sev.get('courtyards_overlap')
+    value = sev.get(rule)
     if value == 'ignore':
         legacy = LEGACY_SEVERITY_PLAN_IGNORES
         if all(saved_all.get(c, sev.get(c)) == 'ignore' for c in legacy):
@@ -2292,6 +2311,16 @@ class CourtyardCensus:
             self.severity, self.severity_basis = courtyard_severity, 'caller'
         self.severity_waiver = (PROJECT_SEVERITY_WAIVER + self.severity
                                 if self.severity == 'ignore' else '')
+        # #1212 (phase-3 verifier): a frame pin is KiCad's pth/npth_inside_
+        # courtyard, not courtyards_overlap, and boards set them apart --
+        # StickHub ignores courtyards_overlap and warns on PTH pins,
+        # One-Air-Max the reverse. Read each rule's own severity.
+        self.pin_severity: Dict[str, Optional[str]] = {}
+        if courtyard_severity == 'auto':
+            for _hole, _rule in (('pth', 'pth_inside_courtyard'),
+                                 ('npth', 'npth_inside_courtyard')):
+                self.pin_severity[_hole] = courtyard_severity_of(
+                    pcb_file, _rule)[0]
         if locked_refs is None:
             # KiCad's own (locked yes) stamps. Best-effort: the file is
             # optional here, and a missing or unreadable one simply means no
@@ -2398,11 +2427,11 @@ class CourtyardCensus:
                             self._pin_pairs(parts, poses, members={ref}))
 
     def _frame_holes(self, frame: str, pose=None) -> list:
-        """[(pin, hole shape, its bounds)] of a pin frame's DRILLED pads at
-        `pose`: the drill, a circle or a milled slot (`pad_drill_capsule`),
-        not the pad copper -- KiCad's pth_inside_courtyard tests the hole,
-        and the copper ring would add 19 hits on rp2350's r06_seed4 where
-        kicad-cli reports 2."""
+        """[(pin, hole shape, its bounds, 'pth' | 'npth')] of a pin
+        frame's DRILLED pads at `pose`: the drill, a circle or a milled slot
+        (`pad_drill_capsule`), not the pad copper -- KiCad's
+        pth_inside_courtyard tests the hole, and the copper ring would add 19
+        hits on rp2350's r06_seed4 where kicad-cli reports 2."""
         key = (frame, None if pose is None else tuple(pose))
         hit = self._holes.get(key)
         if hit is not None:
@@ -2420,18 +2449,53 @@ class CourtyardCensus:
                 continue
             shape = (Point(p1).buffer(r, 16) if p1 == p2
                      else LineString([p1, p2]).buffer(r, 16))
-            holes.append((str(pad.pad_number), shape, shape.bounds))
+            holes.append((str(pad.pad_number or ''), shape, shape.bounds,
+                          'npth' if getattr(pad, 'pad_type', '') ==
+                          'np_thru_hole' else 'pth'))
         if len(self._holes) > self.POSE_CACHE_CAP:
             self._holes = {}
         self._holes[key] = holes
         return holes
 
+    def _pin_shape(self, ref, gp, pose):
+        """`(shape, basis)`: what a frame hole is tested against for `ref`.
+        KiCad's pth/npth_inside_courtyard reads the DRAWN courtyards -- the
+        own face's outline, and a far-face one the footprint draws (a hole
+        goes through both faces; the phase-3 verifier's F-side part with a
+        B.CrtYd over pin 1 was missed) -- so a part that draws one is graded
+        on those, basis 'courtyard'. A part that draws none is tested on its
+        occupancy for disclosure, basis its occupancy source: KiCad reports
+        nothing there, and neither gates."""
+        from shapely.geometry import box
+        from shapely.ops import unary_union
+        from placement.body import SOURCE_COURTYARD
+        lb = self.lbs.get(ref)
+        geom = self.bodies.get(ref)
+        fp = self.fps[ref]
+        x, y, rot = (pose if pose is not None
+                     else (fp.x, fp.y, fp.rotation or 0.0))
+
+        def placed_box(loc):
+            l = rotate_local_bounds(*loc, rot)
+            return box(x + l[0], y + l[1], x + l[2], y + l[3])
+        if lb is not None and lb.source == SOURCE_COURTYARD and geom is not \
+                None and geom.body_local is not None:
+            court = (place_local_shape(geom.court_shape_local, x, y, rot)
+                     if geom.court_shape_local is not None
+                     else placed_box(geom.body_local))
+            shapes = [court]
+            if getattr(geom, 'far_court_local', None) is not None:
+                shapes.append(placed_box(geom.far_court_local))
+            return unary_union(shapes), 'courtyard'
+        shape = gp.poly if gp.poly is not None else box(*gp.rect)
+        return shape, (lb.source if lb is not None else '')
+
     def _pin_pairs(self, parts, poses, members=None) -> list:
         """Raw kind='pin_in_courtyard' pairs: each pin frame's holes against
-        every other part's own-side occupancy (#1212). A part on either face
-        counts -- a plated hole goes through both. `members` restricts to the
-        pairs one of these refs is in."""
-        from shapely.geometry import box
+        every other part's courtyards (`_pin_shape`, #1212), one pair per
+        hole RULE (PTH / NPTH). A part on either face counts -- a plated hole
+        goes through both. `members` restricts to the pairs one of these refs
+        is in."""
         out = []
         poses = poses or {}
         for frame in sorted(self.pin_frames):
@@ -2444,25 +2508,26 @@ class CourtyardCensus:
                 if members is not None and frame not in members \
                         and r not in members:
                     continue
-                rect = gp.rect
-                shape = None
-                pins, area = [], 0.0
-                for num, hs, hb in holes:
-                    if (hb[2] < rect[0] or hb[0] > rect[2]
-                            or hb[3] < rect[1] or hb[1] > rect[3]):
-                        continue
+                shape = basis = None
+                found: Dict[str, list] = {}
+                for num, hs, hb, hole in holes:
                     if shape is None:
-                        shape = gp.poly if gp.poly is not None else box(*rect)
+                        shape, basis = self._pin_shape(r, gp, poses.get(r))
+                    sb = shape.bounds
+                    if (hb[2] < sb[0] or hb[0] > sb[2]
+                            or hb[3] < sb[1] or hb[1] > sb[3]):
+                        continue
                     a = hs.intersection(shape).area
                     if a > EPS:
-                        pins.append(num)
-                        area += a
-                if pins:
+                        f = found.setdefault(hole, [[], 0.0])
+                        f[0].append(num)
+                        f[1] += a
+                for hole, (pins, area) in sorted(found.items()):
                     out.append(BodyOverlapPair(
                         a=min(frame, r), b=max(frame, r),
                         kind='pin_in_courtyard', area_mm2=round(area, 4),
                         side=gp.side, waived=False, waiver='',
-                        pins=tuple(pins)))
+                        pins=tuple(pins), hole=hole, basis=basis))
         return out
 
     def pin_hits(self, ref: str, pose, poses: Optional[Dict[str, tuple]]
@@ -2486,7 +2551,8 @@ class CourtyardCensus:
             near = any(not (hb[2] < rect[0] or hb[0] > rect[2]
                             or hb[3] < rect[1] or hb[1] > rect[3])
                        for f in self.pin_frames
-                       for _n, _s, hb in self._frame_holes(f, poses.get(f)))
+                       for _n, _s, hb, _h in self._frame_holes(
+                           f, poses.get(f)))
             if not near:
                 return []
             refs = [ref] + sorted(self.pin_frames)
@@ -2523,23 +2589,27 @@ class CourtyardCensus:
                                       silk_occupancy_refs=silk)
         gating = (None if moved is None
                   else courtyard_gating(blocking, set(moved)))
-        # Pin pairs: only an AUTHORED waiver or the board's own courtyard
-        # severity excuses them -- no class label, and no lock, applies to a
-        # part sitting on a frame's pin.
+        # Pin pairs: only an AUTHORED waiver or the board's own severity of
+        # the pin's OWN rule (pth_ / npth_inside_courtyard) excuses them --
+        # no class label, and no lock, applies to a part sitting on a frame's
+        # pin; and courtyards_overlap is a different KiCad rule.
         pin_pairs = []
         for p in pin_raw:
             waiver = ''
+            sev = self.pin_severity.get(p.hole)
             if waivers.waiver_sets and frozenset((p.a, p.b)) in \
                     waivers.waiver_sets:
                 waivers.hit.add(frozenset((p.a, p.b)))
                 waiver = 'intent_declared'
-            elif self.severity_waiver:
-                waiver = self.severity_waiver
+            elif sev == 'ignore':
+                waiver = PROJECT_SEVERITY_WAIVER + sev
             pin_pairs.append(p._replace(waived=bool(waiver), waiver=waiver))
         pin_pairs.sort(key=lambda p: (p.waived, -p.area_mm2, p.a, p.b))
-        # A silk-sourced occupancy reports, it does not gate (#896).
+        # Only a hole in a DRAWN courtyard gates: that is the rule KiCad
+        # runs, and a part that draws none (silk, .Fab or pad occupancy) is
+        # reported here and nowhere in KiCad.
         pin_blocking = [p for p in pin_pairs if not p.waived
-                        and p.a not in silk and p.b not in silk]
+                        and p.basis == 'courtyard']
         return CourtyardGrade(
             parts=parts, pairs=pairs, blocking=blocking, gating=gating,
             synthetic_refs=synthetic, silk_occupancy_refs=silk,

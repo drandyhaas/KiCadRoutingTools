@@ -550,6 +550,131 @@ class TheDispositionAsksTheGrader(unittest.TestCase):
                          ['k'], seen)
 
 
+FID = ('  (footprint "Fiducial:Fiducial_1mm_Mask2mm" (layer "F.Cu") (at 20 20)\n'
+       '    (property "Reference" "FID1" (at 0 0) (layer "F.SilkS"))\n'
+       '    (attr smd exclude_from_pos_files exclude_from_bom)\n'
+       '    (fp_circle (center 0 0) (end 1.25 0) (stroke (width 0.05)'
+       ' (type default)) (layer "F.CrtYd"))\n'
+       '    (pad "" smd circle (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")))\n')
+
+
+def _wide(ref, layer='F'):
+    return _fp(ref, 20, 20, 0, [('1', -3, 0, 'rect', 0.5, 0.5, 1),
+                                ('2', 3, 0, 'rect', 0.5, 0.5, 2)],
+               crt=(-3.5, -0.5, 3.5, 0.5), layer=layer)
+
+
+def _narrow(ref, layer='F'):
+    return _fp(ref, 20, 20, 0, [('1', -1.5, 0, 'rect', 0.5, 0.5, 1),
+                                ('2', 1.5, 0, 'rect', 0.5, 0.5, 2)],
+               crt=(-2, -0.5, 2, 0.5), layer=layer)
+
+
+class TheSecondVerifiersCases(unittest.TestCase):
+    """Each channel and input of the disposition, alone."""
+
+    def _dispose(self, path, refs, **kw):
+        import pose_score
+        st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=0.2)
+        return st, seeder._dispose_unseated(st, list(refs), **kw)
+
+    def test_a_pad_intersection_alone_stages(self):
+        """No body, no shared origin: pad copper meeting pad copper."""
+        parts = [_fp('A', 10, 10, 0, [('1', 0, 0, 'rect', 1, 1, 1)],
+                     crt=(-0.6, -0.6, 0.6, 0.6)),
+                 _fp('S', 10.6, 10, 0, [('1', 0, 0, 'rect', 1, 1, 2)],
+                     crt=(-0.6, -0.6, 0.6, 0.6))]
+        with tempfile.TemporaryDirectory() as td:
+            _st, d = self._dispose(_two_part_board(td, 'pads', parts), ['S'])
+        self.assertEqual(d['S']['refused_by'], ['pads', 'A'], d)
+        self.assertEqual(d['S']['basis'], 'check_assembly')
+
+    def test_a_declared_mating_keepout_reaches_the_grade(self):
+        """mating:J1 declared (not derived) over R1: staged only when the
+        intent's keep-outs are handed to the grade."""
+        import test_1098_mating_keepout as t1098
+        k = [{'name': 'mating:J1', 'rect': [20, 5, 30, 15]}]
+        with tempfile.TemporaryDirectory() as td:
+            path = t1098.board(td, r1=(25, 10, 'B.Cu'))
+            _st, d = self._dispose(path, ['R1'], keepouts=k)
+            _st, d0 = self._dispose(path, ['R1'])
+        self.assertEqual(d['R1']['refused_by'], ['mating', 'mating:J1'], d)
+        self.assertEqual(d0['R1']['disposition'], 'clear_at_input', d0)
+
+    def test_the_projects_rules_reach_the_grade(self):
+        """The siblings travel with the scratch board: a project ignoring
+        pth_inside_courtyard leaves a part on a frame pin where it is, as
+        check_assembly does."""
+        from test_1212_container_pins import _frame_board, _pro
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [('P', 3.0, 3.1, 2.0)])
+            _pro(path, pth_inside_courtyard='ignore')
+            _st, d = self._dispose(path, ['P'])
+        self.assertEqual(d['P']['disposition'], 'clear_at_input', d)
+
+    def test_a_marker_is_not_a_stack_partner(self):
+        """A and B unseated with FID1 at one origin: A's only real partner
+        is B, still undecided -- A stays, B is staged on A."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _two_part_board(td, 'mk', [_wide('A'), _narrow('B'), FID])
+            _st, d = self._dispose(path, ['A', 'B'])
+        self.assertEqual(d['A']['disposition'], 'clear_at_input', d)
+        self.assertEqual(d['B']['refused_by'], ['coincident', 'A'], d)
+
+    def test_a_stack_is_per_face(self):
+        """A and B unseated on F, C and D seated on B, one origin: A is in
+        no F-side stack until B is decided."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _two_part_board(td, 'faces', [
+                _wide('A'), _narrow('B'), _wide('C', 'B'), _narrow('D', 'B')])
+            _st, d = self._dispose(path, ['A', 'B'])
+        self.assertEqual(d['A']['disposition'], 'clear_at_input', d)
+        self.assertEqual(d['B']['refused_by'], ['coincident', 'A'], d)
+
+    def test_a_locked_part_is_a_partner_whatever_the_names(self):
+        """BIG is locked and never decided; the unseated part on it is
+        staged whether its name sorts before BIG or after."""
+        for name in ('A1', 'Z1'):
+            parts = [_fp('BIG', 20, 20, 0, [('1', 0, 0, 'rect', 2, 2, 1)],
+                         crt=(-9, -8, 9, 8)),
+                     _fp(name, 20, 20, 0, [('1', 0, 0, 'rect', 2, 2, 2)],
+                         crt=(-7.5, -6.5, 7.5, 6.5))]
+            with tempfile.TemporaryDirectory() as td:
+                path = _two_part_board(td, 'lk', parts)
+                _st, d = self._dispose(path, ['BIG', name],
+                                       locked={'BIG'})
+            self.assertEqual(d['BIG']['disposition'], 'locked_at_input')
+            self.assertEqual(d[name]['disposition'], 'staged', (name, d))
+
+    def test_the_fallback_says_so(self):
+        """No board file: the search's mirror decides, and the record
+        says which answer it is."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _two_part_board(td, 'fb', [_wide('A'), _narrow('B')])
+            import pose_score
+            st = pose_score.make_state(parse_kicad_pcb(path), path,
+                                       clearance=0.2)
+        st.pcb_file = None
+        d = seeder._dispose_unseated(st, ['B'])
+        self.assertTrue(d['B']['basis'].startswith('search predicates'), d)
+
+
+class TheStackRule(unittest.TestCase):
+    """`placement_state.coincident_stack_groups`, the rule check_assembly
+    and the disposition share: markers exempt, two real parts a stack."""
+
+    def test_one_part_on_a_fiducial_is_no_stack(self):
+        from placement import placement_state
+        with tempfile.TemporaryDirectory() as td:
+            path = _two_part_board(td, 'f1', [_narrow('R'), FID])
+            self.assertEqual(placement_state.coincident_stack_groups(
+                parse_kicad_pcb(path), path), [])
+            path = _two_part_board(td, 'f2', [_narrow('R'), _wide('C')])
+            groups = placement_state.coincident_stack_groups(
+                parse_kicad_pcb(path), path)
+        self.assertEqual([sorted(g['refs']) for g in groups], [['C', 'R']])
+
+
 class PlaceSeedHelpers(unittest.TestCase):
 
     def test_staged_placed_and_repairable(self):

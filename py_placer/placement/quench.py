@@ -767,8 +767,12 @@ class _Part:
         # #1206: one box per cluster of drilled pads (a FarSide when there
         # are several) -- the grader's far side, so the seat and the grade
         # agree on what a part presents through the board.
+        # `courtyard_sides` is the BOARD's map: this part's entry is what
+        # names its far courtyard (the second phase-2 verifier: handed the
+        # whole map, `far_courtyard_of` answered None for every part, and the
+        # search admitted a 0603 under a drawn B.CrtYd the grader flags).
         tlb = (legality.far_side_local(fp, legality.far_courtyard_of(
-            courtyard_sides, self.side)) if self.has_tht else None)
+            courtyard_sides.get(ref), self.side)) if self.has_tht else None)
         self.tht_by_rot = ({r: legality.rotate_far(tlb, r) for r in ROTATIONS}
                            if tlb is not None else None)
         # A non-90-degree seed rotation brings its WHOLE 90-degree lattice:
@@ -1943,8 +1947,10 @@ class QuenchState:
         `poses` ({ref: (x, y, rot)}) overrides the parts' current poses --
         a declared pose is judged against its obstacles' DECLARED poses
         (`seeder._fixed_pose_check`), not wherever they sit right now."""
-        if not self.pin_frame_refs or getattr(self, 'courtyards_ignored',
-                                               False):
+        # NOT skipped under `courtyards_ignored`: that is courtyards_overlap,
+        # and a pin is KiCad's pth/npth_inside_courtyard, whose own project
+        # severity the grader's pairs already honour (phase-3 verifier).
+        if not self.pin_frame_refs:
             return []
         if self._pin_census_obj is None:
             self._pin_census_obj = legality.CourtyardCensus(self.pcb_data,

@@ -625,7 +625,8 @@ def main():
         for q in pin_hits:
             frame, other = ((q.a, q.b) if q.a in g['containers']
                             else (q.b, q.a))
-            print(f"    {other} over {frame} pin(s) {', '.join(q.pins)}  "
+            print(f"    {other} over {frame} pin(s) "
+                  f"{', '.join(x or '(unnumbered NPTH)' for x in q.pins)}  "
                   f"{q.area_mm2}mm2  side {q.side}")
     not_buildable = bool(g['blocking'] or locked_contact or stack_groups
                          or g['containment_blocking']

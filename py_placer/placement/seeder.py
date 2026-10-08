@@ -957,9 +957,14 @@ def _dispose_unseated(state, refs: Sequence[str],
     # own conflicts from it, partners filtered by what is decided so far.
     _pending = [r for r in todo if r in state.parts
                 and not (state.parts[r].locked or r in locked)]
-    graded = (_graded_input_conflicts(state, _pending, waivers=waivers,
-                                      keepouts=keepouts)
-              if _pending else {})
+    graded, graded_why = (_graded_input_conflicts(
+        state, _pending, waivers=waivers, keepouts=keepouts)
+        if _pending else ({}, None))
+    # Only parts that WILL be decided are pending partners: a locked or
+    # must_lock part later in name order is never decided -- it stays where
+    # it is -- so a conflict with it is a conflict with a part on the board
+    # (the second phase-2 verifier: the outcome depended on the NAME).
+    _pending_set = set(_pending)
     for i, ref in enumerate(todo):
         part = state.parts.get(ref)
         if part is None:
@@ -978,7 +983,10 @@ def _dispose_unseated(state, refs: Sequence[str],
             # The parts still to decide are not obstacles yet; the ones
             # already LEFT where they are now are, so two unseated parts are
             # never both left on one spot.
-            undecided = set(todo[i + 1:]) | set(staged)
+            undecided = ({r for r in todo[i + 1:] if r in _pending_set}
+                         | set(staged))
+            rec['basis'] = ('check_assembly' if graded is not None else
+                            f'search predicates ({graded_why})')
             if graded is None:
                 conflict = _input_pose_conflict(state, ref, pose, undecided)
             else:
@@ -1025,8 +1033,10 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
     pins), `floorplan.mating_keepout_findings` (a plug's mating region; the
     `other` is the keep-out's name) and `placement_state.
     coincident_stack_groups`. Sorted, so the first conflict a part reports
-    is not a hash accident. None when the board cannot be written or graded
-    (no source file): the caller falls back to `_input_pose_conflict`."""
+    is not a hash accident. Returns `(conflicts, None)`, or `(None, why)`
+    when the board cannot be written or graded: the caller then falls back to
+    `_input_pose_conflict` and records `why` in each part's `basis`, so the
+    weaker answer is never silent."""
     import contextlib
     import io
     import os
@@ -1039,7 +1049,7 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
     from .writer import write_placed_output
     src = getattr(state, 'pcb_file', None)
     if not src or not os.path.isfile(src):
-        return None
+        return None, 'no board file to grade'
     refs = set(refs)
     placements = []
     for r, p in sorted(state.parts.items()):
@@ -1052,7 +1062,7 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
         dst = os.path.join(td, os.path.basename(src))
         with contextlib.redirect_stdout(io.StringIO()):
             if not write_placed_output(src, dst, placements):
-                return None
+                return None, 'the board could not be written'
         from copy_board import SIBLING_EXTS          # ONE list (#711)
         for ext in SIBLING_EXTS:
             sib = os.path.splitext(src)[0] + ext
@@ -1066,8 +1076,8 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
             mating = _fp.mating_keepout_findings(
                 pcb, dst, declared=tuple(keepouts or ()))
             stacks = coincident_stack_groups(pcb, dst)
-    except Exception:                                        # noqa: BLE001
-        return None
+    except Exception as exc:                                 # noqa: BLE001
+        return None, f'the grade raised {type(exc).__name__}: {exc}'
     finally:
         shutil.rmtree(td, ignore_errors=True)
     out: Dict[str, List[Tuple[str, str]]] = {}
@@ -1083,12 +1093,22 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
             _add(q.b, channel, q.a)
     for m in mating or ():
         _add(m.get('ref'), 'mating', str(m.get('keepout')))
+    def _faces(r):
+        from .legality import (footprint_has_through_pads, footprint_side,
+                               sides_occupied)
+        fp = pcb.footprints[r]
+        return sides_occupied(footprint_side(fp),
+                              footprint_has_through_pads(fp))
     for grp in stacks or ():
         parts = [r for r in grp['refs'] if not is_assembly_marker(pcb, r)]
         for r in parts:
             for o in parts:
-                _add(r, 'coincident', o)
-    return {r: sorted(set(v)) for r, v in out.items()}
+                # A stack is per PHYSICAL FACE (`assess_placement` splits
+                # each point by side): an F part over two B parts at one
+                # origin is not in their group (second phase-2 verifier).
+                if o != r and _faces(r) & _faces(o):
+                    _add(r, 'coincident', o)
+    return {r: sorted(set(v)) for r, v in out.items()}, None
 
 
 def _input_pose_conflict(state, ref: str, pose, exclude: Set[str]):

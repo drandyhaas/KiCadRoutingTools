@@ -52,8 +52,10 @@ KICAD_CLI = (os.environ.get('KICAD_CLI')
 RULES = ('pth_inside_courtyard', 'npth_inside_courtyard')
 # Locale-independent: kicad-cli prints in the user's KiCad language
 # ('PTH pad 16 [+3V3] of U8', 'PTH-pad 16 [+3V3] van U8'), so match
-# the SHAPE -- pad number, optional [net], one word, the reference.
-_PAD = re.compile(r'pad\s+(\S+)\s+(?:\[[^\]]*\]\s+)?\S+\s+(\S+)', re.I)
+# the SHAPE -- an optional pad number (an NPTH hole often has none: 'NPTH-pad
+# van FR'), an optional [net], one word, the reference.
+_PAD = re.compile(r'pad\s+(?:(\S+)\s+)?(?:\[[^\]]*\]\s+)?\S+\s+(\S+)',
+                  re.I)
 _FP = re.compile(r'[Ff]ootprint (\S+)')
 
 
@@ -104,7 +106,7 @@ def kicad_items(board, td):
             d = it.get('description', '')
             m = _PAD.search(d)
             if m and owner is None:
-                pin, owner = m.group(1), m.group(2)
+                pin, owner = m.group(1) or '', m.group(2)
                 continue
             m = _FP.search(d)
             if m:
@@ -115,27 +117,29 @@ def kicad_items(board, td):
 
 
 def ours(board):
-    """{(frame, other): {pins}} from check_assembly's own channel, and the
-    board's containers."""
+    """{(frame, other): {pins}} from check_assembly's own GATING pin
+    pairs at the project's own severities (the board handed in is the copy
+    KiCad graded), and the board's containers."""
     from kicad_parser import parse_kicad_pcb
     from placement import legality
     pcb = parse_kicad_pcb(board)
-    g = legality.grade_body_overlap(pcb, 0.2, pcb_file=board,
-                                    courtyard_severity=None)
+    g = legality.grade_body_overlap(pcb, 0.2, pcb_file=board)
     kinds = g['containers']
     out = {}
-    for p in g['pairs']:
-        if p.kind != 'pin_in_courtyard':
-            continue
+    for p in g['pin_in_courtyard_pairs']:
         frame, other = (p.a, p.b) if p.a in kinds else (p.b, p.a)
-        out[(frame, other)] = set(p.pins)
+        out.setdefault((frame, other), set()).update(p.pins)
     return out, kinds
 
 
 def compare(board):
     with tempfile.TemporaryDirectory() as td:
-        k = kicad_items(board, td)
-    mine, kinds = ours(board)
+        # ONE copy for both referees: `ours` grades the project KiCad was
+        # handed, both pin rules at error. Grading the original instead made
+        # a project that ignores them disagree with KiCad by construction.
+        path = _scratch(board, td)
+        k = kicad_items(path, td)
+        mine, kinds = ours(path)
     missed, extra, ordinary = [], [], []
     for (owner, other), pins in sorted(k.items()):
         if owner not in kinds:

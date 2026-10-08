@@ -482,5 +482,158 @@ class AFarFaceCourtyardIsFarSide(unittest.TestCase):
         self.assertIsNone(legality.far_courtyard_of(None, 'F'))
 
 
+class TheSecondVerifiersSites(unittest.TestCase):
+    """The second phase-2 verifier's surviving sites, one witness each."""
+
+    def _mm(self, td, *extra, name='fc'):
+        return _write(td, name, [
+            _tht('MM', 20, 20, [(-3.5, 0), (3.5, 0)], crt=2.0, fab=1.5,
+                 crt_far=(-4.5, -2, 4.5, 2))] + list(extra))
+
+    def test_the_search_sees_a_drawn_far_courtyard(self):
+        """The grader flags R1 under MM's B.CrtYd; the search used to admit
+        it (the board-wide courtyard map in place of MM's own entry)."""
+        import pose_score
+        with tempfile.TemporaryDirectory() as td:
+            path = self._mm(td, _smd('R1', 30, 30, half=(1.5, 0.8)))
+            st = pose_score.make_state(parse_kicad_pcb(path), path,
+                                       clearance=0.2)
+        self.assertEqual(st.candidate_veto('R1', 20.0, 20.0, 0.0,
+                                           exclude=set()),
+                         ('courtyard', 'MM'))
+
+    def test_plan_check_charges_a_drawn_far_courtyard(self):
+        """P1 draws its 10 x 4 courtyard on both faces; on B it fills the
+        zone Q1 and Q2 already fill (40 + 40 of 40): forced 40 mm2, an ERROR
+        over a 2.5 budget. Read off the search state, the far courtyard was
+        charged nowhere: a WARN."""
+        from placement import floorplan
+        with tempfile.TemporaryDirectory() as td:
+            p1 = ('  (footprint "t:P1" (layer "F.Cu") (at 20 20)\n'
+                  '    (property "Reference" "P1" (at 0 0))\n'
+                  '    (fp_rect (start -5 -2) (end 5 2) (stroke (width 0.05)'
+                  ' (type default)) (layer "F.CrtYd"))\n'
+                  '    (fp_rect (start -5 -2) (end 5 2) (stroke (width 0.05)'
+                  ' (type default)) (layer "B.CrtYd"))\n'
+                  '    (pad "1" thru_hole circle (at -4 0) (size 1 1) (drill'
+                  ' 0.6) (layers "*.Cu") (net 1 "N1"))\n'
+                  '    (pad "2" thru_hole circle (at 4 0) (size 1 1) (drill'
+                  ' 0.6) (layers "*.Cu") (net 1 "N1")))\n')
+            path = _write(td, 'p1', [p1,
+                _smd('Q1', 17.5, 20, half=(2.5, 2.0)),
+                _smd('Q2', 22.5, 20, half=(2.5, 2.0))])
+            intent = floorplan.intent_from_dict({
+                'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+                'blocks': [{'name': 'z', 'refs': ['P1', 'Q1', 'Q2'],
+                            'zone': [15, 18, 25, 22], 'tolerance_mm': 0}],
+                'legality_budget': {'overlap_area': 2.5}}, path)
+            found, _m = floorplan.plan_check(intent, parse_kicad_pcb(path),
+                                             path)
+        self.assertTrue([v for v in found if v.rule == 'plan_zone_overfull'],
+                        found)
+
+    def test_the_seam_reads_the_far_courtyard(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._mm(td, _smd('R1', 20, 23.5, half=(1.0, 0.5),
+                                     fab=(0.8, 0.4)), name='seam')
+            g = legality.grade_body_overlap(parse_kicad_pcb(path), 0.2,
+                                            pcb_file=path)
+        self.assertLess(g['body_seam']['mm'], 2.0, g['body_seam'])
+
+    def test_the_mating_region_reads_the_far_courtyard(self):
+        """P sits on the main body; its B.CrtYd reaches 2 mm onto the USB
+        tongue (mating:J1)."""
+        import test_1098_mating_keepout as t1098
+        from placement import floorplan
+        P = ('  (footprint "t:P" (layer "F.Cu") (at 15 14)\n'
+             '    (property "Reference" "P" (at 0 0) (layer "F.SilkS"))\n'
+             '    (fp_rect (start -1.5 -1) (end 1.5 1) (stroke (width 0.05)'
+             ' (type default)) (layer "F.CrtYd"))\n'
+             '    (fp_rect (start -3 -1) (end 3 8) (stroke (width 0.05)'
+             ' (type default)) (layer "B.CrtYd"))\n'
+             '    (pad "1" thru_hole circle (at -1 0) (size 0.8 0.8) (drill'
+             ' 0.5) (layers "*.Cu" "*.Mask") (net 1 "N1"))\n'
+             '    (pad "2" thru_hole circle (at 1 0) (size 0.8 0.8) (drill'
+             ' 0.5) (layers "*.Cu" "*.Mask") (net 2 "N2")))\n')
+        with tempfile.TemporaryDirectory() as td:
+            path = t1098.board(td, r1=(25, 10, 'F.Cu'), hole=False)
+            with open(path, encoding='utf-8') as fh:
+                text = fh.read().rstrip()
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write(text[:-1] + P + ')\n')
+            pcb = parse_kicad_pcb(path)
+            refs = {m['ref'] for m in floorplan.mating_keepout_findings(
+                pcb, path)}
+        self.assertIn('P', refs)
+
+    def test_overlapping_far_boxes_are_counted_once(self):
+        fs = legality.FarSide([(0, 0, 2, 1), (1, 0, 3, 1)])
+        self.assertFalse(fs.disjoint)
+        self.assertAlmostEqual(legality.far_overlap_area(fs, (0, 0, 3, 1)),
+                               3.0)
+        self.assertTrue(legality.FarSide([(0, 0, 1, 1),
+                                          (2, 0, 3, 1)]).disjoint)
+
+    def test_every_fill_site_goes_through_ensure_rotation(self):
+        """The swap and the nudge fill their caches with ensure_rotation,
+        and nothing else writes a rotation cache -- not by assignment, by
+        augmented assignment, or by setdefault/update."""
+        import ast
+        caches = {'tht_by_rot', 'bounds_by_rot', 'grade_by_rot'}
+        allowed = {('quench.py', '__init__'), ('quench.py', 'ensure_rotation')}
+        bad, calls = [], 0
+        pl = os.path.join(ROOT, 'py_placer', 'placement')
+        for name in sorted(os.listdir(pl)):
+            if not name.endswith('.py'):
+                continue
+            with open(os.path.join(pl, name), encoding='utf-8') as fh:
+                tree = ast.parse(fh.read())
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in ast.walk(fn):
+                    tgt = []
+                    if isinstance(node, (ast.Assign, ast.AugAssign)):
+                        tgt = (node.targets if isinstance(node, ast.Assign)
+                               else [node.target])
+                        hit = any(isinstance(t, ast.Subscript)
+                                  and isinstance(t.value, ast.Attribute)
+                                  and t.value.attr in caches for t in tgt)
+                    elif isinstance(node, ast.Call) and isinstance(
+                            node.func, ast.Attribute):
+                        if node.func.attr == 'ensure_rotation' and \
+                                name == 'quench.py' and fn.name == 'quench':
+                            calls += 1
+                        hit = (node.func.attr in ('setdefault', 'update')
+                               and isinstance(node.func.value, ast.Attribute)
+                               and node.func.value.attr in caches)
+                    else:
+                        continue
+                    if hit and (name, fn.name) not in allowed:
+                        bad.append((name, fn.name, node.lineno))
+        self.assertEqual(bad, [])
+        self.assertGreaterEqual(calls, 2, 'the swap and the nudge')
+
+    def test_measure_counts_far_vs_far_contact_as_real(self):
+        """Two F-side THT parts meeting at one post on the far face: real
+        contact the classifier must keep (CM5's Module301/302 shape)."""
+        import measure_1206_far_side_clusters as m
+        with tempfile.TemporaryDirectory() as td:
+            path = _write(td, 'ff2', [
+                _tht('A', 10, 20, [(0, 0), (20, 0)]),
+                _tht('B', 20, 20, [(0, 0), (10, 0)])])
+            rows, bad = m.measure(path)
+        self.assertEqual(bad, [])
+        self.assertEqual([r[0] for r in rows], ['real'])
+
+    def test_verdict_changes_sees_ulx3s(self):
+        import measure_1206_far_side_clusters as m
+        got = m.verdict_changes(os.path.join(ROOT, 'kicad_files',
+                                             'ulx3s.kicad_pcb'))
+        self.assertEqual(len([v for v in got
+                              if v[0] == 'BLOCKING-REMOVED']), 8, got)
+        self.assertFalse([v for v in got if v[0] == 'BLOCKING-ADDED'])
+
+
 if __name__ == '__main__':
     unittest.main()

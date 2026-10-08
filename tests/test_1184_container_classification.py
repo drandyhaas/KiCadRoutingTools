@@ -111,7 +111,7 @@ class AnSmdHolderIsABody(unittest.TestCase):
         self.assertEqual(g['containers'], {})
         self.assertTrue([p for p in g['courtyard_blocking_pairs']
                          if {p.a, p.b} == {'BAT1', 'DC1'}])
-        self.assertEqual(veto[0], 'courtyard')
+        self.assertEqual((veto or (None,))[0], 'courtyard', veto)
 
     def test_locked(self):
         """The issue: locked, the seeder exempted it and the grader did
@@ -120,7 +120,7 @@ class AnSmdHolderIsABody(unittest.TestCase):
         self.assertEqual(g['containers'], {})
         self.assertTrue([p for p in g['courtyard_blocking_pairs']
                          if {p.a, p.b} == {'BAT1', 'DC1'}])
-        self.assertEqual(veto[0], 'courtyard')
+        self.assertEqual((veto or (None,))[0], 'courtyard', veto)
 
 
 class AnOutlineNeverGates(unittest.TestCase):
