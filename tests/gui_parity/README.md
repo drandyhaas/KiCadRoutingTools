@@ -353,7 +353,10 @@ skip cleanly without KiCad python). Run any directly:
   the reopen path (`restore_dialog_settings`), restore from a LEGACY dict
   carrying keys a newer version dropped, and re-save key parity. Deleting or
   renaming a control without updating persistence crashes on CLOSE and loses
-  the user's settings -- this gate is what catches that.
+  the user's settings -- this gate is what catches that. Key parity cannot see
+  a VALUE that silently fails to come back, so it also round-trips one: a
+  non-current Escalation choice must reappear in a fresh dialog (it never did
+  from #857 until the fix: a swallowed NameError on `wx.NOT_FOUND`).
 - `test_900_live_class_clearance.py` -- `apply_targets_to_board` must write the
   net classes at the ROUTED clearance, never at the `rules.min_clearance` value
   capped at a pad's `(clearance ...)` override (#530/#900). The signal, planes

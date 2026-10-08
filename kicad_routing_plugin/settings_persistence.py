@@ -334,7 +334,11 @@ def restore_dialog_settings(dialog, settings):
     # Escalation choice (#857).
     if 'escalation' in settings:
         try:
-            if dialog.escalation.FindString(str(settings['escalation'])) != wx.NOT_FOUND:
+            # FindString answers wx.NOT_FOUND (-1) for a choice this version
+            # dropped. Compared as an index: this module never imports wx, and
+            # spelling it wx.NOT_FOUND was a NameError the except swallowed,
+            # so the saved choice never came back.
+            if dialog.escalation.FindString(str(settings['escalation'])) >= 0:
                 dialog.escalation.SetStringSelection(str(settings['escalation']))
         except Exception:
             pass
