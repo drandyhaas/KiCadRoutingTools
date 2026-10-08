@@ -415,3 +415,42 @@ def gate_or_exit(pcb_data, pcb_file, tool: str, *, allow_unplaced: bool = False,
     if blocking and not warn_only:
         sys.exit(UNPLACED_EXIT)
     return st
+
+
+#: Part classes whose co-location is by design: fiducials, mounting holes and
+#: testpoints are stacked on purpose, and one real part on a fiducial is not
+#: a stack of parts (check_assembly's COINCIDENT ORIGINS, run 19).
+ASSEMBLY_MARKER_CLASSES = ('fiducial', 'mount_hole', 'testpoint')
+
+
+def is_assembly_marker(pcb_data, ref: str) -> bool:
+    """True when `ref` is an `ASSEMBLY_MARKER_CLASSES` part."""
+    from placement.part_class import classify_part
+    try:
+        return classify_part(pcb_data.footprints[ref],
+                             ref).name in ASSEMBLY_MARKER_CLASSES
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def coincident_stack_groups(pcb_data, pcb_file: Optional[str] = None
+                            ) -> List[Dict]:
+    """check_assembly's COINCIDENT ORIGINS channel: `[{point, refs}]`, one
+    entry per origin (rounded to 1 um) holding >= 2 suspect NON-marker
+    parts. `assess_placement` buckets the pad-bearing parts, partitions each
+    bucket by physical side and exonerates all-marker side-groups; `refs`
+    keeps every suspect part at the point, markers included. One function,
+    so the seeder's #1151 disposition and the grader cannot disagree about
+    what a stack is."""
+    suspect = assess_placement(pcb_data, pcb_file=pcb_file).stacked_suspect_refs
+    buckets: Dict = {}
+    for ref in suspect:
+        fp = (pcb_data.footprints or {}).get(ref)
+        if fp is None:
+            continue
+        buckets.setdefault((round(fp.x, 3), round(fp.y, 3)), []).append(ref)
+    return [{'point': [pt[0], pt[1]], 'refs': refs}
+            for pt, refs in sorted(buckets.items())
+            if sum(1 for r in refs
+                   if not is_assembly_marker(pcb_data, r)) >= 2]
+

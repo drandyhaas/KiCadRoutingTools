@@ -93,13 +93,6 @@ FALLBACK_STEP_MM = 2.0
 TARGET_JITTER_MM = 1.5
 
 
-def _rotate_far(r, rot):
-    """`legality.rotate_far`: a far-side value turned cluster by cluster
-    (#1206), so a rotation cache never flattens a FarSide to its union."""
-    from .legality import rotate_far
-    return rotate_far(r, rot)
-
-
 def _rect_inside(rect, outer, tol: float) -> bool:
     return (rect[0] >= outer[0] - tol and rect[1] >= outer[1] - tol
             and rect[2] <= outer[2] + tol and rect[3] <= outer[3] + tol)
@@ -904,7 +897,8 @@ STAGING_PITCH_GAP_MM = 1.0
 
 
 def _dispose_unseated(state, refs: Sequence[str],
-                      locked=()) -> Dict[str, Dict]:
+                      locked=(), waivers=(),
+                      keepouts=()) -> Dict[str, Dict]:
     """Decide where each part the seed could not seat is WRITTEN (#1151).
 
     A part with no seat used to keep the pose it came in with, while every
@@ -924,19 +918,26 @@ def _dispose_unseated(state, refs: Sequence[str],
         would be frozen off the board;
       * `off_board`       -- its rect is already wholly outside the board;
       * `clear_at_input`  -- at its input pose it makes no HARD conflict with
-        what was seated or left before it (`_input_pose_conflict`): left
+        what was seated or left before it (`_graded_input_conflicts`): left
         where it is;
       * `staged`          -- it does: moved to a deterministic row below the
         board, rotation kept, and written there;
       * `not_modelled`    -- not a search part (nothing to decide).
 
-    HARD means what the grader flags whatever moved: pad copper overlapping
-    or stacked on pad copper, a body inside a body, pads under a body. NOT the
-    seat predicate (`pose_ok`), which also demands full containment and a
+    HARD means what check_assembly gates whatever moved, between the part and
+    a neighbour, READ FROM check_assembly's OWN CHANNELS on the board as it
+    would be written (`_graded_input_conflicts`): a pad intersection, a
+    gating containment (pads under a body included), a pin frame's pin under
+    its courtyard, a plug's mating region, a coincident origin -- with the
+    intent's `overlap_waivers` honoured as check_assembly honours them. NOT
+    the seat predicate (`pose_ok`), which also demands full containment and a
     clearance gap: measured on ulx3s, it called the designer's own edge
     connectors J1/J2 illegal at their overhanging edge poses and staged them
     off the board -- 36% more crossings and four edge_connector intent errors
-    on a seed with no stack at all.
+    on a seed with no stack at all. Nor a mirror of the grader built from the
+    search's own predicates: that one was stricter (AABB pads, a rect
+    containment test, no waivers) and looser (no mating region, no
+    coincident origin) at once (phase-2 verifier).
 
     Returns `{ref: {disposition, input, written, refused_by}}`; `refused_by`
     is `candidate_veto`'s `(check, blocker)` at the input pose for a staged
@@ -949,6 +950,14 @@ def _dispose_unseated(state, refs: Sequence[str],
     bb = getattr(getattr(state, 'pcb_data', None), 'board_info', None)
     bb = getattr(bb, 'board_bounds', None)
     staged: List[str] = []
+    # One grade of the board with every part in `refs` at its INPUT pose and
+    # every other at the pose the search gave it; each part below reads its
+    # own conflicts from it, partners filtered by what is decided so far.
+    _pending = [r for r in todo if r in state.parts
+                and not (state.parts[r].locked or r in locked)]
+    graded = (_graded_input_conflicts(state, _pending, waivers=waivers,
+                                      keepouts=keepouts)
+              if _pending else {})
     for i, ref in enumerate(todo):
         part = state.parts.get(ref)
         if part is None:
@@ -968,7 +977,11 @@ def _dispose_unseated(state, refs: Sequence[str],
             # already LEFT where they are now are, so two unseated parts are
             # never both left on one spot.
             undecided = set(todo[i + 1:]) | set(staged)
-            conflict = _input_pose_conflict(state, ref, pose, undecided)
+            if graded is None:
+                conflict = _input_pose_conflict(state, ref, pose, undecided)
+            else:
+                conflict = next((c for c in graded.get(ref, ())
+                                 if c[1] not in undecided), None)
             if conflict is None:
                 rec['disposition'] = 'clear_at_input'
             else:
@@ -998,12 +1011,92 @@ def _dispose_unseated(state, refs: Sequence[str],
     return out
 
 
+def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
+    """`{ref: [(channel, other), ...]}`: every HARD finding check_assembly
+    makes between a part in `refs` -- written at its INPUT pose -- and
+    another part, every other part at the pose the search gave it (#1151).
+
+    The grader is CALLED, on the board as it would be written: written to a
+    scratch copy (siblings carried, so the project's courtyard severity and
+    rules hold) and graded with `grade_body_overlap` (pad intersections,
+    gating containments -- pads under a body included -- and a pin frame's
+    pins), `floorplan.mating_keepout_findings` (a plug's mating region; the
+    `other` is the keep-out's name) and `placement_state.
+    coincident_stack_groups`. Sorted, so the first conflict a part reports
+    is not a hash accident. None when the board cannot be written or graded
+    (no source file): the caller falls back to `_input_pose_conflict`."""
+    import contextlib
+    import io
+    import os
+    import shutil
+    import tempfile
+    from kicad_parser import parse_kicad_pcb
+    from . import floorplan as _fp
+    from .legality import grade_body_overlap
+    from .placement_state import coincident_stack_groups, is_assembly_marker
+    from .writer import write_placed_output
+    src = getattr(state, 'pcb_file', None)
+    if not src or not os.path.isfile(src):
+        return None
+    refs = set(refs)
+    placements = []
+    for r, p in sorted(state.parts.items()):
+        x, y, rot = ((p.seed_x, p.seed_y, p.orig_rot) if r in refs
+                     else (p.x, p.y, p.rot))
+        placements.append({'reference': r, 'new_x': x, 'new_y': y,
+                           'new_rotation': rot})
+    td = tempfile.mkdtemp(prefix='dispose_')
+    try:
+        dst = os.path.join(td, os.path.basename(src))
+        with contextlib.redirect_stdout(io.StringIO()):
+            if not write_placed_output(src, dst, placements):
+                return None
+        from copy_board import SIBLING_EXTS          # ONE list (#711)
+        for ext in SIBLING_EXTS:
+            sib = os.path.splitext(src)[0] + ext
+            if os.path.isfile(sib):
+                shutil.copy2(sib, os.path.splitext(dst)[0] + ext)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pcb = parse_kicad_pcb(dst)
+            g = grade_body_overlap(pcb, getattr(state, 'clearance', 0.2),
+                                   intent_waivers=tuple(waivers or ()),
+                                   pcb_file=dst)
+            mating = _fp.mating_keepout_findings(
+                pcb, dst, declared=tuple(keepouts or ()))
+            stacks = coincident_stack_groups(pcb, dst)
+    except Exception:                                        # noqa: BLE001
+        return None
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    out: Dict[str, List[Tuple[str, str]]] = {}
+
+    def _add(ref, channel, other):
+        if ref in refs and other != ref:
+            out.setdefault(ref, []).append((channel, other))
+    for channel, key in (('pads', 'blocking_pairs'),
+                         ('containment', 'containment_blocking_pairs'),
+                         ('pin_in_courtyard', 'pin_in_courtyard_pairs')):
+        for q in g.get(key) or ():
+            _add(q.a, channel, q.b)
+            _add(q.b, channel, q.a)
+    for m in mating or ():
+        _add(m.get('ref'), 'mating', str(m.get('keepout')))
+    for grp in stacks or ():
+        parts = [r for r in grp['refs'] if not is_assembly_marker(pcb, r)]
+        for r in parts:
+            for o in parts:
+                _add(r, 'coincident', o)
+    return {r: sorted(set(v)) for r, v in out.items()}
+
+
 def _input_pose_conflict(state, ref: str, pose, exclude: Set[str]):
     """`(channel, other)` for the first HARD conflict `ref` makes at `pose`
-    with a part not in `exclude`, or None (#1151). The channels are the ones
-    check_assembly gates whatever moved: pad copper overlapping or stacked
-    (`pair_shortfall`'s `pad_overlap` / `stack`, check_drc's pad-pad test),
-    a body contained in a body, pads under a body."""
+    with a part not in `exclude`, or None (#1151), from the SEARCH's own
+    predicates: pad copper overlapping or stacked (`pair_shortfall`'s
+    `pad_overlap` / `stack`), a body contained in a body, pads under a body.
+    The FALLBACK of `_dispose_unseated`, for a state with no board file to
+    grade -- `_graded_input_conflicts` is the answer whenever there is one,
+    because this mirror is both stricter and looser than check_assembly."""
     ctx = getattr(state, 'legality_ctx', None)
     if ctx is not None:
         for other in sorted(state.parts):
@@ -1289,8 +1382,8 @@ def _materialise_rotation(part, rot: float) -> float:
     for exactly this reason; every seat search must too.
 
     KEYED BY THE NORMALISED ANGLE, which is what `_Part.rect` looks up
-    (`bounds_by_rot.get(rot % 360)`). `_try_place` keeps an inline copy that
-    keys by the RAW angle instead, so a part whose board spells its rotation
+    (`bounds_by_rot.get(rot % 360)`). `_try_place` fills by the RAW angle
+    instead (`_Part.ensure_rotation(_r)`), so a part whose board spells its rotation
     -45 gets an entry at -45 that `rect` never reads and is judged on the
     unrotated box anyway. That is a real bug and it is deliberately NOT fixed
     here: 14 of 40 corpus boards spell a rotation outside [0, 360), fixing it
@@ -1301,13 +1394,7 @@ def _materialise_rotation(part, rot: float) -> float:
     the two callers cannot disagree on anything a declaration can express.
     """
     rot = rot % 360.0
-    if rot not in part.bounds_by_rot:
-        from placement.legality import rotate_local_bounds
-        part.bounds_by_rot[rot] = rotate_local_bounds(
-            *part.bounds_by_rot[0.0], rot)
-    if part.tht_by_rot is not None and rot not in part.tht_by_rot:
-        from placement.legality import rotate_local_bounds
-        part.tht_by_rot[rot] = _rotate_far(part.tht_by_rot[0.0], rot)
+    part.ensure_rotation(rot)
     return rot
 
 
@@ -1543,15 +1630,7 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                                                    for d in (90.0, 180.0, 270.0)])
                 # #893 (PR932 form, VERBATIM -- see the commit message).
                 for _r in _ladder_rots:
-                    if _r not in part.bounds_by_rot:
-                        from placement.legality import rotate_local_bounds
-                        part.bounds_by_rot[_r] = rotate_local_bounds(
-                            *part.bounds_by_rot[0.0], _r)
-                    if (part.tht_by_rot is not None
-                            and _r not in part.tht_by_rot):
-                        from placement.legality import rotate_local_bounds
-                        part.tht_by_rot[_r] = _rotate_far(
-                            part.tht_by_rot[0.0], _r)
+                    part.ensure_rotation(_r)
                 # OPT-IN (`seed_from_intent(rotate_by_facing=True)`): let every
                 # angle of the ladder find its own first fit, and keep the pose
                 # with the fewest connected pads on a row facing the outline
@@ -4804,13 +4883,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 _want = (_edge_decl[0] if _edge_decl[0] is not None
                          else _geo_rot) % 360.0
                 if abs((part.rot % 360.0) - _want) > 1e-9:
-                    if _want not in part.bounds_by_rot:
-                        from placement.legality import rotate_local_bounds
-                        part.bounds_by_rot[_want] = rotate_local_bounds(
-                            *part.bounds_by_rot[0.0], _want)
-                        if part.tht_by_rot is not None:
-                            part.tht_by_rot[_want] = _rotate_far(
-                                part.tht_by_rot[0.0], _want)
+                    part.ensure_rotation(_want)
                     notes.append(
                         f"edge connector {ref}: seated at the declared "
                         f"rotation {_want:g}deg (input was {part.rot:g}deg)"
@@ -6257,7 +6330,10 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # placement row; one left at its input pose needs none.
     disposition = (_dispose_unseated(
         state, [r for r in set(unseated) | set(held) if r not in placed],
-        locked=set(lock_refs) | fixed_lock)
+        locked=set(lock_refs) | fixed_lock,
+        waivers=(intent.waiver_pairs() if hasattr(intent, 'waiver_pairs')
+                 else ()),
+        keepouts=tuple(getattr(intent, 'keepouts', None) or ()))
         if dispose_unseated else {})
     staged = {r for r, d in disposition.items()
               if d['disposition'] == 'staged'}

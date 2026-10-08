@@ -755,7 +755,8 @@ class _Part:
         # #1206: one box per cluster of drilled pads (a FarSide when there
         # are several) -- the grader's far side, so the seat and the grade
         # agree on what a part presents through the board.
-        tlb = legality.far_side_local(fp) if self.has_tht else None
+        tlb = (legality.far_side_local(fp, legality.far_courtyard_of(
+            courtyard_sides, self.side)) if self.has_tht else None)
         self.tht_by_rot = ({r: legality.rotate_far(tlb, r) for r in ROTATIONS}
                            if tlb is not None else None)
         # A non-90-degree seed rotation brings its WHOLE 90-degree lattice:
@@ -776,6 +777,20 @@ class _Part:
         self.locked = locked
         self.nets = sorted({n for _, _, n in self.pads_local})
         self.halo = halo_base + halo_coef * math.sqrt(max(self.pin_count, 1))
+
+    def ensure_rotation(self, rot):
+        """Fill both rotation caches for `rot`, as given (a caller that
+        wants the normalised key normalises first). THE one place an entry is
+        made after construction (#1206): the far side is turned cluster by
+        cluster (`legality.rotate_far`), so no cache can flatten a FarSide
+        to its union box -- four inline copies of this fill (three in the
+        seeder, one in the swap) each could."""
+        if rot not in self.bounds_by_rot:
+            self.bounds_by_rot[rot] = _rotate_local_bounds(
+                *self.bounds_by_rot[0.0], rot)
+        if self.tht_by_rot is not None and rot not in self.tht_by_rot:
+            self.tht_by_rot[rot] = legality.rotate_far(self.tht_by_rot[0.0],
+                                                       rot)
 
     def rect(self, x=None, y=None, rot=None):
         x = self.x if x is None else x
@@ -4500,10 +4515,10 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 # the bounds entry so rect() does not silently fall back to
                 # rot-0 geometry. Every such angle is already inside the group
                 # closure build_neighbor_lists unioned, so this cannot
-                # invalidate the pruning. No-op for orthogonal parts.
-                if rot not in part.bounds_by_rot:
-                    part.bounds_by_rot[rot] = _rotate_local_bounds(
-                        *part.bounds_by_rot[0.0], rot)
+                # invalidate the pruning. No-op for orthogonal parts. The far
+                # side too (#1206): it used to keep only the bounds, so such
+                # an angle read its drilled pads at rot 0.
+                part.ensure_rotation(rot)
 
             best = (current_cost, part.x, part.y, part.rot)
             for cx, cy in _candidate_positions(part, max_displacement, step,
@@ -4592,14 +4607,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         # rotations; add the partner's rotation lazily so
                         # non-90-degree swaps use correct geometry
                         for p_dst, inherited in ((pa, pb.rot % 360), (pb, pa.rot % 360)):
-                            if inherited not in p_dst.bounds_by_rot:
-                                p_dst.bounds_by_rot[inherited] = _rotate_local_bounds(
-                                    *p_dst.bounds_by_rot[0.0], inherited)
-                            if (p_dst.tht_by_rot is not None
-                                    and inherited not in p_dst.tht_by_rot):
-                                p_dst.tht_by_rot[inherited] = (
-                                    legality.rotate_far(p_dst.tht_by_rot[0.0],
-                                                        inherited))
+                            p_dst.ensure_rotation(inherited)
                         involved = set(pa.nets) | set(pb.nets)
                         other_aw = state.airwires_excluding(involved)
 

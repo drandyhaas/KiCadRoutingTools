@@ -2440,7 +2440,8 @@ def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
         rect = (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)
         tht = None
         if has_tht:
-            tl = legality.far_side_local(fp)
+            tl = legality.far_side_local(fp, legality.far_courtyard_of(
+                crt.get(ref), side))
             if tl is not None:
                 tht = legality.offset_far(legality.rotate_far(tl, rot),
                                           fp.x, fp.y)
@@ -7250,9 +7251,13 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 # past it may sit outside the zone (round-2 verifier: a 12x1
                 # drill rect on a 10x4 courtyard was charged 2 mm2 the grade
                 # never counts). Pose-invariant, since both turn together.
+                # Per CLUSTER of drilled pads (#1206), as the grade measures
+                # the far side: the union box charged ulx3s GPDI1's two shell
+                # posts and the gap between them, and called its own shipped
+                # arrangement (0.0 mm2 under the grade) a forced overlap.
                 far = 'B' if part.side == 'F' else 'F'
                 per_face[far] = per_face.get(far, 0.0) + (
-                    legality.rect_overlap_area(t0, b0))
+                    legality.far_overlap_area(t0, b0))
             counted.append(r)
         worst = max(per_face, key=lambda f_: per_face[f_])
         need = per_face[worst]

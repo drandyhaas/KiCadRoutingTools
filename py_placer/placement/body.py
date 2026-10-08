@@ -141,6 +141,10 @@ class BodyGeometry(NamedTuple):
     # bboxes above as its broad phase.
     court_shape_local: object = None
     drawn_shape_local: object = None
+    # #1206 (phase-2 verifier). A courtyard the footprint draws on its FAR
+    # face, when it draws its own face too (`legality.far_courtyard_of`):
+    # part of a through-hole part's far side, which KiCad grades there.
+    far_court_local: Optional[Bbox] = None
 
 
 def _union(a: Bbox, b: Bbox) -> Bbox:
@@ -189,9 +193,11 @@ def body_geometry(fp, side: str,
     the file read once, and so the rung logic has exactly one home.
     """
     from placement.utility import compute_footprint_bbox_local
+    from placement.legality import far_courtyard_of
     from kicad_parser import non_aperture_pads
 
     ref = ref or getattr(fp, 'reference', '') or ''
+    far_court = far_courtyard_of(courtyard_sides, side)
     pads: Optional[Bbox] = None
     # An aperture-only pad is not a pad here (#1143): a part whose only pads
     # are paste windows has no pads rung, like a pad-less one.
@@ -239,7 +245,8 @@ def body_geometry(fp, side: str,
     else:
         return BodyGeometry(ref, None, None, SOURCE_NONE,
                             silk_rejected=silk_rejected,
-                            drawn_local=None, drawn_source=SOURCE_NONE)
+                            drawn_local=None, drawn_source=SOURCE_NONE,
+                            far_court_local=far_court)
 
     occupancy = (body_local if pads is None else _union(body_local, pads))
     court_shape = (_shape_for_side(courtyard_shapes, side)
@@ -250,7 +257,8 @@ def body_geometry(fp, side: str,
                         silk_rejected=silk_rejected,
                         drawn_local=drawn_local, drawn_source=drawn_source,
                         court_shape_local=court_shape,
-                        drawn_shape_local=drawn_shape)
+                        drawn_shape_local=drawn_shape,
+                        far_court_local=far_court)
 
 
 def board_bodies(pcb_data, pcb_file: Optional[str] = None

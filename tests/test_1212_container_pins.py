@@ -96,9 +96,17 @@ class Synthetic(unittest.TestCase):
                               and 'FR' in (p.a, p.b)])
 
     def test_check_assembly_gates_it_without_a_baseline(self):
+        """On the pin ALONE: P's courtyard covers pin 1's hole and its own
+        pad is 0.5 mm clear of the ring, so no other conjunct can fire (P
+        centred on the hole, its pad on the ring, gated as a pad
+        intersection too and hid a dropped conjunct)."""
         from run_utils import check
         with tempfile.TemporaryDirectory() as td:
-            path = _frame_board(td, [('P', 3.0, 1.5, 1.0)])
+            path = _frame_board(td, [('P', 3.0, 3.1, 2.0)])
+            g = legality.grade_body_overlap(parse_kicad_pcb(path), 0.2,
+                                            pcb_file=path)
+            self.assertEqual((g['blocking'], g['containment_blocking'],
+                              g['pin_in_courtyard']), (0, 0, 1))
             check([sys.executable, '-X', 'utf8',
                    os.path.join(ROOT, 'py_tools', 'check_assembly.py'), path],
                   refuse='PIN IN COURTYARD', code=4)

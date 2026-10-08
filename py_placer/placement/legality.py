@@ -481,16 +481,43 @@ class FarSide(tuple):
         return f"FarSide({tuple(self)}, {len(self.boxes)} boxes)"
 
 
-def far_side_local(fp):
+def far_side_local(fp, far_courtyard=None):
     """The far-side obstruction in the footprint's frame: None (no drilled
-    pads), a plain 4-tuple (one cluster -- bit-identical to the old box), or
-    a `FarSide` (several clusters)."""
+    pads), a plain 4-tuple (one box -- bit-identical to the old box), or a
+    `FarSide` (several).
+
+    `far_courtyard` (`far_courtyard_of`) is a courtyard the footprint DRAWS
+    on its far face: KiCad grades that courtyard there, so it is part of the
+    far side, with the clusters it does not already cover. Without it a
+    connector drawing B.CrtYd between two lead clusters lost its pair with a
+    0603 under that body -- a courtyards_overlap kicad-cli reports (phase-2
+    verifier); the old single box over every drilled pad covered it by
+    accident. No tracked corpus part draws both faces."""
     clusters = through_pad_clusters_local(fp)
     if not clusters:
         return None
+    if far_courtyard is not None:
+        fc = tuple(far_courtyard)
+        clusters = [fc] + [c for c in clusters
+                           if not (fc[0] <= c[0] and fc[1] <= c[1]
+                                   and c[2] <= fc[2] and c[3] <= fc[3])]
     if len(clusters) == 1:
         return tuple(clusters[0])
     return FarSide(clusters)
+
+
+def far_courtyard_of(courtyard_sides, own: str):
+    """The courtyard a footprint draws on its FAR face (`parser.
+    extract_courtyard_sides` local bbox), or None. Only when its OWN face is
+    drawn too: a lone far-face courtyard is what `courtyard_for_side` already
+    adopts as the own-side one (a library that drew only F.CrtYd, mounted on
+    B), and must not count twice."""
+    if not courtyard_sides:
+        return None
+    far = 'B' if own == 'F' else 'F'
+    if own in courtyard_sides and far in courtyard_sides:
+        return courtyard_sides[far]
+    return None
 
 
 def far_boxes(r):
@@ -531,8 +558,13 @@ def far_gap(ra, rb) -> float:
 
 def far_overlap_area(ra, rb) -> float:
     """`rect_overlap_area` between two rects either of which may be a
-    `FarSide`. A FarSide's clusters are disjoint (two clusters are more than
-    `FAR_SIDE_CLUSTER_GAP_MM` apart), so summing box-pair overlaps is exact."""
+    `FarSide`, summed box pair by box pair. Exact at the orthogonal turns,
+    where a FarSide's cluster boxes are disjoint (more than
+    `FAR_SIDE_CLUSTER_GAP_MM` apart). At any other angle the rotated boxes
+    can overlap one another and the sum OVER-counts -- the stricter
+    direction (a DIP-16 at 45 degrees: 497.5 against an exact 389.7;
+    phase-2 verifier). No tracked board turns a multi-cluster part off the
+    lattice."""
     if not isinstance(ra, FarSide) and not isinstance(rb, FarSide):
         return rect_overlap_area(ra, rb)
     return sum(rect_overlap_area(a, b)
@@ -1713,8 +1745,10 @@ def _part_local_bounds_and_bodies(pcb_data, pcb_file: Optional[str] = None):
         has_tht = footprint_has_through_pads(fp)
         if has_tht:
             # #1206: one box per cluster of drilled pads (a FarSide when
-            # there are several), a plain tuple when there is one.
-            tht_local = far_side_local(fp)
+            # there are several), a plain tuple when there is one; plus a
+            # far-face courtyard the footprint draws.
+            tht_local = far_side_local(
+                fp, getattr(geom, 'far_court_local', None))
         out[ref] = LocalBounds(ref=ref, side=own, local=tuple(local),
                                tht_local=tht_local,
                                has_tht=has_tht, synthetic=synthetic,
@@ -2531,7 +2565,11 @@ def grade_body_overlap(pcb_data, clearance: float,
             _has_tht = footprint_has_through_pads(fp)
             _tht = None
             if _has_tht:
-                _t = far_side_local(fp)
+                # The census's own far side (`part_local_bounds`), so the
+                # seam and the courtyard channel read one geometry.
+                _lb = _census.lbs.get(ref)
+                _t = (_lb.tht_local if _lb is not None
+                      else far_side_local(fp))
                 if _t is not None:
                     _tht = offset_far(rotate_far(_t, rot), fp.x, fp.y)
             seam_parts.append((ref, sides_occupied(own, _has_tht), own,

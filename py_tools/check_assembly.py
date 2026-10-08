@@ -194,25 +194,9 @@ def main():
     # graphics markers are co-located by design and must NOT flag). A bucket is
     # a finding here only when it holds >= 2 suspect NON-marker parts: one real
     # part sitting on a fiducial is not a stack of parts.
-    from placement.part_class import classify_part
-    from placement.placement_state import assess_placement
-    _MARKER_CLASSES = ('fiducial', 'mount_hole', 'testpoint')
-
-    def _marker(ref):
-        try:
-            return classify_part(pcb.footprints[ref],
-                                 ref).name in _MARKER_CLASSES
-        except Exception:                                      # noqa: BLE001
-            return False
-
-    _suspect = assess_placement(pcb, pcb_file=args.board).stacked_suspect_refs
-    _buckets = {}
-    for _ref in _suspect:
-        _fp = pcb.footprints.get(_ref)
-        if _fp is None:
-            continue
-        _buckets.setdefault((round(_fp.x, 3), round(_fp.y, 3)),
-                            []).append(_ref)
+    # `coincident_stack_groups` is that rule (fa10 P1: the seeder's #1151
+    # disposition calls it too, so the two cannot disagree about a stack).
+    from placement.placement_state import coincident_stack_groups
     # Every footprint BLOCK is an entry here since #726: two blocks sharing a
     # reference are keyed `TP4` and `TP4~2`, so two parts at one point form a
     # coincident pair even when they answer to one name. Before that they
@@ -221,9 +205,7 @@ def main():
     # `coincident_origins 0` with TWO coincident pairs on it.
     # `duplicate_references` below still reports the naming, which is a
     # schematic question rather than a geometric one.
-    stack_groups = [{'point': [pt[0], pt[1]], 'refs': refs}
-                    for pt, refs in sorted(_buckets.items())
-                    if sum(1 for r in refs if not _marker(r)) >= 2]
+    stack_groups = coincident_stack_groups(pcb, args.board)
     dup_refs = dict(getattr(pcb, 'duplicate_references', None) or {})
 
     new_advisory = None

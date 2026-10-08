@@ -405,9 +405,12 @@ def test_the_area_bound_is_sound_for_the_grade():
         got = [v.severity for v in found if v.rule == 'plan_zone_overfull']
         assert got == want, (budget, got, meas['zones'])
     # ulx3s GPDI1 in the zone of its own courtyard, with the B-side parts
-    # under its lead field (the verifier's counterexample): the far-face
-    # charge is real overlap the grade counts, so at budget 0 it is an
-    # ERROR on B (M11), and a budget covering the forced overlap clears it.
+    # under its lead field. The far-face charge is what the GRADE counts,
+    # per cluster of drilled pads (#1206): GPDI1's two shell posts, not the
+    # box spanning them. The shipped board IS an arrangement of exactly
+    # these members in exactly this zone and grades 0.0 mm2 of courtyard
+    # overlap, so no bound may call it forced (the union box read 18.84 and
+    # made this an ERROR at budget 0 -- the phase-2 verifier's BLOCKING).
     ul = os.path.join(REPO, 'kicad_files', 'ulx3s.kicad_pcb')
     pcb = parse_kicad_pcb(ul)
     zone, members = _tight_zone_around(pcb, ul, 'GPDI1', margin=0.0)
@@ -415,13 +418,8 @@ def test_the_area_bound_is_sound_for_the_grade():
             'tolerance_mm': 0}]
     found, meas = _check(_raw(blocks=blk,
                               legality_budget={'overlap_area': 0}), ul)
-    err = [v for v in found if v.rule == 'plan_zone_overfull']
-    assert err and err[0].measured['face'] == 'B', (found, meas['zones'])
-    forced = err[0].measured['forced_overlap_mm2']
-    found, _ = _check(_raw(blocks=blk, legality_budget={
-        'overlap_area': forced + 0.01}), ul)
     assert not [v for v in found if v.rule == 'plan_zone_overfull'], (
-        forced, found)
+        found, meas['zones'])
     with tempfile.TemporaryDirectory() as tmp:
         b = _board(tmp, 'w.kicad_pcb', [('U1', 3, 3, PAD), ('U2', 6, 3, PAD)])
         blocks = [{'name': 'all', 'refs': ['U*'],
@@ -444,8 +442,9 @@ def test_the_area_bound_is_sound_for_the_grade():
         assert row['members'] == [] and not [
             v for v in found if v.rule == 'plan_zone_overfull'], (row, found)
     print("  PASS: glasgow's locked MK1+FID1 pass at the board's own "
-          "budget; GPDI1's far face is an ERROR at budget 0 and not at a "
-          "covering budget; waived and anchor-graded members are skipped")
+          "budget; GPDI1's shipped zone is no ERROR at budget 0 (its far "
+          "face is two posts); waived and anchor-graded members are "
+          "skipped")
 
 
 def test_the_edge_bound_reads_pads_not_courtyards():
@@ -852,10 +851,72 @@ def test_round2_the_far_face_charge_is_what_the_courtyard_confines():
           "inside it")
 
 
+def _tht_over_two(tmp, xs):
+    """P1: an F-side THT part, 10 x 4 courtyard at (20, 20), one 1 x 1 pad
+    (0.6 mm drill) per x in `xs`; Q1 / Q2: B-side 5 x 4 pads filling P1's courtyard
+    exactly, so on B the zone [15, 18, 25, 22] holds 40 of 40 before P1's
+    far side is charged."""
+    path = os.path.join(tmp, 'tht2.kicad_pcb')
+    pads = ''.join(
+        f'    (pad "{i + 1}" thru_hole circle (at {x} 0) (size 1 1) '
+        f'(drill 0.6) (layers "*.Cu") (net 1 "/A") (uuid "t{i}"))\n'
+        for i, x in enumerate(xs))
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(
+            '(kicad_pcb (version 20241229) (generator "test")\n'
+            '  (net 0 "")\n  (net 1 "/A")\n'
+            '  (gr_rect (start 0 0) (end 40 40) (layer "Edge.Cuts") '
+            '(uuid "e1"))\n'
+            '  (footprint "t:T" (layer "F.Cu") (uuid "fp-P1") '
+            '(at 20 20)\n    (property "Reference" "P1" (at 0 0))\n'
+            '    (fp_rect (start -5 -2) (end 5 2) (stroke (width 0.05) '
+            '(type solid)) (fill none) (layer "F.CrtYd") (uuid "c1"))\n'
+            + pads + '  )\n'
+            + ''.join(
+                f'  (footprint "t:Q" (layer "B.Cu") (uuid "fp-{q}") '
+                f'(at {x} 20)\n    (property "Reference" "{q}" '
+                f'(at 0 0))\n    (pad "1" smd rect (at 0 0) (size 5 4) '
+                f'(layers "B.Cu") (net 1 "/A") (uuid "{q}p"))\n  )\n'
+                for q, x in (('Q1', 17.5), ('Q2', 22.5)))
+            + ')\n')
+    return path
+
+
+def test_the_far_face_charge_is_per_cluster():
+    """#1206: the far side is charged per CLUSTER of drilled pads, the
+    currency the grade counts. A pin row (2.54 mm pitch) is one cluster and
+    its whole box is forced overlap on B; two posts 8 mm apart are two
+    small boxes, and the gap between them is not charged."""
+    zone = [{'name': 'z', 'refs': ['P1', 'Q1', 'Q2'],
+             'zone': [15, 18, 25, 22], 'tolerance_mm': 0}]
+    with tempfile.TemporaryDirectory() as tmp:
+        # One cluster: 4 pads at 2.54 pitch, an 8.62 x 1 box (8.62 mm2)
+        # under Q1 and Q2 -- real overlap, an ERROR at budget 0.
+        row = _tht_over_two(tmp, (-3.81, -1.27, 1.27, 3.81))
+        found, meas = _check(_raw(blocks=zone,
+                                  legality_budget={'overlap_area': 0}), row)
+        err = [v for v in found if v.rule == 'plan_zone_overfull']
+        assert err and err[0].measured['face'] == 'B', (found, meas)
+        assert abs(err[0].measured['forced_overlap_mm2'] - 8.62) < 0.01, err
+        # Two clusters: pads at -4 and +4, 1 mm2 each -- 2.0 forced, under
+        # a 2.5 budget. The union box (9 x 1 = 9.0) refused it.
+        posts = _tht_over_two(tmp, (-4.0, 4.0))
+        found, meas = _check(_raw(blocks=zone,
+                                  legality_budget={'overlap_area': 2.5}),
+                             posts)
+        assert not [v for v in found if v.rule == 'plan_zone_overfull'], (
+            found, meas['zones'])
+        assert abs(meas['zones'][0]['members_area_mm2'] - 42.0) < 0.01, (
+            meas['zones'])
+    print("  PASS: a pin row's far side is charged whole; two posts are "
+          "charged as two boxes, not the span between them")
+
+
 TESTS = [
     test_run29_lap5_overlaps_are_warnings_not_errors,
     test_round2_the_plan_errors_track_the_grade,
     test_round2_the_far_face_charge_is_what_the_courtyard_confines,
+    test_the_far_face_charge_is_per_cluster,
     test_the_exclusive_check_reads_the_grades_geometry,
     test_exclusive_infeasibility_is_the_one_error,
     test_a_literal_glob_is_an_error_only_when_it_double_zones,

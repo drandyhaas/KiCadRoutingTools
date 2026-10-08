@@ -286,10 +286,12 @@ class TestPristineBoards(unittest.TestCase):
         # "fix" that empties the census to make the gate quiet is caught here.
         # It was >= 10 before #1206, and the extra pairs were not GPDI1's
         # shell over its passives, as this comment used to say: GPDI1 sits on
-        # F.Cu, and they were B-side parts (U11 38.5 mm2, R22-R26, R61, C18)
-        # under the ONE box drawn over its pin row and its shell tabs' tails.
-        # One box per cluster of drilled pads leaves the 8 real pairs (J5's
-        # and AUDIO1's bodies, GPDI1 x J5 / SW1, B6 x H2).
+        # F.Cu, and they were B-side parts (U11 38.5 mm2, R22, R23, R24, R26,
+        # R61, C18) under the ONE box drawn over its pin row and its shell
+        # tabs' tails, plus R60 under AUDIO1's (measure_1206 --verdicts: 16
+        # -> 8). One box per cluster of drilled pads leaves the 8 real pairs
+        # (J5's and AUDIO1's bodies, GPDI1 x J5 / SW1, B6 x H2) -- the floor
+        # IS the count, so any further loss fails here.
         self.assertGreaterEqual(doc['courtyard_blocking'], 8)
         self.assertEqual(doc['courtyard_blocking_gating'], 0)
 

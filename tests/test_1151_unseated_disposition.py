@@ -393,6 +393,163 @@ class AMustLockPartIsNeverStaged(unittest.TestCase):
                 'locked_at_input')
 
 
+def _fp(ref, x, y, rot, pads, fab=None, crt=None, layer='F'):
+    s = (f'  (footprint "t:{ref}" (layer "{layer}.Cu") (at {x} {y} {rot})\n'
+         f'    (property "Reference" "{ref}" (at 0 0)'
+         f' (layer "{layer}.SilkS"))\n')
+    for lay, r in (('Fab', fab), ('CrtYd', crt)):
+        if r:
+            s += (f'    (fp_rect (start {r[0]} {r[1]}) (end {r[2]} {r[3]}) '
+                  f'(stroke (width 0.1) (type default)) '
+                  f'(layer "{layer}.{lay}"))\n')
+    for (num, px, py, shape, sx, sy, net) in pads:
+        s += (f'    (pad "{num}" smd {shape} (at {px} {py} {rot}) '
+              f'(size {sx} {sy}) (layers "{layer}.Cu") (net {net} "N{net}"))\n')
+    return s + '  )\n'
+
+
+def _two_part_board(td, name, parts):
+    path = os.path.join(td, name + '.kicad_pcb')
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb (version 20240108) (generator pcbnew)\n'
+                 '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal)'
+                 ' (44 "Edge.Cuts" user))\n'
+                 '  (net 0 "") (net 1 "N1") (net 2 "N2") (net 3 "N3")\n'
+                 '  (gr_rect (start 0 0) (end 40 40) (stroke (width 0.1)'
+                 ' (type default)) (layer "Edge.Cuts"))\n'
+                 + ''.join(parts) + ')\n')
+    return path
+
+
+#: The phase-2 verifier's cases (C6): the disposition's old mirror of the
+#: grader staged the first two, which check_assembly calls buildable, and
+#: left the last two, which it calls NOT BUILDABLE.
+GRADER_CASES = {
+    # round pads on a diagonal: the AABBs overlap, the circles are 1.13 apart
+    'round_diag': ([_fp('A', 10, 10, 0, [('1', 0, 0, 'circle', 1.0, 1.0, 1),
+                                         ('2', -3, 0, 'rect', 0.5, 0.5, 3)],
+                        crt=(-3.5, -0.6, 0.6, 0.6)),
+                    _fp('B', 10.8, 10.8, 0, [('1', 0, 0, 'circle', 1.0, 1.0, 2),
+                                             ('2', 3, 0, 'rect', 0.5, 0.5, 3)],
+                        crt=(-0.6, -0.6, 3.5, 0.6))], 'B', 'clear_at_input'),
+    # a 10 x 10 body turned 45 degrees, S in its rect's corner, outside it
+    'rot_fab': ([_fp('U', 20, 20, 45, [('1', 0, 0, 'rect', 1, 1, 1)],
+                     fab=(-5, -5, 5, 5), crt=(-5.2, -5.2, 5.2, 5.2)),
+                 _fp('S', 25.5, 25.5, 0, [('1', -0.3, 0, 'rect', 0.3, 0.3, 2),
+                                          ('2', 0.3, 0, 'rect', 0.3, 0.3, 3)],
+                     fab=(-0.5, -0.4, 0.5, 0.4), crt=(-0.6, -0.5, 0.6, 0.5))],
+                'S', 'clear_at_input'),
+    # two parts at ONE origin, pads clear of each other
+    'coincident': ([_fp('J', 20, 20, 0, [('1', -5, 0, 'rect', 1, 1, 1),
+                                         ('2', 5, 0, 'rect', 1, 1, 3)],
+                        crt=(-6, -1, 6, 1)),
+                    _fp('S', 20, 20, 0, [('1', -0.5, 0, 'rect', 0.4, 0.4, 2),
+                                         ('2', 0.5, 0, 'rect', 0.4, 0.4, 3)],
+                        crt=(-0.8, -0.4, 0.8, 0.4))], 'S', 'staged'),
+}
+
+
+class TheDispositionAsksTheGrader(unittest.TestCase):
+    """`_dispose_unseated` stages a part exactly when check_assembly, grading
+    the board as it would be written, gates it against a neighbour."""
+
+    def _dispose(self, path, ref, **kw):
+        import pose_score
+        st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=0.2)
+        return seeder._dispose_unseated(st, [ref], **kw)[ref]
+
+    def _verdict(self, path):
+        import json
+        import subprocess
+        jp = path + '.json'
+        subprocess.run([sys.executable, '-X', 'utf8', os.path.join(
+            ROOT, 'py_tools', 'check_assembly.py'), path, '--clearance',
+            '0.2', '--json', jp], capture_output=True, text=True,
+            encoding='utf-8', errors='replace', cwd=ROOT)
+        with open(jp, encoding='utf-8') as fh:
+            return json.load(fh)['buildable']
+
+    def test_the_verifiers_cases(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name, (parts, ref, want) in sorted(GRADER_CASES.items()):
+                path = _two_part_board(td, name, parts)
+                d = self._dispose(path, ref)
+                self.assertEqual(d['disposition'], want, (name, d))
+                # ...and check_assembly agrees on the same file.
+                self.assertEqual(self._verdict(path), want != 'staged', name)
+
+    def test_a_part_on_a_plugs_mating_region_is_staged(self):
+        import test_1098_mating_keepout as t1098
+        with tempfile.TemporaryDirectory() as td:
+            path = t1098.board(td, r1=(15, 26, 'B.Cu'))
+            d = self._dispose(path, 'R1')
+            self.assertEqual(d['disposition'], 'staged', d)
+            self.assertEqual(d['refused_by'][0], 'mating', d)
+            self.assertFalse(self._verdict(path))
+
+    def test_a_declared_waiver_is_honoured(self):
+        """S wholly inside U's body: a gating containment, staged -- unless
+        the intent's overlap_waivers names the pair, as check_assembly reads
+        it."""
+        parts = [_fp('U', 20, 20, 0, [('1', -4, 0, 'rect', 1, 1, 1)],
+                     fab=(-5, -5, 5, 5), crt=(-5.2, -5.2, 5.2, 5.2)),
+                 _fp('S', 21, 21, 0, [('1', -0.3, 0, 'rect', 0.3, 0.3, 2),
+                                      ('2', 0.3, 0, 'rect', 0.3, 0.3, 3)],
+                     fab=(-0.5, -0.4, 0.5, 0.4), crt=(-0.6, -0.5, 0.6, 0.5))]
+        with tempfile.TemporaryDirectory() as td:
+            path = _two_part_board(td, 'inside', parts)
+            d = self._dispose(path, 'S')
+            self.assertEqual(d['disposition'], 'staged', d)
+            self.assertEqual(d['refused_by'], ['containment', 'U'], d)
+            d = self._dispose(path, 'S', waivers=[('S', 'U')])
+            self.assertEqual(d['disposition'], 'clear_at_input', d)
+
+    def test_a_part_on_a_frame_pin_is_staged(self):
+        """#1212's channel: P's courtyard over a pin frame's hole, nothing
+        else wrong (test_1212's pin-only fixture)."""
+        from test_1212_container_pins import _frame_board
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [('P', 3.0, 3.1, 2.0)])
+            d = self._dispose(path, 'P')
+        self.assertEqual(d['disposition'], 'staged', d)
+        self.assertEqual(d['refused_by'], ['pin_in_courtyard', 'FR'], d)
+
+    def test_the_seed_hands_over_the_intents_waivers_and_keepouts(self):
+        """seed_from_intent passes the intent's overlap_waivers and keep-outs
+        to the disposition, which grades with them as check_assembly does."""
+        import json
+        seen = {}
+        real = seeder._dispose_unseated
+
+        def spy(state, refs, **kw):
+            seen.update(kw)
+            return real(state, refs, **kw)
+        with tempfile.TemporaryDirectory() as td:
+            path, ipath = _small_board(td, [
+                _part('BIG', 8, 7, 9.0, 8.0, 2),
+                _part('SMALL', 8, 7, 0.5, 0.5, 4)], ['BIG', 'SMALL'])
+            with open(ipath, encoding='utf-8') as fh:
+                doc = json.load(fh)
+            doc['overlap_waivers'] = [{'pair': ['BIG', 'SMALL'],
+                                       'reason': 'test'}]
+            doc['keepouts'] = [{'name': 'k', 'rect': [0.0, 0.0, 0.4, 0.4]}]
+            with open(ipath, 'w', encoding='utf-8') as fh:
+                json.dump(doc, fh)
+            seeder._dispose_unseated = spy
+            try:
+                res = seeder.seed_from_intent(
+                    parse_kicad_pcb(path), path, _load(ipath),
+                    random.Random('0'), clearance=0.2,
+                    board_edge_clearance=0.5, grid_step=0.1)
+            finally:
+                seeder._dispose_unseated = real
+        self.assertIn('BIG', res['unseated'])
+        self.assertIn(frozenset(('BIG', 'SMALL')),
+                      {frozenset(w) for w in seen.get('waivers', ())}, seen)
+        self.assertEqual([k.get('name') for k in seen.get('keepouts', ())],
+                         ['k'], seen)
+
+
 class PlaceSeedHelpers(unittest.TestCase):
 
     def test_staged_placed_and_repairable(self):
