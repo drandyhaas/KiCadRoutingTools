@@ -268,7 +268,10 @@ _OUTLINE_COVER_TOL_MM = 1e-3
 #: joined at this distance is also ACCEPTED at it (`tol` below): judged at
 #: `_OUTLINE_COVER_TOL_MM`, the joined shape's moved corner always failed,
 #: which is how glasgow J4's 8 um corner gap read open while kicad-cli
-#: closes it.
+#: closes it. The distance is measured AFTER the `_OUTLINE_SNAP_MM` snap,
+#: so a gap within ~0.14 um of 20 um can land on the other side of KiCad's
+#: verdict (final P1 verifier: a 19.98 um diagonal gap off the 0.1 um grid
+#: snaps to 20.08 and reads open; KiCad closes it).
 _OUTLINE_JOIN_MM = 0.02
 OUTLINE_POLYGON = 'polygon'
 OUTLINE_HULL = 'hull'
