@@ -581,7 +581,10 @@ Examples:
                         "edge claims and the board term keep the rect the "
                         "floorplan grade reads. For a library that draws "
                         "bodies and no courtyards (One-Air-Max: 197 of 204 "
-                        "parts), where pad boxes let bodies overlap")
+                        "parts), where pad boxes let bodies overlap. Off by "
+                        "default: measured on tests/test_placement_ab.py's "
+                        "body-seed-* rows it costs wirelength or an intent "
+                        "error on every board")
     p.add_argument("--baseline", metavar="BOARD", default=None,
                    help="#1182: with --repair, charge the parts in "
                         "check_assembly's GATING courtyard pairs -- the "

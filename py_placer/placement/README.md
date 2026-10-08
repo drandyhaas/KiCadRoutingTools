@@ -1628,8 +1628,10 @@ re-seating 85/92 while leaving its zone targets unmoved):
   that draws bodies and no courtyards (One-Air-Max: 197 of 204 parts) pad
   boxes let bodies overlap. Measured on One-Air-Max's s180_0p with
   `--repair --baseline`: armed, check_assembly's gating pairs went 6 -> 2;
-  unarmed, 5 of the 6 charged movers ended UNRESOLVED. Opt-in unless the
-  `body-seed-*` rows of `test_placement_ab.py` pass the gate.
+  unarmed, 5 of the 6 charged movers ended UNRESOLVED. **Opt-in**: the
+  `body-seed-*` rows of `test_placement_ab.py` mark REGRESS on all four
+  boards (wirelength, crossings or an intent error), so they are kept as
+  `rejected` rows.
 - **`--reseat`'s gate** measures its last term, courtyard overlap, on
   check_assembly's geometry (`CourtyardGrade.overlap_exact` at the state's
   poses), not the search's rects -- One-Air-Max read `0.4323 -> 0.4323` on

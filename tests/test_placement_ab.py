@@ -463,13 +463,15 @@ ROWS = [
         'why': ('MECHANISM: the board candidate_valid names as the one where nearly every part starts in violation, so it is the most sensitive to a seat box that only grows -- and the one board where the trade goes the OTHER way, signal and both guards together. Kept because it DISAGREES with the other three, and deleting the dissenting row is how a finding becomes folklore.'),
     },
     # --- #1182: the SEED engine on check_assembly's occupancy -------------
-    # ON TRIAL (no `expect`): `place_seed --body-model` seats the neighbour
-    # currency on `placement.body`'s occupancy while every intent question
-    # keeps the courtyard ladder. The signal is check_assembly's own
+    # REJECTED as a default, rows kept: `place_seed --body-model` seats the
+    # neighbour currency on `placement.body`'s occupancy while every intent
+    # question keeps the courtyard ladder. The signal is check_assembly's own
     # `courtyard_blocking` on the written seed, the currency #1182 found the
-    # seeder blind to; the guards are what a bigger seat box can cost. The
-    # default flips only if `gate()` passes (>= 3 boards, improve on N-1,
-    # regress on none).
+    # seeder blind to; the guards are what a bigger seat box can cost.
+    # Measured on all four boards the mark is REGRESS (a guard or an intent
+    # error each time, though the signal improves on two), so the flag ships
+    # opt-in, and the default path to #1182's pairs is the repair's
+    # --baseline charge.
     {
         'name': 'body-seed-esp_prog',
         'board': 'esp_prog.kicad_pcb',
@@ -479,11 +481,13 @@ ROWS = [
         'ignore_nets': ['GND'],
         'signal': 'courtyard_blocking',
         'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
-        'why': ('MECHANISM: the seed re-seats every part with its seat box '
-                'grown from the courtyard-or-pad-box ladder to the occupancy '
-                'check_assembly grades (courtyard, else the drawn body, each '
-                'with its pads); zones, keep-outs and edge claims keep the '
-                'ladder the floorplan grade reads. Numbers: '
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: no footprint here draws a courtyard, so every '
+                'seat box grows to its drawn body at once. The signal has '
+                'nothing to clear -- neither arm leaves a courtyard pair -- '
+                'and the bigger boxes spread the parts, so wirelength and '
+                'crossings pay for nothing. Numbers: '
                 'tests/placement_ab_baseline.json.'),
     },
     {
@@ -495,11 +499,13 @@ ROWS = [
         'ignore_nets': ['GND', '+3V3', '+5V', 'VCC*'],
         'signal': 'courtyard_blocking',
         'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
-        'why': ('MECHANISM: the seed re-seats every part with its seat box '
-                'grown from the courtyard-or-pad-box ladder to the occupancy '
-                'check_assembly grades (courtyard, else the drawn body, each '
-                'with its pads); zones, keep-outs and edge claims keep the '
-                'ladder the floorplan grade reads. Numbers: '
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: the trade #1182 asked for, in its clearest '
+                'form: the seed leaves almost no courtyard pair and '
+                'crossings fall, but the grown boxes cost wirelength and '
+                'push one part out of its intent zone (zone_containment) -- '
+                'a guard the default must not lose. Numbers: '
                 'tests/placement_ab_baseline.json.'),
     },
     {
@@ -511,11 +517,13 @@ ROWS = [
         'ignore_nets': ['GND'],
         'signal': 'courtyard_blocking',
         'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
-        'why': ('MECHANISM: the seed re-seats every part with its seat box '
-                'grown from the courtyard-or-pad-box ladder to the occupancy '
-                'check_assembly grades (courtyard, else the drawn body, each '
-                'with its pads); zones, keep-outs and edge claims keep the '
-                'ladder the floorplan grade reads. Numbers: '
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: signal and both wire guards improve together, '
+                'and the row still REGRESSES on an intent error: one more '
+                'connector seats off its declared edge (edge_connector). '
+                'Kept as the row that comes closest, so the reason it is '
+                'not a default stays on record. Numbers: '
                 'tests/placement_ab_baseline.json.'),
     },
     {
@@ -527,12 +535,11 @@ ROWS = [
         'ignore_nets': ['GND', '+3V3', '+1V1', 'VCC*'],
         'signal': 'courtyard_blocking',
         'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
-        'why': ('MECHANISM: the seed re-seats every part with its seat box '
-                'grown from the courtyard-or-pad-box ladder to the occupancy '
-                'check_assembly grades (courtyard, else the drawn body, each '
-                'with its pads); zones, keep-outs and edge claims keep the '
-                'ladder the floorplan grade reads. Numbers: '
-                'tests/placement_ab_baseline.json.'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: the courtyard pair COUNT does not move (the '
+                'area shrinks), so the signal is neutral, and wirelength '
+                'regresses. Numbers: tests/placement_ab_baseline.json.'),
     },
     # --- run 26: the seeder's opt-in rotation tie-break --------------------
     # REJECTED as a default, rows kept. The seed engine re-seats every part
