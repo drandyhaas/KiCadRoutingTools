@@ -194,6 +194,46 @@ def onset(steps=ONSET_STEPS_UM):
     return rows, first(1), first(2)
 
 
+CHAINING = os.path.join(ROOT, 'tests', 'fixtures',
+                        '1212_courtyard_chaining.json')
+
+
+def chaining():
+    """[(name, recorded, measured)] for every drawing in the chaining
+    fixture: each courtyard put on a part P over test_1212's pin frame,
+    graded by kicad-cli, `malformed_courtyard` on P meaning not closed."""
+    from test_1212_container_pins import _frame_board
+    with open(CHAINING, encoding='utf-8') as fh:
+        cases = json.load(fh)['cases']
+    rows = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, c in sorted(cases.items()):
+            sub = tempfile.mkdtemp(dir=td)
+            path = _frame_board(sub, [])
+            part = (f'  (footprint "t:P" (layer "{c["side"]}.Cu")'
+                    f' (at 3 3.1 {c["rot"]:g})\n'
+                    f'    (property "Reference" "P" (at 0 0) (layer'
+                    f' "{c["side"]}.SilkS"))\n'
+                    + ''.join('    ' + e + '\n' for e in c['courtyard'])
+                    + '  )\n')
+            with open(path, encoding='utf-8') as fh:
+                body = fh.read().rstrip()
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write(body[:-1] + part + ')\n')
+            out = os.path.join(sub, 'drc.json')
+            subprocess.run([KICAD_CLI, 'pcb', 'drc', '--format', 'json',
+                            '--severity-all', '-o', out, path],
+                           capture_output=True, text=True)
+            with open(out, encoding='utf-8') as fh:
+                doc = json.load(fh)
+            mal = any(v.get('type') == 'malformed_courtyard' and any(
+                (it.get('description') or '').split()[-1:] == ['P']
+                for it in v.get('items', []))
+                for v in doc.get('violations', []))
+            rows.append((name, c['kicad_closed'], not mal))
+    return rows
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('boards', nargs='*')
@@ -201,10 +241,20 @@ def main(argv=None):
     ap.add_argument('--onset', action='store_true',
                     help='re-measure the hole tolerance on the tracked '
                          'rp2350 board (see the module docstring)')
+    ap.add_argument('--chaining', action='store_true',
+                    help='re-measure kicad-cli\'s verdict on every drawing '
+                         'in tests/fixtures/1212_courtyard_chaining.json')
     args = ap.parse_args(argv)
     if not KICAD_CLI:
         print('SKIP: kicad-cli is not installed')
         return 77
+    if args.chaining:
+        rows = chaining()
+        moved = [r for r in rows if r[1] != r[2]]
+        for name, was, now in moved:
+            print(f"{name}: recorded closed={was}, kicad-cli now {now}")
+        print(f"{len(rows)} drawings, {len(moved)} verdict(s) moved")
+        return 1 if moved else 0
     if args.onset:
         rows, k0, o0 = onset()
         for d, k, o in rows:

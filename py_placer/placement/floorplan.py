@@ -3499,19 +3499,26 @@ def zone_is_anchor(zone_rect, part, tol: float) -> bool:
         for r in (part.rot % 360, (part.rot + 90) % 360))
 
 
-def _anchor_reachable(zone, part, tol: float) -> bool:
+def _anchor_reachable(zone, part, tol: float, claim=None) -> bool:
     """Could the grade read `zone` as an ANCHOR for `part` (`zone_is_anchor`)
-    at any rotation the seed may give it -- its block's declared `rotation`,
-    else its `rotation_candidates`, else the part's own 90-degree lattice?
-    A plan bound charging such a member is not sound: seated where it does
-    not fit, the grade does not hold it to the zone at all.
+    at any rotation the seed may give it? A plan bound charging such a
+    member is not sound: seated where it does not fit, the grade does not
+    hold it to the zone at all.
+
+    The rotations are the seeder's own: `claim` is the part's entry in
+    `rotations_for_ref` (every block's declaration, not only the zone's own
+    block -- a block may declare an angle with no zone), its decision or
+    else its candidate set; a LOCKED part, or one with no claim, keeps its
+    own 90-degree lattice (the seeder never turns a locked part, whatever
+    a block declares -- b6a63ad8 verifier).
     (`zone_fits_courtyard` tests both orders, so `r` stands for `r + 90`.)"""
-    if zone.rotation is not None:
-        rots = [zone.rotation]
-    elif zone.rotation_candidates:
-        rots = list(zone.rotation_candidates)
-    else:
+    rot, cands = claim if claim else (None, None)
+    if getattr(part, 'locked', False) or (rot is None and not cands):
         rots = [part.rot]
+    elif rot is not None:
+        rots = [rot]
+    else:
+        rots = list(cands)
     from .legality import rotate_local_bounds
     # Turned from the 0-degree box, not read from the part's rotation
     # cache: a declared angle off its lattice has no entry, and the cache
@@ -7378,6 +7385,11 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     # dropping them lost a zone a locked part already fills (round-2
     # verifier). A locked member outside its zone is `plan_fixed_outside_zone`.
     overlap_budget = (intent.legality_budget or {}).get('overlap_area')
+    try:
+        # The seeder's rotation claims, per ref, from every block.
+        _claims = rotations_for_ref(intent, blocks)
+    except IntentError:
+        _claims = {}               # contradictory: validate_intent says so
     if getattr(state, 'courtyards_ignored', False):
         # The project waives KiCad's courtyard rule, so the grade prices no
         # courtyard overlap (#1104): no forced overlap can exceed the budget,
@@ -7407,7 +7419,7 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             part = state.parts[r]
             b0 = part.grade_by_rot[0.0]
             w, h = b0[2] - b0[0], b0[3] - b0[1]
-            if _anchor_reachable(z, part, tol):
+            if _anchor_reachable(z, part, tol, _claims.get(r)):
                 # Anchor-graded at some rotation the seed may give it, as the
                 # grade decides it (`zone_is_anchor`): on the part's own
                 # 90-degree lattice -- two 10 x 4 parts at 45 degrees were

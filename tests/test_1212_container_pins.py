@@ -725,85 +725,52 @@ def _square(gap):
                                (-2, 2, -2, round(-2 + gap, 6)))]
 
 
-def _ln(a, b, c, d):
-    return (f'(fp_line (start {a:.6f} {b:.6f}) (end {c:.6f} {d:.6f}) (stroke'
-            f' (width 0.05) (type default)) (layer "F.CrtYd"))\n')
-
-
-def _arc(s, m, e):
-    return (f'(fp_arc (start {s[0]:.6f} {s[1]:.6f}) (mid {m[0]:.6f}'
-            f' {m[1]:.6f}) (end {e[0]:.6f} {e[1]:.6f}) (stroke (width 0.05)'
-            f' (type default)) (layer "F.CrtYd"))\n')
-
-
-def _sq(g=0.0):
-    return [(-2, -2, 2, -2), (2, -2, 2, 2), (2, 2, -2, 2),
-            (-2, 2, -2, round(-2 + g, 6))]
-
-
-_M = (1.5 + 0.5 * 0.7071067811865476, 1.5 + 0.5 * 0.7071067811865476)
-#: Drawings and KiCad 10's verdict on each: True = a courtyard (kicad-cli
-#: tests pins against it), False = malformed_courtyard. Measured with
-#: kicad-cli 10.0 by the b6a63ad8 verifier (its syn_make.py shapes).
-KICAD_CHAINING = {
-    'gap_0.019': (_sq(0.019), True),
-    'gap_0.02': (_sq(0.02), True),
-    'gap_0.0201': (_sq(0.0201), False),
-    'gap_0.025': (_sq(0.025), False),
-    'gapmid_0.02': ([(-2, -2, 2, -2), (2, -2, 2, 1.98), (2, 2, -2, 2),
-                     (-2, 2, -2, -2)], True),
-    'gapmid_0.021': ([(-2, -2, 2, -2), (2, -2, 2, 1.979), (2, 2, -2, 2),
-                      (-2, 2, -2, -2)], False),
-    'diag_0141': ([(-2, -2, 2, -2), (2, -2, 2, 1.99), (1.99, 2, -2, 2),
-                   (-2, 2, -2, -2)], True),
-    'diag_0212': ([(-2, -2, 2, -2), (2, -2, 2, 1.985), (1.985, 2, -2, 2),
-                   (-2, 2, -2, -2)], False),
-    'cross_0.012': ([(-2, -2, 2, -2), (2, -2, 2, 2.012), (2.012, 2, -2, 2),
-                     (-2, 2, -2, -2)], True),
-    'cross_0.015': ([(-2, -2, 2, -2), (2, -2, 2, 2.015), (2.015, 2, -2, 2),
-                     (-2, 2, -2, -2)], False),
-    'over1_0.015': ([(-2, -2, 2, -2), (2, -2, 2, 2.015), (2, 2, -2, 2),
-                     (-2, 2, -2, -2)], True),
-    'over1_0.03': ([(-2, -2, 2, -2), (2, -2, 2, 2.03), (2, 2, -2, 2),
-                    (-2, 2, -2, -2)], False),
-    'stub_out_0.015': (_sq() + [(-1, 2.015, 1, 2.015)], False),
-    'two_squares_gap': (_sq() + [(2, -2, 6, -2), (6, -2, 6, 2),
-                                 (6, 2, 2.015, 2)], False),
-    'tee_short': (_sq() + [(2, -1, 4, -1), (4, -1, 4, 1),
-                           (4, 1, 2.015, 1)], False),
-    'tiny_chain': ([(-2, -2, 2, -2), (2, -2, 2, 1.99), (2, 2, 1.985, 2),
-                    (1.975, 2, -2, 2), (-2, 2, -2, -2)], True),
-    'two_gaps': ([(-2, -2, 2, -2), (2, -1.985, 2, 1.985), (2, 2, -2, 2),
-                  (-2, 2, -2, -2)], True),
-    'arc_0.015': ([(-2, -2, 2, -2), (2, -2, 2, 1.5), ('arc', (2, 1.5), _M,
-                   (1.5, 2.015)), (1.5, 2, -2, 2), (-2, 2, -2, -2)], True),
-    'arc_0.03': ([(-2, -2, 2, -2), (2, -2, 2, 1.5), ('arc', (2, 1.5), _M,
-                  (1.5, 2.03)), (1.5, 2, -2, 2), (-2, 2, -2, -2)], False),
-}
+#: kicad-cli's verdict on 94 synthetic courtyard drawings (the verifiers'
+#: shapes: gaps at every chain position and across the 20 um boundary,
+#: crossings, stubs, T's, nested and corner-touching squares, fillets, arcs,
+#: subdivided sides, B side, rotations). Re-measure with
+#: `tests/measure_1212_kicad_pins.py --chaining`.
+CHAINING = os.path.join(ROOT, 'tests', 'fixtures',
+                        '1212_courtyard_chaining.json')
+#: Drawings KiCad calls malformed_courtyard (no courtyard: no pin tested)
+#: that the parser closes: the conservative side, a pin graded where KiCad
+#: grades none. A T or stub, a crossing, a duplicate or overlapping segment,
+#: and a gap KiCad rounds past 20 um only after rotation. Pinned, so a
+#: change of the model in EITHER direction shows here.
+KNOWN_CONSERVATIVE = {
+    'cross_0.015', 'cross_0.019', 'divider_exact', 'divider_short',
+    'dup_line', 'overlap_collinear', 'rot30_gap0.02', 'stub_in',
+    'stub_out_0.015', 'stub_tiny_0.015', 'tee_exact', 'tee_short',
+    'two_squares_gap'}
 
 
 class KiCadsChaining(unittest.TestCase):
-    """A courtyard drawing closes exactly when KiCad's does: ends joined end
-    to end within 0.02 mm, transitively, and every joined end meeting one
-    other -- no stub, branch or crossing. The parser's OUTLINE_HULL is how
-    the pin channel knows a courtyard is malformed (`courtyard_malformed`,
-    listed, never gating), so it must be KiCad's verdict.
+    """The parser's OUTLINE_HULL is how the pin channel knows a courtyard
+    is malformed (`courtyard_malformed`: listed, never gating), so it must
+    never read OPEN a drawing KiCad closes -- that would pass a real
+    pth_inside_courtyard. It closes generously instead (`parser.
+    _outline_shapes_by_side`: snap, then a join of loose ends, within
+    20 um), and the drawings it closes that KiCad does not are pinned."""
 
-    KNOWN, not asserted (upstream behaviour, unchanged here): a drawing
-    that closes as written but also carries a stub, divider, duplicate or
-    overlapping segment (KiCad: malformed) reads as a polygon; the vme-wren
-    demo has seven such courtyards, no tracked board has one."""
-
-    def test_each_drawing(self):
+    def test_no_drawing_kicad_closes_reads_open(self):
+        import json
         from placement import parser
-        got = {}
-        for name, (segs, closes) in KICAD_CHAINING.items():
-            text = ''.join(_arc(*s[1:]) if s[0] == 'arc' else _ln(*s)
-                           for s in segs)
-            r = parser._outline_shapes_by_side(text, parser._CRTYD_LAYER,
-                                               even_odd=True)
-            got[name] = (r['F'][1] == parser.OUTLINE_POLYGON)
-        self.assertEqual(got, {k: v[1] for k, v in KICAD_CHAINING.items()})
+        with open(CHAINING, encoding='utf-8') as fh:
+            cases = json.load(fh)['cases']
+        self.assertGreater(len(cases), 90)
+        fn, cons = [], set()
+        for name, c in sorted(cases.items()):
+            r = parser._outline_shapes_by_side(
+                '\n'.join(c['courtyard']), parser._CRTYD_LAYER,
+                even_odd=True)
+            closed = bool(r) and all(v[1] == parser.OUTLINE_POLYGON
+                                     for v in r.values())
+            if c['kicad_closed'] and not closed:
+                fn.append(name)
+            if closed and not c['kicad_closed']:
+                cons.add(name)
+        self.assertEqual(fn, [], 'drawings KiCad closes read OPEN here')
+        self.assertEqual(cons, KNOWN_CONSERVATIVE)
 
 
 class TheThirdVerifiersCases(unittest.TestCase):

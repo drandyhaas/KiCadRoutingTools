@@ -853,6 +853,43 @@ class TheRoundThreeCases(unittest.TestCase):
                                       'outline leg would be vacuous')
         self.assertEqual(bad[:10], [], f'{len(bad)} of {n} samples')
 
+    def test_the_outline_gate_reads_the_grade_rect(self):
+        """watchy cannot witness candidate_valid's outline gate: its buttons
+        START past the rim, so the escape branch admits a move whatever the
+        gate says. Here a courtyard-less part starts clean in an L-shaped
+        board and moves up to the notch: its .Fab body crosses the edge,
+        its pads (the grade rect) do not. Armed, the seat is still legal --
+        the outline is a grade question, asked of the grade rect."""
+        import contextlib
+        import pose_score
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, 'notch.kicad_pcb')
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write('(kicad_pcb (version 20240108) (generator pcbnew)\n'
+                         '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal)'
+                         ' (44 "Edge.Cuts" user))\n'
+                         '  (net 0 "") (net 1 "N1") (net 2 "N2")\n'
+                         '  (gr_poly (pts (xy 0 0) (xy 40 0) (xy 40 20)'
+                         ' (xy 20 20) (xy 20 10) (xy 0 10)) (stroke (width'
+                         ' 0.1) (type default)) (fill none) (layer'
+                         ' "Edge.Cuts"))\n'
+                         + _part('A', 10, 5) + ')\n')
+            pcb = parse_kicad_pcb(path)
+            with contextlib.redirect_stdout(io.StringIO()):
+                st = {armed: pose_score.make_state(
+                    pcb, path, clearance=0.2, board_edge_clearance=0.3,
+                    body_model=armed) for armed in (False, True)}
+        s1 = st[True]
+        self.assertTrue(s1.edge_gate.active)
+        a = s1.parts['A']
+        pose = (10.0, 9.2, 0.0)
+        near = s1._edges_near('A')
+        self.assertTrue(s1.edge_gate.rect_blocked(a.rect(*pose), edges=near))
+        self.assertFalse(s1.edge_gate.rect_blocked(a.grade_rect(*pose),
+                                                   edges=near))
+        self.assertEqual([s.candidate_valid('A', *pose, exclude=set())
+                          for s in (st[False], s1)], [True, True])
+
     def test_watchy_tight_zones(self):
         """Each grown part's zone is its own grade rect plus 0.8 mm: the
         grade rect fits at every sampled offset, the occupancy often does

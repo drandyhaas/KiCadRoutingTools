@@ -526,5 +526,73 @@ class TheRoundThreeCases(unittest.TestCase):
         self.assertEqual(got, {False: True, True: False})
 
 
+def _bar(ref, x, y, rot, half=(5, 0.5), locked=False):
+    hx, hy = half
+    lock = '    (locked yes)\n' if locked else ''
+    return (f'  (footprint "t:BAR" (layer "F.Cu") (at {x} {y} {rot})\n' + lock
+            + f'    (property "Reference" "{ref}" (at 0 0) (layer'
+            f' "F.SilkS"))\n'
+            f'    (fp_rect (start {-hx} {-hy}) (end {hx} {hy}) (stroke (width'
+            ' 0.05) (type default)) (layer "F.CrtYd"))\n'
+            f'    (pad "1" smd rect (at 0 0 {rot}) (size 0.4 0.4) (layers'
+            ' "F.Cu") (net 2 "N2")))\n')
+
+
+class TheZoneBoundsRotationClaims(unittest.TestCase):
+    """`_anchor_reachable` takes the seeder's own claims
+    (`rotations_for_ref`): a block's decision or candidate set, from ANY
+    block, and a locked part's own lattice. Seven 10 x 1 bars in an 8 x 8
+    zone: on their 45-degree lattice they fit (a 7.8 mm box) and 70 mm2 in
+    64 is forced; at 0 or 90 they do not fit, and the grade reads the zone
+    as an anchor."""
+
+    REFS = [f'B{i}' for i in range(7)]
+
+    def _overfull(self, blocks, locked=False, rot=45, half=(5, 0.5),
+                  zone=(16, 16, 24, 24)):
+        with tempfile.TemporaryDirectory() as td:
+            path = _board(td, 'zr', [_bar(r, 20, 5 + 4 * i, rot, half,
+                                          locked=locked)
+                                     for i, r in enumerate(self.REFS)])
+            for b in blocks:
+                b.setdefault('refs', self.REFS)
+            blocks[0]['zone'] = list(zone)
+            blocks[0]['tolerance_mm'] = 0
+            found, _m = _plan(path, {'blocks': blocks,
+                                     'legality_budget': {'overlap_area': 0.0}})
+        return bool([v for v in found if v.rule == 'plan_zone_overfull'])
+
+    def test_a_declared_angle_where_they_do_not_fit(self):
+        self.assertTrue(self._overfull([{'name': 'z'}]))
+        self.assertFalse(self._overfull([{'name': 'z', 'rotation': 0}]))
+
+    def test_any_candidate_where_they_do_not_fit(self):
+        """[45, 0]: they fit at 45 and not at 0 -- the seed may pick 0."""
+        self.assertFalse(self._overfull([
+            {'name': 'z', 'rotation_candidates': [45, 0]}]))
+
+    def test_another_blocks_claim(self):
+        """The zone's block declares nothing; a zone-less block naming the
+        same parts declares the candidates the seeder honours."""
+        self.assertFalse(self._overfull([
+            {'name': 'z'}, {'name': 'r', 'rotation_candidates': [0, 90]}]))
+
+    def test_a_locked_part_keeps_its_own_lattice(self):
+        """Locked bars never turn, whatever a block declares: at 45 they
+        fit, so the forced overlap stands."""
+        self.assertTrue(self._overfull([{'name': 'z', 'rotation': 0}],
+                                       locked=True))
+
+    def test_an_off_lattice_angle_is_turned_not_looked_up(self):
+        """4 x 4 squares at 0 in a 5 x 5 zone, candidates [45]: at 45 their
+        box is 5.66 and does not fit. The part's rotation cache has no 45
+        entry (and answers a miss with the 0-degree box, which fits)."""
+        self.assertTrue(self._overfull([{'name': 'z'}], rot=0, half=(2, 2),
+                                       zone=(16, 16, 21, 21)))
+        self.assertFalse(self._overfull(
+            [{'name': 'z', 'rotation_candidates': [45]}], rot=0, half=(2, 2),
+            zone=(16, 16, 21, 21)))
+
+
 if __name__ == '__main__':
     unittest.main()

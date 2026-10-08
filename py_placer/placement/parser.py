@@ -413,38 +413,42 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
                      ) <= tol
 
     def joined(segs):
-        """`segs` with the ends KiCad chains (within `_OUTLINE_JOIN_MM` of
-        each other, transitively) moved onto one point; a segment whose two
-        ends meet is dropped. Single linkage, not first-come: a 15 um
-        segment in a corner with 10 um gaps at both ends closes in KiCad
-        (b6a63ad8 verifier's tiny_chain), and a greedy grouping split it."""
-        from geometry_utils import UnionFind
+        """`segs` with each DANGLING end -- one no other end meets exactly
+        -- moved onto the nearest other dangling end within
+        `_OUTLINE_JOIN_MM`, nearest pairs first: a chain's loose ends
+        bridged, the way KiCad chains a courtyard. Ends that already meet
+        are left alone, so an arc's short chords and a side drawn in short
+        pieces keep their shape (a 20 um merge of ALL ends collapsed a
+        0.1 mm fillet's chords); a 15 um piece between two 10 um gaps still
+        closes (its four loose ends pair up)."""
         ends = [tuple(ln.coords[k]) for ln in segs for k in (0, -1)]
-        uf = UnionFind()
-        for i in range(len(ends)):
-            uf.find(i)
-            for j in range(i):
-                if math.hypot(ends[i][0] - ends[j][0],
-                              ends[i][1] - ends[j][1]) \
-                        <= _OUTLINE_JOIN_MM + 1e-9:
-                    uf.union(i, j)
-        rep: Dict[int, tuple] = {}
-        for i, p in enumerate(ends):
-            rep.setdefault(uf.find(i), p)
+        seen: Dict[tuple, int] = {}
+        for p in ends:
+            k = (round(p[0], 6), round(p[1], 6))
+            seen[k] = seen.get(k, 0) + 1
+        free = [i for i, p in enumerate(ends)
+                if seen[(round(p[0], 6), round(p[1], 6))] == 1]
+        cands = []
+        for a, i in enumerate(free):
+            for j in free[a + 1:]:
+                d = math.hypot(ends[i][0] - ends[j][0],
+                               ends[i][1] - ends[j][1])
+                if d <= _OUTLINE_JOIN_MM + 1e-9:
+                    cands.append((d, i, j))
+        moved: Dict[int, tuple] = {}
+        used: set = set()
+        for _d, i, j in sorted(cands):
+            if i in used or j in used:
+                continue
+            used.update((i, j))
+            moved[j] = ends[i]
         out = []
         for k in range(len(segs)):
-            a, b = rep[uf.find(2 * k)], rep[uf.find(2 * k + 1)]
+            a = moved.get(2 * k, ends[2 * k])
+            b = moved.get(2 * k + 1, ends[2 * k + 1])
             if a != b:
                 out.append(LineString((a, b)))
         return out
-
-    def closed_loops(segs) -> bool:
-        """Every end of `segs` meets exactly one other: closed chains only."""
-        deg: Dict[tuple, int] = {}
-        for ln in segs:
-            for p in (tuple(ln.coords[0]), tuple(ln.coords[-1])):
-                deg[p] = deg.get(p, 0) + 1
-        return all(d == 2 for d in deg.values())
 
     compose = _nested_even_odd if even_odd else unary_union
     out: Dict[str, tuple] = {}
@@ -459,23 +463,37 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         if pts and lines.get(side) and not covers(shape, pts):
             # Ends that miss each other by a few microns (ulx3s BAT1's
             # courtyard, glasgow J4's 8 um corner: KiCad closes them, a
-            # strict join does not): join them the way KiCad chains a
-            # courtyard -- END TO END within `_OUTLINE_JOIN_MM`, never an
-            # end onto the middle of a segment -- and accept the result
-            # only when every joined end meets exactly one other, i.e. the
-            # drawing is closed loops with no stub, branch or crossing.
-            # Snapping ends onto SEGMENTS closed a T that stops 15 um short
-            # of an edge, which KiCad reports as malformed_courtyard (b6a63ad8
-            # verifier); a cover test alone admitted crossing ends and stray
-            # parallel lines KiCad rejects too.
-            ends = joined(lines[side])
-            if ends and closed_loops(ends):
+            # strict join does not). Two ways to close them, tried in turn:
+            # snap the drawing onto itself (an end within `_OUTLINE_JOIN_MM`
+            # of another segment moves onto it), then join ends to ends
+            # transitively (`joined`: a 15 um piece between two 10 um gaps).
+            # The first that covers every drawn vertex to within the join
+            # distance is the outline.
+            #
+            # GENEROUS BY DESIGN. KiCad's own chaining (end to end, nearest
+            # first) is not reproduced exactly: each stricter emulation
+            # tried here missed drawings KiCad closes (corner-touching
+            # squares, a nested square, an arc beside a corner: the pin
+            # under them is a real pth_inside_courtyard, and reading them
+            # open made it pass). Closing generously can only err the other
+            # way -- a T that stops 15 um short, crossing ends, a stray
+            # parallel line: KiCad calls those malformed and tests no pin;
+            # here the pin is graded, the conservative side for a gate.
+            # tests/fixtures/1212_courtyard_chaining.json holds kicad-cli's
+            # verdict on 94 drawings; the test asserts no drawing KiCad
+            # closes reads open here.
+            import shapely
+            from shapely.geometry import MultiLineString
+            ml = MultiLineString([list(ln.coords) for ln in lines[side]])
+            for cand_lines in (shapely.snap(ml, ml, _OUTLINE_JOIN_MM),
+                               joined(lines[side])):
                 retry = list(areas.get(side, [])) + list(
-                    polygonize(unary_union(ends)))
+                    polygonize(unary_union(cand_lines)))
                 if retry:
                     cand = compose(retry)
                     if covers(cand, pts, _OUTLINE_JOIN_MM):
                         shape, tol = cand, _OUTLINE_JOIN_MM
+                        break
         if pts and not covers(shape, pts, tol):
             from shapely.geometry import MultiPoint
             shape, how = MultiPoint(pts).convex_hull, OUTLINE_HULL

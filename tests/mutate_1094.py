@@ -99,8 +99,8 @@ ROWS = [
      "            shape, how = shape, OUTLINE_HULL",
      (T1094,), 'KILLED'),
     ('micron-gap-not-joined', 'parser',
-     "            ends = joined(lines[side])",
-     "            ends = list(lines[side])",
+     "                if retry:",
+     "                if False:",
      (T1094,), 'KILLED'),
     # --- #1095: the project's courtyard severity -----------------------------
     ('project-ignore-not-read', 'leg',
