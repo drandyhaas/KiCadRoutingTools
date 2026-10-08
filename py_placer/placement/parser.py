@@ -352,11 +352,17 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
     verts: Dict[str, list] = {}
 
     def seg(side, a, b):
+        # A zero-length element (a line or an arc whose ends meet) is no
+        # part of the outline: KiCad drops it (kicad-cli 10: a square plus
+        # a zero-length fp_line, fp_arc or fp_rect is NOT malformed, and a
+        # pin under the square is reported), so its point must not be a
+        # vertex the outline has to cover.
         a = (snap(a[0]), snap(a[1]))
         b = (snap(b[0]), snap(b[1]))
+        if a == b:
+            return
         verts.setdefault(side, []).extend((a, b))
-        if a != b:
-            lines.setdefault(side, []).append(LineString((a, b)))
+        lines.setdefault(side, []).append(LineString((a, b)))
 
     for m in re.finditer(
             r'\(fp_(line|rect)\s+\(start\s+' + _NUM + r'\s+' + _NUM + r'\)\s+'
@@ -365,6 +371,8 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         x1, y1, x2, y2 = (float(m.group(i)) for i in range(2, 6))
         side = m.group(6)
         if m.group(1) == 'rect':
+            if (snap(x1), snap(y1)) == (snap(x2), snap(y2)):
+                continue  # zero-size: dropped, as `seg` drops a point
             r = box(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
             areas.setdefault(side, []).append(r)
             verts.setdefault(side, []).extend(r.exterior.coords)
@@ -420,7 +428,10 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         are left alone, so an arc's short chords and a side drawn in short
         pieces keep their shape (a 20 um merge of ALL ends collapsed a
         0.1 mm fillet's chords); a 15 um piece between two 10 um gaps still
-        closes (its four loose ends pair up)."""
+        closes (its four loose ends pair up). A segment is never joined to
+        ITSELF: a 12 um piece between two 15 um gaps would otherwise pair
+        its own ends first and vanish, leaving both gaps open (KiCad
+        closes it)."""
         ends = [tuple(ln.coords[k]) for ln in segs for k in (0, -1)]
         seen: Dict[tuple, int] = {}
         for p in ends:
@@ -431,6 +442,8 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         cands = []
         for a, i in enumerate(free):
             for j in free[a + 1:]:
+                if i // 2 == j // 2:
+                    continue
                 d = math.hypot(ends[i][0] - ends[j][0],
                                ends[i][1] - ends[j][1])
                 if d <= _OUTLINE_JOIN_MM + 1e-9:
@@ -476,13 +489,18 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
             # tried here missed drawings KiCad closes (corner-touching
             # squares, a nested square, an arc beside a corner: the pin
             # under them is a real pth_inside_courtyard, and reading them
-            # open made it pass). Closing generously can only err the other
-            # way -- a T that stops 15 um short, crossing ends, a stray
-            # parallel line: KiCad calls those malformed and tests no pin;
-            # here the pin is graded, the conservative side for a gate.
+            # open made it pass). Closing generously errs the other way --
+            # a T that stops 15 um short, crossing ends, a stray parallel
+            # line read closed here while KiCad flags malformed_courtyard
+            # (it still tests a pin against the contours that do close).
             # tests/fixtures/1212_courtyard_chaining.json holds kicad-cli's
-            # verdict on 94 drawings; the test asserts no drawing KiCad
-            # closes reads open here.
+            # verdict on 101 drawings; the test asserts no drawing KiCad
+            # closes reads open here. NOT modelled: a drawing that closes
+            # plus debris no join absorbs (a stray piece outside it, a
+            # there-and-back spike, a flat fp_rect or 2-point fp_poly)
+            # reads as the hull here, its pins `courtyard_malformed`
+            # (listed, not gating), where KiCad flags it malformed AND
+            # tests its pins against the square.
             import shapely
             from shapely.geometry import MultiLineString
             ml = MultiLineString([list(ln.coords) for ln in lines[side]])

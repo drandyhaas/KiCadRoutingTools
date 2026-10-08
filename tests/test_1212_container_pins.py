@@ -725,18 +725,24 @@ def _square(gap):
                                (-2, 2, -2, round(-2 + gap, 6)))]
 
 
-#: kicad-cli's verdict on 94 synthetic courtyard drawings (the verifiers'
+#: kicad-cli's verdict on 105 synthetic courtyard drawings (the verifiers'
 #: shapes: gaps at every chain position and across the 20 um boundary,
 #: crossings, stubs, T's, nested and corner-touching squares, fillets, arcs,
-#: subdivided sides, B side, rotations). Re-measure with
-#: `tests/measure_1212_kicad_pins.py --chaining`.
+#: subdivided sides, B side, rotations; zero-length elements, which KiCad
+#: drops; a piece shorter than the gaps around it; a three-way corner beside
+#: a loose end). Re-measure with `tests/measure_1212_kicad_pins.py
+#: --chaining`.
 CHAINING = os.path.join(ROOT, 'tests', 'fixtures',
                         '1212_courtyard_chaining.json')
-#: Drawings KiCad calls malformed_courtyard (no courtyard: no pin tested)
-#: that the parser closes: the conservative side, a pin graded where KiCad
-#: grades none. A T or stub, a crossing, a duplicate or overlapping segment,
-#: and a gap KiCad rounds past 20 um only after rotation. Pinned, so a
-#: change of the model in EITHER direction shows here.
+#: Drawings KiCad flags malformed_courtyard that the parser closes. KiCad
+#: still tests a pin against the contours of such a drawing that DO close
+#: (final P1 verifier: stub_tiny_0.015 reports its pin), so where those
+#: contours are the drawing's own outline both grade the pin, and the two
+#: differ only in the flag; where they are not, the polygon here is the
+#: larger, conservative reading. A T or stub, a crossing, a duplicate or
+#: overlapping segment, and a gap KiCad rounds past 20 um only after
+#: rotation. Pinned, so a change of the model in EITHER direction shows
+#: here.
 KNOWN_CONSERVATIVE = {
     'cross_0.015', 'cross_0.019', 'divider_exact', 'divider_short',
     'dup_line', 'overlap_collinear', 'rot30_gap0.02', 'stub_in',
@@ -750,7 +756,11 @@ class KiCadsChaining(unittest.TestCase):
     never read OPEN a drawing KiCad closes -- that would pass a real
     pth_inside_courtyard. It closes generously instead (`parser.
     _outline_shapes_by_side`: snap, then a join of loose ends, within
-    20 um), and the drawings it closes that KiCad does not are pinned."""
+    20 um), and the drawings it closes that KiCad does not are pinned.
+    Not covered by this flag-level comparison: a drawing KiCad flags
+    malformed while still testing pins against the part that closes (a
+    square plus debris no join absorbs) reads as the hull here, its pins
+    listed and not gating -- see the parser's comment."""
 
     def test_no_drawing_kicad_closes_reads_open(self):
         import json

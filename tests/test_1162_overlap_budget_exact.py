@@ -593,6 +593,20 @@ class TheZoneBoundsRotationClaims(unittest.TestCase):
             [{'name': 'z', 'rotation_candidates': [45]}], rot=0, half=(2, 2),
             zone=(16, 16, 21, 21)))
 
+    def test_contradictory_claims_stand_the_bound_down(self):
+        """Two blocks declare the bars at 0 and at 90: the seeder refuses
+        the intent (`rotations_for_ref` raises, naming both blocks). The
+        bound must not refuse it first at the bars' own 45 degrees, an
+        angle the seeder never uses (final P1 verifier)."""
+        blocks = [{'name': 'z', 'rotation': 0}, {'name': 'r', 'rotation': 90}]
+        with self.assertRaises(floorplan.IntentError):
+            floorplan.rotations_for_ref(
+                floorplan.intent_from_dict({
+                    'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+                    'blocks': [dict(b, refs=self.REFS) for b in blocks]}),
+                {b['name']: self.REFS for b in blocks})
+        self.assertFalse(self._overfull(blocks))
+
 
 if __name__ == '__main__':
     unittest.main()

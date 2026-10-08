@@ -7389,7 +7389,12 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         # The seeder's rotation claims, per ref, from every block.
         _claims = rotations_for_ref(intent, blocks)
     except IntentError:
-        _claims = {}               # contradictory: validate_intent says so
+        # Two blocks declare one part at different angles. The seeder
+        # refuses the intent itself (its `rotations_for_ref` call raises,
+        # naming both blocks); a bound computed here at the part's own
+        # angle -- one the seeder never uses -- would refuse it first, as
+        # a zone overfull it is not (final P1 verifier).
+        _claims = None
     if getattr(state, 'courtyards_ignored', False):
         # The project waives KiCad's courtyard rule, so the grade prices no
         # courtyard overlap (#1104): no forced overlap can exceed the budget,
@@ -7397,7 +7402,7 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         # three circles ERRORed at 35.5 where the grade read 0).
         overlap_budget = None
     for z in intent.blocks:
-        if z.rect is None:
+        if z.rect is None or _claims is None:
             continue
         members = [r for r in blocks.get(z.name, ()) if r in state.parts]
         if any(frozenset((a_, b_)) in waived
