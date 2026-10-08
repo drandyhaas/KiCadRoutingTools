@@ -49,7 +49,10 @@ def _model(board=GLASGOW):
 #: glasgow_revC's courtyard census. 52.252 until #1206: 6.2806 mm2 of it was
 #: J1 <-> TP13 and J1 <-> TP15 (3.1403 each), two test points between J1's
 #: drilled-pad clusters, under the single far-side box drawn over all of them.
-GLASGOW_CENSUS = 45.9714
+#: 45.9714 until J4's F.CrtYd closed (fa10 P1: its ends miss by 8 um at one
+#: corner, KiCad chains them; the polygon is 0.0045 mm2 less than the hull
+#: that stood in for it).
+GLASGOW_CENSUS = 45.9669
 #: ...and the optimizer's rect sum on the same board, 70.05 until #1206 (the
 #: quench's far side is the clusters too). Still a different number from the
 #: census, which is what the caption arms below need.
