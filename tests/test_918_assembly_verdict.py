@@ -266,14 +266,15 @@ def main():
 
         # #1096 made pad copper off the outline the third, #1098 a part on a
         # plug's mating region the fourth, fa10 P1 (#1212) a part on a pin
-        # frame's drilled pin the fifth.
-        print('the five conjuncts that can REALLY fire at blocking 0 are '
+        # frame's drilled pin the fifth, and #1183 the courtyard gate the
+        # sixth -- board_score now arms it when handed --baseline.
+        print('the six conjuncts that can REALLY fire at blocking 0 are '
               'named')
-        check('locked_contacts and courtyard gating are not among them',
+        check('locked_contacts is not among them',
               tuple(board_score.ASSEMBLY_LIVE_CONJUNCTS)
               == ('coincident_origins', 'containment_blocking',
                   'oob_pad_copper_gating_count', 'mating_keepout_count',
-                  'pin_in_courtyard'),
+                  'pin_in_courtyard', 'courtyard_blocking_gating'),
               repr(board_score.ASSEMBLY_LIVE_CONJUNCTS))
         r = board_score.assembly_component(
             {'blocking': 0, 'buildable': False, 'verdict': 'NOT BUILDABLE',

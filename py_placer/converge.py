@@ -667,7 +667,9 @@ def lens_contradictions(lenses, score):
 #: --impedance-nets given; impedance is ungraded"), so that is preferred and
 #: this is only the fallback for a payload that carries `ungraded` alone.
 _UNGRADED_FLAG = {'floorplan': '--intent', 'impedance': '--impedance-nets',
-                  'length': '--length-groups', 'net_widths': '--net-min-widths'}
+                  'length': '--length-groups', 'net_widths': '--net-min-widths',
+                  # #1183: check_assembly's moved-vs-baseline courtyard gate.
+                  'assembly.courtyard_gating': '--baseline'}
 
 
 def ungraded_set(score):

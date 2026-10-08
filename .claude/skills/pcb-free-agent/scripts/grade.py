@@ -81,10 +81,15 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
     out['spec'] = [list(p) for p in spec]
 
     aj = os.path.join(tmp, 'assembly.json')
+    # --baseline ARMS the courtyard gate: a pair a moved part entered gates
+    # (#1183). Without it check_assembly reported them and said buildable.
     out['check_assembly_rc'], _ = _run(['py_tools/check_assembly.py', board,
-                                        *iflag, '--json', aj])
+                                        *iflag, '--baseline', baseline,
+                                        '--json', aj])
     out['assembly_verdict'] = (_load(aj) or {}).get('verdict')
     out['buildable'] = bool((_load(aj) or {}).get('buildable'))
+    out['assembly_gating_basis'] = (_load(aj) or {}).get(
+        'courtyard_gating_basis')
 
     if intent:
         fj = os.path.join(tmp, 'floorplan.json')
@@ -139,8 +144,10 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
                    broken=(c.get('broken') or {}).get('count'),
                    drc=(c.get('drc') or {}).get('count'),
                    **(s.get('quality') or {}))
-        for key, extra in (('check_complete', []),
-                           ('check_complete_authored', ['--authored-from', baseline])):
+        for key, extra in (('check_complete', ['--baseline', baseline]),
+                           ('check_complete_authored',
+                            ['--baseline', baseline,
+                             '--authored-from', baseline])):
             cj = os.path.join(tmp, f'{key}.json')
             out[key + '_rc'], _ = _run(['check_complete.py', board, *iflag,
                                         *spec_args, *extra, '--json', cj])

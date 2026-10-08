@@ -412,10 +412,12 @@ def unrouted_shape(board: str, unrouted_names) -> dict:
 #:     `tests/test_918_assembly_verdict.py` builds, one stacked-capacitor
 #:     defect appears as a group AND as a containment.
 #:
-#: `courtyard_blocking_gating` is null here BY CONSTRUCTION: it is the
-#: moved-vs-baseline subset of the courtyard census, and board_score passes no
-#: --baseline, so check_assembly publishes null rather than 0. Reported as
-#: unmeasured, never counted as clean.
+#: `courtyard_blocking_gating` is the moved-vs-baseline subset of the
+#: courtyard census: armed only when board_score is handed `--baseline`, which
+#: it forwards to check_assembly (#1183). Unarmed, check_assembly publishes
+#: null rather than 0, and the scorer reports it unmeasured -- in
+#: `conjuncts_unmeasured` and in the top-level `ungraded` as
+#: 'assembly.courtyard_gating' -- never counted as clean.
 ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
                       'containment_blocking', 'courtyard_blocking_gating',
                       'oob_pad_copper_gating_count', 'mating_keepout_count',
@@ -425,8 +427,8 @@ ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
 #: this scorer's invocation. Not every conjunct can:
 #:   * `locked_contacts` cannot -- it is a subset of `blocking` (above), so a
 #:     locked contact implies `blocking >= 1` and the board never had 0;
-#:   * `courtyard_blocking_gating` cannot -- it is `[]` unless `--baseline` was
-#:     passed, and board_score never passes one.
+#:   * `courtyard_blocking_gating` can since #1183, when `--baseline` arms it:
+#:     a part moved onto another's courtyard gates at `blocking` 0.
 #: Written down because the issue, and this file's first draft, claimed all
 #: four -- and a motivating case that cannot occur is not a motivating case.
 #: #1096 added `oob_pad_copper_gating_count`: pad copper past the outline
@@ -438,7 +440,7 @@ ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
 #: another part's courtyard, absolute, so it too fires at `blocking` 0.
 ASSEMBLY_LIVE_CONJUNCTS = ('coincident_origins', 'containment_blocking',
                            'oob_pad_copper_gating_count', 'mating_keepout_count',
-                           'pin_in_courtyard')
+                           'pin_in_courtyard', 'courtyard_blocking_gating')
 
 
 def assembly_component(doc: dict, rc: int) -> dict:
@@ -542,8 +544,8 @@ def assembly_component(doc: dict, rc: int) -> dict:
                 None if isinstance(conjuncts['courtyard_blocking_gating'], int)
                 else 'no --baseline was passed, so check_assembly\'s fifth '
                      'conjunct (moved-vs-baseline courtyard interpenetration) '
-                     'is unarmed and publishes null. board_score never passes '
-                     'one, so it is unarmed on every board this scorer grades'),
+                     'is unarmed and publishes null. Pass --baseline <the '
+                     'board this one was derived from> to arm it (#1183)'),
             'advisory_pairs': int(doc.get('advisory') or 0),
             'waived_pairs': int(doc.get('waived') or 0),
             'pairs': doc.get('blocking_pairs') or [],
@@ -553,7 +555,7 @@ def assembly_component(doc: dict, rc: int) -> dict:
 
 
 def score_assembly(root: str, board: str, intent: str, tmp: str,
-                   clearance=None) -> dict:
+                   clearance=None, baseline=None) -> dict:
     """Blocking BODY pairs (run-6): two footprints' pad copper in the same
     space -- physically unbuildable, invisible to every copper checker (the
     shipped C14-on-R14 stack). Runs check_assembly.py, which needs NO
@@ -582,6 +584,13 @@ def score_assembly(root: str, board: str, intent: str, tmp: str,
     # unnoticed; `advisory_pairs` and `waived_pairs` are not.
     if clearance is not None:
         args += ['--clearance', str(clearance)]
+    # #1183: the board this one was derived from ARMS check_assembly's fifth
+    # conjunct -- a courtyard pair a MOVED part entered gates. board_score had
+    # the flag since #962 and handed it to check_drc only, so One-Air-Max's
+    # seed graded `buildable` here and NOT BUILDABLE (22 of 22 pairs gating)
+    # under check_assembly --baseline.
+    if baseline:
+        args += ['--baseline', baseline]
     rc, text = run_tool(root, 'check_assembly.py', *args)
     if rc not in (0, 4) or not os.path.exists(out):
         return skipped(f'check_assembly rc {rc}: {text.strip()[-200:]}')
@@ -1139,7 +1148,9 @@ def build_parser():
                         'in a paste opening as inherited, and grades a graze of '
                         'footprint graphic copper that a part MOVE created (#962). '
                         'A via-in-paste left after that is the run\'s own and '
-                        'counts in BLOCKING (#1171)')
+                        'counts in BLOCKING (#1171). check_assembly then GATES '
+                        'a courtyard pair a moved part entered (#1183). '
+                        'Omitted, that gate is listed in `ungraded`')
     p.add_argument('--clearance', type=float,
                    help='grade DRC at this clearance. OMIT IT unless you know '
                         'better than the board: check_drc then reads the '
@@ -1198,6 +1209,11 @@ def main():
     if not os.path.isfile(args.board):
         print(f"board not found: {args.board}", file=sys.stderr)
         return 3
+    if args.baseline is not None and not os.path.isfile(args.baseline):
+        # Unreadable, the gate it arms would sit unarmed with the caller
+        # believing it graded (#1183).
+        print(f"baseline not found: {args.baseline}", file=sys.stderr)
+        return 2
     root = krt_dir()
     # In-process imports (kicad_parser, net_queries) come from the engine dir;
     # #522 + the placement split spread them over py_router/ and py_tools/, so
@@ -1219,7 +1235,7 @@ def main():
                                                 baseline=args.baseline)
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
         assembly = score_assembly(root, args.board, args.intent, tmp,
-                                  args.clearance)
+                                  args.clearance, baseline=args.baseline)
         _imp_nets = ([g for tok in args.impedance_nets for g in tok.split(',') if g]
                      if args.impedance_nets else args.impedance_nets)
         imped = score_impedance(root, args.board, _imp_nets, tmp)
@@ -1292,7 +1308,15 @@ def main():
              'label': args.label, 'blocking': blocking,
              'blocking_by': {k: v.get('count') for k, v in parts.items()},
              'advisory': {k: v.get('count') for k, v in advisory.items()},
-             'ungraded': sorted(k for k, v in parts.items() if v.get('ran') is False),
+             'ungraded': sorted(
+                 [k for k, v in parts.items() if v.get('ran') is False]
+                 # #964 item 2 / #1183: assembly ran, but its courtyard gate
+                 # did not -- an UNARMED conjunct is unexamined, and only a
+                 # top-level entry is something a loop compares.
+                 + (['assembly.courtyard_gating']
+                    if (parts.get('assembly') or {}).get('ran')
+                    and not parts['assembly'].get('courtyard_gating_armed')
+                    else [])),
              'unknown': sorted(unknown), 'quality': quality(args.board),
              # BESIDE `quality`, never inside `parts` -- see score_placement.
              # Absent entirely without the flag, so a payload that carries the

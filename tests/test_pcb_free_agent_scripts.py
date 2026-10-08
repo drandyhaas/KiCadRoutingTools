@@ -229,6 +229,10 @@ def test_grade_route_mode_names_every_moved_part_and_is_not_done():
         assert isinstance(full.get('crossings'), int), sorted(full)
         # the declared spec reached the graders, and is on the record
         assert full['spec'] == [['--min-via-diameter', '0.6']], full['spec']
+        # #1183: check_assembly graded with the input as --baseline, so its
+        # courtyard gate was ARMED, and the record says so
+        assert full['assembly_gating_basis'] == 'moved-vs-baseline', \
+            full.get('assembly_gating_basis')
         run_utils.check(PY + [os.path.join(SCRIPTS, 'grade.py'), pile,
                               '--baseline', ESP, '--spec', 'no-equals-sign'],
                         refuse='expected NAME=VALUE', code=2,

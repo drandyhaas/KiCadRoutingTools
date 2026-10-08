@@ -95,8 +95,8 @@ ROWS = [
      "                         or False)",
      (T1212,), 'KILLED'),
     ('board-score-drops-the-live-conjunct', 'score',
-     "                           'pin_in_courtyard')",
-     "                           )",
+     "                           'pin_in_courtyard', 'courtyard_blocking_gating')",
+     "                           'courtyard_blocking_gating')",
      (T918,), 'KILLED'),
     # -- the search, the seeder and the repair --
     ('the-search-skips-the-pins', 'quench',
