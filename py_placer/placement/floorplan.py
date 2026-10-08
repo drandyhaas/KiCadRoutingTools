@@ -2188,10 +2188,12 @@ def keepout_hit(entry, rects) -> float:
         if r is None:
             continue
         if entry.get('rect') is not None:
-            hit = max(hit, legality.rect_overlap_area(r, entry['rect']))
+            # #1206: a far side of several clusters is its clusters.
+            hit = max(hit, legality.far_overlap_area(r, entry['rect']))
         else:
             cx, cy, radius = entry['circle']
-            if _circle_hits_rect(cx, cy, radius, r):
+            if any(_circle_hits_rect(cx, cy, radius, b)
+                   for b in legality.far_boxes(r)):
                 hit = max(hit, 1.0)
     return hit if hit > legality.EPS else 0.0
 
@@ -2438,10 +2440,10 @@ def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
         rect = (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)
         tht = None
         if has_tht:
-            tl = legality.through_pad_bounds_local(fp)
+            tl = legality.far_side_local(fp)
             if tl is not None:
-                a0, b0, a1, b1 = legality.rotate_local_bounds(*tl, rot)
-                tht = (fp.x + a0, fp.y + b0, fp.x + a1, fp.y + b1)
+                tht = legality.offset_far(legality.rotate_far(tl, rot),
+                                          fp.x, fp.y)
         sides = legality.sides_occupied(side, has_tht)
         for k in keepouts_for_ref(ks, ref, sides):
             a = keepout_hit(k, (rect, tht))
@@ -3739,7 +3741,7 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
                 continue
             holes = []
             for k in entries:
-                for lb in ((b, t) if t is not None else (b,)):
+                for lb in (b,) + tuple(legality.far_boxes(t)):
                     f = _forbidden_origin_rect(k, lb)
                     if f is not None:
                         holes.append(f)
@@ -3836,7 +3838,9 @@ class _LocalPart:
     def __init__(self, rot: float, local, tht_local=None):
         self.rot = float(rot) % 360
         self._b = tuple(local)
-        self._t = tuple(tht_local) if tht_local is not None else None
+        # #1206: a FarSide keeps its clusters; anything else is one box.
+        self._t = (tht_local if isinstance(tht_local, legality.FarSide)
+                   else tuple(tht_local) if tht_local is not None else None)
 
     def rect(self, x: float, y: float, rot: float):
         b = legality.rotate_local_bounds(*self._b, rot)
@@ -3845,8 +3849,7 @@ class _LocalPart:
     def tht_rect(self, x: float, y: float, rot: float):
         if self._t is None:
             return None
-        t = legality.rotate_local_bounds(*self._t, rot)
-        return (x + t[0], y + t[1], x + t[2], y + t[3])
+        return legality.offset_far(legality.rotate_far(self._t, rot), x, y)
 
 
 def intent_zone_keepout_problems(intent, blocks, pcb_data,

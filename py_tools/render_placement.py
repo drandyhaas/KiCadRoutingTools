@@ -912,16 +912,25 @@ def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
         own = model.side(ref)
         if side is not None and side not in model.sides(ref):
             continue
+        clusters = ()
         if side is not None and own != side:
             # Far side of a through-hole part: its DRILLED-PAD box, which is
-            # what legality.rect_on gates on.
+            # what legality.rect_on gates on -- one per cluster of drilled
+            # pads since #1206 (`.boxes`), drawn as such so the sheet shows
+            # what is graded, not the strip between two far-apart posts.
             rect = model.far_rect(ref)
             if rect is None:
                 continue
+            clusters = getattr(rect, 'boxes', None) or ()
         col = color or (C_COURT_DIM if dim else
                         (C_COURT_B if own == 'B' else C_COURT_F))
         if ref in locked:
             col = C_LOCKED
+        if clusters:
+            for cb in clusters[:-1]:
+                d.rectangle(_rect_pts(r, cb), outline=col,
+                            width=_w(r, width_mm))
+            rect = clusters[-1]
         box = _rect_pts(r, rect)
         # #896. A body the model took from SILK is drawn DASHED, so a reviewer
         # can see at a glance which outlines rest on a silkscreen marking

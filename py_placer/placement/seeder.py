@@ -93,6 +93,13 @@ FALLBACK_STEP_MM = 2.0
 TARGET_JITTER_MM = 1.5
 
 
+def _rotate_far(r, rot):
+    """`legality.rotate_far`: a far-side value turned cluster by cluster
+    (#1206), so a rotation cache never flattens a FarSide to its union."""
+    from .legality import rotate_far
+    return rotate_far(r, rot)
+
+
 def _rect_inside(rect, outer, tol: float) -> bool:
     return (rect[0] >= outer[0] - tol and rect[1] >= outer[1] - tol
             and rect[2] <= outer[2] + tol and rect[3] <= outer[3] + tol)
@@ -711,9 +718,12 @@ def _frozen_refusers(census: Dict) -> List[Tuple[str, str]]:
             out.append((r, f"frees {n} pose(s) when lifted"))
     named = {r for r, _h in out}
     if open_:
+        cap = (f"all of the first {open_} open poses censused (the census "
+               f"cap)" if open_ >= CENSUS_CAP else
+               f"all {open_} open pose(s)")
         for r, n in sorted((census.get('frozen_alone') or {}).items()):
             if n == 0 and r not in named:
-                out.append((r, f"alone refuses all {open_} open pose(s)"))
+                out.append((r, f"alone refuses {cap}"))
     return out
 
 
@@ -884,7 +894,7 @@ def _no_pose_note(ref: str, verdict: str, census: Dict,
 
 
 #: Dispositions of a part the seed could not seat (#1151).
-UNSEATED_DISPOSITIONS = ('locked_at_input', 'off_board', 'legal_at_input',
+UNSEATED_DISPOSITIONS = ('locked_at_input', 'off_board', 'clear_at_input',
                          'staged', 'not_modelled')
 
 #: Gap between the board (or the lowest part rect) and the staging row, and
@@ -893,7 +903,8 @@ STAGING_GAP_MM = 5.0
 STAGING_PITCH_GAP_MM = 1.0
 
 
-def _dispose_unseated(state, refs: Sequence[str]) -> Dict[str, Dict]:
+def _dispose_unseated(state, refs: Sequence[str],
+                      locked=()) -> Dict[str, Dict]:
     """Decide where each part the seed could not seat is WRITTEN (#1151).
 
     A part with no seat used to keep the pose it came in with, while every
@@ -907,13 +918,25 @@ def _dispose_unseated(state, refs: Sequence[str]) -> Dict[str, Dict]:
     measured worse (#982: ulx3s 20 -> 25 unseated over ten seeds, rp2350
     1 -> 3). In sorted order, each part is:
 
-      * `locked_at_input` -- locked: never moved, whatever it touches;
+      * `locked_at_input` -- locked, in the file or by the seed (`locked`:
+        the intent's must_lock and seated fixed poses, which the caller
+        stamps `(locked yes)`): never moved -- a staged part stamped locked
+        would be frozen off the board;
       * `off_board`       -- its rect is already wholly outside the board;
-      * `legal_at_input`  -- `pose_ok` admits its input pose against what was
-        seated and what was left before it: left where it is, harming nobody;
-      * `staged`          -- anything else: moved to a deterministic row below
-        the board, rotation kept, and written there;
+      * `clear_at_input`  -- at its input pose it makes no HARD conflict with
+        what was seated or left before it (`_input_pose_conflict`): left
+        where it is;
+      * `staged`          -- it does: moved to a deterministic row below the
+        board, rotation kept, and written there;
       * `not_modelled`    -- not a search part (nothing to decide).
+
+    HARD means what the grader flags whatever moved: pad copper overlapping
+    or stacked on pad copper, a body inside a body, pads under a body. NOT the
+    seat predicate (`pose_ok`), which also demands full containment and a
+    clearance gap: measured on ulx3s, it called the designer's own edge
+    connectors J1/J2 illegal at their overhanging edge poses and staged them
+    off the board -- 36% more crossings and four edge_connector intent errors
+    on a seed with no stack at all.
 
     Returns `{ref: {disposition, input, written, refused_by}}`; `refused_by`
     is `candidate_veto`'s `(check, blocker)` at the input pose for a staged
@@ -936,7 +959,7 @@ def _dispose_unseated(state, refs: Sequence[str]) -> Dict[str, Dict]:
         rec = {'input': [round(v, 4) for v in pose], 'written':
                [round(v, 4) for v in pose], 'refused_by': None}
         r = part.rect(*pose)
-        if part.locked:
+        if part.locked or ref in locked:
             rec['disposition'] = 'locked_at_input'
         elif bb and rect_overlap_area(r, bb) <= 1e-9:
             rec['disposition'] = 'off_board'
@@ -945,11 +968,11 @@ def _dispose_unseated(state, refs: Sequence[str]) -> Dict[str, Dict]:
             # already LEFT where they are now are, so two unseated parts are
             # never both left on one spot.
             undecided = set(todo[i + 1:]) | set(staged)
-            if pose_ok(state, ref, *pose, exclude=undecided):
-                rec['disposition'] = 'legal_at_input'
+            conflict = _input_pose_conflict(state, ref, pose, undecided)
+            if conflict is None:
+                rec['disposition'] = 'clear_at_input'
             else:
-                veto = state.candidate_veto(ref, *pose, exclude=undecided)
-                rec['refused_by'] = list(veto) if veto else ['pose_ok', None]
+                rec['refused_by'] = list(conflict)
                 rec['disposition'] = 'staged'
                 staged.append(ref)
         if rec['disposition'] != 'staged' and (part.x, part.y, part.rot) \
@@ -973,6 +996,27 @@ def _dispose_unseated(state, refs: Sequence[str]) -> Dict[str, Dict]:
             out[ref]['written'] = [round(x, 4), round(y, 4), rot]
             cursor = x + lx1 + STAGING_PITCH_GAP_MM
     return out
+
+
+def _input_pose_conflict(state, ref: str, pose, exclude: Set[str]):
+    """`(channel, other)` for the first HARD conflict `ref` makes at `pose`
+    with a part not in `exclude`, or None (#1151). The channels are the ones
+    check_assembly gates whatever moved: pad copper overlapping or stacked
+    (`pair_shortfall`'s `pad_overlap` / `stack`, check_drc's pad-pad test),
+    a body contained in a body, pads under a body."""
+    ctx = getattr(state, 'legality_ctx', None)
+    if ctx is not None:
+        for other in sorted(state.parts):
+            if other == ref or other in exclude:
+                continue
+            sf = ctx.pair_shortfall(ref, other, pose_a=pose)
+            if sf.pad_overlap or sf.stack:
+                return ('pads', other)
+    if state._body_contained_at(ref, *pose, exclude=exclude):
+        return ('containment', None)
+    if state._pads_under_body_at(ref, *pose, exclude=exclude):
+        return ('pads_under_body', None)
+    return None
 
 
 def _seated_violations(state, seated: Set[str]) -> Tuple[int, float]:
@@ -1254,8 +1298,7 @@ def _materialise_rotation(part, rot: float) -> float:
             *part.bounds_by_rot[0.0], rot)
     if part.tht_by_rot is not None and rot not in part.tht_by_rot:
         from placement.legality import rotate_local_bounds
-        part.tht_by_rot[rot] = rotate_local_bounds(
-            *part.tht_by_rot[0.0], rot)
+        part.tht_by_rot[rot] = _rotate_far(part.tht_by_rot[0.0], rot)
     return rot
 
 
@@ -1498,8 +1541,8 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                     if (part.tht_by_rot is not None
                             and _r not in part.tht_by_rot):
                         from placement.legality import rotate_local_bounds
-                        part.tht_by_rot[_r] = rotate_local_bounds(
-                            *part.tht_by_rot[0.0], _r)
+                        part.tht_by_rot[_r] = _rotate_far(
+                            part.tht_by_rot[0.0], _r)
                 # OPT-IN (`seed_from_intent(rotate_by_facing=True)`): let every
                 # angle of the ladder find its own first fit, and keep the pose
                 # with the fewest connected pads on a row facing the outline
@@ -4371,8 +4414,16 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      rotate_by_facing: bool = False,
                      array_pose_cap: int = ARRAY_SEAT_POSE_CAP,
                      diagonal_rotations: Optional[bool] = None,
-                     decap_claim_after_ics: Optional[bool] = None) -> Dict:
+                     decap_claim_after_ics: Optional[bool] = None,
+                     dispose_unseated: bool = True) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
+
+    `dispose_unseated` (#1151): stage, below the board, a part it could not
+    seat whose input pose makes a hard conflict (`_dispose_unseated`). True
+    for a seed; `reseat_scope` passes False -- it re-seats a SCOPE inside a
+    placed board and keeps a scope ref it cannot seat where it was, and a
+    staging row there cost a valid re-seat of the rest of the scope (the
+    phase-1 verifier: base `pad_pairs 3 -> 1`, staged: the pass refused).
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
     'notes': [...]}. `placements` covers every ref that was placed (writer
@@ -4714,8 +4765,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         part.bounds_by_rot[_want] = rotate_local_bounds(
                             *part.bounds_by_rot[0.0], _want)
                         if part.tht_by_rot is not None:
-                            part.tht_by_rot[_want] = rotate_local_bounds(
-                                *part.tht_by_rot[0.0], _want)
+                            part.tht_by_rot[_want] = _rotate_far(
+                                part.tht_by_rot[0.0], _want)
                     notes.append(
                         f"edge connector {ref}: seated at the declared "
                         f"rotation {_want:g}deg (input was {part.rot:g}deg)"
@@ -6160,8 +6211,10 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # #1151: where each part the seed could not seat is WRITTEN. After every
     # seat above, so not one seated pose depends on it. A staged part gets a
     # placement row; one left at its input pose needs none.
-    disposition = _dispose_unseated(
-        state, [r for r in set(unseated) | set(held) if r not in placed])
+    disposition = (_dispose_unseated(
+        state, [r for r in set(unseated) | set(held) if r not in placed],
+        locked=set(lock_refs) | fixed_lock)
+        if dispose_unseated else {})
     staged = {r for r, d in disposition.items()
               if d['disposition'] == 'staged'}
     for ref in sorted(staged):
@@ -8135,6 +8188,9 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
         seed_refs=set(scope), evict_depth=evict_depth,
         decap_claim_after_ics=decap_claim_after_ics,
+        # #1151: a scope ref this pass cannot seat stays where it was; the
+        # seed's staging row is for a board seeded from scratch.
+        dispose_unseated=False,
         # The seeder builds its OWN state, so `--lock` -- which this pass
         # resolved into ITS state as extra_locked_refs -- is invisible to the
         # eviction rung. Without this it would cheerfully trade out a ref the

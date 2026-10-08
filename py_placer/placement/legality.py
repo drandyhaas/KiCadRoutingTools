@@ -360,6 +360,21 @@ def through_pad_bounds_local(fp):
     hole's own extent rather than the pad copper's -- the far side sees the
     barrel and the lead, and the annular ring on that side is part of it.
     """
+    # The per-pad boxes and why each is what it is: `drilled_pad_boxes_local`.
+    # This is their UNION. Since #1206 the decision sites read the
+    # per-cluster boxes instead (`far_side_local`); this box is what every
+    # other reader -- the broad phases, the #878 far-face currency -- takes.
+    boxes = drilled_pad_boxes_local(fp)
+    if not boxes:
+        return None
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def drilled_pad_boxes_local(fp) -> List[Tuple[float, float, float, float]]:
+    """One local box per DRILLED pad, in pad order -- the boxes
+    `through_pad_bounds_local` is the bbox of (#1206). See that function for
+    why each box is what it is."""
     # `local_x/local_y` is the pad ANCHOR in the footprint's frame, and for a
     # drilled pad the anchor IS the hole: kicad_parser records hole_x/hole_y as
     # the pre-offset position and only then shifts global_x/global_y to the
@@ -373,7 +388,7 @@ def through_pad_bounds_local(fp):
     # modelled 2.54 x 13.97 where the truth is 3.81 x 12.70, under-blocking
     # 1.27mm). Project them through the pad's local tilt exactly as
     # placement/utility.compute_footprint_bbox_local does.
-    xs, ys = [], []
+    out = []
     for p in (fp.pads or []):
         d = getattr(p, 'drill', 0) or 0
         if d <= 0:
@@ -387,11 +402,136 @@ def through_pad_bounds_local(fp):
         r = d / 2.0
         rx = max(r, hx * c + hy * s)
         ry = max(r, hx * s + hy * c)
-        xs += [p.local_x - rx, p.local_x + rx]
-        ys += [p.local_y - ry, p.local_y + ry]
-    if not xs:
+        out.append((p.local_x - rx, p.local_y - ry,
+                    p.local_x + rx, p.local_y + ry))
+    return out
+
+
+#: #1206. Drilled pads whose boxes come within this many mm of each other
+#: share one far-side box; farther apart, each cluster gets its own. Measured
+#: on the 22 tracked boards plus CM5: the gap from each drilled pad to its
+#: nearest drilled neighbour has a valley at 1.27-2.54 mm (30 pads, against
+#: 1400 below it), and 2.54 sits at its top -- every pin row and 2-row header
+#: stays one box, 5.08 mm terminal blocks merge, DIP rows (7.62 mm) and far
+#: posts split. A NAMED constant rather than a pitch-derived rule: a pitch
+#: rule merges CM5 Module302's two mounting holes, whose own pitch is 48 mm.
+FAR_SIDE_CLUSTER_GAP_MM = 2.54
+
+
+def through_pad_clusters_local(fp) -> List[Tuple[float, float, float, float]]:
+    """Local boxes of the CLUSTERS of a footprint's drilled pads (#1206):
+    single-link, merging two pads whose boxes are within
+    `FAR_SIDE_CLUSTER_GAP_MM`. Sorted, so the result is a function of the
+    footprint alone. Empty when it has no drilled pads.
+
+    Why: the far side used to be ONE box over all drilled pads, so CM5's
+    Module302 -- a B-side SMD connector with two NPTH mount holes 48 mm
+    apart -- became a 3 x 51 mm F-side strip, and 11 parts the designer
+    placed between the holes read as COURTYARD-BLOCKING. Every hole box is
+    inside its cluster box, so nothing a hole really touches is lost."""
+    boxes = drilled_pad_boxes_local(fp)
+    if not boxes:
+        return []
+    from geometry_utils import UnionFind
+    uf = UnionFind()
+    order = sorted(range(len(boxes)), key=lambda i: boxes[i][0])
+    for k, i in enumerate(order):
+        uf.find(i)
+        bi = boxes[i]
+        for j in order[k + 1:]:
+            bj = boxes[j]
+            if bj[0] - bi[2] > FAR_SIDE_CLUSTER_GAP_MM:
+                break
+            if rect_gap(bi, bj) <= FAR_SIDE_CLUSTER_GAP_MM:
+                uf.union(i, j)
+    groups: Dict[object, list] = {}
+    for i in range(len(boxes)):
+        groups.setdefault(uf.find(i), []).append(boxes[i])
+    return sorted((min(b[0] for b in g), min(b[1] for b in g),
+                   max(b[2] for b in g), max(b[3] for b in g))
+                  for g in groups.values())
+
+
+class FarSide(tuple):
+    """A part's far-side obstruction when its drilled pads form more than one
+    cluster (#1206): the UNION box -- this tuple, so every reader that
+    unpacks four numbers reads exactly the box it always did -- carrying
+    `.boxes`, one per cluster. A site that ignores `.boxes` is therefore
+    STRICTER, never more permissive; the decision sites read the boxes
+    (`far_boxes`, `far_geom`)."""
+
+    def __new__(cls, boxes):
+        boxes = tuple(tuple(float(v) for v in b) for b in boxes)
+        self = super().__new__(cls, (min(b[0] for b in boxes),
+                                     min(b[1] for b in boxes),
+                                     max(b[2] for b in boxes),
+                                     max(b[3] for b in boxes)))
+        self.boxes = boxes
+        return self
+
+    def __reduce__(self):
+        return (FarSide, (self.boxes,))
+
+    def __repr__(self):
+        return f"FarSide({tuple(self)}, {len(self.boxes)} boxes)"
+
+
+def far_side_local(fp):
+    """The far-side obstruction in the footprint's frame: None (no drilled
+    pads), a plain 4-tuple (one cluster -- bit-identical to the old box), or
+    a `FarSide` (several clusters)."""
+    clusters = through_pad_clusters_local(fp)
+    if not clusters:
         return None
-    return (min(xs), min(ys), max(xs), max(ys))
+    if len(clusters) == 1:
+        return tuple(clusters[0])
+    return FarSide(clusters)
+
+
+def far_boxes(r):
+    """The boxes a far-side value stands for: its clusters, or itself."""
+    if r is None:
+        return ()
+    return getattr(r, 'boxes', None) or (r,)
+
+
+def rotate_far(r, rot):
+    """`rotate_local_bounds` for a far-side value, cluster by cluster."""
+    if isinstance(r, FarSide):
+        return FarSide([rotate_local_bounds(*b, rot) for b in r.boxes])
+    return rotate_local_bounds(*r, rot)
+
+
+def offset_far(r, x, y):
+    """A far-side value at a position: local + (x, y), cluster by cluster."""
+    if isinstance(r, FarSide):
+        return FarSide([(x + b[0], y + b[1], x + b[2], y + b[3])
+                        for b in r.boxes])
+    return (x + r[0], y + r[1], x + r[2], y + r[3])
+
+
+def far_geom(r):
+    """Shapely geometry of a rect or a far-side value."""
+    from shapely.geometry import box
+    if isinstance(r, FarSide):
+        from shapely.ops import unary_union
+        return unary_union([box(*b) for b in r.boxes])
+    return box(*r)
+
+
+def far_gap(ra, rb) -> float:
+    """`rect_gap` between two rects either of which may be a `FarSide`."""
+    return min(rect_gap(a, b) for a in far_boxes(ra) for b in far_boxes(rb))
+
+
+def far_overlap_area(ra, rb) -> float:
+    """`rect_overlap_area` between two rects either of which may be a
+    `FarSide`. A FarSide's clusters are disjoint (two clusters are more than
+    `FAR_SIDE_CLUSTER_GAP_MM` apart), so summing box-pair overlaps is exact."""
+    if not isinstance(ra, FarSide) and not isinstance(rb, FarSide):
+        return rect_overlap_area(ra, rb)
+    return sum(rect_overlap_area(a, b)
+               for a in far_boxes(ra) for b in far_boxes(rb))
 
 
 def sides_occupied(side: str, has_tht: bool) -> frozenset:
@@ -566,7 +706,8 @@ def pair_min_gap(a_sides, a_side, a_rect, a_tht,
         rb = rect_on(s, b_side, b_rect, b_tht)
         if ra is None or rb is None:
             continue
-        g = rect_gap(ra, rb)
+        # #1206: a far side of several clusters is gapped box by box.
+        g = far_gap(ra, rb)
         if best is None or g < best:
             best = g
     return best
@@ -585,7 +726,7 @@ def pair_overlap_area(a_sides, a_side, a_rect, a_tht,
         rb = rect_on(s, b_side, b_rect, b_tht)
         if ra is None or rb is None:
             continue
-        worst = max(worst, rect_overlap_area(ra, rb))
+        worst = max(worst, far_overlap_area(ra, rb))
     return worst
 
 
@@ -1250,18 +1391,19 @@ def _pair_exact(a: GradedPart, b: GradedPart, s: str, ra, rb):
     `s`: on the drawn outlines where the parts carry them, else the rects.
 
     A part's `poly` is used only on its OWN side; the far side of a
-    through-hole part is its drilled-pad box, which is a rect by definition.
+    through-hole part is its drilled-pad box -- or, since #1206, one box per
+    cluster of drilled pads (`FarSide`), measured as their union.
     """
     pa = a.poly if (s == a.side and a.poly is not None) else None
     pb = b.poly if (s == b.side and b.poly is not None) else None
-    if pa is None and pb is None:
+    if (pa is None and pb is None and not isinstance(ra, FarSide)
+            and not isinstance(rb, FarSide)):
         ix = (max(ra[0], rb[0]), max(ra[1], rb[1]),
               min(ra[2], rb[2]), min(ra[3], rb[3]))
         return (rect_overlap_area(ra, rb), min(ix[2] - ix[0], ix[3] - ix[1]),
                 ix, rect_area(ra), rect_area(rb))
-    from shapely.geometry import box
-    ga = pa if pa is not None else box(*ra)
-    gb = pb if pb is not None else box(*rb)
+    ga = pa if pa is not None else far_geom(ra)
+    gb = pb if pb is not None else far_geom(rb)
     area, depth, ix = shape_overlap(ga, gb)
     return area, depth, ix, ga.area, gb.area
 
@@ -1491,10 +1633,11 @@ def _part_local_bounds_and_bodies(pcb_data, pcb_file: Optional[str] = None):
         tht_local = None
         has_tht = footprint_has_through_pads(fp)
         if has_tht:
-            tht_local = through_pad_bounds_local(fp)
+            # #1206: one box per cluster of drilled pads (a FarSide when
+            # there are several), a plain tuple when there is one.
+            tht_local = far_side_local(fp)
         out[ref] = LocalBounds(ref=ref, side=own, local=tuple(local),
-                               tht_local=(tuple(tht_local)
-                                          if tht_local is not None else None),
+                               tht_local=tht_local,
                                has_tht=has_tht, synthetic=synthetic,
                                from_courtyard=(source == SOURCE_COURTYARD),
                                source=source, silk_rejected=silk_rejected)
@@ -1559,8 +1702,7 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
         rect = (fp.x + lx0, fp.y + ly0, fp.x + lx1, fp.y + ly1)
         tht = None
         if lb.has_tht and lb.tht_local is not None:
-            tx0, ty0, tx1, ty1 = rotate_local_bounds(*lb.tht_local, rot)
-            tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
+            tht = offset_far(rotate_far(lb.tht_local, rot), fp.x, fp.y)
         out.append(GradedPart(ref=ref, side=lb.side, rect=rect,
                               tht_rect=tht, has_tht=lb.has_tht,
                               synthetic=lb.synthetic, source=lb.source,
@@ -1962,8 +2104,7 @@ class CourtyardCensus:
         rect = (x + lx0, y + ly0, x + lx1, y + ly1)
         tht = None
         if lb.has_tht and lb.tht_local is not None:
-            tx0, ty0, tx1, ty1 = rotate_local_bounds(*lb.tht_local, rot)
-            tht = (x + tx0, y + ty0, x + tx1, y + ty1)
+            tht = offset_far(rotate_far(lb.tht_local, rot), x, y)
         if pose is None:
             poly = occupancy_shape(posed, lb, self.bodies.get(ref))
         else:
@@ -2175,10 +2316,9 @@ def grade_body_overlap(pcb_data, clearance: float,
             _has_tht = footprint_has_through_pads(fp)
             _tht = None
             if _has_tht:
-                _t = through_pad_bounds_local(fp)
+                _t = far_side_local(fp)
                 if _t is not None:
-                    tx0, ty0, tx1, ty1 = rotate_local_bounds(*_t, rot)
-                    _tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
+                    _tht = offset_far(rotate_far(_t, rot), fp.x, fp.y)
             seam_parts.append((ref, sides_occupied(own, _has_tht), own,
                                _rect, _tht, body_sources[ref]))
         for i, (ra, sa, rca, sha) in enumerate(fab_parts):

@@ -183,7 +183,9 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   parts tens of mm off, use `--reseat`: `--repair` ran 5 min and attempted
   none of 11.
 - **Read `unseated_refs` after every `place_seed`.** A part in that
-  list is still in the staging pile, so seat it (`--repair`, or
+  list is NOT placed -- left where it came in, or staged below the board
+  when its input pose stacked on a seated part
+  (`unseated_disposition`) -- so seat it (`--repair`, or
   `place_pose.py`) before any route. The exit-4 line names these parts; run
   36 routed a board with C20 still in the pile and the router took GND off
   the board to reach it.

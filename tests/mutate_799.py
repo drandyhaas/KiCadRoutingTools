@@ -117,7 +117,7 @@ ROWS = [
     # moving -- so what this row measures is that the generator's copy is
     # redundant, not that the rect is ignored.
     ('the-through-hole-rect-is-forgotten-by-the-GENERATOR', 'fp',
-     "                for lb in ((b, t) if t is not None else (b,)):\n",
+     "                for lb in (b,) + tuple(legality.far_boxes(t)):\n",
      "                for lb in (b,):\n",
      (T799,), 'SURVIVED'),
 

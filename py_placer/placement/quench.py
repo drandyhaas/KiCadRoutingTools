@@ -53,7 +53,6 @@ from placement import legality
 from placement.legality import (CONTAINER_RATIO, CONTAINMENT_FRAC,
                                 BoardOutlineGate, containment_frac,
                                 footprint_has_through_pads,
-                                through_pad_bounds_local,
                                 footprint_side, pair_min_gap, rect_gap,
                                 rect_overlap_area,
                                 rotate_local_bounds, sides_occupied)
@@ -753,8 +752,11 @@ class _Part:
         self.padbox_local = (compute_footprint_bbox_local(fp)
                              if fp.pads else None)
         self.padbox_by_rot: Dict[float, Tuple[float, float, float, float]] = {}
-        tlb = through_pad_bounds_local(fp) if self.has_tht else None
-        self.tht_by_rot = ({r: _rotate_local_bounds(*tlb, r) for r in ROTATIONS}
+        # #1206: one box per cluster of drilled pads (a FarSide when there
+        # are several) -- the grader's far side, so the seat and the grade
+        # agree on what a part presents through the board.
+        tlb = legality.far_side_local(fp) if self.has_tht else None
+        self.tht_by_rot = ({r: legality.rotate_far(tlb, r) for r in ROTATIONS}
                            if tlb is not None else None)
         # A non-90-degree seed rotation brings its WHOLE 90-degree lattice:
         # those are the poses _candidate_rotations offers such a part, and
@@ -767,7 +769,7 @@ class _Part:
                 rot = (base + r) % 360
                 self.bounds_by_rot[rot] = _rotate_local_bounds(*lb, rot)
                 if self.tht_by_rot is not None:
-                    self.tht_by_rot[rot] = _rotate_local_bounds(*tlb, rot)
+                    self.tht_by_rot[rot] = legality.rotate_far(tlb, rot)
         self.seed_x, self.seed_y = fp.x, fp.y
         self.x, self.y, self.rot = fp.x, fp.y, fp.rotation % 360
         self.orig_rot = fp.rotation % 360
@@ -808,7 +810,7 @@ class _Part:
         b = self.tht_by_rot.get(rot % 360)
         if b is None:
             b = self.tht_by_rot[0.0]
-        return (x + b[0], y + b[1], x + b[2], y + b[3])
+        return legality.offset_far(b, x, y)
 
     def rects(self, x=None, y=None, rot=None):
         """(courtyard rect, far-side rect) at a pose -- what a pair test needs.
@@ -4526,8 +4528,9 @@ def quench(pcb_data: PCBData, pcb_file: str,
                                     *p_dst.bounds_by_rot[0.0], inherited)
                             if (p_dst.tht_by_rot is not None
                                     and inherited not in p_dst.tht_by_rot):
-                                p_dst.tht_by_rot[inherited] = _rotate_local_bounds(
-                                    *p_dst.tht_by_rot[0.0], inherited)
+                                p_dst.tht_by_rot[inherited] = (
+                                    legality.rotate_far(p_dst.tht_by_rot[0.0],
+                                                        inherited))
                         involved = set(pa.nets) | set(pb.nets)
                         other_aw = state.airwires_excluding(involved)
 

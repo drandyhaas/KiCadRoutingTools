@@ -184,14 +184,42 @@ class MovedPoses(unittest.TestCase):
         census = legality.CourtyardCensus(pcb, path)
         u, c = pcb.footprints['USB1'], pcb.footprints['CON2']
         pose = (u.x, u.y, u.rotation or 0.0)
-        away = (c.x + 15.0, c.y + 15.0, c.rotation or 0.0)
-        one = census.grade_ref('USB1', pose, {'CON2': away})
-        full = census.grade({'USB1': pose, 'CON2': away})
+        # CON2 moved ONTO USB1: the pair exists only at the moved pose, so a
+        # grade_ref that ignored `poses` would not see it.
+        onto = (u.x + 1.0, u.y, c.rotation or 0.0)
+        at_file = census.grade_ref('USB1', pose)
+        self.assertFalse(any({'USB1', 'CON2'} == {p.a, p.b}
+                             for p in at_file.pairs))
+        one = census.grade_ref('USB1', pose, {'CON2': onto})
+        full = census.grade({'USB1': pose, 'CON2': onto})
         self.assertEqual([_key(p) for p in one.pairs],
                          [_key(p) for p in full.pairs
                           if 'USB1' in (p.a, p.b)])
-        self.assertFalse(any({'USB1', 'CON2'} == {p.a, p.b}
-                             for p in one.pairs))
+        self.assertTrue(any({'USB1', 'CON2'} == {p.a, p.b}
+                            for p in one.pairs))
+
+
+class Determinism(unittest.TestCase):
+    """An exact area tie between the two faces must not be settled by
+    PYTHONHASHSEED: `courtyard_pair` walks the shared faces SORTED."""
+
+    def test_a_face_tie_names_the_same_side_under_every_hash_seed(self):
+        import subprocess
+        code = (
+            "import sys; sys.path[:0] = ['py_placer', 'py_router']\n"
+            "from placement import legality as L\n"
+            "a = L.GradedPart('A', 'F', (0, 0, 2, 2), (0, 0, 2, 2), True)\n"
+            "b = L.GradedPart('B', 'B', (1, 0, 3, 2), (1, 0, 3, 2), True)\n"
+            "print(L.courtyard_pair(a, b).side)\n")
+        sides = set()
+        for seed in range(8):
+            p = subprocess.run([sys.executable, '-B', '-c', code],
+                               capture_output=True, text=True, cwd=ROOT,
+                               env=dict(os.environ,
+                                        PYTHONHASHSEED=str(seed)))
+            self.assertEqual(p.returncode, 0, p.stderr[-500:])
+            sides.add(p.stdout.strip())
+        self.assertEqual(sides, {'B'})
 
 
 class Gating(unittest.TestCase):

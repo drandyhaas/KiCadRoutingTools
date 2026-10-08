@@ -196,6 +196,44 @@ class Equivalence(unittest.TestCase):
         self.assertTrue(sf.stack and sf.pad_overlap)
 
 
+class Refusers(unittest.TestCase):
+    """`seeder._frozen_refusers`: who the census may NAME. A frozen part
+    that refuses only SOME open poses is in the way, not the refusing
+    member of the pair, and naming it would send the reader to unlock the
+    wrong part."""
+
+    def test_only_a_total_refusal_or_a_freeing_lift_is_named(self):
+        from placement import seeder
+        census = {'baseline': 0, 'open_poses': 64,
+                  'frozen_alone': {'A': 0, 'B': 10, 'C': 64},
+                  'frozen_lifted': {'A': 0, 'B': 0, 'C': 0, 'D': 5}}
+        got = seeder._frozen_refusers(census)
+        self.assertEqual([r for r, _how in got], ['D', 'A'])
+        self.assertIn('frees 5', got[0][1])
+        # 64 IS the census cap, so the note says so rather than printing
+        # the cap as if it were a count.
+        self.assertIn('alone refuses all of the first 64 open poses '
+                      'censused (the census cap)', got[1][1])
+        below = dict(census, open_poses=12, frozen_alone={'A': 0})
+        self.assertIn('alone refuses all 12 open pose(s)',
+                      seeder._frozen_refusers(below)[-1][1])
+
+    def test_the_immovable_note_carries_the_counts(self):
+        from placement import seeder
+        census = {'baseline': 0, 'open_poses': 12, 'censused': 0,
+                  'frozen': {'U8': 'file-locked'},
+                  'frozen_alone': {'U8': 0}, 'frozen_lifted': {'U8': 0}}
+        note = seeder._no_pose_note('U6', 'immovable_given_frozen', census)
+        self.assertIn('measured: U8 alone refuses all 12', note)
+
+    def test_no_open_pose_names_nobody_by_the_alone_count(self):
+        """With nothing open at all, "refuses every open pose" is vacuous."""
+        from placement import seeder
+        census = {'baseline': 0, 'open_poses': 0,
+                  'frozen_alone': {'A': 0}, 'frozen_lifted': {'A': 0}}
+        self.assertEqual(seeder._frozen_refusers(census), [])
+
+
 class OnThePile(unittest.TestCase):
     """The issue's own shape on TRACKED data: rp2350 staged as an unaided
     pile (U8 file-locked, the mechanical refs at their poses, everything else

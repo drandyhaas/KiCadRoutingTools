@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""The #1213 + #1151 mutation battery (fa10 P1, phase 1).
+"""The #1206 mutation battery (fa10 P1, phase 2).
 
-#1213: `LegalityContext.pair_shortfall` windows its pad sweep and its cap
-(`_pad_windows`), so a hollow part -- rp2350's U8, a ring of edge pins -- is
-priced by its pads and not its extent; and the no-pose census names the frozen
-part that refuses a seat (`frozen_blocks`, `frozen_lifted`, `frozen_alone`).
-#1151: `seeder._dispose_unseated` decides where a part the seed could not seat
-is written, so it is never written on top of a neighbour.
+A through-hole part's far side is one box per CLUSTER of drilled pads
+(`legality.far_side_local`, a `FarSide` whose four numbers are still the union
+box), read by the grader's pair channel, the seat search, the keep-out test
+and the reseat clash check. Each row puts one consumer back on the single box
+over all drilled pads -- or breaks the cluster rule -- next to the test that
+must fail.
 
-One row per load-bearing line, each reverting or bending it, next to the test
-that must fail. NOT named `test_*.py`, so `tests/run_all.py` does not collect
-it: it REWRITES the sources in place. One writer per tree. It refuses to start
-on a dirty target, and it runs every witness UNMUTATED first -- a witness that
-already fails would score every row as killed.
+NOT named `test_*.py`, so `tests/run_all.py` does not collect it: it REWRITES
+the sources in place. One writer per tree. It refuses to start on a dirty
+target, and it runs every witness UNMUTATED first.
 
-    python3 -X utf8 tests/mutate_1213_1151.py
-    python3 -X utf8 tests/mutate_1213_1151.py --row window-removed
-    python3 -X utf8 tests/mutate_1213_1151.py --list
+    python3 -X utf8 tests/mutate_1206.py
+    python3 -X utf8 tests/mutate_1206.py --row the-union-box-comes-back
+    python3 -X utf8 tests/mutate_1206.py --list
 
 THE MEASURED RESULT is recorded here from the run, never predicted.
 """
@@ -33,104 +31,50 @@ _ROOT = os.path.dirname(_TESTS)
 _PL = os.path.join(_ROOT, 'py_placer', 'placement')
 
 TARGETS = {'leg': os.path.join(_PL, 'legality.py'),
-           'seed': os.path.join(_PL, 'seeder.py'),
-           'ps': os.path.join(_ROOT, 'py_placer', 'place_seed.py')}
+           'quench': os.path.join(_PL, 'quench.py'),
+           'fp': os.path.join(_PL, 'floorplan.py'),
+           'reseat': os.path.join(_PL, 'reseat.py')}
 
-T1213 = os.path.join(_TESTS, 'test_1213_pair_window.py')
-T1151 = os.path.join(_TESTS, 'test_1151_unseated_disposition.py')
-T834 = os.path.join(_TESTS, 'test_834_cap_branch_side.py')
-T761 = os.path.join(_TESTS, 'test_761_legality_npth_keepout.py')
+T1206 = os.path.join(_TESTS, 'test_1206_far_side_clusters.py')
 
 #: (name, target, old, new, tests, expect)
 ROWS = [
-    # ---- #1213: the window --------------------------------------------------
-    ('window-removed', 'leg',
-     "        wa, wb = _pad_windows(rects_a, ea, rects_b, reach)",
-     "        wa, wb = list(enumerate(rects_a)), list(enumerate(rects_b))",
-     (T1213,), 'KILLED'),
-    ('cap-back-on-the-full-product', 'leg',
-     "        if len(wa) * len(wb) > PAIR_TEST_CAP:",
-     "        if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:",
-     (T1213,), 'KILLED'),
-    ('sweep-keys-floors-by-window-position', 'leg',
-     "        for ai, (a0, a1, a2, a3, na, sa) in wa:",
-     "        for ai, (a0, a1, a2, a3, na, sa) in enumerate("
-     "r for _i, r in wa):",
-     (T1213,), 'KILLED'),
-    ('hole-channel-on-the-windowed-lists', 'leg',
-     "        return PairShortfall(pad_short, overlap,",
-     "        rects_a = [r for _i, r in wa]\n"
-     "        rects_b = [r for _j, r in wb]\n"
-     "        return PairShortfall(pad_short, overlap,",
-     (T1213,), 'KILLED'),
-
-    # ---- #1213: naming the refusing pair -------------------------------------
-    ('frozen-census-never-runs', 'seed',
-     "            if not baseline and _fz:",
-     "            if False:",
-     (T1213,), 'KILLED'),
-    ('frozen-alone-never-measured', 'seed',
-     "                if open_poses:",
-     "                if False:",
-     (T1213,), 'KILLED'),
-    ('verdict-ignores-the-frozen-census', 'seed',
-     "    elif _frozen_refusers(census):",
-     "    elif False:",
-     (T1213,), 'KILLED'),
-    ('a-partial-refusal-is-named', 'seed',
-     "            if n == 0 and r not in named:",
-     "            if n < open_ and r not in named:",
-     (T1213,), 'KILLED'),
-
-    # ---- #1151: the disposition ----------------------------------------------
-    ('disposition-never-runs', 'seed',
-     "        if dispose_unseated else {})",
-     "        if False else {})",
-     (T1151,), 'KILLED'),
-    ('every-unseated-part-staged', 'seed',
-     "            if conflict is None:",
-     "            if False:",
-     (T1151,), 'KILLED'),
-    ('a-left-part-is-no-obstacle', 'seed',
-     "            undecided = set(todo[i + 1:]) | set(staged)",
-     "            undecided = set(todo) - {ref}",
-     (T1151,), 'KILLED'),
-    ('staged-parts-not-written', 'seed',
-     "                  for ref in sorted(set(placed) | staged)]",
-     "                  for ref in sorted(set(placed))]",
-     (T1151,), 'KILLED'),
-    ('staging-row-on-the-board', 'seed',
-     "            y = floor + STAGING_GAP_MM - ly0",
-     "            y = floor - 3.0 * STAGING_GAP_MM - ly0",
-     (T1151,), 'KILLED'),
-    ('polish-prices-the-staged-parts', 'ps',
-     "            pcb_seeded.footprints.pop(_r, None)",
-     "            pass",
-     (T1151,), 'KILLED'),
-    ('placed-counts-the-staged-parts', 'ps',
-     "    return len(result['placements']) - len(staged_refs(result))",
-     "    return len(result['placements'])",
-     (T1151,), 'KILLED'),
-    ('reseat-repairs-the-staged-parts', 'ps',
-     "                   and v.ref not in staged})",
-     "                   })",
-     (T1151,), 'KILLED'),
-    ('reseat-stages-its-scope', 'seed',
-     "        dispose_unseated=False,",
-     "        dispose_unseated=True,",
-     (T1151,), 'KILLED'),
-    ('a-must-lock-part-is-staged', 'seed',
-     "        if part.locked or ref in locked:",
-     "        if part.locked:",
-     (T1151,), 'KILLED'),
-    ('staging-row-ignores-parts-below-the-board', 'seed',
-     "        floor = max(bb[3], lowest) if bb else lowest",
-     "        floor = bb[3] if bb else lowest",
-     (T1151,), 'KILLED'),
-    ('dispositions-in-input-order', 'seed',
-     "    todo = [r for r in sorted(set(refs))]",
-     "    todo = list(refs)",
-     (T1151,), 'KILLED'),
+    ('the-union-box-comes-back', 'leg',
+     "            tht_local = far_side_local(fp)",
+     "            tht_local = through_pad_bounds_local(fp)",
+     (T1206,), 'KILLED'),
+    ('no-pad-ever-clusters', 'leg',
+     "FAR_SIDE_CLUSTER_GAP_MM = 2.54",
+     "FAR_SIDE_CLUSTER_GAP_MM = -1.0",
+     (T1206,), 'KILLED'),
+    ('every-pad-clusters', 'leg',
+     "FAR_SIDE_CLUSTER_GAP_MM = 2.54",
+     "FAR_SIDE_CLUSTER_GAP_MM = 1e9",
+     (T1206,), 'KILLED'),
+    ('the-gap-ignores-the-clusters', 'leg',
+     "        g = far_gap(ra, rb)",
+     "        g = rect_gap(ra, rb)",
+     (T1206,), 'KILLED'),
+    ('the-exact-pass-takes-the-union', 'leg',
+     "    ga = pa if pa is not None else far_geom(ra)",
+     "    ga = pa if pa is not None else far_geom(tuple(ra))",
+     (T1206,), 'KILLED'),
+    ('the-search-turns-the-union', 'quench',
+     "        self.tht_by_rot = ({r: legality.rotate_far(tlb, r) for r in ROTATIONS}",
+     "        self.tht_by_rot = ({r: legality.rotate_local_bounds(*tlb, r) for r in ROTATIONS}",
+     (T1206,), 'KILLED'),
+    ('the-search-offsets-the-union', 'quench',
+     "        return legality.offset_far(b, x, y)",
+     "        return (x + b[0], y + b[1], x + b[2], y + b[3])",
+     (T1206,), 'KILLED'),
+    ('keepout-hit-takes-the-union', 'fp',
+     "            hit = max(hit, legality.far_overlap_area(r, entry['rect']))",
+     "            hit = max(hit, legality.rect_overlap_area(r, entry['rect']))",
+     (T1206,), 'KILLED'),
+    ('reseat-clash-takes-the-union', 'reseat',
+     "        if b_tht is not None and any(_rects_overlap(a_ct, t)",
+     "        if b_tht is not None and any(_rects_overlap(a_ct, b_tht)",
+     (T1206,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is

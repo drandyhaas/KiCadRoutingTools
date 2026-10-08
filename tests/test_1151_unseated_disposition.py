@@ -25,6 +25,7 @@ import os
 import random
 import sys
 import tempfile
+import types
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,15 +55,16 @@ class Dispositions(unittest.TestCase):
     def _movable_legal(self):
         for r in sorted(self.st.parts):
             p = self.st.parts[r]
-            if not p.locked and seeder.pose_ok(
-                    self.st, r, p.seed_x, p.seed_y, p.orig_rot, set()):
+            if not p.locked and seeder._input_pose_conflict(
+                    self.st, r, (p.seed_x, p.seed_y, p.orig_rot),
+                    set()) is None:
                 return r
-        self.fail('no movable part is legal at its own designer pose')
+        self.fail('no movable part is clear at its own designer pose')
 
-    def test_legal_at_input_is_left(self):
+    def test_clear_at_input_is_left(self):
         r = self._movable_legal()
         d = seeder._dispose_unseated(self.st, [r])[r]
-        self.assertEqual(d['disposition'], 'legal_at_input')
+        self.assertEqual(d['disposition'], 'clear_at_input')
         self.assertEqual(d['written'], d['input'])
 
     def test_locked_at_input_is_left(self):
@@ -118,10 +120,53 @@ class Dispositions(unittest.TestCase):
                     and self.st.parts[o].orig_rot == p.orig_rot)
         q = self.st.parts[twin]
         q.seed_x, q.seed_y = p.seed_x, p.seed_y
-        out = seeder._dispose_unseated(self.st, sorted([r, twin]))
+        out = seeder._dispose_unseated(self.st, [twin, r])
         left = [k for k, d in out.items()
-                if d['disposition'] == 'legal_at_input']
+                if d['disposition'] == 'clear_at_input']
         self.assertLessEqual(len(left), 1, out)
+        # Decided in SORTED order whatever order they came in: the first by
+        # name is the one left, so the choice is not a hash accident.
+        self.assertEqual(left, [min(r, twin)], out)
+
+    def test_the_staging_row_clears_parts_below_the_board(self):
+        """A part already sitting BELOW the board (a pile staged off it) is
+        cleared too: the row starts under the lowest part, not the board."""
+        movable = [r for r in sorted(self.st.parts)
+                   if not self.st.parts[r].locked]
+        below, host, victim = movable[0], movable[1], movable[2]
+        b = self.st.parts[below]
+        self.st.apply_move(below, b.x, self.bb[3] + 6.0, b.rot)
+        v = self.st.parts[victim]
+        h = self.st.parts[host]
+        v.seed_x, v.seed_y = h.x, h.y
+        out = seeder._dispose_unseated(self.st, [victim])
+        self.assertEqual(out[victim]['disposition'], 'staged', out)
+        self.assertGreater(self.st.parts[victim].rect()[1],
+                           self.st.parts[below].rect()[3])
+
+
+class AnEdgeConnectorAtItsEdge(unittest.TestCase):
+    """The A/B's finding, as a test: a part that overhangs the board edge at
+    its input pose -- an edge connector where the designer put it -- is NOT
+    staged when it stacks on nothing. The seat predicate would call it
+    illegal (it demands full containment), and staging it moved ulx3s's
+    J1/J2 off the board for no defect at all."""
+
+    def test_an_overhanging_part_with_no_stack_stays(self):
+        import pose_score
+        pcb = parse_kicad_pcb(os.path.join(ROOT, 'kicad_files',
+                                           'ulx3s.kicad_pcb'))
+        path = os.path.join(ROOT, 'kicad_files', 'ulx3s.kicad_pcb')
+        st = pose_score.make_state(pcb, path, clearance=0.2)
+        for r in ('J1', 'J2'):
+            p = st.parts[r]
+            pose = (p.seed_x, p.seed_y, p.orig_rot)
+            # The premise: the SEAT predicate refuses it there...
+            self.assertFalse(seeder.pose_ok(st, r, *pose, exclude=set()),
+                             f'{r}: the fixture no longer overhangs')
+            # ...and the disposition leaves it.
+            d = seeder._dispose_unseated(st, [r])[r]
+            self.assertEqual(d['disposition'], 'clear_at_input', d)
 
 
 class OnThePile(unittest.TestCase):
@@ -142,7 +187,7 @@ class OnThePile(unittest.TestCase):
         try:
             for arm in ('off', 'on'):
                 if arm == 'off':
-                    seeder._dispose_unseated = lambda state, refs: {}
+                    seeder._dispose_unseated = lambda state, refs, **_k: {}
                 else:
                     seeder._dispose_unseated = real_d
                 res = seeder.seed_from_intent(
@@ -235,6 +280,135 @@ class TheCliWritesTheStagedPose(unittest.TestCase):
             seeded = int(next(l for l in p.stdout.splitlines()
                               if l.startswith('Seeded ')).split()[1])
             self.assertEqual(seeded, summary['placed'])
+
+
+
+
+# ---------------------------------------------------------------------------
+# The phase-1 verifier's fixtures: a 16 x 14 board, parts with F.CrtYd rects
+# and a few SMD pads, and an intent with one board-wide zone.
+# ---------------------------------------------------------------------------
+
+def _part(ref, x, y, half_w, half_h, npads, pad_y=0.0):
+    pads = ''.join(
+        f'    (pad "{i + 1}" smd rect (at {i * 0.2 - 0.2} {pad_y})'
+        f' (size 0.3 0.3) (layers "F.Cu")'
+        f' (net {1 if i == 0 else 2} "N{1 if i == 0 else 2}"))\n'
+        for i in range(npads))
+    return (f'  (footprint "test:P{ref}" (layer "F.Cu") (at {x} {y})\n'
+            f'    (property "Reference" "{ref}" (at 0 0))\n'
+            f'    (fp_rect (start {-half_w} {-half_h}) (end {half_w} {half_h})'
+            f' (layer "F.CrtYd"))\n' + pads + '  )\n')
+
+
+def _load(ipath):
+    from placement import floorplan
+    return floorplan.load_intent(ipath)
+
+
+def _small_board(td, parts, refs, must_lock=()):
+    import json
+    path = os.path.join(td, 'b.kicad_pcb')
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb (version 20241229)\n  (net 0 "") (net 1 "N1")'
+                 ' (net 2 "N2")\n  (gr_rect (start 0 0) (end 16 14)'
+                 ' (layer "Edge.Cuts"))\n' + ''.join(parts) + ')\n')
+    intent = {"schema": 1, "kind": "floorplan-intent", "units": "mm",
+              "envelope": {"rect": [0.0, 0.0, 16.0, 14.0],
+                           "tolerance_mm": 0.5},
+              "blocks": [{"name": "everything", "refs": list(refs),
+                          "zone": [0.5, 0.5, 15.5, 13.5],
+                          "tolerance_mm": 0.5}]}
+    if must_lock:
+        intent['must_lock'] = list(must_lock)
+    ipath = os.path.join(td, 'b.json')
+    with open(ipath, 'w', encoding='utf-8') as fh:
+        json.dump(intent, fh)
+    return path, ipath
+
+
+class TheReseatPath(unittest.TestCase):
+    """`--reseat` re-seats a SCOPE inside a placed board; it keeps a scope ref
+    it cannot seat where it was. Staging that ref there (the seed's
+    disposition, reached through `seed_from_intent`) made the whole pass
+    refuse on "off-outline part count GREW" and threw away MID's valid
+    re-seat (phase-1 verifier, fixture "four")."""
+
+    def test_reseat_keeps_its_valid_reseat(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            path, ipath = _small_board(td, [
+                _part('BIG', 9.7, 7, 5.0, 5.0, 2, pad_y=1.5),
+                _part('SMALL', 9.5, 8.5, 0.5, 0.5, 4),
+                _part('MID', 9.9, 8.6, 0.5, 0.5, 3)], ['BIG', 'SMALL', 'MID'])
+            out = os.path.join(td, 'out.kicad_pcb')
+            p = subprocess.run(
+                [sys.executable, '-X', 'utf8', os.path.join(
+                    ROOT, 'py_placer', 'place_seed.py'), path, out,
+                 '--intent', ipath, '--clearance', '0.2',
+                 '--board-edge-clearance', '0.5', '--reseat', 'BIG', 'MID'],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', cwd=ROOT)
+            text = p.stdout + p.stderr
+            self.assertNotIn('STAGED', text)
+            self.assertNotIn('off-outline part count GREW', text)
+            mid = parse_kicad_pcb(out).footprints['MID']
+            self.assertNotEqual((round(mid.x, 3), round(mid.y, 3)),
+                                (9.9, 8.6), 'MID was not re-seated:\n'
+                                + text[-1500:])
+
+    def test_seed_from_intent_can_skip_the_disposition(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, ipath = _small_board(td, [
+                _part('BIG', 8, 7, 5.0, 5.0, 2),
+                _part('SMALL', 9.5, 8.5, 0.5, 0.5, 4)], ['BIG', 'SMALL'])
+            res = seeder.seed_from_intent(
+                parse_kicad_pcb(path), path, _load(ipath), random.Random('0'),
+                clearance=0.2, board_edge_clearance=0.5, grid_step=0.1,
+                dispose_unseated=False)
+            self.assertIn('BIG', res['unseated'])
+            self.assertEqual(res['unseated_disposition'], {})
+            self.assertNotIn('BIG', {p['reference']
+                                     for p in res['placements']})
+
+
+class AMustLockPartIsNeverStaged(unittest.TestCase):
+    """A part the intent must_locks is stamped `(locked yes)` by place_seed;
+    staged, it would be frozen off the board with nothing downstream to move
+    it (phase-1 verifier, fixture "lock")."""
+
+    def test_must_lock_is_locked_at_input(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, ipath = _small_board(td, [
+                _part('BIG', 8, 7, 9.0, 8.0, 2),
+                _part('SMALL', 8, 7, 0.5, 0.5, 4),
+                _part('S2', 8, 7, 0.5, 0.5, 3)], ['BIG', 'SMALL', 'S2'],
+                must_lock=['BIG'])
+            res = seeder.seed_from_intent(
+                parse_kicad_pcb(path), path, _load(ipath), random.Random('0'),
+                clearance=0.2, board_edge_clearance=0.5, grid_step=0.1)
+            self.assertIn('BIG', res['unseated'])
+            self.assertEqual(
+                res['unseated_disposition']['BIG']['disposition'],
+                'locked_at_input')
+
+
+class PlaceSeedHelpers(unittest.TestCase):
+
+    def test_staged_placed_and_repairable(self):
+        import place_seed
+        res = {'placements': [{'reference': r} for r in ('A', 'B', 'X')],
+               'unseated_disposition': {
+                   'X': {'disposition': 'staged'},
+                   'Y': {'disposition': 'clear_at_input'}}}
+        self.assertEqual(place_seed.staged_refs(res), ['X'])
+        self.assertEqual(place_seed.placed_count(res), 2)
+        errs = [types.SimpleNamespace(rule='zone_containment', ref='X'),
+                types.SimpleNamespace(rule='zone_containment', ref='A'),
+                types.SimpleNamespace(rule='keepout', ref=None),
+                types.SimpleNamespace(rule='something_else', ref='B')]
+        self.assertEqual(place_seed.repairable_refs(
+            errs, {'zone_containment', 'keepout'}, ['X']), ['A'])
 
 
 if __name__ == '__main__':

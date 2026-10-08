@@ -282,10 +282,15 @@ class TestPristineBoards(unittest.TestCase):
         r, doc = _grade(ULX3S, '--baseline', ULX3S)
         self.assertEqual(r.returncode, 0, r.stdout[-600:])
         self.assertTrue(doc['buildable'])
-        # The census is large and REAL (GPDI1's shell over its passives) --
-        # pin that it exists, so a future "fix" that empties the census to
-        # make the gate quiet is caught here.
-        self.assertGreaterEqual(doc['courtyard_blocking'], 10)
+        # The census is large and REAL -- pin that it exists, so a future
+        # "fix" that empties the census to make the gate quiet is caught here.
+        # It was >= 10 before #1206, and the extra pairs were not GPDI1's
+        # shell over its passives, as this comment used to say: GPDI1 sits on
+        # F.Cu, and they were B-side parts (U11 38.5 mm2, R22-R26, R61, C18)
+        # under the ONE box drawn over its pin row and its shell tabs' tails.
+        # One box per cluster of drilled pads leaves the 8 real pairs (J5's
+        # and AUDIO1's bodies, GPDI1 x J5 / SW1, B6 x H2).
+        self.assertGreaterEqual(doc['courtyard_blocking'], 8)
         self.assertEqual(doc['courtyard_blocking_gating'], 0)
 
     def test_pristine_board_without_baseline_stays_buildable(self):

@@ -114,7 +114,7 @@ INTENT = {
 _NO_DISPOSE = ("import sys, runpy\n"
                "sys.path[:0] = ['py_placer', 'py_router', 'py_tools']\n"
                "from placement import seeder\n"
-               "seeder._dispose_unseated = lambda state, refs: {}\n"
+               "seeder._dispose_unseated = lambda state, refs, **_k: {}\n"
                "sys.argv = sys.argv[1:]\n"
                "runpy.run_path(sys.argv[0], run_name='__main__')\n")
 
