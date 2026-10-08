@@ -1,3 +1,14 @@
+287d7574 2026-10-08 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit of 4e10db45..287d7574 (2 commits), for the v0.23.0 release. 69a90e95 is
+the previous audit's own marker. 287d7574 fixes restore_dialog_settings, which
+compared FindString against wx.NOT_FOUND in a module that never imports wx, so
+the NameError its own try/except swallowed meant a saved Escalation choice
+never came back on reopen (since #857). GUI-only: dialog-settings persistence
+has no CLI counterpart, and no engine parameter, results key, writer argument
+or default changed. tests/gui_parity/test_settings_roundtrip.py, run on KiCad
+10's python, passes, including the value round-trip that commit added. Parity
+confirmed; the two OPEN items of the 108cac8b entry are unchanged.
+
 4e10db45 2026-10-08 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit of a999f6a1..e42c25f0 (95 commits, 91 non-merge: 69 of them awx-only
 research from the bus622-take5 merge, 21 touching py_router/, py_placer/,
