@@ -182,65 +182,12 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
             return False
 
     def _sides_of(ref):
-        """Which physical sides this footprint occupies: ('F',), ('B',) or both.
-
-        A DRILLED part is on both, and that is not a nicety -- it is the case
-        this partition got wrong. `legality.footprint_side` alone put tigard's
-        J2 (F.Cu, nine 1.0mm drilled pads) and JP1 (B.Cu) in different groups,
-        each alone on its side, so both were exonerated. Moved to one
-        coordinate they produce SIX pad conflicts by `grade_pad_legality` --
-        this function was the only thing in the repo saying they were fine, and
-        it said so because it modelled a through-hole part as living on one
-        side. `legality._sides_interact` has always drawn the other line
-        ("None = through (both sides)"); `footprint_side` /
-        `footprint_has_through_pads` are the canonical readers, so use them
-        rather than comparing `fp.layer` strings.
-        """
-        fp = _by_ref[ref]
-        try:
-            from placement.legality import (footprint_has_through_pads,
-                                            footprint_side)
-            if footprint_has_through_pads(fp):
-                return ('F', 'B')
-            return (footprint_side(fp),)
-        except Exception:                                   # noqa: BLE001
-            # Unknown side is the SUSPICIOUS answer, not the safe one: put it
-            # on both so it groups with everything at this coordinate.
-            return ('F', 'B')
+        return footprint_sides(_by_ref[ref])
 
     def _suspect_in(refs_at_one_spot):
-        """The refs at ONE coordinate that are not explicable, PER SIDE.
-
-        Partitioned by side rather than tested group-wide. A group-wide test
-        let ONE back-side part exonerate an arbitrarily large front-side pile:
-        measured, 105 parts at a single coordinate with one on the far side
-        reported zero suspects and an empty reason list -- silence about a
-        board in a far worse state than the one this filter was written for.
-        Parts on opposite sides cannot collide; parts on the SAME side still
-        can, however many neighbours the far side has -- and a drilled part is
-        on both sides, so it collides with either.
-        """
-        out = set()
-        by_side = {'F': [], 'B': []}
-        for r in refs_at_one_spot:
-            for s in _sides_of(r):
-                by_side[s].append(r)
-        for _side, group in by_side.items():
-            if len(group) < 2:
-                continue                    # alone on its side: nothing to hit
-            if all(_marker(r) for r in group):
-                continue                    # co-located by design
-            # NOTE what is deliberately NOT here: "all locked". A lock records
-            # a decision about WHERE a part goes; it does not make two parts
-            # able to occupy one space. And this toolchain stamps its own locks
-            # -- seeder.stamp_locked, called on place_seed's output -- so a
-            # pile-up the tools CREATED would have been invisible to the check
-            # meant to catch pile-ups. Markers are the real discriminator: a
-            # fiducial and a mounting hole are different physical things and
-            # share a coordinate by design. Costs nothing on the corpus: every
-            # board that changed was already suppressed by side or by class.
-            out.update(group)
-        return sorted(out)      # a through part appears in both side-groups
+        # The NOTE on what is deliberately not a filter ("all locked") is
+        # on `stack_suspects`.
+        return stack_suspects(refs_at_one_spot, _sides_of, _marker)
 
     suspect = sorted(r for refs in pos.values() if len(refs) > 1
                      for r in _suspect_in(refs))
@@ -431,6 +378,83 @@ def is_assembly_marker(pcb_data, ref: str) -> bool:
                              ref).name in ASSEMBLY_MARKER_CLASSES
     except Exception:                                          # noqa: BLE001
         return False
+
+
+def footprint_sides(fp) -> tuple:
+    """Which physical sides this footprint occupies: ('F',), ('B',) or both.
+
+    A DRILLED part is on both, and that is not a nicety -- it is the case
+    this partition got wrong. `legality.footprint_side` alone put tigard's
+    J2 (F.Cu, nine 1.0mm drilled pads) and JP1 (B.Cu) in different groups,
+    each alone on its side, so both were exonerated. Moved to one
+    coordinate they produce SIX pad conflicts by `grade_pad_legality` --
+    this function was the only thing in the repo saying they were fine, and
+    it said so because it modelled a through-hole part as living on one
+    side. `legality._sides_interact` has always drawn the other line
+    ("None = through (both sides)"); `footprint_side` /
+    `footprint_has_through_pads` are the canonical readers, so use them
+    rather than comparing `fp.layer` strings.
+    """
+    try:
+        from placement.legality import (footprint_has_through_pads,
+                                        footprint_side)
+        if footprint_has_through_pads(fp):
+            return ('F', 'B')
+        return (footprint_side(fp),)
+    except Exception:                                       # noqa: BLE001
+        # Unknown side is the SUSPICIOUS answer, not the safe one: put it
+        # on both so it groups with everything at this coordinate.
+        return ('F', 'B')
+
+
+def stack_suspects(refs_at_one_spot, sides_of, is_marker) -> List[str]:
+    """The refs at ONE coordinate that are not explicable, PER SIDE
+    (`sides_of(ref)` -> its sides, `is_marker(ref)` -> a marker class).
+    THE stack rule: `assess_placement` calls it about the board, the
+    seeder's #1151 disposition about the parts PRESENT when it decides
+    (`coincident_stack_suspects`).
+
+    Partitioned by side rather than tested group-wide. A group-wide test
+    let ONE back-side part exonerate an arbitrarily large front-side pile:
+    measured, 105 parts at a single coordinate with one on the far side
+    reported zero suspects and an empty reason list -- silence about a
+    board in a far worse state than the one this filter was written for.
+    Parts on opposite sides cannot collide; parts on the SAME side still
+    can, however many neighbours the far side has -- and a drilled part is
+    on both sides, so it collides with either.
+    """
+    out = set()
+    by_side = {'F': [], 'B': []}
+    for r in refs_at_one_spot:
+        for s in sides_of(r):
+            by_side[s].append(r)
+    for _side, group in by_side.items():
+        if len(group) < 2:
+            continue                    # alone on its side: nothing to hit
+        if all(is_marker(r) for r in group):
+            continue                    # co-located by design
+        # NOTE what is deliberately NOT here: "all locked". A lock records
+        # a decision about WHERE a part goes; it does not make two parts
+        # able to occupy one space. And this toolchain stamps its own locks
+        # -- seeder.stamp_locked, called on place_seed's output -- so a
+        # pile-up the tools CREATED would have been invisible to the check
+        # meant to catch pile-ups. Markers are the real discriminator: a
+        # fiducial and a mounting hole are different physical things and
+        # share a coordinate by design. Costs nothing on the corpus: every
+        # board that changed was already suppressed by side or by class.
+        out.update(group)
+    return sorted(out)      # a through part appears in both side-groups
+
+
+def coincident_stack_suspects(refs, sides, markers) -> List[str]:
+    """check_assembly's verdict on ONE origin holding `refs`, given each
+    ref's `sides` and `markers` maps: the suspect refs when the origin GATES
+    (>= 2 suspect non-markers -- `coincident_stack_groups`' rule), else [].
+    For a caller deciding which parts will be present there (#1151)."""
+    sus = stack_suspects(refs, sides.__getitem__, markers.__getitem__)
+    if sum(1 for r in sus if not markers[r]) >= 2:
+        return sus
+    return []
 
 
 def coincident_stack_groups(pcb_data, pcb_file: Optional[str] = None

@@ -1892,9 +1892,16 @@ class QuenchState:
             others = self.parts.items()
         if getattr(self, 'courtyards_ignored', False):
             # #1104: the courtyard is waived, so the overlap term is the pad
-            # and hole one the waived seat asks (#1101), absolutely.
-            return board, self._waived_overlap(ref, x, y, rot, others,
-                                               exclude, limit, board)
+            # and hole one the waived seat asks (#1101), absolutely -- and a
+            # frame's PIN still counts: it is pth/npth_inside_courtyard, not
+            # the waived rule, and without it the escape branch below seated
+            # a part on a pin the grader gates (second phase-3 verifier).
+            overlap = self._waived_overlap(ref, x, y, rot, others, exclude,
+                                           limit, board)
+            if limit is not None and board + overlap > limit:
+                return board, overlap
+            return board, overlap + self._pin_violation(ref, x, y, rot,
+                                                        exclude)
         clr = self.clearance
         rect = rects[0]
         tht = part.has_tht
@@ -1920,15 +1927,21 @@ class QuenchState:
                 overlap += clr - gap
                 if limit is not None and board + overlap > limit:
                     return board, overlap
-        # #1212: a part on a frame's pin is a violation too, so
-        # `violation() == 0` keeps implying `candidate_valid` admits it.
-        if self.pin_frame_refs:
-            _px = part.x if x is None else x
-            _py = part.y if y is None else y
-            _pr = part.rot if rot is None else rot
-            if self._pin_conflict_at(ref, _px, _py, _pr, exclude) is not None:
-                overlap += clr
-        return board, overlap
+        return board, overlap + self._pin_violation(ref, x, y, rot, exclude)
+
+    def _pin_violation(self, ref, x, y, rot, exclude=None) -> float:
+        """#1212: a part on a frame's pin is a violation too -- the
+        clearance, as for any refused pair -- so `violation() == 0` keeps
+        implying `candidate_valid` admits it, on the waived path as well."""
+        if not self.pin_frame_refs:
+            return 0.0
+        part = self.parts[ref]
+        _px = part.x if x is None else x
+        _py = part.y if y is None else y
+        _pr = part.rot if rot is None else rot
+        if self._pin_conflict_at(ref, _px, _py, _pr, exclude) is not None:
+            return self.clearance
+        return 0.0
 
     def _pin_conflict_at(self, ref, x, y, rot, exclude=None):
         """The first GATING pin_in_courtyard pair `ref` makes at this pose,

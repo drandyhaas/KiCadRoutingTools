@@ -635,5 +635,61 @@ class TheSecondVerifiersSites(unittest.TestCase):
         self.assertFalse([v for v in got if v[0] == 'BLOCKING-ADDED'])
 
 
+class TheSwapAndNudgeFills(unittest.TestCase):
+    """The swap ensures its PARTNER's angle and the nudge every candidate
+    angle (second phase-3 verifier: the AST guard counts the calls, so a
+    wrong angle passed it). C1 at 30 and C2 at 45 sit on disjoint 90-degree
+    lattices, so neither fill can stand in for the other; one pass, so no
+    later nudge refills what the swap left out."""
+
+    def _run(self):
+        import test_quench_swap_cap as t
+        from placement import quench as q
+        _pcb, path = t._swap_board(3)
+        try:
+            with open(path, encoding='utf-8') as fh:
+                text = fh.read()
+            # Each footprint turned, its pads with it (KiCad writes a pad's
+            # angle absolute): the swap compares the parts' rot-0 bounds.
+            head, *blocks = text.split('\t(footprint ')
+            for i, (at, rot) in enumerate((('(at 150.0 100.0)', 30),
+                                           ('(at 153.0 100.0)', 45))):
+                assert at in blocks[i], blocks[i][:200]
+                blocks[i] = (blocks[i].replace(at, at[:-1] + ' %d)' % rot)
+                             .replace('(at -0.5 0)', '(at -0.5 0 %d)' % rot)
+                             .replace('(at 0.5 0)', '(at 0.5 0 %d)' % rot))
+            text = '\t(footprint '.join([head] + blocks)
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write(text)
+            pcb = parse_kicad_pcb(path)
+            calls = []
+            real = q._Part.ensure_rotation
+
+            def spy(part, rot):
+                calls.append((part.ref, round(float(rot), 6)))
+                return real(part, rot)
+            q._Part.ensure_rotation = spy
+            try:
+                res = q.quench(pcb, path, max_displacement=5.0, step=1000.0,
+                               allow_rotations=True, max_passes=1)
+            finally:
+                q._Part.ensure_rotation = real
+        finally:
+            os.unlink(path)
+        return calls, {r['reference']: r for r in res}
+
+    def test_the_nudge_ensures_every_candidate_angle(self):
+        calls, _res = self._run()
+        self.assertTrue({('C1', 30.0), ('C1', 120.0), ('C1', 210.0),
+                         ('C1', 300.0)} <= set(calls), calls)
+
+    def test_the_swap_ensures_the_partners_angle(self):
+        calls, res = self._run()
+        self.assertEqual(res['C1']['new_x'], 153.0, res)
+        rot = round(float(res['C1']['new_rotation']) % 360, 6)
+        self.assertNotIn(rot, (30.0, 120.0, 210.0, 300.0))
+        self.assertIn(('C1', rot), calls)
+
+
 if __name__ == '__main__':
     unittest.main()

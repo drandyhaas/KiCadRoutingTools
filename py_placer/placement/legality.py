@@ -2319,8 +2319,13 @@ class CourtyardCensus:
         if courtyard_severity == 'auto':
             for _hole, _rule in (('pth', 'pth_inside_courtyard'),
                                  ('npth', 'npth_inside_courtyard')):
+                # The same file the courtyard severity is read from: a
+                # census built from a parsed board alone (no `pcb_file`)
+                # read the courtyard rule off its source and the pin rules
+                # off nothing (second phase-3 verifier).
                 self.pin_severity[_hole] = courtyard_severity_of(
-                    pcb_file, _rule)[0]
+                    pcb_file or getattr(pcb_data, 'source_path', None),
+                    _rule)[0]
         if locked_refs is None:
             # KiCad's own (locked yes) stamps. Best-effort: the file is
             # optional here, and a missing or unreadable one simply means no
@@ -2348,6 +2353,16 @@ class CourtyardCensus:
     #: dropped when it reaches this, so a generator asking about many
     #: candidate poses does not grow memory without bound.
     POSE_CACHE_CAP = 20000
+
+    #: How far a hole must reach into a courtyard before KiCad reports it
+    #: (mm). MEASURED, not chosen: SW1's courtyard slid toward U8's pins on
+    #: the tracked rp2350 board in 1 um steps, kicad-cli 10.0 is silent up to
+    #: 5 um of penetration and reports pth_inside_courtyard from 6 um --
+    #: KiCad's arc approximation error (ARC_HIGH_DEF, 0.005 mm). Grading the
+    #: exact circle made a 1 um graze NOT BUILDABLE that KiCad passes (fa10
+    #: 06 s04_u6r90_seed0, second phase-3 verifier).
+    #: `tests/measure_1212_kicad_pins.py --onset` re-measures it.
+    PIN_HOLE_TOLERANCE_MM = 0.005
 
     def graded_part(self, ref: str, pose=None) -> GradedPart:
         """`ref` as the grader sees it at `pose` (None: the file's pose)."""
@@ -2445,6 +2460,9 @@ class CourtyardCensus:
             if (getattr(pad, 'drill', 0) or 0) <= 0:
                 continue
             p1, p2, r = pad_drill_capsule(pad)
+            # A hole KiCad does not report until it reaches this far in
+            # (`PIN_HOLE_TOLERANCE_MM`): tested shrunk by it.
+            r = r - self.PIN_HOLE_TOLERANCE_MM
             if r <= 0:
                 continue
             shape = (Point(p1).buffer(r, 16) if p1 == p2
@@ -2457,18 +2475,27 @@ class CourtyardCensus:
         self._holes[key] = holes
         return holes
 
-    def _pin_shape(self, ref, gp, pose):
-        """`(shape, basis)`: what a frame hole is tested against for `ref`.
-        KiCad's pth/npth_inside_courtyard reads the DRAWN courtyards -- the
-        own face's outline, and a far-face one the footprint draws (a hole
-        goes through both faces; the phase-3 verifier's F-side part with a
-        B.CrtYd over pin 1 was missed) -- so a part that draws one is graded
-        on those, basis 'courtyard'. A part that draws none is tested on its
-        occupancy for disclosure, basis its occupancy source: KiCad reports
-        nothing there, and neither gates."""
+    #: A pin pair's basis when the courtyard over it does not CLOSE:
+    #: listed, never gating -- KiCad reports `malformed_courtyard` there and
+    #: tests no pin against it.
+    MALFORMED_COURTYARD_BASIS = 'courtyard_malformed'
+
+    def _pin_shapes(self, ref, gp, pose) -> list:
+        """`[(shape, basis)]`: what a frame hole is tested against for
+        `ref`, gating shapes first. KiCad's pth/npth_inside_courtyard reads
+        the DRAWN courtyards -- the own face's outline, and a far-face one
+        the footprint draws (a hole goes through both faces; the phase-3
+        verifier's F-side part with a B.CrtYd over pin 1 was missed), each
+        AS DRAWN (an L-shaped or turned far courtyard's bbox covered a pin
+        KiCad does not report) -- so a part that draws one is graded on
+        those, basis 'courtyard'. A courtyard that does not close is basis
+        `MALFORMED_COURTYARD_BASIS`, and a part that draws none is tested on
+        its occupancy, basis its source: KiCad reports nothing in either
+        case, so both are listed and neither gates."""
         from shapely.geometry import box
         from shapely.ops import unary_union
         from placement.body import SOURCE_COURTYARD
+        from placement.parser import OUTLINE_POLYGON
         lb = self.lbs.get(ref)
         geom = self.bodies.get(ref)
         fp = self.fps[ref]
@@ -2480,21 +2507,34 @@ class CourtyardCensus:
             return box(x + l[0], y + l[1], x + l[2], y + l[3])
         if lb is not None and lb.source == SOURCE_COURTYARD and geom is not \
                 None and geom.body_local is not None:
-            court = (place_local_shape(geom.court_shape_local, x, y, rot)
-                     if geom.court_shape_local is not None
-                     else placed_box(geom.body_local))
-            shapes = [court]
-            if getattr(geom, 'far_court_local', None) is not None:
-                shapes.append(placed_box(geom.far_court_local))
-            return unary_union(shapes), 'courtyard'
+            good, bad = [], []
+            for shape, how, loc in (
+                    (geom.court_shape_local, geom.court_shape_how,
+                     geom.body_local),
+                    (getattr(geom, 'far_court_shape_local', None),
+                     getattr(geom, 'far_court_shape_how', ''),
+                     getattr(geom, 'far_court_local', None))):
+                if loc is None:
+                    continue
+                if shape is not None and how == OUTLINE_POLYGON:
+                    good.append(place_local_shape(shape, x, y, rot))
+                else:
+                    bad.append(place_local_shape(shape, x, y, rot)
+                               if shape is not None else placed_box(loc))
+            out = []
+            if good:
+                out.append((unary_union(good), 'courtyard'))
+            if bad:
+                out.append((unary_union(bad), self.MALFORMED_COURTYARD_BASIS))
+            return out
         shape = gp.poly if gp.poly is not None else box(*gp.rect)
-        return shape, (lb.source if lb is not None else '')
+        return [(shape, lb.source if lb is not None else '')]
 
     def _pin_pairs(self, parts, poses, members=None) -> list:
         """Raw kind='pin_in_courtyard' pairs: each pin frame's holes against
-        every other part's courtyards (`_pin_shape`, #1212), one pair per
-        hole RULE (PTH / NPTH). A part on either face counts -- a plated hole
-        goes through both. `members` restricts to the pairs one of these refs
+        every other part's courtyards (`_pin_shapes`, #1212), one pair per
+        hole RULE (PTH / NPTH) and basis. A part on either face counts -- a
+        plated hole goes through both. `members` restricts to the pairs one of these refs
         is in."""
         out = []
         poses = poses or {}
@@ -2508,21 +2548,26 @@ class CourtyardCensus:
                 if members is not None and frame not in members \
                         and r not in members:
                     continue
-                shape = basis = None
-                found: Dict[str, list] = {}
+                shapes = None
+                found: Dict[tuple, list] = {}
                 for num, hs, hb, hole in holes:
-                    if shape is None:
-                        shape, basis = self._pin_shape(r, gp, poses.get(r))
-                    sb = shape.bounds
-                    if (hb[2] < sb[0] or hb[0] > sb[2]
-                            or hb[3] < sb[1] or hb[1] > sb[3]):
-                        continue
-                    a = hs.intersection(shape).area
-                    if a > EPS:
-                        f = found.setdefault(hole, [[], 0.0])
-                        f[0].append(num)
-                        f[1] += a
-                for hole, (pins, area) in sorted(found.items()):
+                    if shapes is None:
+                        shapes = [(s, b, s.bounds) for s, b in
+                                  self._pin_shapes(r, gp, poses.get(r))]
+                    # The first shape a hole reaches decides its basis --
+                    # gating shapes come first, so a hole under a closed
+                    # courtyard is never filed under a malformed one.
+                    for shape, basis, sb in shapes:
+                        if (hb[2] < sb[0] or hb[0] > sb[2]
+                                or hb[3] < sb[1] or hb[1] > sb[3]):
+                            continue
+                        a = hs.intersection(shape).area
+                        if a > EPS:
+                            f = found.setdefault((hole, basis), [[], 0.0])
+                            f[0].append(num)
+                            f[1] += a
+                            break
+                for (hole, basis), (pins, area) in sorted(found.items()):
                     out.append(BodyOverlapPair(
                         a=min(frame, r), b=max(frame, r),
                         kind='pin_in_courtyard', area_mm2=round(area, 4),
@@ -2547,6 +2592,15 @@ class CourtyardCensus:
             lb = self.lbs[ref]
             x, y, rot = pose
             lx0, ly0, lx1, ly1 = rotate_local_bounds(*lb.local, rot)
+            # The broad phase covers every shape `_pin_shapes` tests: the
+            # occupancy, and a drawn FAR courtyard, which can reach past it
+            # (second phase-3 verifier: a B.CrtYd over pin 1 beside a small
+            # F.CrtYd -- the grader gated it, this returned [] before).
+            _far = getattr(self.bodies.get(ref), 'far_court_local', None)
+            if _far is not None:
+                fx0, fy0, fx1, fy1 = rotate_local_bounds(*_far, rot)
+                lx0, ly0 = min(lx0, fx0), min(ly0, fy0)
+                lx1, ly1 = max(lx1, fx1), max(ly1, fy1)
             rect = (x + lx0, y + ly0, x + lx1, y + ly1)
             near = any(not (hb[2] < rect[0] or hb[0] > rect[2]
                             or hb[3] < rect[1] or hb[1] > rect[3])

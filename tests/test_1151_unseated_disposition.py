@@ -693,5 +693,58 @@ class PlaceSeedHelpers(unittest.TestCase):
             errs, {'zone_containment', 'keepout'}, ['X']), ['A'])
 
 
+#: FID1's twin on the back.
+FID_B = FID.replace('FID1', 'FID2').replace('"F.', '"B.')
+
+
+class TheSecondPhase3VerifiersCases(unittest.TestCase):
+    """The stack rule asked about the parts present, and an off-board part
+    as a partner whatever the names."""
+
+    def _dispose(self, path, refs, **kw):
+        import pose_score
+        st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=0.2)
+        return seeder._dispose_unseated(st, list(refs), **kw)
+
+    def test_a_part_and_a_marker_on_each_face_stack(self):
+        """A over FID1 on F, C over FID2 on B, one origin: each face holds a
+        part and a marker, so check_assembly gates all four, and A is
+        staged on C."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _two_part_board(td, 'xf', [_wide('A'), FID,
+                                              _wide('C', 'B'), FID_B])
+            d = self._dispose(path, ['A'])
+            gated = TheDispositionAsksTheGrader._verdict(None, path)
+        self.assertEqual(d['A']['refused_by'], ['coincident', 'C'], d)
+        self.assertFalse(gated)
+
+    def test_a_part_alone_on_its_face_is_not_in_the_far_stack(self):
+        """A on F over C and D on B: check_assembly's group is C and D."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _two_part_board(td, 'fb', [_wide('A'), _wide('C', 'B'),
+                                              _narrow('D', 'B')])
+            d = self._dispose(path, ['A'])
+        self.assertEqual(d['A']['disposition'], 'clear_at_input', d)
+
+    def test_an_off_board_partner_is_a_partner_whatever_the_names(self):
+        """A reaches into the board, its partner sits wholly off it, one
+        origin: the partner is never moved, so A is staged on it whether
+        the partner's name sorts after A or before."""
+        for name in ('B', '0B'):
+            parts = [_fp('A', 41, 20, 0, [('1', -3, 0, 'rect', 0.5, 0.5, 1),
+                                          ('2', 3, 0, 'rect', 0.5, 0.5, 2)],
+                         crt=(-3.5, -0.5, 3.5, 0.5)),
+                     _fp(name, 41, 20, 0,
+                         [('1', -0.25, 0, 'rect', 0.3, 0.3, 3),
+                          ('2', 0.25, 0, 'rect', 0.3, 0.3, 3)],
+                         crt=(-0.5, -0.5, 0.5, 0.5))]
+            with tempfile.TemporaryDirectory() as td:
+                path = _two_part_board(td, 'ob', parts)
+                d = self._dispose(path, ['A', name])
+            self.assertEqual(d[name]['disposition'], 'off_board', (name, d))
+            self.assertEqual(d['A']['refused_by'], ['coincident', name],
+                             (name, d))
+
+
 if __name__ == '__main__':
     unittest.main()

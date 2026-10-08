@@ -162,6 +162,15 @@ ROWS = [
      "            out.append(('BLOCKING-REMOVED', key, old[key], None))",
      "            pass",
      (T1206,), 'KILLED'),
+    # ---- the second phase-3 verifier: the angle each fill is handed --------
+    ('the-swap-ensures-rot-0', 'quench',
+     "                            p_dst.ensure_rotation(inherited)",
+     "                            p_dst.ensure_rotation(0.0)",
+     (T1206,), 'KILLED'),
+    ('the-nudge-ensures-rot-0', 'quench',
+     "                part.ensure_rotation(rot)",
+     "                part.ensure_rotation(0.0)",
+     (T1206,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is

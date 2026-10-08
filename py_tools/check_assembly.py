@@ -619,15 +619,21 @@ def main():
         print(f"  CONTAINERS: {_kinds} -- a pin frame is graded on its "
               f"pins, an outline is waived, neither on its rect")
     if pin_hits:
-        print(f"  PIN IN COURTYARD ({len(pin_hits)}): a frame's drilled pin "
-              f"lies inside another part's courtyard (KiCad: "
-              f"pth_inside_courtyard) -- NOT BUILDABLE")
+        # One finding per part pair AND hole rule (a part over a frame's
+        # PTH and NPTH pins is two KiCad rules): the count says both.
+        _pin_parts = len({(q.a, q.b) for q in pin_hits})
+        print(f"  PIN IN COURTYARD ({_pin_parts} part pair(s), "
+              f"{len(pin_hits)} by hole rule): a frame's drilled pin lies "
+              f"inside another part's courtyard (KiCad: "
+              f"pth_inside_courtyard / npth_inside_courtyard) -- NOT "
+              f"BUILDABLE")
         for q in pin_hits:
             frame, other = ((q.a, q.b) if q.a in g['containers']
                             else (q.b, q.a))
-            print(f"    {other} over {frame} pin(s) "
-                  f"{', '.join(x or '(unnumbered NPTH)' for x in q.pins)}  "
-                  f"{q.area_mm2}mm2  side {q.side}")
+            _kind = (q.hole or 'pth').upper()
+            print(f"    {other} over {frame} {_kind} pin(s) "
+                  f"{', '.join(x or f'(unnumbered {_kind})' for x in q.pins)}"
+                  f"  {q.area_mm2}mm2  side {q.side}")
     not_buildable = bool(g['blocking'] or locked_contact or stack_groups
                          or g['containment_blocking']
                          or courtyard_gating or off_outline_pads or mating

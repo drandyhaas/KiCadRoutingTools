@@ -346,7 +346,7 @@ class AsKiCadGradesIt(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertEqual(doc['pin_in_courtyard'], 1)
         self.assertEqual(len(doc['pin_in_courtyard_pairs']), 1)
-        self.assertIn('P over FR pin(s) 1', out)
+        self.assertIn('P over FR PTH pin(s) 1', out)
 
 
 class AMovingFrame(unittest.TestCase):
@@ -511,6 +511,210 @@ class OnRp2350(unittest.TestCase):
         # ...and it stays a violation for the optimizer.
         self.assertGreater(st.violation_parts('SW1', *SW1_ON_PINS,
                                               exclude=others)[1], 0.0)
+
+
+def _frame_board_npth(td, others, npth):
+    """`_frame_board` with the pins in `npth` ({pin: new number}) made
+    unplated -- np_thru_hole, no net; '' is an unnumbered NPTH."""
+    path = _frame_board(td, others)
+    with open(path, encoding='utf-8') as fh:
+        text = fh.read()
+    for pin, new in npth.items():
+        old = f'(pad "{pin}" thru_hole circle'
+        assert text.count(old) == 1, pin
+        i = text.index(old)
+        j = text.index('\n', i)
+        line = text[i:j].replace(old, f'(pad "{new}" np_thru_hole circle')
+        text = text[:i] + line.replace(' (net 1 "N1")', '') + text[j:]
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+    return path
+
+
+def _crtyd_part(ref, at, shapes, pad=True):
+    """An F-side part at `at` drawing `shapes`: [(layer, s-expr body)]."""
+    s = (f'  (footprint "t:{ref}" (layer "F.Cu") (at {at[0]} {at[1]})\n'
+         f'    (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))\n')
+    for layer, body in shapes:
+        s += (f'    ({body} (stroke (width 0.05) (type default))'
+              f' (layer "{layer}"))\n')
+    if pad:
+        s += ('    (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu")'
+              ' (net 2 "N2"))\n')
+    return s + '  )\n'
+
+
+#: An L whose bbox covers pin 1's hole and whose outline does not, for a
+#: part at (6, 4): its bars are x 5..7 (all y) and y 5..7 (x 2..7).
+L_SHAPE = ('fp_poly (pts (xy -1 -3.5) (xy 1 -3.5) (xy 1 3) (xy -4 3)'
+           ' (xy -4 1) (xy -1 1))')
+#: P over pin 1 (made NPTH) and pin 3 (PTH) of the y = 1.5 row, its own pad
+#: clear of both rings.
+TWO_PINS = [('P', 5.4, 3.1, 3.0)]
+#: E5: a small F.CrtYd clear of pin 1, a B.CrtYd over it.
+E5_PART = ('  (footprint "t:P2" (layer "F.Cu") (at 8 6)\n'
+           '    (property "Reference" "P" (at 0 0) (layer "F.SilkS"))\n'
+           '    (fp_rect (start -0.5 -0.5) (end 0.5 0.5) (stroke (width'
+           ' 0.05) (type default)) (layer "F.CrtYd"))\n'
+           '    (fp_rect (start -6 -5.5) (end -4 -3.5) (stroke (width'
+           ' 0.05) (type default)) (layer "B.CrtYd"))\n'
+           '    (pad "1" thru_hole circle (at 0 0) (size 0.8 0.8)'
+           ' (drill 0.4) (layers "*.Cu" "*.Mask") (net 2 "N2")))\n')
+
+
+class TheSecondPhase3VerifiersCases(unittest.TestCase):
+    """Each finding of the second verifier on the phase-3 fixes, alone."""
+
+    def _grade(self, path, **kw):
+        return legality.CourtyardCensus(parse_kicad_pcb(path), path,
+                                        **kw).grade()
+
+    def test_each_hole_follows_its_own_rule(self):
+        """An unnumbered NPTH pin and a PTH pin under one courtyard are two
+        pairs -- one per KiCad rule -- and each rule's ignore waives only
+        its own."""
+        want = {('error', 'error'): ['npth', 'pth'],
+                ('error', 'ignore'): ['pth'],
+                ('ignore', 'error'): ['npth']}
+        for (pth, npth), gating in sorted(want.items()):
+            with tempfile.TemporaryDirectory() as td:
+                path = _frame_board_npth(td, TWO_PINS, {'1': ''})
+                _pro(path, pth_inside_courtyard=pth,
+                     npth_inside_courtyard=npth)
+                g = self._grade(path)
+            self.assertEqual(sorted((q.hole, q.pins) for q in g.pin_pairs),
+                             [('npth', ('',)), ('pth', ('3',))], (pth, npth))
+            self.assertEqual(sorted(q.hole for q in g.pin_blocking), gating,
+                             (pth, npth))
+
+    def test_a_warning_gates(self):
+        """StickHub warns on pth_inside_courtyard: KiCad reports the pin, so
+        it gates -- only `ignore` waives."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, PIN_ONLY)
+            _pro(path, pth_inside_courtyard='warning')
+            rc, doc, _out = _assembly(path)
+        self.assertEqual((rc, doc['pin_in_courtyard']), (4, 1), doc)
+
+    def test_the_authors_saved_value_is_read_for_the_pin_rule(self):
+        """A tool changed pth_inside_courtyard to error and kept the
+        author's `ignore` in saved_severities: the author's value decides."""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, PIN_ONLY)
+            with open(os.path.splitext(path)[0] + '.kicad_pro', 'w',
+                      encoding='utf-8') as fh:
+                json.dump({'board': {'design_settings': {'rule_severities': {
+                    'pth_inside_courtyard': 'error'}}},
+                    'kicad_routing_tools': {'saved_severities': {
+                        'pth_inside_courtyard': 'ignore'}}}, fh)
+            rc, doc, _out = _assembly(path)
+        self.assertEqual((rc, doc['pin_in_courtyard']), (0, 0), doc)
+
+    def test_ignoring_the_project_grades_a_pin_at_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, PIN_ONLY)
+            _pro(path, pth_inside_courtyard='ignore')
+            rc0, doc0, _o = _assembly(path)
+            rc, doc, _o = _assembly(path, '--ignore-project-severity')
+        self.assertEqual((rc0, doc0['pin_in_courtyard']), (0, 0), doc0)
+        self.assertEqual((rc, doc['pin_in_courtyard']), (4, 1), doc)
+
+    def test_the_census_reads_the_pin_rule_off_its_source(self):
+        """No `pcb_file`: the pin rules come from the parsed board's own
+        source, as the courtyard rule does."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, PIN_ONLY)
+            _pro(path, pth_inside_courtyard='ignore')
+            g = legality.CourtyardCensus(parse_kicad_pcb(path)).grade()
+        self.assertEqual(len(g.pin_pairs), 1)
+        self.assertEqual(g.pin_blocking, [])
+
+    def test_the_own_courtyard_is_graded_as_drawn(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [])
+            _add(path, _crtyd_part('P', (6, 4), [('F.CrtYd', L_SHAPE)]))
+            g = self._grade(path)
+        self.assertEqual(g.pin_pairs, [])
+
+    def test_a_far_courtyard_is_graded_as_drawn(self):
+        """The L on B.CrtYd behind a small F.CrtYd: its bbox covers pin 1
+        and KiCad reports nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [])
+            _add(path, _crtyd_part('P', (6, 4), [
+                ('F.CrtYd', 'fp_rect (start -0.5 -0.5) (end 0.5 0.5)'),
+                ('B.CrtYd', L_SHAPE)]))
+            g = self._grade(path)
+        self.assertEqual(g.pin_pairs, [])
+
+    def test_an_open_courtyard_is_listed_not_gated(self):
+        """Three sides of a square over pin 1: KiCad's malformed_courtyard,
+        no courtyard to test a pin against."""
+        side = 'fp_line (start {} {}) (end {} {})'
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [])
+            _add(path, _crtyd_part('P', (3, 3.1), [
+                ('F.CrtYd', side.format(-2, -2, 2, -2)),
+                ('F.CrtYd', side.format(2, -2, 2, 2)),
+                ('F.CrtYd', side.format(2, 2, -2, 2))]))
+            rc, doc, _out = _assembly(path)
+            g = self._grade(path)
+        self.assertEqual([(q.b, q.basis) for q in g.pin_pairs],
+                         [('P', legality.CourtyardCensus
+                           .MALFORMED_COURTYARD_BASIS)])
+        self.assertEqual((rc, doc['pin_in_courtyard']), (0, 0), doc)
+
+    def test_a_hole_must_reach_in_before_it_counts(self):
+        """KiCad reports a hole 6 um into a courtyard and not 5 um
+        (`PIN_HOLE_TOLERANCE_MM`, measured by measure_1212 --onset). Pin 1's
+        hole ends at y = 2.0; P's courtyard starts at y - 2."""
+        got = {}
+        for y in (3.995, 3.990):
+            with tempfile.TemporaryDirectory() as td:
+                path = _frame_board(td, [('P', 3.0, y, 2.0)])
+                got[y] = len(self._grade(path).pin_blocking)
+        self.assertEqual(got, {3.995: 0, 3.990: 1})
+
+    def test_an_unnumbered_npth_is_labelled(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board_npth(td, PIN_ONLY, {'1': ''})
+            rc, _doc, out = _assembly(path)
+        self.assertEqual(rc, 4)
+        self.assertIn('P over FR NPTH pin(s) (unnumbered NPTH)', out)
+
+    def test_the_search_sees_a_far_courtyard_over_a_pin(self):
+        """E5 through the search: `pin_hits`' broad phase covers the drawn
+        far courtyard, so the search refuses the pose the grader gates."""
+        import pose_score
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [])
+            _add(path, E5_PART)
+            pcb = parse_kicad_pcb(path)
+            hits = legality.CourtyardCensus(pcb, path).pin_hits(
+                'P', (8.0, 6.0, 0.0))
+            st = pose_score.make_state(pcb, path, clearance=0.2)
+            veto = st.candidate_veto('P', 8.0, 6.0, 0.0, exclude=set())
+        self.assertEqual([(q.a, q.b) for q in hits], [('FR', 'P')])
+        self.assertEqual(veto, ('container_pin', 'FR'))
+
+    def test_a_waived_courtyard_does_not_waive_the_escape(self):
+        """courtyards_overlap ignored, pth_inside_courtyard at error, P
+        coming home from off the board: the escape rule asks
+        `violation_parts`, which counts the pin on the waived path too."""
+        import pose_score
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [('P', 45.0, 3.1, 2.0)])
+            _pro(path, courtyards_overlap='ignore',
+                 pth_inside_courtyard='error')
+            st = pose_score.make_state(parse_kicad_pcb(path), path,
+                                       clearance=0.2)
+            on_pin = st.candidate_valid('P', 3.0, 3.1, 0.0)
+            clear = st.candidate_valid('P', 20.0, 15.0, 0.0)
+            vio = st.violation_parts('P', 3.0, 3.1, 0.0)[1]
+        self.assertFalse(on_pin)
+        self.assertTrue(clear)
+        self.assertGreater(vio, 0.0)
 
 
 if __name__ == '__main__':

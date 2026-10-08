@@ -957,14 +957,27 @@ def _dispose_unseated(state, refs: Sequence[str],
     # own conflicts from it, partners filtered by what is decided so far.
     _pending = [r for r in todo if r in state.parts
                 and not (state.parts[r].locked or r in locked)]
-    graded, graded_why = (_graded_input_conflicts(
+    graded, graded_why, stacks = (_graded_input_conflicts(
         state, _pending, waivers=waivers, keepouts=keepouts)
-        if _pending else ({}, None))
-    # Only parts that WILL be decided are pending partners: a locked or
-    # must_lock part later in name order is never decided -- it stays where
-    # it is -- so a conflict with it is a conflict with a part on the board
-    # (the second phase-2 verifier: the outcome depended on the NAME).
-    _pending_set = set(_pending)
+        if _pending else ({}, None, []))
+    # The UNCONDITIONAL dispositions first, for every part: a locked part
+    # and an off-board one stay where they are whatever their name, so each
+    # is a part on the board to every other -- never a "pending partner"
+    # whose conflict is deferred. Deciding them in name order made the
+    # outcome depend on the NAME (the second phase-2 verifier: a locked
+    # partner; the second phase-3 verifier: an off-board one).
+    fixed: Dict[str, str] = {}
+    for ref in todo:
+        part = state.parts.get(ref)
+        if part is None:
+            continue
+        if part.locked or ref in locked:
+            fixed[ref] = 'locked_at_input'
+        elif bb and rect_overlap_area(
+                part.rect(part.seed_x, part.seed_y, part.orig_rot),
+                bb) <= 1e-9:
+            fixed[ref] = 'off_board'
+    _pending_set = set(_pending) - set(fixed)
     for i, ref in enumerate(todo):
         part = state.parts.get(ref)
         if part is None:
@@ -974,11 +987,8 @@ def _dispose_unseated(state, refs: Sequence[str],
         pose = (part.seed_x, part.seed_y, part.orig_rot)
         rec = {'input': [round(v, 4) for v in pose], 'written':
                [round(v, 4) for v in pose], 'refused_by': None}
-        r = part.rect(*pose)
-        if part.locked or ref in locked:
-            rec['disposition'] = 'locked_at_input'
-        elif bb and rect_overlap_area(r, bb) <= 1e-9:
-            rec['disposition'] = 'off_board'
+        if ref in fixed:
+            rec['disposition'] = fixed[ref]
         else:
             # The parts still to decide are not obstacles yet; the ones
             # already LEFT where they are now are, so two unseated parts are
@@ -990,8 +1000,9 @@ def _dispose_unseated(state, refs: Sequence[str],
             if graded is None:
                 conflict = _input_pose_conflict(state, ref, pose, undecided)
             else:
-                conflict = next((c for c in graded.get(ref, ())
-                                 if c[1] not in undecided), None)
+                conflict = (next((c for c in graded.get(ref, ())
+                                  if c[1] not in undecided), None)
+                            or _stack_conflict(stacks, ref, undecided))
             if conflict is None:
                 rec['disposition'] = 'clear_at_input'
             else:
@@ -1030,13 +1041,15 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
     scratch copy (siblings carried, so the project's courtyard severity and
     rules hold) and graded with `grade_body_overlap` (pad intersections,
     gating containments -- pads under a body included -- and a pin frame's
-    pins), `floorplan.mating_keepout_findings` (a plug's mating region; the
-    `other` is the keep-out's name) and `placement_state.
-    coincident_stack_groups`. Sorted, so the first conflict a part reports
-    is not a hash accident. Returns `(conflicts, None)`, or `(None, why)`
-    when the board cannot be written or graded: the caller then falls back to
-    `_input_pose_conflict` and records `why` in each part's `basis`, so the
-    weaker answer is never silent."""
+    pins) and `floorplan.mating_keepout_findings` (a plug's mating region;
+    the `other` is the keep-out's name). Sorted, so the first conflict a
+    part reports is not a hash accident. A shared ORIGIN is not a pair
+    finding: its verdict depends on who is present, so `stacks` carries
+    every origin a part in `refs` shares, for `_stack_conflict` to ask the
+    grader's stack rule at decision time. Returns `(conflicts, None,
+    stacks)`, or `(None, why, None)` when the board cannot be written or
+    graded: the caller then falls back to `_input_pose_conflict` and records
+    `why` in each part's `basis`, so the weaker answer is never silent."""
     import contextlib
     import io
     import os
@@ -1045,11 +1058,12 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
     from kicad_parser import parse_kicad_pcb
     from . import floorplan as _fp
     from .legality import grade_body_overlap
-    from .placement_state import coincident_stack_groups, is_assembly_marker
+    from kicad_parser import non_aperture_pads
+    from .placement_state import footprint_sides, is_assembly_marker
     from .writer import write_placed_output
     src = getattr(state, 'pcb_file', None)
     if not src or not os.path.isfile(src):
-        return None, 'no board file to grade'
+        return None, 'no board file to grade', None
     refs = set(refs)
     placements = []
     for r, p in sorted(state.parts.items()):
@@ -1062,7 +1076,7 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
         dst = os.path.join(td, os.path.basename(src))
         with contextlib.redirect_stdout(io.StringIO()):
             if not write_placed_output(src, dst, placements):
-                return None, 'the board could not be written'
+                return None, 'the board could not be written', None
         from copy_board import SIBLING_EXTS          # ONE list (#711)
         for ext in SIBLING_EXTS:
             sib = os.path.splitext(src)[0] + ext
@@ -1075,9 +1089,25 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
                                    pcb_file=dst)
             mating = _fp.mating_keepout_findings(
                 pcb, dst, declared=tuple(keepouts or ()))
-            stacks = coincident_stack_groups(pcb, dst)
+            # Every origin a part in `refs` shares with another pad-bearing
+            # part, with what the stack rule reads of each member. Not
+            # `coincident_stack_groups`: that is the verdict with EVERY
+            # pending part present, and the disposition asks it about the
+            # parts present when each one is decided (`_stack_conflict`).
+            at: Dict[tuple, List[str]] = {}
+            for r, fp in pcb.footprints.items():
+                if non_aperture_pads(fp):
+                    at.setdefault((round(fp.x, 3), round(fp.y, 3)),
+                                  []).append(r)
+            stacks = [{'refs': sorted(rs),
+                       'sides': {r: footprint_sides(pcb.footprints[r])
+                                 for r in rs},
+                       'markers': {r: is_assembly_marker(pcb, r)
+                                   for r in rs}}
+                      for _pt, rs in sorted(at.items())
+                      if len(rs) > 1 and refs & set(rs)]
     except Exception as exc:                                 # noqa: BLE001
-        return None, f'the grade raised {type(exc).__name__}: {exc}'
+        return None, f'the grade raised {type(exc).__name__}: {exc}', None
     finally:
         shutil.rmtree(td, ignore_errors=True)
     out: Dict[str, List[Tuple[str, str]]] = {}
@@ -1093,22 +1123,31 @@ def _graded_input_conflicts(state, refs, waivers=(), keepouts=()):
             _add(q.b, channel, q.a)
     for m in mating or ():
         _add(m.get('ref'), 'mating', str(m.get('keepout')))
-    def _faces(r):
-        from .legality import (footprint_has_through_pads, footprint_side,
-                               sides_occupied)
-        fp = pcb.footprints[r]
-        return sides_occupied(footprint_side(fp),
-                              footprint_has_through_pads(fp))
-    for grp in stacks or ():
-        parts = [r for r in grp['refs'] if not is_assembly_marker(pcb, r)]
-        for r in parts:
-            for o in parts:
-                # A stack is per PHYSICAL FACE (`assess_placement` splits
-                # each point by side): an F part over two B parts at one
-                # origin is not in their group (second phase-2 verifier).
-                if o != r and _faces(r) & _faces(o):
-                    _add(r, 'coincident', o)
-    return {r: sorted(set(v)) for r, v in out.items()}, None
+    return {r: sorted(set(v)) for r, v in out.items()}, None, stacks
+
+
+def _stack_conflict(stacks, ref, absent):
+    """`('coincident', other)` when check_assembly would gate `ref`'s
+    origin with `ref` there and every part in `absent` (undecided, staged)
+    away, or None. The grader's own rule, `placement_state.
+    coincident_stack_suspects`, asked about the parts PRESENT: a stack is
+    per physical face and its markers are exempt, so whether `ref` stacks
+    depends on WHO is there -- a pairwise test cannot say (the second
+    phase-3 verifier: a face filter cleared an F part stacked with an F
+    fiducial over a B part and its fiducial, a group check_assembly gates;
+    without the filter, an F part over two B parts would have been staged
+    on a group it is not in)."""
+    from .placement_state import coincident_stack_suspects
+    for st in stacks or ():
+        if ref not in st['refs'] or st['markers'].get(ref):
+            continue
+        present = [r for r in st['refs'] if r == ref or r not in absent]
+        sus = coincident_stack_suspects(present, st['sides'], st['markers'])
+        if ref in sus:
+            other = next(r for r in sus
+                         if r != ref and not st['markers'][r])
+            return ('coincident', other)
+    return None
 
 
 def _input_pose_conflict(state, ref: str, pose, exclude: Set[str]):
@@ -7206,14 +7245,20 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                                         else ())}
     _pins = [q for q in body.get('pin_in_courtyard_pairs', ())
              if frozenset((q.a, q.b)) not in _declared]
-    if _pins:
-        print(f"  Pin census: {len(_pins)} part(s) over a pin frame's "
-              f"pin(s), all listed")
+    # One entry per PART: a part over a frame's PTH and NPTH pins is two
+    # pairs (one per KiCad rule), one part to move, charged once.
+    _pin_parts: Dict[str, Tuple[str, List[str]]] = {}
     for q in _pins:
         frame, other = ((q.a, q.b) if q.a in _pin_frames else (q.b, q.a))
+        _pin_parts.setdefault(other, (frame, []))[1].extend(
+            x or f'(unnumbered {(q.hole or "pth").upper()})' for x in q.pins)
+    if _pin_parts:
+        print(f"  Pin census: {len(_pin_parts)} part(s) over a pin frame's "
+              f"pin(s), all listed")
+    for other, (frame, pins) in sorted(_pin_parts.items()):
         if other not in state.parts or state.parts[other].locked:
             notes.append(f"pin_in_courtyard {other} over {frame} pin(s) "
-                         f"{', '.join(q.pins)}: {other} is file-locked -- "
+                         f"{', '.join(pins)}: {other} is file-locked -- "
                          f"not repairable here")
             continue
         _charge(other, CONTAINMENT_CHARGE_MM)
