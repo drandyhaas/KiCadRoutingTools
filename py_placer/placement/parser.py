@@ -465,8 +465,9 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
             # courtyard, glasgow J4's 8 um corner: KiCad closes them, a
             # strict join does not). Two ways to close them, tried in turn:
             # snap the drawing onto itself (an end within `_OUTLINE_JOIN_MM`
-            # of another segment moves onto it), then join ends to ends
-            # transitively (`joined`: a 15 um piece between two 10 um gaps).
+            # of another segment moves onto it), then bridge each loose end
+            # to the nearest loose end (`joined`: a 15 um piece between two
+            # 10 um gaps).
             # The first that covers every drawn vertex to within the join
             # distance is the outline.
             #
