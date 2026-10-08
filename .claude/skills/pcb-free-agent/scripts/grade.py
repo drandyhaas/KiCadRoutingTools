@@ -152,6 +152,11 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
             out[key + '_rc'], _ = _run(['check_complete.py', board, *iflag,
                                         *spec_args, *extra, '--json', cj])
             out[key] = (_load(cj) or {}).get('verdict')
+            # #1183: whether check_complete's score graded the courtyard
+            # gate -- the baseline reaching it is what arms it.
+            out[key + '_gating_armed'] = (
+                ((((_load(cj) or {}).get('score') or {}).get('components')
+                  or {}).get('assembly') or {}).get('courtyard_gating_armed'))
         rc, log = _run(['py_router/check_connected.py', board])
         out['check_connected_rc'] = rc
         rc, log = _run(['py_router/check_drc.py', board, '--baseline', baseline,

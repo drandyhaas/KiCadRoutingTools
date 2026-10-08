@@ -3957,11 +3957,16 @@ def _courtyard_overlap(state, a: str, pose_a, b: str, pose_b):
     judges a declared pose (`grade_rect`), and where those overlap,
     `legality.pair_overlap_area_exact` on the drawn outlines (#1094:
     StickHub's declared -135 degree human poses were refused on rects
-    alone). A part that draws NO courtyard is screened on its occupancy
-    instead (`occupancy_rect_at(courtyard_less_only=True)`, #1182): its
-    ladder rect is a pad box, and two fab bodies meeting outside their pads
-    read 0 while check_assembly grades them. `w` x `h` is the rects'
-    intersection, for the refusal's text only."""
+    alone). Under `body_model` (#1182) a part that draws NO courtyard is
+    screened on its occupancy instead (`occupancy_rect_at(
+    courtyard_less_only=True)`), the currency the armed search seats it on.
+    Unarmed it is screened on the search's own rects, as before #1182: on
+    the occupancy, at this screen's 1e-6 mm2, it refused human poses
+    check_assembly calls advisory (phase-4 verifier: esp_prog's R1, U2 and
+    CON2 at their own file poses, One-Air-Max's C53/U8 at 0.135 mm2) --
+    the courtyard-blocking floors and the silk exemption are the grader's,
+    not this screen's. `w` x `h` is the rects' intersection, for the
+    refusal's text only."""
     from .legality import (graded_part_at_pose, occupancy_rect_at,
                            pair_overlap_area, pair_overlap_area_exact)
     if getattr(state, 'courtyards_ignored', False):
@@ -3972,10 +3977,12 @@ def _courtyard_overlap(state, a: str, pose_a, b: str, pose_b):
     cache = state.__dict__.setdefault('_exact_overlap_cache', {})
     pcb_file = getattr(state, 'pcb_file', None)
     ta, tb = pa.tht_rect(*pose_a), pb.tht_rect(*pose_b)
-    ra = occupancy_rect_at(state.pcb_data, a, pose_a, pa.grade_rect(*pose_a),
-                           pcb_file, cache, courtyard_less_only=True)
-    rb = occupancy_rect_at(state.pcb_data, b, pose_b, pb.grade_rect(*pose_b),
-                           pcb_file, cache, courtyard_less_only=True)
+    ra, rb = pa.grade_rect(*pose_a), pb.grade_rect(*pose_b)
+    if getattr(state, 'body_model', False):
+        ra = occupancy_rect_at(state.pcb_data, a, pose_a, ra, pcb_file,
+                               cache, courtyard_less_only=True)
+        rb = occupancy_rect_at(state.pcb_data, b, pose_b, rb, pcb_file,
+                               cache, courtyard_less_only=True)
     area = pair_overlap_area(pa.sides, pa.side, ra, ta,
                              pb.sides, pb.side, rb, tb)
     if area > FIXED_OVERLAP_EPS_MM2:
@@ -7277,6 +7284,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     cy_base = None
     cy_gating_before: List = []
     cy_charged: Dict[str, Set] = {}
+    _moved0 = None
     try:
         cy_census = _leg.CourtyardCensus(
             pcb_data, pcb_file,
@@ -7298,16 +7306,13 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         cy_census = None
         notes.append(f"courtyard census unavailable ({type(exc).__name__}: "
                      f"{exc}) -- no courtyard pair charged")
-    for q in cy_gating_before:
-        free = [r for r in (q.a, q.b)
-                if r in state.parts and not state.parts[r].locked]
-        mine = [r for r in free if r in (_moved0 or ())] or free
-        if not mine:
+    for q, ordered, charge_mm in courtyard_charges(
+            cy_gating_before, state, _moved0, _mover_key):
+        if not ordered:
             notes.append(f"courtyard {q.a}<->{q.b} ({q.area_mm2}mm2): both "
                          f"file-locked -- not repairable here")
             continue
-        ordered = sorted(mine, key=_mover_key)
-        _charge(ordered[0], max(1.0, float(q.depth_mm or 0.0)))
+        _charge(ordered[0], charge_mm)
         cy_charged.setdefault(ordered[0], set()).add(frozenset((q.a, q.b)))
         for partner in ordered[1:]:
             partner_of.setdefault(ordered[0], []).append(partner)
@@ -7755,31 +7760,22 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         _cga = cy_census.grade(_final, moved=_leg.moved_refs_at(
             pcb_data, cy_base, _final))
         courtyard_after = len(_cga.gating or ())
-        _before = {frozenset((q.a, q.b)) for q in cy_gating_before}
-        for q in (_cga.gating or ()):
-            key = frozenset((q.a, q.b))
-            for r in sorted(key):
-                if key in _before and key in cy_charged.get(r, ()):
-                    why = (f"its courtyard pair with "
-                           f"{(set(key) - {r}).pop()} still gates "
-                           f"({q.area_mm2}mm2)")
-                elif key not in _before and r in moved_refs:
-                    why = (f"its move created a gating courtyard pair with "
-                           f"{(set(key) - {r}).pop()} ({q.area_mm2}mm2)")
-                else:
-                    continue
-                repaired[:] = [x for x in repaired if x != r]
-                if r not in unresolved:
-                    unresolved.append(r)
-                unresolved_claims.setdefault(r, [])
-                if 'courtyard_blocking' not in unresolved_claims[r]:
-                    unresolved_claims[r] = sorted(
-                        unresolved_claims[r] + ['courtyard_blocking'])
-                hint = ("" if body_model else
-                        " (the seat search spaced pad boxes; --body-model "
-                        "seats on check_assembly's occupancy)")
-                notes.append(f"{r}: UNRESOLVED -- {why}{hint} -- NOT "
-                             f"reported repaired")
+        for r, why in courtyard_regrade_notes(
+                cy_gating_before, _cga.gating or (), cy_charged, moved_refs,
+                body_model):
+            repaired[:] = [x for x in repaired if x != r]
+            # Once per ref: one already counted unrepairable (or failed) is
+            # not ALSO unresolved (phase-4 verifier: 6 violators read as
+            # 4 repaired + 2 unresolved + 3 unrepairable).
+            if r not in unresolved and r not in failed \
+                    and r not in unrepairable:
+                unresolved.append(r)
+            unresolved_claims.setdefault(r, [])
+            if 'courtyard_blocking' not in unresolved_claims[r]:
+                unresolved_claims[r] = sorted(
+                    unresolved_claims[r] + ['courtyard_blocking'])
+            notes.append(f"{r}: UNRESOLVED -- {why} -- NOT reported "
+                         f"repaired")
     return {'moves': moves, 'repaired': repaired, 'unrepairable':
             unrepairable + failed, 'unresolved': unresolved,
             'violators': violators, 'notes': notes,
@@ -7803,6 +7799,53 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             # #1066 (b): {cap: {moved, tried: [...]}}; {} when the rung is
             # off or nothing was charged to a decap rule.
             'decap_rung': decap_rung}
+
+
+def courtyard_charges(gating, state, moved, mover_key):
+    """`[(pair, ordered movers, weight)]` for the repair's courtyard
+    census (#1182). The movers are the pair's FREE members that moved
+    against the baseline (else every free member), ordered by `mover_key`:
+    the first is charged, the rest are its partners -- moved back in its
+    place if it cannot go. `[]` movers: both locked. The weight is the
+    pair's depth, floored at 1 mm: it sets the disproportion budget
+    (`DISPROPORTION_RATIO` x weight), and a 0.3 mm graze still needs a move
+    of a clearance and more."""
+    out = []
+    for q in gating:
+        free = [r for r in (q.a, q.b)
+                if r in state.parts and not state.parts[r].locked]
+        mine = [r for r in free if r in (moved or ())] or free
+        out.append((q, sorted(mine, key=mover_key),
+                    max(1.0, float(q.depth_mm or 0.0))))
+    return out
+
+
+def courtyard_regrade_notes(gating_before, gating_after, charged, moved,
+                            body_model):
+    """`[(ref, why)]`: the courtyard half of the repair's honesty re-grade
+    (#1182) -- a ref CHARGED for a pair that still gates, or one that moved
+    into a gating pair the input did not have. Unarmed, `why` says the seat
+    search spaced pad boxes, which is how a move leaves a body pair where
+    it was."""
+    out = []
+    before = {frozenset((q.a, q.b)) for q in gating_before}
+    hint = ("" if body_model else
+            " (the seat search spaced pad boxes; --body-model seats on "
+            "check_assembly's occupancy)")
+    for q in gating_after:
+        key = frozenset((q.a, q.b))
+        for r in sorted(key):
+            other = (set(key) - {r}).pop()
+            if key in before and key in charged.get(r, ()):
+                why = (f"its courtyard pair with {other} still gates "
+                       f"({q.area_mm2}mm2)")
+            elif key not in before and r in moved:
+                why = (f"its move created a gating courtyard pair with "
+                       f"{other} ({q.area_mm2}mm2)")
+            else:
+                continue
+            out.append((r, why + hint))
+    return out
 
 
 def eviction_licence_ok(before: Sequence[float],

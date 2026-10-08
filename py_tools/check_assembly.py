@@ -217,6 +217,13 @@ def main():
             print(f"cannot parse baseline {args.baseline}: {exc}",
                   file=sys.stderr)
             return 2
+        if not base_pcb.footprints:
+            # Every part would read as MOVED against it, and the courtyard
+            # gate would arm against all of them (phase-6 verifier: an empty
+            # file gated 8 of 8 of pristine ulx3s's pairs).
+            print(f"baseline {args.baseline} has no footprints: pass the "
+                  f"board this one was derived from", file=sys.stderr)
+            return 2
         gb = grade_body_overlap(base_pcb, clearance, intent_waivers=waivers,
                                 pcb_file=args.baseline,
                                 courtyard_severity=_cy_sev_arg)

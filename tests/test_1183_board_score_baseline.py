@@ -86,6 +86,9 @@ class BoardScore(unittest.TestCase):
         a = self.unarmed['components']['assembly']
         self.assertFalse(a['courtyard_gating_armed'], a)
         self.assertIn('--baseline', a['courtyard_gating_reason'])
+        # ...and says how: the old text named --baseline too, while saying
+        # board_score never passes one.
+        self.assertIn('to arm it', a['courtyard_gating_reason'])
         self.assertIn('assembly.courtyard_gating', self.unarmed['ungraded'])
 
     def test_converge_calls_them_incommensurable(self):
@@ -116,6 +119,79 @@ class CheckComplete(unittest.TestCase):
             _r, doc = _run([os.path.join(ROOT, 'check_complete.py'), DAMAGED,
                             '--baseline', PLACED, '--skip-slow', '--json',
                             out], out)
+        a = doc['score']['components']['assembly']
+        self.assertTrue(a['courtyard_gating_armed'], a)
+
+
+def _score_doc(ungraded, assembly):
+    return {'blocking': 10 if assembly.get('ran') else 9, 'quality': {},
+            'ungraded': sorted(ungraded),
+            'blocking_by': {'unrouted': 9,
+                            'assembly': 1 if assembly.get('ran') else None},
+            'components': {'assembly': assembly}}
+
+
+class ThePhase6VerifiersCases(unittest.TestCase):
+
+    def test_an_assembly_that_did_not_run_is_no_gain(self):
+        """An unarmed lap, then one whose check_assembly FAILED: `blocking`
+        fell 10 -> 9 only because assembly's count vanished. converge must
+        call it a false improvement -- in board_score's shape now, and in
+        the shape it had before the dotted entry was listed unconditionally
+        (read off the component)."""
+        import converge
+        prev = _score_doc(['assembly.courtyard_gating'],
+                          {'ran': True, 'count': 1,
+                           'courtyard_gating_armed': False})
+        for ung in (['assembly', 'assembly.courtyard_gating'], ['assembly']):
+            cur = _score_doc(ung, {'ran': False, 'count': None})
+            got = converge.commensurability(prev, cur)
+            self.assertIsNotNone(got, ung)
+            self.assertTrue(got[2], (ung, got))
+
+    def test_two_unarmed_scores_compare_across_the_upgrade(self):
+        """An unarmed score written before #1183 (no dotted entry) against
+        one written after: same components graded, commensurable."""
+        import converge
+        asm = {'ran': True, 'count': 1, 'courtyard_gating_armed': False}
+        old = _score_doc([], asm)
+        new = _score_doc(['assembly.courtyard_gating'], asm)
+        self.assertIsNone(converge.commensurability(old, new))
+
+    def test_a_baseline_that_is_not_a_board_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name, text, why in (
+                    ('empty', '', 'not a KiCad board'),
+                    ('text', 'hello\n', 'not a KiCad board'),
+                    ('bare', '(kicad_pcb (version 20240108))\n',
+                     'no footprints')):
+                path = os.path.join(td, name + '.kicad_pcb')
+                with open(path, 'w', encoding='utf-8') as fh:
+                    fh.write(text)
+                run_utils.check([sys.executable, '-X', 'utf8', os.path.join(
+                    ROOT, 'py_tools', 'board_score.py'), DAMAGED,
+                    '--baseline', path], refuse=why, code=2)
+            run_utils.check([sys.executable, '-X', 'utf8', os.path.join(
+                ROOT, 'py_tools', 'check_assembly.py'), PLACED,
+                '--baseline', os.path.join(td, 'bare.kicad_pcb')],
+                refuse='has no footprints', code=2)
+
+    def test_a_relative_baseline_is_resolved_where_it_was_given(self):
+        """check_complete runs board_score from the repo root: a baseline
+        named relative to the caller's directory must reach it resolved."""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, 'cc.json')
+            r = subprocess.run(
+                [sys.executable, '-X', 'utf8',
+                 os.path.join(ROOT, 'check_complete.py'), DAMAGED,
+                 '--baseline', os.path.basename(PLACED), '--skip-slow',
+                 '--json', out], capture_output=True, text=True,
+                encoding='utf-8', errors='replace', cwd=FIX, timeout=1500)
+            self.assertIn(r.returncode, (0, 4), r.stderr[-800:])
+            run_utils.evidence(out, 'check_complete json')
+            with open(out, encoding='utf-8') as fh:
+                doc = json.load(fh)
         a = doc['score']['components']['assembly']
         self.assertTrue(a['courtyard_gating_armed'], a)
 

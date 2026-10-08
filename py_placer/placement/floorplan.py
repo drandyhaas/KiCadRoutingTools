@@ -5279,6 +5279,11 @@ def rule_must_lock(ctx) -> Iterator[Violation]:
                     expected={'locked': True})
 
 
+#: How many overlap pairs `rule_legality` writes into `measured`, worst
+#: first; `pairs_total` carries the full count.
+MEASURED_PAIRS_CAP = 50
+
+
 def rule_legality(ctx) -> Iterator[Violation]:
     """Courtyard overlap and off-board parts, against a declared budget.
 
@@ -5326,9 +5331,19 @@ def rule_legality(ctx) -> Iterator[Violation]:
             ex, rc, pairs = _ctx_overlap_exact(ctx)
             ctx.legality['overlap_area_exact'] = round(ex, 4)
             got = ex
+            # Worst first, capped: a pile lists thousands, and the JSON
+            # doubled (phase-5 verifier). `pairs_total` keeps the count.
+            # `excluded` names the parts the budget does not see -- a silk-
+            # only part (#896) is invisible to it, and says so.
+            _gp, _excl = legality.courtyard_budget_universe(
+                _ctx_census(ctx), list(ctx.parts))
+            ctx.legality['overlap_area_excluded'] = sum(
+                len(v) for v in _excl.values())
             measured = {key: round(float(ex), 4),
                         'overlap_area_rect': round(float(rc), 4),
-                        'pairs': pairs}
+                        'pairs': pairs[:MEASURED_PAIRS_CAP],
+                        'pairs_total': len(pairs),
+                        'excluded': {k: v for k, v in _excl.items() if v}}
             if pairs:
                 note = (' -- worst: ' + ', '.join(
                     f"{a}/{b} {e:.3f} (rect {r:.3f})"
@@ -6589,6 +6604,35 @@ def _run_rules(ctx, abstained=None):
     return found, ran, skipped
 
 
+def _ctx_census(ctx):
+    """The ctx's `CourtyardCensus`, built once."""
+    if ctx._census is None:
+        ctx._census = legality.CourtyardCensus(ctx.pcb, ctx.pcb_file)
+    return ctx._census
+
+
+def _budget_outline_areas(ctx, refs):
+    """`{ref: (side, mm2)}`: what each part of `refs` the overlap budget
+    grades COVERS, on the budget's own geometry (#1162 verifier): its graded
+    outline, clipped to the rect a zone or the board confines (the grade
+    ladder's), at rotation 0 -- both turn together, so it is pose-free.
+    A bound on forced overlap is sound only in the currency the budget is
+    measured in: summing rects (an r=5 circle courtyard as a 10 x 10
+    square) called a layout the grade passes at 61.4 mm2 a forced 100."""
+    from shapely.geometry import box
+    census = _ctx_census(ctx)
+    st = ctx.state
+    eligible, _x = legality.courtyard_budget_universe(
+        census, [r for r in refs if r in st.parts],
+        {r: (0.0, 0.0, 0.0) for r in refs})
+    out = {}
+    for r, g in eligible.items():
+        b0 = st.parts[r].grade_by_rot[0.0]
+        shape = g.poly if g.poly is not None else box(*g.rect)
+        out[r] = (st.parts[r].side, shape.intersection(box(*b0)).area)
+    return out
+
+
 def _ctx_overlap_exact(ctx):
     """`(exact_total, rect_total, pairs)` for the parts `ctx` grades, at
     the poses it grades them (#1162): `legality.courtyard_overlap_pairs` over
@@ -6602,10 +6646,7 @@ def _ctx_overlap_exact(ctx):
     if getattr(st, 'courtyards_ignored', False):
         ctx._overlap_exact = (0.0, 0.0, [])
         return ctx._overlap_exact
-    census = ctx._census
-    if census is None:
-        census = legality.CourtyardCensus(ctx.pcb, ctx.pcb_file)
-        ctx._census = census
+    census = _ctx_census(ctx)
     cont = set(getattr(st, 'container_refs', ()) or ())
     refs = [r for r in ctx.parts if r not in cont]
     if hasattr(st, 'pose'):
@@ -7321,6 +7362,10 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         # The WARN half: the same sum with the grading clearance around each
         # member, which is what the seeder actually needs between them.
         per_face_c = {'F': 0.0, 'B': 0.0}
+        # The ERROR half, on the budget's own geometry (#1162 verifier): the
+        # members' graded OUTLINES, not their rects.
+        per_face_x = {'F': 0.0, 'B': 0.0}
+        _outline = _budget_outline_areas(ctx, members)
         counted = []
         for r in members:
             part = state.parts[r]
@@ -7331,6 +7376,9 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             per_face[part.side] = per_face.get(part.side, 0.0) + w * h
             per_face_c[part.side] = per_face_c.get(part.side, 0.0) + (
                 (w + clr_used) * (h + clr_used))
+            if r in _outline:
+                per_face_x[part.side] = (per_face_x.get(part.side, 0.0)
+                                         + _outline[r][1])
             t0 = (part.tht_by_rot or {}).get(0.0)
             if t0 is not None:
                 # The drilled-pad rect's part INSIDE the courtyard: only the
@@ -7345,17 +7393,29 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 far = 'B' if part.side == 'F' else 'F'
                 per_face[far] = per_face.get(far, 0.0) + (
                     legality.far_overlap_area(t0, b0))
+                # The budget measures the far side on these same cluster
+                # boxes (`legality._pair_exact`), so they are in its
+                # currency too.
+                if r in _outline:
+                    per_face_x[far] = per_face_x.get(far, 0.0) + (
+                        legality.far_overlap_area(t0, b0))
             counted.append(r)
         worst = max(per_face, key=lambda f_: per_face[f_])
         need = per_face[worst]
+        worst_x = max(per_face_x, key=lambda f_: per_face_x[f_])
+        need_x = per_face_x[worst_x]
         zone_rows.append({'block': z.name, 'face': worst,
                           'members_area_mm2': round(need, 3),
+                          'members_outline_area_mm2': round(need_x, 3),
                           'zone_area_mm2': round(zarea, 3),
                           'overlap_budget_mm2': overlap_budget,
                           'members': counted})
         excess = need - zarea
+        # The forced overlap the BUDGET sees (Bonferroni on the outlines and
+        # far-side clusters it measures).
+        excess_x = need_x - zarea
         if (overlap_budget is not None
-                and excess > float(overlap_budget) + legality.EPS):
+                and excess_x > float(overlap_budget) + legality.EPS):
             out.append(Violation(
                 rule='plan_zone_overfull',
                 severity=_plan_severity(intent, 'plan_zone_overfull',
@@ -7363,14 +7423,16 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 block=z.name,
                 message=(f"zone {z.name!r} is {zarea:.2f}mm2 (with its "
                          f"{tol}mm tolerance) and its {len(counted)} "
-                         f"member(s) on {worst}.Cu need {need:.2f}mm2 by "
-                         f"courtyard alone: fitting them forces at least "
-                         f"{excess:.2f}mm2 of courtyard overlap, over the "
-                         f"declared legality_budget.overlap_area "
+                         f"member(s) on {worst_x}.Cu cover {need_x:.2f}mm2 "
+                         f"by their graded outlines alone: fitting them "
+                         f"forces at least {excess_x:.2f}mm2 of courtyard "
+                         f"overlap, over the declared "
+                         f"legality_budget.overlap_area "
                          f"{float(overlap_budget):g}"),
-                measured={'members_area_mm2': round(need, 4),
-                          'face': worst, 'members': counted,
-                          'forced_overlap_mm2': round(excess, 4)},
+                measured={'members_outline_area_mm2': round(need_x, 4),
+                          'members_area_mm2': round(need, 4),
+                          'face': worst_x, 'members': counted,
+                          'forced_overlap_mm2': round(excess_x, 4)},
                 expected={'zone_area_mm2': round(zarea, 4),
                           'overlap_area': float(overlap_budget)}))
         elif excess > legality.EPS:
@@ -7481,21 +7543,33 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     # 0, and a part allowed off it takes its area with it (round-2
     # verifier: two 8x8 parts on a 10x10 board graded clean with one off).
     on_board = (intent.legality_budget or {}).get('oob_count') == 0
+    # The ERROR on the budget's own geometry (#1162 verifier), as row 5:
+    # every graded outline the budget sees, per face, against the usable
+    # area. Never more than the rect sum, so a weaker bound -- never an
+    # unsound one.
+    _faces_x: Dict[str, float] = {'F': 0.0, 'B': 0.0}
+    for _side, _a in _budget_outline_areas(ctx, list(state.parts)).values():
+        _faces_x[_side] = _faces_x.get(_side, 0.0) + _a
+    excess0_x = (max(_faces_x.values())
+                 - (m0.get('usable_area_mm2') or 0.0))
+    measured['outline_area_per_face_mm2'] = {
+        k: round(v, 3) for k, v in sorted(_faces_x.items())}
     if g0.get('fits_by_area') is False and overlap_budget is not None \
             and on_board \
-            and excess0 > float(overlap_budget) + legality.EPS:
+            and excess0_x > float(overlap_budget) + legality.EPS:
         out.append(Violation(
             rule='plan_board_overfull',
             severity=_plan_severity(intent, 'plan_board_overfull',
                                     ('legality',)),
             message=(f"the parts do not fit on the board by AREA alone, "
                      f"even at zero clearance on the busiest face "
-                     f"(utilisation {util0}): they force at least "
-                     f"{excess0:.2f}mm2 of courtyard overlap, over the "
-                     f"declared legality_budget.overlap_area "
+                     f"(utilisation {util0}): their graded outlines force "
+                     f"at least {excess0_x:.2f}mm2 of courtyard overlap, "
+                     f"over the declared legality_budget.overlap_area "
                      f"{float(overlap_budget):g}"),
             measured={'utilisation': util0,
-                      'forced_overlap_mm2': round(excess0, 4)},
+                      'forced_overlap_mm2': round(excess0_x, 4),
+                      'forced_overlap_rect_mm2': round(excess0, 4)},
             expected={'utilisation': '<= 1.0',
                       'overlap_area': float(overlap_budget)}))
     elif util0 is not None and util0 >= _opts.CROWDED_UTILISATION:
@@ -8465,8 +8539,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
             f'auto-budget would bless them')
     else:
         # #1162: the reading `rule_legality` grades -- check_assembly's
-        # outlines -- or the emitted budget fails the board it came from
-        # (esp_prog: 1.140 on rects, 3.227 exact).
+        # outlines, in the budget's universe -- or the emitted budget is a
+        # number in another currency: too tight where the outlines read
+        # more than the rects, too loose where they read less (glasgow g4:
+        # 4.909 on rects, 0.595 on outlines).
         try:
             from types import SimpleNamespace as _SN
             _ex = _ctx_overlap_exact(_SN(

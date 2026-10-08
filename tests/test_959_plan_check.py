@@ -393,9 +393,13 @@ def test_the_area_bound_is_sound_for_the_grade():
     gpcb = parse_kicad_pcb(glas)
     # Every member counts, locked ones too -- the grade counts a locked
     # pair's overlap -- so glasgow's MK1 + FID1 read as the board has them:
-    # clean at the board's own budget, an ERROR at 0 (they DO overlap).
+    # clean at the board's own budget. At 0 they DO overlap, but since
+    # #1162 the bound is on the OUTLINES the budget is measured on (MK1's
+    # r = 5 circle, not its 10 x 10 square): about 75 mm2 in a 100 mm2
+    # zone, which proves no overlap by area -- the grade catches this one,
+    # and test_1162 pins a locked member counting in an outline bound.
     own = fp.emit_intent(gpcb, glas)['legality_budget'].get('overlap_area')
-    for budget, want in ((own, []), (0, ['error'])):
+    for budget, want in ((own, []), (0, [])):
         if budget is None:
             continue
         raw = _raw(blocks=[{'name': 'mk', 'refs': ['MK1', 'FID1'],

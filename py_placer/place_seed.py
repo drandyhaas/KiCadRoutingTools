@@ -1059,6 +1059,12 @@ Examples:
                 'unrepairable': len(result['unrepairable']),
                 'moved_refs': [m['reference'] for m in result['moves']],
                 'max_move_mm': round(max_move, 3),
+                # #1182: check_assembly's gating courtyard pairs against
+                # --baseline, before and after; null without one.
+                'courtyard_gating_before': result.get(
+                    'courtyard_gating_before'),
+                'courtyard_gating_after': result.get(
+                    'courtyard_gating_after'),
             })
             summary['edge_floor_fallback'].update(
                 result.get('edge_floor_fallback') or {})

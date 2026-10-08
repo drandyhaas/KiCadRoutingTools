@@ -233,6 +233,10 @@ def test_grade_route_mode_names_every_moved_part_and_is_not_done():
         # courtyard gate was ARMED, and the record says so
         assert full['assembly_gating_basis'] == 'moved-vs-baseline', \
             full.get('assembly_gating_basis')
+        # ...and check_complete's own score was armed: the baseline reached
+        # it too
+        assert full.get('check_complete_gating_armed') is True, \
+            full.get('check_complete_gating_armed')
         run_utils.check(PY + [os.path.join(SCRIPTS, 'grade.py'), pile,
                               '--baseline', ESP, '--spec', 'no-equals-sign'],
                         refuse='expected NAME=VALUE', code=2,

@@ -554,6 +554,22 @@ def assembly_component(doc: dict, rc: int) -> dict:
             'containments': doc.get('containments') or []}
 
 
+def baseline_problem(path: str):
+    """Why `path` cannot be a --baseline, or None: it must be a KiCad board
+    with at least one footprint (a cheap text test; check_assembly parses it
+    and refuses the same way)."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+    except OSError as exc:
+        return f'unreadable ({exc})'
+    if '(kicad_pcb' not in text[:4096]:
+        return 'not a KiCad board'
+    if '(footprint ' not in text:
+        return 'a board with no footprints'
+    return None
+
+
 def score_assembly(root: str, board: str, intent: str, tmp: str,
                    clearance=None, baseline=None) -> dict:
     """Blocking BODY pairs (run-6): two footprints' pad copper in the same
@@ -1214,6 +1230,15 @@ def main():
         # believing it graded (#1183).
         print(f"baseline not found: {args.baseline}", file=sys.stderr)
         return 2
+    _bad = baseline_problem(args.baseline) if args.baseline else None
+    if _bad:
+        # A file that is not a board with footprints arms the gate against
+        # EVERY part: none is found in it, so each reads as moved (phase-6
+        # verifier: pristine ulx3s, 8 of 8 pairs gating against an empty
+        # file, 0 of 8 against itself).
+        print(f"baseline not usable: {args.baseline}: {_bad}",
+              file=sys.stderr)
+        return 2
     root = krt_dir()
     # In-process imports (kicad_parser, net_queries) come from the engine dir;
     # #522 + the placement split spread them over py_router/ and py_tools/, so
@@ -1310,12 +1335,17 @@ def main():
              'advisory': {k: v.get('count') for k, v in advisory.items()},
              'ungraded': sorted(
                  [k for k, v in parts.items() if v.get('ran') is False]
-                 # #964 item 2 / #1183: assembly ran, but its courtyard gate
-                 # did not -- an UNARMED conjunct is unexamined, and only a
-                 # top-level entry is something a loop compares.
+                 # #964 item 2 / #1183: the courtyard gate did not run --
+                 # an UNARMED conjunct is unexamined, and only a top-level
+                 # entry is something a loop compares. Listed whether or not
+                 # assembly itself ran: a lap whose assembly FAILED must
+                 # still read as grading fewer things than an unarmed one,
+                 # or converge takes its lower `blocking` for a gain (phase-6
+                 # verifier: 10 -> 9 accepted, because the dotted entry
+                 # vanished with the component).
                  + (['assembly.courtyard_gating']
-                    if (parts.get('assembly') or {}).get('ran')
-                    and not parts['assembly'].get('courtyard_gating_armed')
+                    if not (parts.get('assembly') or {}).get(
+                        'courtyard_gating_armed')
                     else [])),
              'unknown': sorted(unknown), 'quality': quality(args.board),
              # BESIDE `quality`, never inside `parts` -- see score_placement.

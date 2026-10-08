@@ -675,9 +675,12 @@ _UNGRADED_FLAG = {'floorplan': '--intent', 'impedance': '--impedance-nets',
 def ungraded_set(score):
     """Which components this score did NOT measure, or None if unknowable.
 
-    Two sources, unioned, because either can be absent: board_score's own
-    `ungraded` list, and every key `blocking_by` reports as null. A null in
-    `blocking_by` IS the component saying it did not answer.
+    Three sources, unioned, because any can be absent: board_score's own
+    `ungraded` list, every key `blocking_by` reports as null (a null in
+    `blocking_by` IS the component saying it did not answer), and the
+    assembly component's own `courtyard_gating_armed` (#1183) -- so a score
+    written before board_score listed 'assembly.courtyard_gating' still
+    compares with one written after, unarmed against unarmed.
     """
     if not isinstance(score, dict):
         return None
@@ -689,6 +692,14 @@ def ungraded_set(score):
     by = score.get('blocking_by')
     if isinstance(by, dict):
         out |= {str(k) for k, v in by.items() if v is None}
+        seen = True
+    asm = (score.get('components') or {}).get('assembly') \
+        if isinstance(score.get('components'), dict) else None
+    if isinstance(asm, dict):
+        # Only when the score SAYS something about assembly: a partial
+        # document with no assembly component reads from the list alone.
+        if asm.get('courtyard_gating_armed') is not True:
+            out.add('assembly.courtyard_gating')
         seen = True
     return out if seen else None
 

@@ -482,10 +482,8 @@ ROWS = [
 
     # ==== seeder: stage 0, the fixed poses ==================================
     ('fixed-abutting-refused', 'sd',
-     "    ra = occupancy_rect_at(state.pcb_data, a, pose_a, pa.grade_rect(*pose_a),\n"
-     "                           pcb_file, cache, courtyard_less_only=True)",
-     "    ra = occupancy_rect_at(state.pcb_data, a, pose_a, pa.grade_rect(*pose_a),\n"
-     "                           pcb_file, cache, courtyard_less_only=True)\n"
+     "    ra, rb = pa.grade_rect(*pose_a), pb.grade_rect(*pose_b)",
+     "    ra, rb = pa.grade_rect(*pose_a), pb.grade_rect(*pose_b)\n"
      "    ra = tuple(v + d for v, d in zip(ra, (-0.02, -0.02, 0.02, 0.02)))",
      (T_SEED + '::test_abutting_fixed_poses_seat_and_overlapping_ones_both_refuse',),
      'KILLED'),

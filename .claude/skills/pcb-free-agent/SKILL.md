@@ -193,7 +193,11 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   - `place_seed --repair` counts a violator `repaired` only once its
     finding is gone; read `unresolved_refs` / `unresolved_by_rule` in its
     `JSON_SUMMARY` for the rest (#1066). Add `--repair-decaps` to seat
-    charged caps at their IC's pin (opt-in; `decap_rung` says what it did);
+    charged caps at their IC's pin (opt-in; `decap_rung` says what it did).
+    Pass `--baseline <input>` too: only then does the repair charge the
+    courtyard pairs check_assembly gates (#1182), and on a library that
+    draws bodies but no courtyards add `--body-model`, or the seat search
+    spaces pad boxes and such a pair stays unresolved;
   - `place_fanout_clearance` holds both decap limits when you pass it
     `--intent` (#1067): no cap move takes a decap claim past its limit and
     further than before, unless no clear pose keeps it -- then the cap

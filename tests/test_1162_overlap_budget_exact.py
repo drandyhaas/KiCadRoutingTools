@@ -212,5 +212,206 @@ class APoseComparison(unittest.TestCase):
         self.assertEqual(keys, {'overlap_area_exact'}, rows)
 
 
+def _pro_waives_courtyards(path):
+    import json
+    with open(os.path.splitext(path)[0] + '.kicad_pro', 'w',
+              encoding='utf-8') as fh:
+        json.dump({'board': {'design_settings': {'rule_severities': {
+            'courtyards_overlap': 'ignore'}}}}, fh)
+
+
+def _plan(path, raw):
+    import contextlib
+    import io as _io
+    base = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm'}
+    base.update(raw)
+    with contextlib.redirect_stdout(_io.StringIO()):
+        return floorplan.plan_check(floorplan.intent_from_dict(base, path),
+                                    parse_kicad_pcb(path), path)
+
+
+def _sized_board(td, name, size, parts):
+    path = os.path.join(td, name + '.kicad_pcb')
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb (version 20240108) (generator pcbnew)\n'
+                 '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal)'
+                 ' (37 "F.SilkS" user) (44 "Edge.Cuts" user))\n'
+                 '  (net 0 "") (net 1 "N1") (net 2 "N2")\n'
+                 f'  (gr_rect (start 0 0) (end {size[0]} {size[1]}) (stroke'
+                 ' (width 0.1) (type default)) (layer "Edge.Cuts"))\n'
+                 + ''.join(parts) + ')\n')
+    return path
+
+
+class ThePhase5VerifiersCases(unittest.TestCase):
+
+    def test_a_waived_project_reads_no_exact_overlap(self):
+        """courtyards_overlap ignored: the budget, the pose grader and the
+        plan read zero (#1104) -- on the exact key too, or `_grade_worse`
+        refuses moves on it. The control, unwaived, reads the overlap."""
+        import pose_score
+        got = {}
+        for waived in (False, True):
+            with tempfile.TemporaryDirectory() as td:
+                path = _board(td, 'w', [_mk('MK1', 12, 15, locked=True),
+                                        _mk('MK2', 19, 15, locked=True)])
+                if waived:
+                    _pro_waives_courtyards(path)
+                res = floorplan.grade(_intent(path), parse_kicad_pcb(path),
+                                      path)
+                st = pose_score.make_state(parse_kicad_pcb(path), path,
+                                           clearance=0.2)
+                la = floorplan.PoseGrader(
+                    _intent(path), st, blocks={}, clearance=0.2,
+                    board_edge_clearance=0.5).legality_at()
+            got[waived] = (res.legality['overlap_area_exact'],
+                           la['overlap_area_exact'],
+                           bool([v for v in res.violations
+                                 if v.rule == 'legality']))
+        self.assertGreater(got[False][0], 0.0, got)
+        self.assertGreater(got[False][1], 0.0, got)
+        self.assertTrue(got[False][2], got)
+        self.assertEqual(got[True], (0.0, 0.0, False))
+
+    def test_a_posed_view_leaves_a_pin_frame_out(self):
+        """rp2350's U8 is a pin frame: a posed view of the state prices the
+        overlap the state prices (it read 425.18 with U8's rect, 18.45
+        without)."""
+        import pose_score
+        p = os.path.join(ROOT, 'kicad_files',
+                         'rp2350_fpga_eensy_prePlane.kicad_pcb')
+        st = pose_score.make_state(parse_kicad_pcb(p), p, clearance=0.2)
+        self.assertIn('U8', set(st.container_refs))
+        view = floorplan._PosedState(st)
+        self.assertAlmostEqual(view.legality_metrics()['overlap_area'],
+                               st.legality_metrics()['overlap_area'],
+                               places=4)
+
+    def test_the_decap_rung_compares_the_exact_reading(self):
+        """A seat that grows ONLY the exact overlap is reverted."""
+        import test_repair_decap_honesty as t
+        from placement import seeder
+        real = floorplan.PoseGrader.legality_at
+        with tempfile.TemporaryDirectory() as td:
+            intent, src = t._splitflap3(td)
+            home = parse_kicad_pcb(src).footprints['C2']
+
+            def grows(self, *a, **kw):
+                got = dict(real(self, *a, **kw))
+                p = self.state.parts['C2']
+                if abs(p.x - home.x) + abs(p.y - home.y) > 1e-6:
+                    got['overlap_area_exact'] = float(
+                        got.get('overlap_area_exact') or 0) + 1
+                return got
+            floorplan.PoseGrader.legality_at = grows
+            try:
+                on = seeder.repair_placement(
+                    parse_kicad_pcb(src), src, intent,
+                    group_sources=t.SOURCES, clearance=t.CLEARANCE,
+                    repair_decaps=True)
+            finally:
+                floorplan.PoseGrader.legality_at = real
+        row = on['decap_rung']['C2']['tried'][0]
+        self.assertEqual(row['result'], 'reverted', row)
+        self.assertIn('legality.overlap_area_exact', row['added'])
+
+    def test_the_message_names_the_worst_five_first(self):
+        xs = (3, 11, 18, 24, 29, 33, 36)
+        with tempfile.TemporaryDirectory() as td:
+            path = _board(td, 'm', [_mk(f'MK{i}', x, 20)
+                                    for i, x in enumerate(xs)])
+            res = floorplan.grade(_intent(path), parse_kicad_pcb(path), path)
+        v = [x for x in res.violations if x.rule == 'legality'][0]
+        pairs = v.measured['pairs']
+        self.assertGreater(len(pairs), 5)
+        self.assertEqual(pairs, sorted(pairs, key=lambda p: (-p[3], -p[2],
+                                                             p[0], p[1])))
+        self.assertEqual(v.measured['pairs_total'], len(pairs))
+        named = v.message.split(' -- worst: ')[1]
+        self.assertTrue(named.startswith(', '.join(
+            f"{a}/{b} {e:.3f} (rect {r:.3f})"
+            for a, b, r, e in pairs[:5])), named)
+        self.assertTrue(v.message.endswith(f", +{len(pairs) - 5} more"))
+
+    def test_the_rect_reading_is_the_callers(self):
+        """`rect_of` is the RECT reading's source: R's rect moved 50 mm away
+        reads no rect overlap, and the exact reading does not move."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _board(td, 'rc', [_mk('MK', 20, 20),
+                                     _rect('R', 16.5, 17.0)])
+            census = legality.CourtyardCensus(parse_kicad_pcb(path), path)
+
+            def shifted(r):
+                g = census.graded_part(r)
+                dx = 50.0 if r == 'R' else 0.0
+                x0, y0, x1, y1 = g.rect
+                return (g.sides, g.side, (x0 + dx, y0, x1 + dx, y1),
+                        g.tht_rect if r != 'R' else None)
+            own = legality.courtyard_overlap_pairs(census, ['MK', 'R'])
+            far = legality.courtyard_overlap_pairs(census, ['MK', 'R'],
+                                                   rect_of=shifted)
+        self.assertGreater(own[1], 0.0)
+        self.assertEqual(far[1], 0.0)
+        self.assertAlmostEqual(far[0], own[0], places=6)
+
+    def test_the_zone_bound_is_on_the_outlines(self):
+        """Three r = 5 circles in a 20 x 10 zone: their RECTS force 100
+        mm2, their outlines about 35.5 -- and the grade passes them at
+        61.4. A budget of 62 is satisfiable (no ERROR); 30 is not -- and
+        MK2 is LOCKED: a locked member counts (the grade counts its
+        overlap), and without it the outlines fit (157 < 200)."""
+        for budget, want in ((62.0, False), (30.0, True)):
+            with tempfile.TemporaryDirectory() as td:
+                path = _board(td, 'z', [_mk('MK1', 5, 5),
+                                        _mk('MK2', 10, 5, locked=True),
+                                        _mk('MK3', 15, 5)])
+                found, meas = _plan(path, {
+                    'blocks': [{'name': 'mk', 'refs': ['MK1', 'MK2', 'MK3'],
+                                'zone': [0, 0, 20, 10], 'tolerance_mm': 0}],
+                    'legality_budget': {'overlap_area': budget}})
+            over = [v for v in found if v.rule == 'plan_zone_overfull']
+            self.assertEqual(bool(over), want,
+                             (budget, [(v.rule, v.message) for v in found]))
+        row = meas['zones'][0]
+        self.assertLess(row['members_outline_area_mm2'],
+                        row['members_area_mm2'])
+        self.assertAlmostEqual(over[0].measured['forced_overlap_mm2'],
+                               row['members_outline_area_mm2'] - 200.0,
+                               places=3)
+
+    def test_the_board_bound_is_on_the_outlines(self):
+        """Two r = 5 circles on a 15 x 10 board: rects force 50 mm2, the
+        outlines about 7. A budget of 20 is satisfiable; 2 is not."""
+        for budget, want in ((20.0, False), (2.0, True)):
+            with tempfile.TemporaryDirectory() as td:
+                path = _sized_board(td, 'b', (15, 10), [_mk('MK1', 5, 5),
+                                                        _mk('MK2', 10, 5)])
+                found, meas = _plan(path, {'legality_budget': {
+                    'overlap_area': budget, 'oob_count': 0}})
+            over = [v for v in found if v.rule == 'plan_board_overfull']
+            self.assertEqual(bool(over), want,
+                             (budget, [(v.rule, v.message) for v in found],
+                              meas.get('outline_area_per_face_mm2')))
+
+    def test_a_silk_only_part_is_named_as_excluded(self):
+        """Two parts drawing only silk, crossed: #896 keeps a silk body out
+        of every gate, so the budget does not see them -- and says so."""
+        part = ('  (footprint "t:SILK" (layer "F.Cu") (at 15 15 {rot})\n'
+                '    (property "Reference" "{ref}" (at 0 0) (layer'
+                ' "F.SilkS"))\n'
+                '    (fp_rect (start -3.5 -1) (end 3.5 1) (stroke (width 0.12)'
+                ' (type default)) (layer "F.SilkS"))\n'
+                '    (pad "1" smd rect (at -3 0) (size 1 1.5) (layers "F.Cu")'
+                ' (net 1 "N1"))\n'
+                '    (pad "2" smd rect (at 3 0) (size 1 1.5) (layers "F.Cu")'
+                ' (net 2 "N2")))\n')
+        with tempfile.TemporaryDirectory() as td:
+            path = _sized_board(td, 's', (30, 30), [
+                part.format(ref='A1', rot=0), part.format(ref='B1', rot=90)])
+            res = floorplan.grade(_intent(path), parse_kicad_pcb(path), path)
+        self.assertEqual(res.legality['overlap_area_exact'], 0.0)
+        self.assertEqual(res.legality['overlap_area_excluded'], 2)
+
+
 if __name__ == '__main__':
     unittest.main()

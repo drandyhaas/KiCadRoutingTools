@@ -29,6 +29,7 @@ _TESTS = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_TESTS)
 
 TARGETS = {'bs': os.path.join(_ROOT, 'py_tools', 'board_score.py'),
+           'ca': os.path.join(_ROOT, 'py_tools', 'check_assembly.py'),
            'cv': os.path.join(_ROOT, 'py_placer', 'converge.py'),
            'cc': os.path.join(_ROOT, 'check_complete.py'),
            'gr': os.path.join(_ROOT, '.claude', 'skills', 'pcb-free-agent',
@@ -72,6 +73,31 @@ ROWS = [
      "                                        *iflag, '--baseline', baseline,",
      "                                        *iflag,",
      (TFA,), 'KILLED'),
+    # ---- the phase-6 verifier's cases --------------------------------------
+    ('converge-ignores-the-component', 'cv',
+     "        if asm.get('courtyard_gating_armed') is not True:",
+     "        if False:",
+     (T1183,), 'KILLED'),
+    ('a-non-board-baseline-is-accepted', 'bs',
+     "    _bad = baseline_problem(args.baseline) if args.baseline else None",
+     "    _bad = None",
+     (T1183,), 'KILLED'),
+    ('check-assembly-accepts-an-empty-baseline', 'ca',
+     "        if not base_pcb.footprints:",
+     "        if False:",
+     (T1183,), 'KILLED'),
+    ('grade-py-drops-the-armed-record', 'gr',
+     "            out[key + '_gating_armed'] = (",
+     "            out[key + '_gating_armed_x'] = (",
+     (TFA,), 'KILLED'),
+    ('check-complete-keeps-a-relative-baseline', 'cc',
+     "        a.baseline = os.path.abspath(a.baseline)",
+     "        a.baseline = a.baseline",
+     (T1183,), 'KILLED'),
+    ('the-reason-does-not-say-how', 'bs',
+     "                     'board this one was derived from> to arm it (#1183)'),",
+     "                     'board this one was derived from>'),",
+     (T1183,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is

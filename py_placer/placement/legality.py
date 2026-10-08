@@ -1558,20 +1558,14 @@ def graded_part_at_pose(pcb_data, ref: str, pose, side: str, rect, tht_rect,
                         cache: Optional[dict] = None) -> GradedPart:
     """A `GradedPart` for `ref` at a pose nothing has written yet, carrying
     its drawn occupancy outline there (#1094). `cache` (any dict the caller
-    keeps) holds the one board read this needs across calls.
-
-    The rect is the OCCUPANCY rect at the pose (`occupancy_rect_at`), the
-    polygon's own bounds -- not `rect`, which is the caller's search rect and
-    on a courtyard-less library a pad box (#1182): a pad-box rect around a
-    fab-body polygon made the exact test's broad phase skip every pair whose
-    bodies met outside their pads. `rect` stands only for a part the board
-    read could not bound."""
+    keeps) holds the one board read this needs across calls. `rect` is the
+    caller's: `seeder._courtyard_overlap` hands the occupancy rect when the
+    search is armed (#1182) and its own rect when it is not."""
     if cache is None:
         cache = {}
     lbs, bodies = _bodies_cached(pcb_data, pcb_file, cache)
     lb = lbs.get(ref)
     fp = (pcb_data.footprints or {}).get(ref)
-    rect = occupancy_rect_at(pcb_data, ref, pose, rect, pcb_file, cache)
     poly = None
     if lb is not None and fp is not None:
         try:
@@ -1615,6 +1609,33 @@ def occupancy_rect_at(pcb_data, ref: str, pose, fallback=None,
     return (x + lx0, y + ly0, x + lx1, y + ly1)
 
 
+def courtyard_budget_universe(census, refs, poses=None):
+    """`(graded, excluded)`: the parts of `refs` a courtyard-overlap
+    BUDGET grades (`{ref: GradedPart}` at `poses`), and the ones it leaves
+    out by name -- `{'containers': [...], 'synthetic': [...], 'silk':
+    [...]}`. One rule, so `courtyard_overlap_pairs` and the plan's area
+    bounds price the same parts, and a reader can see who was not counted
+    (a silk-only part is invisible to the budget, #896)."""
+    from placement.body import SOURCE_SILK
+    poses = poses or {}
+    gp = {}
+    excluded = {'containers': [], 'synthetic': [], 'silk': []}
+    for r in refs:
+        if r not in census.lbs:
+            continue
+        if r in census.containers:
+            excluded['containers'].append(r)
+            continue
+        g = census.graded_part(r, poses.get(r))
+        if g.synthetic:
+            excluded['synthetic'].append(r)
+        elif g.source == SOURCE_SILK:
+            excluded['silk'].append(r)
+        else:
+            gp[r] = g
+    return gp, {k: sorted(v) for k, v in excluded.items()}
+
+
 def courtyard_overlap_pairs(census, refs, poses=None, rect_of=None):
     """`(exact_total, rect_total, pairs)`: the courtyard overlap a floorplan
     budget grades, pair by pair, on check_assembly's drawn-outline geometry
@@ -1633,14 +1654,7 @@ def courtyard_overlap_pairs(census, refs, poses=None, rect_of=None):
     the caller's own `(sides, side, rect, tht_rect)` for the RECT reading --
     the search's currency, reported beside the exact one so a reader sees
     which overlap the budget used to count; default the census's rects."""
-    from placement.body import SOURCE_SILK
-    poses = poses or {}
-    gp = {}
-    for r in refs:
-        if r in census.lbs and r not in census.containers:
-            g = census.graded_part(r, poses.get(r))
-            if not g.synthetic and g.source != SOURCE_SILK:
-                gp[r] = g
+    gp, _excluded = courtyard_budget_universe(census, refs, poses)
     keys = sorted(gp)
     pairs = []
     ex_tot = rc_tot = 0.0
