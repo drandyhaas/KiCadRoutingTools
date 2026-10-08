@@ -1048,6 +1048,15 @@ def _seated_violations(state, seated: Set[str]) -> Tuple[int, float]:
     others = set(state.parts) - set(refs)
     count = 0
     area = 0.0
+    # #1212: a seated part on a seated frame's pin.
+    if getattr(state, 'pin_frame_refs', None):
+        for a in refs:
+            if a in containers:
+                continue
+            pa = state.parts[a]
+            if state._pin_conflict_at(a, pa.x, pa.y, pa.rot,
+                                      exclude=others) is not None:
+                count += 1
     for i, a in enumerate(refs):
         pa = state.parts[a]
         if a not in containers:
@@ -3882,6 +3891,19 @@ def _drill_conflict(state, a: str, pose_a, b: str, pose_b) -> Optional[str]:
             f"gap is holes overlapping)")
 
 
+def _waived_what(m: Dict) -> str:
+    """One waived pair's measurement, as `_fixed_pose_check` recorded it:
+    a courtyard overlap's box and area, a frame pin under the courtyard
+    (#1212), or both."""
+    what = []
+    if 'area_mm2' in m:
+        what.append(f"{m['w_mm']:.2f}x{m['h_mm']:.2f}mm, "
+                    f"{m['area_mm2']:.3f}mm2")
+    if m.get('pins'):
+        what.append(f"pin(s) {', '.join(m['pins'])}")
+    return '; '.join(what)
+
+
 def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
                       waived=frozenset(),
                       waived_out: Optional[Dict[str, Dict]] = None
@@ -3946,6 +3968,29 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
                    for n in state.exclusive_blockers(ref, (r, tht)))
     containers = getattr(state, 'container_refs', ()) or ()
     ctx = state.legality_ctx
+    # #1212: a declared pose on a frame's pin is refused like a courtyard
+    # overlap -- the frame's rect is skipped below, its pins are not. Judged
+    # against the obstacles at THEIR poses, and, like a courtyard overlap,
+    # recorded instead of refused when the pair's overlap is declared: the
+    # grader waives an intent-declared pin pair (`intent_declared`) too.
+    if getattr(state, 'pin_frame_refs', None):
+        for _hit in state._pin_hits_at(
+                ref, *pose, poses={o: tuple(p) for o, p in obstacles.items()
+                                   if o != ref}):
+            _other = _hit.b if _hit.a == ref else _hit.a
+            if _other not in obstacles:
+                continue
+            _pins = ', '.join(_hit.pins)
+            if frozenset((ref, _other)) in waived:
+                if waived_out is not None:
+                    waived_out.setdefault(_other, {})['pins'] = list(
+                        _hit.pins)
+                continue
+            conflicts[_other] = (
+                f"sits on {_other}'s pin(s) {_pins} (pin_in_courtyard)"
+                if _other in state.pin_frame_refs else
+                f"pin(s) {_pins} under {_other}'s courtyard "
+                f"(pin_in_courtyard)")
     for other in sorted(obstacles):
         if other == ref or other not in state.parts:
             continue
@@ -3955,9 +4000,9 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
             if area > FIXED_OVERLAP_EPS_MM2:
                 if frozenset((ref, other)) in waived:
                     if waived_out is not None:
-                        waived_out[other] = {'area_mm2': round(area, 4),
-                                             'w_mm': round(w, 3),
-                                             'h_mm': round(h, 3)}
+                        waived_out.setdefault(other, {}).update(
+                            {'area_mm2': round(area, 4),
+                             'w_mm': round(w, 3), 'h_mm': round(h, 3)})
                     # The courtyard is waived; its holes are not.
                     _dh = _drill_conflict(state, ref, pose, other, opose)
                     if _dh:
@@ -4188,8 +4233,7 @@ def _seat_fixed_poses(state, pcb_data, entries, placed: Set[str],
             seated[ref]['courtyard_waived'] = waived_hits[ref]
             notes.append(
                 f"fixed pose {ref}: courtyard overlap WAIVED with "
-                + ', '.join(f"{o} ({m['w_mm']:.2f}x{m['h_mm']:.2f}mm, "
-                            f"{m['area_mm2']:.3f}mm2)"
+                + ', '.join(f"{o} ({_waived_what(m)})"
                             for o, m in sorted(waived_hits[ref].items()))
                 + " -- declared by accept_courtyard_overlap / "
                   "overlap_waivers; pads, holes, keep-outs and the outline "
@@ -7021,6 +7065,32 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         _charge(ordered[0], CONTAINMENT_CHARGE_MM)
         for partner in ordered[1:]:
             partner_of.setdefault(ordered[0], []).append(partner)
+
+    # PIN census (fa10 P1, #1212): a part whose courtyard covers a pin
+    # frame's drilled pin -- KiCad's pth_inside_courtyard, check_assembly's
+    # absolute `pin_in_courtyard` conjunct. The frame itself never moves for
+    # it (its rect is not a body, and it is usually the board's host): the
+    # OTHER member is charged, at the containment scale, because a pin under
+    # a courtyard is the same yes/no buildability fact. A pair the intent
+    # declares is the designer's and is skipped, as check_assembly skips it.
+    _pin_frames = set(body.get('containers') or ())
+    _declared = {frozenset(w) for w in (intent.waiver_pairs()
+                                        if intent is not None
+                                        and hasattr(intent, 'waiver_pairs')
+                                        else ())}
+    _pins = [q for q in body.get('pin_in_courtyard_pairs', ())
+             if frozenset((q.a, q.b)) not in _declared]
+    if _pins:
+        print(f"  Pin census: {len(_pins)} part(s) over a pin frame's "
+              f"pin(s), all listed")
+    for q in _pins:
+        frame, other = ((q.a, q.b) if q.a in _pin_frames else (q.b, q.a))
+        if other not in state.parts or state.parts[other].locked:
+            notes.append(f"pin_in_courtyard {other} over {frame} pin(s) "
+                         f"{', '.join(q.pins)}: {other} is file-locked -- "
+                         f"not repairable here")
+            continue
+        _charge(other, CONTAINMENT_CHARGE_MM)
 
     # Off-board census on PAD/HOLE extents at ZERO margin -- copper or drill
     # off the outline is a fab defect; a COURTYARD poking past the edge is

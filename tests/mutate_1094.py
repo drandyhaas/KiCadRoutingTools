@@ -68,8 +68,8 @@ T1101 = _t('test_1101_courtyard_waiver_seat.py')
 ROWS = [
     # --- #1094: courtyards and bodies as drawn -------------------------------
     ('graded-parts-lose-their-outline', 'leg',
-     "                              poly=occupancy_shape(fp, lb, bodies.get(ref))))",
-     "                              poly=None))",
+     "                              poly=occupancy_shape(fp, lb, bodies.get(ref)),",
+     "                              poly=None,",
      (T1094,), 'KILLED'),
     ('fab-bodies-back-to-boxes', 'leg',
      "                ov, _depth, _ix = shape_overlap(sha, shb)",
@@ -137,8 +137,8 @@ ROWS = [
      (T1094,), 'KILLED'),
     # --- #1096: pad copper off the outline -----------------------------------
     ('off-outline-not-a-conjunct', 'asm',
-     "                         or courtyard_gating or off_outline_pads or mating)",
-     "                         or courtyard_gating or mating)",
+     "                         or courtyard_gating or off_outline_pads or mating",
+     "                         or courtyard_gating or mating",
      (T1096,), 'KILLED'),
     ('overrun-printed-as-the-sum', 'asm',
      "                      + ', '.join(f'{r} ({_overrun.get(r, a)}mm past the '",
@@ -168,8 +168,8 @@ ROWS = [
      "        if False:",
      (T1098,), 'KILLED'),
     ('plug-not-a-conjunct', 'asm',
-     "                         or courtyard_gating or off_outline_pads or mating)",
-     "                         or courtyard_gating or off_outline_pads)",
+     "                         or courtyard_gating or off_outline_pads or mating",
+     "                         or courtyard_gating or off_outline_pads",
      (T1098,), 'KILLED'),
     ('grade-blind-to-the-plug', 'fp',
      "        if len(_ks) != len(intent.keepouts or ()):",

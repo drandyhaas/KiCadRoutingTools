@@ -70,9 +70,9 @@ EPS_IMPROVE = 1e-6
 #: candidate_valid asks (intent first, the tether last); 'unattributed' is a
 #: refusal no label covered and is a bug for `tests/test_1113_pose_veto.py`.
 VETO_CHECKS = ('intent', 'board_bbox', 'outline', 'waived_drill',
-               'waived_pads', 'body_overlap', 'courtyard', 'body_contained',
-               'pads_under_body', 'keepout_band', 'pads', 'tether',
-               'escape_overlap')
+               'waived_pads', 'body_overlap', 'courtyard', 'container_pin',
+               'body_contained', 'pads_under_body', 'keepout_band', 'pads',
+               'tether', 'escape_overlap')
 #: mm2 of .Fab body overlap `_body_overlap_at` counts: bodies that abut
 #: (a shared edge, area 0) are not overlapping.
 _BODY_OVERLAP_EPS = 1e-6
@@ -1212,16 +1212,31 @@ class QuenchState:
         # connector). Pairs with a container member skip the courtyard
         # channels; the PAD layer (pads_ok) still applies in full -- the
         # module's pads are real obstacles.
-        barea = max(1e-9, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]))
-        self.container_refs = set()
-        for ref, p in self.parts.items():
-            r = p.rect()
-            if (r[2] - r[0]) * (r[3] - r[1]) >= CONTAINER_RATIO * barea:
-                self.container_refs.add(ref)
+        #
+        # fa10 P1 (#1184, #1212): WHO is a container is the grader's own
+        # decision (`legality.container_kinds`): a pin frame or a pad-less
+        # outline, never a big BODY and never a drawn courtyard. Area alone
+        # called One-Air-Max's 18650 holder a frame and the seed put DC1
+        # wholly inside it, while check_assembly gated the pair. A pin
+        # frame's PINS still bind: `_pin_conflict_at`, the grader's
+        # `pin_hits`, refuses a part on one (KiCad's pth_inside_courtyard).
+        try:
+            _kinds = legality.container_kinds(
+                pcb_data, legality.part_local_bounds(pcb_data, pcb_file))
+        except Exception:                                    # noqa: BLE001
+            _kinds = {}
+        self.container_kinds = {r: k for r, k in _kinds.items()
+                                if r in self.parts}
+        self.container_refs = set(self.container_kinds)
+        self.pin_frame_refs = {r for r, k in self.container_kinds.items()
+                               if k == 'pin_frame'}
+        self._pin_census_obj = None
         if self.container_refs:
-            print(f"  container footprint(s) (courtyard >= "
-                  f"{CONTAINER_RATIO:.0%} of the board -- frame, not body): "
-                  f"{', '.join(sorted(self.container_refs))}")
+            print(f"  container footprint(s) (>= {CONTAINER_RATIO:.0%} of "
+                  f"the board, a pin frame or an outline -- frame, not "
+                  f"body): " + ', '.join(
+                      f"{r} ({k})"
+                      for r, k in sorted(self.container_kinds.items())))
 
         # --- pad + drill legality (gate currency; see placement/legality.py).
         # pose_of/seed_of read the live _Part records, so the context follows
@@ -1844,7 +1859,45 @@ class QuenchState:
                 overlap += clr - gap
                 if limit is not None and board + overlap > limit:
                     return board, overlap
+        # #1212: a part on a frame's pin is a violation too, so
+        # `violation() == 0` keeps implying `candidate_valid` admits it.
+        if self.pin_frame_refs:
+            _px = part.x if x is None else x
+            _py = part.y if y is None else y
+            _pr = part.rot if rot is None else rot
+            if self._pin_conflict_at(ref, _px, _py, _pr, exclude) is not None:
+                overlap += clr
         return board, overlap
+
+    def _pin_conflict_at(self, ref, x, y, rot, exclude=None):
+        """The first GATING pin_in_courtyard pair `ref` makes at this pose,
+        as the GRADER finds it (`legality.CourtyardCensus.pin_hits`, the
+        function check_assembly's channel runs), or None. Frames sit at their
+        current poses; a frame being moved is graded against every part."""
+        for q in self._pin_hits_at(ref, x, y, rot):
+            other = q.b if q.a == ref else q.a
+            if exclude and other in exclude:
+                continue
+            return q
+        return None
+
+    def _pin_hits_at(self, ref, x, y, rot, poses=None) -> list:
+        """Every GATING pin_in_courtyard pair `ref` makes at this pose.
+        `poses` ({ref: (x, y, rot)}) overrides the parts' current poses --
+        a declared pose is judged against its obstacles' DECLARED poses
+        (`seeder._fixed_pose_check`), not wherever they sit right now."""
+        if not self.pin_frame_refs or getattr(self, 'courtyards_ignored',
+                                               False):
+            return []
+        if self._pin_census_obj is None:
+            self._pin_census_obj = legality.CourtyardCensus(self.pcb_data,
+                                                            self.pcb_file)
+        if poses is None:
+            refs = (self.parts if ref in self.pin_frame_refs
+                    else self.pin_frame_refs)
+            poses = {r: (self.parts[r].x, self.parts[r].y,
+                         self.parts[r].rot) for r in refs}
+        return self._pin_census_obj.pin_hits(ref, (x, y, rot), poses)
 
     def intent_spec_for(self, ref) -> Tuple[_IntentTerm, ...]:
         """The claims binding `ref` right now: frozen zone terms, plus keep-out
@@ -2316,6 +2369,17 @@ class QuenchState:
                     if self._why is not None:
                         self._veto('courtyard', other_ref, path='smd')
                     break
+        if legal and self.pin_frame_refs:
+            # #1212: a pin frame's PINS. Its rect is skipped above (a frame,
+            # not a body), so without this a part was seated on a Teensy pin
+            # (rp2350 seed 4: SW1 over U8 pins 16/17, which KiCad reports and
+            # no repo checker saw). The grader's own pairs decide.
+            _hit = self._pin_conflict_at(ref, x, y, rot, exclude)
+            if _hit is not None:
+                legal = False
+                if self._why is not None:
+                    self._veto('container_pin',
+                               _hit.b if _hit.a == ref else _hit.a)
         if legal:
             # BODY layer. A pose that buries this part inside another part's
             # .Fab body is not a trade-off to be priced -- it is illegal, the
@@ -3289,7 +3353,12 @@ class QuenchState:
                 oob_count += 1
                 oob_amount += amt
                 oob_area += self.edge_gate.out_of_board_area(p.rect)
-        overlap = legality.placement_overlap_area(parts)
+        # A container's RECT is not a body (fa10 P1): the grader dropped a
+        # pin frame's rect pairs and waives an outline's, so the optimizer's
+        # number leaves them out too -- rp2350's was mostly U8's frame.
+        _cont = getattr(self, 'container_refs', ()) or ()
+        overlap = legality.placement_overlap_area(
+            [g for g in parts if g.ref not in _cont])
         out = {'overlap_area': overlap,
                'oob_count': oob_count, 'oob_amount': oob_amount,
                'oob_area': oob_area, 'hpwl': self.hpwl()}

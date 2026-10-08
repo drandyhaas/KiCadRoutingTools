@@ -44,12 +44,17 @@ EPS = 1e-6
 #: answers. Off: the conservative box answer, unchanged.
 STACK_EXACT_CONFIRM = False
 
-# Run-6: a courtyard covering at least this fraction of the board bbox is a
+# Run-6: a part covering at least this fraction of the board bbox MAY be a
 # CONTAINER (a module-outline footprint hosting the design -- a frame, not a
 # body). Calibration: rp2350_fpga_eensy U8 = 1.13x board area; the largest
-# non-container anywhere in the 33-board corpus = 0.29 (sonde_u J1). Pairs
-# with a container member are exempt from the courtyard channels everywhere;
-# the pad layer applies in full.
+# non-container anywhere in the 33-board corpus = 0.29 (sonde_u J1). Since
+# fa10 P1 the ratio is only the first test: `_container_kind` decides, on
+# geometry (an `outline` or a `pin_frame`, see FRAME_DRILLED_FRAC), so
+# One-Air-Max's BAT1 at 0.62 is a body. Census over the tracked corpus and the
+# fa10 human boards: U8 'pin_frame', watchy REF** 'outline', nothing else.
+# An outline's courtyard pairs are waived `container_class`; a pin frame's
+# rect pairs are dropped and its HOLES graded (`pin_in_courtyard`); the pad
+# layer applies in full to both.
 CONTAINER_RATIO = 0.5
 
 BOTH_SIDES = frozenset(('F', 'B'))
@@ -660,24 +665,89 @@ def assembly_census(pcb_data) -> Dict:
     }
 
 
-def container_refs(pcb_data, graded) -> set:
-    """Refs whose courtyard covers at least `CONTAINER_RATIO` of the board.
+#: fa10 P1 (#1184, #1212). What separates a FRAME from a big BODY is
+#: geometry, not area and not a lock: rp2350's U8 (the Teensy 4.0 frame, 66
+#: drilled pins ringing the board, nothing drawn) hosts the design; One-Air-
+#: Max's BAT1 (an SMD 18650 holder, 6 clips and 1 drill) is a body the
+#: designer keeps parts out of -- on the human board only NTC1 touches it.
+#: Both cover more than half the board. A container is therefore one of:
+#:
+#:   'outline'    -- no copper pads and no holes at all: a mechanical outline
+#:                   stacked over the board (watchy's e-paper REF**, which the
+#:                   designer puts J2 and SW1-4 under);
+#:   'pin_frame'  -- at least FRAME_DRILLED_FRAC of its pads drilled, and no
+#:                   pad centre inside its box inset by FRAME_BAND_FRAC of the
+#:                   shorter side: a ring of pins, hollow inside.
+#:
+#: and never a part whose COURTYARD is drawn: that is the designer's keep-out,
+#: and KiCad grades it as one. The two thresholds rest on two parts (U8 at
+#: 1.0 drilled, BAT1 at 0.14) and are pinned as a change detector.
+FRAME_DRILLED_FRAC = 0.5
+FRAME_BAND_FRAC = 0.2
 
-    A frame, not a body -- see the constant. Extracted from
-    `grade_body_overlap` (#835) so the escape ledger decides who is a
-    container the same way the courtyard channel does; two copies of this
-    arithmetic is how the two channels would come to disagree about rp2350's
-    U8, which is the part the constant was calibrated on.
 
-    `graded` is a `graded_parts_from_file(...)` sequence. Empty when the board
-    declares no bounds, which is the conservative answer: nothing is exempt.
-    """
+def container_kinds(pcb_data, local_bounds) -> Dict[str, str]:
+    """{ref: 'outline' | 'pin_frame'} for every container on the board, from
+    its LOCAL geometry only -- a turn cannot make a part a frame. Empty when
+    the board declares no bounds (the conservative answer). See
+    `FRAME_DRILLED_FRAC` for the rule and the measurements behind it."""
+    return {ref: k for ref, lb in sorted(local_bounds.items())
+            for k in (_container_kind(pcb_data, ref, lb.local, lb.source,
+                                      lb.synthetic),) if k}
+
+
+def _container_kind(pcb_data, ref, local, source, synthetic):
+    """The one decision behind `container_kinds` and `container_refs`:
+    'outline', 'pin_frame' or None for one part, from its LOCAL occupancy
+    box, its occupancy source and its pads."""
+    from placement.body import SOURCE_COURTYARD
     bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
-    if not bb:
-        return set()
+    if not bb or local is None:
+        return None
     barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
-    return {g.ref for g in graded
-            if rect_area(g.rect) >= CONTAINER_RATIO * barea}
+    x0, y0, x1, y1 = local
+    if (x1 - x0) * (y1 - y0) < CONTAINER_RATIO * barea:
+        return None
+    if source == SOURCE_COURTYARD or synthetic:
+        return None
+    fp = (pcb_data.footprints or {}).get(ref)
+    if fp is None:
+        return None
+    pads = [p for p in (fp.pads or ())
+            if (getattr(p, 'drill', 0) or 0) > 0 or _pad_carries_copper(p)]
+    if not pads:
+        return 'outline'
+    drilled = sum(1 for p in pads if (getattr(p, 'drill', 0) or 0) > 0)
+    if drilled < FRAME_DRILLED_FRAC * len(pads):
+        return None
+    inset = FRAME_BAND_FRAC * min(x1 - x0, y1 - y0)
+    ix0, iy0, ix1, iy1 = x0 + inset, y0 + inset, x1 - inset, y1 - inset
+    if any(ix0 < p.local_x < ix1 and iy0 < p.local_y < iy1 for p in pads):
+        return None
+    return 'pin_frame'
+
+
+def container_refs(pcb_data, graded=None, pcb_file: Optional[str] = None
+                   ) -> set:
+    """The board's containers (`_container_kind`), as a set of refs.
+
+    Shared by the courtyard channel, the escape ledger (#835) and
+    routability, so a part cannot be a frame to one and a body to another.
+    From `graded` (a `graded_parts_from_file` list, which carries each
+    part's LOCAL occupancy box) when the caller has one -- no second board
+    read -- else from the board's local bounds. Never from a rect at a pose:
+    a turn grows the rotated rect, and made sonde_u's J1 a "container".
+    """
+    if graded is not None and all(g.local is not None for g in graded):
+        return {g.ref for g in graded
+                if _container_kind(pcb_data, g.ref, g.local, g.source,
+                                   g.synthetic)}
+    try:
+        lbs = part_local_bounds(pcb_data, pcb_file)
+    except Exception:                                        # noqa: BLE001
+        return set()
+    return set(container_kinds(pcb_data, lbs))
+
 
 
 def rect_on(side_wanted: str, own_side: str, courtyard_rect, tht_rect):
@@ -1195,6 +1265,10 @@ class GradedPart(NamedTuple):
     # the broad phase; None (a generator's own record) means the pair is
     # measured on the rects alone.
     poly: object = None
+    # fa10 P1: the part's LOCAL occupancy box (`LocalBounds.local`), so a
+    # consumer can ask a pose-independent question -- `container_refs` --
+    # without reading the board again. None on a generator's own record.
+    local: object = None
 
     @property
     def sides(self) -> frozenset:
@@ -1342,6 +1416,9 @@ class BodyOverlapPair(NamedTuple):
     # re-derived. Empty is the common case and means every verified
     # intersection was same-net.
     shorts: Tuple[str, ...] = ()      # e.g. ('C1.1:+3V3 <-> U1.8:/USB_P',)
+    # kind='pin_in_courtyard' (#1212): the frame's pins (pad numbers) whose
+    # holes lie inside the other part's occupancy. Appended LAST below, with
+    # a default, so every positional construction keeps its meaning.
     # Either member carries KiCad's own (locked yes). A locked part's pose is
     # a decision somebody made; copper landing on it is never dispositionable
     # by a placement search (run-8 E6).
@@ -1384,6 +1461,8 @@ class BodyOverlapPair(NamedTuple):
     # and true, while `contained` -- the flag anything downstream acts on --
     # is asserted only where the corpus says it discriminates.
     contained: bool = False
+    # #1212: see `shorts` above. ('16', '17') for SW1 over U8's pins.
+    pins: Tuple[str, ...] = ()
 
 
 def _pair_exact(a: GradedPart, b: GradedPart, s: str, ra, rb):
@@ -1706,7 +1785,8 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
         out.append(GradedPart(ref=ref, side=lb.side, rect=rect,
                               tht_rect=tht, has_tht=lb.has_tht,
                               synthetic=lb.synthetic, source=lb.source,
-                              poly=occupancy_shape(fp, lb, bodies.get(ref))))
+                              poly=occupancy_shape(fp, lb, bodies.get(ref)),
+                              local=tuple(lb.local)))
     return out
 
 
@@ -1932,6 +2012,13 @@ class PairWaivers:
         # we; the pair stays in the census with its label.
         if p.waiver.startswith(PROJECT_SEVERITY_WAIVER):
             return True
+        # A container (an `outline` since fa10 P1 -- a pin frame's pairs
+        # never reach here, its pins are graded instead) is waived for what
+        # it IS, a mechanical outline other parts sit under, so its lock is
+        # not the question (#1184: the seeder exempted it, locked or not,
+        # while this refused it for a lock, so the two disagreed).
+        if p.waiver == 'container_class':
+            return True
         # No CLASS waiver blesses contact with a KiCad-LOCKED part (the
         # run-8 E6 principle, extended to the courtyard channel): a locked
         # pose is a decision somebody made, and a class label chosen for
@@ -2021,11 +2108,16 @@ class CourtyardGrade(NamedTuple):
     gating: Optional[List[BodyOverlapPair]]   # None when `moved` was None
     synthetic_refs: frozenset
     silk_occupancy_refs: frozenset
-    containers: frozenset            # at the GRADED poses
+    containers: frozenset            # `container_kinds`, pose-independent
     severity: Optional[str]
     severity_basis: str
     severity_waiver: str
     waivers: PairWaivers
+    # #1212: a pin frame's pins against every other part's occupancy
+    # (kind='pin_in_courtyard'), labelled; `pin_blocking` are the ones that
+    # gate, absolutely -- KiCad's pth_inside_courtyard has no "moved" either.
+    pin_pairs: List[BodyOverlapPair] = []
+    pin_blocking: List[BodyOverlapPair] = []
 
 
 class CourtyardCensus:
@@ -2070,13 +2162,15 @@ class CourtyardCensus:
                     locked_refs = set()
         self.locked_refs = set(locked_refs)
         self._parts: Dict[tuple, GradedPart] = {}
-        # At the FILE's poses. A grade re-derives them at the poses it grades:
-        # `container_refs` reads the rotated rect's area, so turning a part
-        # can make it a container or stop it being one, and a census that
-        # kept the file's answer waived pairs the written board gates
-        # (sonde_u's J1 at 135 degrees: 6 pairs) -- the phase-0 verifier.
-        self.containers = frozenset(container_refs(
-            pcb_data, [self.graded_part(r) for r in self.lbs]))
+        # #1184 / #1212: who is a container is the part's own geometry
+        # (`container_kinds`), not its rect at a pose -- before, turning
+        # sonde_u's J1 to 135 degrees made it one. A pin frame's rect pairs
+        # leave the courtyard channel; its PINS are graded instead.
+        self.kinds = container_kinds(pcb_data, self.lbs)
+        self.containers = frozenset(self.kinds)
+        self.pin_frames = frozenset(r for r, k in self.kinds.items()
+                                    if k == 'pin_frame')
+        self._holes: Dict[tuple, list] = {}
 
     #: Cached GradedParts at poses other than the file's; the cache is
     #: dropped when it reaches this, so a generator asking about many
@@ -2114,7 +2208,7 @@ class CourtyardCensus:
                 poly = None
         gp = GradedPart(ref=ref, side=lb.side, rect=rect, tht_rect=tht,
                         has_tht=lb.has_tht, synthetic=lb.synthetic,
-                        source=lb.source, poly=poly)
+                        source=lb.source, poly=poly, local=tuple(lb.local))
         self._parts[key] = gp
         return gp
 
@@ -2132,7 +2226,7 @@ class CourtyardCensus:
         poses = poses or {}
         parts = {r: self.graded_part(r, poses.get(r)) for r in self.lbs}
         return self._select(parts, body_overlap_pairs(list(parts.values())),
-                            moved)
+                            moved, self._pin_pairs(parts, poses))
 
     def grade_ref(self, ref: str, pose, poses: Optional[Dict[str, tuple]]
                   = None, *, moved=None) -> CourtyardGrade:
@@ -2157,15 +2251,118 @@ class CourtyardCensus:
                      else courtyard_pair(me, gp))
                 if p is not None:
                     raw.append(p)
-        return self._select(parts, raw, moved)
+        return self._select(parts, raw, moved,
+                            self._pin_pairs(parts, poses, members={ref}))
 
-    def _select(self, parts, raw, moved) -> CourtyardGrade:
+    def _frame_holes(self, frame: str, pose=None) -> list:
+        """[(pin, hole shape, its bounds)] of a pin frame's DRILLED pads at
+        `pose`: the drill, a circle or a milled slot (`pad_drill_capsule`),
+        not the pad copper -- KiCad's pth_inside_courtyard tests the hole,
+        and the copper ring would add 19 hits on rp2350's r06_seed4 where
+        kicad-cli reports 2."""
+        key = (frame, None if pose is None else tuple(pose))
+        hit = self._holes.get(key)
+        if hit is not None:
+            return hit
+        from kicad_parser import pad_drill_capsule
+        from shapely.geometry import LineString, Point
+        fp = self.fps[frame]
+        posed = fp if pose is None else footprint_at_pose(fp, tuple(pose))
+        holes = []
+        for pad in (posed.pads or ()):
+            if (getattr(pad, 'drill', 0) or 0) <= 0:
+                continue
+            p1, p2, r = pad_drill_capsule(pad)
+            if r <= 0:
+                continue
+            shape = (Point(p1).buffer(r, 16) if p1 == p2
+                     else LineString([p1, p2]).buffer(r, 16))
+            holes.append((str(pad.pad_number), shape, shape.bounds))
+        if len(self._holes) > self.POSE_CACHE_CAP:
+            self._holes = {}
+        self._holes[key] = holes
+        return holes
+
+    def _pin_pairs(self, parts, poses, members=None) -> list:
+        """Raw kind='pin_in_courtyard' pairs: each pin frame's holes against
+        every other part's own-side occupancy (#1212). A part on either face
+        counts -- a plated hole goes through both. `members` restricts to the
+        pairs one of these refs is in."""
+        from shapely.geometry import box
+        out = []
+        poses = poses or {}
+        for frame in sorted(self.pin_frames):
+            if frame not in parts:
+                continue
+            holes = self._frame_holes(frame, poses.get(frame))
+            for r, gp in parts.items():
+                if r == frame or r in self.containers or gp.synthetic:
+                    continue
+                if members is not None and frame not in members \
+                        and r not in members:
+                    continue
+                rect = gp.rect
+                shape = None
+                pins, area = [], 0.0
+                for num, hs, hb in holes:
+                    if (hb[2] < rect[0] or hb[0] > rect[2]
+                            or hb[3] < rect[1] or hb[1] > rect[3]):
+                        continue
+                    if shape is None:
+                        shape = gp.poly if gp.poly is not None else box(*rect)
+                    a = hs.intersection(shape).area
+                    if a > EPS:
+                        pins.append(num)
+                        area += a
+                if pins:
+                    out.append(BodyOverlapPair(
+                        a=min(frame, r), b=max(frame, r),
+                        kind='pin_in_courtyard', area_mm2=round(area, 4),
+                        side=gp.side, waived=False, waiver='',
+                        pins=tuple(pins)))
+        return out
+
+    def pin_hits(self, ref: str, pose, poses: Optional[Dict[str, tuple]]
+                 = None) -> list:
+        """The GATING pin_in_courtyard pairs `ref` is in, with `ref` at
+        `pose` and every other part at `poses` (else the file's): the
+        search's question, answered with the grader's own pairs. Cheap when
+        `ref` is near no pin -- the broad phase is the frame holes' boxes
+        against `ref`'s occupancy rect, built without a polygon."""
+        if not self.pin_frames or ref not in self.lbs:
+            return []
+        poses = dict(poses or {})
+        poses[ref] = tuple(pose)
+        if ref in self.pin_frames:
+            refs = list(self.lbs)
+        else:
+            lb = self.lbs[ref]
+            x, y, rot = pose
+            lx0, ly0, lx1, ly1 = rotate_local_bounds(*lb.local, rot)
+            rect = (x + lx0, y + ly0, x + lx1, y + ly1)
+            near = any(not (hb[2] < rect[0] or hb[0] > rect[2]
+                            or hb[3] < rect[1] or hb[1] > rect[3])
+                       for f in self.pin_frames
+                       for _n, _s, hb in self._frame_holes(f, poses.get(f)))
+            if not near:
+                return []
+            refs = [ref] + sorted(self.pin_frames)
+        parts = {r: self.graded_part(r, poses.get(r)) for r in refs
+                 if r in self.lbs}
+        g = self._select(parts, [], None,
+                         self._pin_pairs(parts, poses, members={ref}))
+        return list(g.pin_blocking)
+
+    def _select(self, parts, raw, moved, pin_raw=()) -> CourtyardGrade:
         from placement.body import SOURCE_SILK
-        containers = frozenset(container_refs(self.pcb_data,
-                                              list(parts.values())))
+        containers = self.containers
         waivers = self.waivers(
             rect_of=lambda r: parts[r].rect if r in parts else None,
             containers=containers)
+        # #1212: a pin frame's RECT is not a body -- its pairs leave the
+        # courtyard channel and its pins are graded below instead.
+        raw = [p for p in raw
+               if p.a not in self.pin_frames and p.b not in self.pin_frames]
         pairs = []
         for p in raw:
             waiver = waivers.label(p.a, p.b)
@@ -2183,12 +2380,30 @@ class CourtyardCensus:
                                       silk_occupancy_refs=silk)
         gating = (None if moved is None
                   else courtyard_gating(blocking, set(moved)))
+        # Pin pairs: only an AUTHORED waiver or the board's own courtyard
+        # severity excuses them -- no class label, and no lock, applies to a
+        # part sitting on a frame's pin.
+        pin_pairs = []
+        for p in pin_raw:
+            waiver = ''
+            if waivers.waiver_sets and frozenset((p.a, p.b)) in \
+                    waivers.waiver_sets:
+                waivers.hit.add(frozenset((p.a, p.b)))
+                waiver = 'intent_declared'
+            elif self.severity_waiver:
+                waiver = self.severity_waiver
+            pin_pairs.append(p._replace(waived=bool(waiver), waiver=waiver))
+        pin_pairs.sort(key=lambda p: (p.waived, -p.area_mm2, p.a, p.b))
+        # A silk-sourced occupancy reports, it does not gate (#896).
+        pin_blocking = [p for p in pin_pairs if not p.waived
+                        and p.a not in silk and p.b not in silk]
         return CourtyardGrade(
             parts=parts, pairs=pairs, blocking=blocking, gating=gating,
             synthetic_refs=synthetic, silk_occupancy_refs=silk,
             containers=containers, severity=self.severity,
             severity_basis=self.severity_basis,
-            severity_waiver=self.severity_waiver, waivers=waivers)
+            severity_waiver=self.severity_waiver, waivers=waivers,
+            pin_pairs=pin_pairs, pin_blocking=pin_blocking)
 
 
 def courtyard_census(pcb_data, pcb_file: Optional[str] = None, *,
@@ -2255,7 +2470,7 @@ def grade_body_overlap(pcb_data, clearance: float,
     # may inform but must never gate (run-23's phantom G***<->J5).
     _synthetic_refs = set(_cg.synthetic_refs)
 
-    pairs: List[BodyOverlapPair] = list(_cg.pairs)
+    pairs: List[BodyOverlapPair] = list(_cg.pairs) + list(_cg.pin_pairs)
     # Refs the DRAWN-BODY channel could not judge: no .Fab outline and no
     # usable silk either (#896 widened this from ".Fab only"). A board with no
     # readable source path leaves this empty AND judges nothing -- both are
@@ -2510,6 +2725,13 @@ def grade_body_overlap(pcb_data, clearance: float,
             # a pair can be both advisory-listed and courtyard-blocking.
             'courtyard_blocking': len(courtyard_blocking),
             'courtyard_blocking_pairs': courtyard_blocking,
+            # #1212: a pin frame's holes inside another part's occupancy --
+            # KiCad's pth_inside_courtyard. GATES, absolutely: on the two
+            # healthy frame boards it is 0 (rp2350's own and the fa10 final).
+            'pin_in_courtyard': len(_cg.pin_blocking),
+            'pin_in_courtyard_pairs': list(_cg.pin_blocking),
+            # #1184: {ref: 'outline' | 'pin_frame'} -- `container_kinds`.
+            'containers': dict(_census.kinds),
             # Refs graded on the zero-pad +/-0.5mm fictional box: their pairs
             # are disclosure, never gates (run-23's phantom G***<->J5).
             'courtyard_synthetic_refs': sorted(_synthetic_refs),

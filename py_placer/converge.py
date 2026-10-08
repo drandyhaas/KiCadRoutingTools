@@ -770,9 +770,9 @@ def _pose_knobs(board, clearance, board_edge_clearance):
 
 #: #1113: veto labels that name a NEIGHBOUR (quench.VETO_CHECKS minus the
 #: board, outline, intent and keep-out-band terms).
-_NEIGHBOUR_CHECKS = ('courtyard', 'pads', 'waived_pads', 'waived_drill',
-                     'body_overlap', 'body_contained', 'pads_under_body',
-                     'tether', 'escape_overlap')
+_NEIGHBOUR_CHECKS = ('courtyard', 'container_pin', 'pads', 'waived_pads',
+                     'waived_drill', 'body_overlap', 'body_contained',
+                     'pads_under_body', 'tether', 'escape_overlap')
 
 
 def _in_place_clause(ref, diag) -> str:

@@ -1478,6 +1478,28 @@ any grader cannot disagree:
   not in copper), but not inside a front-side connector's pin field. Cross-side
   pairs also pay no halo penalty — spreading them apart buys no routing room.
   On a single-sided board every test reduces to plain courtyard-vs-courtyard.
+  The far side is one box per CLUSTER of drilled pads (#1206,
+  `legality.far_side_local`): holes merge single-link while their boxes are
+  within `FAR_SIDE_CLUSTER_GAP_MM` (2.54) of each other, so a pin row or a
+  2-row header stays one box and two mounting posts 48 mm apart are two.
+  The returned `FarSide` is still the union 4-tuple, so a consumer that does
+  not read `.boxes` gets the old (stricter) answer. CM5 human: 45 courtyard
+  pairs -> 14 (`tests/measure_1206_far_side_clusters.py`).
+- **Containers** (#1184, #1212, `legality.container_kinds`). A part is a
+  container only by GEOMETRY: at least `CONTAINER_RATIO` (0.5) of the board,
+  no drawn courtyard, and either an `outline` (no pads and no holes -- watchy's
+  e-paper REF**) or a `pin_frame` (at least `FRAME_DRILLED_FRAC` of its pads
+  drilled and none inside the box inset by `FRAME_BAND_FRAC` of its short
+  side -- rp2350's Teensy U8). Never by area alone (One-Air-Max's SMD 18650
+  holder BAT1 is a BODY) and never by a lock. Pose-independent: a turn grows a
+  rect, never a part's own box. An outline's courtyard pairs are listed,
+  waived `container_class`, locked or not. A pin frame's rect pairs leave the
+  courtyard channel and its drilled HOLES are graded instead, kind
+  `pin_in_courtyard` (KiCad's `pth_inside_courtyard`): check_assembly's
+  eighth conjunct, absolute; `tests/measure_1212_kicad_pins.py` cross-checks
+  it against kicad-cli. The search (`container_pin` veto), the seeder's
+  declared-pose and eviction checks and the repair census all ask
+  `CourtyardCensus.pin_hits`, the grader's own function.
 - **Board containment** measures against the real Edge.Cuts rings, not an inset
   of the axis-aligned `board_bounds`, so parts are not nudged into an L-shaped
   board's notch or an interior cutout. Three levels of short-circuit keep it

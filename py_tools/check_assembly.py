@@ -625,9 +625,30 @@ def main():
         for m in mating:
             print(f"    {m['ref']} ({m['side']}) in {m['keepout']}  "
                   f"{m['area_mm2']}mm2")
+    # #1212, the EIGHTH conjunct: a pin frame's (rp2350's Teensy U8) drilled
+    # pins inside another part's courtyard -- KiCad's pth_inside_courtyard.
+    # The frame's RECT left the courtyard channel (it flagged every part
+    # inside it and could not find the real hit); its pins are graded here,
+    # absolutely, as KiCad grades them: 0 on both healthy frame boards.
+    pin_hits = list(g.get('pin_in_courtyard_pairs') or [])
+    if g.get('containers'):
+        _kinds = ', '.join(f"{r} ({k})"
+                           for r, k in sorted(g['containers'].items()))
+        print(f"  CONTAINERS: {_kinds} -- a pin frame is graded on its "
+              f"pins, an outline is waived, neither on its rect")
+    if pin_hits:
+        print(f"  PIN IN COURTYARD ({len(pin_hits)}): a frame's drilled pin "
+              f"lies inside another part's courtyard (KiCad: "
+              f"pth_inside_courtyard) -- NOT BUILDABLE")
+        for q in pin_hits:
+            frame, other = ((q.a, q.b) if q.a in g['containers']
+                            else (q.b, q.a))
+            print(f"    {other} over {frame} pin(s) {', '.join(q.pins)}  "
+                  f"{q.area_mm2}mm2  side {q.side}")
     not_buildable = bool(g['blocking'] or locked_contact or stack_groups
                          or g['containment_blocking']
-                         or courtyard_gating or off_outline_pads or mating)
+                         or courtyard_gating or off_outline_pads or mating
+                         or pin_hits)
     verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
 
@@ -669,6 +690,12 @@ def main():
             # reached a reader (#918).
             'containment_blocking': g['containment_blocking'],
             'containments': [q._asdict() for q in g['containment_pairs']],
+            # #1212 / #1184: the containers (`legality.container_kinds`) and
+            # the eighth conjunct -- a pin frame's holes inside another
+            # part's courtyard, graded absolutely.
+            'containers': dict(g.get('containers') or {}),
+            'pin_in_courtyard': len(pin_hits),
+            'pin_in_courtyard_pairs': [q._asdict() for q in pin_hits],
             'fab_unjudged': g['fab_unjudged'],
             'fab_unjudged_refs': g['fab_unjudged_refs'],
             # Run-23 courtyard channel. `courtyard_pairs` is EVERY

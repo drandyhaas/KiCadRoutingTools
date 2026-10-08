@@ -137,32 +137,21 @@ class MovedPoses(unittest.TestCase):
         # A sample that never produced a pair would compare nothing.
         self.assertGreaterEqual(nonempty, 3, f'{nonempty} of {checked}')
 
-    def test_a_turn_that_changes_container_status(self):
-        """sonde_u's J1 covers 0.29 of the board at its file pose and more
-        than half at 135 degrees, where its rotated rect grows: it becomes a
-        container. Graded at the file's container set, the census labelled
-        its pairs `edge_class` and BLOCKING where the written board waives
-        them; graded the other way (built on J1 at 45, graded at -90) it
-        waived 6 pairs the written board gates."""
+    def test_a_turn_never_changes_container_status(self):
+        """sonde_u's J1 covers 0.29 of the board at its file pose, and at 135
+        degrees its rotated RECT covered more than half: phase 0's census
+        then made it a container at that pose (its verifier found the census
+        and the written board disagreeing both ways). Since #1184 a container
+        is the part's own geometry (`container_kinds`), so no turn makes one
+        -- and at every turn the census still equals the written board."""
         path = _board('sonde_u')
         pcb = parse_kicad_pcb(path)
         census = legality.CourtyardCensus(pcb, path)
-        self.assertNotIn('J1', census.containers)
-        got, _b = self._agree(census, path, {'J1': (104.55, 88.019, 135.0)},
-                              'J1 at 135')
-        self.assertIn('J1', got.containers, 'the fixture no longer turns J1 '
-                      'into a container; this arm tests nothing')
-        g45, _b = self._written_grade(path, {'J1': (104.55, 88.019, 45.0)})
-        turned = os.path.join(self._td.name,
-                              f'w{len(os.listdir(self._td.name)) - 1}'
-                              '.kicad_pcb')
-        census45 = legality.CourtyardCensus(parse_kicad_pcb(turned), turned)
-        self.assertIn('J1', census45.containers)
-        got2, _b = self._agree(census45, turned,
-                               {'J1': (109.512, 77.103, -90.0)},
-                               'J1 back at -90')
-        self.assertTrue(got2.blocking, 'the dangerous direction: the written '
-                        'board gates pairs here')
+        for rot in (45.0, 135.0, -90.0):
+            got, _b = self._agree(census, path,
+                                  {'J1': (104.55, 88.019, rot)},
+                                  f'J1 at {rot}')
+            self.assertNotIn('J1', got.containers, rot)
 
     def test_the_edge_waiver_reads_the_graded_pose(self):
         """An edge-class waiver holds only for a part AT an edge, so it must

@@ -391,7 +391,7 @@ def unrouted_shape(board: str, unrouted_names) -> dict:
             'open': sorted(open_nets)}
 
 
-#: check_assembly's seven `not_buildable` conjuncts, by the JSON key each one
+#: check_assembly's eight `not_buildable` conjuncts, by the JSON key each one
 #: publishes (check_assembly's `not_buildable = ...` line). `blocking` -- pad INTERSECTIONS -- is
 #: the first of them and is the only one this component used to read (#918).
 #:
@@ -418,10 +418,11 @@ def unrouted_shape(board: str, unrouted_names) -> dict:
 #: unmeasured, never counted as clean.
 ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
                       'containment_blocking', 'courtyard_blocking_gating',
-                      'oob_pad_copper_gating_count', 'mating_keepout_count')
+                      'oob_pad_copper_gating_count', 'mating_keepout_count',
+                      'pin_in_courtyard')
 
 #: The conjuncts that can ACTUALLY flip the verdict while `blocking` is 0, in
-#: this scorer's invocation. Two, not four:
+#: this scorer's invocation. Not every conjunct can:
 #:   * `locked_contacts` cannot -- it is a subset of `blocking` (above), so a
 #:     locked contact implies `blocking >= 1` and the board never had 0;
 #:   * `courtyard_blocking_gating` cannot -- it is `[]` unless `--baseline` was
@@ -433,12 +434,15 @@ ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
 #: verdict, and it does not need `blocking` to fire. It overlaps `unrouted` /
 #: `broken` (such a part's nets cannot be routed) and adds at most 1 through
 #: the NOT-BUILDABLE floor, deliberately: CLAUDE.md ranks it first.
+#: fa10 P1 (#1212) added `pin_in_courtyard`: a pin frame's drilled pin inside
+#: another part's courtyard, absolute, so it too fires at `blocking` 0.
 ASSEMBLY_LIVE_CONJUNCTS = ('coincident_origins', 'containment_blocking',
-                           'oob_pad_copper_gating_count', 'mating_keepout_count')
+                           'oob_pad_copper_gating_count', 'mating_keepout_count',
+                           'pin_in_courtyard')
 
 
 def assembly_component(doc: dict, rc: int) -> dict:
-    """check_assembly's VERDICT, not one of its seven conjuncts (#918).
+    """check_assembly's VERDICT, not one of its eight conjuncts (#918).
 
     `not_buildable` is `blocking or locked_contact or stack_groups or
     containment_blocking or courtyard_gating`. This component read `blocking`
