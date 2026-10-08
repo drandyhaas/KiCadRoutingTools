@@ -67,10 +67,13 @@ T1101 = _t('test_1101_courtyard_waiver_seat.py')
 # (name, target, old, new, tests, expect)
 ROWS = [
     # --- #1094: courtyards and bodies as drawn -------------------------------
+    # Since fa10 P1 phase 0 check_assembly grades through the census, so
+    # test_1094 no longer reaches this reader; the census test pins the two
+    # to one outline.
     ('graded-parts-lose-their-outline', 'leg',
      "                              poly=occupancy_shape(fp, lb, bodies.get(ref)),",
      "                              poly=None,",
-     (T1094,), 'KILLED'),
+     (T1094, os.path.join(_TESTS, 'test_p1_courtyard_census.py')), 'KILLED'),
     ('fab-bodies-back-to-boxes', 'leg',
      "                ov, _depth, _ix = shape_overlap(sha, shb)",
      "                from shapely.geometry import box as _bx; ov, _depth, _ix = shape_overlap(_bx(*rca), _bx(*rcb))",

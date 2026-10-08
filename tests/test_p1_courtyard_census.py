@@ -268,5 +268,29 @@ class AuditCanFail(unittest.TestCase):
         self.assertGreater(broken['under'], 0)
 
 
+class TheFileReadersAgree(unittest.TestCase):
+    """`graded_parts_from_file` -- what render_placement, check_pockets,
+    routability and escape read -- carries the same drawn outline per part
+    as the census check_assembly grades with. It used to BE check_assembly's
+    reader; since phase 0 the census builds its own parts, so only this
+    keeps the two from drifting (mutate_1094's outline row)."""
+
+    def test_the_outlines_are_the_censuss(self):
+        for name in ('watchy', 'glasgow_revC'):
+            path = _board(name)
+            pcb = parse_kicad_pcb(path)
+            census = legality.CourtyardCensus(pcb, path)
+            parts = legality.graded_parts_from_file(pcb, path)
+            self.assertTrue(parts)
+            for gp in parts:
+                want = census.graded_part(gp.ref).poly
+                if want is None:
+                    self.assertIsNone(gp.poly, (name, gp.ref))
+                    continue
+                self.assertIsNotNone(gp.poly, (name, gp.ref))
+                self.assertAlmostEqual(gp.poly.area, want.area, places=6,
+                                       msg=(name, gp.ref))
+
+
 if __name__ == '__main__':
     unittest.main()
