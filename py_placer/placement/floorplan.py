@@ -3050,6 +3050,10 @@ class _Ctx:
         self.parts = {p.ref: p for p in state.graded_parts()}
         self.gate = state.edge_gate
         self.legality = state.legality_metrics()
+        #: #1162: check_assembly's courtyard channel for `overlap_exact`;
+        #: a PoseGrader hands its own over, `grade` builds one on demand.
+        self._census = None
+        self._overlap_exact = None
         self.envelope = intent.envelope.get('rect')
         self.owner: Dict[str, str] = {}
         for name, refs in sorted(blocks.items()):
@@ -5312,6 +5316,25 @@ def rule_legality(ctx) -> Iterator[Violation]:
         lim = float(budget[key])
         measured = {key: round(float(got), 4)}
         note = ''
+        if key == 'overlap_area':
+            # #1162: graded on check_assembly's drawn outlines, not the
+            # search's rects. glasgow g4 read 4.909 mm2 here -- 3.93 of it
+            # MK1-4's r=5 circle courtyards graded as 10 x 10 squares -- while
+            # check_assembly said buildable; and the error named no pair, so
+            # a caller rebuilt them from a different universe and threw a
+            # legal layout away. Both readings and every pair are measured.
+            ex, rc, pairs = _ctx_overlap_exact(ctx)
+            ctx.legality['overlap_area_exact'] = round(ex, 4)
+            got = ex
+            measured = {key: round(float(ex), 4),
+                        'overlap_area_rect': round(float(rc), 4),
+                        'pairs': pairs}
+            if pairs:
+                note = (' -- worst: ' + ', '.join(
+                    f"{a}/{b} {e:.3f} (rect {r:.3f})"
+                    for a, b, r, e in pairs[:5])
+                        + (f", +{len(pairs) - 5} more" if len(pairs) > 5
+                           else ''))
         if key == 'oob_count' and exempt:
             raw = got
             got = raw - len(exempt)
@@ -6566,6 +6589,40 @@ def _run_rules(ctx, abstained=None):
     return found, ran, skipped
 
 
+def _ctx_overlap_exact(ctx):
+    """`(exact_total, rect_total, pairs)` for the parts `ctx` grades, at
+    the poses it grades them (#1162): `legality.courtyard_overlap_pairs` over
+    `ctx.parts` -- the grade's own universe, the container exemption the
+    quench's metric applies -- with the grade's rects as the RECT reading.
+    Cached on the ctx; zero when the project waives courtyard overlap, as the
+    quench's `overlap_area` is."""
+    if ctx._overlap_exact is not None:
+        return ctx._overlap_exact
+    st = ctx.state
+    if getattr(st, 'courtyards_ignored', False):
+        ctx._overlap_exact = (0.0, 0.0, [])
+        return ctx._overlap_exact
+    census = ctx._census
+    if census is None:
+        census = legality.CourtyardCensus(ctx.pcb, ctx.pcb_file)
+        ctx._census = census
+    cont = set(getattr(st, 'container_refs', ()) or ())
+    refs = [r for r in ctx.parts if r not in cont]
+    if hasattr(st, 'pose'):
+        poses = {r: tuple(st.pose(r)) for r in refs}
+    else:
+        poses = {r: (st.parts[r].x, st.parts[r].y, st.parts[r].rot)
+                 for r in refs if r in st.parts}
+    gps = ctx.parts
+
+    def rect_of(r):
+        g = gps[r]
+        return (g.sides, g.side, g.rect, g.tht_rect)
+    ctx._overlap_exact = legality.courtyard_overlap_pairs(
+        census, refs, poses, rect_of=rect_of)
+    return ctx._overlap_exact
+
+
 class _PosedState:
     """What `_Ctx` reads off a `QuenchState`, answered for the board a seat
     search is ASKING about rather than one it has written: the search state's
@@ -6580,6 +6637,9 @@ class _PosedState:
         # #1104: `legality_metrics` reads it; without it a posed view of a
         # courtyard-waived board priced courtyard overlap again.
         self.courtyards_ignored = getattr(state, 'courtyards_ignored', False)
+        # fa10 P1: and the containers it leaves out of the overlap -- a posed
+        # view used to price rp2350's U8 frame rect again.
+        self.container_refs = getattr(state, 'container_refs', ()) or ()
 
     def pose(self, ref):
         if ref in self._poses:
@@ -6663,6 +6723,7 @@ class PoseGrader:
         self._outline = None
         self._locked = None
         self._bodies = None
+        self._census = None
         self._rings = None
         self._ring_base = None
         self._ring_at = None
@@ -6727,7 +6788,25 @@ class PoseGrader:
         a fixture, 0.18 mm2 of new overlap with a LOCKED part, no pad or hole
         predicate able to see it and no grade error raised.
         """
-        return _PosedState(self.state, exclude, poses).legality_metrics()
+        view = _PosedState(self.state, exclude, poses)
+        out = view.legality_metrics()
+        # #1162: the reading the `legality` rule grades now, beside the
+        # quench's own -- a caller comparing two poses compares both.
+        out['overlap_area_exact'] = round(
+            _ctx_overlap_exact(self._exact_ctx(view))[0], 4)
+        return out
+
+    def _exact_ctx(self, view):
+        """The few `_Ctx` fields `_ctx_overlap_exact` reads, for `view`,
+        with this grader's one census."""
+        from types import SimpleNamespace
+        if self._census is None:
+            self._census = legality.CourtyardCensus(self.state.pcb_data,
+                                                    self.state.pcb_file)
+        return SimpleNamespace(
+            state=view, pcb=self.state.pcb_data, pcb_file=self.state.pcb_file,
+            parts={p.ref: p for p in view.graded_parts()},
+            _census=self._census, _overlap_exact=None)
 
     def _ring_counts(self, ref, pose):
         """How many of `ref`'s pad centres fall inside each interior contour.
@@ -6768,6 +6847,10 @@ class PoseGrader:
                    self._locked, self._outline)
         ctx.requested_floors = self.floors
         ctx._bodies = self._bodies
+        if self._census is None:
+            self._census = legality.CourtyardCensus(state.pcb_data,
+                                                    state.pcb_file)
+        ctx._census = self._census
         found, _ran, _skipped = _run_rules(ctx)
         return found
 
@@ -7160,13 +7243,14 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                     expected={'zone': list(z.rect), 'tolerance_mm': tol}))
 
     # 8. two FILE-locked parts overlapping -- in every placement there is.
-    fixed_gp = {p.ref: p for p in state.graded_parts() if p.ref in ctx.locked}
-    fixed_refs = sorted(fixed_gp)
+    # #1162: on the reading the budget is graded in (check_assembly's drawn
+    # outlines), from the grade's own exact pairs restricted to locked ones.
+    fixed_refs = sorted(r for r in ctx.parts if r in ctx.locked)
+    _fixed = set(fixed_refs)
     fixed_pairs = []
-    for i_, a_ in enumerate(fixed_refs):
-        for b_ in fixed_refs[i_ + 1:]:
-            area = legality.placement_overlap_area([fixed_gp[a_],
-                                                    fixed_gp[b_]])
+    for a_, b_, _rc, area in sorted(_ctx_overlap_exact(ctx)[2],
+                                    key=lambda p_: (p_[0], p_[1])):
+        if a_ in _fixed and b_ in _fixed:
             if area > legality.EPS:
                 fixed_pairs.append((a_, b_, area))
                 out.append(Violation(
@@ -8380,7 +8464,18 @@ def emit_intent(pcb_data, pcb_file: str, *,
             f'past the blocking floors on the emitting board (run-23): an '
             f'auto-budget would bless them')
     else:
-        _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
+        # #1162: the reading `rule_legality` grades -- check_assembly's
+        # outlines -- or the emitted budget fails the board it came from
+        # (esp_prog: 1.140 on rects, 3.227 exact).
+        try:
+            from types import SimpleNamespace as _SN
+            _ex = _ctx_overlap_exact(_SN(
+                state=state, pcb=pcb_data, pcb_file=pcb_file,
+                parts={p.ref: p for p in state.graded_parts()},
+                _census=None, _overlap_exact=None))[0]
+        except Exception:                                    # noqa: BLE001
+            _ex = float(leg['overlap_area'])
+        _budget['overlap_area'] = _ceil4(float(_ex))
     if _pile and int(leg['oob_count']):
         _withheld['oob_count'] = (
             'the board is a pile: its off-board count is staging, not a '

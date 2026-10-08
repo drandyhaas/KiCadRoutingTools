@@ -2443,6 +2443,13 @@ def _grade_accepts(state, part, entry: Dict, edge: str, lo: float,
             and not _outside_its_along_edge_claim(state, part, entry, edge, x, y))
 
 
+#: The legality readings a pose comparison may not let rise (`_grade_worse`,
+#: the decap rung): the quench's rect overlap, the exact one the `legality`
+#: budget is graded on since #1162, and the off-board pair.
+LEGALITY_COMPARE_KEYS = ('overlap_area', 'overlap_area_exact', 'oob_amount',
+                         'oob_count')
+
+
 def _grade_worse(grade, ref: str, rot: float, first, seat, exclude, memo):
     """What the intent grade adds when `ref` sits at `seat` instead of `first`
     -- the seat the ladder always chose -- or () when nothing.
@@ -2511,7 +2518,11 @@ def _grade_worse(grade, ref: str, rot: float, first, seat, exclude, memo):
         # Whatever the armed `legality` rule already said, said once: a budget
         # it reported growing is the same finding as the reading below.
         said = {r.get('budget') for r in rows if r.get('rule') == 'legality'}
-        for key in ('overlap_area', 'oob_amount', 'oob_count'):
+        # #1162: the budget is graded on `overlap_area_exact` now, so a rule
+        # row for 'overlap_area' already said what that reading would.
+        if 'overlap_area' in said:
+            said.add('overlap_area_exact')
+        for key in LEGALITY_COMPARE_KEYS:
             if key in said:
                 continue
             was, now = memo['legality'].get(key), moved.get(key)
@@ -6686,7 +6697,7 @@ def _repair_decap_rung(state, pcb_data, graded, grader, limits, rot_ladder,
                         + ('' if how == 'new' else ' (worse)')
                         for v, how in new_or_worse(findings_of(before),
                                                    after)})
-        for key in ('overlap_area', 'oob_amount', 'oob_count'):
+        for key in LEGALITY_COMPARE_KEYS:
             was, now = leg0.get(key), leg1.get(key)
             if (isinstance(was, (int, float)) and isinstance(now, (int, float))
                     and now > was + (0 if isinstance(now, int) else _eps)):

@@ -1599,6 +1599,55 @@ def occupancy_rect_at(pcb_data, ref: str, pose, fallback=None,
     return (x + lx0, y + ly0, x + lx1, y + ly1)
 
 
+def courtyard_overlap_pairs(census, refs, poses=None, rect_of=None):
+    """`(exact_total, rect_total, pairs)`: the courtyard overlap a floorplan
+    budget grades, pair by pair, on check_assembly's drawn-outline geometry
+    (#1162). `pairs` is `[[a, b, rect_mm2, exact_mm2], ...]`, worst exact
+    first, every pair either reading puts above EPS.
+
+    `refs` is the UNIVERSE -- the grade's own parts, never the board's: a
+    caller that rebuilt it from `graded_parts_from_file` counted KiCad-locked
+    pad-less logos as 1 x 1 mm bodies the grade never sees (glasgow g8: J5
+    against two REF** logos, 2.0 mm2, where the grade said 0.0). Containers
+    and synthetic parts are left out, as the grade leaves them out, and so
+    is a part whose occupancy is SILK: #896's rule that a silk body never
+    gates holds for a budget too (esp_prog's OLIMEX brackets read 37.7 mm2
+    of 'overlap' on a seed whose parts clear their real bodies).
+    `poses` overrides the file's ({ref: (x, y, rot)}). `rect_of(ref)` gives
+    the caller's own `(sides, side, rect, tht_rect)` for the RECT reading --
+    the search's currency, reported beside the exact one so a reader sees
+    which overlap the budget used to count; default the census's rects."""
+    from placement.body import SOURCE_SILK
+    poses = poses or {}
+    gp = {}
+    for r in refs:
+        if r in census.lbs and r not in census.containers:
+            g = census.graded_part(r, poses.get(r))
+            if not g.synthetic and g.source != SOURCE_SILK:
+                gp[r] = g
+    keys = sorted(gp)
+    pairs = []
+    ex_tot = rc_tot = 0.0
+    for i, a in enumerate(keys):
+        ga = gp[a]
+        for b in keys[i + 1:]:
+            gb = gp[b]
+            if rect_of is not None:
+                ra, rb = rect_of(a), rect_of(b)
+                rc = pair_overlap_area(*ra, *rb)
+            else:
+                rc = pair_overlap_area(ga.sides, ga.side, ga.rect,
+                                       ga.tht_rect, gb.sides, gb.side,
+                                       gb.rect, gb.tht_rect)
+            ex = pair_overlap_area_exact(ga, gb)
+            if rc > EPS or ex > EPS:
+                pairs.append([a, b, round(rc, 4), round(ex, 4)])
+                rc_tot += rc
+                ex_tot += ex
+    pairs.sort(key=lambda p: (-p[3], -p[2], p[0], p[1]))
+    return ex_tot, rc_tot, pairs
+
+
 def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
     """Per-PAIR side-aware courtyard intersections (kind='courtyard').
 
@@ -2203,8 +2252,15 @@ class CourtyardGrade(NamedTuple):
         """Total courtyard overlap (mm2) over every pair, waived or not, on
         the grader's exact geometry: `placement_overlap_area`'s question
         answered on check_assembly's rects. #1182: reseat's gate compares
-        this, not the search's (pad boxes on a courtyard-less library)."""
-        return round(sum(p.area_mm2 for p in self.pairs), 4)
+        this, not the search's (pad boxes on a courtyard-less library).
+        Synthetic parts (a pad-less logo's +/-0.5 mm fiction), containers
+        and silk-sourced occupancy are left out, as `courtyard_overlap_pairs`
+        and the floorplan budget leave them out (#1162: g8's two logos read
+        2.0 mm2 otherwise; a silk body never gates, #896)."""
+        skip = (set(self.synthetic_refs) | set(self.containers)
+                | set(self.silk_occupancy_refs))
+        return round(sum(p.area_mm2 for p in self.pairs
+                         if p.a not in skip and p.b not in skip), 4)
 
 
 class CourtyardCensus:

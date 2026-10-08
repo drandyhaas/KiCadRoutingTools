@@ -1053,9 +1053,15 @@ class WhichReasonsWalk(_Boards):
 
 
 #: The round-4 verifier's J1: a body 3 mm west of its origin, pads inside it.
+# J1 draws a COURTYARD exactly its pad box -- the rect every arm below was
+# built on. Without one its occupancy is its .Fab body, which the overlap
+# budget reads since #1162 and no unarmed seat can space (#1182): the
+# "first seat" these arms keep would itself exceed a budget of 0.
 GD_J1 = ('  (footprint "t" (layer "F.Cu") (at 15 5 0)\n'
          '    (property "Reference" "J1")\n'
          '    (fp_rect (start -3 -1) (end 1 1) (layer "F.Fab"))\n'
+         '    (fp_rect (start -2.25 -0.75) (end 0.75 0.75)'
+         ' (layer "F.CrtYd"))\n'
          '    (pad "1" smd rect (at -2.0 -0.5) (size .5 .5) (layers "F.Cu"))\n'
          '    (pad "2" smd rect (at -2.0 0.5) (size .5 .5) (layers "F.Cu"))\n'
          '    (pad "3" smd rect (at 0.5 0) (size .5 .5) (layers "F.Cu")))\n')
@@ -1173,8 +1179,10 @@ class GradeDelta(_Boards):
                              f'the kept pose carries {kept}mm2 of overlap')
         record = res['edge_floor_fallback']['J1']
         self.assertEqual(record['why'], 'grade_delta')
+        # Both readings rise: the quench's rects and, since #1162, the
+        # drawn outlines the budget is graded on.
         self.assertEqual([d.get('budget') for d in record['grade_delta']],
-                         ['overlap_area'])
+                         ['overlap_area', 'overlap_area_exact'])
         self.assertEqual(record['n_grade_delta'], len(record['grade_delta']))
 
     def test_stage_one_does_not_raise_the_overlap_budget(self):
