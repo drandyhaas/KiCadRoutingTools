@@ -2376,6 +2376,13 @@ class CourtyardCensus:
     #: exact circle made a 1 um graze NOT BUILDABLE that KiCad passes (fa10
     #: 06 s04_u6r90_seed0, second phase-3 verifier).
     #: `tests/measure_1212_kicad_pins.py --onset` re-measures it.
+    #: KiCad's model is not this one, only equal to it on a straight edge: it
+    #: deflates the courtyard POLYGON by that error and tests the exact hole.
+    #: Probed (79cfc025 verifier): at a convex corner KiCad reports 1-2 um
+    #: LATER than this does, and on a round courtyard (fp_circle / fp_arc,
+    #: which KiCad polygonises as well) up to 3 um EARLIER -- a few-micron
+    #: window where a hole KiCad reports is missed here. No frame board
+    #: measured (35 of them) draws a round courtyard over a pin.
     PIN_HOLE_TOLERANCE_MM = 0.005
 
     def graded_part(self, ref: str, pose=None) -> GradedPart:

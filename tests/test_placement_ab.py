@@ -679,7 +679,11 @@ ROWS += [
         # change detector with its measured mark; the numbers are in the
         # baseline, not here.
         'rejected': True,
-        'expect': 'neutral' if b in _FLAT else 'regress',
+        # ulx3s reads neutral since fa10 P1 (#1206): its OFF seed packs on
+        # per-cluster far sides (GPDI1's posts), and the toggle that merges
+        # them back restores regress.
+        'expect': ('neutral' if b in _FLAT or b == 'ulx3s.kicad_pcb'
+                   else 'regress'),
         'why': (('MECHANISM: the ON arm seeds from an intent carrying the '
                  'observed decap limit, so seeder stage 2.5 seats each '
                  'tethered cap at a supply pin of an IC its zone placed '
@@ -733,7 +737,12 @@ _AFTER_ICS_MARKS = {
     ('decap-after-queue', 'splitflap_driver'): 'neutral',
     ('decap-after-queue', 'tigard'): 'improve',
     ('decap-after-queue', 'glasgow_revC'): 'neutral',
-    ('decap-after-queue', 'ulx3s'): 'improve',
+    # fa10 P1 (#1206): ulx3s's OFF seed moved -- GPDI1's two shell posts are
+    # two far-side boxes now, not one box spanning the gap between them --
+    # and on that seed both families read neutral (merging the clusters
+    # back restores improve / regress: the attribution toggle).
+    ('decap-within-limit', 'ulx3s'): 'neutral',
+    ('decap-after-queue', 'ulx3s'): 'neutral',
 }
 ROWS += [
     {

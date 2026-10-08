@@ -261,7 +261,12 @@ _OUTLINE_SNAP_MM = 1e-4
 _OUTLINE_COVER_TOL_MM = 1e-3
 #: Segment ends within this of each other are joined on a second attempt
 #: when a drawing does not close as written (#1094 verifier: ulx3s BAT1).
-_OUTLINE_JOIN_MM = 0.01
+#: KiCad's own courtyard chaining epsilon (`BuildCourtyardCaches`, 0.02 mm):
+#: a drawing it closes is a courtyard it tests pins against, and one this
+#: called open read `courtyard_malformed` and gated nothing (fa10 P1 verifier:
+#: glasgow J4's 8 um corner gap, which kicad-cli closes; synthetic gaps of
+#: 15 and 19 um close in KiCad, 30 um does not).
+_OUTLINE_JOIN_MM = 0.02
 OUTLINE_POLYGON = 'polygon'
 OUTLINE_HULL = 'hull'
 #: One read of a board's outlines per (path, mtime, size, layer): a single
@@ -397,12 +402,32 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
             areas.setdefault(lm.group(1), []).append(p)
         verts.setdefault(lm.group(1), []).extend(pts)
 
-    def covers(shape, pts):
+    def covers(shape, pts, tol=_OUTLINE_COVER_TOL_MM):
         if shape is None or shape.is_empty:
             return False
         import shapely
         return float(shapely.distance(shape, shapely.points(pts)).max()
-                     ) <= _OUTLINE_COVER_TOL_MM
+                     ) <= tol
+
+    def joined(segs):
+        """`segs` with every end within `_OUTLINE_JOIN_MM` of an earlier end
+        moved onto it -- the join KiCad's chaining makes. (Snapping a drawing
+        onto ITSELF, which this replaced, snapped each end to its own vertex
+        and closed no corner gap at all.)"""
+        reps: list = []
+
+        def rep(p):
+            for q in reps:
+                if math.hypot(p[0] - q[0], p[1] - q[1]) <= _OUTLINE_JOIN_MM:
+                    return q
+            reps.append(p)
+            return p
+        out = []
+        for ln in segs:
+            a, b = rep(tuple(ln.coords[0])), rep(tuple(ln.coords[-1]))
+            if a != b:
+                out.append(LineString((a, b)))
+        return out
 
     compose = _nested_even_odd if even_odd else unary_union
     out: Dict[str, tuple] = {}
@@ -413,22 +438,27 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         how = OUTLINE_POLYGON
         shape = compose(parts) if parts else None
         pts = verts.get(side, [])
+        tol = _OUTLINE_COVER_TOL_MM
         if pts and lines.get(side) and not covers(shape, pts):
             # Ends that miss each other by a few microns (ulx3s BAT1's
-            # courtyard: KiCad closes it, a strict join does not): snap
-            # the drawing onto itself at `_OUTLINE_JOIN_MM` and polygonise
-            # again before settling for the hull.
+            # courtyard, glasgow J4's 8 um corner: KiCad closes them, a
+            # strict join does not): join the ends within `_OUTLINE_JOIN_MM`,
+            # then also snap ends onto segments (a T that falls short), and
+            # polygonise again before settling for the hull. A joined
+            # drawing covers its vertices to within the join distance.
             import shapely
             from shapely.geometry import MultiLineString
-            ml = MultiLineString([list(ln.coords) for ln in lines[side]])
-            snapped = shapely.snap(ml, ml, _OUTLINE_JOIN_MM)
-            retry = list(areas.get(side, [])) + list(
-                polygonize(unary_union(snapped)))
-            if retry:
-                cand = compose(retry)
-                if covers(cand, pts):
-                    shape = cand
-        if pts and not covers(shape, pts):
+            ends = joined(lines[side])
+            ml = MultiLineString([list(ln.coords) for ln in ends])
+            for cand_lines in (ends, shapely.snap(ml, ml, _OUTLINE_JOIN_MM)):
+                retry = list(areas.get(side, [])) + list(
+                    polygonize(unary_union(cand_lines)))
+                if retry:
+                    cand = compose(retry)
+                    if covers(cand, pts, _OUTLINE_JOIN_MM):
+                        shape, tol = cand, _OUTLINE_JOIN_MM
+                        break
+        if pts and not covers(shape, pts, tol):
             from shapely.geometry import MultiPoint
             shape, how = MultiPoint(pts).convex_hull, OUTLINE_HULL
         if shape is None or shape.is_empty or shape.area <= 0:

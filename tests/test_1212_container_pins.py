@@ -717,5 +717,106 @@ class TheSecondPhase3VerifiersCases(unittest.TestCase):
         self.assertGreater(vio, 0.0)
 
 
+def _square(gap):
+    """Four F.CrtYd lines of a 4 x 4 square, the last stopping `gap` short
+    of the first's start (a corner that does not quite close)."""
+    return [('F.CrtYd', f'fp_line (start {a} {b}) (end {c} {d})')
+            for a, b, c, d in ((-2, -2, 2, -2), (2, -2, 2, 2), (2, 2, -2, 2),
+                               (-2, 2, -2, round(-2 + gap, 6)))]
+
+
+class TheThirdVerifiersCases(unittest.TestCase):
+    """The verifier on 79cfc025: KiCad's chaining, the broad phase at every
+    rotation, the gating shape first, the counts."""
+
+    def _grade(self, path):
+        return legality.CourtyardCensus(parse_kicad_pcb(path), path).grade()
+
+    def test_a_corner_kicad_closes_is_a_courtyard(self):
+        """KiCad chains courtyard ends within 0.02 mm: 8 and 19 um gaps
+        close (a pin under them is reported), 30 um does not (malformed)."""
+        got = {}
+        for gap in (0.008, 0.019, 0.03):
+            with tempfile.TemporaryDirectory() as td:
+                path = _frame_board(td, [])
+                _add(path, _crtyd_part('P', (3, 3.1), _square(gap)))
+                g = self._grade(path)
+            got[gap] = [(q.b, q.basis, q.waived) for q in g.pin_pairs]
+        self.assertEqual(got[0.008], [('P', 'courtyard', False)])
+        self.assertEqual(got[0.019], [('P', 'courtyard', False)])
+        self.assertEqual(got[0.03], [(
+            'P', legality.CourtyardCensus.MALFORMED_COURTYARD_BASIS, False)])
+
+    def test_glasgow_j4_closes(self):
+        """The real case: J4's F.CrtYd ends 8 um apart at one corner."""
+        from placement import parser
+        shapes = parser.extract_courtyard_shapes(os.path.join(
+            ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb'))
+        self.assertEqual(shapes['J4']['F'][1], parser.OUTLINE_POLYGON)
+
+    def test_the_onset_is_six_microns(self):
+        """5 um in: silent; 6 um in: reported -- the step KiCad reports
+        from (measure_1212 --onset). Pin 1's hole ends at y = 2.0."""
+        got = {}
+        for y in (3.995, 3.994):
+            with tempfile.TemporaryDirectory() as td:
+                path = _frame_board(td, [('P', 3.0, y, 2.0)])
+                got[y] = len(self._grade(path).pin_blocking)
+        self.assertEqual(got, {3.995: 0, 3.994: 1})
+
+    def test_the_search_and_the_grade_agree_at_every_rotation(self):
+        """E5's far courtyard swept over pin 1 at four rotations: the
+        search's `pin_hits` finds exactly the pins the grade gates (its
+        broad phase turns the far courtyard and covers both of its sides)."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [])
+            _add(path, E5_PART)
+            c = legality.CourtyardCensus(parse_kicad_pcb(path), path)
+            bad, seen = [], 0
+            for rot in (0.0, 90.0, 180.0, 270.0):
+                for x in range(1, 16):
+                    for y in range(1, 14):
+                        pose = (float(x), float(y), rot)
+                        hits = bool(c.pin_hits('P', pose))
+                        graded = any(q.b == 'P' for q in
+                                     c.grade({'P': pose}).pin_blocking)
+                        seen += graded
+                        if hits != graded:
+                            bad.append((pose, hits, graded))
+        self.assertGreater(seen, 8)
+        self.assertEqual(bad, [])
+
+    def test_a_closed_courtyard_gates_before_an_open_one(self):
+        """A closed F.CrtYd and an open B.CrtYd both over pin 1: the pin
+        is graded on the closed one, and gates."""
+        shapes = ([('F.CrtYd', 'fp_rect (start -2 -2) (end 2 2)')]
+                  + [('B.CrtYd', b) for _l, b in _square(0.5)])
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board(td, [])
+            _add(path, _crtyd_part('P', (3, 3.1), shapes))
+            g = self._grade(path)
+        self.assertEqual([(q.b, q.basis) for q in g.pin_blocking],
+                         [('P', 'courtyard')])
+
+    def test_a_part_over_two_hole_kinds_is_one_part(self):
+        """P over an NPTH pin and a PTH pin: two KiCad findings, one part
+        pair -- check_assembly counts both, the repair charges one part."""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            path = _frame_board_npth(td, TWO_PINS, {'1': ''})
+            rc, doc, out = _assembly(path)
+            self.assertEqual(rc, 4)
+            self.assertIn('PIN IN COURTYARD (1 part pair(s), 2 by hole rule)',
+                          out)
+            r = subprocess.run(
+                [sys.executable, '-X', 'utf8',
+                 os.path.join(ROOT, 'py_placer', 'place_reconstruct.py'),
+                 path, os.path.join(td, 'o.kicad_pcb'), '--stages',
+                 'legalize', '--clearance', '0.2'],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', cwd=ROOT, timeout=600)
+        self.assertIn('Pin census: 1 part(s)', r.stdout, r.stdout[-800:])
+
+
 if __name__ == '__main__':
     unittest.main()

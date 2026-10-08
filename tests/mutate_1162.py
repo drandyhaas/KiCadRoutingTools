@@ -120,6 +120,27 @@ ROWS = [
      "    pairs.sort(key=lambda p: (-p[3], -p[2], p[0], p[1]))",
      "    pass",
      (T1162,), 'KILLED'),
+    # ---- the verifier on 8492b3c1 -----------------------------------------
+    ('the-plan-prices-a-waived-project', 'fp',
+     "        overlap_budget = None",
+     "        pass",
+     (T1162,), 'KILLED'),
+    ('the-zone-bound-ignores-the-anchor', 'fp',
+     "            if zone_is_anchor(z.rect, part, tol):",
+     "            if False:",
+     (T1162,), 'KILLED'),
+    ('the-excluded-are-not-named', 'fp',
+     "                        'excluded': {k: v for k, v in _excl.items() if v}}",
+     "                        'excluded': {}}",
+     (T1162,), 'KILLED'),
+    ('the-pair-cap-lifted', 'fp',
+     "MEASURED_PAIRS_CAP = 50",
+     "MEASURED_PAIRS_CAP = 10 ** 9",
+     (T1162,), 'KILLED'),
+    ('a-container-is-not-named', 'leg',
+     "            excluded['containers'].append(r)",
+     "            pass",
+     (T1162,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is

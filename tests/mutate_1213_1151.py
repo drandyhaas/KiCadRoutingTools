@@ -203,6 +203,15 @@ ROWS = [
      "    _pending_set = set(_pending) - set(fixed)",
      "    _pending_set = set(_pending)",
      (T1151,), 'KILLED'),
+    # ---- the verifier on 79cfc025 -----------------------------------------
+    ('a-marker-is-never-staged', 'seed',
+     "        if st['markers'][ref] and coincident_stack_suspects(",
+     "        if st['markers'][ref] or False and coincident_stack_suspects(",
+     (T1151,), 'KILLED'),
+    ('a-padless-part-stacks', 'seed',
+     "                if non_aperture_pads(fp):",
+     "                if True:",
+     (T1151,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is

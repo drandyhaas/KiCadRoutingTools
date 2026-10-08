@@ -37,6 +37,7 @@ TARGETS = {'q': os.path.join(_PL, 'quench.py'),
            'fp': os.path.join(_PL, 'floorplan.py'),
            'rc': os.path.join(_PL, 'reconstruct.py'),
            'pa': os.path.join(_PL, 'parser.py'),
+           'ar': os.path.join(_PL, 'arrays.py'),
            'ps': os.path.join(_ROOT, 'py_placer', 'place_seed.py')}
 
 T1182 = os.path.join(_TESTS, 'test_1182_body_model_movers.py')
@@ -210,6 +211,19 @@ ROWS = [
     ('the-fixed-pose-rects-on-the-neighbour', 's',
      "    r, tht = part.grade_rects(x, y, rot)\n    outside = state.edge_gate",
      "    r, tht = part.rects(x, y, rot)\n    outside = state.edge_gate",
+     (T1182,), 'KILLED'),
+    # ---- the verifier on 8492b3c1 -----------------------------------------
+    ('the-outline-gate-on-occupancy', 'q',
+     "                    grect, edges=near, skip_rings=self._owned_rings(ref)):",
+     "                    rect, edges=near, skip_rings=self._owned_rings(ref)):",
+     (T1182,), 'KILLED'),
+    ('the-array-check-on-occupancy', 'ar',
+     "        r = p.grade_rect() if hasattr(p, 'grade_rect') else p.rect()",
+     "        r = p.rect()",
+     (T1182,), 'KILLED'),
+    ('an-unrepairable-ref-is-also-unresolved', 's',
+     "            if r in failed or r in unrepairable:",
+     "            if False:",
      (T1182,), 'KILLED'),
 ]
 

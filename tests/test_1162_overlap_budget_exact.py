@@ -413,5 +413,87 @@ class ThePhase5VerifiersCases(unittest.TestCase):
         self.assertEqual(res.legality['overlap_area_excluded'], 2)
 
 
+class TheRoundThreeCases(unittest.TestCase):
+
+    def test_the_finding_names_the_parts_it_left_out(self):
+        """Two crossed silk-only parts and an overlapping MK pair: the
+        finding fails on the MKs and names the silk parts as excluded."""
+        part = ('  (footprint "t:SILK" (layer "F.Cu") (at 25 25 {rot})\n'
+                '    (property "Reference" "{ref}" (at 0 0) (layer'
+                ' "F.SilkS"))\n'
+                '    (fp_rect (start -3.5 -1) (end 3.5 1) (stroke (width 0.12)'
+                ' (type default)) (layer "F.SilkS"))\n'
+                '    (pad "1" smd rect (at -3 0) (size 1 1.5) (layers "F.Cu")'
+                ' (net 1 "N1"))\n'
+                '    (pad "2" smd rect (at 3 0) (size 1 1.5) (layers "F.Cu")'
+                ' (net 2 "N2")))\n')
+        with tempfile.TemporaryDirectory() as td:
+            path = _sized_board(td, 'x', (40, 40), [
+                part.format(ref='A1', rot=0), part.format(ref='B1', rot=90),
+                _mk('MK1', 8, 8), _mk('MK2', 14, 8)])
+            res = floorplan.grade(_intent(path), parse_kicad_pcb(path), path)
+        v = [x for x in res.violations if x.rule == 'legality']
+        self.assertEqual(len(v), 1, res.violations)
+        self.assertEqual(v[0].measured['excluded'], {'silk': ['A1', 'B1']})
+
+    def test_the_pairs_are_capped(self):
+        """Twelve parts on one spot: 66 pairs, the worst 50 written."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _board(td, 'c', [_mk(f'MK{i}', 20, 20) for i in range(12)])
+            res = floorplan.grade(_intent(path), parse_kicad_pcb(path), path)
+        m = [x for x in res.violations if x.rule == 'legality'][0].measured
+        self.assertEqual((len(m['pairs']), m['pairs_total']), (50, 66))
+        self.assertEqual(floorplan.MEASURED_PAIRS_CAP, 50)
+
+    def test_a_container_is_named_as_excluded(self):
+        p = os.path.join(ROOT, 'kicad_files',
+                         'rp2350_fpga_eensy_prePlane.kicad_pcb')
+        pcb = parse_kicad_pcb(p)
+        census = legality.CourtyardCensus(pcb, p)
+        _gp, excluded = legality.courtyard_budget_universe(
+            census, list(census.lbs))
+        self.assertEqual(excluded['containers'], ['U8'])
+
+    def test_a_waived_project_forces_no_overlap(self):
+        """courtyards_overlap ignored: the grade prices no overlap, so the
+        zone bound stands down to its WARN (35.5 forced on the outlines)."""
+        with tempfile.TemporaryDirectory() as td:
+            path = _board(td, 'zw', [_mk('MK1', 5, 5), _mk('MK2', 10, 5),
+                                     _mk('MK3', 15, 5)])
+            _pro_waives_courtyards(path)
+            found, _m = _plan(path, {
+                'blocks': [{'name': 'mk', 'refs': ['MK1', 'MK2', 'MK3'],
+                            'zone': [0, 0, 20, 10], 'tolerance_mm': 0}],
+                'legality_budget': {'overlap_area': 30.0}})
+        self.assertFalse([v for v in found if v.rule == 'plan_zone_overfull'])
+        self.assertTrue([v for v in found if v.rule == 'plan_zone_crowded'])
+
+    def test_a_part_at_45_degrees_is_anchor_graded(self):
+        """Two 10 x 4 courtyards at 45 degrees in a 12 x 5 zone: no
+        rotation of their lattice fits, so the grade reads the zone as an
+        anchor and the bound charges nothing; at 0 degrees they fit, and
+        80 mm2 in 60 is an ERROR at budget 0."""
+        def rot_rect(ref, x, y, rot):
+            return (f'  (footprint "t:R" (layer "F.Cu") (at {x} {y} {rot})\n'
+                    f'    (property "Reference" "{ref}" (at 0 0) (layer'
+                    f' "F.SilkS"))\n'
+                    '    (fp_rect (start -5 -2) (end 5 2) (stroke (width 0.05)'
+                    ' (type default)) (layer "F.CrtYd"))\n'
+                    f'    (pad "1" smd rect (at 0 0 {rot}) (size 0.6 0.6)'
+                    ' (layers "F.Cu") (net 2 "N2")))\n')
+        got = {}
+        for rot in (45, 0):
+            with tempfile.TemporaryDirectory() as td:
+                path = _board(td, f'r{rot}', [rot_rect('R1', 10, 10, rot),
+                                              rot_rect('R2', 25, 25, rot)])
+                found, _m = _plan(path, {
+                    'blocks': [{'name': 'z', 'refs': ['R1', 'R2'],
+                                'zone': [4, 4, 16, 9], 'tolerance_mm': 0}],
+                    'legality_budget': {'overlap_area': 0.0}})
+            got[rot] = bool([v for v in found
+                             if v.rule == 'plan_zone_overfull'])
+        self.assertEqual(got, {45: False, 0: True})
+
+
 if __name__ == '__main__':
     unittest.main()

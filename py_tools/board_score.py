@@ -554,6 +554,22 @@ def assembly_component(doc: dict, rc: int) -> dict:
             'containments': doc.get('containments') or []}
 
 
+def ungraded_entries(parts: dict) -> list:
+    """The top-level `ungraded` list: every component that did not run,
+    and 'assembly.courtyard_gating' whenever check_assembly's courtyard gate
+    was not armed (#964 item 2 / #1183) -- an UNARMED conjunct is
+    unexamined, and only a top-level entry is something a loop compares.
+    Listed whether or not assembly itself ran: a lap whose assembly FAILED
+    must still read as grading fewer things than an unarmed one, or
+    converge takes its lower `blocking` for a gain (phase-6 verifier: 10 ->
+    9 accepted, because the dotted entry vanished with the component)."""
+    return sorted(
+        [k for k, v in parts.items() if v.get('ran') is False]
+        + (['assembly.courtyard_gating']
+           if not (parts.get('assembly') or {}).get('courtyard_gating_armed')
+           else []))
+
+
 def baseline_problem(path: str):
     """Why `path` cannot be a --baseline, or None: it must be a KiCad board
     with at least one footprint (a cheap text test; check_assembly parses it
@@ -1333,20 +1349,7 @@ def main():
              'label': args.label, 'blocking': blocking,
              'blocking_by': {k: v.get('count') for k, v in parts.items()},
              'advisory': {k: v.get('count') for k, v in advisory.items()},
-             'ungraded': sorted(
-                 [k for k, v in parts.items() if v.get('ran') is False]
-                 # #964 item 2 / #1183: the courtyard gate did not run --
-                 # an UNARMED conjunct is unexamined, and only a top-level
-                 # entry is something a loop compares. Listed whether or not
-                 # assembly itself ran: a lap whose assembly FAILED must
-                 # still read as grading fewer things than an unarmed one,
-                 # or converge takes its lower `blocking` for a gain (phase-6
-                 # verifier: 10 -> 9 accepted, because the dotted entry
-                 # vanished with the component).
-                 + (['assembly.courtyard_gating']
-                    if not (parts.get('assembly') or {}).get(
-                        'courtyard_gating_armed')
-                    else [])),
+             'ungraded': ungraded_entries(parts),
              'unknown': sorted(unknown), 'quality': quality(args.board),
              # BESIDE `quality`, never inside `parts` -- see score_placement.
              # Absent entirely without the flag, so a payload that carries the

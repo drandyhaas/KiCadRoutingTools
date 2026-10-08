@@ -753,6 +753,144 @@ class TheRectInventory(unittest.TestCase):
         self.assertEqual(diff, {}, 'rect reads moved -- see the docstring')
 
 
+class TheRoundThreeCases(unittest.TestCase):
+    """The verifier on 8492b3c1: the differential's outline and zone legs on
+    a board where they bind, the array check on the grade ladder, a charged
+    ref that cannot move."""
+
+    def _differential(self, board, offs, tight_zones):
+        import contextlib
+        import pose_score
+        from placement import floorplan, seeder
+        pcb = parse_kicad_pcb(board)
+        with contextlib.redirect_stdout(io.StringIO()):
+            raw = floorplan.emit_intent(pcb, board)
+            st0 = pose_score.make_state(pcb, board, clearance=0.2)
+            st1 = pose_score.make_state(pcb, board, clearance=0.2,
+                                        body_model=True)
+        grew = [r for r in sorted(st0.parts) if not st0.parts[r].locked
+                and st1.parts[r].rect() != st0.parts[r].rect()]
+        if tight_zones:
+            # One block per grown part, its zone the part's grade rect at
+            # its file pose plus 0.8 mm: the grade rect fits at every
+            # sampled offset, the occupancy often does not.
+            raw['blocks'] = [
+                {'name': 'z_' + r, 'refs': [r], 'tolerance_mm': 0,
+                 'zone': [round(v + d, 4) for v, d in zip(
+                     st0.parts[r].grade_rect(), (-0.8, -0.8, 0.8, 0.8))]}
+                for r in grew]
+        intent = floorplan.intent_from_dict(raw, board)
+        with contextlib.redirect_stdout(io.StringIO()):
+            blocks, _ = floorplan.resolve_blocks(intent, pcb,
+                                                 ('kicad', 'sheet'))
+            gate, _ = floorplan.resolve_intent_gate(intent, pcb,
+                                                    ('kicad', 'sheet'))
+            ze = floorplan.zone_entries(intent, blocks)
+            s0, s1 = (pose_score.make_state(
+                pcb, board, clearance=0.2, board_edge_clearance=0.3,
+                keepouts=intent.keepouts, intent_zones=gate.get('zones'),
+                exclusive_zones=ze, body_model=armed)
+                for armed in (False, True))
+        zone_of = {}
+        for z in intent.blocks:
+            if z.rect is not None:
+                for r in blocks.get(z.name, ()):
+                    zone_of.setdefault(r, z)
+        everyone = set(s0.parts)
+        bad, n, zoned, edged = [], 0, 0, 0
+        for ref in grew:
+            p0, p1 = s0.parts[ref], s1.parts[ref]
+            ex = everyone - {ref}
+            for rot in (p0.rot, (p0.rot + 90) % 360):
+                for dx, dy in offs:
+                    x, y = p0.x + dx, p0.y + dy
+                    n += 1
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        got = {'candidate_valid': [s.candidate_valid(
+                            ref, x, y, rot, exclude=ex) for s in (s0, s1)],
+                            'pose_ok': [seeder.pose_ok(s, ref, x, y, rot,
+                                                       ex) for s in (s0, s1)],
+                            'fixed': [seeder._fixed_pose_check(
+                                s, ref, (x, y, rot), {})[0]
+                                for s in (s0, s1)]}
+                        edged += s1.edge_gate.active and bool(
+                            s1.edge_gate.rect_blocked(p1.rect(x, y, rot)))
+                        z = zone_of.get(ref)
+                        if z is not None:
+                            tol = intent.zone_tolerance(z)
+                            got['zone'] = [seeder.zone_gate(
+                                p, z.rect, tol)[0](x, y, rot)
+                                for p in (p0, p1)]
+                            zoned += 1
+                    for k, (a, b) in got.items():
+                        if a != b:
+                            bad.append((ref, x, y, rot, k, a, b))
+        return bad, n, zoned, edged
+
+    def test_watchy_outline_and_tight_zones(self):
+        """watchy's outline gate is ACTIVE and its grown parts sit near the
+        rim (the occupancy is blocked where the grade rect is not); the
+        zones are each part's own grade rect plus 0.8 mm."""
+        offs = [(dx * 0.3, dy * 0.3) for dx in range(-2, 3)
+                for dy in range(-2, 3)]
+        bad, n, zoned, edged = self._differential(
+            os.path.join(ROOT, 'kicad_files', 'watchy.kicad_pcb'), offs,
+            tight_zones=True)
+        self.assertGreater(zoned, 50)
+        self.assertGreater(edged, 0, 'no sample puts an occupancy rect on '
+                                     'the rim: the outline leg is vacuous')
+        self.assertEqual(bad[:10], [], f'{len(bad)} of {n} samples')
+
+    def test_the_array_check_reads_the_grade_ladder(self):
+        """`arrays.formation_at_state` measures member centres on the rect
+        `rule_array_formation` reads: armed, the grade rect, not the
+        occupancy."""
+        import pose_score
+        from placement import arrays
+        pcb = parse_kicad_pcb(ESP)
+        st = pose_score.make_state(pcb, ESP, clearance=0.2, body_model=True)
+        grew = [r for r in sorted(st.parts)
+                if st.parts[r].rect() != st.parts[r].grade_rect()]
+        self.assertTrue(grew)
+        seen = {}
+        real = arrays.formation
+
+        def spy(poses, **kw):
+            seen['poses'] = poses
+            return real(poses, **kw)
+        arrays.formation = spy
+        try:
+            arrays.formation_at_state(st, pcb, {}, grew[:3])
+        finally:
+            arrays.formation = real
+        for p in seen['poses']:
+            g = st.parts[p['ref']].grade_rect()
+            self.assertAlmostEqual(p['x'], (g[0] + g[2]) / 2.0, places=9)
+            self.assertAlmostEqual(p['y'], (g[1] + g[3]) / 2.0, places=9)
+
+    def test_a_charged_ref_that_cannot_move_is_unrepairable_only(self):
+        """The fixture's mover can find no seat (`_try_place` finds none):
+        it is reported unrepairable, and not also unresolved -- no entry,
+        no claim, no note."""
+        from placement import floorplan, seeder
+        real = seeder._try_place
+        seeder._try_place = lambda *a, **k: None
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                base, moved, intent = _fixture(td)
+                res = seeder.repair_placement(
+                    parse_kicad_pcb(moved), moved,
+                    floorplan.load_intent(intent), clearance=0.2,
+                    board_edge_clearance=0.5, baseline_file=base)
+        finally:
+            seeder._try_place = real
+        self.assertIn('A', res['unrepairable'])
+        self.assertEqual(res['unresolved'], [])
+        self.assertNotIn('A', res.get('unresolved_claims') or {})
+        self.assertFalse([n for n in res['notes']
+                          if n.startswith('A: UNRESOLVED')], res['notes'])
+
+
 if __name__ == '__main__':
     if '--write-rect-inventory' in sys.argv:
         os.makedirs(os.path.dirname(RECT_INVENTORY), exist_ok=True)

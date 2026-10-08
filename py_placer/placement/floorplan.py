@@ -7183,9 +7183,14 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
          far face) against the zone's area.
          Fitting area A into a zone of area Z forces at least A - Z of
          pairwise courtyard overlap, which the grade counts against a
-         DECLARED `legality_budget.overlap_area`: past it, ERROR. With no
-         budget declared nothing bounds the overlap, and it is the WARN (the
-         seeder never overlaps courtyards, so it may leave members unseated).
+         DECLARED `legality_budget.overlap_area`: past it, ERROR. The ERROR
+         sums the members' graded OUTLINES and far-side clusters -- the
+         geometry the budget is measured on (#1162) -- the WARN their rects.
+         With no budget declared, or a project that waives courtyard overlap
+         (the grade then prices none), nothing bounds the overlap, and it is
+         the WARN (the seeder never overlaps courtyards, so it may leave
+         members unseated). An anchor-graded member (`zone_is_anchor`) is not
+         charged.
          Anchor-graded members and zones holding a waived pair are not
          charged; a locked member is, because the grade counts its overlap
          too.
@@ -7195,9 +7200,10 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
          edge's span (WARN -- flanges legitimately overhang corners).
       7. `plan_board_overfull` / `_crowded`: `options.grow_board` at
          clearance 0 on the per-face basis. The same argument as row 5: an
-         ERROR when the overlap it forces exceeds a declared budget; a WARN
-         past `options.CROWDED_UTILISATION` or on the one-face basis a
-         declared `assembly.sides` implies.
+         ERROR when the overlap the graded outlines force (per face, against
+         `grow_board`'s usable area) exceeds a declared budget; a WARN past
+         `options.CROWDED_UTILISATION` or on the one-face basis a declared
+         `assembly.sides` implies.
     """
     from . import options as _opts
     ctx, outline, state, blocks, block_problems = _grade_ctx(
@@ -7348,6 +7354,12 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     # dropping them lost a zone a locked part already fills (round-2
     # verifier). A locked member outside its zone is `plan_fixed_outside_zone`.
     overlap_budget = (intent.legality_budget or {}).get('overlap_area')
+    if getattr(state, 'courtyards_ignored', False):
+        # The project waives KiCad's courtyard rule, so the grade prices no
+        # courtyard overlap (#1104): no forced overlap can exceed the budget,
+        # and these bounds stand down to their WARNs (8492b3c1 verifier:
+        # three circles ERRORed at 35.5 where the grade read 0).
+        overlap_budget = None
     for z in intent.blocks:
         if z.rect is None:
             continue
@@ -7371,8 +7383,11 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             part = state.parts[r]
             b0 = part.grade_by_rot[0.0]
             w, h = b0[2] - b0[0], b0[3] - b0[1]
-            if not zone_fits_courtyard(z.rect, (0.0, 0.0, w, h), tol) and                     not zone_fits_courtyard(z.rect, (0.0, 0.0, h, w), tol):
-                continue            # anchor-graded: the zone cannot hold it
+            if zone_is_anchor(z.rect, part, tol):
+                # Anchor-graded, as the grade decides it -- on the part's own
+                # 90-degree lattice: two 10 x 4 parts at 45 degrees were
+                # charged as if seated at 0 (8492b3c1 verifier).
+                continue
             per_face[part.side] = per_face.get(part.side, 0.0) + w * h
             per_face_c[part.side] = per_face_c.get(part.side, 0.0) + (
                 (w + clr_used) * (h + clr_used))

@@ -50,8 +50,8 @@ ROWS = [
      "                                  args.clearance, baseline=None)",
      (T1183,), 'KILLED'),
     ('an-unarmed-gate-is-not-ungraded', 'bs',
-     "                 + (['assembly.courtyard_gating']",
-     "                 + ([]",
+     "        + (['assembly.courtyard_gating']",
+     "        + ([]",
      (T1183,), 'KILLED'),
     ('an-unreadable-baseline-is-accepted', 'bs',
      "    if args.baseline is not None and not os.path.isfile(args.baseline):",
@@ -97,6 +97,11 @@ ROWS = [
     ('the-reason-does-not-say-how', 'bs',
      "                     'board this one was derived from> to arm it (#1183)'),",
      "                     'board this one was derived from>'),",
+     (T1183,), 'KILLED'),
+    # ---- the verifier on 8492b3c1 -----------------------------------------
+    ('the-gate-listed-only-when-assembly-ran', 'bs',
+     "           if not (parts.get('assembly') or {}).get('courtyard_gating_armed')",
+     "           if (parts.get('assembly') or {}).get('ran') and not (parts.get('assembly') or {}).get('courtyard_gating_armed')",
      (T1183,), 'KILLED'),
 ]
 

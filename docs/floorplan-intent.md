@@ -860,7 +860,7 @@ status from this list:
 | `proximity` | two DECLARED parts are further apart than `max_mm` ([#902](https://github.com/drandyhaas/KiCadRoutingTools/issues/902)). Per SUBJECT pad when the claim names `pads`, once per pair when it does not | `legality.pad_rect` + `rect_gap`, or `placement.body`'s DRAWN body for `basis: "body"` |
 | `proximity_unresolved` | a proximity claim names a ref, or a pad number, this board does not have. A separate NAME so a DNP-variant board can demote it without demoting the distance claim | same |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
-| `legality` | overlap or off-board parts exceed a budget | overlap: `legality.courtyard_overlap_pairs` (check_assembly's drawn outlines, #1162); off-board: `QuenchState.legality_metrics` |
+| `legality` | overlap or off-board parts exceed a budget. An overlap finding's `measured` carries `overlap_area` (the outline reading the budget grades), `overlap_area_rect`, the worst 50 `pairs` (`[a, b, rect, exact]`) with `pairs_total`, and `excluded` -- the containers, pad-less logos and silk-only parts the budget does not see (a silk body never gates, #896); `legality.overlap_area_excluded` counts them on every grade | overlap: `legality.courtyard_overlap_pairs` (check_assembly's drawn outlines, #1162); off-board: `QuenchState.legality_metrics` |
 | `block_unresolved` | a block matched no footprint | — |
 | `intent_zone_in_keepout` | a declared zone is contradicted by a keep-out that binds its members: covered entirely (reported per block), or left with no pose for a member at any rotation (per member) | `zone_covered_by_keepout`, then `zone_pose_feasibility` |
 | `keepout_allow_unresolved` | a keep-out's `allow` pattern matches no footprint (**warn** by default) | `allow_pattern_matches`, the resolver's own matcher |
@@ -1129,9 +1129,9 @@ plan. The WARN is the same quantity with a margin.
 | `intent_zone_in_keepout` | as `grade` raises it | |
 | `block_glob_literal` | a real reference used as a glob over-matches a block into a second, disjoint zone | a stray over-match with no such conflict is a WARN; one the same list also names (an intended over-match) is no finding |
 | `plan_fixed_outside_zone` | a FILE-locked member is already outside its zone; or (WARN) a `fixed_poses[]` entry's declared pose is outside its own block's zone | |
-| `plan_zone_overfull` / `_crowded` | per face, the members' areas exceed the zone by more than the declared `legality_budget.overlap_area`. Fitting area A into zone Z forces at least A - Z of courtyard overlap; the ERROR sums the members' graded OUTLINES (the geometry the budget is measured on), the WARN their rects | the WARN applies without a budget, or past a crowding margin |
+| `plan_zone_overfull` / `_crowded` | per face, the members' areas exceed the zone by more than the declared `legality_budget.overlap_area`. Fitting area A into zone Z forces at least A - Z of courtyard overlap; the ERROR sums the members' graded OUTLINES and far-side clusters (the geometry the budget is measured on, #1162), the WARN their rects. `measured.zones[]` carries both (`members_outline_area_mm2`, `members_area_mm2`) | the WARN applies without a budget, on a project that waives courtyard overlap, or past a crowding margin |
 | `plan_edge_overfull` / `_crowded` | one edge-claimed part's pad extent, at its best 90-degree turn, is longer than its edge | summed extents are a WARN, because flanges overhang corners |
-| `plan_board_overfull` / `_crowded` | `options.grow_board` at clearance 0 forces more overlap than the budget allows, with `oob_count` declared 0 | |
+| `plan_board_overfull` / `_crowded` | the parts' graded outlines, per face, force more overlap against `options.grow_board`'s usable area (clearance 0) than the budget allows, with `oob_count` declared 0; `measured.outline_area_per_face_mm2`, and the rect reading as `forced_overlap_rect_mm2` | |
 | `plan_fixed_overlap_budget` / `plan_fixed_overlap` | the FILE-locked pairs alone exceed the overlap budget | each such pair is a WARN |
 
 A plan ERROR is only as strong as the rules it stands for. With

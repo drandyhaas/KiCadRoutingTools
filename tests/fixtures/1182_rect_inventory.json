@@ -1,5 +1,6 @@
 {
  "arrays.py::formation_at_state": {
+  "grade_rect": 1,
   "rect": 1
  },
  "floorplan.py::_PosedState.graded_parts": {

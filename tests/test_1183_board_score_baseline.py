@@ -196,5 +196,20 @@ class ThePhase6VerifiersCases(unittest.TestCase):
         self.assertTrue(a['courtyard_gating_armed'], a)
 
 
+class TheUngradedList(unittest.TestCase):
+
+    def test_the_gate_is_listed_whether_or_not_assembly_ran(self):
+        import board_score
+        self.assertEqual(board_score.ungraded_entries(
+            {'assembly': {'ran': False}}),
+            ['assembly', 'assembly.courtyard_gating'])
+        self.assertEqual(board_score.ungraded_entries(
+            {'assembly': {'ran': True, 'courtyard_gating_armed': False}}),
+            ['assembly.courtyard_gating'])
+        self.assertEqual(board_score.ungraded_entries(
+            {'assembly': {'ran': True, 'courtyard_gating_armed': True},
+             'impedance': {'ran': False}}), ['impedance'])
+
+
 if __name__ == '__main__':
     unittest.main()

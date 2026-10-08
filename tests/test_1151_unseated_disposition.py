@@ -746,5 +746,55 @@ class TheSecondPhase3VerifiersCases(unittest.TestCase):
                              (name, d))
 
 
+class TheThirdVerifiersCases(unittest.TestCase):
+    """A marker that MAKES the stack, and a pad-less part that is none."""
+
+    def _dispose(self, path, refs, **kw):
+        import pose_score
+        st = pose_score.make_state(parse_kicad_pcb(path), path, clearance=0.2)
+        return seeder._dispose_unseated(st, list(refs), **kw)
+
+    def test_a_marker_that_makes_the_stack_is_staged(self):
+        """A on F and C (with FID2) on B share one origin and gate nothing;
+        FID1 unseated there joins A into an F-side group, and the origin
+        gates (check_assembly agrees). FID1 is staged."""
+        parts = [_wide('A'), _wide('C', 'B'), FID_B]
+        with tempfile.TemporaryDirectory() as td:
+            clean = _two_part_board(td, 'clean', parts)
+            stacked = _two_part_board(td, 'stacked', parts + [FID])
+            d = self._dispose(stacked, ['FID1'])
+            v_clean = TheDispositionAsksTheGrader._verdict(None, clean)
+            v_stacked = TheDispositionAsksTheGrader._verdict(None, stacked)
+        self.assertEqual((v_clean, v_stacked), (True, False))
+        self.assertEqual(d['FID1']['refused_by'], ['coincident', 'A'], d)
+
+    def test_one_part_is_staged_whatever_the_names(self):
+        """The part and the marker both unseated: exactly one is staged,
+        whichever name sorts first, and the board no longer gates."""
+        for name in ('A', 'Z'):
+            part = _wide('A').replace('"A"', f'"{name}"').replace(
+                't:A"', f't:{name}"')
+            with tempfile.TemporaryDirectory() as td:
+                path = _two_part_board(td, 'n' + name, [
+                    part, _wide('C', 'B'), FID_B, FID])
+                d = self._dispose(path, [name, 'FID1'])
+            staged = sorted(r for r, v in d.items()
+                            if v['disposition'] == 'staged')
+            self.assertEqual(len(staged), 1, (name, d))
+
+    def test_a_padless_part_is_no_stack_partner(self):
+        """check_assembly's stack rule reads pad-bearing parts only: a logo
+        at A's origin stages nothing."""
+        logo = ('  (footprint "t:LOGO" (layer "F.Cu") (at 20 20 0)\n'
+                '    (property "Reference" "LOGO1" (at 0 0) (layer'
+                ' "F.SilkS"))\n'
+                '    (fp_rect (start -3 -1) (end 3 1) (stroke (width 0.1)'
+                ' (type default)) (layer "F.SilkS")))\n')
+        with tempfile.TemporaryDirectory() as td:
+            path = _two_part_board(td, 'lg', [_wide('A'), logo])
+            d = self._dispose(path, ['A'])
+        self.assertEqual(d['A']['disposition'], 'clear_at_input', d)
+
+
 if __name__ == '__main__':
     unittest.main()

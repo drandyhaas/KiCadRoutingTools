@@ -1139,14 +1139,24 @@ def _stack_conflict(stacks, ref, absent):
     on a group it is not in)."""
     from .placement_state import coincident_stack_suspects
     for st in stacks or ():
-        if ref not in st['refs'] or st['markers'].get(ref):
+        if ref not in st['refs']:
             continue
         present = [r for r in st['refs'] if r == ref or r not in absent]
         sus = coincident_stack_suspects(present, st['sides'], st['markers'])
-        if ref in sus:
-            other = next(r for r in sus
-                         if r != ref and not st['markers'][r])
-            return ('coincident', other)
+        if ref not in sus:
+            continue
+        # A MARKER (fiducial, mounting hole, testpoint) is co-located by
+        # design, so it conflicts only when it is what makes the origin
+        # gate: a drilled mounting hole joins an F part and a B part into
+        # one stack neither forms alone (the 79cfc025 verifier: A on F, C
+        # on B, an unseated H1 between them was left, and the written board
+        # failed COINCIDENT ORIGINS).
+        if st['markers'][ref] and coincident_stack_suspects(
+                [r for r in present if r != ref], st['sides'],
+                st['markers']):
+            continue
+        other = next(r for r in sus if r != ref and not st['markers'][r])
+        return ('coincident', other)
     return None
 
 
@@ -7765,10 +7775,12 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                 body_model):
             repaired[:] = [x for x in repaired if x != r]
             # Once per ref: one already counted unrepairable (or failed) is
-            # not ALSO unresolved (phase-4 verifier: 6 violators read as
-            # 4 repaired + 2 unresolved + 3 unrepairable).
-            if r not in unresolved and r not in failed \
-                    and r not in unrepairable:
+            # reported there with its reason, not ALSO as unresolved -- no
+            # entry, no claim, no note (phase-4 verifier: 6 violators read
+            # as 4 repaired + 2 unresolved + 3 unrepairable).
+            if r in failed or r in unrepairable:
+                continue
+            if r not in unresolved:
                 unresolved.append(r)
             unresolved_claims.setdefault(r, [])
             if 'courtyard_blocking' not in unresolved_claims[r]:
