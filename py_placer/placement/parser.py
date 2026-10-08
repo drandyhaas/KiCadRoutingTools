@@ -264,8 +264,11 @@ _OUTLINE_COVER_TOL_MM = 1e-3
 #: KiCad's own courtyard chaining epsilon (`BuildCourtyardCaches`, 0.02 mm):
 #: a drawing it closes is a courtyard it tests pins against, and one this
 #: called open read `courtyard_malformed` and gated nothing (fa10 P1 verifier:
-#: glasgow J4's 8 um corner gap, which kicad-cli closes; synthetic gaps of
-#: 15 and 19 um close in KiCad, 30 um does not).
+#: synthetic gaps of 15 and 19 um close in KiCad, 30 um does not). A drawing
+#: joined at this distance is also ACCEPTED at it (`tol` below): judged at
+#: `_OUTLINE_COVER_TOL_MM`, the joined shape's moved corner always failed,
+#: which is how glasgow J4's 8 um corner gap read open while kicad-cli
+#: closes it.
 _OUTLINE_JOIN_MM = 0.02
 OUTLINE_POLYGON = 'polygon'
 OUTLINE_HULL = 'hull'
@@ -409,26 +412,6 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         return float(shapely.distance(shape, shapely.points(pts)).max()
                      ) <= tol
 
-    def joined(segs):
-        """`segs` with every end within `_OUTLINE_JOIN_MM` of an earlier end
-        moved onto it -- the join KiCad's chaining makes. (Snapping a drawing
-        onto ITSELF, which this replaced, snapped each end to its own vertex
-        and closed no corner gap at all.)"""
-        reps: list = []
-
-        def rep(p):
-            for q in reps:
-                if math.hypot(p[0] - q[0], p[1] - q[1]) <= _OUTLINE_JOIN_MM:
-                    return q
-            reps.append(p)
-            return p
-        out = []
-        for ln in segs:
-            a, b = rep(tuple(ln.coords[0])), rep(tuple(ln.coords[-1]))
-            if a != b:
-                out.append(LineString((a, b)))
-        return out
-
     compose = _nested_even_odd if even_odd else unary_union
     out: Dict[str, tuple] = {}
     for side in set(verts) | set(areas):
@@ -442,22 +425,21 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         if pts and lines.get(side) and not covers(shape, pts):
             # Ends that miss each other by a few microns (ulx3s BAT1's
             # courtyard, glasgow J4's 8 um corner: KiCad closes them, a
-            # strict join does not): join the ends within `_OUTLINE_JOIN_MM`,
-            # then also snap ends onto segments (a T that falls short), and
-            # polygonise again before settling for the hull. A joined
-            # drawing covers its vertices to within the join distance.
+            # strict join does not): snap the drawing onto itself at
+            # `_OUTLINE_JOIN_MM` -- an end within it of another segment
+            # moves onto it -- and polygonise again before settling for the
+            # hull. The snapped drawing covers its vertices to within the
+            # join distance, and is judged at that distance.
             import shapely
             from shapely.geometry import MultiLineString
-            ends = joined(lines[side])
-            ml = MultiLineString([list(ln.coords) for ln in ends])
-            for cand_lines in (ends, shapely.snap(ml, ml, _OUTLINE_JOIN_MM)):
-                retry = list(areas.get(side, [])) + list(
-                    polygonize(unary_union(cand_lines)))
-                if retry:
-                    cand = compose(retry)
-                    if covers(cand, pts, _OUTLINE_JOIN_MM):
-                        shape, tol = cand, _OUTLINE_JOIN_MM
-                        break
+            ml = MultiLineString([list(ln.coords) for ln in lines[side]])
+            snapped = shapely.snap(ml, ml, _OUTLINE_JOIN_MM)
+            retry = list(areas.get(side, [])) + list(
+                polygonize(unary_union(snapped)))
+            if retry:
+                cand = compose(retry)
+                if covers(cand, pts, _OUTLINE_JOIN_MM):
+                    shape, tol = cand, _OUTLINE_JOIN_MM
         if pts and not covers(shape, pts, tol):
             from shapely.geometry import MultiPoint
             shape, how = MultiPoint(pts).convex_hull, OUTLINE_HULL

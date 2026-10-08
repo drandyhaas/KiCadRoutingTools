@@ -758,7 +758,7 @@ class TheRoundThreeCases(unittest.TestCase):
     a board where they bind, the array check on the grade ladder, a charged
     ref that cannot move."""
 
-    def _differential(self, board, offs, tight_zones):
+    def _differential(self, board, offs, tight_zones, rots=None):
         import contextlib
         import pose_score
         from placement import floorplan, seeder
@@ -801,7 +801,9 @@ class TheRoundThreeCases(unittest.TestCase):
         for ref in grew:
             p0, p1 = s0.parts[ref], s1.parts[ref]
             ex = everyone - {ref}
-            for rot in (p0.rot, (p0.rot + 90) % 360):
+            near = s1._edges_near(ref) if s1.edge_gate.active else None
+            rings = s1._owned_rings(ref)
+            for rot in (rots or (p0.rot, (p0.rot + 90) % 360)):
                 for dx, dy in offs:
                     x, y = p0.x + dx, p0.y + dy
                     n += 1
@@ -813,8 +815,18 @@ class TheRoundThreeCases(unittest.TestCase):
                             'fixed': [seeder._fixed_pose_check(
                                 s, ref, (x, y, rot), {})[0]
                                 for s in (s0, s1)]}
-                        edged += s1.edge_gate.active and bool(
-                            s1.edge_gate.rect_blocked(p1.rect(x, y, rot)))
+                        # A CONTESTED sample: the occupancy crosses the
+                        # outline, the grade rect does not, and the unarmed
+                        # search admits the pose -- where reading the wrong
+                        # rect would show.
+                        edged += bool(
+                            near and got['candidate_valid'][0]
+                            and s1.edge_gate.rect_blocked(
+                                p1.rect(x, y, rot), edges=near,
+                                skip_rings=rings)
+                            and not s1.edge_gate.rect_blocked(
+                                p1.grade_rect(x, y, rot), edges=near,
+                                skip_rings=rings))
                         z = zone_of.get(ref)
                         if z is not None:
                             tol = intent.zone_tolerance(z)
@@ -827,18 +839,30 @@ class TheRoundThreeCases(unittest.TestCase):
                             bad.append((ref, x, y, rot, k, a, b))
         return bad, n, zoned, edged
 
-    def test_watchy_outline_and_tight_zones(self):
-        """watchy's outline gate is ACTIVE and its grown parts sit near the
-        rim (the occupancy is blocked where the grade rect is not); the
-        zones are each part's own grade rect plus 0.8 mm."""
+    def test_watchy_outline(self):
+        """watchy's outline gate is ACTIVE: its buttons SW1-SW4 sit by the
+        round rim, where a 1 mm grid at every rotation finds poses whose
+        occupancy crosses the outline and whose grade rect does not. The
+        two states must still agree there."""
+        offs = [(float(dx), float(dy)) for dx in range(-4, 5)
+                for dy in range(-4, 5)]
+        bad, n, _zoned, edged = self._differential(
+            os.path.join(ROOT, 'kicad_files', 'watchy.kicad_pcb'), offs,
+            tight_zones=False, rots=(0.0, 90.0, 180.0, 270.0))
+        self.assertGreater(edged, 10, 'too few contested samples: the '
+                                      'outline leg would be vacuous')
+        self.assertEqual(bad[:10], [], f'{len(bad)} of {n} samples')
+
+    def test_watchy_tight_zones(self):
+        """Each grown part's zone is its own grade rect plus 0.8 mm: the
+        grade rect fits at every sampled offset, the occupancy often does
+        not."""
         offs = [(dx * 0.3, dy * 0.3) for dx in range(-2, 3)
                 for dy in range(-2, 3)]
-        bad, n, zoned, edged = self._differential(
+        bad, n, zoned, _edged = self._differential(
             os.path.join(ROOT, 'kicad_files', 'watchy.kicad_pcb'), offs,
             tight_zones=True)
         self.assertGreater(zoned, 50)
-        self.assertGreater(edged, 0, 'no sample puts an occupancy rect on '
-                                     'the rim: the outline leg is vacuous')
         self.assertEqual(bad[:10], [], f'{len(bad)} of {n} samples')
 
     def test_the_array_check_reads_the_grade_ladder(self):
