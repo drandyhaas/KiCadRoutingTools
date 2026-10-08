@@ -210,6 +210,30 @@ class AFixedPoseOnTheGradersGeometry(unittest.TestCase):
         self.assertAlmostEqual(got[True], 1.0, places=3)
         self.assertEqual(got[False], 0.0)
 
+    def test_armed_a_drawn_courtyard_is_still_the_courtyard(self):
+        """#1054 under --body-model: X and Y draw courtyards 0.2 mm apart,
+        and X's pad reaches 0.4 mm past its own -- into Y's courtyard. KiCad
+        judges the drawn courtyards (clear); only a courtyard-LESS part is
+        screened on its occupancy."""
+        import pose_score
+        from placement import seeder
+
+        def part(ref, x, pad_x):
+            return (f'  (footprint "t:C" (layer "F.Cu") (at {x} 10)\n'
+                    f'    (property "Reference" "{ref}" (at 0 0) (layer'
+                    f' "F.SilkS"))\n'
+                    f'    (fp_rect (start -1 -1) (end 1 1) (stroke (width'
+                    f' 0.05) (type default)) (layer "F.CrtYd"))\n'
+                    f'    (pad "1" smd rect (at {pad_x} 0) (size 0.6 0.6)'
+                    f' (layers "F.Cu") (net 1 "N1")))\n')
+        with tempfile.TemporaryDirectory() as td:
+            path = _write(td, 'c', [part('X', 10, 1.1), part('Y', 12.2, 0)])
+            st = pose_score.make_state(parse_kicad_pcb(path), path,
+                                       clearance=0.2, body_model=True)
+            area = seeder._courtyard_overlap(
+                st, 'X', (10.0, 10.0, 0.0), 'Y', (12.2, 10.0, 0.0))[0]
+        self.assertEqual(area, 0.0)
+
 
 class ArmedOnlyMovesTheNeighbourCurrency(unittest.TestCase):
 

@@ -111,7 +111,10 @@ ROWS = [
     ('a-declared-pose-drops-the-drawn-courtyard', 'leg',
      "    if lb is None or (courtyard_less_only and lb.from_courtyard):",
      "    if lb is None:",
-     (os.path.join(_TESTS, 'test_1051_hardening.py'),), 'KILLED'),
+     # Armed only since the phase-4 verifier (the unarmed screen is the
+     # search's rects), so test_1051_hardening's unarmed case no longer
+     # reaches it.
+     (T1182, os.path.join(_TESTS, 'test_1051_hardening.py')), 'KILLED'),
     ('the-warning-names-every-part', 'pa',
      "                       if sources.get(r) not in (None, 'pad_bbox'))",
      "                       if False)",
