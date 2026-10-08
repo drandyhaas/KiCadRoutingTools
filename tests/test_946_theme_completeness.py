@@ -206,8 +206,9 @@ def test_the_refusals_are_armed():
         fail('theme("chartreuse") was accepted in strict mode')
     except ValueError:
         pass
-    if RT.theme('chartreuse', strict=False) is not RT.THEMES['dark']:
-        fail('lenient resolution did not fall back to dark')
+    if RT.theme('chartreuse', strict=False) is not             RT.THEMES[RT.DEFAULT_THEME_NAME]:
+        fail('lenient resolution did not fall back to the default (%s)'
+             % RT.DEFAULT_THEME_NAME)
     if not _FAIL:
         print('  PASS: 5 refusals armed (3 malformed themes, 2 name modes)')
 
@@ -280,7 +281,8 @@ def test_layer_palette_matches_route_renders_assignment():
             fail('layer_palette differs on %d layers: %s vs %s'
                  % (len(st), a, b))
             return
-        if a['F.Cu'] != RT.DARK.layers[0] or a.get('B.Cu') != RT.DARK.layers[1]:
+        _d = RT.default_theme()          # None-theme = the configured one
+        if a['F.Cu'] != _d.layers[0] or a.get('B.Cu') != _d.layers[1]:
             fail('F.Cu/B.Cu are not slots 0 and 1 on a %d-layer stack'
                  % len(st))
             return
@@ -290,10 +292,10 @@ def test_layer_palette_matches_route_renders_assignment():
 def test_the_film_chrome_reads_the_active_theme():
     """#946/C4: the last DARK literals in the film path are gone.
 
-    `make_film._card_frame` and `_badge`, the iso panel (`iso_panel`,
-    `stack`) and the run clock (`cmd_timing.add_clock_band`) each drew in
-    DARK whatever `--theme` said, so a light film carried dark cards, a dark
-    iso slab and a dark clock band. Asserted by PIXEL on each, under LIGHT --
+    `make_film._card_frame` and `_badge` and the run clock
+    (`cmd_timing.add_clock_band`) each drew in DARK whatever `--theme` said,
+    so a light film carried dark cards and a dark clock band. (The iso panel
+    this also checked was retired with every film layout but stage3d.) Asserted by PIXEL on each, under LIGHT --
     and by source for `make_film`, whose module must not bind DARK at all."""
     _mark = len(_FAIL)
     try:
@@ -303,7 +305,6 @@ def test_the_film_chrome_reads_the_active_theme():
         return
     import cmd_timing
     import make_film
-    import movie_panels
     L, D = RT.theme('light'), RT.theme('dark')
     card = make_film._card_frame((200, 120), None, 'x', theme='light')
     if card.getpixel((5, 5)) != L.rgb('chrome_panel'):
@@ -314,16 +315,6 @@ def test_the_film_chrome_reads_the_active_theme():
     if fr.getpixel((0, 0)) != L.rgb('status_tried'):
         fail('a light badge is %r, not LIGHT status_tried %r'
              % (fr.getpixel((0, 0)), L.rgb('status_tried')))
-    pan, _err = movie_panels.iso_panel((160, 100), None, 'cap',
-                                       theme='light')
-    if pan.getpixel((5, 5)) != L.rgb('chrome_panel'):
-        fail('a light iso panel ground is %r' % (pan.getpixel((5, 5)),))
-    if pan.getpixel((5, 98)) != L.rgb('chrome_strip'):
-        fail('a light iso caption strip is %r' % (pan.getpixel((5, 98)),))
-    st = movie_panels.stack(Image.new('RGB', (40, 10)),
-                            Image.new('RGB', (40, 10)), theme='light')
-    if st.size != (40, 20):
-        fail('stack changed shape: %r' % (st.size,))
     band = cmd_timing.add_clock_band(Image.new('RGB', (120, 40)),
                                      ['t 0:01'], 30, theme='light')
     if band.getpixel((119, 69)) != L.rgb('chrome_band'):
@@ -337,7 +328,7 @@ def test_the_film_chrome_reads_the_active_theme():
     if 'DARK as _TH' in src or 'import DARK' in src:
         fail('make_film still binds DARK')
     if len(_FAIL) == _mark:
-        print('  PASS: cards, badges, iso panel and clock band draw in the '
+        print('  PASS: cards, badges and clock band draw in the '
               'active theme')
 
 

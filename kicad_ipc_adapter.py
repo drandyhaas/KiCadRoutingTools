@@ -1136,6 +1136,8 @@ def apply_planes_results(board, *, pcb_data,
 def apply_oracle_reconnect(board, *, nets, config, pcb_data,
                            track_via_clearance, hole_to_hole_clearance,
                            progress_callback=None,
+                           net_clearances_by_name=None,
+                           net_widths_by_name=None,
                            message: str = "KiCadRoutingTools: oracle reconnect") -> dict:
     """GUI/stress parity (#364): run the kicad-oracle recheck the CLI plane
     repair front runs on its written output, against a temp snapshot of the
@@ -1146,8 +1148,16 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
     kicad-cli reports missing, then adds the returned segments/vias. Net names
     come from pcb_data (kipy assigns nets by name). Best-effort: returns {} and
     skips quietly when kicad-cli is unavailable or anything fails. The IPC
-    analogue of the SWIG planes tab's temp-save + PCB_TRACK/PCB_VIA apply."""
-    from kicad_oracle import oracle_reconnect, find_kicad_cli
+    analogue of the SWIG planes tab's temp-save + PCB_TRACK/PCB_VIA apply.
+
+    `net_clearances_by_name` (#1137) and `net_widths_by_name` (#1133) are the
+    engine run's resolved class map and per-net width maps keyed by net NAME
+    (kicad_oracle.oracle_net_widths_by_name): the snapshot numbers its nets
+    afresh, so an id-keyed map would land on other nets, and the oracle
+    re-keys them onto each parse. For the same reason the oracle hands its
+    copper back on pcb_data's ids (`net_ids_by_name`), which `name_for` below
+    reads -- the SWIG front's run_kicad_oracle_on_live_board does the same."""
+    from kicad_oracle import oracle_reconnect, find_kicad_cli, oracle_net_ids_by_name
     from routing_utils import pos_key
     import os
     import tempfile
@@ -1187,7 +1197,11 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
             project_from=_proj_from,
             track_via_clearance=track_via_clearance,
             hole_to_hole_clearance=hole_to_hole_clearance,
-            progress_callback=progress_callback)
+            progress_callback=progress_callback,
+            net_clearances_by_name=net_clearances_by_name,
+            net_widths_by_name=net_widths_by_name,
+            net_ids_by_name=(oracle_net_ids_by_name(pcb_data.nets)
+                             if pcb_data is not None else None))
     finally:
         try:
             os.unlink(tmp)

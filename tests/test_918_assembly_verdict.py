@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """`board_score`'s assembly component must read the VERDICT, not one conjunct (#918).
 
-`check_assembly` decides NOT BUILDABLE on five conjuncts
+`check_assembly` decides NOT BUILDABLE on seven conjuncts
 (`py_tools/check_assembly.py`)::
 
     not_buildable = bool(g['blocking'] or locked_contact or stack_groups
                          or g['containment_blocking']
-                         or courtyard_gating)
+                         or courtyard_gating or off_outline_pads or mating)
 
-`blocking` is the FIRST of them and means "pad intersections". `board_score`'s
+(the last two since #1096 and #1098). `blocking` is the FIRST of them and means "pad intersections". `board_score`'s
 `score_assembly` read that scalar alone and accepted `rc in (0, 4)`, so a board
 that is unbuildable through any of the other four contributed **0** to the
 number the whole placement/routing loop ranks and stops on.
@@ -216,7 +216,8 @@ def main():
         r = board_score.assembly_component(
             {'blocking': 0, 'buildable': False, 'verdict': 'NOT BUILDABLE',
              'locked_contacts': 0, 'coincident_origins': 3,
-             'containment_blocking': 5, 'courtyard_blocking_gating': None}, 4)
+             'containment_blocking': 5, 'courtyard_blocking_gating': None,
+             'oob_pad_copper_gating_count': 0, 'mating_keepout_count': 0}, 4)
         check('count is 1, not 8', r.get('count') == 1,
               f"count={r.get('count')!r} basis={r.get('count_basis')!r}")
         check('...and the basis says WHY it is not a sum',
@@ -261,10 +262,14 @@ def main():
               r.get('conjuncts_fired') == ['coincident_origins'],
               f"fired={r.get('conjuncts_fired')!r}")
 
-        print('the two conjuncts that can REALLY fire at blocking 0 are named')
+        # #1096 made pad copper off the outline the third, #1098 a part on a
+        # plug's mating region the fourth.
+        print('the four conjuncts that can REALLY fire at blocking 0 are '
+              'named')
         check('locked_contacts and courtyard gating are not among them',
               tuple(board_score.ASSEMBLY_LIVE_CONJUNCTS)
-              == ('coincident_origins', 'containment_blocking'),
+              == ('coincident_origins', 'containment_blocking',
+                  'oob_pad_copper_gating_count', 'mating_keepout_count'),
               repr(board_score.ASSEMBLY_LIVE_CONJUNCTS))
         r = board_score.assembly_component(
             {'blocking': 0, 'buildable': False, 'verdict': 'NOT BUILDABLE',
@@ -279,6 +284,7 @@ def main():
             {'blocking': 0, 'buildable': True, 'verdict': 'buildable',
              'locked_contacts': 0, 'coincident_origins': 0,
              'containment_blocking': 0, 'courtyard_blocking_gating': 0,
+             'oob_pad_copper_gating_count': 0, 'mating_keepout_count': 0,
              'courtyard_gating_basis': 'moved-vs-baseline'}, 0)
         check('a doc produced WITH --baseline reports the conjunct as armed',
               r.get('courtyard_gating_armed') is True

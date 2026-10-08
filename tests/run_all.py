@@ -14,6 +14,13 @@ Usage:
     python3 tests/run_all.py --list          # print classification, run nothing
     python3 tests/run_all.py --timeout 300   # per-test timeout (seconds)
     python3 tests/run_all.py -j 1            # serial (default runs 4 in parallel)
+    python3 tests/run_all.py --shard 3/50    # one of 50 duration-balanced slices
+    python3 tests/run_all.py --durations-out d.json   # per-test wall seconds
+
+A `--shard` run ends with a `DURATIONS: {...}` line (wall seconds of each
+test that passed or timed out); tests/stress/modal_suite/run_all_modal.py
+--write-durations gathers those into tests/run_all_durations.json, which
+`--shard` balances on once it is committed.
 
 A test is "integration" (slow; skipped by --fast) if its source shells out --
 it imports run_utils or uses subprocess. That auto-classification needs no
@@ -27,6 +34,7 @@ temp dir). Run a single test directly to keep its temp output for a look.
 """
 import argparse
 import glob
+import json
 import os
 import re
 import shutil
@@ -85,6 +93,43 @@ SKIP_EXIT = 77
 _BUDGET_RE = re.compile(r'^RUN_ALL_TIMEOUT\s*=\s*([0-9.]+)', re.M)
 
 
+#: A test may declare `RUN_ALL_PARTS = N` (read from the source, like
+#: RUN_ALL_TIMEOUT): it then runs as N units, `name.py[i/N]`, each invoked
+#: with `--part i/N` under the test's own budget, and they shard like any
+#: other test. It is for a test of independent rows whose length alone sets
+#: the floor of every fan-out: test_placement_ab ran 2364 s of a 2405 s
+#: slowest shard, against a 194 s mean over 50.
+_PARTS_RE = re.compile(r'^RUN_ALL_PARTS\s*=\s*([0-9]+)', re.M)
+# Joins a file to its part in a unit; no path contains it.
+_PART_SEP = '::'
+
+
+def _declared_parts(path):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            m = _PARTS_RE.search(f.read())
+    except OSError:
+        return 1
+    return max(1, int(m.group(1))) if m else 1
+
+
+def unit_file(unit):
+    """The test file a unit runs."""
+    return unit.split(_PART_SEP, 1)[0]
+
+
+def unit_name(unit):
+    """What a unit is called in every line, summary and durations table."""
+    f, _, part = unit.partition(_PART_SEP)
+    return os.path.basename(f) + (f'[{part}]' if part else '')
+
+
+def unit_argv(unit):
+    """The arguments a unit's test is run with."""
+    _, _, part = unit.partition(_PART_SEP)
+    return ['--part', part] if part else []
+
+
 def _declared_budget(path, default):
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
@@ -113,12 +158,66 @@ def discover(filters):
             continue
         if filters and not any(term in os.path.basename(f) for term in filters):
             continue
-        out.append(f)
+        n = _declared_parts(f)
+        out.extend([f] if n == 1 else
+                   [f'{f}{_PART_SEP}{i}/{n}' for i in range(n)])
     return out
 
 
-def shard(tests, index, count):
+#: Measured per-test wall seconds, {file name: seconds}, from a fan-out run
+#: (run_all_modal.py --write-durations). Read by `shard`; regenerate it when
+#: the suite's cost shape moves -- a stale entry only makes a shard a little
+#: less even, never wrong.
+DURATIONS_FILE = os.path.join(TESTS_DIR, 'run_all_durations.json')
+
+
+def load_durations(path=DURATIONS_FILE):
+    """{test file name: seconds}, or {} when there is no usable table."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: float(v) for k, v in data.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
+def estimated_costs(tests, durations, fast=False):
+    """{test path: seconds} for balancing. A test the table knows costs what
+    it measured; one it does not is priced at the median of the known tests
+    of its kind (integration or unit), or of all known tests when its kind has
+    none. Under --fast an integration test is skipped, so it costs 0 -- pricing
+    it would pile the unit tests onto whichever shards drew no heavy ones."""
+    kind = {f: is_integration(unit_file(f)) for f in tests}
+    known = {True: [], False: []}
+    for f in tests:
+        name = unit_name(f)
+        if name in durations:
+            known[kind[f]].append(durations[name])
+
+    def median(xs):
+        xs = sorted(xs)
+        return xs[len(xs) // 2] if xs else 1.0
+    fallback = {k: median(v or known[True] + known[False]) for k, v in known.items()}
+    return {f: (0.0 if fast and kind[f] else
+                durations.get(unit_name(f), fallback[kind[f]]))
+            for f in tests}
+
+
+def shard(tests, index, count, durations=None, fast=False):
     """The `index`-th of `count` disjoint slices of `tests` (0-based index).
+
+    With a `durations` table ({file name: seconds}) the slices are BALANCED:
+    longest first, each test onto the shard with the least time so far (LPT).
+    The wall-clock of a fan-out is its slowest shard, and a strided split
+    measured 2462 s on one shard against a 195 s mean, because cost is nothing
+    like uniform across files. A test the table does not know is priced at the
+    median of the known tests of its kind (integration or unit). Deterministic:
+    ties go to the lowest shard index, tests are taken in (-seconds, name)
+    order, and each shard lists its tests by name. Without a table it is the
+    strided split below.
 
     STRIDED (`tests[index::count]`), not contiguous blocks, and that is the
     whole point: `discover` returns the list SORTED BY NAME, so adjacent
@@ -135,7 +234,17 @@ def shard(tests, index, count):
     50-way fan-out over 30 files must report 20 empty shards green rather
     than failing 20 times.
     """
-    return tests[index::count]
+    if not durations:
+        return tests[index::count]
+    cost = estimated_costs(tests, durations, fast)
+    loads = [0.0] * count
+    mine = []
+    for f in sorted(tests, key=lambda f: (-cost[f], unit_name(f))):
+        j = min(range(count), key=lambda k: (loads[k], k))
+        loads[j] += cost[f]
+        if j == index:
+            mine.append(f)
+    return sorted(mine)
 
 
 def _parse_shard(spec):
@@ -172,6 +281,13 @@ def main():
                     help='run only the I-th of N disjoint slices (0-based), '
                          'for fanning the suite out across machines; see '
                          'tests/stress/modal_suite/run_all_modal.py')
+    ap.add_argument('--shard-by', choices=('time', 'stride'), default='time',
+                    help='time (default): balance the slices on the measured '
+                         'durations in tests/run_all_durations.json (stride '
+                         'when there is none); stride: every N-th file by name')
+    ap.add_argument('--durations-out', metavar='FILE', default=None,
+                    help='also write this run\'s per-test wall seconds (passed '
+                         'and timed-out tests) as JSON')
     args = ap.parse_args()
 
     tests = discover(args.filters)
@@ -182,10 +298,15 @@ def main():
     if args.shard is not None:
         _i, _n = args.shard
         _all = len(tests)
-        tests = shard(tests, _i, _n)
+        _table = load_durations() if args.shard_by == 'time' else {}
+        tests = shard(tests, _i, _n, _table, fast=args.fast)
         # Announced on its own line so a shard's log says what it covered --
-        # an aggregating driver that mis-sharded is otherwise invisible.
-        print(f'shard {_i}/{_n}: {len(tests)} of {_all} test file(s)')
+        # an aggregating driver that mis-sharded is otherwise invisible -- and
+        # how it was cut: the same index over a different table is a
+        # different slice.
+        print(f'shard {_i}/{_n}: {len(tests)} of {_all} test file(s), '
+              + (f'balanced on {len(_table)} measured durations'
+                 if _table else 'strided by name'))
         if not tests:
             # NOT the 'No tests matched' error above: more shards than files
             # is a legitimate fan-out, and this shard passing vacuously is the
@@ -199,17 +320,17 @@ def main():
 
     if args.list:
         for f in tests:
-            kind = 'integration' if is_integration(f) else 'unit'
-            print(f'{kind:12s} {os.path.basename(f)}')
+            kind = 'integration' if is_integration(unit_file(f)) else 'unit'
+            print(f'{kind:12s} {unit_name(f)}')
         print(f'\n{len(tests)} tests '
-              f'({sum(is_integration(f) for f in tests)} integration).')
+              f'({sum(is_integration(unit_file(f)) for f in tests)} integration).')
         return 0
 
     passed, failed, skipped = [], [], []
     to_run = []
     for f in tests:
-        name = os.path.basename(f)
-        if args.fast and is_integration(f):
+        name = unit_name(f)
+        if args.fast and is_integration(unit_file(f)):
             skipped.append(name)
             print(f'SKIP  {name}  (integration; --fast)')
             continue
@@ -233,13 +354,23 @@ def main():
     # build deep trees (git object stores, run/board/stage dirs) under TEMP.
     scratch_root = tempfile.mkdtemp(prefix='krt_')
 
+    durations = {}
+
     def run_one(f):
-        name = os.path.basename(f)
-        budget = _declared_budget(f, args.timeout)
+        name = unit_name(f)
+        budget = _declared_budget(unit_file(f), args.timeout)
         tdir = tempfile.mkdtemp(prefix='t', dir=scratch_root)
         env = dict(os.environ, TMPDIR=tdir, TEMP=tdir, TMP=tdir)
+        t_start = time.time()
         try:
-            return _run_test(f, name, budget, env)
+            result = _run_test(f, name, budget, env)
+            # Only a test that ran to the end, or to its budget, says what it
+            # COSTS: a failure or a self-skip can stop in a second and would
+            # price the test as cheap.
+            ok = result[1]
+            if ok is True or (isinstance(ok, tuple) and ok and ok[0] == 'timeout'):
+                durations[name] = round(time.time() - t_start, 1)
+            return result
         finally:
             _rmtree_scratch(tdir)
 
@@ -252,7 +383,8 @@ def main():
             # threading traceback and NO summary, which reads as "the tests
             # crashed" rather than "the runner cannot read them". Every other
             # subprocess call in this repo already pins utf-8 + replace.
-            r = subprocess.run([sys.executable, '-X', 'utf8', f], cwd=ROOT,
+            r = subprocess.run([sys.executable, '-X', 'utf8', unit_file(f)]
+                               + unit_argv(f), cwd=ROOT,
                                capture_output=True, text=True,
                                encoding='utf-8', errors='replace',
                                timeout=budget, env=env)
@@ -354,6 +486,14 @@ def main():
             else f'{n} (at {b:.0f}s)' for n, b in timed_out))
         print('  A timeout is not evidence of a broken test. Re-run each one '
               'alone (or raise --timeout) before recording it as a failure.')
+    # Per-test wall seconds, for balancing shards: one line, after the
+    # summary, on a SHARD's run only (run_all_modal.py always passes --shard
+    # and collects it); a full local run would print ~30 KB of it.
+    if args.shard is not None:
+        print('DURATIONS: ' + json.dumps(dict(sorted(durations.items()))))
+    if args.durations_out:
+        with open(args.durations_out, 'w', encoding='utf-8') as f:
+            json.dump(dict(sorted(durations.items())), f, indent=0)
     return 1 if (failed or timed_out) else 0
 
 

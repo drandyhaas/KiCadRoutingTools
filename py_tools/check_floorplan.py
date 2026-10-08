@@ -112,6 +112,22 @@ def build_parser():
                         'labelled an observed regression baseline; a pile '
                         'records why in context.decap_census.auto_withheld '
                         'rather than a limit of 0.0 (#959)')
+    p.add_argument('--decaps-from', default=None, metavar='BOARD',
+                   help='with --emit-intent: derive decaps.max_distance_mm '
+                        'from this PLACED reference board of the same design '
+                        '(a human layout, an earlier placement) instead of '
+                        'the board being emitted -- the way to arm the decap '
+                        'rule on a pile, where nothing can be read (#1099). '
+                        'Same derivation and withholding as --declare-decaps; '
+                        'the census records decaps_basis reference:<file>. '
+                        'Also derives decaps.max_pin_distance_mm (supply pin '
+                        'to nearest cap, #1102) and lists the caps the '
+                        'reference keeps inside the search radius '
+                        '(decaps.within_radius_refs, #1142): such a cap left '
+                        'beyond the radius is a decap_ungraded ERROR, per '
+                        'cap, while a cap the reference itself keeps beyond '
+                        'stays a warn. Overrides the '
+                        '--*declare-decaps arms')
     p.add_argument('--declare-decaps', dest='declare_decaps',
                    action='store_const', const='strict',
                    help='with --emit-intent: ALSO derive decaps.'
@@ -218,6 +234,87 @@ def build_parser():
     # on the parser instead.
     p.set_defaults(declare_decaps=DECLARE_DECAPS_DEFAULT)
     return p
+
+
+def _seeder_forecast(doc, pcb, board, sources):
+    """#1105: `seeder.decap_pin_forecast` on the emitted document, with the
+    parts place_seed leaves standing when it is run without `--force`:
+    file-locked parts, and on a partially-unplaced board everything outside
+    the pile it seeds (place_seed's own rule, `stacked_suspect_refs`)."""
+    from placement import seeder
+    from placement.floorplan import resolve_blocks
+    from placement.placement_state import assess_placement
+    try:
+        intent = intent_from_dict(doc, board)
+        blocks, _probs = resolve_blocks(intent, pcb, sources or ())
+    except IntentError as exc:
+        return {'unavailable': str(exc)}
+    standing = set((doc.get('context') or {}).get('file_locked') or ())
+    st = assess_placement(pcb, board)
+    partial = bool(st.partially_unplaced and not st.unplaced)
+    if partial:
+        standing |= set(pcb.footprints) - set(st.stacked_suspect_refs)
+    out = seeder.decap_pin_forecast(pcb, intent, blocks,
+                                    standing=sorted(standing))
+    out['standing'] = sorted(standing)
+    # `--force` re-seeds every unlocked part, so the parts a partial pile
+    # leaves standing are only standing without it (file locks survive it).
+    out['standing_needs_no_force'] = partial
+    return out
+
+
+def _forecast_clause(cen):
+    """#1105: the tail of the emitter's decap line -- what place_seed's pin
+    stages can claim from this intent, by stage, and what they never can.
+    Falls back to the census's scope count when no forecast was taken."""
+    f = cen.get('seeder_forecast') or {}
+    if not f or 'unavailable' in f:
+        return (f" and will seat up to {cen.get('seeder_pin_scope')} cap(s) "
+                f"per supply pin instead of zone-packing them"
+                + (f" (seeder forecast unavailable: {f['unavailable']})"
+                   if f else ''))
+
+    def _refs(xs, n=8):
+        xs = list(xs)
+        return ', '.join(xs[:n]) + (f", +{len(xs) - n} more" if len(xs) > n
+                                    else '')
+
+    early, late = f.get('early') or [], f.get('late') or []
+    armed = bool(f.get('late_armed'))
+    head = (f" and can claim up to {len(early) + (len(late) if armed else 0)} "
+            f"of {f.get('scope')} cap(s) in scope at a supply pin instead of "
+            f"zone-packing them")
+    parts = []
+    if early:
+        parts.append(f"{len(early)} at stage 2.5, at owner IC(s) seated "
+                     f"before it ({_refs(f.get('early_owners') or ())}) if "
+                     f"those seats succeed"
+                     + (" and place_seed runs without --force"
+                        if f.get('standing_needs_no_force') else ''))
+    if late and armed:
+        parts.append(f"{len(late)} at stage 3.5, once the centroid stage has "
+                     f"seated their owner IC(s) "
+                     f"({_refs(f.get('late_owners') or ())})"
+                     + ('' if early else ' -- no owner IC is seated before '
+                        'stage 2.5 on this board'))
+    out = head + (': ' + ', '.join(parts) if parts else '')
+    if late and not armed:
+        out += (f"; {len(late)} are NOT claimed: their owner IC(s) "
+                f"({_refs(f.get('late_owners') or ())}) are seated only by "
+                f"the centroid stage, after the pin stage (declare them as "
+                f"fixed_poses or in a zoned block to seat them first; "
+                f"place_seed --decap-claim-after-ics claims after them, "
+                f"opt-in -- the corpus A/B rejected it as a default)")
+    if f.get('ownerless'):
+        out += (f"; {len(f['ownerless'])} can never be claimed -- no "
+                f"{f.get('owner_rule', 'U-prefixed')} part carries their "
+                f"rail ({_refs(f['ownerless'])})")
+    if f.get('exempt'):
+        out += f"; {len(f['exempt'])} exempt"
+    if f.get('array_members'):
+        out += (f"; {len(f['array_members'])} are declared array members "
+                f"(the array wins)")
+    return out
 
 
 def _brief_absence_reason(args, brief):
@@ -496,12 +593,21 @@ def main(argv=None):
                         args.board_edge_clearance)[2]
 
     _require_brief_failed = False
+    if args.decaps_from and not args.emit_intent:
+        print("ERROR: --decaps-from derives a limit INTO an emitted intent; "
+              "pass --emit-intent with it", file=sys.stderr)
+        return 2
+    if args.decaps_from and not os.path.isfile(args.decaps_from):
+        print(f"ERROR: --decaps-from {args.decaps_from}: no such board",
+              file=sys.stderr)
+        return 2
     if args.emit_intent:
         try:
             doc = emit_intent(pcb, args.board, group_sources=sources or (),
                               declare_classes=args.declare_classes,
                               derive_decaps=args.declare_decaps,
-                              brief_fragment=brief_fragment or None)
+                              brief_fragment=brief_fragment or None,
+                              decaps_from=args.decaps_from)
         except UntrustworthyOutline as exc:
             print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
             return UNPLACED_EXIT
@@ -596,6 +702,15 @@ def main(argv=None):
                   + ". The emitted intent describes the board as it is, "
                     "including its damage.", file=sys.stderr)
             _require_brief_failed = True
+        # #1105: what the seeder's pin stages CAN claim from THIS document
+        # (merged brief and compiled fixed_poses included), so the printed
+        # promise is the seed's and not the census's.
+        _dcen = (doc.get('context') or {}).get('decap_census')
+        if (isinstance(_dcen, dict)
+                and (doc.get('decaps') or {}).get('max_distance_mm')
+                is not None):
+            _dcen['seeder_forecast'] = _seeder_forecast(doc, pcb, args.board,
+                                                        sources)
         # The file is written BEFORE the --require-brief verdict: the flag
         # says "exit 4 when nothing was declared", not "produce nothing".
         # Returning early left `--emit-intent X --require-brief` with no X at
@@ -611,31 +726,58 @@ def main(argv=None):
                   f"{len(doc['must_lock'])} locked part(s)")
             print(f"  envelope {doc['envelope']['rect']} -- read from the "
                   f"board. The outline is not editable by this toolchain")
+            # #1103: a pile says what it did not read off its poses.
+            _pcw = (doc.get('context') or {}).get('pose_claims_withheld')
+            if _pcw:
+                print(f"  pile: {_pcw['reason']} -- withheld "
+                      f"{', '.join(_pcw['withheld'])} for "
+                      f"{len(_pcw['refs_off_board'])} unlocked part(s) off the board; "
+                      f"kept: {_pcw['kept']}")
             # #704: the decap number and what it COSTS, next to each other.
             cen = (doc.get('context') or {}).get('decap_census') or {}
             lim = (doc.get('decaps') or {}).get('max_distance_mm')
             held = ((doc.get('context') or {}).get('budget_withheld')
                     or {}).get('decaps.max_distance_mm')
             if lim is not None:
+                _src = (f"{cen.get('reference_tethers')} tether(s) on the "
+                        f"reference {os.path.basename(cen['reference_board'])}"
+                        if cen.get('reference_board')
+                        else f"{cen.get('tethers')} tether(s)")
                 print(f"  decaps: max_distance_mm {lim} from "
-                      f"{cen.get('tethers')} tether(s) -- NOTE: place_seed "
-                      f"READS this key and will seat "
-                      f"{cen.get('seeder_pin_scope')} cap(s) per supply pin "
-                      f"instead of zone-packing them")
+                      f"{_src} -- NOTE: place_seed READS this key"
+                      + _forecast_clause(cen))
             elif held:
                 print(f"  decaps: max_distance_mm WITHHELD -- {held}")
+            # #1102: the pin limit --decaps-from derives beside it.
+            _plim = (doc.get('decaps') or {}).get('max_pin_distance_mm')
+            if _plim is not None:
+                _pc = cen.get('reference_pin_census') or {}
+                print(f"  decaps: max_pin_distance_mm {_plim} from "
+                      f"{_pc.get('covered')} supply pin(s) on the reference")
+            elif cen.get('pin_limit_withheld'):
+                print(f"  decaps: max_pin_distance_mm not derived -- "
+                      f"{cen['pin_limit_withheld']}")
             elif cen.get('auto_withheld'):
                 # #959: auto's withholding is kept out of budget_withheld
                 # (no exit change), and printed here so it is not silent.
                 print(f"  decaps: max_distance_mm not derived (auto) -- "
                       f"{cen['auto_withheld']}")
+            # A severity the emit RAISED is said whether or not a pin limit
+            # came with it: it rides on the tether limit, and the esp_prog
+            # fixtures promote with the pin limit withheld (2 covered pins).
+            if cen.get('decap_ungraded_promoted'):
+                print(f"  decaps: decap_ungraded promoted to error -- "
+                      f"{cen['decap_ungraded_promoted']}")
             # The two causes are printed SEPARATELY (#792). One number
             # used to carry both, and the doc explained it with a third
             # cause -- a predicate mismatch -- that measurement says does
             # not exist. A reader cannot act on a conflated count: the
             # first is a grading hole to widen or accept, the second is a
             # design fact about caps that have no IC at all.
-            if cen.get('beyond_radius'):
+            # A limit read off a --decaps-from reference owes nothing to THIS
+            # board's census, so the "not derived from them" line is only
+            # true without one.
+            if cen.get('beyond_radius') and not cen.get('reference_board'):
                 print(f"  decap census: {cen['beyond_radius']} rail-sharing "
                       f"cap(s) lie beyond the {cen['search_radius_mm']}mm "
                       f"search radius (worst {cen['worst_beyond_mm']}mm), "
@@ -714,7 +856,8 @@ def main(argv=None):
                        with_health=args.health, with_roster=True,
                        brief_fragment=brief_fragment or None,
                        mechanical=mech, mechanical_skip=_lost,
-                       reconciliation=_rows)
+                       reconciliation=_rows,
+                       with_pad_stacks=True)
     except UntrustworthyOutline as exc:
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
         print("  Refused rather than graded: with no usable outline every "

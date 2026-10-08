@@ -45,6 +45,7 @@ env.
 import copy as _copy
 import math
 import os
+import awx_settings
 import time as _time
 
 import numpy as np
@@ -53,7 +54,7 @@ from kicad_parser import Segment
 import topo_strings as ts
 import taut_fast as tf
 
-DEBUG = os.environ.get('BRAID_PACK_DEBUG') == '1'
+DEBUG = awx_settings.get('BRAID_PACK_DEBUG') == '1'
 # PK_* environment overrides (PK_HUG_FLAT, PK_PULL_MIN, PK_SNAP_DEV, and the
 # rule switches PK_REANCHOR / PK_FOLDS / PK_THIN / PK_ARC = 0) exist for
 # bisecting a change on the benches through pack_board.py; the defaults
@@ -63,7 +64,7 @@ FREEZE = ts.FREEZE            # no moves this close to a lane's end (0.35)
 CAP = 0.05                    # a point moves at most this per round: below a
                               # thin capsule's radius, so it never jumps one
 PUSHES = 6                    # projections per round for a wedged point
-PULL_MIN = int(os.environ.get('PK_PULL_MIN', '3'))   # a pull applies only in a run of this many
+PULL_MIN = int(awx_settings.get('PK_PULL_MIN', '3'))   # a pull applies only in a run of this many
                               # consecutive pulled points (a point alone in a
                               # slot is refused)
 VIA_SPAN = 5                  # a via's smoothing pull comes from the points this
@@ -126,7 +127,7 @@ HUG_MAX = 0.8                 # a point hugs copper within this (the pitch, or a
                               # plateau past a via); farther is a free stretch
 OCT_FREE_TOLS = (0.4, 0.15, 0.06)   # a free stretch simplified at these, coarsest first
 OCT_DTOL = 0.03               # a hug at a distance this different is another line...
-HUG_FLAT = float(os.environ.get('PK_HUG_FLAT', '0.05'))   # ...unless the whole hug of one chord varies by no
+HUG_FLAT = float(awx_settings.get('PK_HUG_FLAT', '0.05'))   # ...unless the whole hug of one chord varies by no
                               # more than this: then it is ONE line at the LARGEST
                               # distance (a 0.05 mm bump in a hug is the wiggle the
                               # eye sees; SRST's top ride). At 0.15 it moved long
@@ -135,7 +136,7 @@ HUG_FLAT = float(os.environ.get('PK_HUG_FLAT', '0.05'))   # ...unless the whole 
                               # 0.05 measured 7 / 40 / 36 mm on K35 / K41 / K28
                               # against 12 / 54 / 42 with the rule off (2026-09-09)
 OCT_SNAP = 2.0                # degrees: a chord this close to a grid direction IS one
-SNAP_DEV = float(os.environ.get('PK_SNAP_DEV', '0.01'))   # ...if the snap moves its far end by no more than this
+SNAP_DEV = float(awx_settings.get('PK_SNAP_DEV', '0.01'))   # ...if the snap moves its far end by no more than this
 MIN_LEG = 0.05                # a grid leg shorter than this is dropped
 JOG_MIN = 0.06                # parallel lines offset by less than this are one line
 REPAIR_TOL = 0.012            # the string's chords that replace an unclear leg:
@@ -302,7 +303,8 @@ def _segs_hit(A0, A1, caps, tol=EPS):
                     np.minimum(_pt_seg_d2_pairs(b0, a0, a1)[0], _pt_seg_d2_pairs(b1, a0, a1)[0]))
     x = ((_orient(a0, a1, b0) * _orient(a0, a1, b1) < 0)
          & (_orient(b0, b1, a0) * _orient(b0, b1, a1) < 0))
-    hit[i[x | (d2 < (M[j, 4] - tol) ** 2)]] = True
+    r_ = M[j, 4] - tol
+    hit[i[x | (d2 < r_ * r_)]] = True
     return hit
 
 
@@ -680,8 +682,8 @@ def _side_of(P, cls, Ts, window):
 
 
 
-TRACE = set(int(x) for x in os.environ.get('BRAID_PACK_TRACE', '').split(',') if x)
-DUMP = set(x for x in os.environ.get('BRAID_PACK_DUMP', '').split(',') if x)   # lanes whose
+TRACE = set(int(x) for x in awx_settings.get('BRAID_PACK_TRACE', '').split(',') if x)
+DUMP = set(x for x in awx_settings.get('BRAID_PACK_DUMP', '').split(',') if x)   # lanes whose
                               # relaxed string is saved to tmp/dump_<net>.npz
 
 
@@ -1303,7 +1305,7 @@ def _octilinear_run(q, M, TC, hug_j, hug_d, free_tol):
     # free groups split into wraps (chamfers) and the rest
     split = []
     for (kind, i0, i1) in groups:
-        if kind == 'hug' or os.environ.get('PK_ARC', '1') != '1':
+        if kind == 'hug' or awx_settings.get('PK_ARC', '1') != '1':
             split.append((kind, i0, i1, None))
         else:
             split.extend(_arc_lines(qa, i0, i1, Mm, dep_, jj_, tt_))
@@ -1609,7 +1611,7 @@ def emit_lane(P, cls, layers, models, worlds):
             ib_ = int(np.argmin(np.hypot(qa_[:, 0] - b_[0], qa_[:, 1] - b_[1])))
             lo_, hi_ = min(ia_, ib_), max(ia_, ib_)
             return REPAIR_TOL + 1e-3 + float(dq_[lo_:hi_ + 1].max())
-        if os.environ.get('PK_THIN', '1') == '1':
+        if awx_settings.get('PK_THIN', '1') == '1':
             q = _thin(q, M, _allow)
         emit_lane.repaired += _octilinear_run.repaired
         emit_lane.arcs += _octilinear_run.arcs
@@ -1794,10 +1796,10 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     via_r = br.VIA_SIZE / 2
     via_extra = via_r - br.TRACK / 2          # a via's radius over a track's
     if pitch is None:
-        pitch = float(os.environ.get('BRAID_PACK_PITCH', '0') or 0) \
+        pitch = float(awx_settings.get('BRAID_PACK_PITCH', '0') or 0) \
             or (br.TRACK + br.CLEAR + MARGIN_R)
     if window is None:
-        window = float(os.environ.get('BRAID_PACK_WINDOW', '1.5'))
+        window = float(awx_settings.get('BRAID_PACK_WINDOW', '1.5'))
     kids = set(ctx.kids)
     lanes = {nm: (list(c.out_segs.get(nm) or []), list(c.out_vias.get(nm) or []))
              for nm in c.members if c.out_segs.get(nm)}
@@ -1869,7 +1871,7 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         # lists what its trim already removed)
         _on = {id(s_) for s_ in ctx.pcb.segments}
         chain = [(s_, t_, p_) for (s_, t_, p_) in chain if s_ is not None and id(s_) in _on]
-        if chain and len(pts) > 6 and os.environ.get('PK_REANCHOR', '1') == '1':
+        if chain and len(pts) > 6 and awx_settings.get('PK_REANCHOR', '1') == '1':
             verts = [tuple(chain[0][1])] + [tuple(p_) for (_s, _t, p_) in chain]
             L_last = layers.index(lays[-1])
             wl = world_of(lays[-1], nid)
@@ -2094,7 +2096,7 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     # whole-board pack that iterates passes: a bundle of taut strings
     # settles into nested curves that bend where the obstacle is, where the
     # follow copies the neighbour's jog wherever it happens to be
-    _follow = os.environ.get('PK_FOLLOW', '1') != '0'
+    _follow = awx_settings.get('PK_FOLLOW', '1') != '0'
     for nm in order:
         n_lanes += 1
         reason = pack_one(nm, follow=_follow)
@@ -2130,7 +2132,7 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     # above its via, packed one lane before SA6, 2026-09-09). Few lanes,
     # and a fold the topology forces just stays
     n_fold = 0
-    for nm in (order if os.environ.get('PK_FOLDS', '1') == '1' else ()):
+    for nm in (order if awx_settings.get('PK_FOLDS', '1') == '1' else ()):
         if nm in still or folds.get(nm, 0) == 0:
             continue
         if pack_one(nm) is None:

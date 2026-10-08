@@ -9,6 +9,7 @@ this one."""
 import os
 import sys
 
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 BENCH = os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb')
 
@@ -62,7 +63,7 @@ def admissible(pcb, net):
         other = [q for q in fp.pads if q is not p][0]
         return pcb.nets[other.net_id].name.split('/')[-1] == mate if other.net_id in pcb.nets else False
     ends = [p for p in pads if not waypoint(p)
-            and not any(_pairs.under_pad(q, p, _rules.VIA_SIZE) for q in pads if q is not p)]
+            and not any(_pairs.under_pad(q, p, _rules.active().via_size) for q in pads if q is not p)]
     return len(ends) == 2 and len({p.component_ref for p in ends}) == 2
 
 

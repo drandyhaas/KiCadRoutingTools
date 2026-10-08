@@ -284,6 +284,7 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
     from placement.body import board_bodies
     from placement.legality import footprint_side, rotate_local_bounds
     from placement.part_class import classify_part
+    from kicad_parser import non_aperture_pads
     import list_nets
 
     bodies = board_bodies(pcb_data, pcb_file)
@@ -366,7 +367,8 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
             'body_source': (geom.source if geom is not None else 'none'),
             'drawn_body_source': (geom.drawn_source if geom is not None
                                   else 'none'),
-            'pads': len(fp.pads or ()),
+            # Apertures (paste/mask windows) are not pads (#1143).
+            'pads': len(non_aperture_pads(fp)),
             'side': footprint_side(fp),
             'at': [round(fp.x, 3), round(fp.y, 3),
                    round(fp.rotation or 0.0, 3)],
@@ -385,6 +387,8 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
         'board': os.path.basename(pcb_file),
         'bounds': list(pcb_data.board_info.board_bounds or ()),
         'copper_layers': list(pcb_data.board_info.copper_layers or ()),
+        # #1197: a pour decides the routing plan, and nothing here named one.
+        'pours': _pours(pcb_data, pcb_file),
         'floors': {'clearance': clearance, 'track_width': track_width},
         # `find_differential_pairs` returns (positive, negative) tuples.
         'diff_pairs': [list(t) for t in sorted(pairs or ())],
@@ -400,6 +404,7 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
                       'never be a target -- see #902)',
             'diff_pairs': 'list_nets.find_differential_pairs '
                           '(rejects 2-terminal resonators)',
+            'pours': 'board_brief.pour_census (the brief\'s own `pours`)',
             'role': 'inferred here from footprint / prefix / value; the '
                     'board carries no datasheet or 3D-model field to cite',
             'mating': 'which parts count as connectors: '
@@ -551,6 +556,15 @@ def pin_order_rows(pcb_data, pcb_file: str, clearance: float):
     return {'error': None, 'rows': rows}
 
 
+def _pours(pcb_data, pcb_file):
+    """board_brief's pour census, the same call (#1197); None if it fails."""
+    try:
+        from board_brief import pour_census
+        return pour_census(pcb_data, pcb_file)
+    except Exception:                            # noqa: BLE001 - disclosed
+        return None
+
+
 def format_md(doc) -> str:
     """The sheet, for a reader. Markdown because the audience is a model and a
     human reading the same page, and a table is how a pin row reads."""
@@ -566,6 +580,14 @@ def format_md(doc) -> str:
     if doc.get('panels_error'):
         L.append(f"PANELS NOT WRITTEN ({doc['panels_error']}).")
         L.append('')
+    pc = doc.get('pours')
+    if pc is None:
+        L.append('Copper pours: NOT MEASURED.')
+    else:
+        from board_brief import format_pours
+        L.append('Copper pours: ' + (format_pours(pc) or 'none') + '.'
+                 + (f" Keep-out rule areas: {pc['keepout_areas']}."
+                    if pc.get('keepout_areas') else ''))
     if doc['diff_pairs']:
         L.append('Differential pairs: '
                  + ', '.join('/'.join(t) for t in doc['diff_pairs']) + '.')

@@ -173,8 +173,8 @@
     "path": "Hardware/pedal-board/pedal-board.kicad_pcb",
     "branch": "main",
     "file": "daisy_pedal_board.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/torvalds/GuitarPedal/main/Hardware/pedal-board/pedal-board.kicad_pcb",
-    "github_url": "https://github.com/torvalds/GuitarPedal/blob/main/Hardware/pedal-board/pedal-board.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/torvalds/GuitarPedal/79e351650b51a5e344a759e2e9999e8fb8f3c540/Hardware/pedal-board/pedal-board.kicad_pcb",
+    "github_url": "https://github.com/torvalds/GuitarPedal/blob/79e351650b51a5e344a759e2e9999e8fb8f3c540/Hardware/pedal-board/pedal-board.kicad_pcb",
     "size_kb": 515,
     "layers_est": 4,
     "footprints": 21,
@@ -186,7 +186,7 @@
     "lane": "audio_analog",
     "license": "see repo",
     "short_name": "daisy_pedal_board",
-    "note": "guitar pedal mainboard, THT jacks/pots + codec, mixed analog/digital"
+    "note": "guitar pedal mainboard, THT jacks/pots + codec, mixed analog/digital. raw_url re-pinned 2026-10-08 to 79e35165, the commit that served the corpus's version: 2026-08-16 commit 3891713 ('Retire old board formats') deleted Hardware/pedal-board/; the board exists on no branch now."
   },
   {
     "set": "set22",

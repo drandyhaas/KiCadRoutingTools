@@ -238,6 +238,12 @@ class AIBackend:
         return (f"{self.label} CLI not found. Install it ({self.install_url}) "
                 f"and make sure `{self.cli_name}` is on your PATH.")
 
+    def cli_status(self, cli_path):
+        """The AI tabs' transcript line: where the CLI is, or how to get it."""
+        if cli_path:
+            return f"{self.label} CLI found: {cli_path}"
+        return self.not_found_message() + " Then reopen this dialog."
+
     def auth_hint(self, error):
         """Extra guidance when a run failed because the CLI isn't logged in."""
         if error and any(m in error.lower() for m in self._auth_markers):

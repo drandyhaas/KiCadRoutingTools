@@ -147,10 +147,8 @@ ROWS = [
      (T_POSE,), 'KILLED'),
 
     ('the-lock-guard-is-skipped', 'o',
-     "    if placements:\n"
-     "        from placement.parser import extract_locked_refs",
-     "    if False:\n"
-     "        from placement.parser import extract_locked_refs",
+     "        locked_now = extract_locked_refs(board_path)",
+     "        locked_now = set()",
      (T_POSE,), 'KILLED'),
 
     ('lock-and-unlock-of-one-ref-is-allowed-again', 'o',
@@ -239,7 +237,7 @@ ROWS = [
 
     # ---- the lock stamper -------------------------------------------------
     ('stamp_unlocked-removes-nothing', 's',
-     "        new_head, n = re.subn(r'\\s*\\(locked\\s+yes\\)', '', head)",
+     "        new_head, n = re.subn(r'\\s*\\(locked(?:\\s+yes)?\\)', '', head)",
      "        new_head, n = head, 0",
      (T_POSE,), 'KILLED'),
 

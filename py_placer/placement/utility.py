@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from typing import Tuple
 
-from kicad_parser import Footprint
+from kicad_parser import Footprint, non_aperture_pads
 
 
 def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, float, float]:
@@ -14,8 +14,13 @@ def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, fl
     Fallback: compute bounding box from pad LOCAL coordinates.
     Returns (min_x, min_y, max_x, max_y) in local coordinates.
     Used when no courtyard data is available.
+
+    Aperture-only pads (paste/mask windows, `kicad_parser.pad_is_aperture_only`)
+    are not part of the footprint's extent and are skipped (#1143); NPTH and
+    drilled pads are kept. A footprint with no other pad gets the fallback box.
     """
-    if not footprint.pads:
+    pads = non_aperture_pads(footprint)
+    if not pads:
         return (-0.5, -0.5, 0.5, 0.5)
 
     min_x = float('inf')
@@ -27,7 +32,7 @@ def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, fl
     # tilted by rect_rotation + the footprint rotation, so the local-axis bbox
     # half-extents follow from that combined angle (exact for any placement angle;
     # reduces to size/2 for an axis-aligned pad in an unrotated footprint).
-    for pad in footprint.pads:
+    for pad in pads:
         local_tilt = math.radians((getattr(pad, 'rect_rotation', 0.0) or 0.0)
                                   + (footprint.rotation or 0.0))
         c, s = abs(math.cos(local_tilt)), abs(math.sin(local_tilt))
@@ -50,6 +55,15 @@ def compute_footprint_bbox_local(footprint: Footprint) -> Tuple[float, float, fl
         max_y = mid + 0.05
 
     return (min_x, min_y, max_x, max_y)
+
+
+def literal_ref_glob(ref: str) -> str:
+    """`ref` as an fnmatch pattern matching exactly itself: glob
+    metacharacters (`D[1]`, `Ref*`) are bracket-escaped. For a ref the caller
+    selected by name or geometry, handed to code that globs every ref (an
+    intent `refs` list, `reseat_scope`). Shared by place_seed's region reseat
+    and rank_rotations.py (#1113)."""
+    return ''.join('[%s]' % c if c in '*?[]' else c for c in ref)
 
 
 def snap_to_grid(value: float, grid_step: float) -> float:
@@ -85,7 +99,8 @@ def refs_in_rect(pcb_data, rect, *, by='pad') -> list:
     if by != 'pad':
         raise ValueError("refs_in_rect: by must be 'pad' or 'origin'")
     for fp in pcb_data.footprints.values():
-        for pad in fp.pads:
+        # a paste/mask aperture in the rect does not put the part there (#1143)
+        for pad in non_aperture_pads(fp):
             if (x0 <= pad.global_x < x1 and y0 <= pad.global_y < y1
                     and pad.component_ref):
                 out.add(pad.component_ref)

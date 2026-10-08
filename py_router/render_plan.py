@@ -81,7 +81,7 @@ def draw_plan(d, r, intent, *, verdict=None, alpha=1.0, theme=None,
     try:
         import render_theme
         from route_render import load_font
-        th = theme or getattr(r, 'theme', None) or render_theme.DARK
+        th = theme or getattr(r, "theme", None) or render_theme.default_theme()
         ss = max(1, int(getattr(r, 'ss', 1)))
         w = max(1, int(round(1.4 * ss * (0.5 + 0.5 * alpha))))
         font = load_font(max(9, int(11 * ss)))

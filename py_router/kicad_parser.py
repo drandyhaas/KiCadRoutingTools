@@ -17,7 +17,7 @@ import routing_defaults as defaults  # fab-floor outline width for 0-stroke copp
 from swig_compat import patch_swig_iterators as _patch_swig_iterators
 # #962: the paste-stencil model. A leaf module (it imports check_drc/this module
 # only inside its functions), so importing it here cannot cycle.
-from paste_apertures import PasteAperture, build_paste_apertures
+from paste_apertures import PasteAperture, build_paste_apertures, pad_has_copper
 from dataclasses import dataclass, field
 from typing import Dict, List, Sequence, Tuple, Optional
 from pathlib import Path
@@ -162,6 +162,158 @@ def detect_kicad_version(content: str) -> int:
     """Extract version number from (version YYYYMMDD) header."""
     m = re.search(r'\(version\s+(\d+)\)', content)
     return int(m.group(1)) if m else 0
+
+
+# ---------------------------------------------------------------------------
+# KiCad 6-era file conventions pcbnew converts on load. Each cutoff is KiCad's
+# own (pcb_io_kicad_sexpr_parser.cpp / pcb_io_kicad_sexpr.h at 10.0.0); the
+# text parser applies the same conversion so a KiCad 6 board parses the way
+# the GUI -- which builds from pcbnew -- already sees it. Found by parsing all
+# 89 KiCad 6 corpus sources raw and after a pcbnew round trip.
+# ---------------------------------------------------------------------------
+
+#: Files at or before this version wrote arcs as (start CENTER) (end ARC-START)
+#: (angle SWEEP) -- LEGACY_ARC_FORMATTING.
+LEGACY_ARC_FORMATTING = 20210925
+#: Files at or before this version declared a net tie by footprint keywords
+#: (tags "net tie ...") rather than (net_tie_pad_groups ...) -- LEGACY_NET_TIES.
+LEGACY_NET_TIES = 20220815
+#: Files before this version wrote overbars as ~TEXT~ rather than ~{TEXT}.
+NEW_OVERBAR_NOTATION = 20210606
+
+#: The first board format with (footprint ...) blocks ("module -> footprint",
+#: KiCad 5.99). An older file -- KiCad 5, KiCad 4 -- writes (module ...) and
+#: bare net names, and this parser would read it as a board with no footprints
+#: and no nets: it is REFUSED instead (UnsupportedBoardFormat).
+FIRST_SUPPORTED_BOARD_VERSION = 20201115
+
+
+class UnsupportedBoardFormat(ValueError):
+    """A board file this parser cannot read. The message says what the file is
+    and what to do, so a CLI prints it as a clean ERROR line rather than as a
+    traceback (``user_facing``, honoured by cli_banner's excepthook)."""
+    user_facing = True
+
+
+_TSTAMP_RE = re.compile(r'\(tstamp\s+"?([0-9A-Fa-f-]+)"?\)')
+
+
+def kiid_from_tstamp(raw: str) -> str:
+    """The uuid pcbnew gives a KiCad 6 ``(tstamp ...)`` (kiid.cpp).
+
+    A value of at most 8 hex digits is a LEGACY timestamp: only the last four
+    octets are filled, from the END of the string. Anything else is already a
+    uuid and is kept as written.
+    """
+    s = raw.strip('"')
+    if s and len(s) <= 8 and all(c in '0123456789abcdefABCDEF' for c in s):
+        octets = []
+        for i in range(4):
+            start = len(s) - 8 + i * 2
+            end = start + 2
+            start = max(0, start)
+            o = s[start:start + max(0, end - start)]
+            octets.append(int(o, 16) if o else 0)
+        return '00000000-0000-0000-0000-0000' + ''.join('%02x' % o for o in octets)
+    return s
+
+
+def uuid_or_tstamp(text: str) -> str:
+    """The first ``(uuid "...")`` in TEXT, else its KiCad 6 ``(tstamp ...)``
+    as pcbnew converts it, else ''. Callers bound TEXT to the item's own
+    header, exactly as they did for the uuid alone."""
+    m = re.search(r'\(uuid\s+"([^"]+)"', text)
+    if m:
+        return m.group(1)
+    m = _TSTAMP_RE.search(text)
+    return kiid_from_tstamp(m.group(1)) if m else ""
+
+
+def convert_to_new_overbar_notation(old: str) -> str:
+    """KiCad's ConvertToNewOverbarNotation (string_utils.cpp), ported as is:
+    ``~X~`` -> ``~{X}``, ``~~`` -> ``~``, a space / ``}`` / ``)`` ends an
+    open overbar, and a string already holding ``~{`` is returned untouched."""
+    if old == '~':
+        return old
+    out = []
+    in_overbar = False
+    i, n = 0, len(old)
+    while i < n:
+        ch = old[i]
+        if ch == '~':
+            la = i + 1
+            if la < n and old[la] == '~':
+                if la + 1 < n and old[la + 1] == '{':
+                    out.append('~~{}')
+                    i += 1
+                    continue
+                out.append('~')
+                i += 2
+                continue
+            if la < n and old[la] == '{':
+                return old
+            out.append('}' if in_overbar else '~{')
+            in_overbar = not in_overbar
+            i += 1
+            continue
+        if ch in ' })' and in_overbar:
+            out.append('}')
+            in_overbar = False
+        out.append(ch)
+        i += 1
+    if in_overbar:
+        out.append('}')
+    return ''.join(out)
+
+
+_LEGACY_ARC_RE = re.compile(
+    r'\((gr_arc|fp_arc)(\s+(?:locked\s+)?)'
+    r'\(start\s+([-\d.eE+]+)\s+([-\d.eE+]+)\)\s*'
+    r'\(end\s+([-\d.eE+]+)\s+([-\d.eE+]+)\)\s*'
+    r'\(angle\s+([-\d.eE+]+)\)')
+
+
+def _fmt_mm(v: float) -> str:
+    s = '%.6f' % v
+    s = s.rstrip('0').rstrip('.')
+    return '0' if s in ('-0', '') else s
+
+
+def upgrade_legacy_arcs(content: str, kicad_version: Optional[int] = None) -> str:
+    """CONTENT with every legacy center/angle arc rewritten as start/mid/end.
+
+    For files at or before LEGACY_ARC_FORMATTING, KiCad reads ``(start)`` as the
+    arc CENTER, ``(end)`` as the arc's START point and ``(angle)`` as the sweep
+    (SetArcAngleAndEnd: end = start rotated by the angle, the two swapped when
+    the angle is negative). Every reader here matches only the three-point
+    form, so an old arc was simply dropped: a rounded outline lost its corners
+    (or closed nothing at all). Analysis copies ONLY -- never write this back
+    into a file of that version, which KiCad would then fail to load.
+    """
+    if kicad_version is None:
+        kicad_version = detect_kicad_version(content)
+    if not kicad_version or kicad_version > LEGACY_ARC_FORMATTING or '(angle' not in content:
+        return content
+
+    def _sub(m):
+        cx, cy, sx, sy = (float(m.group(k)) for k in (3, 4, 5, 6))
+        ang = float(m.group(7))
+
+        def rot(a):
+            r = math.radians(a)
+            dx, dy = sx - cx, sy - cy
+            return (cx + dx * math.cos(r) - dy * math.sin(r),
+                    cy + dx * math.sin(r) + dy * math.cos(r))
+        ex, ey = rot(ang)
+        mx, my = rot(ang / 2.0)
+        start, end = (sx, sy), (ex, ey)
+        if ang < 0:
+            start, end = end, start
+        return '(%s%s(start %s %s) (mid %s %s) (end %s %s)' % (
+            m.group(1), m.group(2),
+            _fmt_mm(start[0]), _fmt_mm(start[1]), _fmt_mm(mx), _fmt_mm(my),
+            _fmt_mm(end[0]), _fmt_mm(end[1]))
+    return _LEGACY_ARC_RE.sub(_sub, content)
 
 
 def is_kicad_10(content: str) -> bool:
@@ -429,6 +581,13 @@ class Segment:
     # tab is invisible to them; the off-outline census reads this to look
     # inside.
     graphic_filled: bool = False
+    # #1181: for a FILLED closed graphic, its outline as one tuple of (x, y)
+    # vertices, shared by every segment of the shape; None otherwise. The
+    # segments are only the perimeter, so a via lying wholly inside the shape
+    # touched none of them: the router put a foreign via in a filled shape and
+    # check_drc graded the short clean. The obstacle map stamps this interior
+    # and check_drc grades containment in it.
+    graphic_ring: Optional[Tuple[Tuple[float, float], ...]] = None
 
 
 @dataclass
@@ -555,6 +714,22 @@ class Footprint:
     # check_drc.footprint_graphic_outline_census re-poses it from this
     # (a side flip is reported unmeasured). None = unknown, taken as unmoved.
     parsed_pose: Optional[Tuple[float, float, float, str]] = None
+    # #1098: the footprint's (attr ...) flags, as the sorted subset of
+    # FOOTPRINT_ATTR_TOKENS it carries, and whether it declares a 3D model.
+    # Together they say what the ASSEMBLY house places: a part flagged
+    # `board_only` or `exclude_from_pos_files` with no model is board copper
+    # (a PCB-trace USB plug, a card edge, a jumper), not a component. Both
+    # parse paths fill them; APPENDED like the fields above.
+    attrs: Tuple[str, ...] = ()
+    has_model: bool = False
+
+
+#: The (attr ...) flags `Footprint.attrs` keeps -- the ones the text form and
+#: pcbnew's GetAttributes() bitmask can both spell, so the two parse paths
+#: agree token for token (#1098).
+FOOTPRINT_ATTR_TOKENS = ('allow_missing_courtyard', 'allow_soldermask_bridges',
+                         'board_only', 'dnp', 'exclude_from_bom',
+                         'exclude_from_pos_files', 'smd', 'through_hole')
 
 
 @dataclass
@@ -664,6 +839,17 @@ class PCBData:
     # match the copper the engine is routing against. Not a file path on
     # purpose: the GUI never needs to save to be priced correctly.
     exact_fill_provider: object = None
+    # #1187: callable returning the LIVE board's design-settings rules,
+    # {rule key: mm} in the .kicad_pro's own keys (min_track_width,
+    # min_connection), which the floor readers (fix_kicad_drc_settings.
+    # connection_width_floor) take in place of the sibling file. A callable,
+    # read when the floor is asked for, like the CLI's file read: mid-plan the
+    # file beside the live board is the ORIGINAL project, the floors the plan's
+    # steps lowered live in pcbnew's memory (update_live_drc_floors), and a
+    # PCBData the GUI built before a step's writeback is still in use after it
+    # -- a value captured at build time read the pre-writeback floor there.
+    # None = read the file (parse_kicad_pcb).
+    live_rules_provider: object = None
     # #459: KiCad (group "name" (uuid ...) (members <uuid> ...)) blocks, as
     # {group name: [footprint reference, ...]}. The designer's own statement that
     # these parts belong together, so placement grouping ranks it above any
@@ -1261,6 +1447,31 @@ def pad_drill_capsule(pad) -> Tuple[Tuple[float, float], Tuple[float, float], fl
 _REMOVE_UNUSED_RE = re.compile(r'\(remove_unused_layers(?:\s+(yes|no))?\s*\)')
 _KEEP_END_RE = re.compile(r'\(keep_end_layers(?:\s+(yes|no))?\s*\)')
 
+# One name in a `(layers ...)` list, either spelling. KiCad 7+ quotes every
+# name, `(layers "*.Cu" "*.Mask")`; KiCad 6 writes a pad's list bare,
+# `(layers *.Cu *.Mask)`. A quoted-only reader returns [] for every pad of a
+# KiCad 6 file, so the board parses with no pad on any copper layer and every
+# net fails at its first step -- seen on a KiCad 6 corpus source routed
+# without the pcbnew round-trip that corpus prep always gives it.
+_LAYER_LIST_TOKEN_RE = re.compile(r'"((?:[^"\\]|\\.)*)"|([^\s"()]+)')
+
+
+def layer_list_tokens(body: str) -> List[str]:
+    """The layer names in the BODY of a `(layers ...)` list -- the text after
+    the keyword -- quoted or bare, in file order."""
+    return [bare or quoted
+            for quoted, bare in _LAYER_LIST_TOKEN_RE.findall(body)]
+
+
+def map_layer_list_tokens(body: str, fn) -> str:
+    """BODY with every layer name replaced by ``fn(name)``, each keeping the
+    spelling it had: a quoted name stays quoted, a bare one stays bare."""
+    def _sub(m):
+        if m.group(2) is not None:
+            return fn(m.group(2))
+        return '"' + fn(m.group(1)) + '"'
+    return _LAYER_LIST_TOKEN_RE.sub(_sub, body)
+
 
 def unconnected_layer_mode_from_text(pad_text: str) -> str:
     """A pad block's unconnected-layer mode (see Pad.unconnected_layer_mode).
@@ -1312,6 +1523,40 @@ def pad_is_plated_through(pad) -> bool:
     `pad.drill > 0` wherever the question is "does this pad connect layers"."""
     return ((getattr(pad, 'drill', 0.0) or 0.0) > 0
             and getattr(pad, 'pad_type', '') != 'np_thru_hole')
+
+
+def pad_is_aperture_only(pad) -> bool:
+    """True for a pad that is ONLY an aperture: not NPTH, no drill, and no
+    copper layer -- a paste or mask window, e.g. a thermal pad's split paste
+    windows or a spacer's paste ring (#1143).
+
+    Such a pad is not copper, not a hole and not a pin, so a measure that asks
+    "where are this part's pads" or "does this part have pads" must not read it.
+    NPTH and drilled pads are deliberately NOT aperture-only: a mounting hole is
+    physical extent, and dropping it moves splitflap's H6/H7 rects and the
+    #837 assembly census. Use `pad_has_copper` instead where the question is
+    copper (it is False for NPTH too).
+
+    A pad object with no `layers` attribute at all is NOT an aperture: nothing
+    says it is one. Both parsers always fill `layers`, but placement code builds
+    position-only stand-ins (`arrays.pose_free_chip_refs`' SimpleNamespace
+    pads, test stubs), and reading those as apertures dropped every pad of a
+    1xN header from the row test, so headers became "chips" (Phase-1
+    verifier: 13 of 22 corpus boards)."""
+    if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return False
+    if (getattr(pad, 'drill', 0.0) or 0.0) > 0:
+        return False
+    if getattr(pad, 'layers', None) is None:
+        return False
+    return not pad_has_copper(pad)
+
+
+def non_aperture_pads(fp) -> list:
+    """`fp.pads` without its aperture-only pads (`pad_is_aperture_only`): the
+    pads a placement measure of extent, centre, pitch or "has pads" reads."""
+    return [p for p in (getattr(fp, 'pads', None) or ())
+            if not pad_is_aperture_only(p)]
 
 
 def pad_drill_circles(pad, step: float = 0.0) -> List[Tuple[float, float, float]]:
@@ -1514,6 +1759,25 @@ def find_matching_paren(content: str, open_idx: int) -> int:
 
 def extract_layers(content: str) -> BoardInfo:
     """Extract layer information from PCB file."""
+    layers, copper_layers = _layer_table(content)
+
+    # Extract board bounds from Edge.Cuts
+    bounds = extract_board_bounds(content)
+
+    # Extract board outline polygon(s) and cutouts for non-rectangular boards
+    outers, cutouts = extract_board_contours(content)
+
+    # Extract stackup information
+    stackup = extract_stackup(content)
+
+    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds,
+                     stackup=stackup, board_outline=(outers[0] if outers else []),
+                     board_outlines=outers, board_cutouts=cutouts)
+
+
+def _layer_table(content: str) -> Tuple[Dict[int, str], List[str]]:
+    """The board's (layers ...) table: {id: name}, and its copper layer names
+    in table order."""
     layers = {}
     copper_layers = []
 
@@ -1537,19 +1801,7 @@ def extract_layers(content: str) -> BoardInfo:
             # 2-layer (issue #76).
             if '.Cu' in layer_name and layer_type in ('signal', 'power', 'mixed', 'jumper'):
                 copper_layers.append(layer_name)
-
-    # Extract board bounds from Edge.Cuts
-    bounds = extract_board_bounds(content)
-
-    # Extract board outline polygon(s) and cutouts for non-rectangular boards
-    outers, cutouts = extract_board_contours(content)
-
-    # Extract stackup information
-    stackup = extract_stackup(content)
-
-    return BoardInfo(layers=layers, copper_layers=copper_layers, board_bounds=bounds,
-                     stackup=stackup, board_outline=(outers[0] if outers else []),
-                     board_outlines=outers, board_cutouts=cutouts)
+    return layers, copper_layers
 
 
 def extract_stackup(content: str) -> List[StackupLayer]:
@@ -3117,7 +3369,6 @@ def _parse_ref_label(fp_text: str, ref_start: int,
 #: note in `footprint_raw_reference`).
 _FP_REF_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]+)"')
 _FP_REF_LEGACY_RE = re.compile(r'\(fp_text\s+reference\s+"([^"]+)"')
-_FP_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"')
 _FP_START_RE = re.compile(r'\(footprint\s+"')
 
 #: Separator between a duplicated reference and its file-order ordinal (#726).
@@ -3157,10 +3408,36 @@ def _footprint_header_end(fp_text: str) -> int:
     return end
 
 
+_FP_HEAD_RE = re.compile(
+    r'\(\s*(?:footprint|module)\s+(?:"(?:[^"\\]|\\.)*"|[^\s()"]+)((?:\s+[A-Za-z_]+)*)')
+
+
+def footprint_head_flags(fp_text: str) -> set:
+    """The bare keywords right after a footprint's name. KiCad 6 writes its
+    flags there -- ``(footprint "X" locked placed (layer ...`` -- where KiCad
+    7+ writes ``(locked yes)`` children; pcbnew reads both."""
+    m = _FP_HEAD_RE.match(fp_text)
+    return set(m.group(1).split()) if m else set()
+
+
+_BARE_SHAPE_LOCK_RE = re.compile(r'\((gr_[a-z]+|fp_[a-z]+)\s+locked(?=\s*\()')
+
+
+def strip_bare_shape_locks(content: str) -> str:
+    """CONTENT with KiCad 6's bare ``locked`` dropped from graphic shapes:
+    ``(gr_line locked (start ...`` -> ``(gr_line (start ...``. Every shape
+    reader expects the geometry first, so a locked Edge.Cuts line was dropped
+    and a board drawn with locked outline segments parsed with no outline.
+    Graphic lock state is not modelled. Analysis copies only."""
+    if ' locked' not in content:
+        return content
+    return _BARE_SHAPE_LOCK_RE.sub(r'(\1', content)
+
+
 def footprint_uuid(fp_text: str) -> str:
-    """The footprint's OWN uuid, or '' when it has none."""
-    m = _FP_UUID_RE.search(fp_text[:_footprint_header_end(fp_text)])
-    return m.group(1) if m else ""
+    """The footprint's OWN uuid -- or its KiCad 6 (tstamp ...) as pcbnew
+    converts it -- or '' when it has none."""
+    return uuid_or_tstamp(fp_text[:_footprint_header_end(fp_text)])
 
 
 def footprint_raw_reference(fp_text: str) -> str:
@@ -3358,6 +3635,10 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
         # open circuit, so callers must not treat its pads as bridging two nets.
         attr_match = re.search(r'\(attr\b([^)]*)\)', fp_text)
         is_dnp = bool(attr_match and re.search(r'\bdnp\b', attr_match.group(1)))
+        fp_attrs = tuple(sorted(
+            t for t in (attr_match.group(1).split() if attr_match else ())
+            if t in FOOTPRINT_ATTR_TOKENS))
+        fp_has_model = bool(re.search(r'\(model\s', fp_text))
 
         # Footprint-level (locked yes): appears in the block header, before the
         # first nested element. Limit the search there so a locked PAD or
@@ -3367,7 +3648,9 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             _i = fp_text.find(_tok)
             if _i != -1:
                 _hdr_end = min(_hdr_end, _i)
-        is_locked = bool(re.search(r'\(locked\s+yes\)', fp_text[:_hdr_end]))
+        # (locked yes) from KiCad 7; (locked) in files 20210108-20210423.
+        is_locked = (bool(re.search(r'\(locked(?:\s+yes)?\)', fp_text[:_hdr_end]))
+                     or 'locked' in footprint_head_flags(fp_text))  # KiCad 6: bare
 
         # Footprint-level (clearance ...) override (issue #326). KiCad writes it
         # in the footprint header, after the properties but before any graphic/
@@ -3394,11 +3677,24 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
         # numbers varies by KiCad version; strip it.
         net_tie_groups: List[List[str]] = []
         ntpg_match = re.search(r'\(net_tie_pad_groups\b([^)]*)\)', fp_text)
-        if ntpg_match:
-            for grp in re.findall(r'"([^"]*)"', ntpg_match.group(1)):
-                pads_in_group = [p.strip() for p in grp.split(',') if p.strip()]
-                if len(pads_in_group) >= 2:
-                    net_tie_groups.append(pads_in_group)
+        group_strings = (re.findall(r'"([^"]*)"', ntpg_match.group(1))
+                         if ntpg_match else [])
+        if (not ntpg_match and _file_version
+                and _file_version <= LEGACY_NET_TIES):
+            # A legacy net tie is declared by keyword: pcbnew turns a footprint
+            # whose (tags ...) START with "net tie" into one group of every pad
+            # (NetTie parts, and the library's BRIDGED solder jumpers).
+            _tag_end = min([i for i in (fp_text.find(t) for t in
+                                        ('(pad', '(fp_', '(zone', '(model'))
+                            if i != -1] or [len(fp_text)])
+            _tags = re.search(r'\(tags\s+"((?:[^"\\]|\\.)*)"\)', fp_text[:_tag_end])
+            if _tags and _unescape_kicad_string(_tags.group(1)).startswith('net tie'):
+                group_strings = [', '.join(
+                    re.findall(r'\(pad\s+"((?:[^"\\]|\\.)*)"', fp_text))]
+        for grp in group_strings:
+            pads_in_group = [p.strip() for p in grp.split(',') if p.strip()]
+            if len(pads_in_group) >= 2:
+                net_tie_groups.append(pads_in_group)
 
         # Own uuid + schematic sheet path, for placement grouping (#459). Both
         # sit in the footprint header; bound the uuid search to before the first
@@ -3408,8 +3704,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             _i = fp_text.find(_tok)
             if _i != -1:
                 _uid_end = min(_uid_end, _i)
-        _fp_uid = re.search(r'\(uuid\s+"([^"]+)"', fp_text[:_uid_end])
-        fp_uuid = _fp_uid.group(1) if _fp_uid else ""
+        fp_uuid = uuid_or_tstamp(fp_text[:_uid_end])  # KiCad 6: (tstamp ...)
         _path_m = re.search(r'\(path\s+"([^"]*)"', fp_text)
         fp_path = _path_m.group(1) if _path_m else ""
 
@@ -3437,6 +3732,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             paste_margin=fp_paste_margin,
             paste_margin_ratio=fp_paste_ratio,
             parsed_pose=(fp_x, fp_y, fp_rotation, fp_layer),
+            attrs=fp_attrs,
+            has_model=fp_has_model,
         )
 
         # Extract pads
@@ -3525,11 +3822,11 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
             if not custom_resolved:
                 size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
 
-            # Extract layers - use findall to get all quoted layer names
+            # Extract layers, quoted (KiCad 7+) or bare (KiCad 6)
             layers_section = re.search(r'\(layers\s+([^)]+)\)', pad_text)
             pad_layers = []
             if layers_section:
-                pad_layers = re.findall(r'"([^"]+)"', layers_section.group(1))
+                pad_layers = layer_list_tokens(layers_section.group(1))
 
             # Extract net - try KiCad 9 format first, then KiCad 10
             net_match = re.search(r'\(net\s+(\d+)\s+"%s"\)' % _ESC_STR, pad_text)
@@ -3728,6 +4025,79 @@ def extract_groups(content: str, footprints: Dict[str, 'Footprint']) -> Dict[str
     return out
 
 
+# Every child KiCad's teardrop reader knows (parseTEARDROP_PARAMETERS).
+_TEARDROP_KEYS = frozenset((
+    'best_length_ratio', 'max_length', 'best_width_ratio', 'max_width',
+    'curved_edges', 'filter_ratio', 'enabled', 'allow_two_segments',
+    'prefer_zone_connections'))
+_TEARDROP_OPEN_RE = re.compile(r'\(teardrops?(?=[\s(])')
+_TOKEN_POS_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[()]|[^\s()"]+')
+
+
+def repair_bare_teardrop_tokens(content: str) -> Tuple[str, int]:
+    """Give a teardrop child written without its ``(`` the paren KiCad reads
+    into it (#1149). Returns ``(content, number of tokens repaired)``.
+
+    KiCad's teardrop reader takes each child's opening paren as OPTIONAL --
+    ``if( token == T_LEFT ) token = NextTok();`` before the keyword switch -- so
+    ``(curved_edges no)filter_ratio 0.9)`` loads as ``(filter_ratio 0.9)``, and
+    the ``)`` that looks surplus is that child's own close. Every paren-counting
+    reader here took it as the pad's close instead: KiCad 10.0.0's
+    RoyalBlue54L-Feather demo carries 349 such blocks, and the text parser ended
+    U2 (QFN-32), U4 and U6 after their first pad (pcbnew: 59/10/21).
+
+    The repair walks each ``(teardrop``/``(teardrops`` block token by token with
+    KiCad's rule: a known key as a BARE word directly inside the block opens a
+    child, which its value's ``)`` then closes. Nothing else is touched, and a
+    file without the defect is returned as the same string.
+    """
+    if '(teardrop' not in content:
+        return content, 0
+    inserts: List[int] = []
+    pos = 0
+    for m in _TEARDROP_OPEN_RE.finditer(content):
+        if m.start() < pos:
+            continue
+        depth = 1
+        pos = m.end()
+        for t in _TOKEN_POS_RE.finditer(content, m.end()):
+            tok = t.group(0)
+            pos = t.end()
+            if tok == '(':
+                depth += 1
+            elif tok == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            elif depth == 1 and tok in _TEARDROP_KEYS:
+                inserts.append(t.start())
+                depth += 1
+    if not inserts:
+        return content, 0
+    parts = []
+    last = 0
+    for i in inserts:
+        parts.append(content[last:i])
+        parts.append('(')
+        last = i
+    parts.append(content[last:])
+    return ''.join(parts), len(inserts)
+
+
+def read_board_text(path: str, quiet: bool = False) -> str:
+    """A .kicad_pcb's text as KiCad reads it: `repair_bare_teardrop_tokens`
+    applied, with a one-line note when it changed anything (#1149). For every
+    reader that walks footprint or pad blocks by their parens."""
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    content, n = repair_bare_teardrop_tokens(content)
+    if n and not quiet:
+        print(f"NOTE: {n} teardrop token(s) in {os.path.basename(path)} lack their "
+              f"opening paren; read the way KiCad reads them (#1149).",
+              file=sys.stderr)
+    return content
+
+
 def _via_blocks(content: str) -> List[Tuple[int, str]]:
     """``(start offset, paren-balanced text)`` for every ``(via ...)`` in a file.
 
@@ -3797,7 +4167,6 @@ _VIA_PREFIX_RE = re.compile(
 _VIA_NET_RE = re.compile(r'\(net\s+(?:"((?:[^"\\]|\\.)*)"|(\d+))\)')
 _VIA_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"\)')
 _VIA_FREE_RE = re.compile(r'\(free\s+yes\)')
-_VIA_LOCKED_RE = re.compile(r'\(locked\s+yes\)')
 
 
 def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
@@ -3823,19 +4192,35 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
     independently retires that too, and lets a uuid-less via carry a spec at all.
     """
     vias = []
+    unparsed = []
     # One linear scan: most boards mention no protection token and skip the
     # per-block spec work entirely.
     want_spec = any(('(' + t) in content for t in VIA_PROTECTION_TOKENS)
 
     for _start, block in _via_blocks(content):
         m = _VIA_PREFIX_RE.match(block)
-        if not m:
-            continue
+        if m:
+            geom = (m.group(1), m.group(2), m.group(3), m.group(4),
+                    m.group(5), m.group(6))
+        else:
+            # The geometry prefix out of its usual order -- a (locked yes)
+            # stamped inside it, or the bare `(via locked (at ...` form, both
+            # of which KiCad loads (#1158). Read it by its own depth-1 tokens
+            # (never a (size) inside a per-layer padstack), and REPORT a block
+            # that still cannot be modelled: it used to vanish silently.
+            geom, why = _via_geometry_from_tokens(block)
+            if geom is None:
+                unparsed.append((_start, why))
+                continue
         nm = _VIA_NET_RE.search(block)
+        net_name, numeric = (nm.group(1), nm.group(2)) if nm else (None, None)
         if nm is None:
-            continue
-        net_name, numeric = nm.group(1), nm.group(2)
-        if numeric is not None:
+            # No (net ...) at all: KiCad loads the via on net 0, and so does
+            # the track path. Skipping it made a real barrel invisible -- 152
+            # of RoyalBlue54L-Feather's 183 vias, whose (net) a malformed
+            # teardrop block had cut off (#1149), went that way, silently.
+            net_id = 0
+        elif numeric is not None:
             net_id = int(numeric)
         else:
             # KiCad 10 dialect. Without the name map the id is unknowable, so
@@ -3854,19 +4239,19 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             net_id = name_to_id.get(net_name, 0)
         u = _VIA_UUID_RE.search(block)
         via = Via(
-            x=float(m.group(1)),
-            y=float(m.group(2)),
-            size=float(m.group(3)),
-            drill=float(m.group(4)),
-            layers=[m.group(5), m.group(6)],
+            x=float(geom[0]),
+            y=float(geom[1]),
+            size=float(geom[2]),
+            drill=float(geom[3]),
+            layers=[geom[4], geom[5]],
             net_id=net_id,
-            uuid=u.group(1) if u else "",
+            uuid=(u.group(1) if u else uuid_or_tstamp(block)),  # KiCad 6: (tstamp ...)
             # Read from the block, not from a capture group and not from a
             # second uuid-keyed pass over the file. The old v10 path needed
             # that pass (#225's O(vias x filesize) backtracking, guarded by a
             # linear pre-scan) and it could only reach vias that HAD a uuid.
             free=bool(_VIA_FREE_RE.search(block)),
-            locked=bool(_VIA_LOCKED_RE.search(block)),
+            locked=_track_locked(block),
         )
         # Protection spec per via (#489 §8): tenting/covering/plugging/capping/
         # filling were parsed by NOBODY, so a re-placed via lost whatever the
@@ -3877,7 +4262,25 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
                 via.tenting_attrs = spec
         vias.append(via)
 
+    _report_unparsed_copper(content, 'via', unparsed)
     return vias
+
+
+def _via_geometry_from_tokens(block: str):
+    """``((x, y, size, drill, layer_a, layer_b) as strings, None)`` read from a
+    via block's depth-1 tokens in any order, or ``(None, reason)`` (#1158)."""
+    ch, _bare = _sexpr_children(block)
+    at = next((a[:2] for a in ch.get('at', ()) if len(a) >= 2
+               and all(_NUM_TOKEN_RE.match(x) for x in a[:2])), None)
+    size = next((a[0] for a in ch.get('size', ()) if a and _NUM_TOKEN_RE.match(a[0])), None)
+    drill = next((a[0] for a in ch.get('drill', ()) if a and _NUM_TOKEN_RE.match(a[0])), None)
+    layers = next((a[:2] for a in ch.get('layers', ()) if len(a) >= 2
+                   and all(x.startswith('"') for x in a[:2])), None)
+    missing = [t for t, v in (('at', at), ('size', size), ('drill', drill),
+                              ('layers', layers)) if v is None]
+    if missing:
+        return None, f"via without {'/'.join(missing)}"
+    return (at[0], at[1], size, drill, layers[0][1:-1], layers[1][1:-1]), None
 
 
 VIA_PROTECTION_TOKENS = ('tenting', 'covering', 'plugging', 'capping', 'filling')
@@ -4282,10 +4685,8 @@ def _paste_shape_record(tag: str, blk: str, owner: str, transform):
     if not layers:
         return []
     wm = re.search(r'\(width\s+([-\d.]+)\)', blk)
-    um = (re.search(r'\(uuid\s+"([^"]+)"\)', blk)
-          or re.search(r'\(tstamp\s+([-\w]+)\)', blk))
     width = float(wm.group(1)) if wm else 0.0
-    uuid = um.group(1) if um else ''
+    uuid = uuid_or_tstamp(blk)
 
     def xy(name):
         m = re.search(r'\(' + name + r'\s+([-\d.]+)\s+([-\d.]+)\)', blk)
@@ -4465,12 +4866,12 @@ def _extract_via_protection_attrs(content: str) -> Dict[str, Dict[str, str]]:
 
     out: Dict[str, Dict[str, str]] = {}
     for _start, block in _via_blocks(content):
-        uuid_match = _VIA_UUID_RE.search(block)
-        if not uuid_match:
+        via_uuid = uuid_or_tstamp(block)  # KiCad 6 vias carry (tstamp ...)
+        if not via_uuid:
             continue
         spec = _via_spec_from_block(block)
         if spec:
-            out[uuid_match.group(1)] = spec
+            out[via_uuid] = spec
     return out
 
 
@@ -4514,96 +4915,290 @@ def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
     return len(tagged)
 
 
+# A track block's FAST PATH: the field order KiCad (9 and 10) and this repo's
+# writer emit. (locked yes) is optional between width/layer or layer/net
+# (issue #150); uuid is optional (PR #534: KiCad accepts uuid-less copper).
+# A block these do not match is NOT dropped any more (#1158): it is read by its
+# own tokens in `_track_from_tokens`, and reported if even that fails.
+_SEG_CANON_NUM_RE = re.compile(
+    r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?')
+_SEG_CANON_NAMED_RE = re.compile(
+    r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"' + _ESC_STR + r'"\)(?:\s+\(uuid\s+"([^"]+)"\))?')
+_ARC_CANON_FIELDS = (r'\(arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                     r'\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                     r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+                     r'\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?'
+                     r'\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+')
+_ARC_CANON_NUM_RE = re.compile(_ARC_CANON_FIELDS + r'(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?')
+_ARC_CANON_NAMED_RE = re.compile(_ARC_CANON_FIELDS + r'"' + _ESC_STR + r'"\)(?:\s+\(uuid\s+"([^"]+)"\))?')
+
+# Where a track block opens. `(arc` also opens the arc vertex of a polygon's
+# (pts ...); `_track_from_tokens` tells the two apart (a vertex carries no
+# width, layer or net).
+_TRACK_OPEN_RE = re.compile(r'\((segment|arc)(?=[\s()])')
+# The rest of a block whose children nest one level deep (every track block
+# KiCad writes), string-aware. Unrolled -- normal* (special normal*)* with
+# disjoint first characters -- so a block that does not close fails in linear
+# time instead of backtracking. Anything deeper falls back to
+# find_matching_paren.
+_STR_RE_SRC = r'"(?:[^"\\]|\\.)*"'
+_SHALLOW_TAIL_RE = re.compile(
+    r'[^()"]*(?:(?:' + _STR_RE_SRC + r'|\([^()"]*(?:' + _STR_RE_SRC
+    + r'[^()"]*)*\))[^()"]*)*\)')
+_SEXPR_TOKEN_RE = re.compile(_STR_RE_SRC + r'|[()]|[^\s()"]+')
+_LOCKED_CHILD_RE = re.compile(r'\(locked(?:\s+(yes|no|true|false))?\s*\)')
+_NUM_TOKEN_RE = re.compile(r'^-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$')
+
+
+def _sexpr_children(block: str):
+    """``({token: [[arg, ...], ...]}, [bare word, ...])`` for one block's
+    depth-1 children, string-aware. Only the per-token fallback path pays
+    for this; quoted args keep their quotes."""
+    children: Dict[str, List[List[str]]] = {}
+    bare: List[str] = []
+    depth = 0
+    cur: Optional[List[str]] = None
+    for t in _SEXPR_TOKEN_RE.findall(block):
+        if t == '(':
+            depth += 1
+            if depth == 2:
+                cur = []
+        elif t == ')':
+            if depth == 2 and cur:
+                children.setdefault(cur[0], []).append(cur[1:])
+                cur = None
+            depth -= 1
+        elif depth == 2 and cur is not None:
+            cur.append(t)
+        elif depth == 1:
+            bare.append(t)
+    # bare[0] is the block's own keyword (segment / arc / via).
+    return children, bare[1:]
+
+
+def _track_locked(block: str) -> bool:
+    """KiCad's lock on a track or via block, wherever the token sits (#1158).
+
+    KiCad's reader accepts ``(locked yes)``, ``(locked)`` (parseMaybeAbsentBool)
+    and the older bare ``locked`` word anywhere in the block. The fast-path
+    patterns used to read the flag from their own match, which ends at
+    ``(net ...)``, so a lock written after the net was lost.
+    """
+    if 'locked' not in block:
+        return False
+    m = _LOCKED_CHILD_RE.search(block)
+    if m:
+        return m.group(1) in (None, 'yes', 'true')
+    return 'locked' in _sexpr_children(block)[1]
+
+
+def _child_floats(children, tok, n):
+    """The first `tok` child's first `n` numeric args, or None."""
+    for args in children.get(tok, ()):
+        if len(args) >= n and all(_NUM_TOKEN_RE.match(a) for a in args[:n]):
+            return [float(a) for a in args[:n]]
+    return None
+
+
+def _child_net(children, name_to_id):
+    """``(net_id, named)`` from a block's (net ...) child; net 0 when the block
+    carries none, which is what KiCad assigns. ``None`` for a named net with no
+    name map to resolve it (the caller skips the block, as it always has)."""
+    for args in children.get('net', ()):
+        if not args:
+            continue
+        a = args[0]
+        if a.startswith('"'):
+            if not name_to_id:
+                return None
+            return name_to_id.get(a[1:-1], 0), True
+        if _NUM_TOKEN_RE.match(a):
+            return int(float(a)), False
+    return 0, bool(name_to_id)
+
+
+def _child_uuid(children) -> str:
+    for args in children.get('uuid', ()):
+        if args and args[0].startswith('"'):
+            return args[0][1:-1]
+    for args in children.get('tstamp', ()):  # KiCad 6's spelling
+        if args:
+            return kiid_from_tstamp(args[0])
+    return ""
+
+
+def _block_uuid(block: str) -> str:
+    """A block's (uuid ...) wherever it sits; the fast path captures it only
+    directly after (net ...)."""
+    if '(uuid' not in block and '(tstamp' not in block:
+        return ""
+    return _child_uuid(_sexpr_children(block)[0])
+
+
+def _track_blocks(content: str):
+    """``(kind, start offset, block text)`` for every (segment ...) and (arc ...)
+    in file order, plus the offsets of blocks that never close."""
+    out = []
+    unbalanced = []
+    for m in _TRACK_OPEN_RE.finditer(content):
+        t = _SHALLOW_TAIL_RE.match(content, m.end())
+        if t is not None:
+            out.append((m.group(1), m.start(), content[m.start():t.end()]))
+            continue
+        j = find_matching_paren(content, m.start())
+        if j >= len(content) and not content.endswith(')'):
+            unbalanced.append(m.start())
+            continue
+        out.append((m.group(1), m.start(), content[m.start():j]))
+    return out, unbalanced
+
+
+def _report_unparsed_copper(content: str, kind: str, rows) -> None:
+    """One WARNING naming copper blocks the parser could not model (#1158).
+
+    A block KiCad loads and this parser drops is copper the router plans
+    through and every grader misses, so it is never silent. ``rows`` are
+    ``(offset, reason)``.
+    """
+    if not rows:
+        return
+    shown = ', '.join(f"line {content.count(chr(10), 0, off) + 1} ({why})"
+                      for off, why in rows[:5])
+    more = f", and {len(rows) - 5} more" if len(rows) > 5 else ""
+    print(f"WARNING: {len(rows)} {kind} block(s) could not be read and are NOT "
+          f"modelled -- not an obstacle, not graded: {shown}{more}. KiCad may "
+          f"still load them as copper; fix the block in the file (#1158).",
+          file=sys.stderr)
+
+
+def _track_from_tokens(kind, block, name_to_id):
+    """Read one track block by its own tokens, in any order (#1158).
+
+    Returns ``(fields, None)``, ``(None, reason)`` for a block that is a track
+    but cannot be modelled, or ``(None, None)`` for a block that is not track
+    copper at all (a polygon's arc vertex; a named net with no name map).
+    """
+    ch, _bare = _sexpr_children(block)
+    if kind == 'arc' and not any(k in ch for k in ('width', 'layer', 'net')):
+        return None, None          # a (pts ...) arc vertex, not a track
+    net = _child_net(ch, name_to_id)
+    if net is None:
+        return None, None
+    start = _child_floats(ch, 'start', 2)
+    end = _child_floats(ch, 'end', 2)
+    mid = _child_floats(ch, 'mid', 2) if kind == 'arc' else None
+    width = _child_floats(ch, 'width', 1)
+    layer = next((a[0][1:-1] for a in ch.get('layer', ()) if a and a[0].startswith('"')), None)
+    if layer is None:
+        # KiCad 9's solder-mask-exposed track: (layers "F.Cu" "F.Mask"). Its
+        # copper is the .Cu layer (endgame_trackball's antenna feed, six
+        # segments the fixed-order patterns never saw).
+        layer = next((x[1:-1] for a in ch.get('layers', ()) for x in a
+                      if x.startswith('"') and x[1:-1].endswith('.Cu')), None)
+    missing = [t for t, v in (('start', start), ('end', end), ('width', width),
+                              ('layer', layer)) if v is None]
+    if kind == 'arc' and mid is None:
+        missing.insert(1, 'mid')
+    if missing:
+        return None, f"{kind} without {'/'.join(missing)}"
+    return dict(start=start, mid=mid, end=end, width=width[0], layer=layer,
+                net_id=net[0], named=net[1], uuid=_child_uuid(ch),
+                locked=_track_locked(block)), None
+
+
 def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Segment]:
-    """Extract all track segments from PCB file."""
-    segments = []
+    """Extract all track segments (and linearised track arcs) from a PCB file.
 
-    # Try KiCad 9 format first: (net <id>). (locked yes) is optional and KiCad
-    # emits it between width/layer or layer/net, so allow it at both spots -
-    # otherwise a locked track parses to nothing, never becomes an obstacle, and
-    # the router lays copper straight through it (issue #150).
-    # uuid OPTIONAL (PR #534), same reason as the via pattern: KiCad accepts
-    # uuid-less copper, so requiring the token silently dropped real segments.
-    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?'
+    BLOCK-BASED (#1158). Each ``(segment ...)`` / ``(arc ...)`` block is found
+    first, then matched against the canonical field order (the fast path, which
+    is every block KiCad writes); a block in any other order is read by its own
+    tokens, and one that still cannot be modelled is REPORTED. The patterns used
+    to run over the whole file and accept ``(locked yes)`` at only two
+    positions, so a hand-stamped lock before ``(width)`` -- or the bare
+    ``(segment locked ...`` form -- made the track vanish from the model,
+    silently, while KiCad loaded it as copper (StickHub: 747 of 749 segments).
 
-    for m in re.finditer(segment_pattern, content, re.DOTALL):
-        segment = Segment(
-            start_x=float(m.group(1)),
-            start_y=float(m.group(2)),
-            end_x=float(m.group(3)),
-            end_y=float(m.group(4)),
-            width=float(m.group(5)),
-            layer=m.group(6),
-            net_id=int(m.group(7)),
-            uuid=m.group(8) or "",
+    Output order is unchanged for every block the old patterns read: numeric
+    -net segments, then named-net segments, then numeric-net arcs, then
+    named-net arcs, each in file order (#79: mixed-dialect files are legal).
+    """
+    seg_num: List[Segment] = []
+    seg_named: List[Segment] = []
+    arc_num: List[Segment] = []
+    arc_named: List[Segment] = []
+    unparsed = []
+
+    def _seg(sx, sy, ex, ey, width, layer, net_id, uuid, locked, strs=None):
+        if strs is None:
+            strs = (repr(sx), repr(sy), repr(ex), repr(ey))
+        return Segment(
+            start_x=sx, start_y=sy, end_x=ex, end_y=ey, width=width,
+            layer=layer, net_id=net_id, uuid=uuid,
             # Store original strings for exact file matching
-            start_x_str=m.group(1),
-            start_y_str=m.group(2),
-            end_x_str=m.group(3),
-            end_y_str=m.group(4),
-            locked='(locked yes)' in m.group(0)
-        )
-        segments.append(segment)
+            start_x_str=strs[0], start_y_str=strs[1],
+            end_x_str=strs[2], end_y_str=strs[3], locked=locked)
 
-    if name_to_id:
-        # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
-        # pattern and merge — mixed-style files are legal and each segment
-        # matches exactly one pattern (issue #79).
-        # uuid OPTIONAL here too (PR #534, the KiCad-10 twin).
-        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"' + _ESC_STR + r'"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
-        for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
-            net_name = m.group(7)
-            segment = Segment(
-                start_x=float(m.group(1)),
-                start_y=float(m.group(2)),
-                end_x=float(m.group(3)),
-                end_y=float(m.group(4)),
-                width=float(m.group(5)),
-                layer=m.group(6),
-                net_id=name_to_id.get(net_name, 0),
-                uuid=m.group(8) or "",
-                start_x_str=m.group(1),
-                start_y_str=m.group(2),
-                end_x_str=m.group(3),
-                end_y_str=m.group(4),
-                locked='(locked yes)' in m.group(0)
-            )
-            segments.append(segment)
-
-    # Arc tracks: KiCad routes rounded corners as (arc (start)(mid)(end)...).
-    # The parser otherwise drops them, fragmenting arc-routed (human) boards so
-    # connectivity/clearance checks see false gaps (KiCad finds them connected).
-    # Linearize each arc into straight Segments via the existing helper so the
-    # copper graph is complete. (The router never emits arcs, so its own output
-    # is unaffected; this only matters when ingesting hand-routed boards.)
-    # (locked yes) is optional at the same two spots the segment patterns
-    # allow it (#150 / #369 A7) -- without it a LOCKED arc parses to nothing,
-    # never becomes an obstacle, and the router routes straight through it.
-    arc_fields = (r'\(arc\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+'
-                  r'\(mid\s+([\d.-]+)\s+([\d.-]+)\)\s+'
-                  r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+'
-                  r'\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?'
-                  r'\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+')
-
-    def _append_arc(sx, sy, mx, my, ex, ey, width, layer, net_id, uuid, locked=False):
+    def _arc(out, sx, sy, mx, my, ex, ey, width, layer, net_id, uuid, locked):
+        # Arc tracks: KiCad routes rounded corners as (arc (start)(mid)(end)...).
+        # Linearize each into straight Segments so the copper graph is complete
+        # -- dropped, they fragmented arc-routed (human) boards into false gaps.
+        # (The router never emits arcs; this only matters for ingested boards.)
         for (p0, p1) in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
-            segments.append(Segment(
-                start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
-                width=width, layer=layer, net_id=net_id, uuid=uuid,
-                start_x_str=repr(p0[0]), start_y_str=repr(p0[1]),
-                end_x_str=repr(p1[0]), end_y_str=repr(p1[1]), locked=locked))
+            out.append(_seg(p0[0], p0[1], p1[0], p1[1], width, layer, net_id,
+                            uuid, locked))
 
-    # uuid OPTIONAL in both dialects (PR #534), same as the segment/via
-    # patterns: a uuid-less hand-drawn arc otherwise vanished from the model.
-    for m in re.finditer(arc_fields + r'(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?', content, re.DOTALL):
-        _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
-                    float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
-                    int(m.group(9)), m.group(10) or "", '(locked yes)' in m.group(0))
-    if name_to_id:
-        for m in re.finditer(arc_fields + r'"' + _ESC_STR + r'"\)(?:\s+\(uuid\s+"([^"]+)"\))?', content, re.DOTALL):
-            _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
-                        float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
-                        name_to_id.get(m.group(9), 0), m.group(10) or "", '(locked yes)' in m.group(0))
+    blocks, unbalanced = _track_blocks(content)
+    for off in unbalanced:
+        unparsed.append((off, 'block never closes'))
+    for kind, off, block in blocks:
+        if kind == 'segment':
+            m = _SEG_CANON_NUM_RE.match(block)
+            named = False
+            if m is None and name_to_id:
+                m = _SEG_CANON_NAMED_RE.match(block)
+                named = True
+            if m is not None:
+                net_id = (name_to_id.get(m.group(7), 0) if named
+                          else int(m.group(7)))
+                (seg_named if named else seg_num).append(_seg(
+                    float(m.group(1)), float(m.group(2)), float(m.group(3)),
+                    float(m.group(4)), float(m.group(5)), m.group(6), net_id,
+                    m.group(8) or _block_uuid(block),
+                    _track_locked(block),
+                    strs=(m.group(1), m.group(2), m.group(3), m.group(4))))
+                continue
+        else:
+            m = _ARC_CANON_NUM_RE.match(block)
+            named = False
+            if m is None and name_to_id:
+                m = _ARC_CANON_NAMED_RE.match(block)
+                named = True
+            if m is not None:
+                net_id = (name_to_id.get(m.group(9), 0) if named
+                          else int(m.group(9)))
+                _arc(arc_named if named else arc_num,
+                     float(m.group(1)), float(m.group(2)), float(m.group(3)),
+                     float(m.group(4)), float(m.group(5)), float(m.group(6)),
+                     float(m.group(7)), m.group(8), net_id,
+                     m.group(10) or _block_uuid(block),
+                     _track_locked(block))
+                continue
+        f, why = _track_from_tokens(kind, block, name_to_id)
+        if f is None:
+            if why:
+                unparsed.append((off, why))
+            continue
+        if kind == 'segment':
+            (seg_named if f['named'] else seg_num).append(_seg(
+                f['start'][0], f['start'][1], f['end'][0], f['end'][1],
+                f['width'], f['layer'], f['net_id'], f['uuid'], f['locked']))
+        else:
+            _arc(arc_named if f['named'] else arc_num,
+                 f['start'][0], f['start'][1], f['mid'][0], f['mid'][1],
+                 f['end'][0], f['end'][1], f['width'], f['layer'],
+                 f['net_id'], f['uuid'], f['locked'])
+    _report_unparsed_copper(content, 'track', unparsed)
+    segments = seg_num + seg_named + arc_num + arc_named
 
     # Net-tied copper GRAPHICS (#337): KiCad renders gr_line / gr_arc drawn on
     # a copper layer as real copper (optionally carrying a (net ...)). They are
@@ -4637,6 +5232,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
             return
         ew = w if w > 0 else defaults.TRACK_WIDTH
         seq = pts + [pts[0]] if closed else pts
+        ring = tuple((float(x), float(y)) for x, y in pts) if (filled and closed) else None
         for a, b in zip(seq, seq[1:]):
             if a == b:
                 # A poly whose vertex list already REPEATS its first point --
@@ -4650,7 +5246,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
                 width=ew, layer=layer, net_id=nid, uuid=uuid, graphic=True,
                 drawn_width=max(0.0, w), graphic_kind=kind,
-                graphic_circle=circle, graphic_filled=bool(filled and closed)))
+                graphic_circle=circle, graphic_filled=bool(filled and closed),
+                graphic_ring=ring))
 
     def _blk_fields(blk):
         # BOTH layer tokens (#659 follow-up). KiCad writes the singular
@@ -4679,11 +5276,9 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                     layers.append(_one)
         wm = re.search(r'\(width\s+([-\d.]+)\)', blk)
         nm = re.search(r'\(net\s+("[^"]*"|\d+)\)', blk)
-        um = (re.search(r'\(uuid\s+"([^"]+)"\)', blk)
-              or re.search(r'\(tstamp\s+([-\w]+)\)', blk))
         return (layers, float(wm.group(1)) if wm else 0.0,
                 _resolve_net(nm.group(1)) if nm else 0,
-                um.group(1) if um else '')
+                uuid_or_tstamp(blk))
 
     def _xy(blk, name):
         m = re.search(r'\(' + name + r'\s+([-\d.]+)\s+([-\d.]+)\)', blk)
@@ -4911,6 +5506,7 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
     These are used for power planes and other filled copper areas.
     """
     zones = []
+    copper_layers = None  # the board's copper stack, read once if a zone says *.Cu
 
     for zone_content, in_footprint in _iter_zone_blocks(content):
         # Rule areas are routing restrictions, not copper -- skip regardless
@@ -4981,17 +5577,28 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
             layers_match = re.search(r'\(layers\s+([^)]+)\)', zone_header)
             if not layers_match:
                 continue
-            _toks = [t.strip('"') for t in
-                     re.findall(r'"[^"]+"|\S+', layers_match.group(1))]
-            zone_layers = [l for l in _toks
-                           if l.endswith('.Cu') or l == '*.Cu']
+            # KiCad 6 spells a two-face pour (layers F&B.Cu) and an all-copper
+            # one (layers *.Cu); pcbnew loads them as F.Cu + B.Cu and as every
+            # copper layer. Kept literally, each became ONE zone on a layer
+            # nothing else recognizes, so the pour vanished from the model.
+            zone_layers = []
+            for l in layer_list_tokens(layers_match.group(1)):
+                if l == 'F&B.Cu':
+                    names = ['F.Cu', 'B.Cu']
+                elif l == '*.Cu':
+                    if copper_layers is None:
+                        copper_layers = _layer_table(content)[1]
+                    names = copper_layers
+                else:
+                    names = [l] if l.endswith('.Cu') else []
+                for nm in names:
+                    if nm not in zone_layers:
+                        zone_layers.append(nm)
             if not zone_layers:
                 continue
         layer = zone_layers[0]
 
-        # Extract UUID
-        uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', zone_content)
-        uuid = uuid_match.group(1) if uuid_match else ""
+        uuid = uuid_or_tstamp(zone_header)  # KiCad 6 zones carry (tstamp ...)
 
         # Fill semantics (#350). All three live before the polygon blocks, so
         # the header slice covers them: (priority N) is a direct zone child;
@@ -5164,10 +5771,19 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     Returns:
         PCBData object containing all parsed data
     """
-    with open(filepath, 'r', encoding='utf-8') as f:
-        content = f.read()
+    content = read_board_text(filepath)
 
     kicad_version = detect_kicad_version(content)
+    if 0 < kicad_version < FIRST_SUPPORTED_BOARD_VERSION:
+        raise UnsupportedBoardFormat(
+            f"{filepath} is a KiCad 5 (or older) board, file format "
+            f"{kicad_version}. This tool reads KiCad 6 and later; it would see "
+            f"no footprints or nets in this file. Open the board in KiCad 6 or "
+            f"newer and save it, which converts it, or use the KiCad plugin, "
+            f"which reads the board through KiCad itself.")
+    # A file from before 6.0's arc format: rewrite its center/angle arcs as
+    # start/mid/end on this ANALYSIS copy, the form every reader below matches.
+    content = strip_bare_shape_locks(upgrade_legacy_arcs(content, kicad_version))
 
     # Extract components in order
     board_info = extract_layers(content)
@@ -5208,6 +5824,8 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     vias = extract_vias(content, name_to_id)
     segments = extract_segments(content, name_to_id)
     zones = extract_zones(content, name_to_id)
+    if kicad_version and kicad_version < NEW_OVERBAR_NOTATION:
+        _apply_new_overbar_notation(nets, footprints, zones)
     board_info.keepouts = extract_keepouts(content)
     guide_paths = parse_guide_paths(content, guide_layer)
     keepout_zones = parse_keepout_zones(content, keepout_layer)
@@ -5248,6 +5866,20 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         paste_apertures=paste_apertures,
         graphic_copper_unmeasured=graphic_copper_unmeasured,
     )
+
+
+def _apply_new_overbar_notation(nets, footprints, zones) -> None:
+    """Rename ~X~ overbars to ~{X} on every DISPLAY net name, as pcbnew does on
+    loading a file from before NEW_OVERBAR_NOTATION -- so `--nets "/~{RST}"`,
+    which is how KiCad shows the net, matches on the CLI too. `name_to_id`
+    keeps the raw file text: in-file references still resolve against it."""
+    for net in nets.values():
+        net.name = convert_to_new_overbar_notation(net.name)
+    for fp in footprints.values():
+        for pad in fp.pads:
+            pad.net_name = convert_to_new_overbar_notation(pad.net_name or '')
+    for zone in zones:
+        zone.net_name = convert_to_new_overbar_notation(zone.net_name or '')
 
 
 def _nm_quantize_bounds(bounds):
@@ -5918,19 +6550,20 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
         fp_layer = get_layer_name(getattr(fp, "layer", None))
         fp_value = _fp_value(fp)
 
+        # #1098: (attr ...) flags and the 3D-model declaration, parity with
+        # the text parser (FOOTPRINT_ATTR_TOKENS).
+        fp_attrs, fp_has_model = kipy_footprint_attrs(fp)
         # DNP (do-not-populate) flag — kept at parity with the text parser. A
         # no-pop series part is an open circuit, so its pads must not be treated
-        # as bridging two nets into one logical net. IsDNP() is KiCad 7+.
-        try:
-            fp_dnp = bool(fp.IsDNP())
-        except Exception:
-            fp_dnp = False
+        # as bridging two nets into one logical net. It is one of the kipy
+        # attributes: this read used to be pcbnew's IsDNP(), which a kipy
+        # footprint does not have, so every part read as populated.
+        fp_dnp = 'dnp' in fp_attrs
 
         # Locked flag — parity with the text parser's footprint (locked yes).
-        try:
-            fp_locked = bool(fp.IsLocked())
-        except Exception:
-            fp_locked = False
+        # Was pcbnew's IsLocked(), likewise absent on kipy, so every part read
+        # as unlocked; a kipy FootprintInstance has the `locked` property.
+        fp_locked = kipy_locked(fp)
 
         # Footprint-level clearance override (#326) — IPC parity with the text
         # parser and the SWIG builder's fp.GetLocalClearance(). kipy exposes it
@@ -6084,6 +6717,8 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
             paste_margin=_fp_paste[0],
             paste_margin_ratio=_fp_paste[1],
             parsed_pose=(fp_x, fp_y, fp_rotation, fp_layer),
+            attrs=fp_attrs,
+            has_model=fp_has_model,
         )
 
         for pad in _fp_pads(fp):
@@ -6635,6 +7270,55 @@ def kipy_locked(item) -> bool:
         return item.proto.locked == LockedState.LS_LOCKED
     except Exception:
         return False
+
+
+#: #1098 over IPC: (attr ...) token -> kipy FootprintAttributes field. kipy
+#: 0.7.1 wraps the first four as properties; the last two exist only on the
+#: proto, which carries all of them, so each is read property first, proto
+#: second (as kipy_locked reads `locked`).
+_KIPY_FP_ATTR_FIELDS = (
+    ('board_only', 'not_in_schematic'),
+    ('exclude_from_bom', 'exclude_from_bill_of_materials'),
+    ('exclude_from_pos_files', 'exclude_from_position_files'),
+    ('dnp', 'do_not_populate'),
+    ('allow_missing_courtyard', 'exempt_from_courtyard_requirement'),
+    ('allow_soldermask_bridges', 'allow_soldermask_bridges'),
+)
+
+
+def kipy_footprint_attrs(fp) -> Tuple[Tuple[str, ...], bool]:
+    """#1098 over IPC: a kipy footprint's ``(attr ...)`` flags, spelled as
+    FOOTPRINT_ATTR_TOKENS, and whether it declares a 3D model -- the two
+    Footprint fields both of main's parse paths fill.
+
+    kipy footprints have none of pcbnew's GetAttributes() / IsDNP() /
+    Models(): the flags are FootprintAttributes fields, smd / through_hole is
+    its mounting_style, and the models are footprint items. A flag kipy
+    cannot read is left unset rather than raising mid-parse."""
+    toks = set()
+    a = getattr(fp, 'attributes', None)
+    if a is not None:
+        proto = getattr(a, 'proto', None)
+        for tok, field in _KIPY_FP_ATTR_FIELDS:
+            v = getattr(a, field, None)
+            if not isinstance(v, bool) and proto is not None:
+                v = getattr(proto, field, None)
+            if v is True:
+                toks.add(tok)
+        try:
+            from kipy.proto.board.board_types_pb2 import FMS_SMD, FMS_THROUGH_HOLE
+        except Exception:
+            FMS_THROUGH_HOLE, FMS_SMD = 1, 2   # the proto's own enum values
+        style = getattr(a, 'mounting_style', None)
+        if style == FMS_SMD:
+            toks.add('smd')
+        elif style == FMS_THROUGH_HOLE:
+            toks.add('through_hole')
+    try:
+        has_model = len(fp.definition.models) > 0
+    except Exception:
+        has_model = False
+    return tuple(sorted(toks)), has_model
 
 
 #: The per-side protection tokens on a kipy padstack's front/back outer layers:
@@ -7915,12 +8599,19 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 # compared too. The off-outline grade measures from them, so a
                 # front that reads a different stroke or fill grades a
                 # different overrun.
+                # #1181: and the filled interior, `graphic_ring` -- the
+                # obstacle map stamps it and check_drc grades inside it, so a
+                # front reading a different ring routes around different
+                # copper.
                 _dw = getattr(s, 'drawn_width', None)
+                _ring = getattr(s, 'graphic_ring', None)
                 return (ends, _q(s.width), s.layer, '<graphic>',
                         getattr(s, 'owner_ref', ''),
                         None if _dw is None else _q(_dw),
                         getattr(s, 'graphic_kind', ''),
-                        bool(getattr(s, 'graphic_filled', False)))
+                        bool(getattr(s, 'graphic_filled', False)),
+                        None if _ring is None
+                        else tuple((_q(x), _q(y)) for x, y in _ring))
             return (ends, _q(s.width), s.layer, _net_label(pcb, s.net_id))
         return _seg_sig
 
@@ -8126,7 +8817,7 @@ def get_nets_to_route(pcb_data: PCBData,
         # Skip based on exclude patterns
         excluded = False
         for pattern in exclude_patterns:
-            if fnmatch.fnmatch(net.name.upper(), pattern.upper()):
+            if fnmatch.fnmatchcase(net.name.upper(), pattern.upper()):
                 excluded = True
                 break
         if excluded:
@@ -8136,7 +8827,7 @@ def get_nets_to_route(pcb_data: PCBData,
         if net_patterns:
             matched = False
             for pattern in net_patterns:
-                if fnmatch.fnmatch(net.name, pattern):
+                if fnmatch.fnmatchcase(net.name, pattern):
                     matched = True
                     break
             if not matched:
@@ -8233,8 +8924,11 @@ def detect_package_type(footprint: Footprint) -> str:
     if 'DIP' in fp_name or 'PDIP' in fp_name:
         return 'DIP'
 
-    # Analyze pad arrangement if name doesn't indicate type
-    pads = footprint.pads
+    # Analyze pad arrangement if name doesn't indicate type. The PINS only
+    # (#1148): a paste or mask window is not a pad, and reading it made an
+    # 0201's split paste windows a four-pad "QFN" (rp2350 C28/R9) and
+    # orangecrab U6 a QFN that is OTHER without its apertures.
+    pads = non_aperture_pads(footprint)
     if len(pads) < 4:
         return 'OTHER'
 
@@ -8369,12 +9063,16 @@ def detect_bga_pitch(footprint: Footprint) -> float:
     Returns:
         Pitch in mm, or 1.0 as default if cannot be detected
     """
-    if not footprint.pads or len(footprint.pads) < 2:
+    # The pins only (#1148): a thermal pad's split paste windows sit between
+    # the balls, so they read as a pitch no part has (glasgow U36/U8: 0.1 for
+    # a 0.325 array; rp2350's 0402 caps: 0.025).
+    pads = non_aperture_pads(footprint)
+    if len(pads) < 2:
         return 1.0
 
     axis_pitches = []
     for _coord in (lambda q: q.global_x, lambda q: q.global_y):
-        positions = sorted({_coord(p) for p in footprint.pads})
+        positions = sorted({_coord(p) for p in pads})
         gaps = [b - a for a, b in zip(positions, positions[1:])
                 if (b - a) >= _PITCH_NOISE_MM]
         if gaps:

@@ -38,8 +38,8 @@
     "repo": "GlasgowEmbedded/glasgow",
     "path": "hardware/boards/glasgow/glasgow.kicad_pcb",
     "file": "glasgow_revC.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/GlasgowEmbedded/glasgow/main/hardware/boards/glasgow/glasgow.kicad_pcb",
-    "github_url": "https://github.com/GlasgowEmbedded/glasgow",
+    "raw_url": "https://raw.githubusercontent.com/GlasgowEmbedded/glasgow/d884af4b22846c96c4dba9b1c347e62207ea6c8d/hardware/boards/glasgow/glasgow.kicad_pcb",
+    "github_url": "https://github.com/GlasgowEmbedded/glasgow/blob/d884af4b22846c96c4dba9b1c347e62207ea6c8d/hardware/boards/glasgow/glasgow.kicad_pcb",
     "version": 20240108,
     "size_kb": 3762,
     "layers_est": 4,
@@ -47,7 +47,7 @@
     "routable_nets": 226,
     "packages": "mixed",
     "short_name": "glasgow_revC",
-    "note": "FPGA BGA interface tool",
+    "note": "FPGA BGA interface tool. raw_url re-pinned 2026-10-08 to d884af4b, the commit that served the corpus's version: 2026-09-02 commit c0f63b3 ('hardware: restructure to avoid relying on branches') deleted hardware/boards/glasgow/glasgow.kicad_pcb and split the board into per-revision dirs (revA..revD1); the current revC3/glasgow.kicad_pcb is a DIFFERENT blob, so the old path is pinned at d884af4b.",
     "branch": "main"
   },
   {

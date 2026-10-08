@@ -1,0 +1,550 @@
+{
+ "clearance": 0.2,
+ "limit_mm": 3.0,
+ "recorded_at": "055fa9e1",
+ "root": "krt-980-base",
+ "runs": {
+  "esp_prog:0": {
+   "notes": [
+    "decap stage 2.5: 4 cap(s) in scope, 0 claimed at a supply pin -- no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips. They fall through to the centroid stage",
+    "anchors-first: 7 anchor(s) (extent >= 3.61mm) seed before 11 small(s): CON2, U1, USB1, CON1, U2, Q1, Q2",
+    "USB1: rotated 180 -> 270 (no contained pose at the input rotation)"
+   ],
+   "placements": {
+    "C1": [
+     128.657,
+     95.902,
+     90.0
+    ],
+    "C2": [
+     128.582,
+     92.788,
+     270.0
+    ],
+    "C3": [
+     124.316,
+     97.324,
+     180.0
+    ],
+    "C4": [
+     126.914,
+     92.785,
+     90.0
+    ],
+    "CON1": [
+     119.031,
+     98.077,
+     270.0
+    ],
+    "CON2": [
+     129.371,
+     99.387,
+     180.0
+    ],
+    "Q1": [
+     131.049,
+     102.247,
+     180.0
+    ],
+    "Q2": [
+     127.039,
+     101.965,
+     180.0
+    ],
+    "R1": [
+     137.401,
+     102.09,
+     270.0
+    ],
+    "R2": [
+     137.204,
+     104.039,
+     90.0
+    ],
+    "R3": [
+     127.852,
+     104.039,
+     180.0
+    ],
+    "R4": [
+     139.196,
+     103.036,
+     180.0
+    ],
+    "Ref*": [
+     124.325,
+     95.215,
+     0.0
+    ],
+    "Ref*~2": [
+     124.22,
+     92.436,
+     0.0
+    ],
+    "U1": [
+     141.709,
+     97.967,
+     0.0
+    ],
+    "U2": [
+     128.337,
+     95.734,
+     270.0
+    ],
+    "USB1": [
+     133.862,
+     95.684,
+     270.0
+    ],
+    "Y1": [
+     135.177,
+     102.332,
+     90.0
+    ]
+   },
+   "unseated": []
+  },
+  "watchy:0": {
+   "notes": [
+    "edge connector C11: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector J2: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector R4: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector R8: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector R9: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector SW1: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector SW2: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector U3: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector D3: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "edge connector M1: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "edge connector R11: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "edge connector SW3: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "edge connector SW4: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "decap stage 2.5: 26 cap(s) in scope, 0 claimed at a supply pin -- no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips. They fall through to the centroid stage",
+    "anchors-first: 15 anchor(s) (extent >= 3.50mm) seed before 69 small(s): J3, J1, J2, U4, SW1, SW2, SW3, SW4, D1, D3, D4, D5, L2, D2, U2"
+   ],
+   "placements": {
+    "AE1": [
+     82.816,
+     90.314,
+     0.0
+    ],
+    "C1": [
+     95.518,
+     104.3,
+     90.0
+    ],
+    "C10": [
+     96.572,
+     83.497,
+     90.0
+    ],
+    "C11": [
+     94.03,
+     75.917,
+     0.0
+    ],
+    "C12": [
+     85.79,
+     108.631,
+     180.0
+    ],
+    "C13": [
+     91.649,
+     87.759,
+     0.0
+    ],
+    "C14": [
+     97.4,
+     95.565,
+     270.0
+    ],
+    "C15": [
+     90.036,
+     78.219,
+     0.0
+    ],
+    "C16": [
+     85.255,
+     77.181,
+     270.0
+    ],
+    "C17": [
+     80.012,
+     76.934,
+     180.0
+    ],
+    "C18": [
+     80.85,
+     78.148,
+     180.0
+    ],
+    "C19": [
+     92.215,
+     76.576,
+     90.0
+    ],
+    "C2": [
+     90.722,
+     75.863,
+     90.0
+    ],
+    "C20": [
+     94.393,
+     106.376,
+     0.0
+    ],
+    "C21": [
+     71.094,
+     96.929,
+     0.0
+    ],
+    "C22": [
+     71.567,
+     94.499,
+     90.0
+    ],
+    "C23": [
+     95.485,
+     85.838,
+     90.0
+    ],
+    "C24": [
+     74.916,
+     91.627,
+     90.0
+    ],
+    "C25": [
+     77.341,
+     89.091,
+     90.0
+    ],
+    "C26": [
+     71.589,
+     99.698,
+     90.0
+    ],
+    "C27": [
+     70.725,
+     92.215,
+     90.0
+    ],
+    "C28": [
+     91.543,
+     89.563,
+     90.0
+    ],
+    "C29": [
+     70.449,
+     89.709,
+     270.0
+    ],
+    "C3": [
+     93.591,
+     95.705,
+     90.0
+    ],
+    "C4": [
+     97.121,
+     92.623,
+     90.0
+    ],
+    "C5": [
+     95.512,
+     101.966,
+     90.0
+    ],
+    "C6": [
+     76.252,
+     96.648,
+     90.0
+    ],
+    "C7": [
+     79.688,
+     89.971,
+     180.0
+    ],
+    "C9": [
+     88.107,
+     80.564,
+     0.0
+    ],
+    "D1": [
+     80.302,
+     106.938,
+     0.0
+    ],
+    "D2": [
+     91.705,
+     97.985,
+     270.0
+    ],
+    "D3": [
+     75.505,
+     87.834,
+     90.0
+    ],
+    "D4": [
+     72.907,
+     90.918,
+     270.0
+    ],
+    "D5": [
+     74.234,
+     96.043,
+     270.0
+    ],
+    "J1": [
+     86.464,
+     100.708,
+     90.0
+    ],
+    "J2": [
+     80.692,
+     100.454,
+     90.0
+    ],
+    "J3": [
+     84.304,
+     93.843,
+     0.0
+    ],
+    "L1": [
+     95.481,
+     81.351,
+     270.0
+    ],
+    "L2": [
+     74.875,
+     101.42,
+     270.0
+    ],
+    "M1": [
+     98.055,
+     103.122,
+     90.0
+    ],
+    "Q1": [
+     92.56,
+     103.029,
+     270.0
+    ],
+    "Q2": [
+     95.579,
+     98.773,
+     90.0
+    ],
+    "Q3": [
+     71.296,
+     85.727,
+     270.0
+    ],
+    "R1": [
+     88.332,
+     78.481,
+     90.0
+    ],
+    "R10": [
+     95.46,
+     78.4,
+     270.0
+    ],
+    "R11": [
+     79.064,
+     75.507,
+     0.0
+    ],
+    "R12": [
+     88.972,
+     76.628,
+     0.0
+    ],
+    "R13": [
+     98.317,
+     89.586,
+     0.0
+    ],
+    "R14": [
+     93.387,
+     108.985,
+     270.0
+    ],
+    "R15": [
+     86.43,
+     77.372,
+     90.0
+    ],
+    "R16": [
+     72.628,
+     79.116,
+     90.0
+    ],
+    "R17": [
+     72.202,
+     81.698,
+     270.0
+    ],
+    "R18": [
+     77.953,
+     77.711,
+     270.0
+    ],
+    "R19": [
+     95.311,
+     83.762,
+     270.0
+    ],
+    "R2": [
+     83.521,
+     109.507,
+     270.0
+    ],
+    "R20": [
+     74.117,
+     77.197,
+     0.0
+    ],
+    "R3": [
+     92.172,
+     109.289,
+     90.0
+    ],
+    "R4": [
+     92.925,
+     78.315,
+     180.0
+    ],
+    "R5": [
+     91.731,
+     106.808,
+     270.0
+    ],
+    "R6": [
+     95.536,
+     95.055,
+     90.0
+    ],
+    "R7": [
+     90.065,
+     80.119,
+     90.0
+    ],
+    "R8": [
+     97.228,
+     86.179,
+     180.0
+    ],
+    "R9": [
+     82.96,
+     76.761,
+     0.0
+    ],
+    "SW1": [
+     79.403,
+     82.744,
+     270.0
+    ],
+    "SW2": [
+     92.513,
+     82.926,
+     270.0
+    ],
+    "SW3": [
+     94.7,
+     90.398,
+     90.0
+    ],
+    "SW4": [
+     75.482,
+     81.861,
+     90.0
+    ],
+    "TP1": [
+     98.404,
+     84.041,
+     0.0
+    ],
+    "TP2": [
+     98.1,
+     80.652,
+     0.0
+    ],
+    "TP3": [
+     98.114,
+     78.32,
+     0.0
+    ],
+    "TP4": [
+     98.992,
+     98.424,
+     0.0
+    ],
+    "TP4~2": [
+     71.101,
+     102.633,
+     0.0
+    ],
+    "TP5": [
+     71.243,
+     105.385,
+     0.0
+    ],
+    "TP5~2": [
+     98.798,
+     92.234,
+     0.0
+    ],
+    "TP6": [
+     70.724,
+     79.434,
+     0.0
+    ],
+    "TP7": [
+     71.859,
+     76.701,
+     0.0
+    ],
+    "U1": [
+     86.424,
+     80.311,
+     180.0
+    ],
+    "U2": [
+     74.837,
+     106.469,
+     180.0
+    ],
+    "U3": [
+     88.939,
+     107.35,
+     270.0
+    ],
+    "U4": [
+     85.826,
+     85.939,
+     270.0
+    ],
+    "U5": [
+     84.506,
+     106.521,
+     0.0
+    ],
+    "U6": [
+     79.354,
+     87.613,
+     0.0
+    ],
+    "Y1": [
+     76.214,
+     76.458,
+     270.0
+    ],
+    "Y2": [
+     83.93,
+     79.793,
+     180.0
+    ]
+   },
+   "unseated": []
+  }
+ }
+}

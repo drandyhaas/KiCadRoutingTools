@@ -1,0 +1,6 @@
+three.js r186 (npm three@0.186.1), vendored unmodified for the stage3d film (#1081).
+Files: build/three.module.js, build/three.core.js, examples/jsm/loaders/GLTFLoader.js,
+examples/jsm/utils/BufferGeometryUtils.js, examples/jsm/utils/SkeletonUtils.js. MIT, see LICENSE.
+Pinned so a render is a pure function of its inputs: a different three.js draws
+different pixels. To upgrade, replace all five files from one npm version and
+re-record tests/test_1081_render3d.py.

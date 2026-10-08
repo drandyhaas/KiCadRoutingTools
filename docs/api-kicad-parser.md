@@ -91,6 +91,7 @@ The top-level container returned by both entry points.
 | `groups` | `List` | KiCad groups (#459) — kept so writers can preserve group membership |
 | `source_path` | `str` | Absolute path this data came from (`""` = in-memory). Lets engines with no `input_file` discover sibling project files, e.g. the `.kicad_dru` per-layer clearance rules (#498) |
 | `exact_fill_provider` | `Optional[Callable]` | Zero-arg callable returning `{(net_name, layer): [island_polygon, ...]}` — KiCad-truth fill for exact-fill consumers (#424). `None` (file-parsed boards) = refill `source_path`; `build_pcb_data_from_board` sets it to a staged-save refill of the live board (live copper AND live clearances) |
+| `live_rules_provider` | `Optional[Callable]` | Zero-arg callable returning the LIVE board's design-settings rules `{'min_track_width': mm, 'min_connection': mm}` (#1187), read when called. `None` (file-parsed boards) = the sibling `.kicad_pro`; `build_pcb_data_from_board` sets it, because mid-plan the file beside the live board is the original project while the floors the plan lowered live in pcbnew's memory. Read by `fix_kicad_drc_settings.connection_width_floor` |
 | `paste_apertures` | `List[PasteAperture]` | Every solder-paste OPENING (#962), from `paste_apertures.build_paste_apertures`. Sources: `pad` (a pad on a paste layer, grown by its resolved paste margin -- pad, then footprint, then board setup, per axis, ratio and margin independently, clamped at -size/2 except for a custom pad, which KiCad does not clamp), `paste_only_pad` (a pad on a paste layer with no copper, e.g. windowpanes) and `graphic` (a paste-layer shape, e.g. esp_prog U2's F.Paste tab). Which nets an opening concerns is `paste_apertures.aperture_nets` (the per-net lists `apertures_by_net` / `apertures_for_net` are memoised): a pad opening its pad's net, a graphic or paste-only one the nets of the owner's copper it overlaps. Both parse paths feed the one builder |
 | `graphic_copper_unmeasured` | `List[dict]` | Footprint copper the parser does NOT model, per owner (`{owner_ref, kind, reason}`, kind `logo` / `curve` / `text`), so the off-outline grade can say what it did not measure (#962) |
 
@@ -152,12 +153,13 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `uuid` | str | UUID from the file (`''` for newly created segments and for uuid-less file items — KiCad treats the token as optional, PR #534) |
 | `start_x_str`, … | str | Original coordinate strings, kept for exact file matching |
 | `graphic` | bool | This copper came from a **graphic**, not a track (issue #337, extended to footprint shapes by #908). It is real copper for obstacles and DRC, and it is immutable: cleanup passes must never prune it and writers cannot strip it, because there is no `(segment …)` block to match. It never conducts — connectivity gives a graphic no credit, so KiCad will keep calling such a net unconnected (#513 item 6). |
-| `locked` | bool | KiCad `(locked yes)`: the user pinned this copper. Its net is never rip-eligible (#521, no override); locked copper was already an obstacle (#150). Both parse paths set it. |
+| `locked` | bool | KiCad `(locked yes)`: the user pinned this copper. Its net is never rip-eligible (#521, no override); locked copper was already an obstacle (#150). Both parse paths set it. The text parser reads the token anywhere in the block, as KiCad does -- `(locked yes)`, `(locked)` or the bare `(segment locked ...` word (#1158) -- and reads every track block by its own tokens, so a hand-written block in any field order is modelled, and one it still cannot model is reported on stderr rather than dropped. |
 | `owner_ref` | str | For copper drawn **inside a footprint**, the disambiguated footprint key that owns it (`'U2'`, `'TP4~2'`); `''` for board-level graphics and every routed track (#908). It is what lets a DRC report name the object the way KiCad does — `net_0 [Polygon(U2)]` beside KiCad's *"Polygon [\<no net\>] of U2 on F.Cu"* — and what scopes the own-pad obstacle lift to the owning part. |
 | `drawn_width` | Optional[float] | Graphic copper only: the stroke AS DRAWN (#962). `width` models a filled shape drawn at stroke 0 at the fab track width, which is right for an obstacle and wrong for a measurement; the off-outline grade reads this. `None` for tracks |
 | `graphic_kind` | str | Graphic copper only: the primitive (`'line'`, `'arc'`, `'poly'`, `'rect'`, `'circle'`; a footprint rect at a non-cardinal angle reads `'poly'`, as pcbnew loads it). `''` for tracks |
 | `graphic_circle` | Optional[Tuple] | For a circle, its TRUE `(cx, cy, r)`: the outline is a 16-gon whose chord midpoints sit 1.9% of r inside the curve, so a reach measured on the chords under-reads |
 | `graphic_filled` | bool | A closed graphic (poly/rect/circle) whose interior is copper, by KiCad's loader rules (a `(fill ...)` token; without one a poly is filled and a rect or circle only at stroke 0). The segments model only the outline; the off-outline grade reads this to look inside |
+| `graphic_ring` | Optional[Tuple] | For a FILLED closed graphic, its outline vertices as one tuple shared by every segment of the shape; `None` otherwise (#1181). The obstacle map stamps the interior it encloses and check_drc grades copper inside it (`check_drc.filled_graphic_shapes`). Both parse paths set it |
 
 ### `Via`
 
@@ -215,8 +217,9 @@ the two apart; `footprint_copper_is_functional(pad_count)` does, and the
 writer's silkscreen mover reads the same predicate — a footprint with copper
 pads owns a land pattern (modelled, kept on copper), a pad-less one is a logo
 (relocated to silk by the writer, as #146 has always done, and therefore not
-modelled). Only the **perimeter** is modelled as an obstacle, never the
-interior fill, which is the same limit board-level graphics have; the
+modelled). The segments are the **perimeter**; a filled shape's interior is
+its `graphic_ring` (#1181), which the obstacle map stamps for every foreign net
+and check_drc grades containment in -- the same for board-level graphics. The
 off-outline grade (`check_drc.footprint_graphic_outline_census`, #962) reads
 `Segment.graphic_filled` to look inside a filled shape.
 
@@ -398,6 +401,59 @@ from kicad_parser import parse_kicad_pcb, KICAD_10_MIN_VERSION
 pcb = parse_kicad_pcb('kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb')
 v10 = pcb.kicad_version >= KICAD_10_MIN_VERSION
 print(f"File version {pcb.kicad_version} -> {'KiCad 10+' if v10 else 'KiCad 9'} format")
+```
+
+### KiCad 5 and older: refused
+
+A board older than `FIRST_SUPPORTED_BOARD_VERSION` (20201115, KiCad's
+"module -> footprint" change) writes its parts as `(module ...)` blocks with
+bare net names, which this parser does not read. Rather than return a board
+with no footprints and no nets, `parse_kicad_pcb` raises
+`UnsupportedBoardFormat` (a `ValueError`) saying what the file is and what to
+do: open it in KiCad 6 or newer and save it, or use the KiCad plugin, which
+reads the board through KiCad itself. The CLIs print it as one `ERROR:` line
+and exit 1.
+
+### KiCad 6-era files
+
+pcbnew converts several KiCad 6-era conventions when it loads a file, and the
+GUI (which builds from pcbnew) has always seen the converted board.
+`parse_kicad_pcb` applies the same conversions, at KiCad's own version cutoffs
+(`pcb_io_kicad_sexpr_parser.cpp` / `pcb_io_kicad_sexpr.h`, KiCad 10.0.0), so a
+KiCad 6 board parses on the CLI the way it loads in KiCad:
+
+| Convention in the file | Read as | Applies to |
+|---|---|---|
+| `(layers *.Cu *.Mask)` — names unquoted | the same names | every layer list (KiCad 6 writes pad lists bare) |
+| a zone on `(layers F&B.Cu)` / `(layers *.Cu)` | one `Zone` per layer: F.Cu + B.Cu / every copper layer | all versions |
+| `(gr_arc (start CENTER) (end ARC-START) (angle SWEEP))` | the three-point arc pcbnew writes | version ≤ `LEGACY_ARC_FORMATTING` (20210925) |
+| a footprint whose `(tags ...)` start with `"net tie"` | one `net_tie_groups` entry of every pad | version ≤ `LEGACY_NET_TIES` (20220815) |
+| `(tstamp ...)` | the item's `uuid` (an 8-hex-digit stamp expanded as KiCad's KIID does) | footprints, tracks, vias, zones |
+| `~X~` overbars in net names | `~{X}` | version < `NEW_OVERBAR_NOTATION` (20210606) |
+| a bare `locked`: `(footprint "X" locked (layer ...`, `(gr_line locked (start ...`; or `(locked)` (20210108-20210423) | `Footprint.locked`; the shape is read as unlocked geometry | all versions (KiCad 6 spells it so) |
+
+The legacy arc rewrite and the shape-lock strip happen on the parser's
+**analysis copy** only: never write `upgrade_legacy_arcs` output back into a
+file of that version, which KiCad would then fail to load.
+
+```python
+layer_list_tokens(body: str) -> List[str]          # names in a (layers ...) body, quoted or bare
+map_layer_list_tokens(body: str, fn) -> str        # rewrite each name, keeping its spelling
+upgrade_legacy_arcs(content: str, kicad_version=None) -> str
+kiid_from_tstamp(raw: str) -> str
+uuid_or_tstamp(text: str) -> str                   # (uuid "...") else (tstamp ...), else ''
+convert_to_new_overbar_notation(old: str) -> str   # KiCad's ConvertToNewOverbarNotation
+footprint_head_flags(fp_text: str) -> set          # bare words after the name: {'locked', 'placed'}
+strip_bare_shape_locks(content: str) -> str        # (gr_line locked (start -> (gr_line (start
+```
+
+```python
+from kicad_parser import (convert_to_new_overbar_notation, kiid_from_tstamp,
+                          layer_list_tokens)
+
+print(convert_to_new_overbar_notation('/~RST~'))   # /~{RST}
+print(kiid_from_tstamp('5E3F1A2B'))                # 00000000-0000-0000-0000-00005e3f1a2b
+print(layer_list_tokens(' *.Cu *.Mask)'))          # ['*.Cu', '*.Mask']
 ```
 
 ## Coordinate transformation

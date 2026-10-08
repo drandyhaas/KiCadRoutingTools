@@ -29,6 +29,52 @@ if TYPE_CHECKING:
     from obstacle_cache import NetObstacleData
 
 
+# Run-scoped ledgers kept on pcb_data: rip victims and their saved copper,
+# #134 refusals, #666 queued cap moves, exact-name rip overrides, via-unblock
+# blame, #189 shrunk-via sizes and #1156's rip authority. The CLI parses a fresh board per step, so
+# they start empty; the GUI keeps ONE PCBData across runs, where an earlier
+# run's entries would be read as this run's (a stale victim pulled into the
+# escalation and stale-strip scope, a shrunk via size emitted at a cell where
+# a full via now fits). Nested sub-runs share the outer run's ledgers.
+RUN_LEDGERS = ('_preexisting_rips', '_rip_saved', '_refused_saved_134',
+               '_pending_cap_moves', '_rip_override_names',
+               '_via_unblock_blame', '_unblock_via_sizes',
+               '_rip_authority_ids')
+
+
+def reset_run_ledgers(pcb_data) -> None:
+    """Start a top-level run with empty ledgers, as a fresh parse does."""
+    for attr in RUN_LEDGERS:
+        if attr in vars(pcb_data):
+            delattr(pcb_data, attr)
+
+
+def mark_input_copper(pcb_data) -> None:
+    """Record the copper a step was HANDED, for the restore test (#980).
+
+    A restore is refused when copper of another net is within the PAIR
+    clearance of the saved route -- except copper that came in with the step,
+    which keeps the flat value: it sat beside the saved copper before the rip
+    too, so a graze between the two values is one the input already had, and
+    refusing it would ship the net open where the input had it connected.
+
+    Called where a run starts with its own board: a top-level route or diff-pair
+    run, a sub-run that parsed its own file, and repair_planes when nothing has
+    marked the board yet. The objects are kept as well as their ids, so no id
+    can be reused while the mark lives. The GUI rebuilds every copper object
+    before a step and forgets the mark there (forget_input_copper)."""
+    segs = tuple(pcb_data.segments or ())
+    vias = tuple(pcb_data.vias or ())
+    pcb_data._input_copper = (frozenset(map(id, segs)) | frozenset(map(id, vias)),
+                              segs, vias)
+
+
+def forget_input_copper(pcb_data) -> None:
+    """Drop the #980 input-copper mark (its objects are no longer the board's)."""
+    if '_input_copper' in vars(pcb_data):
+        del pcb_data._input_copper
+
+
 def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
                routed_net_paths: Dict[int, List], routed_results: Dict[int, dict],
                diff_pair_by_net_id: Dict[int, Tuple[str, DiffPairNet]],
@@ -76,7 +122,13 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             (another net wanted the ground). Pass False for an own-tree
             re-ask (#444 seam dissolution), which rips a net's own copper to
             re-ask it: no second net is competing, so charging the negotiated-
-            congestion field there would price a cell nobody contested.
+            congestion field there would price a cell nobody contested --
+            and so is the ripped-route ghost, whose job is to steer a
+            CONTESTED net's retry off the ground it lost. Ghosting an own-tree
+            re-ask prices the net's reroute against its own old corridor (the
+            very tree it is trying to improve on) and, if the re-ask is
+            undone, leaves the rejected tree's corridor priced for every later
+            net. A False rip records no ghost and drops a stale one.
 
     Returns:
         tuple: (saved_result, ripped_net_ids, was_in_results) for later restoration
@@ -196,12 +248,9 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[net_id])
         # Ripped-route avoidance: steer the retry away from the branch we freed,
         # exactly as the whole-net path does for the copper it removed.
-        if config.ripped_route_avoidance_cost > 0 and ripped_route_layer_costs is not None \
-                and layer_map is not None:
-            _lc, _vp = compute_ripped_route_costs(partial, config, layer_map)
-            ripped_route_layer_costs[net_id] = _lc
-            if ripped_route_via_positions is not None:
-                ripped_route_via_positions[net_id] = _vp
+        _record_ripped_ghost(partial, [net_id], config, layer_map,
+                             ripped_route_layer_costs,
+                             ripped_route_via_positions, history_conflict)
         # #590: the branch we just tore out was contested ground -- bump its
         # cells' PERMANENT history cost (no-op unless KICAD_HISTORY_COST > 0).
         # Unlike the ghost above this survives the victim's reroute.
@@ -286,12 +335,9 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[rid])
 
     # Compute and store ripped route avoidance costs if enabled
-    if config.ripped_route_avoidance_cost > 0 and ripped_route_layer_costs is not None and layer_map is not None:
-        layer_costs, via_positions = compute_ripped_route_costs(saved_result, config, layer_map)
-        for rid in ripped_net_ids:
-            ripped_route_layer_costs[rid] = layer_costs
-            if ripped_route_via_positions is not None:
-                ripped_route_via_positions[rid] = via_positions
+    _record_ripped_ghost(saved_result, ripped_net_ids, config, layer_map,
+                         ripped_route_layer_costs, ripped_route_via_positions,
+                         history_conflict)
 
     # #590 history congestion: one conflict event per rip, charged to the
     # cells the ripped copper occupied. Independent of the ghosts above --
@@ -340,8 +386,32 @@ def _seg_seg_dist_sq(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) -> float:
     )
 
 
+def _record_ripped_ghost(result, net_ids, config, layer_map,
+                         ripped_route_layer_costs, ripped_route_via_positions,
+                         contention: bool) -> None:
+    """The ripped-route ghost of `result`'s copper for `net_ids`: recorded on a
+    contention rip, and for an own-tree re-ask (contention False) not recorded,
+    with any ghost an earlier rip left for those nets dropped -- it would come
+    back to life the moment the net is unrouted again."""
+    if not contention:
+        for ledger in (ripped_route_layer_costs, ripped_route_via_positions):
+            if ledger is not None:
+                for rid in net_ids:
+                    ledger.pop(rid, None)
+        return
+    if (config.ripped_route_avoidance_cost > 0
+            and ripped_route_layer_costs is not None and layer_map is not None):
+        layer_costs, via_positions = compute_ripped_route_costs(
+            result, config, layer_map)
+        for rid in net_ids:
+            ripped_route_layer_costs[rid] = layer_costs
+            if ripped_route_via_positions is not None:
+                ripped_route_via_positions[rid] = via_positions
+
+
 def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
-                          own_net_ids: List[int], clearance: float) -> bool:
+                          own_net_ids: List[int], clearance: float,
+                          config: Optional[GridRouteConfig] = None) -> bool:
     """Issue #134: return True if restoring saved_result's copper verbatim would
     violate clearance against another net's copper currently in pcb_data.
 
@@ -352,18 +422,32 @@ def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
     ottercast both arose this way). Restoring exactly where it was only
     collides with copper that MOVED into its space while it was ripped -
     precisely the desync we want to refuse. Mirrors the plane fix (#88.1).
+
+    With `config`, each pair is priced at check_drc's value for it (#980; see
+    _saved_route_colliders); without, at the flat `clearance`.
     """
     return bool(_saved_route_colliders(saved_result, pcb_data, own_net_ids,
-                                       clearance, first_only=True))
+                                       clearance, first_only=True,
+                                       config=config))
 
 
 def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
                            own_net_ids: List[int], clearance: float,
-                           first_only: bool = False) -> list:
+                           first_only: bool = False,
+                           config: Optional[GridRouteConfig] = None) -> list:
     """The items behind a _saved_route_collides verdict (#517 instrumentation):
     every foreign pcb_data segment/via within clearance of the saved copper,
     as ('segment'|'via', obj) pairs, deduplicated. Same geometry as the
     boolean test; first_only preserves its early-exit for the hot path.
+
+    #980: with `config`, a pair is priced at `config.pair_clearance` -- the
+    two nets' classes and the .kicad_dru layer rule, starting from
+    `clearance` -- as check_drc grades it, each restored item at its own net.
+    Foreign copper the step was handed (mark_input_copper) is priced at the
+    smaller of that and `clearance`: it sat beside the saved copper before
+    the rip, so only a graze the flat test already refused is refused there.
+    No config, or a board that declares no class, layer rule or track rule,
+    prices every pair at `clearance`, as before.
     """
     own = set(own_net_ids)
     segs = saved_result.get('new_segments', []) or []
@@ -371,28 +455,58 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     if not segs and not vias:
         return []
 
+    pairwise = config is not None and not config.pair_clearance_inert()
+    _inp = getattr(pcb_data, '_input_copper', None) if pairwise else None
+    inp_ids = _inp[0] if _inp else frozenset()
+
+    def _clr(own_net, o, layer, kind):
+        if not pairwise:
+            return clearance
+        c = config.pair_clearance(own_net, o.net_id, layer, kind=kind,
+                                  base=clearance)
+        if id(o) in inp_ids and c > clearance:
+            return clearance
+        return c
+
     # Bounding box of the saved route, expanded, to prefilter pcb_data copper.
+    # #1138: the box reaches the largest threshold any pair can have -- the
+    # widest restored item's half size plus the widest pair clearance -- and
+    # each foreign item's box grows by its own half size, so the prefilter
+    # drops only copper that cannot collide. (It was a fixed 1 mm, which a
+    # 2 mm power track's threshold already exceeds before any clearance.)
     xs, ys = [], []
+    own_half = 0.0
     for s in segs:
         xs.extend((s.start_x, s.end_x))
         ys.extend((s.start_y, s.end_y))
+        own_half = max(own_half, s.width / 2.0)
     for v in vias:
         xs.append(v.x)
         ys.append(v.y)
-    margin = 1.0  # widths + clearance are well under 1mm
+        own_half = max(own_half, v.size / 2.0)
+    margin = own_half + (config.max_pair_clearance(base=clearance)
+                         if pairwise else clearance)
     minx, maxx = min(xs) - margin, max(xs) + margin
     miny, maxy = min(ys) - margin, max(ys) + margin
 
     def _in_box(lo_x, hi_x, lo_y, hi_y):
         return not (hi_x < minx or lo_x > maxx or hi_y < miny or lo_y > maxy)
 
-    o_segs = [s for s in pcb_data.segments
-              if s.net_id not in own and s.net_id != 0
-              and _in_box(min(s.start_x, s.end_x), max(s.start_x, s.end_x),
-                          min(s.start_y, s.end_y), max(s.start_y, s.end_y))]
-    o_vias = [v for v in pcb_data.vias
-              if v.net_id not in own and v.net_id != 0
-              and minx <= v.x <= maxx and miny <= v.y <= maxy]
+    o_segs = []
+    for s in pcb_data.segments:
+        if s.net_id in own or s.net_id == 0:
+            continue
+        h = s.width / 2.0
+        if _in_box(min(s.start_x, s.end_x) - h, max(s.start_x, s.end_x) + h,
+                   min(s.start_y, s.end_y) - h, max(s.start_y, s.end_y) + h):
+            o_segs.append(s)
+    o_vias = []
+    for v in pcb_data.vias:
+        if v.net_id in own or v.net_id == 0:
+            continue
+        h = v.size / 2.0
+        if _in_box(v.x - h, v.x + h, v.y - h, v.y + h):
+            o_vias.append(v)
 
     hits = []
     seen = set()
@@ -408,14 +522,14 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
         for o in o_segs:
             if o.layer != s.layer:
                 continue
-            thr = hw + o.width / 2.0 + clearance
+            thr = hw + o.width / 2.0 + _clr(s.net_id, o, s.layer, 'track')
             if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
                                 o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
                 _hit('segment', o)
                 if first_only:
                     return hits
         for v in o_vias:
-            thr = hw + v.size / 2.0 + clearance
+            thr = hw + v.size / 2.0 + _clr(s.net_id, v, s.layer, 'layer')
             if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
                                s.end_x, s.end_y) < thr * thr:
                 _hit('via', v)
@@ -426,13 +540,13 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
     for vv in vias:
         vr = vv.size / 2.0
         for v in o_vias:
-            thr = vr + v.size / 2.0 + clearance
+            thr = vr + v.size / 2.0 + _clr(vv.net_id, v, None, 'stack')
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
                 _hit('via', v)
                 if first_only:
                     return hits
         for o in o_segs:
-            thr = vr + o.width / 2.0 + clearance
+            thr = vr + o.width / 2.0 + _clr(vv.net_id, o, o.layer, 'layer')
             if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
                                o.end_x, o.end_y) < thr * thr:
                 _hit('segment', o)
@@ -443,7 +557,8 @@ def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
 
 
 def partition_force_restores(force_ripped, pcb_data: PCBData,
-                             clearance: float, skip_net_ids=None):
+                             clearance: float, skip_net_ids=None,
+                             config: Optional[GridRouteConfig] = None):
     """Split --force-reroute's saved copper into what may be restored and what
     may not, and APPLY the restores to pcb_data in order.
 
@@ -468,7 +583,8 @@ def partition_force_restores(force_ripped, pcb_data: PCBData,
     Order matters and is deliberate: each restore is applied before the next is
     tested, so two refused-then-restored nets cannot be re-admitted on top of
     each other. `skip_net_ids` are nets whose replan DID land copper; they keep
-    it and are not candidates here.
+    it and are not candidates here. `config` prices each pair as
+    _saved_route_colliders does (#980).
     """
     skip = set(skip_net_ids or ())
     restored, refused = [], []
@@ -476,7 +592,8 @@ def partition_force_restores(force_ripped, pcb_data: PCBData,
         if net_id in skip:
             continue
         saved = {'new_segments': segs, 'new_vias': vias}
-        if _saved_route_collides(saved, pcb_data, [net_id], clearance):
+        if _saved_route_collides(saved, pcb_data, [net_id], clearance,
+                                 config=config):
             refused.append(net_id)
             continue
         pcb_data.segments = list(pcb_data.segments) + list(segs)
@@ -536,7 +653,8 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
     # corridor while the branch was out, refuse and leave it ripped (the net is
     # already queued for a clean re-route) rather than ship a different-net short.
     if saved_result.get('partial_leg_rip'):
-        if _saved_route_collides(saved_result, pcb_data, [net_id], config.clearance):
+        if _saved_route_collides(saved_result, pcb_data, [net_id], config.clearance,
+                                 config=config):
             print(f"      restore skipped (net {net_id}): partial-leg copper would "
                   f"short other-net copper; left ripped (#134/#510)")
             if refused_sink is not None:
@@ -566,7 +684,8 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
     # it in remaining_net_ids with stubs-only obstacles) so it is reported
     # unrouted rather than shorted. The net IDs are recorded in refused_sink so
     # the caller gives them a clean reroute pass afterward (no completion loss).
-    if _saved_route_collides(saved_result, pcb_data, ripped_net_ids, config.clearance):
+    if _saved_route_collides(saved_result, pcb_data, ripped_net_ids, config.clearance,
+                             config=config):
         net_label = '/'.join(str(r) for r in ripped_net_ids) or str(net_id)
         print(f"      restore skipped (net {net_label}): saved copper would short "
               f"other-net copper; left ripped (#134)")

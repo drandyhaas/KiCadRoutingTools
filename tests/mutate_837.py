@@ -78,10 +78,13 @@ ROWS = [
     # THE reason the census exists. esp_prog and watchy are the witnesses: 3
     # and 1 zero-pad blocks on the back, and counting them makes a
     # single-sided board report a second reflow pass for silkscreen logos.
+    # RE-ANCHORED for #1143: the census binds `pads = non_aperture_pads(fp)`
+    # once, so this row and the two below read `pads` where they read
+    # `fp.pads`; the mutations are unchanged.
     ('zero-pad-blocks-count-as-parts', 'le',
-     "        if not (fp.pads or ()):\n            zero_pad[side].append(ref)\n"
+     "        if not pads:\n            zero_pad[side].append(ref)\n"
      "            continue\n",
-     "        if not (fp.pads or ()):\n            zero_pad[side].append(ref)\n",
+     "        if not pads:\n            zero_pad[side].append(ref)\n",
      (CEN,), 'KILLED'),
 
     # The other half: the verdict must come from the PAD-BEARING census. On 20
@@ -97,15 +100,15 @@ ROWS = [
     # with unplated alignment posts, and the text then tells the reader they
     # need wave soldering.
     ('the-through-hole-rule-is-bare-drill', 'le',
-     "        if any(pad_is_plated_through(p) for p in fp.pads):\n",
-     "        if any((getattr(p, 'drill', 0) or 0) > 0 for p in fp.pads):\n",
+     "        if any(pad_is_plated_through(p) for p in pads):\n",
+     "        if any((getattr(p, 'drill', 0) or 0) > 0 for p in pads):\n",
      (CEN,), 'KILLED'),
 
     # flat_hierarchy: 58 through-hole parts and 6 NPTH mounting holes. Folding
     # the holes into SMD reports 1 reflow pass for a board that gets none.
     ('npth-only-parts-are-counted-as-smd', 'le',
      "        elif any(getattr(p, 'pad_type', '') != 'np_thru_hole' "
-     "for p in fp.pads):\n",
+     "for p in pads):\n",
      "        elif True:\n",
      (CEN,), 'KILLED'),
 
@@ -233,10 +236,11 @@ ROWS = [
     # unchanged in kind -- fail to move the reader when a declarable field
     # arrives -- so it reverts 4 to the version before this key, exactly as it
     # used to revert 3 to the version before `assembly.sides`.
-    # ...and again for #959 (#1000), 5 -> 6, and for #1051, 6 -> 7.
+    # ...and again for #959 (#1000), 5 -> 6, for #1051, 6 -> 7, and for
+    # #1142, 7 -> 8.
     ('the-reader-version-does-not-move', 'fp',
+     "READER_VERSION = 8\n",
      "READER_VERSION = 7\n",
-     "READER_VERSION = 6\n",
      (CEN,), 'KILLED'),
 
     # ------------------------------------------------------- the arithmetic

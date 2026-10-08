@@ -11,7 +11,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
-board = os.path.expanduser('~/Downloads/bus/00_human_original.kicad_pcb')
+board = os.path.join(HERE, 'fb_t2q_human.kicad_pcb')
 if not os.path.isfile(board):
     print(f'no human reference at {board}')
     sys.exit(2)

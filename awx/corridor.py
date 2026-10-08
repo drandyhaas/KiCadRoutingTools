@@ -380,7 +380,7 @@ class Spine:
             tc = np.clip(t, 0.0, Lk)
             fx = px + tc * dx
             fy = py + tc * dy
-            d2 = (X - fx) ** 2 + (Y - fy) ** 2
+            d2 = (X - fx) * (X - fx) + (Y - fy) * (Y - fy)
             o = (X - px) * nx + (Y - py) * ny
             better = d2 < best_d2 - 1e-12
             best_d2 = np.where(better, d2, best_d2)
@@ -414,6 +414,78 @@ class Spine:
     def project_pt(self, p: Pt) -> Tuple[float, float]:
         s, o = self.project(np.array([p[0]]), np.array([p[1]]))
         return float(s[0]), float(o[0])
+
+    def lane_line(self, so: Sequence[Tuple[float, float]], fixed=()) -> List[Tuple[float, float, float]]:
+        """Board polyline of a lane given by its COLUMN points so [(s, o)], s increasing: [(x, y, s)], each column on
+        its own leg, and at each corner of the spine the lane's two legs MEET: a lane on the corner's outer side at the
+        mitre of its offset there (every column drawn), a lane inside it where its own two lines cross -- the line
+        through its last two points before the corner and the line through its first two after it. A point past that
+        crossing is left out: a lane inside a corner lies, near it, beyond where its line meets the other leg's (by
+        |o| tan(turn / 2) at a fixed offset, sooner where its offset grows into the corner), and drawn there it
+        stepped past the corner and back. The constant-offset mitre lane_xy puts in is that crossing only for a lane
+        whose offset does not change. Points whose index is in `fixed` (terminals, layer changes) are never left out;
+        where one would have to be, or the two lines cross farther than a turn of 120 degrees would put them, the
+        lane runs straight across the corner."""
+        pts = [(float(s), float(o), i) for i, (s, o) in enumerate(so)]
+        at = {}                                         # pts index -> the corner put in after it
+        for j in range(1, self.n):
+            if abs(float(self.turn[j - 1])) < 1e-6:
+                continue
+            Sj = float(self.S[j])
+            # (a column ON the corner is drawn on the leg after it, as Spine.xy draws it: one of the points after)
+            b = next((k for k, p in enumerate(pts) if p[0] >= Sj - 1e-9), None)
+            if b is None or b == 0:
+                continue
+            a = b - 1
+            X = None
+            # a lane on the corner's OUTER side (its offset at the corner of the sign away from the turn): its legs meet
+            # at the mitre of that offset, between its last column before the corner and its first after it, and every
+            # column is drawn. Outside a corner the offset lines part, so no column lies past the meeting -- but the
+            # meeting of a lane's OWN two lines does, where its offset changes across the corner: the zynq DDR's RAS,
+            # 3.8 mm outside the north ring's 36-degree corner and moving in 0.07 mm a column, met its other leg 2.3 mm
+            # along it, its three columns there were left out, and the line drawn to that point crossed ODT's, which
+            # stood a pitch inside it at every column. The mitres of two lanes' offsets keep the order of their columns
+            oc = pts[a][1] + (pts[b][1] - pts[a][1]) * (Sj - pts[a][0]) / max(pts[b][0] - pts[a][0], 1e-12)
+            if oc * float(self.turn[j - 1]) < 0:
+                n1, n2 = self.nrm[j - 1], self.nrm[j]
+                m = (n1 + n2) / max(1.0 + float(n1 @ n2), 1e-6)
+                X = (float(self.P[j, 0] + oc * m[0]), float(self.P[j, 1] + oc * m[1]))
+                P1, Q0 = self.xy(*pts[a][:2]), self.xy(*pts[b][:2])
+                gap = math.hypot(Q0[0] - P1[0], Q0[1] - P1[1])
+                if math.hypot(X[0] - P1[0], X[1] - P1[1]) + math.hypot(Q0[0] - X[0], Q0[1] - X[1]) <= 2.0 * gap + 1e-9:
+                    at[pts[a][2]] = (X[0], X[1], Sj)
+                continue                                # (past a turn of 120 degrees: straight across)
+            while a >= 1 and b + 1 < len(pts) and self.seg_of(pts[a - 1][0]) == j - 1 and self.seg_of(pts[b + 1][0]) == j:
+                P0, P1 = self.xy(*pts[a - 1][:2]), self.xy(*pts[a][:2])
+                Q0, Q1 = self.xy(*pts[b][:2]), self.xy(*pts[b + 1][:2])
+                r = (P1[0] - P0[0], P1[1] - P0[1]); q = (Q1[0] - Q0[0], Q1[1] - Q0[1])
+                den = r[0] * q[1] - r[1] * q[0]
+                if abs(den) < 1e-12:
+                    break                               # the two lines parallel: straight across
+                w = (Q0[0] - P0[0], Q0[1] - P0[1])
+                t = (w[0] * q[1] - w[1] * q[0]) / den   # P0 + t r = Q0 + u q
+                u = (w[0] * r[1] - w[1] * r[0]) / den
+                if t < 1.0 - 1e-9 and pts[a][2] not in fixed:
+                    del pts[a]; a -= 1; b -= 1          # the last point before the corner lies past the crossing
+                    continue
+                if u > 1e-9 and pts[b][2] not in fixed:
+                    del pts[b]                          # the first one after it lies before the crossing
+                    continue
+                if t >= 1.0 - 1e-9 and u <= 1e-9:
+                    X = (P0[0] + t * r[0], P0[1] + t * r[1])
+                    gap = math.hypot(Q0[0] - P1[0], Q0[1] - P1[1])
+                    if math.hypot(X[0] - P1[0], X[1] - P1[1]) + math.hypot(Q0[0] - X[0], Q0[1] - X[1]) > 2.0 * gap + 1e-9:
+                        X = None
+                break
+            if X is not None:
+                at[pts[a][2]] = (X[0], X[1], Sj)
+        out = []
+        for s, o, i in pts:
+            x, y = self.xy(s, o)
+            out.append((x, y, s))
+            if i in at:
+                out.append(at[i])
+        return out
 
     def extend(self, back: float, fwd: float) -> 'Spine':
         """The same spine with its first leg extended backwards by
@@ -452,16 +524,147 @@ class Spine:
                 n2 = self.nrm[j]
                 V = self.P[j]
                 if abs(o) > 1e-9:
-                    # the mitre of the two offset lines, either side
+                    # the mitre of the two offset lines, either side --
+                    # unless it lies BEHIND the piece's start along the
+                    # incoming leg or past its end along the outgoing one:
+                    # an inner offset near a vertex put it there and the
+                    # line stepped back (HHa's north wrap, SDQ10: 0.05 mm
+                    # back at the corner, two 170-degree turns)
                     den = 1.0 + float(n1 @ n2)
                     m = (n1 + n2) / max(den, 1e-6)
-                    push((float(V[0] + o * m[0]), float(V[1] + o * m[1])))
+                    mp = (float(V[0] + o * m[0]), float(V[1] + o * m[1]))
+                    a_ = out[-1] if out else self.xy(sa, oa)
+                    b_ = self.xy(sb, ob)
+                    d1_, d2_ = self.d[j - 1], self.d[j]
+                    if ((mp[0] - a_[0]) * d1_[0] + (mp[1] - a_[1]) * d1_[1] > 0
+                            and (b_[0] - mp[0]) * d2_[0] + (b_[1] - mp[1]) * d2_[1] > 0):
+                        push(mp)
                 else:
                     push((float(V[0]), float(V[1])))
             push(self.xy(sb, ob))
         if len(out) == 1:
             out.append(out[0])
         return out
+
+
+# ---------------------------------------------------------------- a part seen from several spines
+# The whole route's geometry (whole_geo) lays each lane in frames -- the trunk, a ring round the destination -- each a
+# spine whose offset o runs across it. A part a lane must pass is one thing on the board, and which side of it the lane
+# passes is decided once there (decide_sides) and carried into every frame (side_carry); each frame only measures it,
+# column by column, along the column's own offset line (line_extent) -- the box of its four corners projected into a
+# BENT frame is far larger than its copper (zynq K44: C98 at the corner where the trunk hands its lanes to the ring).
+
+def line_extent(sp: Spine, s: float, rects, g: float) -> Optional[Tuple[float, float]]:
+    """(lo, hi): the offsets where spine `sp`'s offset line at `s` -- sp.xy(s, o) for every o -- meets the rectangles
+    `rects` [(x0, y0, x1, y1)] grown by `g` on every side; None where it misses them all. The line is infinite: a
+    caller bounds it (whole_geo gates it by the part's span and its box, and the lane's reach)."""
+    ax, ay = sp.xy(s, 0.0)
+    nx, ny = (float(v) for v in sp.nrm[sp.seg_of(s)])
+    lo, hi = math.inf, -math.inf
+    for (x0, y0, x1, y1) in rects:
+        a_, b_ = -math.inf, math.inf
+        for p0, p1, q, d in ((x0 - g, x1 + g, ax, nx), (y0 - g, y1 + g, ay, ny)):
+            if abs(d) < 1e-12:
+                if not (p0 <= q <= p1):
+                    a_, b_ = 1.0, -1.0
+                continue
+            t0, t1 = sorted(((p0 - q) / d, (p1 - q) / d))
+            a_, b_ = max(a_, t0), min(b_, t1)
+        if a_ <= b_:
+            lo, hi = min(lo, a_), max(hi, b_)
+    return (lo, hi) if lo <= hi else None
+
+
+def round_cover(x: float, y: float, rx: float, ry: float):
+    """a ROUND pad or hole (centre x, y, half-sizes rx, ry) as rectangles for line_extent: the cross of two, each its
+    full size one way and cos 45 of it the other. It covers the circle and reaches 0.22 of its radius past it at its
+    corners, where the square of its box reached 0.41 -- a hole beside a ring's handoff held the ring's lanes in past
+    the ring's start by that much (synth_handoff npth_corner)"""
+    c = math.sqrt(0.5)
+    return [(x - rx, y - c * ry, x + rx, y + c * ry), (x - c * rx, y - ry, x + c * rx, y + ry)]
+
+
+def pads_across(spines, pads) -> bool:
+    """whether a two-pad part's pads (centres) stand ACROSS the lanes -- one beside the other in its home frame's offset,
+    so a lane through the gap between them runs along the frame -- rather than one after the other along it, where a
+    lane "between" them would cross the part's axis through the gap (K51 C12 along DU1's south face: lanes told to
+    pass between its pads, 0.21 mm short, and the loop did not converge). `spines` {frame: Spine}"""
+    so = {f: [sp.project_pt(p) for p in pads] for f, sp in spines.items()}
+    c = ((pads[0][0] + pads[1][0]) / 2, (pads[0][1] + pads[1][1]) / 2)
+    h = part_home(spines, {f: (min(q[0] for q in v), max(q[0] for q in v)) for f, v in so.items()}, c)
+    (s1, o1), (s2, o2) = so[h]
+    return abs(o1 - o2) > abs(s1 - s2)
+
+
+def part_home(spines, spans, centre: Pt):
+    """the frame that sees a part WHOLE -- its span (sa, sb), the s of its four corners there, not cut at the frame's
+    ends -- nearest its spine; `spines` {frame: Spine}, `spans` {frame: (sa, sb)}"""
+    return min((not (spans[f][0] > 1e-6 and spans[f][1] < spines[f].L - 1e-6), abs(spines[f].project_pt(centre)[1]), f)
+               for f in sorted(spines))[2]
+
+
+def side_carry(sp_from: Spine, sp_to: Spine, centre: Pt, o_hi: float, room: float) -> int:
+    """+1 or -1: a part's +1 side in spine `sp_from` (its offsets above `o_hi`, the top of its box there) as a side in
+    `sp_to` -- a point `room` beyond it at the centre's s, against the centre, both measured in `sp_to`"""
+    s_c, _o = sp_from.project_pt(centre)
+    up = sp_from.xy(s_c, o_hi + room)
+    return 1 if sp_to.project_pt(up)[1] >= sp_to.project_pt(centre)[1] else -1
+
+
+def decide_sides(meets, home, split_side, box_mid, carry):
+    """{(lane, part): side in the part's HOME frame's terms} for every lane meeting a part in two frames or more.
+    `meets` {(lane, part): {frame: [the lane's offsets at its columns meeting the part]}}; `home` {part: frame};
+    `split_side` {(frame, lane, part): side}, the frames' own splits; `box_mid` {(frame, part): the middle of the
+    part's offsets there}; `carry` {(part, frame): +1 / -1, side_carry from the home frame}. The home frame's split
+    where the lane is in it -- a split reads the lane order at the part's middle column, where a lane handing off
+    before it is absent -- else the frame the lane meets the part in over most columns (the home first among equals):
+    that frame's split, else its mean offset against the part's middle there"""
+    out = {}
+    for (n, ii), byf in meets.items():
+        if len(byf) < 2:
+            continue
+        h = home[ii]
+        if (h, n, ii) in split_side:
+            src, sd = h, split_side[(h, n, ii)]
+        else:
+            src = max(sorted(byf), key=lambda f: (len(byf[f]), f == h))
+            sd = split_side.get((src, n, ii))
+            if sd is None:
+                sd = -1 if float(np.mean(byf[src])) < box_mid[(src, ii)] else 1
+        out[(n, ii)] = sd * carry[(ii, src)]
+    return out
+
+
+def piece_u(u: float, trunk: bool, handoff: float) -> float:
+    """the place along a lane at which its layers are read on one of its pieces (whole_geo.lay_u), a point of it there
+    at `u`: its changes up to its ring's `handoff` are the trunk's and the later ones the ring's, as their vias are
+    drawn -- so on the trunk (`trunk`) no later than the handoff, and on the ring no earlier. A ring piece starts where
+    its trunk ENDS, which may be short of the ring's origin, its first columns' u short of the handoff"""
+    h = handoff + 1e-9
+    return min(u, h) if trunk else max(u, h)
+
+
+def held_interval(iv, ref: float, was, term):
+    """(lo, hi): the free interval of a column a lane is bounded to (whole_geo's bound rows). `iv` the column's free
+    offset intervals outside the arrays' boxes, `ref` the lane's reference there, `was` the interval it was held to a
+    column before (None at its first), `term` the offset of its NEARER fixed terminal (None: that end is not fixed).
+    The interval the reference lies in; where it lies in none -- it cuts a box's corner -- the one the lane was in a
+    column before, which it cannot leave across the box (K41: at the column clipping the source's south-east corner,
+    the interval nearest the south-face lanes' references was the one NORTH of the box, and six lanes were bounded 2.7
+    to 3.9 mm off where they ran). Where that one stood on both sides of the box here -- the box's corner starts at
+    this column -- the side of its nearer terminal, which it cannot reach across the box: by the most overlap it was
+    the larger side, and zynq U2's top-face berths, which stand on the destination's grown box, had A8 and CKE held
+    SOUTH of the corner they reached them round, their last columns run across the west column's balls (A8 into A6's
+    via in the gap). The nearest one only with neither"""
+    inside = [q for q in iv if q[0] <= ref <= q[1]]
+    if inside:
+        return inside[0]
+    over = [q for q in iv if was is not None and min(q[1], was[1]) > max(q[0], was[0])]
+    if len(over) > 1 and term is not None:
+        return min(over, key=lambda q: max(q[0] - term, term - q[1], 0.0))
+    if over:
+        return max(over, key=lambda q: min(q[1], was[1]) - max(q[0], was[0]))
+    return min(iv, key=lambda q: min(abs(ref - q[0]), abs(ref - q[1])))
 
 
 # ---------------------------------------------------------------- obstacles
@@ -968,6 +1171,91 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
             f'corners {[round(t_) for _i, _s, t_ in Spine(sp).corners()]}'
             + (f'  {[(round(x, 2), round(y, 2)) for x, y in sp]}' if len(sp) <= 8 else ''))
     return Spine(align_tail(sp, dest_box))
+
+
+def octo_hull(pts: Sequence[Pt], margin: float) -> List[Pt]:
+    """The octilinear hull of `pts` (the intersection of the half-planes of
+    its eight support lines, at 0, 45, .. 315 degrees) pushed out by
+    `margin`: eight vertices in increasing-angle order."""
+    dirs = [(math.cos(k * math.pi / 4), math.sin(k * math.pi / 4)) for k in range(8)]
+    h = [max(p[0] * d[0] + p[1] * d[1] for p in pts) + margin for d in dirs]
+    V = []
+    for k in range(8):
+        (a1, b1), c1 = dirs[k], h[k]
+        (a2, b2), c2 = dirs[(k + 1) % 8], h[(k + 1) % 8]
+        det = a1 * b2 - a2 * b1
+        V.append(((c1 * b2 - c2 * b1) / det, (a1 * c2 - a2 * c1) / det))
+    return V
+
+
+def build_wrap_spine(dest_pts: Sequence[Pt], stubs: Sequence[Pt],
+                     teeth: Sequence[Pt], ccw: bool, arrive: Pt,
+                     margin: float, reach_deg: float = 8.0,
+                     per_edge: int = 40, hull_extra: Sequence[Pt] = (), wrap_side: bool = False) -> Spine:
+    """A WRAP corridor's spine: the bundle comes in from its teeth, meets
+    the destination array at the corner where the face the incoming
+    bundle meets ends (the straight corridor's face), and runs round the
+    array -- along the octilinear hull of its pads and this group's stubs,
+    `margin` outside -- in the group's wrap direction (`ccw`: the angle
+    round the array's centre increasing) to just past the farthest stub,
+    so every stub lies on the spine's inner side and the lanes peel off
+    in arc order, innermost first, as a human's ring does. `arrive` is
+    the incoming bundle's direction at the array. `hull_extra`: more copper
+    the ring must pass outside (the trunk's head-on lanes on their way to
+    their berths), in the hull only."""
+    V = octo_hull(list(dest_pts) + list(stubs) + list(hull_extra), margin)
+    cen = (sum(p[0] for p in dest_pts) / len(dest_pts),
+           sum(p[1] for p in dest_pts) / len(dest_pts))
+    Ct = (sum(p[0] for p in teeth) / len(teeth), sum(p[1] for p in teeth) / len(teeth))
+    ring = []
+    for k in range(8):
+        a, b = V[k], V[(k + 1) % 8]
+        for t in np.linspace(0, 1, per_edge, endpoint=False):
+            ring.append((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])))
+    ang = lambda p: math.atan2(p[1] - cen[1], p[0] - cen[0])
+
+    def outward_dot(k):
+        a, b = V[k], V[(k + 1) % 8]
+        n_ = (b[1] - a[1], -(b[0] - a[0]))
+        L_ = math.hypot(*n_) or 1.0
+        return (n_[0] * arrive[0] + n_[1] * arrive[1]) / L_
+    k_front = min(range(8), key=outward_dot)       # the face the bundle meets
+    step = 1 if ccw else -1
+    # angles are measured from the corner where that face ends in the wrap
+    # direction: every stub of the group lies ahead of it
+    i_f = (((k_front + 1) % 8) * per_edge) if ccw else (k_front * per_edge)
+    a0 = ang(ring[i_f])
+
+    def swept(p):
+        d = ang(p) - a0
+        return d % (2 * math.pi) if ccw else (-d) % (2 * math.pi)
+    for _ in range(len(ring)):
+        if all(swept(s) < 1.5 * math.pi for s in stubs):
+            break
+        i_f = (i_f - step) % len(ring)
+        a0 = ang(ring[i_f])
+    a_end = max(swept(s) for s in stubs) + math.radians(reach_deg)
+    # the lead-in is pulled TAUT: straight from the teeth to where it grazes
+    # the hull on the wrap side (the tangent point), never along the face the
+    # bundle meets; stubs short of the tangent point are peeled off the lead-in
+    ahead = [i % len(ring) for i in range(i_f, i_f + step * len(ring), step)
+             if swept(ring[i % len(ring)]) <= a_end]
+    cx_, cy_ = cen[0] - Ct[0], cen[1] - Ct[1]
+
+    def bearing(q):
+        # signed angle at the teeth between the array's centre and q
+        qx, qy = q[0] - Ct[0], q[1] - Ct[1]
+        return math.atan2(cx_ * qy - cy_ * qx, cx_ * qx + cy_ * qy)
+    # (`wrap_side`: the tangent on the side the ring wraps -- a ring wrapping with the angle rising grazes the hull at
+    # the least bearing -- not the stubs' side: a WOUND ring's stubs lie past the array's far side, and their bearings
+    # pointed the lead-in at the facing face, a hook back down it, whole_frame's winding cut)
+    side = (-1.0 if ccw else 1.0) if wrap_side else sum(bearing(s) for s in stubs)
+    i_t = (max(ahead, key=lambda i: bearing(ring[i])) if side > 0
+           else min(ahead, key=lambda i: bearing(ring[i])))
+    path = [Ct]
+    for i in ahead[ahead.index(i_t):]:
+        path.append(ring[i])
+    return Spine(simplify(path, 0.02))
 
 
 # ---------------------------------------------------------------- distances

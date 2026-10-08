@@ -113,6 +113,10 @@ REGISTRY = {
     'apply_stamps_in_memory': ['via_protection_stamps'],
     'print_via_protection_record': ['via_protection_stamps'],
     'via_snapshot': ['via_protection_stamps'],
+    # #1195: which floors a fanout step may lower (none for a QFN run with no
+    # copper, no via floors without a via). qfn_fanout's main and the fanout
+    # tab's apply both decide with it before their writeback.
+    'fanout_written_floors': ['_apply_fanout_results'],
 }
 # NOTE (deliberately NOT registered): move_copper_graphics_to_silkscreen runs
 # inside the shared plane WRITER (plane_io), not a main() -- so this gate, which
@@ -170,6 +174,11 @@ DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     # routing, no board mutation; the GUI operates on the live board and
                     # never cp's, so no GUI counterpart is needed.
                     'warn_if_missing_project_floor',
+                    # #1160: its sibling. Pre-engine and report-only: SAYS when the
+                    # input project's Default class carries a clearance an earlier
+                    # step's descent lowered (the writeback's class_clearance_relaxed
+                    # record). No board mutation; the GUI writes no project record.
+                    'warn_if_class_clearance_relaxed',
                     # #441: pure RESOLVER (max(cli, project edge rule, fab floor) ->
                     # float) feeding the engine's board_edge_clearance; same VALUE-level
                     # parity story as read_project_edge_clearance above -- the GUI
@@ -279,6 +288,7 @@ SAME_SYMBOL_TWINS = {
     'persist_protected_nets',
     'persist_impedance_specs',
     'persist_pour_served_pads',
+    'fanout_written_floors',
 }
 
 

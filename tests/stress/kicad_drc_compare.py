@@ -274,7 +274,12 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = False,
     for v in violations or []:
         if v.get("type") in CD_SIZE_TYPES:
             continue        # out of the copper-clearance scope on BOTH sides
-        nets = frozenset(str(v.get(k)) for k in ("net1", "net2") if v.get(k))
+        # Net 0 in KiCad's spelling: check_drc names it `net_0` (a KiCad 10
+        # board has no nets[0]), KiCad says `<no net>`. Without this a short
+        # against a part's own copper -- which check_drc counts since #1181 --
+        # shared only one net with KiCad's item and fell to the tight radius.
+        nets = frozenset("<no net>" if str(v.get(k)) == "net_0" else str(v.get(k))
+                         for k in ("net1", "net2") if v.get(k))
         pos = None
         for k in ("loc1", "via_loc", "pad_loc", "seg_loc", "cross_point", "loc2"):
             p = v.get(k)
@@ -290,6 +295,13 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = False,
             item["accepted"] = v["accepted"]
         if v.get("owner"):
             item["owner"] = v["owner"]     # #995 footprint-own-copper
+        # The part whose graphic copper the row names ("Polygon(U2)"), so
+        # match() can pair it with KiCad's "Polygon [<no net>] of U2" item,
+        # which KiCad anchors at the SHAPE, not at the contact (#1181).
+        for _k in ("item1", "item2"):
+            _lbl = v.get(_k) or ""
+            if _lbl.startswith("Polygon(") and _lbl.endswith(")"):
+                item["graphic_owner"] = _lbl[len("Polygon("):-1].split("~")[0]
         # Board-edge reconciliation (edge family) needs the WHOLE segment, not
         # just its start: check_drc anchors segment-board-edge at the segment
         # start while kicad anchors copper_edge_clearance at the edge-closest
@@ -300,6 +312,12 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = False,
             item["seg"] = (float(seg[0]), float(seg[1]), float(seg[2]), float(seg[3]))
         out.append(item)
     return out
+
+
+#: A graphic item both engines attribute to the SAME part with the SAME nets
+#: is paired within this radius (#1181) -- the part bounds how far apart the
+#: two anchors can be.
+GRAPHIC_OWNER_MATCH_RADIUS_MM = 15.0
 
 
 def match(kicad_items, cd_items):
@@ -321,6 +339,13 @@ def match(kicad_items, cd_items):
             # identity is unambiguous -- allow a generous radius; the tight
             # radius only arbitrates single-net/partial matches.
             radius = 3.0 if (kv["nets"] and kv["nets"] == cv["nets"]) else MATCH_RADIUS_MM
+            # Same nets AND the same part's graphic copper named on both
+            # sides: one object, whatever the anchors. KiCad anchors a
+            # polygon item at the polygon, which on a big tab or shield is
+            # several mm from the contact check_drc reports (#1181).
+            if (radius == 3.0 and cv.get("graphic_owner")
+                    and cv["graphic_owner"] in (kv.get("graphic_owners") or ())):
+                radius = GRAPHIC_OWNER_MATCH_RADIUS_MM
             if d <= radius and (best is None or d < best[0]):
                 best = (d, i)
         if best is not None:
@@ -542,27 +567,9 @@ def _drop_kicad_own_copper(kicad, cd_own):
     return keep, dropped
 
 
-def _web_min_connection(cfg: dict):
-    """The min-copper-web width (mm) a board should be graded at (#406), from
-    its .kicad_pro: an author-set `min_connection` is a real design rule and
-    wins; otherwise the project's `min_track_width` (the post-route ledger
-    floors it at the smallest object on the board, so the graded condition is
-    "a copper web narrower than the narrowest intentional track"). None when
-    neither is recorded -- connection_width is then NOT graded (KiCad's
-    default min_connection is 0 = checker off), and the caller reports None
-    rather than a fake clean 0."""
-    try:
-        rules = cfg.get("board", {}).get("design_settings", {}).get("rules", {})
-        for key in ("min_connection", "min_track_width"):
-            try:
-                v = float(rules.get(key))
-            except (TypeError, ValueError):
-                continue
-            if v > 0:
-                return v
-    except AttributeError:
-        pass
-    return None
+# The floor itself lives in py_router so check_weird and the repair passes call
+# the SAME function (#1187) rather than a mirror of it.
+from fix_kicad_drc_settings import web_min_connection as _web_min_connection  # noqa: E402
 
 
 _PAD_OVERRIDE_CACHE = {}
@@ -737,16 +744,17 @@ def _staged_copy(board: str, clearance: float):
 
 def _pro_clearance(board: str):
     """Read the board's routed copper clearance from its sibling .kicad_pro
-    Default net class -- the same Stage-C auto-grade check_drc.py's CLI does
+    Default net class, floored at Board Setup min_clearance as KiCad grades it
+    (#1210) -- the same Stage-C auto-grade check_drc.py's CLI does
     (#226/#227). Grading at a default (0.1) instead of the board's own floor
     manufactures phantom sub-clearance grazes on legitimately tight copper
     (#359). Returns None if no project / no clearance is recorded."""
     try:
-        from fix_kicad_drc_settings import find_project, project_copper_clearance
+        from fix_kicad_drc_settings import find_project, project_grading_clearance
         pro = find_project(board)
         if os.path.isfile(pro):
             with open(pro) as f:
-                return project_copper_clearance(json.load(f))
+                return project_grading_clearance(json.load(f))[0]
     except Exception:  # noqa: BLE001 -- best-effort, fall back to check_drc default
         pass
     return None

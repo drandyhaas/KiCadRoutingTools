@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#887 mutation battery: are the reader, the run clock and the panel covered,
+"""#887 mutation battery: are the reader, the run clock and the iso renderer covered,
 or do their tests merely run?
 
     python3 tests/mutate_887.py
@@ -41,22 +41,24 @@ TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS)
 
 TIMING = os.path.join(ROOT, 'py_router', 'cmd_timing.py')
-PANELS = os.path.join(ROOT, 'py_router', 'movie_panels.py')
 ISO = os.path.join(ROOT, 'py_router', 'kicad_iso_render.py')
 #: make_movie is the INTEGRATION, and it is a target because that is where the
 #: two worst defects of this branch lived -- the clock that never ran, and the
 #: named ledger that silently became a different one. Both were invisible to
-#: every row aimed at the three modules above.
+#: every row aimed at the modules above.
 MOVIE = os.path.join(ROOT, 'py_router', 'make_movie.py')
-TARGETS = {'t': TIMING, 'p': PANELS, 'i': ISO, 'm': MOVIE}
+TARGETS = {'t': TIMING, 'i': ISO, 'm': MOVIE}
 
 T_READER = os.path.join(TESTS, 'test_887_cmd_timing_reader.py')
 T_CLOCK = os.path.join(TESTS, 'test_887_frame_clock.py')
 T_SMALL = os.path.join(TESTS, 'test_887_small_items.py')
-T_PANEL = os.path.join(TESTS, 'test_887_two_panel_frame.py')
+#: The machine-independent killer of the 'i' rows (kicad-cli monkeypatched).
+#: It was `test_887_two_panel_frame.py` until the iso panel was retired with
+#: every film layout but stage3d; its kicad_iso_render tests moved here.
+T_MODELS = os.path.join(TESTS, 'test_887_iso_models.py')
 #: The kicad-cli arm. Rows naming it are killed by EITHER file, and this one
 #: self-skips (exit 77, which `run` reads as "not killed") on a machine without
-#: kicad-cli -- so a row that only this file can kill must also name T_PANEL, or
+#: kicad-cli -- so a row that only this file can kill must also name T_MODELS, or
 #: it would report SURVIVED there for an environmental reason.
 T_ISO = os.path.join(TESTS, 'test_887_iso_render.py')
 
@@ -251,89 +253,39 @@ ROWS = [
      "            'krt:ledger_rows': t.n if t else 0,",
      "            'krt:ledger_rows': t.n if t else 0,\n            'krt:progress': 0.5,",
      (T_CLOCK,), 'KILLED'),
-    # ---- the two-panel composer -----------------------------------------
-    # Every row here is a mutation that SURVIVED the first panel review, i.e.
-    # a hole the tests did not cover until this commit.
-    ('the-composed-height-is-not-forced-even', 'p',
-     "    total = H_top + H_iso\n    if total % 2:\n        H_iso += 1\n"
-     "        total += 1",
-     "    total = H_top + H_iso",
-     (T_PANEL,), 'KILLED'),
-    ('a-shot-may-be-shorter-than-a-beat', 'p',
-     "            if best_len < 2 * MIN_SHOT_FRAMES:",
-     "            if best_len < 2:",
-     (T_PANEL,), 'KILLED'),
-    ('the-head-fill-skips-an-empty-first-mark', 'p',
-     "    head = all_marks[0][1]\n"
-     "    for i in range(min(n_frames, max(0, all_marks[0][2]))):",
-     "    head = spans[0][1] if spans else all_marks[0][1]\n"
-     "    for i in range(min(n_frames, max(0, (spans or all_marks)[0][2]))):",
-     (T_PANEL,), 'KILLED'),
-    ('every-caption-names-the-opening-board', 'p',
-     "            _m, note = _note_for(shot.board)",
-     "            _m, note = _note_for(shots[0].board)",
-     (T_PANEL,), 'KILLED'),
-    ('the-probe-render-is-skipped-entirely', 'p',
-     "        if not got:\n            return frames, _report('error', err)",
-     "        if False:\n            return frames, _report('error', err)",
-     (T_PANEL,), 'KILLED'),
-    ('a-panel-that-cannot-be-read-is-not-counted', 'p',
-     "        failed = sum(1 for e in errors.values() if e)",
-     "        failed = sum(1 for k2 in results if not results[k2][0])",
-     (T_PANEL,), 'KILLED'),
-    ('the-failure-reason-is-not-drawn-into-the-panel', 'p',
-     "            _wrapped_text(d, font, drawn_error,\n"
-     "                          10, max(8, H // 3), W - 20, error_fg)",
-     "            pass",
-     (T_PANEL,), 'KILLED'),
-    ('the-temp-dir-failure-escapes-as-a-traceback', 'p',
-     "    except OSError as exc:\n"
-     "        return frames, _report('error',\n"
-     "                               'could not make a directory for the renders (%s)'\n"
-     "                               % exc)",
-     "    except ZeroDivisionError as exc:\n"
-     "        return frames, _report('error', str(exc))",
-     (T_PANEL,), 'KILLED'),
-    ('a-non-finite-tuning-value-is-trusted', 'p',
-     "    if v is None or not math.isfinite(v):",
-     "    if v is None:",
-     (T_PANEL,), 'KILLED'),
-    ('the-disabled-message-hardcodes-zero', 'p',
-     "                               '--iso-max-renders %d' % opts.max_renders)",
-     "                               '--iso-max-renders 0')",
-     (T_PANEL,), 'KILLED'),
+    # ---- the iso renderer (kicad_iso_render) ------------------------------
     ('render-results-come-back-in-completion-order', 'i',
      "    with ThreadPoolExecutor(max_workers=n) as ex:\n"
      "        for k, v in ex.map(one, jobs):\n            out[k] = v",
      "    with ThreadPoolExecutor(max_workers=n) as ex:\n"
      "        for i2, (k, v) in enumerate(ex.map(one, jobs)):\n"
      "            out[jobs[-1 - i2][0]] = v",
-     (T_PANEL, T_ISO), 'KILLED'),
+     (T_MODELS, T_ISO), 'KILLED'),
     ('a-relative-model-path-is-resolved-against-the-cwd', 'i',
      "        if not os.path.isabs(path):\n"
      "            path = os.path.join(proj, path).replace('\\\\', '/')",
      "        pass",
-     (T_PANEL,), 'KILLED'),
+     (T_MODELS,), 'KILLED'),
     ('models-note-prints-total-over-found', 'i',
      "    note = '3D models %d/%d' % (f, t)",
      "    note = '3D models %d/%d' % (t, f)",
-     (T_PANEL,), 'KILLED'),
+     (T_MODELS,), 'KILLED'),
     ('a-mostly-bare-board-gets-no-warning', 'i',
      "    elif f < t * MOSTLY_BARE_FRACTION:",
      "    elif False:",
-     (T_PANEL,), 'KILLED'),
+     (T_MODELS,), 'KILLED'),
     ('model_dirs-stops-defining-KIPRJMOD', 'i',
      "    if board_path:\n        dirs['KIPRJMOD'] = os.path.dirname(os.path.abspath(board_path))",
      "    if False:\n        dirs['KIPRJMOD'] = os.path.dirname(os.path.abspath(board_path))",
-     (T_PANEL,), 'KILLED'),
+     (T_MODELS,), 'KILLED'),
     ('an-unreadable-png-is-accepted-as-a-render', 'i',
      "        with Image.open(out_png) as probe:\n            probe.verify()",
      "        pass",
-     (T_PANEL, T_ISO), 'KILLED'),
+     (T_MODELS, T_ISO), 'KILLED'),
     ('the-error-tail-is-sliced-from-the-end-again', 'i',
      "        head = blob.splitlines()[0].strip() if blob else ''",
      "        head = blob.replace('\\n', ' ')[-160:] if blob else ''",
-     (T_PANEL, T_ISO), 'SURVIVED'),   # a one-line stderr reads the same
+     (T_MODELS, T_ISO), 'SURVIVED'),   # a one-line stderr reads the same
 
     ('a-countdown-comes-back-into-the-png-block', 't',
      "        if r.instant is not None:\n"
@@ -385,14 +337,6 @@ ROWS = [
      "                 if ln), default=0)",
      "    worst = len(_wrap_clock(all_lines[0], avail, measure))",
      (T_CLOCK,), 'KILLED'),
-    ('the-render-margin-is-letterboxed-in-again', 'p',
-     "            im = _alpha_crop(Image.open(png_path))",
-     "            im = Image.open(png_path)",
-     (T_PANEL,), 'KILLED'),
-    ('every-shot-is-fitted-to-its-own-box-again', 'p',
-     "            sc = min(scale, fit) if scale else fit",
-     "            sc = fit",
-     (T_PANEL,), 'KILLED'),
 ]
 
 

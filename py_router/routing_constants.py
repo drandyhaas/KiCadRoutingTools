@@ -69,10 +69,6 @@ IPC_2221_K_EXTERNAL = 0.048           # k-value for external layers
 # flagged out-of-range rather than silently reported.
 IPC_2221_MAX_AREA_MILS2 = 700.0
 
-# Polygon/zone geometry tolerances (mm)
-POLYGON_BUFFER_DISTANCE = 0.01        # Buffer distance for polygon shrinking
-POLYGON_EDGE_TOLERANCE = 0.001        # Tolerance for edge-sharing detection
-
 # BGA/component detection (mm)
 BGA_EDGE_DETECTION_TOLERANCE = 0.01   # Tolerance for detecting pad alignment
 BGA_DEFAULT_EDGE_TOLERANCE = 1.6      # Default edge tolerance for BGA pitch detection

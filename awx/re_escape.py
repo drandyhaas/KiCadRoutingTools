@@ -17,10 +17,10 @@ when it is cheaper under the economy's rate (ECON_MM_PER_VIA of copper a
 via) and the net's scoped DRC is no worse. Pure output economy: the
 routed world is untouched, as the trim's is."""
 import math
-import os
+import awx_settings
 
 RE_ESCAPE_DEFAULT = 8.0                                             # mm over the pad->berth airline (2026-09-21, on by default)
-RE_ESCAPE = float(os.environ.get('BRAID_RE_ESCAPE', str(RE_ESCAPE_DEFAULT)) or 0)   # 0 = off
+RE_ESCAPE = float(awx_settings.get('BRAID_RE_ESCAPE', str(RE_ESCAPE_DEFAULT)) or 0)   # 0 = off
 
 
 def _mm(segs):

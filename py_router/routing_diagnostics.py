@@ -546,17 +546,43 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
         prot_txt = ""
     if not names:
         return _ret(prot_txt.lstrip("\n") if prot_txt else "", [])
-    quoted = " ".join(f"'{n}'" for n in names)
+    # #1156: say which of them this run could ALREADY rip. The automatic
+    # candidacy (route.py: unprotected, <=30 segments and <=6 vias) and
+    # --rip-existing-nets both grant it, and a net the run ripped had it; the
+    # hint used to call all of them "not allowed to rip" and prescribe the
+    # flag, which on multichannel_mixer named 7 nets the same run had ripped
+    # -- and the gate then reverted the follow-up run for having MORE
+    # authority. The returned names are unchanged: they feed the #103
+    # reconciliation, whose authority is a separate decision.
+    _auth = set(getattr(pcb_data, '_rip_authority_ids', None) or ())
+    _ripped = set((getattr(pcb_data, '_preexisting_rips', None) or {}).keys())
+    _n2i = {n.name: i for i, n in pcb_data.nets.items() if n.name}
+    had = [n for n in names if _n2i.get(n) in (_auth | _ripped)]
+    outside = [n for n in names if n not in had]
+    had_txt = ""
+    if had:
+        _nr = sum(1 for n in had if _n2i.get(n) in _ripped)
+        had_txt = (f" {len(had)} {'of them' if outside else 'blocking net(s)'} "
+                   f"({' '.join(repr(n) for n in had)}) this run could already "
+                   f"rip{f', and ripped {_nr}' if _nr else ''} (automatic "
+                   f"candidacy or --rip-existing-nets): granting the flag "
+                   f"adds no authority over them.")
+    if not outside:
+        return _ret(f"Hint: the blocking copper belongs to pre-existing "
+                    f"net(s) committed by an earlier run/step.{had_txt}"
+                    + prot_txt, names)
+    quoted = " ".join(f"'{n}'" for n in outside)
     # The net list appears ONCE, in the retry command -- naming them in the
     # prose as well doubled a hint that already runs to several hundred
     # characters, and the command is the half the reader acts on.
     return _ret(f"Hint: the blocking copper belongs to {len(names)} pre-existing "
-            f"net(s) committed by an earlier run/step, which this run is not "
-            f"allowed to rip. Retry with --rip-existing-nets {quoted} to rip "
-            f"and re-route them in this run (issue #103) -- the decisive "
+            f"net(s) committed by an earlier run/step; {len(outside)} of them "
+            f"this run may not rip. Retry with --rip-existing-nets {quoted} to "
+            f"rip and re-route them in this run (issue #103) -- the decisive "
             f"blocker may be any of them, so start with the full set (each "
             f"ripped net is re-routed and the run reports honestly if one "
-            f"cannot be), then bisect if you want a minimal rip." + prot_txt, names)
+            f"cannot be), then bisect if you want a minimal rip.{had_txt}"
+            + prot_txt, names)
 
 
 def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,

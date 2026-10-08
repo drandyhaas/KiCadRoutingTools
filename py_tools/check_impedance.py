@@ -64,8 +64,10 @@ from impedance import (                                   # noqa: E402
 # underlying occupancy grid does not have.
 DEFAULT_SAMPLE_STEP = 0.15
 
-# A void run shorter than this is quantization noise around a via antipad or a
-# pad clearance opening, not a plane slot worth reporting.
+# A void run shorter than this is quantization noise around a pad clearance
+# opening, not a plane slot worth reporting. The net's OWN via antipads are
+# exempted by geometry instead (#1203): a segment ending on its via runs over
+# ~via radius + clearance of antipad, which no length filter can separate.
 DEFAULT_MIN_VOID_LENGTH = 0.30
 
 # How far a measured coplanar gap may stray from the declared one before the
@@ -112,6 +114,11 @@ class NetImpedance:
     length_over_void_mm: float = 0.0
     segments_over_void: int = 0
     crossings: List[RefCrossing] = field(default_factory=list)
+    # Void runs inside the antipad of the net's OWN via, or its P/N
+    # partner's (#1203): a layer change, not a plane slot. Counted here,
+    # never as a crossing.
+    own_via_antipad_runs: int = 0
+    length_over_own_antipad_mm: float = 0.0
     # --- side gap / CPW (A) ---
     gap_samples: List[float] = field(default_factory=list)   # mm, coplanar gap
     tight_gap_length_mm: float = 0.0    # length where gap <= ratio_limit * h
@@ -272,6 +279,50 @@ class LayerCopper:
 # Measurement
 # =============================================================================
 
+def _pair_partners(pcb) -> Dict[int, int]:
+    """net_id -> its diff-pair partner's net_id, by `extract_diff_pair_base`
+    (same base, same suffix style, opposite polarity)."""
+    from net_queries import extract_diff_pair_base
+    halves: Dict[Tuple[str, str, bool], int] = {}
+    for nid, net in pcb.nets.items():
+        got = extract_diff_pair_base(getattr(net, 'name', '') or '')
+        if got:
+            base, pos, style = got
+            halves[(base, style, pos)] = nid
+    return {nid: halves[(b, st, not pos)]
+            for (b, st, pos), nid in halves.items() if (b, st, not pos) in halves}
+
+
+def _via_spans(via, layer: str, order: List[str]) -> bool:
+    """Does `via`'s barrel pass through copper `layer`?"""
+    layers = [l for l in (getattr(via, 'layers', None) or ()) if l in order]
+    if len(layers) < 2 or layer not in order:
+        return True             # unknown span: treat as through
+    lo, hi = sorted(order.index(l) for l in layers[:2])
+    return lo <= order.index(layer) <= hi
+
+
+def own_antipad_radius(pcb, ref_layer: str, via, cell: float) -> float:
+    """How far the reference fill on `ref_layer` stays off `via`: its radius
+    plus the clearance the fill model carves it at -- max(zone clearance, the
+    plane net's class, the via net's class), as `ZoneFillModel` stamps a
+    foreign via -- plus one model cell for its cell-centre quantisation."""
+    try:
+        from plane_fill_model import _NC_ATTR
+        import routing_defaults as _defaults
+        nc = getattr(pcb, _NC_ATTR, None) or {}
+        default_zc = _defaults.PLANE_ZONE_CLEARANCE
+    except Exception:
+        nc, default_zc = {}, 0.0
+    clr = 0.0
+    for z in getattr(pcb, 'zones', None) or ():
+        if z.layer != ref_layer or not z.net_id or not z.polygon:
+            continue
+        zc = z.clearance if z.clearance is not None else default_zc
+        clr = max(clr, zc, nc.get(z.net_id, 0.0), nc.get(via.net_id, 0.0))
+    return via.size / 2.0 + clr + cell
+
+
 def _sample_points(x1: float, y1: float, x2: float, y2: float,
                    step: float) -> List[Tuple[float, float, float]]:
     """Points along a segment as (x, y, arc-length-from-start)."""
@@ -372,7 +423,9 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
         net_patterns: fnmatch patterns limiting which nets are analyzed.
             None/empty analyzes every routed signal net.
         sample_step: Distance between samples along a trace, mm.
-        min_void_length: Ignore void runs shorter than this (via antipads).
+        min_void_length: Ignore void runs shorter than this (fill
+            quantisation). A run inside the antipad of the net's own via or its
+            P/N partner's is never a crossing, whatever its length (#1203).
         ratio_limit: Side gap <= ratio_limit * h counts as coplanar-coupled.
         include_plane_nets: Also analyze nets that own a pour (off by default;
             a plane net's own traces are not controlled-impedance signals).
@@ -469,7 +522,21 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                 if note not in report.notes:
                     report.notes.append(note)
 
+    # #1203: a trace that ends on its own via runs over that via's antipad on
+    # the reference layer for about via radius + clearance (0.425 mm at a 0.45
+    # via and 0.2 clearance), which no void-length filter separates from a
+    # slot. Those samples are a layer change, not a missing plane.
+    partners = _pair_partners(pcb)
+    layer_order = copper_layers_in_order(pcb)
+    vias_by_net: Dict[int, List] = {}
+    for v in pcb.vias:
+        if v.net_id:
+            vias_by_net.setdefault(v.net_id, []).append(v)
+
     for net_id, net_name in selected:
+        own_vias = list(vias_by_net.get(net_id, ()))
+        if partners.get(net_id) is not None:
+            own_vias += vias_by_net.get(partners[net_id], [])
         # #521: a net's own recorded declaration outranks the call-level gap.
         net_gap = (net_declared_gaps or {}).get(net_id, coplanar_gap)
         result = NetImpedance(net_id=net_id, net_name=net_name,
@@ -506,13 +573,37 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             # exceed the trace's own length -- summing per ref layer
             # double-counted inner-layer traces and produced >100% figures.
             void_any = [False] * len(samples)
+            antipad_any = [False] * len(samples)
             for ref_layer in ref_layers:
                 ref_copper = copper_for(ref_layer)
                 keys = [ref_copper.key_at(x, y) for x, y, _ in samples]
+                # Samples inside the antipad of an own / partner via that
+                # passes through this reference layer.
+                discs = [(v.x, v.y, own_antipad_radius(pcb, ref_layer, v,
+                                                       ref_copper.cell))
+                         for v in own_vias
+                         if _via_spans(v, ref_layer, layer_order)]
+                lo_x = min(seg.start_x, seg.end_x)
+                hi_x = max(seg.start_x, seg.end_x)
+                lo_y = min(seg.start_y, seg.end_y)
+                hi_y = max(seg.start_y, seg.end_y)
+                discs = [d for d in discs
+                         if lo_x - d[2] <= d[0] <= hi_x + d[2]
+                         and lo_y - d[2] <= d[1] <= hi_y + d[2]]
+                in_antipad = [key is None and any(
+                                  math.hypot(x - dx, y - dy) <= dr
+                                  for dx, dy, dr in discs)
+                              for (x, y, _), key in zip(samples, keys)]
+                for i, hit in enumerate(in_antipad):
+                    if hit:
+                        antipad_any[i] = True
+                        if i == 0 or not in_antipad[i - 1]:
+                            result.own_via_antipad_runs += 1
 
                 run_start: Optional[int] = None
                 for i, key in enumerate(keys + [object()]):   # sentinel closes
-                    is_void = (i < len(keys)) and (key is None)
+                    is_void = (i < len(keys)) and (key is None) \
+                        and not in_antipad[i]
                     if is_void and run_start is None:
                         run_start = i
                     elif not is_void and run_start is not None:
@@ -547,6 +638,9 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                         seg_flagged = True
 
             result.length_over_void_mm += sum(void_any[:n_int]) * per_sample
+            result.length_over_own_antipad_mm += (
+                sum(a and not v for a, v in zip(antipad_any[:n_int],
+                                                void_any[:n_int])) * per_sample)
             if seg_flagged:
                 result.segments_over_void += 1
 
@@ -616,6 +710,12 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
         if result.routed_length_mm > 0:
             report.nets.append(result)
 
+    runs = sum(n.own_via_antipad_runs for n in report.nets)
+    if runs:
+        report.notes.append(
+            f"{runs} void run(s) inside an antipad of the net's own via (or its "
+            f"P/N partner's) are a layer change, not a plane slot: counted as "
+            f"own_via_antipad_runs, never as a crossing (#1203).")
     return report
 
 
@@ -762,6 +862,8 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
             'segments_over_void': report.segments_over_void,
             'crossings': report.total_crossings,
             'length_over_void_mm': round(report.length_over_void_mm, 4),
+            'own_via_antipad_runs': sum(n.own_via_antipad_runs
+                                        for n in report.nets),
             'gap_samples': len(gaps),
             'gap_percentiles_mm': {k: round(v, 4)
                                    for k, v in _percentiles(gaps).items()},
@@ -783,6 +885,9 @@ def report_to_dict(report: BoardImpedanceReport) -> dict:
                 'length_over_void_mm': round(n.length_over_void_mm, 4),
                 'segments_over_void': n.segments_over_void,
                 'crossings': len(n.crossings),
+                'own_via_antipad_runs': n.own_via_antipad_runs,
+                'length_over_own_antipad_mm': round(
+                    n.length_over_own_antipad_mm, 4),
                 'void_fraction': round(n.void_fraction, 5),
                 'tight_gap_length_mm': round(n.tight_gap_length_mm, 4),
                 'outer_length_mm': round(n.outer_length_mm, 4),
@@ -819,8 +924,10 @@ def main() -> int:
     parser.add_argument('--min-void-length', type=float,
                         default=DEFAULT_MIN_VOID_LENGTH,
                         help=f'Ignore void runs shorter than this in mm '
-                             f'(default {DEFAULT_MIN_VOID_LENGTH}; filters via '
-                             f'antipads)')
+                             f'(default {DEFAULT_MIN_VOID_LENGTH}; filters fill '
+                             f'quantisation. The net\'s own via antipads, and '
+                             f'its P/N partner\'s, are exempted whatever the '
+                             f'length)')
     parser.add_argument('--gap-ratio-limit', type=float,
                         default=CPWG_GAP_RATIO_LIMIT,
                         help=f'Side gap <= this multiple of the dielectric '

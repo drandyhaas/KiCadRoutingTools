@@ -58,6 +58,8 @@ import io
 import json
 import math
 import os
+os.environ.setdefault('TAUT_MEMO', '1')      # a harness: the caches the router leaves off, on
+os.environ.setdefault('PROBE_MEMO', '1')
 import re
 import subprocess
 import sys

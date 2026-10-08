@@ -50,12 +50,11 @@ Use `route_diff.py` for differential pair routing. All nets specified are treate
 
 ```bash
 # Route a specific diff pair
-python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
-    --stub-proximity-radius 4
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*"
 
 # Route with debug visualization
 python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
-    --stub-proximity-radius 4 --debug-lines
+    --debug-lines
 
 # Route all LVDS nets with custom gap
 python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
@@ -601,7 +600,7 @@ This helps visualize the routing structure without affecting the actual routed c
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm) |
+| `--diff-pair-gap` | 0.101 | Gap between P and N traces (mm). Raised, never lowered, to the clearance (#441), the pair's net class (#530) and any `.kicad_dru` clearance rule that binds the pair on a layer it routes on (#1145): KiCad grades P against N as two nets |
 | `--diff-pair-centerline-setback` | 2x P-N dist | Distance in front of stubs to start centerline (mm) |
 | `--min-turning-radius` | 0.2 | Minimum turning radius for pose-based routing (mm) |
 | `--max-turn-angle` | 180 | Max cumulative turn angle (degrees) to prevent U-turns |
@@ -621,7 +620,7 @@ This helps visualize the routing structure without affecting the actual routed c
 
 ## Track Proximity Avoidance
 
-The `--track-proximity-distance` and `--track-proximity-cost` options penalize routes that run close to previously routed tracks on the same layer. This encourages spread-out routing and reduces the risk of DRC violations. Disabled by default (cost = 0).
+The `--track-proximity-distance` and `--track-proximity-cost` options penalize routes that run close to previously routed tracks on the same layer. This spreads routes apart, which can rescue a congested board, but across the corpus it ADDS DRC violations (#584: +119 to +244 at cost 2), so it is a retry lever: re-run with it, compare, and keep whichever grades better. Disabled by default (cost = 0).
 
 **Note:** Track proximity works correctly for differential pair routing (pose-based A*).
 

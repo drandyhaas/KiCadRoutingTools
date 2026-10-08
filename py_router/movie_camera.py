@@ -387,7 +387,6 @@ class Stage:
         self.movie = None
         self.r = None
         self._mirror = False      # True once flipped to the back
-        self._mark = 0            # frames emitted before the last step
         self.layers = None
         self.shots = []
         self._queue = []
@@ -446,42 +445,18 @@ class Stage:
         steps reveal through Movie's own path -- flips together. A movie where
         the board is mirrored but the tracks are not would be worse than no
         flip at all.
-        """
-        if not self._mirror:
-            self.movie.snapshot(label)
-            return
-        # Render WITHOUT the caption, mirror the board, then stamp the caption
-        # upright. Mirroring a frame that already carries its label reverses the
-        # text and throws it into the opposite corner -- it reads as a rendering
-        # fault, not as "you are looking at the back".
-        from PIL import ImageOps
-        img = self.r.frame(segments=list(self.movie.live_s.values()),
-                           vias=list(self.movie.live_v.values()),
-                           zone_net_ids=self.movie.revealed_zones)
-        img = ImageOps.mirror(img)
-        if label:
-            self.r._label(img, label)
-        self.movie.frames.append(img)
 
-    def _mirror_new_frames(self, label=''):
-        """Mirror frames appended by code that does not go through _snap --
-        i.e. the routing steps, which Movie renders and captions itself."""
-        if not self._mirror:
-            self._mark = len(self.movie.frames)
-            return
-        from PIL import ImageDraw, ImageOps
-        for i in range(self._mark, len(self.movie.frames)):
-            fr = ImageOps.mirror(self.movie.frames[i])
-            # Their caption was baked in before we saw the frame, so it mirrored
-            # with the board. Clear the whole top strip -- the caption bar's own
-            # territory -- and stamp it again upright.
-            d = ImageDraw.Draw(fr)
-            d.rectangle([0, 0, fr.size[0], max(18, fr.size[1] // 26)],
-                        fill=tuple(self.r.bg))
-            if label:
-                self.r._label(fr, label)
-            self.movie.frames[i] = fr
-        self._mark = len(self.movie.frames)
+        The mirror itself is `Movie`'s (#1082-#1085): the frame goes through
+        `Movie.snapshot` like every other, which mirrors it while
+        `movie.mirrored` is set and stamps the caption upright afterwards --
+        and only when no rail carries it. A second, Stage-side render path
+        used to do this, and it skipped the chrome record, the ghost overlay
+        and the rail's caption rule; the copper a routing step revealed after
+        a flip was never mirrored at all, because the hook meant to do it
+        (`exit_step`) had no caller.
+        """
+        self.movie.mirrored = self._mirror
+        self.movie.snapshot(label)
 
     def _emit(self, kind, views, label, side=None):
         """One frame per view, at a FROZEN board. A frame either moves the
@@ -493,7 +468,6 @@ class Stage:
             for v in views:
                 self._aim(v)
                 self._snap(label)
-        self._mark = len(self.movie.frames)
         self._log.append((kind, start, len(self.movie.frames)))
 
     def _plan(self):
@@ -612,11 +586,18 @@ class Stage:
             w = max(1, int(round(W * k)))
             frame = Image.new('RGB', (W, H), bg)
             frame.paste(face.resize((w, H), Image.BILINEAR), ((W - w) // 2, 0))
-            self.r._label(frame, label)       # upright, after the rotation
-            self.movie.frames.append(frame)
+            # Through Movie's one frame path (#1082/#1083): it notes this
+            # frame's chrome, stamps the caption upright only when no rail
+            # carries it, and records the flip for the 3D board (#1081).
+            self.movie.flip = (t, side)
+            try:
+                self.movie._push_frame(frame, label, 'flip',
+                                       record_chrome=True)
+            finally:
+                self.movie.flip = None
         # From here on we are looking at the other face.
         self._mirror = to_back
-        self._mark = len(self.movie.frames)
+        self.movie.mirrored = to_back
 
     # -- the build_boards hooks -----------------------------------------
     def handles(self, board):
@@ -636,10 +617,10 @@ class Stage:
     def _arrive(self):
         """Call `on_arrive` once, right before the frame the parts LAND on.
 
-        `build_boards` sets it so the lower box's inventory reads the SOURCE
-        board through the glide and the destination only from the landing
-        frame (#1036) -- it read the destination's "272 of 272 placed" over
-        parts still in the pile.
+        `build_boards` sets it so the placement panels change beat on the
+        landing frame, not before (#1036, #1042): the SOURCE board holds
+        through the glide and the destination only from the frame the parts
+        land on.
         """
         fn, self.on_arrive = getattr(self, 'on_arrive', None), None
         if fn is not None:
@@ -697,14 +678,7 @@ class Stage:
             self._arrive()
             self._snap(label)
         self._arrive()          # no-op unless the tween never reached one
-        self._mark = len(self.movie.frames)
         return not synth
-
-    def exit_step(self, label):
-        # Routing steps render through Movie's own path, not _snap, so their
-        # frames have to be flipped here or the board would be mirrored while
-        # the tracks landing on it were not.
-        self._mirror_new_frames(label)
 
     def _settle(self, label, n=None):
         """Bring the camera home to the BOARD before a copper step (#1036).
@@ -756,16 +730,21 @@ class Stage:
         float drift -- and t=1 on the last frame reproduces the parsed board
         EXACTLY, so the hand-off to the copper reveal is seamless.
 
-        Rotation SNAPS rather than tweens: tweening it means re-deriving
-        global_x/y from local_x/y plus rect_rotation plus the >=90 deg
-        size_x/size_y swap the parser already resolved. Quench rotations are
-        90-degree multiples and rare.
+        **Rotation turns WITH the glide (#1086)**, along the shortest arc and
+        on the same smoothstep: the pads turn rigidly about the footprint
+        origin from the destination parse (`_offset_to`'s `phi`), so the
+        parser's resolved size_x/size_y swap is never re-derived -- a turned
+        rectangle is carried by `rect_rotation`, which the renderer already
+        draws at any angle. It used to SNAP: the part showed its destination
+        orientation at its source position for the whole glide, and the
+        `tween=0` "before" frame misstated the source.
         """
         from movie_camera import smoothstep
         # Keyed by REFERENCE: Footprint is unhashable (no __hash__), so it
         # cannot be a dict key.
         home = {}
         deltas = []
+        turns = {}
         for m in moved:
             ref = m['reference']
             fp = pcb.footprints.get(ref)
@@ -774,22 +753,45 @@ class Stage:
             home[ref] = (fp.x, fp.y,
                          [(p, p.global_x, p.global_y) for p in fp.pads],
                          [(p, [list(pt) for pt in (p.polygons or [])])
-                          for p in fp.pads if getattr(p, 'polygons', None)])
+                          for p in fp.pads if getattr(p, 'polygons', None)],
+                         {'rot': fp.rotation or 0.0,
+                          'rr': [(p, p.rect_rotation or 0.0, p.size_x,
+                                  p.size_y) for p in fp.pads],
+                          # an OFFSET drill's hole is absolute too
+                          'holes': [(p, p.hole_x, p.hole_y)
+                                    for p in fp.pads
+                                    if getattr(p, 'hole_x', None) is not None
+                                    and getattr(p, 'hole_y', None)
+                                    is not None]})
             deltas.append((ref, fp, m['from'][0] - m['to'][0],
                            m['from'][1] - m['to'][1]))
+            turns[ref] = turn_deg(m)
         if not deltas:
             self._arrive()
             self._snap(label)
             return
         n = self.tween_frames
         start = len(self.movie.frames)
+        # #1081: the stage record reads the poses of whatever is mid-glide.
+        self.movie.moving = tuple(ref for ref, _fp, _dx, _dy in deltas)
+        self.movie.moving_rest = {ref: (home[ref][0], home[ref][1],
+                                        home[ref][4]['rot'])
+                                  for ref, _fp, _dx, _dy in deltas}
+        try:
+            self._glide(deltas, home, turns, n, label, smoothstep)
+        finally:
+            self.movie.moving = ()
+            self.movie.moving_rest = {}
+        self._log.append(('action', start, len(self.movie.frames)))
+
+    def _glide(self, deltas, home, turns, n, label, smoothstep):
         if n == 0:
             # No glide: one BEFORE frame at the source poses, then one AFTER at
             # the parsed board. The delta still reads -- it is a cut, not a
             # missing beat -- and a long run stops spending most of its runtime
             # on decoration.
             for ref, fp, dx, dy in deltas:
-                _offset_to(fp, home[ref], dx, dy)
+                _offset_to(fp, home[ref], dx, dy, turns.get(ref, 0.0))
             self._snap(f"{label}  before ({len(deltas)} part(s))")
             for ref, fp, _dx, _dy in deltas:
                 _offset_to(fp, home[ref], 0.0, 0.0)
@@ -806,10 +808,12 @@ class Stage:
             for i in range(n):
                 t = smoothstep((i + 1) / n)
                 for ref, fp, dx, dy in deltas:
-                    _offset_to(fp, home[ref], dx * (1 - t), dy * (1 - t))
+                    _offset_to(fp, home[ref], dx * (1 - t), dy * (1 - t),
+                               turns.get(ref, 0.0) * (1 - t))
                 try:
                     self.movie.overlay = place_motion.ghost_overlay(
-                        place_motion.items_from_deltas(deltas, home),
+                        place_motion.items_from_deltas(deltas, home,
+                                                       turns=turns),
                         getattr(self.r, 'theme', None), t=t)
                 except Exception:                              # noqa: BLE001
                     self.movie.overlay = None
@@ -819,20 +823,80 @@ class Stage:
             self.movie.overlay = None
             for ref, fp, _dx, _dy in deltas:      # exact restore
                 _offset_to(fp, home[ref], 0.0, 0.0)
-        self._log.append(('action', start, len(self.movie.frames)))
 
     # -- introspection for tests ----------------------------------------
     def frame_log(self):
         return list(self._log)
 
 
-def _offset_to(fp, home, dx, dy):
-    hx, hy, pads, polys = home
+def turn_deg(move):
+    """The SHORTEST signed turn from a move's source rotation to its
+    destination's, as `source - destination` in KiCad degrees, folded to
+    (-180, 180]; 0 when either pose carries no rotation."""
+    try:
+        a, b = float(move['from'][2]), float(move['to'][2])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return 0.0
+    d = (a - b) % 360.0
+    return d - 360.0 if d > 180.0 else d
+
+
+def fold_rect(angle, sx, sy):
+    """A rectangle `sx` x `sy` tilted `angle` degrees, in the PARSER's own
+    normal form: the tilt folded to (-45, 45] with the sides swapped when the
+    fold crosses 90 -- which is how `kicad_parser._resolve_pad_rect` states an
+    orthogonal pad (tilt 0, sides swapped for 90), and the only tilt the
+    renderer draws a ROUNDED rectangle at. Unfolded, a pad turned 90 degrees
+    kept `rect_rotation -90` and lost its rounded corners through the whole
+    glide (the phase-2 verifier: 4.5% of U1's pixels)."""
+    a = angle % 180.0
+    if a > 135.0:
+        return a - 180.0, sx, sy
+    if a > 45.0:
+        return a - 90.0, sy, sx
+    return a, sx, sy
+
+
+def _offset_to(fp, home, dx, dy, phi=0.0):
+    """Pose `fp` at its home (destination) pose offset by `(dx, dy)` and
+    turned by `phi` KiCad degrees about its origin (#1086).
+
+    KiCad's angle is NEGATED in the board frame (`kicad_parser.
+    local_to_global`), so a turn of `phi` rotates every pad offset by
+    `-phi` and adds `-phi` to each pad's `rect_rotation`. At `phi == 0` this
+    is the old pure translation, bit for bit -- the exact restore relies on
+    it."""
+    hx, hy, pads, polys = home[:4]
+    extra = home[4] if len(home) > 4 else None
     fp.x, fp.y = hx + dx, hy + dy
+    if not phi:
+        for p, gx, gy in pads:
+            p.global_x, p.global_y = gx + dx, gy + dy
+        for p, orig in polys:                 # custom pad copper is ABSOLUTE
+            p.polygons = [[(x + dx, y + dy) for x, y in poly] for poly in orig]
+        if extra is not None:
+            fp.rotation = extra['rot']
+            for p, rr, sx, sy in extra['rr']:
+                p.rect_rotation, p.size_x, p.size_y = rr, sx, sy
+            for p, hx0, hy0 in extra.get('holes', ()):
+                p.hole_x, p.hole_y = hx0 + dx, hy0 + dy
+        return
+    a = math.radians(-phi)
+    ca, sa = math.cos(a), math.sin(a)
+
+    def _turn(x, y):
+        ox, oy = x - hx, y - hy
+        return (hx + dx + ox * ca - oy * sa, hy + dy + ox * sa + oy * ca)
     for p, gx, gy in pads:
-        p.global_x, p.global_y = gx + dx, gy + dy
-    for p, orig in polys:                     # custom pad copper is ABSOLUTE
-        p.polygons = [[(x + dx, y + dy) for x, y in poly] for poly in orig]
+        p.global_x, p.global_y = _turn(gx, gy)
+    for p, orig in polys:
+        p.polygons = [[_turn(x, y) for x, y in poly] for poly in orig]
+    if extra is not None:
+        fp.rotation = extra['rot'] + phi
+        for p, rr, sx, sy in extra['rr']:
+            p.rect_rotation, p.size_x, p.size_y = fold_rect(rr - phi, sx, sy)
+        for p, hx0, hy0 in extra.get('holes', ()):
+            p.hole_x, p.hole_y = _turn(hx0, hy0)
 
 
 def _moved_bbox(pcb, moved):

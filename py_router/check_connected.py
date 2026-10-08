@@ -95,7 +95,7 @@ def points_in_polygon_mask(xs, ys, polygon):
 def matches_any_pattern(name: str, patterns: List[str]) -> bool:
     """Check if a net name matches any of the given patterns (fnmatch style)."""
     for pattern in patterns:
-        if fnmatch.fnmatch(name, pattern):
+        if fnmatch.fnmatchcase(name, pattern):
             return True
     return False
 
@@ -253,6 +253,32 @@ def _pad_credit_disc(pad):
     return pad.global_x, pad.global_y, 0.05
 
 
+#: #1157: two real pads are ONE terminal only where their copper meets, as
+#: KiCad's connectivity has it. The 0.02-0.06 allowances the joins used to
+#: take are endpoint-COINCIDENCE tolerances (#320) -- geometric intent -- and
+#: asked a copper-reaches-copper question they joined two StickHub +5V pads
+#: 15 um apart, so the multipoint router never planned the link KiCad
+#: reports open. Point-like terminals (stubs) keep the caller's tolerance:
+#: theirs IS a coincidence question.
+PAD_JOIN_EPS = 1e-6
+
+
+def _pad_is_point(p) -> bool:
+    """A pad-like terminal with no outline (an _EndpointStub, or a pad with
+    no shape or size): a point, not copper."""
+    return not getattr(p, 'shape', None) or (p.size_x <= 0 and p.size_y <= 0)
+
+
+def _pads_join(pi: Pad, pj: Pad, tolerance: float) -> bool:
+    """Whether two same-net pads sharing a copper layer are one terminal: their
+    copper touches (exact gap <= PAD_JOIN_EPS, #1157). A point-like terminal
+    joins within `tolerance`, as before."""
+    if _pad_is_point(pi) or _pad_is_point(pj):
+        return _pads_copper_touch(pi, pj, tolerance)
+    from check_drc import pad_copper_gap
+    return pad_copper_gap(pi, pj) <= PAD_JOIN_EPS
+
+
 def _pads_copper_touch(pi: Pad, pj: Pad, tolerance: float = 0.05) -> bool:
     """Shape-accurate test that two pads' copper physically touches/overlaps
     (edge-to-edge gap <= tolerance).
@@ -268,10 +294,9 @@ def _pads_copper_touch(pi: Pad, pj: Pad, tolerance: float = 0.05) -> bool:
     """
     from check_drc import point_to_pad_distance, _pad_perimeter_points
 
-    def _degenerate(p):
-        # _EndpointStub terminals (and any pad-like without a shape/size)
-        # are points, not outlines.
-        return not getattr(p, 'shape', None) or (p.size_x <= 0 and p.size_y <= 0)
+    # _EndpointStub terminals (and any pad-like without a shape/size) are
+    # points, not outlines.
+    _degenerate = _pad_is_point
 
     if _degenerate(pi) and _degenerate(pj):
         return math.hypot(pi.global_x - pj.global_x,
@@ -304,7 +329,8 @@ def _pads_copper_touch(pi: Pad, pj: Pad, tolerance: float = 0.05) -> bool:
 
 def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: float = 0.05) -> bool:
     """True if every pad of the net touches the others through overlapping
-    copper alone (no track needed).
+    copper alone (no track needed). Real pads join only where their copper
+    meets (_pads_join, #1157); `tolerance` reaches point-like terminals only.
 
     Castellated modules represent each pin as a through-hole pad plus an SMD
     pad at the same spot; such a net has pads but no segments yet is fully
@@ -338,7 +364,7 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
             dx = pi.global_x - pj.global_x
             dy = pi.global_y - pj.global_y
             if dx * dx + dy * dy <= reach * reach and \
-                    _pads_copper_touch(pi, pj, tolerance):
+                    _pads_join(pi, pj, tolerance):
                 parent[find(i)] = find(j)
     return len({find(i) for i in range(len(pads))}) == 1
 
@@ -1371,8 +1397,10 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 reach = pad_reach[idx] + pad_reach[jdx] + tolerance
                 dx = pad.global_x - other.global_x
                 dy = pad.global_y - other.global_y
+                # Physical, not `tolerance` (#1157): a positive gap between
+                # two pads is a link to route, whatever the point tolerance.
                 if dx * dx + dy * dy <= reach * reach and \
-                        _pads_copper_touch(pad, other, tolerance):
+                        _pads_join(pad, other, tolerance):
                     _union(pad_repr_id[idx], pad_repr_id[jdx])
 
     # A via dropped *inside* an SMD pad's copper connects that pad even when the
@@ -1889,9 +1917,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         # that carries it in `nets`, --component graded it as a real net and
         # reported every no-net pad on the part as "disconnected" -- interf_u
         # --component U9 shipped a phantom "(net 0): 6 disconnected components".
-        # The no-component path never had this (net 0 has no segments/vias, so
-        # its `and net_id in pads_by_net` arm excludes it); only the component
-        # filter let it through.
+        # Every path now skips net 0 by id/name below (#1180).
         from net_queries import nets_for_components
         component_net_ids = set(nets_for_components(pcb_data, [component]).net_ids)
         if not quiet:
@@ -1900,6 +1926,14 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     # Determine which nets to check
     nets_to_check = []
     for net_id, net_info in pcb_data.nets.items():
+        # Net 0 is the no-net pseudo-net, never a net to connect (#1180). Its
+        # "has copper" test used to exclude it, until #908 parsed footprint
+        # copper (solder-jumper bridges, a SOT89 tab) as net-0 segments: on a
+        # KiCad 9 file, whose parse keeps nets[0], every no-net pad then read as
+        # a disconnected component, and a `--nets '*'` pattern matched its
+        # empty name the same way. Same guard as the unrouted loop below.
+        if net_id == 0 or not net_info.name:
+            continue
         # Filter by component if specified
         if component_net_ids is not None and net_id not in component_net_ids:
             continue

@@ -226,8 +226,10 @@ def main():
         print('the corpus case the exemption was written for')
         if os.path.exists(MARKER_BOARD):
             go = _grade(MARKER_BOARD)
-            check('orangecrab_ext_pll ships 2 real containments',
-                  go['contained'] == 2, str(go['contained']))
+            # 2 fiducials inside connector bodies, plus (#1106) the pads of
+            # test points TP26/TP27, which draw no body, under J4's.
+            check('orangecrab_ext_pll ships 4 real containments',
+                  go['contained'] == 4, str(go['contained']))
             check('...both marker_class, so none gates',
                   go['containment_blocking'] == 0,
                   str([(q.a, q.b, q.waiver) for q in go['containment_pairs']]))

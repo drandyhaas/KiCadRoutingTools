@@ -878,8 +878,9 @@ def exact_clusters(pcb_data, net_id: int, islands,
     # segments) while kicad-cli's own connectivity reported the copper
     # connected. Shape-accurate test (#346: bounding circles
     # false-connect); the center-distance prefilter keeps it O(near
-    # pairs); NPTH pads have no copper to touch (#328).
-    from check_connected import _pads_copper_touch
+    # pairs); NPTH pads have no copper to touch (#328). Physical (#1157):
+    # pads 15 um apart are two clusters to KiCad, so they are two here.
+    from check_connected import _pads_join
     from net_queries import expand_pad_layers as _epl
     _cu_layers = pcb_data.board_info.copper_layers
     _cupads = [p for p in pads
@@ -900,7 +901,7 @@ def exact_clusters(pcb_data, net_id: int, islands,
             if abs(pi.global_x - pj.global_x) > _reach \
                     or abs(pi.global_y - pj.global_y) > _reach:
                 continue
-            if _shares_cu(pi, pj) and _pads_copper_touch(pi, pj, tolerance):
+            if _shares_cu(pi, pj) and _pads_join(pi, pj, tolerance):
                 union(('p', id(pi)), ('p', id(pj)))
 
     # Every copper component gets a node even if it touched nothing.

@@ -895,7 +895,7 @@ class PlanesTab(wx.Panel):
         # Expand assignments: each net goes on each layer in the assignment
         # e.g., nets=['+3.3V'] layers=['F.Cu', 'In2.Cu'] becomes:
         #   expanded_nets=['+3.3V', '+3.3V'], expanded_layers=['F.Cu', 'In2.Cu']
-        # Also build layer_nets dict for multi-net layer handling (Voronoi boundaries)
+        # Also build layer_nets dict for multi-net layer handling (the spine split)
         expanded_nets = []
         expanded_layers = []
         layer_nets = {}  # layer -> list of nets on that layer
@@ -1002,10 +1002,6 @@ class PlanesTab(wx.Panel):
                 # config-driven, defaulting to the same value route_planes.py's
                 # argparse uses so current GUI behavior is unchanged unless a
                 # plan/control sets them.
-                plane_proximity_radius=config.get('plane_proximity_radius', 3.0),
-                plane_proximity_cost=config.get('plane_proximity_cost', 2.0),
-                plane_track_via_clearance=config.get('plane_track_via_clearance',
-                                                     defaults.PLANE_TRACK_VIA_CLEARANCE),
                 voronoi_seed_interval=config.get('voronoi_seed_interval', 2.0),
                 plane_max_iterations=config.get('plane_max_iterations', defaults.MAX_ITERATIONS),
                 debug_lines=config.get('debug_lines', False),

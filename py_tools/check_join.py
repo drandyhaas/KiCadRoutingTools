@@ -95,11 +95,11 @@ def _drc_knobs(board, quiet):
     the staged grade equals what plain check_drc.py would say."""
     clearance = 0.2
     try:
-        from fix_kicad_drc_settings import find_project, project_copper_clearance
+        from fix_kicad_drc_settings import find_project, project_grading_clearance
         pro = find_project(board)
         if os.path.isfile(pro):
             with open(pro, encoding='utf-8') as f:
-                pc = project_copper_clearance(json.load(f))
+                pc, _src = project_grading_clearance(json.load(f))
             if pc:
                 clearance = pc
     except Exception:

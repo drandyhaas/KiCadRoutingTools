@@ -300,7 +300,7 @@ impl SearchSink for FrontierSink {
     }
 }
 
-/// Sink that accumulates RouteStats (route_multi and the visualizer).
+/// Sink that accumulates RouteStats (route_multi).
 #[derive(Default)]
 pub struct StatsSink {
     pub stats: RouteStats,

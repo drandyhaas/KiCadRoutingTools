@@ -26,6 +26,8 @@
 # FF on (open, vias, segments), PASS only when all three are equal at
 # every K. Exit status 1 when an isometry pose fails.
 cd "$(dirname "$0")"
+# a harness: the caches the router leaves off, on (TAUT_MEMO: the taut strings; PROBE_MEMO: probe verdicts and solves)
+export TAUT_MEMO=${TAUT_MEMO:-1} PROBE_MEMO=${PROBE_MEMO:-1}
 BOARD=$1; SRC=$2; DST=$3; shift 3
 KS=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do KS+=("$1"); shift; done

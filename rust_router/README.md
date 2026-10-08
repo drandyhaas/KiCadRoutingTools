@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.22.0**
+**Current Version: 0.23.0**
 
 > **Release note:** the 0.20.0 per-platform binaries are published as of
 > [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
@@ -310,6 +310,26 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+### 0.23.0 (2026-09-26)
+
+- **`lane_search`**: the whole-route snap's grid search for a single lane
+  (`awx/whole_snap.py`, `route()` -> `search()`), ported exactly -- A* over
+  (cell, heading, vias taken) in the lane's window, its band, its layer's
+  blocked cells, a via's rules (the heading's via map, the arc gates, the
+  plan's via site within RVIA), the join and stub rules at its ends. Every
+  cost is formed from the same operations in the same order as the Python,
+  and the heap orders entries as Python's tuples do (estimate, cost, state),
+  so the same states are expanded in the same order: the snapped plan is
+  byte-identical. The heuristic and the near-end tests are hypot of two
+  integers, sqrt(a*a + b*b) exactly; a via's distance from its planned site
+  comes in as a table `math.hypot` filled. A pair's search (its pose
+  counters, its crossover) stays in Python; a Python build against an older
+  binary detects the missing function and searches in Python.
+- The grid router's leftovers from the visualizer it no longer has
+  (`NodeStore::closed_cells` / `visited_open_cells`, `GridSearch::is_done`,
+  and the state `SearchStep::Progress` carried for its cursor) removed: the
+  crate builds without warnings, the search unchanged.
 
 ### 0.22.0 (2026-09-03)
 

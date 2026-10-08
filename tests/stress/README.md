@@ -57,11 +57,13 @@ in `RUNBOOK.md` → "Orchestration".
 Operational limits (baked into the scripts / learned the hard way):
 
 - Every routing/fanout/plane/check command is wrapped in `run_limited.sh`
-  (kills the job at ~4 GB RSS, overridable with `LIMIT_KB`). It also **records**
-  each command to a replay manifest — see "Deterministic replay" below.
-- 4 boards run concurrently — most jobs stay well under the 4 GB cap, so
-  4-in-flight works on an 8 GB machine and the per-job watchdog backstops any
-  spike. (Lower the concurrency arg if you see swapping.)
+  (kills the job at ~12 GB RSS, overridable with `LIMIT_KB`; 4 GB until #422).
+  The wrapper only enforces that cap: the tools themselves **record** each
+  command to a replay manifest — see "Deterministic replay" below.
+- Boards are admitted by load, not a fixed count (`run_queue.sh`: a hard
+  ceiling, default 8, under `QUEUE_LOAD_MAX`, default ncore-2). The watchdog is
+  per step, so size the machine from 12 GB per concurrently heavy step. (Lower
+  the ceiling arg if you see swapping.)
 - Each worker runs its routing commands in the foreground under a hard
   3-hour/command cap and ~3.5-hour board budget (RUNBOOK rule 12). The queue
   manager and `stress_status.sh` track liveness from disk (results JSON +

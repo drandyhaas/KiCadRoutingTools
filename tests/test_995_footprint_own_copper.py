@@ -16,7 +16,9 @@ net the part's own pads give its copper qualifies:
 
   * a GND track touching the same tab is a real GND short to `Net-(C1-Pad1)`,
     which KiCad reports in the same `<no net>` form. It must not become an
-    accepted row, so the compare tool keeps it KICAD-ONLY;
+    accepted row: check_drc COUNTS it (#1181 -- a touching track used to
+    grant the tab its own net and waive itself), and the compare tool pairs it
+    with KiCad's item;
   * a net-less PAD ("Pad 3 [<no net>] of U2") is not graphic copper.
 
 The KiCad leg runs only where kicad-cli is found and says so when it does not.
@@ -99,9 +101,15 @@ def t_check_drc(base, own, gnd):
           str(footprint_own_copper_nets(pcb).get('U2')))
 
     rows = {k: _drc(p) for k, p in (('base', base), ('own', own), ('gnd', gnd))}
-    for k, r in rows.items():
+    for k in ('base', 'own'):
+        r = rows[k]
         check(f'{k}: no counted violation', not [v for v in r if not v.get('accepted')],
               str([v['type'] for v in r if not v.get('accepted')][:5]))
+    counted = [v for v in rows['gnd'] if not v.get('accepted')]
+    check('gnd: the GND short is counted, against the tab (#1181)',
+          len(counted) == 1 and {counted[0]['net1'], counted[0]['net2']} == {'GND', 'net_0'}
+          and counted[0].get('item2') == 'Polygon(U2)',
+          str([(v['type'], v['net1'], v['net2']) for v in counted]))
     b, o, g = (_own(rows[k]) for k in ('base', 'own', 'gnd'))
     check('base: pad 2 against its own tab is published',
           b and all((r['owner'], r['net1'], r['net2']) == ('U2', OWN_NET, '<no net>') for r in b),
@@ -160,10 +168,11 @@ def t_kicad_leg(base, own, gnd):
     check('KiCad: the own-net contact is on the #995 channel, not kicad_only',
           d_own['kicad_only'] == 0 and d_own['kicad_own_copper'] >= 1,
           f"kicad_only={d_own['kicad_only']} own={d_own['kicad_own_copper']}")
-    gnd_items = [sorted(k['nets']) for k in d_gnd['kicad_only_items']]
-    check('KiCad: the GND short stays kicad_only',
-          ['<no net>', 'GND'] in gnd_items and d_gnd['kicad_own_copper'] == 0,
-          str(gnd_items))
+    check('KiCad: the GND short is matched by check_drc, not on the #995 channel',
+          d_gnd['kicad_only'] == 0 and d_gnd['checkdrc_only'] == 0
+          and d_gnd['matched'] == 1 and d_gnd['kicad_own_copper'] == 0,
+          f"matched={d_gnd['matched']} kicad_only={d_gnd['kicad_only']} "
+          f"checkdrc_only={d_gnd['checkdrc_only']} own={d_gnd['kicad_own_copper']}")
 
 
 def main():

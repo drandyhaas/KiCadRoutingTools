@@ -72,6 +72,15 @@ Categories:
                      size, so --tolerance never filters it (as for soft-joint:
                      for a web, THINNER is worse, so a size filter would drop
                      the severe findings and keep the marginal ones).
+  kicad-dangling     a joint segment whose two ends both lie on other
+                     same-net TRACKS that hold the other end too (#1217):
+                     KiCad counts such an item for one end only, so its DRC
+                     reports track_dangling (a 24-35 um stub on one track)
+                     while the T-junction rule credits both ends. Only in
+                     that shape -- a via, pad or zone at either end is left to
+                     KiCad's own grade -- and with NO size, since KiCad warns
+                     at any length. Measured on six routed boards: every
+                     finding is one of KiCad's track_dangling warnings.
 
 This script NEVER modifies the board (read-only; nothing is written back).
 Net 0 (unconnected) copper is skipped -- "same-net" semantics do not apply.
@@ -98,8 +107,9 @@ from check_connected import (matches_any_pattern, check_net_connectivity,
                              analyze_conn_excluding, point_in_polygon,
                              _point_in_pad)
 from check_drc import point_to_pad_distance
-from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
-                          endpoint_reaches_via)
+from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad, strict_joint_roots,
+                          endpoint_reaches_via, lands_on_interior,
+                          via_copper_layers)
 from routing_constants import SOFT_JOINT_MIN_GAP
 from pcb_modification import (_point_anchored, _prune_net_cycles, _pt_seg_dist,
                               _restore_soft_joint_bridges,
@@ -108,7 +118,8 @@ from pcb_modification import (_point_anchored, _prune_net_cycles, _pt_seg_dist,
 
 CATEGORIES = ['dangling-end', 'soft-joint', 'redundant-cycle',
               'removable-segment', 'stacked-copper', 'unsupported-via',
-              'dangling-via', 'orphan-island', 'narrow-pad-joint']
+              'dangling-via', 'orphan-island', 'narrow-pad-joint',
+              'kicad-dangling']
 # Cost cap for the removable scan (skip unless --thorough): the removal pass's
 # own cap (#1063), so the checker never grades a net the pass may not clean.
 MAX_SEGS_PER_NET = STRICT_REMOVAL_MAX_SEGS
@@ -215,6 +226,14 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
                                      id(s)))
 
     soft_pts = set()
+    roots = []   # check_drc's "ONLY" test (#984), built on the first candidate
+
+    def joined_elsewhere(oa, ob):
+        if not roots:
+            roots.append(strict_joint_roots(net_segs, net_vias, net_pads,
+                                            copper_layers))
+        return roots[0].get(oa) == roots[0].get(ob)
+
     for layer, ends in dangles.items():
         for i in range(len(ends)):
             xi, yi, wi, gi, oi = ends[i]
@@ -226,7 +245,8 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
                 cap = (wi + wj) / 2.0
                 if gi and gj:
                     continue  # art meets art: nothing anyone can act on
-                if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6 \
+                        and not joined_elsewhere(oi, oj):
                     # size=None: soft joints bypass the --tolerance filter.
                     # Filtering by GAP inverted the severity metric (small
                     # gap = still fragile) and on <=0.1mm-width routing every
@@ -246,7 +266,7 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
 
 
 def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
-                   soft_pts, findings, join_tol: float = 0.0):
+                   soft_pts, findings, join_tol: float = 0.0, copper_layers=()):
     """Degree-1 endpoints that _point_anchored calls unanchored and that are
     not inside a same-net zone outline. Half-segment tails past a mid-body
     anchor reuse trim_dangles_past_body_anchor's geometry (report-only)."""
@@ -254,7 +274,20 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
     track_segs = [s for s in net_segs if not getattr(s, 'graphic', False)]
     if not track_segs:
         return
-    via_pts = [(v.x, v.y, getattr(v, 'size', 0.6) or 0.6) for v in net_vias]
+    # A via anchors only the layers its barrel has copper on (#722's via-layer
+    # rule, which _check_soft_joints already applies through
+    # endpoint_reaches_via): a blind F.Cu/In1.Cu via anchors no B.Cu end.
+    # This credit was layer-blind, and the soft-joint finding used to mask it
+    # -- until #984 stopped calling two stubs out of one vertex a soft joint.
+    _via_pts_on = {}
+
+    def via_pts_on(layer):
+        pts = _via_pts_on.get(layer)
+        if pts is None:
+            pts = _via_pts_on[layer] = [
+                (v.x, v.y, getattr(v, 'size', 0.6) or 0.6) for v in net_vias
+                if layer in via_copper_layers(v, copper_layers or None)]
+        return pts
     # NO pads are handed to _point_anchored. Its pad test is a bounding CIRCLE
     # of radius max(size_x, size_y)/2, which over-credits every non-square pad
     # -- and because it runs FIRST it can only ADD credit, so the exact test
@@ -300,7 +333,7 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                 continue
             if ((s.layer, round(fx, 3), round(fy, 3)) in soft_pts):
                 continue  # already reported as the more specific soft-joint
-            if _point_anchored(fx, fy, s.layer, via_pts, pad_pts,
+            if _point_anchored(fx, fy, s.layer, via_pts_on(s.layer), pad_pts,
                                seg_index, _CELL, s, tol):
                 continue
             # _point_anchored's pad test is RADIAL (center distance vs the
@@ -365,9 +398,9 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
         # endpoint teeing into the body.
         cands = []
         if L2 >= 1e-9:
-            for vx, vy, vsize in via_pts:
+            for vx, vy, vsize in via_pts_on(s.layer):
                 t = ((vx - s.start_x) * dx + (vy - s.start_y) * dy) / L2
-                if t <= 0.02 or t >= 0.98:
+                if not lands_on_interior(t, L2, tol):          # #1186
                     continue
                 cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                 if math.hypot(vx - cx_, vy - cy_) < (vsize + s.width) / 2 - 1e-6:
@@ -377,7 +410,7 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                     continue
                 for ox, oy in ((o.start_x, o.start_y), (o.end_x, o.end_y)):
                     t = ((ox - s.start_x) * dx + (oy - s.start_y) * dy) / L2
-                    if t <= 0.02 or t >= 0.98:
+                    if not lands_on_interior(t, L2, tol):      # #1186
                         continue
                     cx_, cy_ = s.start_x + t * dx, s.start_y + t * dy
                     if math.hypot(ox - cx_, oy - cy_) < (o.width + s.width) / 2 - 1e-6:
@@ -489,6 +522,75 @@ def _check_removable(net_id, name, net_segs, removable, findings):
             f"({s.end_x:.3f}, {s.end_y:.3f}) w{s.width:.3f}: removal "
             f"does not change net connectivity",
             size=math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)))
+
+
+def _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
+                          net_zones, copper_layers, findings):
+    """A joint segment KiCad's DRC calls ``track_dangling`` although both its
+    ends lie on same-net copper (#1217).
+
+    KiCad's rule (CONNECTIVITY_DATA::TestTrackEndpointDangling): each item
+    touching the segment -- its shape within half the segment's width of an
+    end -- counts for that end, and an item touching BOTH ends counts only for
+    the end nearer it (a track by its nearer endpoint). The segment dangles
+    unless both ends are counted. So a 24-35 um stub lying on one other track
+    -- its far end mid-body, its root in that track's copper -- dangles in
+    KiCad, while check_weird's T-junction rule credits both ends.
+
+    Reported only in that unambiguous shape: every item touching the segment
+    is a same-net TRACK, each one touches both ends, and no via, pad or zone
+    touches it. Where a via, pad or zone is involved KiCad's verdict turns on
+    zone-fill and anchor details this model does not reproduce, so it says
+    nothing rather than guess. Never size-filtered: KiCad warns at any length.
+    """
+    for i, s in enumerate(net_segs):
+        if getattr(s, 'graphic', False):
+            continue
+        acc = s.width / 2.0
+        ends = ((s.start_x, s.start_y), (s.end_x, s.end_y))
+        touchers = []
+        for j, o in enumerate(net_segs):
+            if j == i or o.layer != s.layer or getattr(o, 'graphic', False):
+                continue
+            hits = [_pt_seg_dist(x, y, o.start_x, o.start_y, o.end_x, o.end_y)
+                    <= o.width / 2.0 + acc + 1e-9 for x, y in ends]
+            if any(hits):
+                touchers.append(hits)
+        if not touchers or not all(h[0] and h[1] for h in touchers):
+            continue
+        if any(s.layer in via_copper_layers(v, copper_layers)
+               and min(math.hypot(v.x - x, v.y - y) for x, y in ends)
+               <= v.size / 2.0 + acc + 1e-9 for v in net_vias):
+            continue
+        if any(endpoint_reaches_pad(x, y, acc, (s.layer,), p)
+               for p in net_pads for x, y in ends):
+            continue
+        if any(z.layer == s.layer and z.polygon
+               and any(point_in_polygon(x, y, z.polygon) for x, y in ends)
+               for z in net_zones):
+            continue
+        # Every toucher holds both ends, so each is counted once, at the end
+        # nearer one of its own endpoints; the other end is never counted.
+        counts = [0, 0]
+        for j, o in enumerate(net_segs):
+            if j == i or o.layer != s.layer or getattr(o, 'graphic', False):
+                continue
+            if _pt_seg_dist(ends[0][0], ends[0][1], o.start_x, o.start_y,
+                            o.end_x, o.end_y) > o.width / 2.0 + acc + 1e-9:
+                continue
+            d0, d1 = (min(math.hypot(o.start_x - x, o.start_y - y),
+                          math.hypot(o.end_x - x, o.end_y - y)) for x, y in ends)
+            counts[0 if d0 < d1 else 1] += 1
+        if all(counts):
+            continue
+        free = ends[0] if counts[0] == 0 else ends[1]
+        findings.append(_finding(
+            'kicad-dangling', name, s.layer, free[0], free[1],
+            f"segment ({s.start_x:.3f}, {s.start_y:.3f})-({s.end_x:.3f}, "
+            f"{s.end_y:.3f}) w{s.width:.3f}: both ends lie on other {name} "
+            f"track(s) that hold the other end too -- KiCad's DRC reports "
+            f"track_dangling at ({free[0]:.3f}, {free[1]:.3f})",
+            size=None))
 
 
 def _check_stacked(net_id, name, net_segs, net_vias, findings):
@@ -782,11 +884,13 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
     copper_layers = (getattr(pcb_data.board_info, 'copper_layers', None)
                      or ['F.Cu', 'B.Cu'])
 
-    # Connection-width floor for the terminal-web check (#416): the thinnest
-    # track on the board -- KiCad's scan_board_minima min_track_width.
-    _widths = [s.width for s in pcb_data.segments
-               if not getattr(s, 'graphic', False) and s.width and s.width > 0]
-    min_track_w = min(_widths) if _widths else 0.0
+    # Connection-width floor for the terminal-web check (#416): the floor the
+    # board's project grades connection_width at (the author's min_connection,
+    # else min_track_width), the same call kicad_drc_compare stages KiCad's
+    # grade from (#1187) -- so re-routing one net cannot flip another's
+    # verdict. A board with no project falls back to its thinnest track.
+    from fix_kicad_drc_settings import connection_width_floor
+    min_track_w = connection_width_floor(pcb_data)
 
     net_ids = set(segs_by_net) | set(vias_by_net)
     check_ids = []
@@ -813,7 +917,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
         soft_pts = _check_soft_joints(net_id, name, net_segs, net_vias,
                                       net_pads, findings, copper_layers)
         _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
-                       soft_pts, findings, join_tol=tolerance or 0.0)
+                       soft_pts, findings, join_tol=tolerance or 0.0,
+                       copper_layers=copper_layers)
         _check_orphan_islands(net_id, name, net_segs, net_vias, net_pads,
                               net_zones, findings)
         removable = _strict_removable(net_id, name, net_segs, net_vias,
@@ -823,6 +928,8 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
                       findings, removable)
         _check_removable(net_id, name, net_segs, removable, findings)
         _check_stacked(net_id, name, net_segs, net_vias, findings)
+        _check_kicad_dangling(net_id, name, net_segs, net_vias, net_pads,
+                              net_zones, copper_layers, findings)
         _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
                                 net_zones, copper_layers, findings)
         _check_terminal_web(pcb_data, net_id, name, net_segs, net_pads,
@@ -887,9 +994,10 @@ def main():
                         help='Minimum finding size in mm (dangle/tail length, '
                              'gap, duplicated-copper length, via diameter); '
                              'smaller findings are dropped. Default 0.1; use '
-                             '0 to report everything. soft-joint and '
-                             'narrow-pad-joint carry no size and are ALWAYS '
-                             'reported -- for those, smaller is worse.')
+                             '0 to report everything. soft-joint, '
+                             'narrow-pad-joint and kicad-dangling carry no '
+                             'size and are ALWAYS reported -- smaller is '
+                             'worse, or KiCad warns at any length.')
     parser.add_argument('--max-print', type=int, default=20,
                         help='Max findings printed per category '
                              '(<=0 prints all; default 20)')

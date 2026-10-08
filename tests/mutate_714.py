@@ -90,7 +90,7 @@ ROWS = [
     # Killed by SELF with no pcbnew at all -- the cheapest kill in the set,
     # and the one that proves the two independent side derivations disagree.
     ('pad-layers-are-not-toggled', 'wr',
-     "        node = node[:lm.start()] + new_block + node[lend:]\n",
+     "        node = node[:lm.end()] + map_layer_list_tokens(body, flip_layer_token) + node[lend:]\n",
      "        node = node\n",
      (SELF, PAR), 'KILLED'),
 

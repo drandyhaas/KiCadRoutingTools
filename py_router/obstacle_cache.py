@@ -779,6 +779,26 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,
                                    blocked_cell_spans_set, blocked_via_spans_set,
                                    via_block_mm)
+    # #1181: a net-tagged FILLED graphic of this net is copper inside too; the
+    # loop above stamped only its perimeter (net-0 footprint copper never gets
+    # here -- the base map stamps it).
+    if net_id:
+        from check_drc import filled_graphic_shapes
+        from obstacle_map import (filled_graphic_interior_cells,
+                                  filled_graphic_interior_spans)
+        for _sh in filled_graphic_shapes(pcb_data):
+            if _sh.net_id != net_id:
+                continue
+            _gx, _gy = filled_graphic_interior_cells(
+                pcb_data, coord, _sh,
+                getattr(pcb_data.board_info, 'board_bounds', None))
+            if not len(_gx):
+                continue
+            _li = layer_map.get(_sh.layer)
+            if _li is not None:
+                blocked_cell_spans_set.append(
+                    filled_graphic_interior_spans(_gx, _gy, _li))
+            blocked_via_spans_set.append(filled_graphic_interior_spans(_gx, _gy))
 
     # Process vias. Keep-out from the via's ACTUAL size, not config.via_size: a
     # fanout via-in-pad is larger (e.g. 0.45 vs 0.3), and using config under-

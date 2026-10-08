@@ -122,6 +122,9 @@ TO_ENGINE = {
     'cap_prefix': 'cap_prefix',
     'cap_default_via_size': 'default_via_size',
     'cap_allow_rotation': 'allow_rotations',
+    # #1067: the PATH is the plan param; the engine is handed the intent
+    # loaded from it (compared by its source_path below).
+    'cap_intent_path': 'intent',
 }
 ABSENT = '<<absent>>'
 # the shape the engine's own early returns carry, plus the four nudge keys, so
@@ -160,6 +163,15 @@ def main():
     app = wx.App(False)  # noqa: F841
     board = os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pcb')
     dlg = RoutingDialog(None, parse_kicad_pcb(board), board)
+    # #1067: a real intent file, so the step loads one and reaches the engine
+    import json
+    import tempfile
+    from placement import floorplan as _fpl
+    _itd = tempfile.mkdtemp(prefix='p772_intent_')
+    intent_path = os.path.join(_itd, 'flat.intent.json')
+    with open(intent_path, 'w', encoding='utf-8') as fh:
+        json.dump(_fpl.emit_intent(parse_kicad_pcb(board), board), fh)
+    PLAN['cap_intent_path'] = intent_path
     failures = []
 
     def check(name, ok, detail=''):
@@ -226,7 +238,12 @@ def main():
     for p in sorted(PLAN):
         e, want = TO_ENGINE[p], PLAN[p]
         got = kw.get(e, ABSENT)
-        ok = close(got, want) if isinstance(want, float) else got == want
+        if p == 'cap_intent_path':
+            src = getattr(got, 'source_path', None) or ''
+            ok = (os.path.normcase(os.path.abspath(src))
+                  == os.path.normcase(os.path.abspath(want)))
+        else:
+            ok = close(got, want) if isinstance(want, float) else got == want
         check('plan %s=%r -> engine %s' % (p, want, e), ok, 'got %r' % (got,))
 
     # == 2. and NOT through the Basic tab's SIGNAL edge control ==============
@@ -276,7 +293,7 @@ def main():
     kws = drive([
         {'action': 'optimize_caps',
          'params': {'cap_near_margin': 1.5, 'cap_prefix': 'C',
-                    'cap_max_passes': 7}},
+                    'cap_max_passes': 7, 'cap_intent_path': intent_path}},
         {'action': 'optimize_caps', 'params': {'cap_capture_radius': 5.0}},
         # STEP C NAMES NO CAP KNOB AT ALL, only Basic-tab params -- exactly
         # what `place_fanout_clearance.py --clearance 0.1 --grid-step 0.05`
@@ -303,6 +320,13 @@ def main():
           kws[1].get('cap_prefix') == 'C,R,FB',
           'cap_prefix=%r -- step A\'s value leaked'
           % (kws[1].get('cap_prefix'),))
+    check('step A: its intent is delivered (#1067)',
+          getattr(kws[0].get('intent'), 'source_path', None) is not None,
+          'intent=%r' % (kws[0].get('intent', ABSENT),))
+    check('step B: and does NOT inherit step A\'s intent',
+          kws[1].get('intent', ABSENT) is None,
+          'intent=%r -- step A\'s intent leaked into step B'
+          % (kws[1].get('intent', ABSENT),))
     # The knob to watch is CAPTURE_RADIUS: step B named it, so step B's own
     # reset left it at 5.0 while returning everything else to the defaults.
     # It is therefore the only non-default value standing when step C runs,
@@ -418,6 +442,12 @@ def main():
         if gui_name == 'cap_board_edge_clearance':
             check('engine default for %s is None (== the panel 0 = UNSET)'
                   % engine_name, eng is None, 'got %r' % (eng,))
+            continue
+        if gui_name == 'cap_intent_path':
+            check('engine default for %s is None (== the panel \'\' = no '
+                  'intent)' % engine_name,
+                  eng is None and table[gui_name] == '',
+                  'engine=%r panel=%r' % (eng, table[gui_name]))
             continue
         want = table[gui_name]
         ok = close(eng, want) if isinstance(want, float) else eng == want

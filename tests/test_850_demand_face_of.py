@@ -223,9 +223,13 @@ def the_spy_and_conservation(boards):
         # once WITHOUT one, which is the property this arm was written for;
         # the second call happens only for a pad whose first answer was None.
         box_calls = [c for c in seen if c[4] is None]
+        # Once per pad the ledger assigns, which since #1143 excludes the
+        # aperture-only pads (tigard U3: 91 pads, 9 of them paste windows).
+        from kicad_parser import non_aperture_pads
+        n_pads = len(non_aperture_pads(fp))
         check('spy: %s %s -- the kernel was called once per pad' % (name, ref),
-              len(box_calls) == len(fp.pads),
-              '%d box calls for %d pads' % (len(box_calls), len(fp.pads)))
+              len(box_calls) == n_pads,
+              '%d box calls for %d pads' % (len(box_calls), n_pads))
         rescue = [c for c in seen if c[4] is not None]
         check('spy: %s %s -- only a box-interior pad is asked twice'
               % (name, ref),

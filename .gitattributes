@@ -1,2 +1,5 @@
 # Normalize line endings: Python sources are LF
 *.py text eol=lf
+
+# #1081: the vendored three.js must stay byte-identical (pixels depend on it)
+py_router/stage3d/vendor/** -text linguist-vendored

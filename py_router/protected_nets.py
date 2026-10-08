@@ -405,6 +405,15 @@ def filter_rippable_names(names: List[str], protected: Dict[str, str],
             by_reason.setdefault(protected[n], []).append(n)
         det = '; '.join(f"{r}: {', '.join(ns[:4])}{'...' if len(ns) > 4 else ''}"
                         for r, ns in sorted(by_reason.items()))
+        # The override hint only for the reasons that HAVE one (#1192): a
+        # 'locked' net was refused even if the caller named it exactly.
+        hints = []
+        if any(r != 'locked' for r in by_reason):
+            hints.append("name a net exactly (no glob) to override"
+                         + (" all but 'locked'" if 'locked' in by_reason else ""))
+        if 'locked' in by_reason:
+            hints.append("KiCad-locked copper has no override; unlock it in "
+                         "the board")
         print(f"  {len(blocked)} PROTECTED net(s) excluded from {context} ({det})"
-              f" -- name a net exactly (no glob) to override")
+              f" -- {'; '.join(hints)}")
     return kept

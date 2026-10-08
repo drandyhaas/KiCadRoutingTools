@@ -87,3 +87,8 @@ wk/
 # with the scheduled job). The ARCHIVE under metrics/data/ is the part that is
 # tracked, because it cannot be regenerated -- GitHub discards traffic after 14 days.
 docs/site/
+
+# #1081: the stage3d renderer's npm install (package-lock.json is tracked)
+py_router/stage3d/node_modules/
+# ...but the vendored three.js keeps upstream's own build/ layout (#1081)
+!py_router/stage3d/vendor/three/build/

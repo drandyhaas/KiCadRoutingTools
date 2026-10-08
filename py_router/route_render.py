@@ -53,7 +53,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from startup_checks import check_render_dependencies
 check_render_dependencies()
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -61,7 +61,8 @@ from PIL import Image, ImageChops, ImageDraw, ImageFont
 # A distinct color per copper layer, assigned in board stack order so any
 # board (2, 4, 6, ... layers) renders sensibly. F.Cu warm/red, B.Cu cool/blue,
 # inners spread across the spectrum -- roughly the KiCad convention.
-from render_theme import DARK as _THEME_DARK, default_theme
+from render_theme import DARK as _THEME_DARK
+from render_theme import default_theme as _default_theme, default_theme
 
 #: Module-level aliases onto the dark theme, kept AS NAMES because callers read
 #: them that way -- `tests/test_431_render_placement.py:293-294` reads
@@ -92,7 +93,7 @@ def layer_palette(copper_layers: Sequence[str],
     this is the name the repo imports.
     """
     import render_theme
-    return render_theme.layer_palette(copper_layers, theme or _THEME_DARK)
+    return render_theme.layer_palette(copper_layers, theme or _default_theme())
 
 
 # ---------------------------------------------------------------------------
@@ -201,15 +202,15 @@ class BoardRenderer:
                  dynamic_zones: bool = False,
                  view: Optional[Tuple[float, float, float, float]] = None,
                  theme=None):
-        # #1011. `theme=None` resolves to DARK, whose values are exactly
-        # the constants this module shipped before, so every existing
-        # construction site renders byte-identically. `bg` and
-        # `layer_alpha` stay and still WIN when passed explicitly: `bg`
-        # had zero callers repo-wide, so this closes the half-open door
-        # rather than removing it.
+        # #1011. `theme=None` resolves to the CONFIGURED default
+        # (`render_theme.default_theme()`: light since #1081, or
+        # $KICAD_RENDER_THEME) -- it used to be hard-wired DARK, which kept
+        # every construction site byte-identical but meant no default could
+        # reach a render that named no theme. `bg` and `layer_alpha` stay
+        # and still WIN when passed explicitly.
         import render_theme
         self.theme = render_theme.theme(theme) if theme is not None \
-            else _THEME_DARK
+            else _default_theme()
         self.pcb = pcb
         # dynamic_zones: keep plane pours OUT of the static base so the animator
         # can reveal each plane's fill per frame (via frame(zone_net_ids=...)).
@@ -559,7 +560,8 @@ class BoardRenderer:
               focus_layer: Optional[str] = None,
               opaque_crossings: Optional[bool] = None,
               label: Optional[str] = None, zone_net_ids=None,
-              overlays: Optional[Sequence] = None) -> Image.Image:
+              overlays: Optional[Sequence] = None, mirror: bool = False
+              ) -> Image.Image:
         """Composite the given copper onto the static substrate and return an
         RGB image at output resolution.
 
@@ -570,6 +572,10 @@ class BoardRenderer:
         pours under the copper, so a plane "fills in" on the frame its taps land.
         ``overlays`` is a sequence of ``fn(draw, renderer)`` callables drawn at
         SUPERSAMPLED resolution, above the copper and below the label.
+
+        ``mirror`` (#1082-#1085) flips the board left-right -- the view from
+        the BACK -- after ``overlays`` and BEFORE the downsample, and stamps
+        ``label`` last, upright.
         """
         segs = self.pcb.segments if segments is None else segments
         vs = self.pcb.vias if vias is None else vias
@@ -663,6 +669,8 @@ class BoardRenderer:
         # ghosts, arrows, airwires) out of this copper renderer entirely.
         for fn in (overlays or ()):
             fn(ImageDraw.Draw(img), self)
+        if mirror:
+            img = ImageOps.mirror(img)
         if self.ss > 1:
             img = img.resize((self.W, self.H), Image.LANCZOS)
         if label:
@@ -875,7 +883,7 @@ def main() -> int:
                     help='draw reference designators at footprint origins (a '
                          'cross marks the exact JSON coordinate). Default: on '
                          'for a --view crop, off whole-board')
-    ap.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    ap.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'light' (default, or $KICAD_RENDER_THEME) or 'dark' (KiCad's own canvas). The file's ground cannot be changed afterwards.")
     ap.add_argument('--ruler', default=None, action=argparse.BooleanOptionalAction,
                     help='mm coordinate ticks along the top/left edges, so the '
                          'picture is matchable to JSON coordinates. Default: '

@@ -157,6 +157,11 @@ def install() -> None:
             state['rc'] = c if isinstance(c, int) else (0 if c is None else 1)
         else:
             state['rc'] = 1
+            if getattr(ev, 'user_facing', False):
+                # A refusal whose message IS the explanation (an unsupported
+                # board format): say it plainly. A traceback reads as a crash.
+                print(f"ERROR: {ev}", file=sys.stderr, flush=True)
+                return
         real_hook(et, ev, tb)
 
     sys.excepthook = _hook

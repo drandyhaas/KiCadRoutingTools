@@ -46,7 +46,8 @@ for _d in ('py_router', 'py_placer'):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kicad_parser import parse_kicad_pcb, iter_footprint_blocks  # noqa: E402
+from kicad_parser import (parse_kicad_pcb, iter_footprint_blocks,  # noqa: E402
+                          non_aperture_pads)
 from placement.placement_state import assess_placement          # noqa: E402
 from placement.utility import compute_footprint_bbox_local       # noqa: E402
 from placement.portfolio import copy_siblings                    # noqa: E402
@@ -102,12 +103,15 @@ def build(src: str, dst: str, keep_locked: bool = False) -> int:
               f'tests/stress/strip_copper_only.py {src} <unrouted.kicad_pcb>',
               file=sys.stderr)
         return 3
+    # A part whose only pads are apertures (paste/mask windows) is artwork,
+    # not a pad-bearing part (#1143).
     was_locked = sorted(r for r, f in pcb.footprints.items()
-                        if f.pads and getattr(f, 'locked', False))
+                        if non_aperture_pads(f) and getattr(f, 'locked', False))
     held = was_locked if keep_locked else []
     movable = sorted(r for r, f in pcb.footprints.items()
-                     if f.pads and r not in held)
-    artwork = sorted(r for r, f in pcb.footprints.items() if not f.pads)
+                     if non_aperture_pads(f) and r not in held)
+    artwork = sorted(r for r, f in pcb.footprints.items()
+                     if not non_aperture_pads(f))
     if not movable:
         print('refuse: no movable pad-bearing part', file=sys.stderr)
         return 3

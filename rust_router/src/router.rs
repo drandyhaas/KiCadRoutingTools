@@ -200,49 +200,13 @@ impl NodeStore {
         path.reverse();
         path
     }
-
-    /// All closed cells, up to `limit` (visualizer snapshots only).
-    pub(crate) fn closed_cells(&self, limit: usize) -> Vec<(i32, i32, u8)> {
-        let mut out = Vec::new();
-        'tiles: for tile in &self.tiles {
-            for (i, slot) in tile.slots.iter().enumerate() {
-                if slot.parent & CLOSED_BIT32 != 0 {
-                    let i = i as i32;
-                    out.push((tile.base_x + (i & TILE_MASK), tile.base_y + (i >> TILE_BITS), tile.layer));
-                    if out.len() >= limit {
-                        break 'tiles;
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// All visited-but-not-closed cells, up to `limit` (visualizer snapshots
-    /// only; the old visualizer's "open" dump was g_costs keys minus closed).
-    pub(crate) fn visited_open_cells(&self, limit: usize) -> Vec<(i32, i32, u8)> {
-        let mut out = Vec::new();
-        'tiles: for tile in &self.tiles {
-            for (i, slot) in tile.slots.iter().enumerate() {
-                if slot.g != i32::MAX && slot.parent & CLOSED_BIT32 == 0 {
-                    let i = i as i32;
-                    out.push((tile.base_x + (i & TILE_MASK), tile.base_y + (i >> TILE_BITS), tile.layer));
-                    if out.len() >= limit {
-                        break 'tiles;
-                    }
-                }
-            }
-        }
-        out
-    }
 }
 
 
 /// Outcome of one GridSearch step (one open-set pop).
 pub(crate) enum SearchStep {
-    /// A node was expanded normally (payload: the expanded state, for the
-    /// visualizer's cursor; run-to-completion callers ignore it).
-    Progress(GridState),
+    /// A node was expanded normally.
+    Progress,
     /// The pop was a duplicate (already closed) or a target reached from a
     /// rejected arrival direction; nothing was expanded.
     Skipped,
@@ -358,9 +322,9 @@ fn check_via_exclusion(nx: i32, ny: i32, current_gx: i32, current_gy: i32,
     false
 }
 
-/// C1 (issue #387): THE grid A* search core. route_multi, route_with_frontier
-/// and the visualizer all drive this one step() loop with different sinks, so
-/// there is exactly one copy of the expansion logic (the visualizer fork had
+/// C1 (issue #387): THE grid A* search core. route_multi and
+/// route_with_frontier drive this one step() loop with different sinks, so
+/// there is exactly one copy of the expansion logic (a visualizer fork had
 /// drifted -- B1 in #386). step() pops and processes ONE open-set entry;
 /// run-to-completion callers just loop it.
 /// S3-b (#385): O(1) admissible replacement for the O(targets) exact
@@ -585,11 +549,6 @@ impl GridSearch {
             .min(self.iteration_ceiling);
         self.tranches_granted += 1;
         true
-    }
-
-    /// True when the search cannot make further progress.
-    pub(crate) fn is_done(&self) -> bool {
-        self.open_set.is_empty() || self.iterations >= self.max_iterations
     }
 
     /// Pop and process one open-set entry.
@@ -981,7 +940,7 @@ impl GridSearch {
             }
         }
 
-        SearchStep::Progress(current)
+        SearchStep::Progress
     }
 }
 
@@ -1196,7 +1155,7 @@ impl GridRouter {
                     return (Some(path), search.iterations, stats_dict);
                 }
                 SearchStep::IterationCap | SearchStep::Exhausted => break,
-                SearchStep::Progress(_) | SearchStep::Skipped => {}
+                SearchStep::Progress | SearchStep::Skipped => {}
             }
         }
 
@@ -1258,7 +1217,7 @@ impl GridRouter {
                     return (Some(path), search.iterations, Vec::new());
                 }
                 SearchStep::IterationCap | SearchStep::Exhausted => break,
-                SearchStep::Progress(_) | SearchStep::Skipped => {}
+                SearchStep::Progress | SearchStep::Skipped => {}
             }
         }
 

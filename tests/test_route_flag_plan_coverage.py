@@ -11,7 +11,8 @@ only the flags a recorded manifest uses AND a hand-kept table names, and
 
 `tests/gui_parity/test_manifest_plan_parity.py` now carries
 `check_flag_coverage`, which enumerates EVERY flag the argparse of route.py,
-route_diff.py, route_planes.py and bga_fanout.py accepts and requires each to
+route_diff.py, route_planes.py, bga_fanout.py and qfn_fanout.py accepts and
+requires each to
 be reached, listed CLI-only with a reason, or listed as a known gap. THIS IS
 ITS WX-FREE, RUN_ALL HALF: `run_all.py`'s flat
 glob never collects `tests/gui_parity/`, so a gate living only there is one
@@ -54,7 +55,8 @@ class TheEnumeration(unittest.TestCase):
     """In-process: every flag of every FLAG_COVERAGE tool is accounted for,
     and exactly once."""
 
-    TOOLS = ('route.py', 'route_diff.py', 'route_planes.py', 'bga_fanout.py')
+    TOOLS = ('route.py', 'route_diff.py', 'route_planes.py', 'bga_fanout.py',
+             'qfn_fanout.py')
 
     @classmethod
     def setUpClass(cls):
@@ -62,7 +64,7 @@ class TheEnumeration(unittest.TestCase):
         cls.gate = gate
         cls.results = {t: gate.check_flag_coverage(t) for t in cls.TOOLS}
 
-    def test_the_four_routing_tools_are_enumerated(self):
+    def test_the_routing_tools_are_enumerated(self):
         self.assertEqual(set(self.gate.FLAG_COVERAGE), set(self.TOOLS))
 
     def test_every_flag_is_accounted_for(self):
@@ -237,7 +239,8 @@ class TheNegativeControlsExist(unittest.TestCase):
         src = _src(self.CONTROLS)
         for path in ('py_router/route.py', 'py_router/route_diff.py',
                      'py_router/route_planes.py',
-                     'py_router/bga_fanout/__init__.py'):
+                     'py_router/bga_fanout/__init__.py',
+                     'py_router/qfn_fanout/__init__.py'):
             self.assertIn("'%s'" % path, src)
 
 

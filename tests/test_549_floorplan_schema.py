@@ -155,7 +155,9 @@ KEY_SETS = {
     '_CENTER_ON_EDGE_KEYS': {'tolerance_mm'},
     '_ALONG_EDGE_BAND_KEYS': {'from', 'to'},
     '_DECAP_KEYS': {'max_distance_mm', 'exempt', 'search_radius_mm',
-                    'max_pin_distance_mm', 'pin_functions', 'same_side'},
+                    'max_pin_distance_mm', 'pin_functions', 'same_side',
+                    # #1142: the caps a --decaps-from reference holds.
+                    'within_radius_refs', 'within_radius_mm'},
     '_HEALTH_KEYS': {'bus_corridors', 'classes', 'zoned_blocks',
                      'affinity_exempt_nets', 'affinity_exempt_net_ids',
                      'ignore_net_ids', 'max_fanout', 'block_displacement_mm',
@@ -294,7 +296,9 @@ def test_an_intent_using_every_known_key_loads():
              'along_edge_band': {'from': 0.10, 'to': 0.35}}],
         'decaps': {'max_distance_mm': 2.5, 'exempt': ['C99'],
                    'search_radius_mm': 6.0, 'max_pin_distance_mm': 1.5,
-                   'pin_functions': ['VCC', 'VDD'], 'same_side': False},
+                   'pin_functions': ['VCC', 'VDD'], 'same_side': False,
+                   # #1142: read at the same radius the rule searches.
+                   'within_radius_refs': ['C1'], 'within_radius_mm': 6.0},
         'must_lock': ['MH*'],
         'legality_budget': {'overlap_area': 1.0, 'oob_count': 2,
                             'oob_amount': 3.0},

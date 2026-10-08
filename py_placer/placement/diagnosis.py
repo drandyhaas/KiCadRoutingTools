@@ -343,7 +343,7 @@ def ignore_net_ids(pcb_data, patterns: Optional[Sequence[str]]) -> set:
     ids = set()
     if patterns:
         for nid, net in (pcb_data.nets or {}).items():
-            if any(fnmatch.fnmatch(net.name, p) for p in patterns):
+            if any(fnmatch.fnmatchcase(net.name, p) for p in patterns):
                 ids.add(nid)
     return ids
 

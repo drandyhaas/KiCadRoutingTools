@@ -13,7 +13,7 @@ corridor's business, not this module's.
 """
 from __future__ import annotations
 
-import os
+import awx_settings
 from typing import Dict, List, Optional, Sequence, Set
 import prices as _pr  # ONE source for the swimmer price
 
@@ -22,7 +22,7 @@ import prices as _pr  # ONE source for the swimmer price
 # the LIS-first greedy below. Measured on the K8 exact plan: a crossing-
 # free 4/4 split the greedy made 5/2 + 1 swimmer (10 vias for 8); on the
 # K41 greedy plan's own orders 17 swimmers where 14 suffice.
-EXACT_PAGES = int(os.environ.get('BRAID_EXACT_PAGES', '0'))
+EXACT_PAGES = int(awx_settings.get('BRAID_EXACT_PAGES', '0'))
 
 
 def exact_pages(launch: Sequence[str], ranks: Sequence[int], cost) -> Optional[Dict[str, Optional[str]]]:

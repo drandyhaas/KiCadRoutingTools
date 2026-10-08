@@ -370,11 +370,12 @@ LENS_MUST_BE_SOURCED = ('connectivity', 'drc', 'spec')
 
 #: Stop conditions a `--final --kind completion` row may carry when a lens
 #: FAILED. Two vocabularies, both of record: the stop NUMBERS (2 budget
-#: spent, 4 measured-unfixable) and the verdict NAMES as `verdict` prints them
-#: (the retired loop_driver's L5 interpolated them).
+#: spent, 3 plateau, 4 measured-unfixable) and the verdict NAMES as `verdict`
+#: prints them (the retired loop_driver's L5 interpolated them). '3' and STUCK
+#: are the same stop (#1202: STUCK passed while its number was refused).
 #: DONE-EXHAUSTED is deliberately absent -- with a FAIL lens it is a
 #: contradiction, refused above the membership check.
-FAIL_COMPATIBLE_STOPS = ('2', '4', 'STUCK', 'BUDGET')
+FAIL_COMPATIBLE_STOPS = ('2', '3', '4', 'STUCK', 'BUDGET')
 
 #: The WHOLE stop-condition vocabulary (#901), checked on every `record` that
 #: carries one -- not only when a lens FAILED, which is what let ~500 characters
@@ -485,57 +486,14 @@ def score_component(score, key):
     return None
 
 
-def blocking_defect(b):
-    """None when `b` is a count a verdict can rank (or null/absent); else WHY
-    it is neither (#1071, #1075).
-
-    A verdict ranks every lap on `blocking` and asks `blocking == 0` for a
-    finished board, so the value must be a non-negative number. Anything else
-    either breaks the ranking outright (a per-term dict: two different dicts
-    compare with `<` and raise) or ranks wrong without a word (`false == 0`
-    reads as a finished board, `"10" < "9"`, NaN never compares below
-    anything so its half reads as plateaued).
-    """
-    if b is None:
-        return None
-    if isinstance(b, bool):
-        return (f'the boolean {json.dumps(b)}, not a count (true would rank '
-                f'as 1 and false as a finished board)')
-    if not isinstance(b, (int, float)):
-        kind = {dict: 'a JSON object', list: 'a JSON array',
-                str: 'a string'}.get(type(b), type(b).__name__)
-        try:
-            text = json.dumps(b, sort_keys=True)     # the JSON it arrived as
-        except (TypeError, ValueError):
-            text = repr(b)
-        text = text if len(text) <= 60 else text[:57] + '...'
-        hint = {dict: ' -- a per-term breakdown belongs in `blocking_by`',
-                str: ' -- strings compare letter by letter',
-                }.get(type(b), '')
-        return f'{kind} ({text}), not a number{hint}'
-    # FLOATS only: an int is always finite, and `math.isfinite` converts its
-    # argument to float -- a 400-digit JSON integer raised OverflowError here.
-    if isinstance(b, float) and not math.isfinite(b):
-        return f'{b!r}, which no board measures'
-    if b < 0:
-        return f'negative ({b!r}); a count of blockers cannot be below zero'
-    # Past the float range: nothing measures that many blockers, and the film
-    # plots `float(b)`, which raised OverflowError on a row `record` had
-    # accepted. (int > float compares exactly, without converting.)
-    if b > sys.float_info.max:
-        return (f'an integer of {len(str(b))} digits, beyond any float, which '
-                f'no board measures')
-    return None
-
-
-def blocking_value(b):
-    """`b` as a rankable count, or None when it is null OR not a count.
-
-    ONE rule for `_score_key` (the ranking), `record` (the refusal) and --
-    mirrored, since the router side does not import the placer --
-    `movie_attempts._blocking_value` (the film's axis).
-    """
-    return None if b is None or blocking_defect(b) else b
+# ONE rule for what a `blocking` is (#1088): `_score_key` (the ranking),
+# `record` (the refusal), `check_complete`, `run_watch` and the film all use
+# the same two functions. They live in `py_router/ledger_score.py` so the
+# router side can import them without importing a placement engine
+# (`_placer_path`'s one-way rule); converge re-exports them. The film used to
+# MIRROR this rule by hand, pinned by a parity test -- a mirror is a second
+# place to get it wrong.
+from ledger_score import blocking_defect, blocking_value  # noqa: E402,F401
 
 
 #: The answers `score_board_binding` can give, in the order a reader meets
@@ -810,6 +768,39 @@ def _pose_knobs(board, clearance, board_edge_clearance):
     return board_floor_knobs(board, clearance, board_edge_clearance)
 
 
+#: #1113: veto labels that name a NEIGHBOUR (quench.VETO_CHECKS minus the
+#: board, outline, intent and keep-out-band terms).
+_NEIGHBOUR_CHECKS = ('courtyard', 'pads', 'waived_pads', 'waived_drill',
+                     'body_overlap', 'body_contained', 'pads_under_body',
+                     'tether', 'escape_overlap')
+
+
+def _in_place_clause(ref, diag) -> str:
+    """#1113: what vetoed the part's OWN spot, and -- when its in-place
+    rotations are vetoed -- why this sweep cannot rank them."""
+    import pose_score
+    out = ''
+    by = diag.get('dropped_in_place_by') or []
+    if by:
+        out += (" In place: " + pose_score.in_place_phrase(by) + ".")
+    if not diag.get('in_place_evaluated', True):
+        out += (f" Its own angle {diag.get('input_rotation', 0):g} is not on "
+                f"the swept lattice, so staying put was not evaluated.")
+    # Only a NEIGHBOUR veto says the neighbours were packed around the
+    # part; a board-term or knob veto (board_bbox at a 50 mm clearance) is
+    # not a reason to rank rotations at seed level.
+    turned = [d for d in by if d['check'] in _NEIGHBOUR_CHECKS
+              and abs(((d['rot'] - diag.get('input_rotation', 0)) + 180.0)
+                      % 360.0 - 180.0) > 1e-6]
+    if turned:
+        out += (" A one-part move holds every neighbour where it is, so it "
+                "cannot judge a rotation the neighbours were packed around: "
+                f"rank {ref}'s rotations at seed level with "
+                "py_placer/rank_rotations.py on the pile this board was "
+                "seeded from.")
+    return out
+
+
 def cmd_poses(a):
     from kicad_parser import parse_kicad_pcb
     import pose_score
@@ -837,23 +828,46 @@ def cmd_poses(a):
                                            else 'unrankable')},
                          indent=1))
         return 4
+    # #1113: WHICH check vetoed the dropped candidates, and against whom.
+    _phrase = pose_score.veto_phrase(diag.get('dropped_by') or {})
+    _veto = {'dropped_by': diag.get('dropped_by') or {},
+             'dropped_in_place_by': diag.get('dropped_in_place_by') or [],
+             'evaluated_total': diag.get('evaluated_total', 0),
+             'all_moves_vetoed': bool(diag.get('all_moves_vetoed'))}
     if not poses:
         # The dropped-pose census is the difference between "this part has
         # nowhere to go" and "your knobs veto even staying put" (run-7 S4:
         # flip-in-place WAS enumerated, then silently dropped).
         _cut = bool(diag.get('stopped_early'))
-        print(json.dumps({'ref': a.ref, 'poses': [], 'knobs': knobs,
-                          'dropped_total': diag.get('dropped_total', 0),
-                          'dropped_in_place': diag.get('dropped_in_place', []),
-                          'stopped_early': _cut,
-                          # "no legal pose" is a VERDICT about the part. A cut
-                          # sweep has not earned it -- it diagnoses a part whose
-                          # poses were never enumerated.
-                          'note': ('the sweep stopped early -- this is NOT a '
-                                   'verdict about the part' if _cut else
-                                   'no legal pose, including staying put')},
-                         indent=1))
+        _note = ('the sweep stopped early -- this is NOT a verdict about '
+                 'the part' if _cut else
+                 'no legal pose, including staying put -- vetoed by '
+                 + _phrase)
+        _clause = '' if _cut else _in_place_clause(a.ref, diag)
+        if _clause:
+            _note += '.' + _clause
+        if not _cut:
+            print(f"converge poses {a.ref}: {_note}", file=sys.stderr)
+        print(json.dumps(dict({'ref': a.ref, 'poses': [], 'knobs': knobs,
+                               'dropped_total': diag.get('dropped_total', 0),
+                               'dropped_in_place':
+                                   diag.get('dropped_in_place', []),
+                               'stopped_early': _cut,
+                               # "no legal pose" is a VERDICT about the part.
+                               # A cut sweep has not earned it -- it diagnoses
+                               # a part whose poses were never enumerated.
+                               'note': _note}, **_veto), indent=1))
         return 2 if _cut else 1
+    _all_note = None
+    if diag.get('all_moves_vetoed') and diag.get('dropped_total'):
+        # #1113: only staying put survived. For a part whose neighbours were
+        # packed around its current pose -- an IC with its decaps at its
+        # supply pins -- a one-part move cannot judge another rotation.
+        _all_note = (f"every candidate except staying put was vetoed "
+                     f"({diag['dropped_total']} of "
+                     f"{diag.get('evaluated_total', 0)}) -- {_phrase}."
+                     + _in_place_clause(a.ref, diag))
+        print(f"converge poses {a.ref}: {_all_note}", file=sys.stderr)
 
     if a.route:
         if not a.affected:
@@ -902,6 +916,8 @@ def cmd_poses(a):
                       'knobs': knobs,
                       'dropped_total': diag.get('dropped_total', 0),
                       'dropped_in_place': diag.get('dropped_in_place', []),
+                      **_veto,
+                      **({'note': _all_note} if _all_note else {}),
                       'poses': poses}, indent=1))
     return 0
 
@@ -1470,8 +1486,8 @@ def cmd_record(a):
     if a.final and _failed and _sc not in FAIL_COMPATIBLE_STOPS:
         print(f"record: {len(_failed)} lens FAILED, so this run did not "
               f"finish clean -- --stop-condition must be 2 (budget spent), "
-              f"4 (measured-unfixable and said so), or the loop verdict "
-              f"naming the same thing (STUCK, BUDGET), not "
+              f"3 (plateau), 4 (measured-unfixable and said so), or the "
+              f"loop verdict naming the same thing (BUDGET, STUCK), not "
               f"{a.stop_condition!r}. A FAIL means `blocking` was not "
               f"really zero. Nothing was written.", file=sys.stderr)
         return 2

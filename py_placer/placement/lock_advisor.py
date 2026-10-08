@@ -288,8 +288,9 @@ def advise_locks(pcb_data, pcb_file: Optional[str] = None, *,
     except Exception:                                          # noqa: BLE001
         orbit_seat = {}
 
+    from kicad_parser import non_aperture_pads
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
-        if not fp.pads:
+        if not non_aperture_pads(fp):   # apertures are not pads (#1143)
             continue
         rules: List[str] = []
         reasons: List[str] = []
@@ -304,7 +305,9 @@ def advise_locks(pcb_data, pcb_file: Optional[str] = None, *,
         ev: Dict[str, object] = {
             'footprint_name': fp.footprint_name, 'ref_prefix': pref,
             'connected_pins': len(netted), 'npth_pads': len(npth),
-            'plated_pads': len(plated), 'total_pads': len(fp.pads),
+            # apertures (paste/mask windows) are not pads (#1143)
+            'plated_pads': len(plated),
+            'total_pads': len(non_aperture_pads(fp)),
             'side': footprint_side(fp),
         }
 
@@ -498,7 +501,7 @@ def advise_locks(pcb_data, pcb_file: Optional[str] = None, *,
         src = 'kicad' if locked else None
         if not locked and lock_patterns:
             for pat in lock_patterns:
-                if fnmatch.fnmatch(ref, pat):
+                if fnmatch.fnmatchcase(ref, pat):
                     locked, src = True, 'cli'
                     break
         adv.findings.append(LockFinding(

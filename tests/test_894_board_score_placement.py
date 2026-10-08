@@ -82,10 +82,13 @@ def test_the_flag_changes_nothing_that_gates():
               'quality', 'components', 'floors', 'connectivity_nets'):
         check(f'{k} is unchanged', off.get(k) == on.get(k),
               f'off={json.dumps(off.get(k))[:70]} on={json.dumps(on.get(k))[:70]}')
+    # `tool_seconds` is each sub-checker's wall time (#1202), a measurement
+    # of the run rather than of the board, so it differs between ANY two runs.
+    _skip = ('placement', 'tool_seconds')
     check('...and nothing else in the document moved either',
-          {k: v for k, v in off.items() if k != 'placement'}
-          == {k: v for k, v in on.items() if k != 'placement'},
-          'every key but `placement`')
+          {k: v for k, v in off.items() if k not in _skip}
+          == {k: v for k, v in on.items() if k not in _skip},
+          'every key but `placement` (and the wall-time `tool_seconds`)')
     check('the key is ABSENT without the flag, so a payload that carries it '
           'asked for it', 'placement' not in off and 'placement' in on,
           f"off={'placement' in off} on={'placement' in on}")

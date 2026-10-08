@@ -74,7 +74,7 @@ def ghost_overlay(items, theme, t=0.0):
     def _draw(d, r):
         try:
             import render_theme
-            th = theme or render_theme.DARK
+            th = theme or render_theme.default_theme()
             ghost = th.rgb('place_ghost')
             arrow = th.rgb('place_arrow')
             ss = max(1, int(getattr(r, 'ss', 1)))
@@ -125,7 +125,7 @@ def ghost_overlay(items, theme, t=0.0):
     return _draw
 
 
-def items_from_deltas(deltas, home):
+def items_from_deltas(deltas, home, turns=None):
     """`movie_camera.Stage._tween`'s own state -> `ghost_overlay` items.
 
     `deltas` is `[(ref, footprint, dx, dy), ...]` where `(dx, dy)` is
@@ -133,12 +133,24 @@ def items_from_deltas(deltas, home):
     poses. So the source pose is the home centre plus the delta, and the extent
     is the home pad bbox -- which is the part's own footprint rather than a
     guess at its size.
+
+    `turns` (#1086), `{ref: source - destination rotation}` in KiCad degrees,
+    turns that pad set to the SOURCE orientation before the bbox is taken, so
+    the ghost of a part that also rotates has the shape it had where it came
+    from (KiCad's angle is negated in the board frame).
     """
     out = []
     for ref, fp, dx, dy in deltas:
         rec = home.get(ref)
         hx, hy = (rec[0], rec[1]) if rec else (fp.x, fp.y)
         pads = rec[2] if rec and len(rec) > 2 else []
+        phi = (turns or {}).get(ref, 0.0)
+        if phi:
+            a = math.radians(-phi)
+            ca, sa = math.cos(a), math.sin(a)
+            pads = [(p, hx + (gx - hx) * ca - (gy - hy) * sa,
+                     hy + (gx - hx) * sa + (gy - hy) * ca)
+                    for p, gx, gy in pads]
         xs = [gx for _p, gx, _gy in pads]
         ys = [gy for _p, _gx, gy in pads]
         if xs and ys:

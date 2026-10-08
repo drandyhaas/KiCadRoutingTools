@@ -318,9 +318,13 @@ def main():
                         'incremental, in-place prepare) must price history')
     import layer_swap_fallback
     lsf_src = inspect.getsource(layer_swap_fallback)
-    if lsf_src.count('add_history_source') < 4:
+    # Its maps come from the main loop's builder, which prices history (the
+    # routing_context count above); a hand-built map would not.
+    if ('build_diff_pair_obstacles' not in lsf_src
+            or lsf_src.count('_pair_map(') < 4 or 'clone_fresh()' in lsf_src):
         failures.append('the diff-pair layer-swap fallback maps (retry / rip / '
-                        'reroute) must price history too')
+                        'reroute) must be built by build_diff_pair_obstacles, '
+                        'so they price history too')
     if 'record_rip(config' not in lsf_src:
         failures.append('the layer-swap fallback rips blockers INLINE (not via '
                         'rip_up_net) -- that rip must be recorded too')

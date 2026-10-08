@@ -29,7 +29,7 @@ import math
 import os
 import re
 from collections import defaultdict
-from fnmatch import fnmatch, fnmatchcase
+from fnmatch import fnmatchcase
 from kicad_parser import parse_kicad_pcb, find_components_by_type
 
 
@@ -115,8 +115,9 @@ def effective_floors(constraints, copper_layers):
         # from the DRC floor above. The deepest reachable, so DRC grades pass it.
         'fab_track_width':      fmin['track_width'],
         # min_clearance is deliberately NOT pinned up here (see the docstring):
-        # nothing downstream enforces it either -- check_drc does not raise its
-        # clearance from the constraint -- so the fab floor IS the honest value.
+        # routing does not raise its clearance to it. KiCad's DRC does, and so
+        # does check_drc's default grade since #1210; a run below it lowers it
+        # in the output project and records that in design_rules.narrowed.
         'drc_clearance':        fmin['clearance'],
         # #603: hole-to-hole and board-edge ARE pinned up by the board's own
         # DRC-enforced constraint everywhere else in the toolchain -- check_drc
@@ -727,15 +728,17 @@ def print_design_rules(pcb_path):
               f"min_hole_to_hole ({_h2h_con}), above the JLC fab min "
               f"{eff['fab']['hole_to_hole']}: it is DRC-enforced, so route AND grade "
               "at it (check_drc raises a lower --hole-to-hole-clearance to it anyway).")
-    # Copper clearance is the one floor NOT pinned up by the board's constraint
-    # -- min_clearance is an unreliable edit-floor (often 0, sometimes stale-large)
-    # and nothing downstream enforces it, so the fab minimum is the honest value.
+    # Copper clearance is the one floor routing does NOT pin up to the board's
+    # constraint -- min_clearance is an unreliable edit-floor (often 0, sometimes
+    # stale-large). KiCad's DRC and check_drc (#1210) DO grade at it, so a run
+    # below it lowers it in the output project and discloses that.
     _clr_con = float((dr['constraints'] or {}).get('min_clearance') or 0.0)
     if _clr_con > eff['drc_clearance']:
         print(f"  - clearance {eff['drc_clearance']} is the FAB floor; the board's "
-              f"min_clearance ({_clr_con}) is deliberately NOT applied here (it is an "
-              "aspirational edit-floor, and grading above what was routed manufactures "
-              "phantom violations -- #439). Fine-pitch escapes route down to the fab floor.")
+              f"min_clearance ({_clr_con}) is NOT applied to routing (it is often an "
+              "aspirational edit-floor -- #439), but KiCad's DRC enforces it on the "
+              "board as it stands: a route below it lowers it in the output project and "
+              "says so (#1210). Fine-pitch escapes route down to the fab floor.")
     # The router must honour these as DISTINCT rules (issue #125):
     print(f"  - via hole-to-hole {eff['drc_hole_to_hole']} = drill-to-drill minimum, "
           "net-INDEPENDENT (via/via and via/pad-drill, all nets incl. same-net); "
@@ -1156,7 +1159,7 @@ def main():
             ))
             for pad in pads_sorted:
                 net_name = pad.net_name if pad.net_name else "(no net)"
-                if args.pattern and not fnmatch(net_name, args.pattern):
+                if args.pattern and not fnmatchcase(net_name, args.pattern):
                     continue
                 print(f"  {pad.pad_number}: {net_name}")
         else:
@@ -1164,7 +1167,7 @@ def main():
             nets = set()
             for pad in footprint.pads:
                 if pad.net_name and pad.net_id > 0:
-                    if args.pattern and not fnmatch(pad.net_name, args.pattern):
+                    if args.pattern and not fnmatchcase(pad.net_name, args.pattern):
                         continue
                     nets.add(pad.net_name)
 

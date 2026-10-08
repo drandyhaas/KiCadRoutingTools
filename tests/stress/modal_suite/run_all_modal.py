@@ -198,7 +198,10 @@ image = (
         else str(_repo_root / "requirements.txt"))
     # No pytest: run_all.py runs every test as a plain script, and
     # test_718_static_test_hygiene refuses a test file that needs pytest.
-    .apt_install("git", "procps", "curl")
+    .apt_install("git", "procps", "curl", "build-essential")
+    # a toolchain for the case with no prebuilt to download: a branch whose rust_router/Cargo.toml is
+    # ahead of the latest release (build_router.py then builds from source, and without cargo it fails)
+    .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
     .env({"KICAD_SWEEP_GIT": GIT_SHA, "PYTHONUNBUFFERED": "1"})
     .add_local_dir(_src_dir, REPO, copy=True, ignore=[
         "**/.git/**", "**/__pycache__/**", "**/target/**",
@@ -230,7 +233,8 @@ image = (
         f"want={_N_BOARDS}; print('corpus boards visible to git:', n, 'want', want); "
         f"sys.exit(0 if n == want else "
         f"f'image is not a faithful checkout: {{n}} of {{want}} boards')\"",
-        f"cd {REPO} && python3 build_router.py",
+        f"cd {REPO} && (python3 build_router.py"
+        f" || (. $HOME/.cargo/env && python3 build_router.py --from-source))",
         # Prove the extension imports IN A FRESH PROCESS before any shard runs.
         # A broken .so would otherwise surface as 594 identical import errors
         # spread over 50 containers.
@@ -315,14 +319,61 @@ def _named(log: str, prefix: str) -> list:
     return []
 
 
+def _durations(log: str) -> dict:
+    """run_all's `DURATIONS: {...}` line -- per-test wall seconds -- or {}.
+
+    The LAST such line, as `_counts` takes the last summary: a failing test's
+    printed tail comes earlier in the log and may carry one of its own."""
+    import json
+    for line in reversed(log.splitlines()):
+        if line.startswith("DURATIONS: "):
+            try:
+                got = json.loads(line[len("DURATIONS: "):])
+            except ValueError:
+                continue
+            if isinstance(got, dict):
+                return got
+    return {}
+
+
+#: The table run_all.py's `shard()` balances on (tests/run_all_durations.json).
+DURATIONS_PATH = _repo_root / "tests" / "run_all_durations.json"
+
+
+def _write_durations(measured: dict) -> int:
+    """Merge `measured` into the committed table: new measurements win,
+    entries this run did not measure (a filtered run) stay, and entries for
+    test files that no longer exist go -- by the unit's FILE, since a test
+    declaring RUN_ALL_PARTS is measured per part (`name.py[3/8]`). Returns
+    the table's size."""
+    import json
+    try:
+        table = json.loads(DURATIONS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        table = {}
+    table.update(measured)
+    alive = {p.name for p in (_repo_root / "tests").glob("test_*.py")}
+    table = {k: v for k, v in sorted(table.items())
+             if k.split("[", 1)[0] in alive}
+    DURATIONS_PATH.write_text(json.dumps(table, indent=0) + "\n",
+                              encoding="utf-8")
+    return len(table)
+
+
 @app.local_entrypoint()
 def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
-         jobs: int = 2, filters: str = "", out_dir: str = ""):
+         jobs: int = 2, filters: str = "", out_dir: str = "",
+         write_durations: bool = False, force_durations: bool = False):
     """Fan the suite out over `shards` containers and aggregate.
 
     filters: space-separated substrings, passed straight to run_all (so
     `--filters "908 910"` runs those families across all shards).
     out_dir:  write every shard's log here (default: a temp dir, printed).
+    write_durations: merge every shard's per-test wall seconds into
+        tests/run_all_durations.json, the table run_all.py balances the
+        shards on. Commit it when the suite's cost shape has moved. Refused
+        on a RED run (a broken image whose tests all die in a second would
+        price the whole suite as cheap) unless force_durations.
     """
     import tempfile
 
@@ -370,6 +421,9 @@ def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
 
     tot = {k: sum(r[k] for r in results)
            for k in ("passed", "failed", "timed_out", "skipped", "self_skipped")}
+    measured = {}
+    for r in results:
+        measured.update(_durations(r["log"]))
     failed_names = [n for r in results for n in r["failed_names"]]
     timeout_names = [n for r in results for n in r["timed_out_names"]]
 
@@ -378,6 +432,15 @@ def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
           f"{tot['skipped']} skipped (+{tot['self_skipped']} self-skipped) "
           f"in {dt:.0f}s wall across {len(results)}/{shards} shard(s)")
     print(f"logs: {out}")
+    if results:
+        _slow = max(results, key=lambda r: r["seconds"])
+        _mean = sum(r["seconds"] for r in results) / len(results)
+        print(f"shard wall: slowest {_slow['seconds']:.0f}s (shard "
+              f"{_slow['index']}), mean {_mean:.0f}s")
+    if measured:
+        _top = sorted(measured.items(), key=lambda kv: -kv[1])[:5]
+        print("slowest tests: " + ", ".join(f"{n} {s:.0f}s" for n, s in _top)
+              + "  (no shard can finish before the slowest test does)")
 
     if failed_names:
         print(f"\nFAILED ({len(failed_names)}):")
@@ -403,6 +466,15 @@ def main(shards: int = 50, fast: bool = False, timeout: float = 600.0,
               f"{unparsed}\n   Read their logs above -- the counts exclude them.")
 
     ok = not (red or missing or unparsed)
+    if write_durations:
+        if not measured:
+            print("durations: none measured (no DURATIONS line); table untouched")
+        elif not ok and not force_durations:
+            print("durations: NOT written -- the run is RED (pass "
+                  "--force-durations to write it anyway)")
+        else:
+            print(f"durations: {len(measured)} measured -> "
+                  f"{DURATIONS_PATH} ({_write_durations(measured)} entries)")
     print(f"\n{'ALL GREEN' if ok else 'RED'}"
           + ("" if ok else f"  (failing shards: {red or 'none'};"
                            f" missing: {missing or 'none'};"

@@ -152,7 +152,19 @@ SET_BLURB = {
         "Four boards ship a .kicad_dru (h616_lpddr4, imx6ulz_4l, sam9g25, cider):\n"
         "h616's per-netclass DDR skew limits, imx6ulz_4l's length-window rules,\n"
         "sam9g25's `(layer outer)` rules conditioned on `A.insideCourtyard`, and\n"
-        "cider's JLCPCB 4-layer rule set."
+        "cider's JLCPCB 4-layer rule set.\n"
+        "\n"
+        "c64_250407 joined 2026-10-08 as the public stand-in for issue #1219: a\n"
+        "2-layer all-through-hole pinball MPU (a Bally AS-2518-35 recreation, not\n"
+        "public) whose owner reported the router's output as spaghetti. It is\n"
+        "bwack's Commodore 64 ASSY 250407 replica -- 2 layers, 390x180mm, 227\n"
+        "footprints, a multi-drop A0-A15/D0-D7 bus across eight DRAMs and the\n"
+        "ROMs, and a routed reference that replicates Commodore's hand-taped\n"
+        "artwork (buses horizontal on F.Cu, vertical on B.Cu, 574 vias).\n"
+        "validate_candidate PASS (tier hard); dedupe best 0.044 (set12's abn6502)\n"
+        "against the 463 corpus boards whose raw_url still resolved (13 now 404,\n"
+        "and mez_rx is archive-only), with no shared symbol UUIDs. set30 is now\n"
+        "22 boards, 7 of them 2-layer."
     ),
 }
 

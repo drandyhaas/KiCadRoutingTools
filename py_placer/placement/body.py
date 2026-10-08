@@ -132,6 +132,15 @@ class BodyGeometry(NamedTuple):
     # channel reads THIS pair, not the occupancy one.
     drawn_local: Optional[Bbox] = None
     drawn_source: str = SOURCE_NONE
+    # #1094. The drawn OUTLINES behind `body_local` (when the courtyard rung
+    # answered) and `drawn_local` (when the fab rung answered), as shapely
+    # geometry in the same local frame; None on every other rung. A bbox is
+    # exact only while the part stays axis-aligned: at 45 degrees its corners
+    # swing out past the drawing, which is how KiCad's StickHub demo graded 74
+    # phantom courtyard pairs. `legality` uses these for the exact test and the
+    # bboxes above as its broad phase.
+    court_shape_local: object = None
+    drawn_shape_local: object = None
 
 
 def _union(a: Bbox, b: Bbox) -> Bbox:
@@ -157,11 +166,22 @@ def _for_side(sides: Optional[Dict[str, Bbox]],
     return courtyard_for_side(sides, side)
 
 
+def _shape_for_side(shapes: Optional[Dict[str, tuple]], side: str):
+    """The outline geometry `_for_side` would pick the bbox of, or None."""
+    if not shapes:
+        return None
+    got = shapes.get(side) or next(iter(shapes.values()))
+    return got[0] if got else None
+
+
 def body_geometry(fp, side: str,
                   courtyard_sides: Optional[Dict[str, Bbox]] = None,
                   fab_sides: Optional[Dict[str, Bbox]] = None,
                   silk_sides: Optional[Dict[str, Bbox]] = None,
-                  ref: str = '') -> BodyGeometry:
+                  ref: str = '',
+                  courtyard_shapes: Optional[Dict[str, tuple]] = None,
+                  fab_shapes: Optional[Dict[str, tuple]] = None
+                  ) -> BodyGeometry:
     """THE ladder, for one footprint. Per-side bboxes come from the caller.
 
     Split from `board_bodies` so a consumer that already holds the three
@@ -169,10 +189,13 @@ def body_geometry(fp, side: str,
     the file read once, and so the rung logic has exactly one home.
     """
     from placement.utility import compute_footprint_bbox_local
+    from kicad_parser import non_aperture_pads
 
     ref = ref or getattr(fp, 'reference', '') or ''
     pads: Optional[Bbox] = None
-    if getattr(fp, 'pads', None):
+    # An aperture-only pad is not a pad here (#1143): a part whose only pads
+    # are paste windows has no pads rung, like a pad-less one.
+    if non_aperture_pads(fp):
         try:
             pads = compute_footprint_bbox_local(fp)
         except Exception:                                    # noqa: BLE001
@@ -219,9 +242,15 @@ def body_geometry(fp, side: str,
                             drawn_local=None, drawn_source=SOURCE_NONE)
 
     occupancy = (body_local if pads is None else _union(body_local, pads))
+    court_shape = (_shape_for_side(courtyard_shapes, side)
+                   if source == SOURCE_COURTYARD else None)
+    drawn_shape = (_shape_for_side(fab_shapes, side)
+                   if drawn_source == SOURCE_FAB else None)
     return BodyGeometry(ref, body_local, occupancy, source,
                         silk_rejected=silk_rejected,
-                        drawn_local=drawn_local, drawn_source=drawn_source)
+                        drawn_local=drawn_local, drawn_source=drawn_source,
+                        court_shape_local=court_shape,
+                        drawn_shape_local=drawn_shape)
 
 
 def board_bodies(pcb_data, pcb_file: Optional[str] = None
@@ -239,14 +268,23 @@ def board_bodies(pcb_data, pcb_file: Optional[str] = None
     `legality.part_local_bounds` so both see one universe.
     """
     from placement.legality import footprint_side
-    from placement.parser import (extract_courtyard_sides, extract_fab_sides,
-                                  extract_silk_sides)
+    from placement.parser import (extract_courtyard_shapes,
+                                  extract_courtyard_sides, extract_fab_shapes,
+                                  extract_fab_sides, extract_silk_sides)
 
     path = pcb_file or getattr(pcb_data, 'source_path', None)
     crt: Dict[str, Dict[str, Bbox]] = {}
     fab: Dict[str, Dict[str, Bbox]] = {}
     silk: Dict[str, Dict[str, Bbox]] = {}
+    crt_shapes: Dict[str, Dict[str, tuple]] = {}
+    fab_shapes: Dict[str, Dict[str, tuple]] = {}
     if path:
+        for reader, target in ((extract_courtyard_shapes, crt_shapes),
+                               (extract_fab_shapes, fab_shapes)):
+            try:
+                target.update(reader(path))
+            except Exception:                                # noqa: BLE001
+                pass
         for reader, target in ((extract_courtyard_sides, 'crt'),
                                (extract_fab_sides, 'fab'),
                                (extract_silk_sides, 'silk')):
@@ -266,7 +304,9 @@ def board_bodies(pcb_data, pcb_file: Optional[str] = None
         geom = body_geometry(fp, footprint_side(fp),
                              courtyard_sides=crt.get(ref),
                              fab_sides=fab.get(ref),
-                             silk_sides=silk.get(ref), ref=ref)
+                             silk_sides=silk.get(ref), ref=ref,
+                             courtyard_shapes=crt_shapes.get(ref),
+                             fab_shapes=fab_shapes.get(ref))
         if geom.body_local is None and geom.source != SOURCE_NONE:
             continue
         out[ref] = geom

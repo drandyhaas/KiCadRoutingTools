@@ -127,6 +127,25 @@ the routing pipeline applies both so the model and the output file agree.
 > `excluded_via_indices` for this and now returns the `num_copper_components`
 > it always computed.
 
+> **#1166 -- dangling vias.** `sweep_dangling_via_branches(board, net_ids,
+> protected_ids=frozenset(), max_rounds=32, stats=None)` removes every via
+> `check_weird` calls `dangling-via` (reached on one layer, KiCad's
+> `via_dangling`) or `unsupported-via` on `net_ids`, graded by the checker's own
+> `via_support_parts`, together with the chain its one supported layer carries
+> away: through every plain vertex (two segment ends, no via, pad or zone
+> there) up to the first junction, tee, pad, via, zone or free end. A via with
+> several segments on its one layer goes alone. Each removal is gated on the
+> net: no pad less connected, no dangling end where there was none, no more
+> dangling vias, no new soft joint. A via a removal exposes is the next
+> round's candidate, so a via-to-via dead branch goes whole. A net with a pad
+> still disconnected is skipped (its copper is the next step's landing site,
+> #473). Pads, locked
+> copper and `protected_ids` are never removed. The dead-end passes cannot do
+> this: they count any same-net via as an anchor. route.py runs it at the end
+> of the outermost run, after the strict collapse
+> (`route._late_dangling_via_sweep1166`, both fronts, input copper included
+> unless `--keep-input-copper`), and on the "nothing to route" return too.
+
 > **#672 -- sub-cell slivers.** `sweep_dead_ends(..., sliver_eps=mm)` is the one
 > exception to its `protect_net_ids` exemption (nets with unfinished pads keep
 > every landing site, #473): a protected net still loses a dead-end piece

@@ -204,6 +204,10 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
         - new_vias: List of new vias created (pad vias if switching from F.Cu)
         - segment_modifications: List of dicts with segment layer changes for writing to file
     """
+    # Moves segments to another layer in place and may add a pad via:
+    # invalidate what was cached against the old copper.
+    from pcb_modification import bump_copper_epoch
+    bump_copper_epoch(pcb_data)
     new_vias = []
     segment_mods = []
 
@@ -441,6 +445,8 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
         segment_mods: List of segment modifications from apply_stub_layer_switch
         new_vias: List of vias that were added (to be removed)
     """
+    from pcb_modification import bump_copper_epoch
+    bump_copper_epoch(pcb_data)
     # Remove reuse-connector segments (#340) before layer restoration
     for mod in segment_mods:
         c = mod.get('added_seg')
@@ -728,16 +734,28 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
     the swap partner's nets are excluded - their copper is the connection or is
     moving with the swap.
 
+    Each foreign item is priced at the clearance check_drc grades the pair
+    at (#1136): `config.pair_clearance` against a track (on its layer) or a
+    via (the stack), `pad_pair_clearance_before_override` against a pad (the
+    copper the two share). A board that declares no class and no .kicad_dru
+    rule reads `config.clearance` at every item, as before.
+
     Returns (clear, reason).
     """
     exclude = set(exclude_net_ids) | {net_id}
     via_r = (via_size if via_size is not None else config.via_size) / 2
+    # The widest pair value: copper that clears it clears its own pair, so
+    # only copper inside it is priced (this runs over every board segment).
+    mp = config.max_pair_clearance()
     # Foreign tracks on ANY layer - the barrel passes through all of them.
     for seg in pcb_data.segments:
         if seg.net_id in exclude:
             continue
         dist = point_to_segment_distance_seg(pad_x, pad_y, seg)
-        if dist < via_r + config.clearance + seg.width / 2:
+        if dist >= via_r + mp + seg.width / 2:
+            continue
+        if dist < via_r + config.pair_clearance(net_id, seg.net_id,
+                                                seg.layer) + seg.width / 2:
             net = pcb_data.nets.get(seg.net_id)
             nm = net.name if net else f"net {seg.net_id}"
             return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would punch through "
@@ -747,7 +765,10 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
         if v.net_id in exclude:
             continue
         d = math.hypot(v.x - pad_x, v.y - pad_y)
-        if d < via_r + config.clearance + v.size / 2:
+        if d >= via_r + mp + v.size / 2:
+            continue
+        if d < via_r + config.pair_clearance(net_id, v.net_id,
+                                             kind='stack') + v.size / 2:
             net = pcb_data.nets.get(v.net_id)
             nm = net.name if net else f"net {v.net_id}"
             return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
@@ -763,11 +784,14 @@ def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
             # #369 A15: window by the pad's EDGE, not its center -- a large
             # exposed pad (QFN/DFN EP, thermal paddle) can have its center
             # outside a fixed window while its copper reaches the via.
-            _reach = 2.0 + max(pad.size_x or 0, pad.size_y or 0) / 2
+            # #1136: and never short of the widest pair value.
+            _reach = (max(2.0, via_r + mp)
+                      + max(pad.size_x or 0, pad.size_y or 0) / 2)
             if abs(pad.global_x - pad_x) > _reach or abs(pad.global_y - pad_y) > _reach:
                 continue
             d = point_to_pad_rect_dist(pad_x, pad_y, pad)
-            if d < via_r + config.clearance:
+            if d < via_r + config.pad_pair_clearance_before_override(
+                    pad, net_id):
                 net = pcb_data.nets.get(pnid)
                 nm = net.name if net else f"net {pnid}"
                 return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
@@ -908,17 +932,30 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
     pads only block their own layer, so this only bites on the swap's destination
     layer. Own net and the swap partner's nets are excluded.
 
+    Each stub is sized at its OWN width (config.track_width only when it has
+    none), as stub_clear_of_foreign_tracks sizes it (#1136): sizing every stub
+    at the config width refused a narrower stub where it fits and admitted a
+    wider one where it grazes. Each pad is priced at the clearance check_drc
+    grades the pair at on dest_layer (`pad_pair_clearance_before_override`,
+    #1136); `config.clearance` on a board that declares no class and no
+    .kicad_dru rule.
+
     Returns (clear, reason).
     """
     exclude = set(exclude_net_ids) | {net_id}
-    clear_dist = config.track_width / 2 + config.clearance
     step = max(config.grid_step / 2, 0.02)
+    mp = config.max_pair_clearance()
     for seg in segments:
+        seg_half = (seg.width if getattr(seg, 'width', 0) and seg.width > 0
+                    else config.track_width) / 2
         x1, y1, x2, y2 = seg.start_x, seg.start_y, seg.end_x, seg.end_y
         seg_len = math.hypot(x2 - x1, y2 - y1)
         n = max(2, int(seg_len / step) + 1)
-        bminx, bmaxx = min(x1, x2) - 1.5, max(x1, x2) + 1.5
-        bminy, bmaxy = min(y1, y2) - 1.5, max(y1, y2) + 1.5
+        # #1136: the window reaches the widest pair value, never less than
+        # the fixed 1.5 mm it was
+        _w = max(1.5, seg_half + mp)
+        bminx, bmaxx = min(x1, x2) - _w, max(x1, x2) + _w
+        bminy, bmaxy = min(y1, y2) - _w, max(y1, y2) + _w
         for pnid, plist in pcb_data.pads_by_net.items():
             if pnid in exclude:
                 continue
@@ -941,7 +978,8 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
                     d = point_to_pad_rect_dist(qx, qy, pad)
                     if d < best:
                         best = d
-                if best < clear_dist:
+                if best < seg_half + config.pad_pair_clearance_before_override(
+                        pad, net_id, dest_layer):
                     net = pcb_data.nets.get(pnid)
                     nm = net.name if net else f"net {pnid}"
                     return False, (f"stub on {dest_layer} would graze {nm} pad "
@@ -1007,9 +1045,14 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
 
     Mirrors stub_clear_of_foreign_pads but over pcb_data.segments (foreign tracks
     on dest_layer) and pcb_data.vias (through-hole, so all-layer like the obstacle
-    map). Own net and any swap-partner nets are excluded. Returns (clear, reason).
+    map). Own net and any swap-partner nets are excluded. Each foreign item is
+    priced at the clearance check_drc grades the pair at on dest_layer
+    (`config.pair_clearance`, #1136: kind 'track' against a track, 'layer'
+    against a via); `config.clearance` on a board that declares no class and
+    no .kicad_dru rule. Returns (clear, reason).
     """
     exclude = set(exclude_net_ids) | {net_id}
+    mp = config.max_pair_clearance()
     for seg in segments:
         # Use the REAL widths of both tracks, not config.track_width: a netclass-
         # wide stub (ulx5m DDMI0 at 0.125 vs --track-width 0.1) moved next to an
@@ -1021,20 +1064,26 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
                     else config.track_width) / 2
         sminx, smaxx = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
         sminy, smaxy = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
-        bminx, bmaxx = sminx - 1.5, smaxx + 1.5
-        bminy, bmaxy = sminy - 1.5, smaxy + 1.5
+        # #1136: the window reaches the widest pair value, never less than
+        # the fixed 1.5 mm it was
+        _w = max(1.5, seg_half + mp)
+        bminx, bmaxx = sminx - _w, smaxx + _w
+        bminy, bmaxy = sminy - _w, smaxy + _w
         # Foreign routed tracks living on the destination layer.
         for other in pcb_data.segments:
             if other.layer != dest_layer or other.net_id in exclude:
                 continue
-            if (max(other.start_x, other.end_x) < bminx or
-                    min(other.start_x, other.end_x) > bmaxx or
-                    max(other.start_y, other.end_y) < bminy or
-                    min(other.start_y, other.end_y) > bmaxy):
-                continue
             other_half = (other.width if other.width > 0 else config.track_width) / 2
+            # the window is grown by the foreign track's own half-width: a
+            # wide track whose centreline is outside it can still reach (#1136)
+            if (max(other.start_x, other.end_x) < bminx - other_half or
+                    min(other.start_x, other.end_x) > bmaxx + other_half or
+                    max(other.start_y, other.end_y) < bminy - other_half or
+                    min(other.start_y, other.end_y) > bmaxy + other_half):
+                continue
             d = segment_to_segment_distance_seg(seg, other)
-            if d < seg_half + other_half + config.clearance:
+            if d < seg_half + other_half + config.pair_clearance(
+                    net_id, other.net_id, dest_layer, kind='track'):
                 net = pcb_data.nets.get(other.net_id)
                 nm = net.name if net else f"net {other.net_id}"
                 return False, (f"stub on {dest_layer} would graze {nm} track "
@@ -1044,10 +1093,13 @@ def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_i
         for via in pcb_data.vias:
             if via.net_id in exclude:
                 continue
-            if not (bminx <= via.x <= bmaxx and bminy <= via.y <= bmaxy):
+            _vr = (via.size or 0) / 2
+            if not (bminx - _vr <= via.x <= bmaxx + _vr
+                    and bminy - _vr <= via.y <= bmaxy + _vr):
                 continue
-            d = point_to_segment_distance_seg(via.x, via.y, seg) - (via.size or 0) / 2
-            if d < seg_half + config.clearance:
+            d = point_to_segment_distance_seg(via.x, via.y, seg) - _vr
+            if d < seg_half + config.pair_clearance(net_id, via.net_id,
+                                                    dest_layer):
                 net = pcb_data.nets.get(via.net_id)
                 nm = net.name if net else f"net {via.net_id}"
                 return False, (f"stub on {dest_layer} would graze {nm} via "

@@ -1,0 +1,783 @@
+{
+ "clearance": 0.2,
+ "limit_mm": 3.0,
+ "recorded_at": "4aa33a88",
+ "root": "krt-1105-base",
+ "runs": {
+  "esp_prog:0": {
+   "decap_stage": {
+    "armed": true,
+    "array_members_skipped": [],
+    "claimed": 0,
+    "pins": 0,
+    "put_back": 0,
+    "reason": "no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips",
+    "scope": 4,
+    "served_first": []
+   },
+   "notes": [
+    "decap stage 2.5: 4 cap(s) in scope, 0 claimed at a supply pin -- no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips. They fall through to the centroid stage"
+   ],
+   "placements": {
+    "C1": [
+     120.937,
+     98.751,
+     90.0
+    ],
+    "C2": [
+     125.731,
+     102.228,
+     270.0
+    ],
+    "C3": [
+     124.004,
+     92.083,
+     180.0
+    ],
+    "C4": [
+     122.063,
+     100.133,
+     90.0
+    ],
+    "CON1": [
+     140.763,
+     99.182,
+     270.0
+    ],
+    "CON2": [
+     134.283,
+     93.571,
+     180.0
+    ],
+    "Q1": [
+     123.411,
+     103.202,
+     180.0
+    ],
+    "Q2": [
+     121.738,
+     94.709,
+     180.0
+    ],
+    "R1": [
+     121.975,
+     97.463,
+     270.0
+    ],
+    "R2": [
+     120.778,
+     101.412,
+     90.0
+    ],
+    "R3": [
+     133.62,
+     94.942,
+     180.0
+    ],
+    "R4": [
+     137.965,
+     94.939,
+     180.0
+    ],
+    "Ref*": [
+     142.325,
+     104.215,
+     0.0
+    ],
+    "Ref*~2": [
+     119.22,
+     103.436,
+     0.0
+    ],
+    "U1": [
+     129.371,
+     99.387,
+     0.0
+    ],
+    "U2": [
+     126.34,
+     94.905,
+     270.0
+    ],
+    "USB1": [
+     134.954,
+     100.587,
+     180.0
+    ],
+    "Y1": [
+     124.055,
+     99.076,
+     90.0
+    ]
+   },
+   "unseated": []
+  },
+  "esp_prog:1": {
+   "decap_stage": {
+    "armed": true,
+    "array_members_skipped": [],
+    "claimed": 0,
+    "pins": 0,
+    "put_back": 0,
+    "reason": "no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips",
+    "scope": 4,
+    "served_first": []
+   },
+   "notes": [
+    "decap stage 2.5: 4 cap(s) in scope, 0 claimed at a supply pin -- no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips. They fall through to the centroid stage"
+   ],
+   "placements": {
+    "C1": [
+     122.125,
+     102.08,
+     90.0
+    ],
+    "C2": [
+     134.326,
+     94.708,
+     270.0
+    ],
+    "C3": [
+     136.646,
+     95.603,
+     180.0
+    ],
+    "C4": [
+     130.908,
+     103.912,
+     90.0
+    ],
+    "CON1": [
+     141.718,
+     97.932,
+     270.0
+    ],
+    "CON2": [
+     135.517,
+     92.686,
+     180.0
+    ],
+    "Q1": [
+     124.437,
+     94.259,
+     180.0
+    ],
+    "Q2": [
+     125.182,
+     101.817,
+     180.0
+    ],
+    "R1": [
+     121.463,
+     93.299,
+     270.0
+    ],
+    "R2": [
+     121.562,
+     95.201,
+     90.0
+    ],
+    "R3": [
+     136.572,
+     94.311,
+     180.0
+    ],
+    "R4": [
+     139.173,
+     95.841,
+     180.0
+    ],
+    "Ref*": [
+     119.526,
+     98.503,
+     0.0
+    ],
+    "Ref*~2": [
+     128.768,
+     104.297,
+     0.0
+    ],
+    "U1": [
+     130.421,
+     98.12,
+     0.0
+    ],
+    "U2": [
+     123.655,
+     98.241,
+     270.0
+    ],
+    "USB1": [
+     136.38,
+     100.518,
+     180.0
+    ],
+    "Y1": [
+     125.105,
+     98.214,
+     90.0
+    ]
+   },
+   "unseated": []
+  },
+  "pile:0": {
+   "decap_stage": {
+    "armed": true,
+    "array_members_skipped": [],
+    "claimed": 0,
+    "pins": 0,
+    "put_back": 0,
+    "reason": "no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips",
+    "scope": 4,
+    "served_first": []
+   },
+   "notes": [
+    "decap stage 2.5: 4 cap(s) in scope, 0 claimed at a supply pin -- no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips. They fall through to the centroid stage"
+   ],
+   "placements": {
+    "C1": [
+     134.264,
+     95.29,
+     0.0
+    ],
+    "C2": [
+     130.824,
+     91.996,
+     0.0
+    ],
+    "C3": [
+     137.439,
+     95.538,
+     0.0
+    ],
+    "C4": [
+     140.22,
+     98.802,
+     0.0
+    ],
+    "CON1": [
+     122.07,
+     96.182,
+     0.0
+    ],
+    "CON2": [
+     134.283,
+     93.571,
+     0.0
+    ],
+    "Q1": [
+     120.168,
+     98.827,
+     0.0
+    ],
+    "Q2": [
+     122.935,
+     93.668,
+     0.0
+    ],
+    "R1": [
+     119.77,
+     94.656,
+     0.0
+    ],
+    "R2": [
+     119.573,
+     93.605,
+     0.0
+    ],
+    "R3": [
+     120.488,
+     101.15,
+     0.0
+    ],
+    "R4": [
+     124.612,
+     103.98,
+     0.0
+    ],
+    "Ref*": [
+     141.325,
+     101.215,
+     0.0
+    ],
+    "Ref*~2": [
+     120.22,
+     103.436,
+     0.0
+    ],
+    "U1": [
+     129.371,
+     99.387,
+     0.0
+    ],
+    "U2": [
+     123.882,
+     101.094,
+     0.0
+    ],
+    "USB1": [
+     134.954,
+     100.587,
+     180.0
+    ],
+    "Y1": [
+     124.044,
+     99.472,
+     0.0
+    ]
+   },
+   "unseated": []
+  },
+  "watchy:0": {
+   "decap_stage": {
+    "armed": true,
+    "array_members_skipped": [],
+    "claimed": 0,
+    "pins": 0,
+    "put_back": 0,
+    "reason": "no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips",
+    "scope": 26,
+    "served_first": []
+   },
+   "notes": [
+    "edge connector C11: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector J2: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector R4: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector R8: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector R9: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector SW1: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector SW2: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector U3: the overhang walk did not converge on the east edge, so stage 1 left it for the later stages",
+    "edge connector D3: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "edge connector M1: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "edge connector R11: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "edge connector SW3: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "edge connector SW4: the overhang walk did not converge on the west edge, so stage 1 left it for the later stages",
+    "decap stage 2.5: 26 cap(s) in scope, 0 claimed at a supply pin -- no PLACED IC carries a scoped cap's rail (pins 0) -- no owner IC is seated before this stage (a fixed pose, must_lock, a zoned block or a declared row's `serves` seats one earlier); owners must be U-prefixed unless decap_owner_chips. They fall through to the centroid stage"
+   ],
+   "placements": {
+    "AE1": [
+     84.438,
+     89.4,
+     0.0
+    ],
+    "C1": [
+     82.518,
+     107.3,
+     90.0
+    ],
+    "C10": [
+     93.93,
+     84.773,
+     90.0
+    ],
+    "C11": [
+     71.09,
+     81.348,
+     0.0
+    ],
+    "C12": [
+     74.883,
+     95.215,
+     180.0
+    ],
+    "C13": [
+     78.716,
+     97.494,
+     0.0
+    ],
+    "C14": [
+     95.959,
+     96.774,
+     270.0
+    ],
+    "C15": [
+     76.196,
+     102.534,
+     0.0
+    ],
+    "C16": [
+     93.465,
+     87.345,
+     270.0
+    ],
+    "C17": [
+     71.515,
+     101.986,
+     180.0
+    ],
+    "C18": [
+     75.026,
+     96.41,
+     180.0
+    ],
+    "C19": [
+     97.586,
+     91.523,
+     90.0
+    ],
+    "C2": [
+     82.099,
+     78.75,
+     90.0
+    ],
+    "C20": [
+     74.393,
+     82.376,
+     0.0
+    ],
+    "C21": [
+     90.246,
+     109.557,
+     0.0
+    ],
+    "C22": [
+     83.061,
+     104.942,
+     90.0
+    ],
+    "C23": [
+     94.389,
+     96.956,
+     90.0
+    ],
+    "C24": [
+     84.352,
+     104.768,
+     90.0
+    ],
+    "C25": [
+     81.339,
+     104.836,
+     90.0
+    ],
+    "C26": [
+     80.653,
+     107.714,
+     90.0
+    ],
+    "C27": [
+     78.139,
+     105.002,
+     90.0
+    ],
+    "C28": [
+     79.504,
+     90.097,
+     90.0
+    ],
+    "C29": [
+     84.157,
+     106.926,
+     270.0
+    ],
+    "C3": [
+     90.688,
+     86.971,
+     90.0
+    ],
+    "C4": [
+     94.962,
+     88.264,
+     90.0
+    ],
+    "C5": [
+     92.252,
+     87.648,
+     90.0
+    ],
+    "C6": [
+     93.266,
+     95.384,
+     90.0
+    ],
+    "C7": [
+     91.508,
+     89.312,
+     180.0
+    ],
+    "C9": [
+     94.125,
+     89.886,
+     0.0
+    ],
+    "D1": [
+     72.881,
+     105.145,
+     0.0
+    ],
+    "D2": [
+     95.152,
+     93.276,
+     270.0
+    ],
+    "D3": [
+     96.858,
+     102.251,
+     90.0
+    ],
+    "D4": [
+     98.695,
+     107.379,
+     270.0
+    ],
+    "D5": [
+     86.86,
+     108.658,
+     270.0
+    ],
+    "J1": [
+     96.657,
+     81.093,
+     90.0
+    ],
+    "J2": [
+     72.49,
+     89.713,
+     90.0
+    ],
+    "J3": [
+     86.368,
+     101.859,
+     0.0
+    ],
+    "L1": [
+     96.325,
+     88.773,
+     270.0
+    ],
+    "L2": [
+     94.649,
+     107.505,
+     270.0
+    ],
+    "M1": [
+     98.389,
+     96.441,
+     90.0
+    ],
+    "Q1": [
+     71.252,
+     97.337,
+     270.0
+    ],
+    "Q2": [
+     90.785,
+     96.661,
+     90.0
+    ],
+    "Q3": [
+     90.334,
+     105.783,
+     270.0
+    ],
+    "R1": [
+     83.24,
+     80.683,
+     90.0
+    ],
+    "R10": [
+     94.12,
+     82.574,
+     270.0
+    ],
+    "R11": [
+     76.784,
+     79.324,
+     0.0
+    ],
+    "R12": [
+     95.262,
+     86.386,
+     0.0
+    ],
+    "R13": [
+     94.159,
+     104.482,
+     0.0
+    ],
+    "R14": [
+     74.121,
+     107.572,
+     270.0
+    ],
+    "R15": [
+     80.149,
+     104.882,
+     90.0
+    ],
+    "R16": [
+     84.179,
+     109.152,
+     90.0
+    ],
+    "R17": [
+     87.677,
+     104.907,
+     270.0
+    ],
+    "R18": [
+     71.262,
+     83.782,
+     270.0
+    ],
+    "R19": [
+     86.292,
+     104.74,
+     270.0
+    ],
+    "R2": [
+     76.155,
+     107.1,
+     270.0
+    ],
+    "R20": [
+     76.658,
+     80.626,
+     0.0
+    ],
+    "R3": [
+     73.667,
+     102.219,
+     90.0
+    ],
+    "R4": [
+     80.957,
+     80.744,
+     180.0
+    ],
+    "R5": [
+     72.427,
+     100.389,
+     270.0
+    ],
+    "R6": [
+     77.959,
+     90.009,
+     90.0
+    ],
+    "R7": [
+     78.671,
+     80.235,
+     90.0
+    ],
+    "R8": [
+     73.399,
+     84.325,
+     180.0
+    ],
+    "R9": [
+     75.491,
+     84.004,
+     0.0
+    ],
+    "SW1": [
+     78.684,
+     85.163,
+     270.0
+    ],
+    "SW2": [
+     91.145,
+     82.133,
+     270.0
+    ],
+    "SW3": [
+     86.662,
+     82.079,
+     90.0
+    ],
+    "SW4": [
+     82.444,
+     85.59,
+     90.0
+    ],
+    "TP1": [
+     99.882,
+     99.945,
+     0.0
+    ],
+    "TP2": [
+     97.578,
+     86.556,
+     0.0
+    ],
+    "TP3": [
+     89.198,
+     77.145,
+     0.0
+    ],
+    "TP4": [
+     99.992,
+     87.424,
+     0.0
+    ],
+    "TP4~2": [
+     74.101,
+     79.633,
+     0.0
+    ],
+    "TP5": [
+     78.243,
+     107.385,
+     0.0
+    ],
+    "TP5~2": [
+     99.798,
+     92.234,
+     0.0
+    ],
+    "TP6": [
+     79.598,
+     77.863,
+     0.0
+    ],
+    "TP7": [
+     71.656,
+     79.011,
+     0.0
+    ],
+    "U1": [
+     85.66,
+     87.852,
+     180.0
+    ],
+    "U2": [
+     91.456,
+     92.49,
+     180.0
+    ],
+    "U3": [
+     75.256,
+     99.11,
+     270.0
+    ],
+    "U4": [
+     84.304,
+     93.843,
+     270.0
+    ],
+    "U5": [
+     77.844,
+     95.686,
+     0.0
+    ],
+    "U6": [
+     77.958,
+     92.567,
+     0.0
+    ],
+    "Y1": [
+     76.418,
+     104.537,
+     270.0
+    ],
+    "Y2": [
+     88.193,
+     87.784,
+     180.0
+    ]
+   },
+   "unseated": []
+  }
+ }
+}

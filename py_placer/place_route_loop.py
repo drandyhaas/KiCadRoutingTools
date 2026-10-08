@@ -393,7 +393,7 @@ def relocate_round(pcb_data, pcb_file, blocks, *, block=None, refs=None,
     units_src = dict(blocks or {})
     if refs:
         named = sorted({r for pat in refs
-                        for r in fnmatch.filter(sorted(pcb.footprints), pat)})
+                        for r in sorted(pcb.footprints) if fnmatch.fnmatchcase(r, pat)})
         if len(named) < 2:
             return _rel.Relocation(
                 refusal='no_diagnosed_block: --relocate-refs matched %d part(s)'
@@ -475,7 +475,7 @@ def nets_to_refs(pcb_data, net_names, max_pins, locked_patterns):
         pins = len([p for p in fp.pads if p.net_id > 0])
         if pins > max_pins:
             continue
-        if locked_patterns and any(fnmatch.fnmatch(ref, p)
+        if locked_patterns and any(fnmatch.fnmatchcase(ref, p)
                                    for p in locked_patterns):
             continue
         # #829: never offer a footprint that draws the board outline as a
@@ -507,7 +507,7 @@ def _locked_out(pcb_data, locked_patterns):
     if not locked_patterns:
         return set()
     return {r for r in (pcb_data.footprints or {})
-            if any(fnmatch.fnmatch(r, p) for p in locked_patterns)}
+            if any(fnmatch.fnmatchcase(r, p) for p in locked_patterns)}
 
 
 def _outline_owners(pcb_data):

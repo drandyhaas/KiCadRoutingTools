@@ -4,10 +4,11 @@
 # Set-2 boards -> boards_unrouted_set2/.
 # Run AFTER set 1 finishes so pcbnew loads of big boards don't OOM the 8GB box.
 set -u
-STRESS="$HOME/Documents/kicad_stress_test"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STRESS="${STRESS_DIR:-$HOME/Documents/kicad_stress_test}"
 SRC="$STRESS/sources/github_set2"
-KPY="/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
-PREP="$STRESS/scripts/prep_set2.py"
+KPY="${KICAD_PYTHON:-/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3}"
+PREP="$SELF/prep_set2.py"
 SILKPY="$(cd "$(dirname "$0")" && pwd)/set_silk_ignore.py"
 # Silk-DENSE boards (keyboard legends etc.) whose O(n^2) silkscreen DRC makes KiCad's
 # interactive DRC crawl for minutes -- demote the silk checks to 'ignore' in their

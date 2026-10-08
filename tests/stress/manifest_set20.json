@@ -127,12 +127,12 @@
   },
   {
     "set": "set20",
-    "repo": "LimesKey/limeskey-node",
+    "repo": "LimesKey/parsnip-node",
     "path": "meshtastic.kicad_pcb",
     "branch": "main",
     "file": "limeskey_mesh.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/LimesKey/limeskey-node/main/meshtastic.kicad_pcb",
-    "github_url": "https://github.com/LimesKey/limeskey-node/blob/main/meshtastic.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/LimesKey/parsnip-node/ce40403fa63036e97b755e2c2b337cf7deecbd83/meshtastic.kicad_pcb",
+    "github_url": "https://github.com/LimesKey/parsnip-node/blob/ce40403fa63036e97b755e2c2b337cf7deecbd83/meshtastic.kicad_pcb",
     "size_kb": 4716,
     "layers_est": 4,
     "footprints": 93,
@@ -144,7 +144,7 @@
     "lane": "rf_microwave",
     "license": "see repo",
     "short_name": "limeskey_mesh",
-    "note": "915MHz Meshtastic node: E22 1W LoRa module, GNSS receiver, antenna keep-out and RF feed"
+    "note": "915MHz Meshtastic node: E22 1W LoRa module, GNSS receiver, antenna keep-out and RF feed. raw_url re-pinned 2026-10-08 to ce40403f, the commit that served the corpus's version: repo renamed LimesKey/limeskey-node -> LimesKey/parsnip-node (the API redirects, the raw branch URL does not), and 2026-08-19 commit ab1408a renamed+edited meshtastic.kicad_{pcb,pro,dru} -> parsnip.*. That commit also carries a .kicad_dru (5238 B, JLCPCB rules incl. inner-layer width/spacing), which the corpus has never fetched; recorded runs graded without it."
   },
   {
     "set": "set20",

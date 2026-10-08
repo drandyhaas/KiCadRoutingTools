@@ -260,7 +260,8 @@ def test_every_seating_stage_honours_the_declaration():
     """The claim is about the SEEDER, not about one stage of it.
 
     `seed_from_intent` seats parts from several stages, and `_try_place` is
-    called from 13 sites. The first version of this work threaded the declared
+    called from 15 sites in seeder.py (one more, outside it, in place_seed's
+    post-polish re-seat). The first version of this work threaded the declared
     ladder through TWO of them, so a part seated by stage 1.5 (`must_lock`),
     stage 2.5 (the decap seats) or the eviction rung took the FALLBACK ladder
     and could be turned silently -- the exact failure #893 exists to remove,
@@ -369,34 +370,150 @@ def test_every_try_place_site_passes_a_rotation_ladder():
     `rotations=`. It is a shape assertion, not a grep for a comment: it parses
     the file and checks the keyword is present in each call's arguments, so a
     mention in prose cannot satisfy it.
+
+    It missed a THIRD time, and the reason is the gate's own scope (#1117):
+    it read only seeder.py and only bare-name calls, and the one site that
+    really did omit the ladder -- `place_seed`'s post-polish re-seat -- is
+    `seeder._try_place(...)` in another file. So it now reads every source
+    tree, matches attribute calls too, and refuses a literal `rotations=None`
+    (a site that "passes" the keyword and still searches the fallback).
+    `tests/` is not read: test_run26_rotate_by_facing calls the fallback on
+    purpose, as a unit test of it.
     """
-    import ast
-    src_path = os.path.join(ROOT, 'py_placer', 'placement', 'seeder.py')
-    src = io.open(src_path, encoding='utf-8').read()
-    tree = ast.parse(src)
-    missing = []
-    total = 0
+    missing, per_file = [], {}
+    for path in _ladder_source_files():
+        rel = os.path.relpath(path, ROOT).replace(os.sep, '/')
+        try:
+            tree = ast.parse(io.open(path, encoding='utf-8').read(), path)
+        except SyntaxError as exc:
+            raise AssertionError('%s does not parse (%s): the gate cannot '
+                                 'say what it does not read' % (rel, exc))
+        for call in _try_place_calls(tree):
+            per_file[rel] = per_file.get(rel, 0) + 1
+            why = _ladder_missing(call)
+            if why:
+                missing.append('%s:%d (%s)' % (rel, call.lineno, why))
+    total = sum(per_file.values())
+    assert total >= 16 and 'py_placer/place_seed.py' in per_file, (
+        'only %d `_try_place` call(s) found (%r) -- this gate is not looking '
+        'at what it thinks it is' % (total, per_file))
+    assert not missing, (
+        '%d of %d `_try_place` call(s) do not pass a rotation ladder: %r. '
+        'A seating site that omits it uses the FALLBACK ladder and can turn a '
+        'part whose rotation was DECLARED -- silently, which is the failure '
+        '#893 exists to remove.' % (len(missing), total, missing))
+    print('  all %d _try_place call sites pass a rotation ladder (%s)'
+          % (total, ', '.join('%s %d' % kv for kv in sorted(per_file.items()))))
+
+
+TESTS.append(test_every_try_place_site_passes_a_rotation_ladder)
+
+
+#: The trees the standing gate reads (#1117). Production source only.
+_LADDER_TREES = ('py_placer', 'py_router', 'py_tools', 'kicad_routing_plugin')
+
+
+def _ladder_source_files():
+    out = []
+    for tree in _LADDER_TREES:
+        for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT, tree)):
+            dirnames[:] = [d for d in dirnames if d != '__pycache__']
+            out.extend(os.path.join(dirpath, f) for f in sorted(filenames)
+                       if f.endswith('.py'))
+    return sorted(out)
+
+
+def _try_place_calls(tree, callee='_try_place'):
+    """Every call to `callee` (default `_try_place`), spelled bare or as an
+    attribute (`seeder._try_place`)."""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
-        if not (isinstance(fn, ast.Name) and fn.id == '_try_place'):
-            continue
-        total += 1
-        if not any(kw.arg == 'rotations' for kw in node.keywords):
-            missing.append(node.lineno)
-    assert total >= 10, (
-        'only %d `_try_place` call(s) found in seeder.py -- this gate is not '
-        'looking at what it thinks it is' % total)
-    assert not missing, (
-        '%d of %d `_try_place` call(s) do not pass `rotations=`, at line(s) %r. '
-        'A seating site that omits it uses the FALLBACK ladder and can turn a '
-        'part whose rotation was DECLARED -- silently, which is the failure '
-        '#893 exists to remove.' % (len(missing), total, missing))
-    print('  all %d _try_place call sites pass a rotation ladder' % total)
+        name = (fn.id if isinstance(fn, ast.Name)
+                else fn.attr if isinstance(fn, ast.Attribute) else None)
+        if name == callee:
+            yield node
 
 
-TESTS.append(test_every_try_place_site_passes_a_rotation_ladder)
+def _ladder_missing(call, kw='rotations'):
+    """Why `call` does not hand over its declaration keyword `kw` (default
+    `rotations`, the ladder), or None if it does. A `**kw` call cannot be
+    read, so it counts as missing."""
+    kws = {k.arg: k.value for k in call.keywords}
+    if kw not in kws:
+        return 'no %s=' % kw + (' (**kw cannot be read)' if None in kws
+                                else '')
+    v = kws[kw]
+    if isinstance(v, ast.Constant) and v.value is None:
+        return '%s=None' % kw
+    return None
+
+
+#: The other functions that take a rotation DECLARATION, the keyword they
+#: take it by, and the file whose production call must pass it (#1121).
+#: `perturb_poses` is the portfolio's `poses` strategy, which turned a
+#: declared part because nothing handed it the claims.
+_DECLARATION_CALLS = (
+    ('_seat_edge', 'rotations', 'py_placer/placement/seeder.py'),
+    ('perturb_poses', 'declared', 'py_placer/placement/portfolio.py'),
+)
+
+
+def test_every_declaration_taking_call_passes_it():
+    """The standing gate's shape, for every function in `_DECLARATION_CALLS`:
+    each production call passes the declaration, and the file that must
+    call it does."""
+    for callee, kw, home in _DECLARATION_CALLS:
+        missing, per_file = [], {}
+        for path in _ladder_source_files():
+            rel = os.path.relpath(path, ROOT).replace(os.sep, '/')
+            tree = ast.parse(io.open(path, encoding='utf-8').read(), path)
+            for call in _try_place_calls(tree, callee):
+                per_file[rel] = per_file.get(rel, 0) + 1
+                why = _ladder_missing(call, kw)
+                if why:
+                    missing.append('%s:%d (%s)' % (rel, call.lineno, why))
+        assert home in per_file, (
+            'no `%s` call in %s (%r) -- this gate is not looking at what it '
+            'thinks it is' % (callee, home, per_file))
+        assert not missing, (
+            '`%s` call(s) without %s=: %r. A caller that drops it lets the '
+            'function turn a part whose rotation was DECLARED.'
+            % (callee, kw, missing))
+        print('  every %s call passes %s= (%s)' % (
+            callee, kw, ', '.join('%s %d' % kv
+                                  for kv in sorted(per_file.items()))))
+
+
+TESTS.append(test_every_declaration_taking_call_passes_it)
+
+
+def test_the_ladder_gate_sees_what_slipped_past_it():
+    """The control for the gate above, on source it is handed: the #1117
+    call shape (an attribute call with no ladder) and a literal None must be
+    reported; a call that passes a ladder must not."""
+    src = ("seeder._try_place(st, 'U1', 0, 0, set(), tol=0.5)\n"
+           "_try_place(st, 'U1', 0, 0, set(), rotations=None)\n"
+           "_try_place(st, 'U1', 0, 0, set(), **kw)\n"
+           "seeder._try_place(st, 'U1', 0, 0, set(), rotations=lad)\n")
+    got = [(c.lineno, _ladder_missing(c))
+           for c in _try_place_calls(ast.parse(src))]
+    assert [ln for ln, _ in got] == [1, 2, 3, 4], got
+    assert got[0][1] == 'no rotations=' and got[1][1] == 'rotations=None', got
+    assert got[2][1] and '**kw' in got[2][1] and got[3][1] is None, got
+    # #1121: the same gate, for the portfolio's declaration keyword.
+    src2 = ("portfolio.perturb_poses(st, free, 0)\n"
+            "perturb_poses(st, free, 0, declared=None)\n"
+            "perturb_poses(st, free, 0, declared=_declared)\n")
+    got2 = [_ladder_missing(c, 'declared')
+            for c in _try_place_calls(ast.parse(src2), 'perturb_poses')]
+    assert got2 == ['no declared=', 'declared=None', None], got2
+    print('  the gate reports %d of 4 shapes and passes the good one'
+          % sum(1 for _, w in got if w))
+
+
+TESTS.append(test_the_ladder_gate_sees_what_slipped_past_it)
 
 
 def test_no_declaration_leaves_the_seeder_unchanged():
@@ -562,7 +679,15 @@ TESTS.append(test_seat_edge_is_unchanged_without_a_declaration)
 
 def main():
     failures = 0
-    for fn in TESTS:
+    only = sys.argv[1:]
+    run = [fn for fn in TESTS
+           if not only or any(o in fn.__name__ for o in only)]
+    if only and not run:
+        # A filter that names no case passes nothing: a mutation battery
+        # witness spelled wrong would otherwise read every row as SURVIVED.
+        print('NO TEST matches %r' % (only,))
+        return 2
+    for fn in run:
         print('%s ...' % fn.__name__)
         try:
             fn()
@@ -570,9 +695,9 @@ def main():
             failures += 1
             print('FAIL %s: %s' % (fn.__name__, exc))
     if failures:
-        print('%d/%d checks FAILED' % (failures, len(TESTS)))
+        print('%d/%d checks FAILED' % (failures, len(run)))
         return 1
-    print('all %d checks passed' % len(TESTS))
+    print('all %d checks passed' % len(run))
     return 0
 
 

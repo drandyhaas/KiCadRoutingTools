@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """#887: the half that needs a REAL kicad-cli. Self-skips without one.
 
-`tests/test_887_two_panel_frame.py` grades the composition with kicad-cli
-monkeypatched and carries the regression on any machine. This file grades the
+`tests/test_887_iso_models.py` grades everything that can be graded with
+kicad-cli monkeypatched, on any machine. This file grades the
 three things only a real render can answer, and it exists because each of them
 was measured once and would otherwise be a comment nobody re-checks:
 
@@ -15,7 +15,6 @@ was measured once and would otherwise be a comment nobody re-checks:
 import atexit
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 
@@ -26,20 +25,17 @@ ROOT = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
 try:
-    from PIL import Image, ImageSequence
+    from PIL import Image
 except ImportError:
     print('SKIP: Pillow is not installed')
     sys.exit(77)
 
-import animate_route as A                                  # noqa: E402
-import make_movie as MM                                    # noqa: E402
-import movie_panels as mp                                  # noqa: E402
 import kicad_iso_render as kir                             # noqa: E402
 
 CLI, WHY = kir.resolve_cli()
 if not CLI:
     print('SKIP: no kicad-cli on this machine (%s). '
-          'tests/test_887_two_panel_frame.py carries the regression.' % WHY)
+          'tests/test_887_iso_models.py carries the regression.' % WHY)
     sys.exit(77)
 
 def _stage(name, into):
@@ -107,56 +103,6 @@ def test_kicad_cli_returns_something_near_but_not_equal_to_the_asked_size():
          'is why the caller never trusts the returned size', '%dx%d' % (w, h))
 
 
-def test_the_two_panel_movie_writes_and_the_encoded_file_holds_one_size():
-    """Assert on the ENCODED file, the way test_431_animator_port.py:99 does.
-
-    Every assertion here USED TO PASS with the panel disabled: a one-panel movie
-    is also written, is also one size, and its height at size=240 is also even.
-    Proven by forcing compose_two_panel to return did_not_run -- three green
-    lines about a feature that never ran. So the test now establishes the panel
-    RAN, and compares against a measured single-panel control.
-    """
-    d = tempfile.mkdtemp()
-    one = MM.make_movie([LVDS, QFN], out=os.path.join(d, 'one.gif'), size=240,
-                        quiet=True, panels='xray')
-    with Image.open(one) as im:
-        one_sizes = {f.size for f in ImageSequence.Iterator(im)}
-    want(len(one_sizes) == 1, 'the single-panel control is one size', one_sizes)
-    one_h = one_sizes.pop()[1]
-
-    seen = {}
-    real = mp.compose_two_panel
-
-    def spy(frames, marks, final, opts=None):
-        frames, rep = real(frames, marks, final, opts)
-        seen['rep'] = rep
-        return frames, rep
-
-    mp.compose_two_panel = spy
-    try:
-        out = os.path.join(d, 'm.gif')
-        got = MM.make_movie([LVDS, QFN], out=out, size=240, quiet=True,
-                            panels='xray+iso',
-                            iso_opts=mp.IsoOpts(require_models=False, max_renders=2, quality='basic'))
-    finally:
-        mp.compose_two_panel = real
-    want(got and os.path.exists(got), 'the two-panel movie is written', got)
-    want(seen.get('rep', {}).get('state') == 'ran',
-         'and the panel actually RAN -- without this, every assertion below is '
-         'equally true of a one-panel movie',
-         seen.get('rep', {}).get('state'))
-    want(seen.get('rep', {}).get('failed') == 0,
-         'with no failed shot', seen.get('rep', {}).get('failed'))
-    with Image.open(got) as im:
-        sizes = {f.size for f in ImageSequence.Iterator(im)}
-    want(len(sizes) == 1, 'and every encoded frame is one size', sizes)
-    w, h = sizes.pop()
-    want(h % 2 == 0, 'with an even height', h)
-    want(h > one_h,
-         'and the composed frame is TALLER than the single-panel control',
-         (h, one_h))
-
-
 def test_the_yaw_sweep_reaches_kicad_cli_and_changes_the_picture():
     """The plan's yaw is pinned; that it ARRIVES was not.
 
@@ -185,35 +131,6 @@ def test_the_yaw_sweep_reaches_kicad_cli_and_changes_the_picture():
          is None,
          'while the SAME yaw renders the same pixels, so the difference above '
          'is the rotation and not noise')
-
-
-def test_an_unreadable_render_is_a_failure_not_a_success():
-    """Exit 0 plus a file on disk is not a decodable image.
-
-    A zero-byte write -- a full disk, a killed child -- used to be reported as
-    unqualified success while the composer drew "could not read the render"
-    into the panel: three broken panels under a status line saying everything
-    worked.
-    """
-    d = tempfile.mkdtemp()
-    png = os.path.join(d, 'empty.png')
-    real = kir.subprocess.run
-
-    def fake(argv, **kw):
-        open(png, 'wb').close()          # exit 0, file exists, zero bytes
-        class R:
-            returncode = 0
-            stdout = stderr = ''
-        return R()
-
-    kir.subprocess.run = fake
-    try:
-        got, err = kir.render_iso(LVDS, png, CLI, 320, 240)
-    finally:
-        kir.subprocess.run = real
-    want(got is None, 'an unreadable PNG is not a success', got)
-    want('unreadable' in err and '0 bytes' in err,
-         'and the reason names what was wrong, with the size', err)
 
 
 def test_parallel_renders_are_deterministic_and_really_parallel():
@@ -272,7 +189,7 @@ def test_reproducibility_is_the_default_qualitys_not_kicad_clis():
       --quality high  : bytes and pixels BOTH differ, on both
 
     So the movie's reproducibility is a property of the default quality, not of
-    kicad-cli, and `--iso-jobs` is not what changes it. Worth a test because an
+    kicad-cli, and the worker count is not what changes it. Worth a test because an
     earlier version of this file's comment had it backwards -- it claimed byte
     instability at `basic` on the strength of one noisy sample, and changed the
     determinism assertion from bytes to pixels to work around a problem that was
@@ -309,28 +226,24 @@ def test_reproducibility_is_the_default_qualitys_not_kicad_clis():
     want(high != (True, True),
          'while at --quality high kicad-cli is not reproducible against ITSELF '
          'run to run -- nothing here can make it so, and that is the caveat the '
-         '--iso-jobs help now carries', high)
+         'render_many docstring carries', high)
 
 
 def test_a_real_board_with_no_resolvable_models_still_renders_and_says_bare():
     """tigard: 84 model refs -- 81 ${KISYS3DMOD} + 3 ${KIPRJMOD}, 82 of them
     .wrl -- against a KiCad 10 tree that ships .step only."""
     d = tempfile.mkdtemp()
-    steps, final = MM.resolve_inputs([TIGARD])
-    marks = []
-    frames = A.build_boards(steps, final, 200, 1, 150, 2, 6, marks=marks)
-    out, rep = mp.compose_two_panel(frames, marks, final,
-                                    mp.IsoOpts(require_models=False, max_renders=1))
-    want(rep['state'] == 'ran',
+    png, err = kir.render_iso(TIGARD, os.path.join(d, 'tigard.png'), CLI,
+                              320, 240)
+    want(png and not err,
          'a bare board is NOT a failure -- it renders fine, it just has no '
-         'component bodies', rep['state'])
-    want(len({f.size for f in out}) == 1, 'one frame size')
-    m = rep['models']
+         'component bodies', err)
+    m = kir.resolve_models(TIGARD, kir.model_dirs(CLI, TIGARD))
     want(m and m['total'] == 84, '84 model references', m and m['total'])
     if m and m['found'] == 0:
-        want('BARE BOARD' in mp.iso_status_line(rep),
-             'and with none of them on disk the status line says BARE BOARD',
-             mp.iso_status_line(rep))
+        want('BARE BOARD' in kir.models_note(m),
+             'and with none of them on disk the note says BARE BOARD',
+             kir.models_note(m))
     else:
         # A machine with the .wrl libraries installed is a legitimate state and
         # must not fail the suite -- but say which state it was in, so a reader
@@ -343,9 +256,7 @@ def test_a_real_board_with_no_resolvable_models_still_renders_and_says_bare():
 
 TESTS_TO_RUN = [
     test_kicad_cli_returns_something_near_but_not_equal_to_the_asked_size,
-    test_the_two_panel_movie_writes_and_the_encoded_file_holds_one_size,
     test_the_yaw_sweep_reaches_kicad_cli_and_changes_the_picture,
-    test_an_unreadable_render_is_a_failure_not_a_success,
     test_parallel_renders_are_deterministic_and_really_parallel,
     test_reproducibility_is_the_default_qualitys_not_kicad_clis,
     test_a_real_board_with_no_resolvable_models_still_renders_and_says_bare,

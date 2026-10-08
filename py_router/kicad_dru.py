@@ -556,6 +556,75 @@ def min_rule_clearance(board_path: str) -> Optional[float]:
     return min(lmap.values()) if lmap else None
 
 
+def _record_board_copper(config, pcb_data) -> None:
+    """Keep the board's copper list on `config` for
+    `GridRouteConfig.pad_pair_clearance`; untouched without a board."""
+    copper = list(getattr(getattr(pcb_data, 'board_info', None),
+                          'copper_layers', None) or [])
+    if copper:
+        config.board_copper_layers = copper
+
+
+def _read_layer_map(input_file, pcb_data, fallback_layers):
+    """({layer: mm}, notes, copper) for the board: its sibling .kicad_dru
+    expanded over the board's copper list (``fallback_layers`` without one)
+    and pinned up to the fab tier's clearance floor."""
+    copper = None
+    if pcb_data is not None and getattr(pcb_data, 'board_info', None) is not None:
+        copper = list(pcb_data.board_info.copper_layers or [])
+    if not copper:
+        copper = list(fallback_layers or [])
+    try:
+        from fab_tiers import fab_floors
+        floor = fab_floors(len(copper)).get('clearance')
+    except Exception:
+        floor = None
+    lmap, notes = read_board_layer_clearances(input_file or "", copper,
+                                              fab_clearance_floor=floor)
+    return lmap, notes, copper
+
+
+def resolve_layer_clearances(layer_clearances, input_file, pcb_data=None,
+                             fallback_layers=()) -> Dict[str, float]:
+    """The #498 map `install_layer_clearances` installs, for a caller that
+    needs it before it has a config (route_diff's coupling gap, #1145).
+    Quiet; the same precedence: an explicit dict wins, else the sibling
+    .kicad_dru of ``input_file`` (or ``PCBData.source_path``)."""
+    if layer_clearances is not None:
+        return dict(layer_clearances)
+    if not input_file:
+        input_file = getattr(pcb_data, 'source_path', "") or ""
+    return _read_layer_map(input_file, pcb_data, fallback_layers)[0]
+
+
+def pair_gap_rule_floor(layer_map: Dict[str, float], layers,
+                        track_rules: List[TrackRule] = (),
+                        p_cls=frozenset(), n_cls=frozenset()
+                        ) -> Tuple[float, Optional[str]]:
+    """The largest .kicad_dru clearance that binds a diff pair's P against
+    its own N on a layer in ``layers``, and what set it: (mm, why), or
+    (0.0, None) when no rule binds (#1145).
+
+    KiCad grades P against N like any two nets, so a layer rule (#498) on a
+    layer the pair routes on and a track rule (#735) whose class takes in
+    the pair (``track_pair_clearance``, pair-exact: an ``other_only`` rule
+    exempts a member's own partner) both bind the coupled run. The caller
+    raises the coupling gap to this and never lowers it, so a rule that
+    RELAXES its layer below the class changes nothing. One value over every
+    layer: a per-layer gap would need per-layer geometry."""
+    best, why = 0.0, None
+    for layer in layers or ():
+        v = layer_map.get(layer) if layer_map else None
+        if v is not None and v > best:
+            best, why = v, f"the .kicad_dru clearance rule on {layer}"
+    if track_rules:
+        v, rule = track_pair_clearance(track_rules, p_cls, n_cls, best)
+        if rule is not None:
+            best, why = v, (f"the .kicad_dru track rule '{rule.name}' "
+                            f"(class '{rule.cls}')")
+    return best, why
+
+
 def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None):
     """Resolve and install the #498 per-layer map on ``config``, engine-side so
     BOTH fronts inherit it (the CLI passes nothing; the GUI passes nothing --
@@ -568,24 +637,17 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
     if layer_clearances is not None:
         config.layer_clearances = dict(layer_clearances)
         _install_rules_quietly(config, input_file, pcb_data)
+        _record_board_copper(config, pcb_data)
         return
     if not input_file:
         # Engines whose signatures carry no input path (planes, fanout, oracle
         # sub-configs) discover the board file via PCBData.source_path.
         input_file = getattr(pcb_data, 'source_path', "") or ""
     _install_rules_quietly(config, input_file, pcb_data)
-    copper = None
-    if pcb_data is not None and getattr(pcb_data, 'board_info', None) is not None:
-        copper = list(pcb_data.board_info.copper_layers or [])
-    if not copper:
-        copper = list(config.layers)
-    try:
-        from fab_tiers import fab_floors
-        floor = fab_floors(len(copper)).get('clearance')
-    except Exception:
-        floor = None
-    lmap, notes = read_board_layer_clearances(input_file or "", copper,
-                                              fab_clearance_floor=floor)
+    lmap, notes, copper = _read_layer_map(input_file, pcb_data, config.layers)
+    # The copper list the map is expanded over, for pad_pair_clearance (a
+    # `*.Cu` pad's shared layers are the BOARD's, not the routed subset's).
+    config.board_copper_layers = list(copper)
     # One announcement per (board, map) per process -- plane/fanout runs build
     # several configs for the same board and would repeat it.
     _key = (os.path.abspath(input_file) if input_file else "",

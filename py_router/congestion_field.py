@@ -144,7 +144,12 @@ def compute_congestion_cells(pcb_data: PCBData, config: GridRouteConfig,
 def register_congestion_field(pcb_data: PCBData, config: GridRouteConfig,
                               track_proximity_cache: Dict) -> None:
     """Compute and register the field under the reserved cache key (no-op
-    when disabled)."""
+    when disabled).
+
+    STATIC by design: the field is computed ONCE, from the pin density at
+    batch start, and never refreshed as the run routes -- it prices where the
+    board was crowded before routing, not where copper has since gone. (v2
+    below is the variant whose demand decays as nets complete.)"""
     cells = compute_congestion_cells(pcb_data, config, len(config.layers))
     if len(cells):
         track_proximity_cache[CONGESTION_CACHE_KEY] = cells

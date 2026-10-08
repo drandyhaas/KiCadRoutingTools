@@ -1,26 +1,20 @@
 #!/usr/bin/env python3
-"""The attempts band: every round a point, the record a step-line (#946, #1021).
+"""The search behind a film, read off disk (#946, #1021).
 
 Routing and placement are not one shot. `place_route_loop` tries a round, routes
 it, keeps it or throws it away, widens the nudge cap and tries again; `converge`
 does the same thing one lap at a time with a ledger; and `awx/evolve_movie`
 already films exactly this for the bus-routing work -- a population of worlds, a
 node per world, and a gold staircase tracking the best admissible result over
-time. **That ribbon is the thing this module shares.** It was written once for
-`awx/`, and the main side has the same data and throws it away.
+time. This module reads those records into one `Track` of `Attempt`s, and
+shares the record rule (`best_so_far`) with `awx`.
 
-Because it does throw it away, and the throwing-away is documented:
-`make_movie.placement_chain` skips every non-accepted round ("rejected/screened
-rounds are on disk, not the story"), while two docstrings in `movie_camera` say
-the opposite about the same files --
-
-    "`make_film` wants the dropped ones precisely because they are the search"
-    "A caller that wants to show rejected attempts should say so by passing them
-     and labelling them, not by having them inferred here."
-
--- and `write_round_sidecar` carries a `parent` field that exists *only* because
-a rejected round sits between two accepted ones in both name and mtime order.
-The search is on disk in full. Nothing drew it.
+It drew the ATTEMPTS BAND too, a verdict graph under the board. That band is
+retired with every film layout but stage3d, whose one band -- the benchmark
+band (`movie_benchmark`) -- folds the verdict and the placement laps into one
+curve; what stays here is the readers, the shared helpers `movie_benchmark`
+and `movie_placement` import (`_blocking_value`, `_row_t`,
+`ledger_time_domain`), and `band_height`, which sizes the stage3d band.
 
 **THE Y-AXIS IS THE RUN'S OWN ACCEPT RULE, CHOSEN ONCE.** `place_route_loop`'s
 ranker is
@@ -65,7 +59,7 @@ and nothing is invented. That is the degradation arm, not a gap.
 
 **A SCREENED ROUND STILL GETS A NODE.** Its sidecar has `board: None`,
 `routed: None`, `metrics: {}` -- written that way precisely so a consumer
-"cannot tell 'screened' from 'crashed'". It draws as a tick on the axis rail --
+"cannot tell 'screened' from 'crashed'". It is read as an UNGRADED attempt --
 present and countable, and visibly not a score, which is the whole point.
 Likewise a converge row with `score: null` is **not**
 `score 0` and is not dropped: `board_score` returns `blocking = None` when a
@@ -75,41 +69,13 @@ laps were invisible for having a null score.
 
 **NOTHING IS EVER SYNTHESISED.** `movie_camera.synth_rounds` forbids exactly
 this extension in its own docstring, and inferring a search that did not happen
-is the worst thing this panel could do. No attempts on disk means no band.
-
-**DEGRADATION IS A FIRST-CLASS CASE AND IT REFUSES BY NAME.** A plain routing
-chain has exactly one attempt, and a scatter of one point under a flat staircase
-is noise. `attach` then returns the frame list **completely untouched** -- the
-same list object, the same `Image` objects -- with a report that says why. That
-is `compose_two_panel`'s stated degradation contract, and its rule that no OFF
-state may read like success. The middle case -- two or more rounds, all accepted
--- **does** draw: it is a real monotone staircase with no forks, and the note
-says `0 of N attempts dropped` rather than letting the panel silently look like
-a line chart.
-
-**WHY A BAND AND NOT A FOURTH CONTENT OF THE LOWER BOX** (#1020). The box's
-contents are each a statement about *this frame's board*; the attempts graph is
-the only element whose subject is the whole run. Making it a phase would put it
-on screen exactly when it is least needed (the bookends) and off when it is most
-needed (during an attempt). `evolve_movie` draws its ribbon in every frame of
-every scene, unconditionally, and that is right. A band also composes: it is a
-time series, so it wants width and little height, and it adds a constant to
-every frame exactly as `cmd_timing.add_clock_band` does -- which is the
-precedent for growing a legacy frame, too.
-
-Composition order is **board -> attempts -> clock -> iso**, so the band sits
-adjacent to the board it annotates and the iso panel still stacks last.
-
-**ONE ORDERING CONSTRAINT, AND IT IS LOAD-BEARING.** `make_film.build_film`
-must call `attach()` **before** its badge loop. `_badge` draws a border on the
-frame it is given; attach the band afterwards and the border encloses only the
-board, which is precisely the trap `movie_panels.py:40-44` documents.
+is the worst thing a reader of the search could do. No attempts on disk means
+no track.
 """
 from __future__ import annotations
 
 import glob
 import json
-import math
 import os
 import re
 import sys
@@ -126,36 +92,12 @@ BAND_FRAC = 0.16
 BAND_MIN_PX = 64
 
 #: And a CEILING, because the floor above has no opinion about the frame it is
-#: floored in. Measured on a long thin board (`legacy`, 560x86): the band took
-#: **74% of the frame**, and 52% at 124 px -- a time series about the run
-#: dwarfing the film it annotates. Above this share the frame is simply too
-#: short to carry a band, and `band_height` returns 0 so `attach` declines and
-#: says why. Refusing is the honest arm: a 64 px band on an 86 px frame is not
-#: a smaller band, it is a different picture.
+#: floored in. Measured on a long thin board (560x86): a band took **74% of
+#: the frame**, and 52% at 124 px -- a time series about the run dwarfing the
+#: film it annotates. Above this share the frame is simply too short to carry
+#: a band, and `band_height` returns 0. Refusing is the honest arm: a 64 px
+#: band on an 86 px frame is not a smaller band, it is a different picture.
 BAND_MAX_FRAC = 0.34
-
-#: The band's Y axis (#946 review) is BROKEN: the working range gets the
-#: plot, the outliers a thin log strip under a break mark. A band whose
-#: broken axis cannot draw falls back to one linear scale.
-#: The working range is every graded attempt up to this percentile.
-WORK_PCTL = 0.90
-#: The axis breaks only when the GAP above the working range's top (the worst
-#: attempt minus that top) exceeds `BREAK_RATIO - 1` times the working range's
-#: own span; otherwise the whole range is one linear scale. Offset-based, so
-#: it means the same thing for negative scores.
-BREAK_RATIO = 2.0
-#: The outlier strip's share of the plot height.
-STRIP_FRAC = 0.18
-
-#: An attempt whose `kind` is not one of these draws in `op_seed`'s grey. The
-#: names are the vocabulary the two producers already use: `place_route_loop`
-#: rounds are descents, `converge` rows carry a `kind`, and `evolve` carries an
-#: origin grammar.
-KIND_ROLE = {'seed': 'op_seed', 'descend': 'op_descend', 'jump': 'op_jump',
-             'cross': 'op_cross', 'completion': 'op_descend',
-             'placement': 'op_jump', 'systemic': 'op_cross',
-             'round': 'op_descend'}
-
 
 class Attempt(NamedTuple):
     """One thing that was tried.
@@ -294,26 +236,12 @@ def _is_placement_row(e) -> bool:
     return str(e.get('kind') or '') == 'placement'
 
 
-def _blocking_value(b):
-    """`b` as a count the axis can plot, or None (drawn ungraded).
-
-    A MIRROR of `py_placer/converge.py:blocking_value`, not an import: the
-    router side does not import placement engines (`_placer_path`).
-    tests/test_946_movie_attempts.py pins that the two agree. A count is an
-    int or a finite float >= 0 and never a bool -- a per-term dict raised
-    `float(b)` inside `make_film.main()`, and `false` plotted at 0.0 as
-    admissible (#1077).
-    """
-    if isinstance(b, bool) or not isinstance(b, (int, float)):
-        return None
-    # `isfinite` on floats only: it converts an int to float, and a
-    # 400-digit JSON integer raised OverflowError.
-    if (isinstance(b, float) and not math.isfinite(b)) or b < 0:
-        return None
-    # ...and within the float range, since this axis plots `float(b)`.
-    if b > sys.float_info.max:
-        return None
-    return b
+#: `blocking` as a count the axis can plot, or None (drawn ungraded): THE
+#: rule `converge` ranks and refuses by, imported rather than mirrored
+#: (#1088). A count is an int or a finite float >= 0, within the float range,
+#: and never a bool -- a per-term dict raised `float(b)` inside
+#: `make_film.main()`, and `false` plotted at 0.0 as admissible (#1077).
+from ledger_score import blocking_value as _blocking_value  # noqa: E402
 
 
 def _graded(e) -> bool:
@@ -455,23 +383,12 @@ def _row_t(row) -> Optional[float]:
 
 def ledger_time_domain(rows) -> Optional[Tuple[float, float]]:
     """`(t0, t1)` over EVERY row that carries a time, or None when fewer
-    than two do or they span nothing. Shared by the verdict band and the
-    placement panels (#1042), so both draw one run clock."""
+    than two do or they span nothing. The placement panels' run clock
+    (#1042)."""
     ts = [t for t in (_row_t(r) for r in rows) if t is not None]
     if len(ts) < 2 or max(ts) - min(ts) <= 0:
         return None
     return (min(ts), max(ts))
-
-
-def x_is_time(track) -> bool:
-    """True when the band's x is RUN TIME: a domain, and a time on every
-    attempt inside it. A joined converge+loop track has none on its loop
-    half, so it keeps the lap index -- and says so by not saying 'run time'."""
-    dom = getattr(track, 'x_domain', None)
-    if not dom or track is None or not track.attempts:
-        return False
-    return all(a.t is not None and dom[0] <= a.t <= dom[1]
-               for a in track.attempts)
 
 
 def attempts_from_evolve_ledger(path: str) -> Optional[Track]:
@@ -677,11 +594,13 @@ def join_tracks(a: Track, b: Track, first='ledger') -> Track:
 
 
 # ---------------------------------------------------------------------------
-# the graph
+# the band's height, and the record rule
 # ---------------------------------------------------------------------------
 def band_height(width: int, height: int) -> int:
-    """The band's height, decided ONCE over the whole film and constant for
-    every frame -- the invariant `save_movie` cannot take a violation of."""
+    """The stage3d band's height (the benchmark band's, via
+    `animate_route.build_boards(attempts_band=True)`), decided ONCE over the
+    whole film and constant for every frame -- the invariant `save_movie`
+    cannot take a violation of."""
     try:
         import frame_layout
         even = frame_layout.even
@@ -690,21 +609,8 @@ def band_height(width: int, height: int) -> int:
             return int(v) - (int(v) % 2)
     want = max(BAND_MIN_PX, even(int(height * BAND_FRAC)))
     if want > height * BAND_MAX_FRAC:
-        return 0          # too short to carry one; `attach` declines and says so
+        return 0          # too short to carry one: no band
     return want
-
-
-def _plot(box, cap_h=14, label_h=12):
-    """The plotting rectangle inside the band.
-
-    `cap_h` is the caption's own line, and `label_h` is the headroom the record
-    labels need: they are drawn ABOVE their step, so a plot that starts at the
-    caption puts the first record value on top of the axis title. Reserving it
-    here rather than clamping each label keeps the y-scale honest -- a clamped
-    label sits at a height that is not its value.
-    """
-    return (box.x + 46, box.y + cap_h + label_h,
-            box.x + box.w - 12, box.y + box.h - 12)
 
 
 def best_so_far(rows: Sequence[Attempt], *, require_accepted=True,
@@ -769,454 +675,3 @@ def best_so_far(rows: Sequence[Attempt], *, require_accepted=True,
         if best is not None:
             out.append((i, best))
     return out
-
-
-def draw_track(d, box, track: Optional[Track], *, upto=None, theme=None,
-               debug=None):
-    """The ribbon: x is when an attempt was born, y is the accept rule's
-    leading term with LOWER HIGHER on screen.
-
-    A node is hollow while the attempt still has something blocking and filled
-    once it is admissible; its colour is the operator that made it; a kept
-    attempt is ringed; and a gold staircase tracks the best admissible result
-    over time, labelling each new record once.
-
-    `upto` is the visibility horizon, so the graph grows with the film.
-
-    **Returns True when it drew and False when it declined**, because a caller
-    cannot be asked to tell those apart by looking: the body is wrapped in a
-    bare `except`, so a decline and a crash and a success all return the same
-    `None`. `attach` reports the difference in its status line.
-
-    Never raises: a band is an artifact, and taking a routing run down for a
-    font metric is the trade this repo refuses (`movie_panels._finite`).
-
-    **A reserved band is never left blank** (#1036 review): when the
-    broken axis fails to draw, the plain linear axis is drawn instead
-    (the box is repainted first, so nothing half-drawn survives).
-    """
-    ok = _draw_track(d, box, track, upto=upto, theme=theme, debug=debug,
-                     _mode='broken')
-    if not ok:
-        ok = _draw_track(d, box, track, upto=upto, theme=theme, debug=debug,
-                         _mode='linear')
-    return ok
-
-
-def _draw_track(d, box, track, *, upto=None, theme=None, debug=None,
-                _mode='broken'):
-    """`draw_track`'s body for one axis mode; False when it could not draw."""
-    if box is None or box.h <= 0 or track is None or not track.attempts:
-        return False
-    try:
-        import render_theme
-        from route_render import load_font
-        # RESOLVED, not assumed to be a Theme: `make_movie(theme=...)` carries
-        # the NAME the CLI was given and hands it straight on, so a bare
-        # `theme or DARK` would put a `str` here and every `.rgb()` would raise
-        # into the swallow below -- a blank band that looks like "no attempts".
-        th = render_theme.theme(theme, strict=False)
-        rows = track.attempts
-        d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
-                    fill=th.rgb('chrome_panel'),
-                    outline=th.rgb('chrome_panel_edge'))
-        f = load_font(max(9, min(15, int(box.h * 0.16))))
-        fs = load_font(max(8, min(13, int(box.h * 0.13))))
-        px0, py0, px1, py1 = _plot(box, f.size + 6, fs.size + 4)
-        if px1 <= px0 or py1 <= py0:
-            return False
-        graded = [a.score for a in rows if a.score is not None
-                  and a.score == a.score
-                  and a.score not in (float('inf'), float('-inf'))]
-        vmin = min(graded) if graded else 0.0
-        vmax = max(graded) if graded else 1.0
-        if vmax - vmin < 1e-9:
-            vmax = vmin + 1.0
-        # THE Y AXIS (#946 review). A search spends most of its laps in a
-        # narrow WORKING RANGE and a few attempts far outside it: run 32 opens
-        # at blocking 12703 (the unplaced pile) and spends ~200 laps between
-        # 19 and 43. A linear axis puts all of those laps on one pixel row, so
-        # the record's drops 41 -> 38 -> 33 -> 32 -> 30 are invisible.
-        #
-        # So the axis is BROKEN, the way the owner's evolve_movie Ribbon makes
-        # progress readable: the working range -- every graded attempt up to
-        # the WORK_PCTL percentile, padded -- gets the main plot, and the
-        # outliers above it are compressed (log) into a thin strip at the
-        # bottom, under a visible break mark.
-        import math
-        srt = sorted(graded)
-        hi_w = (srt[max(0, int(math.ceil(WORK_PCTL * len(srt))) - 1)]
-                if srt else vmax)
-        # OFFSET-BASED, so a negative score cannot break it (#1036 review):
-        # the break needs a positive GAP above the working range, measured
-        # against the working range's own span -- not a ratio of raw values,
-        # which misfires once hi_w < 0 -- and the strip maps the distance
-        # ABOVE the working range, log1p(v - w_hi), which is defined for any
-        # sign. The old log10(1 + v) raised on a negative range and the
-        # except below left a reserved band blank.
-        _wspan = hi_w - vmin
-        _gap = vmax - hi_w
-        broken = (_mode == 'broken' and _wspan > 0 and _gap > 0
-                  and _gap > (BREAK_RATIO - 1.0) * _wspan)
-        ph = py1 - py0
-        if broken:
-            _r = _wspan
-            w_lo, w_hi = vmin - 0.06 * _r, hi_w + 0.10 * _r
-            main_h = ph * (1.0 - STRIP_FRAC)
-            s0 = py0 + main_h + max(4.0, ph * 0.05)
-            _top = math.log1p(max(0.0, vmax - w_hi))
-
-            def Y(v):
-                if v <= w_hi:
-                    return py0 + main_h * ((v - w_lo) / (w_hi - w_lo))
-                t = math.log1p(v - w_hi) / max(1e-9, _top)
-                return s0 + (py1 - s0) * t
-        else:
-            def Y(v):
-                return py0 + ph * ((v - vmin) / (vmax - vmin))
-        xs = [a.index for a in rows]
-        x0v, x1v = min(xs), max(xs)
-        span = max(1, x1v - x0v)
-        horizon = x1v if upto is None else upto
-
-        # RUN TIME on x when every attempt carries it (#1042): laps sit where
-        # they happened, and the placement panels share the same domain.
-        # Otherwise the lap index, as before -- and the caption says which.
-        timed = x_is_time(track)
-        _tdom = track.x_domain
-        _tmap = {a.index: a.t for a in rows}
-
-        def X(i):
-            if timed:
-                return px0 + (px1 - px0) * ((_tmap[i] - _tdom[0])
-                                            / float(_tdom[1] - _tdom[0]))
-            return px0 + (px1 - px0) * ((i - x0v) / float(span))
-
-        _tspan = (hi_w - vmin) if broken else (vmax - vmin)
-        _decimals = (0 if _tspan >= 10 else 1 if _tspan >= 1
-                     else 2 if _tspan >= 0.1 else 3)
-
-        # the axis, and the one thing it means
-        def _tick(v):
-            # COMPACT, because the tick column is ~38 px wide: run 32's
-            # 12703 was drawn as '1270' with its last digit under the plot.
-            av = abs(v)
-            if av >= 10000:
-                return '%.0fk' % (v / 1000.0)
-            if av >= 1000:
-                return '%.1fk' % (v / 1000.0)
-            # PRECISION FROM THE SPAN (#1036 review): rounding to integers
-            # labelled a 0.12..0.9 axis 0/1/1.
-            # The caption's "[axis broken above X]" uses this same function.
-            return '%g' % round(v, _decimals)
-
-        # EVERY label drawn in the band is registered here, ticks and caption
-        # included, so a record label is placed against all of them -- not
-        # only against other record labels (#1036 review: '12703' still sat
-        # on the axis tick beside it).
-        taken = []
-
-        def _bbox(xy, txt, font, anchor=None):
-            try:
-                return d.textbbox(xy, txt, font=font, anchor=anchor)
-            except Exception:                                  # noqa: BLE001
-                w = d.textlength(txt, font=font)
-                return (xy[0], xy[1], xy[0] + w, xy[1] + font.size)
-
-        if broken:
-            ticks = [vmin, (vmin + hi_w) / 2.0, hi_w, vmax]
-        else:
-            ticks = [vmin, (vmin + vmax) / 2.0, vmax]
-        last_y = None
-        for v in ticks:
-            yy = Y(v)
-            d.line([px0, yy, px1, yy], fill=th.rgb('chrome_rule'))
-            if last_y is not None and abs(yy - last_y) < fs.size + 2:
-                continue
-            _t = _tick(v)
-            d.text((box.x + 8, yy - 6), _t,
-                   fill=th.rgb('chrome_text_faint'), font=fs)
-            taken.append(_bbox((box.x + 8, yy - 6), _t, fs))
-            last_y = yy
-        if broken:
-            # THE BREAK MARK: two short slashes across the axis in the gap,
-            # so nobody reads the strip as a continuation of the scale.
-            gy = (py0 + main_h + s0) / 2.0
-            for gx in (px0, px1):
-                for dy in (-3, 3):
-                    d.line([gx - 5, gy + dy + 3, gx + 5, gy + dy - 3],
-                           fill=th.rgb('chrome_text_dim'), width=2)
-                # an OBSTACLE like any label: run 32's first record label
-                # ('604') printed into the left mark
-                taken.append((gx - 7, gy - 8, gx + 7, gy + 8))
-        if debug is not None:
-            debug['plot'] = (px0, py0, px1, py1)
-            debug['x_mode'] = 'time' if timed else 'index'
-            debug['mode'] = 'broken' if broken else 'linear'
-            debug['work_hi'] = hi_w
-            debug['ys'] = [(v, Y(v)) for v in graded]
-        # The caption is the axis's meaning plus the disclosure, and it is
-        # DROPPED rather than ellipsised or overprinted when the band is too
-        # narrow to hold it beside the plot -- same rule as the layer strip's
-        # count. A half-sentence about what the axis means is worse than none:
-        # 'failures (lower bet...' invites the reader to guess the rest.
-        metric = track.metric + (
-            '  [axis broken above %s]' % _tick(hi_w) if broken
-            else '') + (
-            '  [x: run time]' if timed else '')
-        cap = '%s  -  %s' % (metric, track.note)
-        # WHOLE captions only, longest first: the note, then the axis
-        # qualifiers, and at the last the metric alone -- a band beside the
-        # placement panels is ~450 px wide and used to lose its caption
-        # entirely, leaving an axis that said nothing about what it plots.
-        short = track.metric + ('  [x: run time]' if timed else '')
-        for c in (cap, metric, short, track.metric):
-            if d.textlength(c, font=f) <= (px1 - px0) * 0.92:
-                d.text((px1, box.y + 3), c,
-                       fill=th.rgb('chrome_text_dim'), font=f, anchor='ra')
-                taken.append(_bbox((px1, box.y + 3), c, f, 'ra'))
-                if debug is not None:
-                    debug['caption'] = c
-                break
-
-        vis = [a for a in rows if a.index <= horizon]
-        pos = {a.index: (X(a.index), Y(a.score) if a.score is not None else py1)
-               for a in rows}
-        # edges first, under everything
-        for a in vis:
-            if a.parent is None or a.parent not in pos:
-                continue
-            if a.parent > horizon:
-                continue
-            ax, ay = pos[a.parent]
-            bx, by = pos[a.index]
-            d.line([ax, ay, bx, by],
-                   fill=th.rgb(KIND_ROLE.get(a.kind, 'op_seed')), width=1)
-        # the record staircase, over the edges and under the nodes
-        pts, last, shown, labels = [], None, set(), []
-        for i, r in best_so_far(rows,
-                                require_admissible=track.gate_record):
-            if i > horizon:
-                break
-            if last is not None and r != last:
-                pts += [(X(i), Y(last))]
-            pts += [(X(i), Y(r))]
-            if r not in shown:
-                shown.add(r)
-                labels.append((X(i) - 6, Y(r) - fs.size - 4,
-                               '%g' % round(r, 2)))
-            last = r
-        if len(pts) > 1:
-            d.line([p for xy in pts for p in xy], fill=th.rgb('status_best'),
-                   width=2)
-        # the nodes
-        for a in vis:
-            cx, cy = pos[a.index]
-            col = th.rgb(KIND_ROLE.get(a.kind, 'op_seed'))
-            r = 4
-            if a.score is None:
-                # AN UNGRADED ATTEMPT IS NOT A ZERO. It is drawn as a tick on
-                # the rail at the bottom of the axis -- present, countable, and
-                # visibly not a score.
-                d.line([cx, py1 - 5, cx, py1 + 3],
-                       fill=th.rgb('status_dropped'), width=2)
-                continue
-            if a.admissible:
-                d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col)
-            else:
-                d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=col,
-                          width=2)
-            if a.accepted:
-                d.ellipse([cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3],
-                          outline=th.rgb('status_kept'), width=1)
-
-        # THE RECORD LABELS, LAST, placed against EVERYTHING already in the
-        # band: the ticks and the caption (registered as they were drawn),
-        # every visible node with its kept ring, and every ungraded tick on
-        # the rail. Run 32's '12703' sat on the rejected-attempt ticks beside
-        # it and its first drops (267, 251, 239 ...) printed over their own
-        # nodes -- the old rule avoided other record labels only. Newest
-        # first, so the record the film is currently about always wins; each
-        # label tries above, right and below its step; one with no free spot
-        # is not drawn. A backing plate keeps the gold line from striking
-        # through the digits.
-        obstacles = list(taken)
-        for a in vis:
-            cx, cy = pos[a.index]
-            if a.score is None:
-                obstacles.append((cx - 2, py1 - 6, cx + 2, py1 + 4))
-            else:
-                obstacles.append((cx - 8, cy - 8, cx + 8, cy + 8))
-
-        def _hits(rect):
-            return any(not (rect[2] < o[0] or o[2] < rect[0]
-                            or rect[3] < o[1] or o[3] < rect[1])
-                       for o in obstacles)
-
-        placed = []
-        plate = th.rgb('chrome_panel')
-        for lx, ly, txt in reversed(labels):
-            h = fs.size + 4
-            for cx, cy in ((lx, ly - 6), (lx + 14, ly - 6),
-                           (lx + 14, ly + h + 10), (lx, ly + h + 10)):
-                rect = _bbox((cx, cy), txt, fs)
-                inside = (rect[0] >= box.x and rect[2] <= box.x + box.w
-                          and rect[1] >= box.y and rect[3] <= box.y + box.h)
-                if inside and not _hits(rect):
-                    obstacles.append(rect)
-                    placed.append((txt, rect))
-                    d.rectangle([rect[0] - 1, rect[1] - 1, rect[2] + 1,
-                                 rect[3] + 1], fill=plate)
-                    d.text((cx, cy), txt, fill=th.rgb('status_best'),
-                           font=fs)
-                    break
-        if debug is not None:
-            debug['labels'] = placed
-            debug['obstacles'] = obstacles[:len(obstacles) - len(placed)]
-            debug['wanted'] = [t for _x, _y, t in labels]
-        return True
-    except Exception:                                          # noqa: BLE001
-        return False  # a band is never worth failing a render over
-
-
-def attach(frames, track: Optional[Track], *, theme=None, marks=None,
-           box=None):
-    """Draw the graph into a band on every frame.
-
-    ``box`` (#946/C4), a `frame_layout.Box`, is the band the LAYOUT reserved
-    (`FrameGeometry.track`): the graph is drawn INTO it and the frame keeps
-    the size the layout planned, so every ratio preset stays the size it
-    declares. Without a box every frame GROWS by a constant band, as it
-    always did -- the path for a caller that planned no band.
-
-    Returns `(frames, report)`. **When there is nothing to draw the frame list
-    comes back COMPLETELY UNTOUCHED** -- the same list object holding the same
-    `Image` objects -- and the report says why in words. No OFF state may read
-    like success.
-
-    `marks` is `build_boards`' per-step `(label, board, first, last)` list; when
-    given, the visibility horizon follows the STEPS rather than a linear ramp,
-    so a step that took 40 frames does not advance the graph 40 attempts.
-    """
-    report = {'drawn': False, 'why': '', 'attempts': 0, 'source': '',
-              'band_px': 0}
-    if not frames:
-        report['why'] = 'no frames'
-        return frames, report
-    if track is None or not track.attempts:
-        report['why'] = ('no loop_round*.json sidecars and no converge '
-                         'ledger: this chain is one attempt')
-        return frames, report
-    report['attempts'] = len(track.attempts)
-    report['source'] = track.source
-    if len(track.attempts) < 2:
-        report['why'] = ('one attempt on disk (%s): a single point under a '
-                         'flat staircase is noise' % track.source)
-        return frames, report
-    try:
-        from PIL import Image, ImageDraw
-        import frame_layout
-    except Exception as exc:                                   # noqa: BLE001
-        report['why'] = 'no PIL (%s)' % exc
-        return frames, report
-    import frame_spool
-    sizes = frame_spool.frame_sizes(frames)
-    if len(sizes) != 1:
-        # A caller that hands us a mixed list has a defect of its own, and
-        # pasting onto the first frame's size would CROP the others silently --
-        # the same class of quiet distortion this whole subsystem exists to
-        # refuse. Say so and decline.
-        report['why'] = ('the frames are not one size (%s); the band declines '
-                         'rather than cropping them' % sorted(sizes)[:3])
-        return frames, report
-    W, H = frames[0].size
-    if box is not None and box.w > 0 and box.h > 0:
-        bh = int(box.h)
-    else:
-        box = None
-        bh = band_height(W, H)
-    if not bh:
-        report['why'] = ('the frame is %dx%d; a legible band would be over '
-                         '%.0f%% of it, so there is no room for one'
-                         % (W, H, BAND_MAX_FRAC * 100))
-        return frames, report
-    idx = [a.index for a in track.attempts]
-    lo, hi = min(idx), max(idx)
-    n = max(1, len(frames) - 1)
-    # The horizon per frame, decided before any frame is rebuilt.
-    horizons = None
-    if marks:
-        try:
-            ends = sorted({int(m[3]) for m in marks if len(m) >= 4})
-            if ends:
-                horizons = []
-                for i in range(len(frames)):
-                    k = sum(1 for e in ends if e < i)
-                    horizons.append(lo + (hi - lo) * (k / float(len(ends))))
-        except Exception:                                      # noqa: BLE001
-            horizons = None
-    try:
-        import render_theme
-        th = render_theme.theme(theme, strict=False)
-    except Exception:                                          # noqa: BLE001
-        th = None
-    bg = th.rgb('ground') if th is not None else (14, 16, 18)
-    into = box is not None
-    if not into:
-        box = frame_layout.Box(0, H, W, bh)
-    # `draw_track` RETURNS whether it drew: a band shorter than its own plot
-    # rectangle declines, and reporting `drawn=True` over a blank strip is an
-    # OFF state reading like success -- which is the one thing this module's
-    # degradation contract forbids. The answer depends only on the band's
-    # size, so it is asked ONCE, on a scratch band, before any frame is
-    # touched -- which is also what lets a spool apply the band lazily while
-    # the encoder streams (#1036).
-    _probe = Image.new('RGB', (box.w, bh), bg)
-    drew = bool(draw_track(ImageDraw.Draw(_probe),
-                           frame_layout.Box(0, 0, box.w, bh), track, upto=hi,
-                           theme=th))
-    if drew and into:
-        def _into(i, f):
-            up = horizons[i] if horizons else (lo + (hi - lo) * (i / float(n)))
-            d = ImageDraw.Draw(f)
-            d.rectangle([box.x, box.y, box.x + box.w - 1, box.y + box.h - 1],
-                        fill=bg)
-            draw_track(d, box, track, upto=up, theme=th)
-            return f
-        frames = frame_spool.transform(frames, _into, out_size=(W, H),
-                                       optional='attempts band',
-                                       ground=bg)
-    elif drew:
-        def _band(i, f):
-            canvas = Image.new('RGB', (W, H + bh), bg)
-            canvas.paste(f, (0, 0))
-            up = horizons[i] if horizons else (lo + (hi - lo) * (i / float(n)))
-            draw_track(ImageDraw.Draw(canvas), box, track, upto=up, theme=th)
-            return canvas
-        frames = frame_spool.transform(frames, _band,
-                                       out_size=(W, H + bh),
-                                       optional='attempts band',
-                                       ground=bg)
-    if not drew:
-        report.update(drawn=False, band_px=bh,
-                      why='the band is %d px, too short for its own plot; '
-                          'nothing was drawn in it' % bh)
-        return frames, report
-    report.update(drawn=True, band_px=bh, reserved=into,
-                  why='%d attempts from %s (%s)%s'
-                      % (len(track.attempts), track.source, track.note,
-                         ', in the layout-reserved band' if into else ''))
-    return frames, report
-
-
-def status_line(report) -> str:
-    """One line saying whether the band ran, was skipped, or failed -- the
-    same channel `movie_panels.iso_status_line` gives the iso panel, and for
-    the same reason: a feature with no dialog control needs a way to say what
-    it did."""
-    if not report:
-        return 'attempts band: not asked for'
-    if report.get('drawn'):
-        return ('attempts band: %s (%d px)'
-                % (report.get('why', ''), report.get('band_px', 0)))
-    return 'attempts band: not drawn -- %s' % (report.get('why') or 'unknown')

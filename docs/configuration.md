@@ -18,7 +18,7 @@ python py_router/route_diff.py input.kicad_pcb --overwrite [OPTIONS]         # O
 
 Use `route.py` for single-ended nets and `route_diff.py` for differential pairs. By default, all nets are routed. Use `--nets` to filter specific patterns.
 
-`route.py` always writes the output file, even when nothing routes (no valid nets, or all already connected) — it writes an unchanged copy of the input in that case, so output→input pipelines don't break on a missing file.
+`route.py` always writes the output file, even when nothing routes (no valid nets, or all already connected) — it writes an unchanged copy of the input in that case, so output→input pipelines don't break on a missing file. The exception is a step whose `--nets` holds a poured (zone) net: there "all already connected" is only the router's fill model, so the run carries on to the in-run plane finalize, which checks the pours against KiCad's exact fill and repairs them, and the end-of-run cleanup runs with it (#1112).
 
 Pads with no pad number (paste/thermal-via artifacts KiCad doesn't netlist individually) are not used as routing targets; they remain copper obstacles.
 
@@ -54,15 +54,19 @@ values it consumes the tokens after it, so pass the output via `--output` or put
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--rip-existing-nets` | off (untouched) | Net name patterns of **pre-existing** routed nets that may be ripped up and re-routed when they block a net being routed |
+| `--rip-existing-nets` | off (small nets only) | Net name patterns of **pre-existing** routed nets that may be ripped up and re-routed when they block a net being routed |
 
-By default the router **never** rips committed tracks that were already on the
-input board — only nets it routed *in this run* are candidates for rip-up (see
-[Rip-Up and Reroute](rip-up-reroute.md)). `--rip-existing-nets PATTERN` lifts
-that restriction for the matching pre-existing routed nets, so the router may
-tear them up and re-route them when they block a net it is trying to route (for
-example on a board already routed by a previous run). Use `'*'` to allow any
-non-plane net.
+Without the flag the router may still rip **small** pre-existing nets: an
+unprotected, unlocked, non-zone net with at most 30 segments and 6 vias that is
+not `!`-negated in `--nets`. Such a rip is custody-backed -- the victim is
+rerouted in the same run, restored, or at least keeps its escape stub -- and the
+in-run plane finalize's pad repair may rip a signal net blocking a tap
+(`KICAD_RIP_PREEXISTING=0` / `KICAD_FINALIZE_RIP=0` switch these off; see
+[Rip-Up and Reroute](rip-up-reroute.md)). `--rip-existing-nets PATTERN` extends
+the authority to the matching pre-existing routed nets whatever their size, so
+the router may tear them up and re-route them when they block a net it is trying
+to route (for example on a board already routed by a previous run). Use `'*'` to
+allow any non-plane net.
 
 ```bash
 # Let the router rip and re-route any pre-existing DATA net that gets in the way
@@ -112,7 +116,7 @@ python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-rerou
 | `--track-width` | 0.3 | Track width in mm (ignored if `--impedance` specified) |
 | `--impedance` | - | Target single-ended impedance in ohms (calculates width per layer from stackup) |
 | `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance of the **Default net class** for this run, in mm; nets in other classes route at their own class clearance (pairwise `max`, as KiCad's DRC does). **Omitted** → the board's own Default class from the sibling `.kicad_pro`. Since #530 this no longer caps the other classes; use `--net-clearances <json>` for explicit per-net values |
-| `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). **This is the flag for a chained run**: on a project an earlier step already lowered, the run stays at that lower floor instead of routing wider, which is what the recorded corpus chains and the routing skills use. GUI: the **Class ceiling** checkbox next to Min Clearance |
+| `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). **This is the flag for a chained run**: on a project an earlier step already lowered, the run stays at that lower floor instead of routing wider, which is what the recorded corpus chains and the routing skills use. GUI: the **Clearance ceiling** checkbox next to Min Clearance |
 | `--via-size` | Default net-class via (else 0.5) | Via outer diameter in mm. **Given** → every net's vias are this size. **Omitted** → each net's vias are drawn at its **own** net class / `.kicad_dru` `via_diameter` (#530 decision 4): the router carries one via-legality map per distinct via geometry on the board (`grid_router` 0.22.0+; an older binary routes every net at the Default class size and says so) |
 | `--via-drill` | Default net-class drill (else 0.3) | Via drill diameter in mm; per-net exactly like `--via-size` |
 | `--grid-step` | 0.1 | Grid resolution in mm |
@@ -132,7 +136,7 @@ vias and clearances *down toward* when it needs to. It is shared by every CLI
 |--------|---------|-------------|
 | `--fab-tier` | `auto` | `auto` (the standard floor, escalating to advanced when a fine-pitch fan-out, plane tap or last-resort via cannot fit; warned and counted), `standard` (no extra fab cost, **hard**) or `advanced` (tighter, "more costly", **hard**) |
 | `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
-| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums, i.e. what KiCad's DRC accepts; an unset key falls back to the fab tier floor), `off` (never; the net fails and is reported) |
+| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums, i.e. what KiCad's DRC accepts; an unset key falls back to the fab tier floor, except clearance, which falls back to the Default net class's clearance, #1160), `off` (never; the net fails and is reported) |
 | `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired. For `--power-nets` track widths this means copper that SHIPS under width (one `design_rules` row per power net, #1033), not every narrower routing attempt |
 
 The tier is a **floor ladder**:
@@ -273,19 +277,19 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--via-cost` | 75 | Via penalty in 0.1mm grid steps, i.e. 50 = 5mm of path; mm-equivalent at any `--grid-step` (effectively doubled for diff pairs since two vias are placed) |
+| `--via-cost` | 75 | Via penalty in 0.1mm grid steps, i.e. 75 = 7.5mm of path; mm-equivalent at any `--grid-step` (effectively doubled for diff pairs since two vias are placed) |
 | `--max-iterations` | 200000 | A* iteration limit per route |
 | `--max-probe-iterations` | 5000 | Quick probe per direction to detect stuck routes |
 | `--heuristic-weight` | 2.3 | A* greediness (>1 = faster, <1 = more optimal). 2.3 is the corpus dose-response peak (#586); 1.9 was the default before it |
 | `--turn-cost` | 1000 | Penalty for direction changes (encourages straighter paths) |
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 | `--ripup-abandon-metric` | `stranded` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
-| `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
+| `--routing-clearance-margin` | 1.0 | Diff pairs only (a pair the run routes or restores): multiplier on the track-to-via distance that sets the P/N via offset and the centerline's via keep-out (1.0 = minimum DRC). Single-ended tracks and vias do not read it |
 | `--hole-to-hole-clearance` | board's `min_hole_to_hole` (else 0.20) | Minimum drill hole edge-to-edge clearance (mm). Omitted → the board's own constraint minimum (#439) |
 | `--board-edge-clearance` | board's `min_copper_edge_clearance` (else 0.0) | Clearance from board edge in mm. Omitted → the board's own constraint minimum (#439) |
 | `--proximity-heuristic-factor` | 0.02 | Factor for proximity-aware A* heuristic (higher = faster but may find suboptimal paths, 0 = disabled) |
 | `--ripped-route-avoidance-radius` | 1.0 | Radius around ripped route corridors to apply soft penalty (mm) |
-| `--ripped-route-avoidance-cost` | 0.1 | Cost penalty for routing through ripped corridors (0 = disabled) |
+| `--ripped-route-avoidance-cost` | 0.1 | Cost for other nets routing through a ripped net's former corridor, reserving it for that net's reroute (0 = disabled) |
 
 See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up, how blockers are identified and ranked, and how ripped nets are rerouted.
 
@@ -310,6 +314,9 @@ See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |
 | `--track-proximity-cost` | 0.0 | Cost penalty near routed tracks (0 = disabled) |
+| `--keep-away AGG:VICTIM:GAP` | (off) | Soft keep-away between two net groups (#1146), repeatable. While a net of one side routes, cells where its track would sit closer than GAP mm (edge to edge, same layer) to the other side's copper cost `--keep-away-cost`. Each side is comma-separated net patterns as in `--nets` and/or net classes as `class=NAME` (`!class=NAME` takes one out), e.g. `class=Digital:class=Audio:0.5`. `route.py` and `route_diff.py`. See [Keep-away](api-routing-config.md#pairwise-keep-away-keep_away--keep_away_free--keep_away_cost) |
+| `--keep-away-free` | 1.5 | Within this distance of the routed net's own pads the keep-away band is not priced (mm) |
+| `--keep-away-cost` | 0.5 | Cost per cell inside a keep-away band (mm equivalent; 0 = measure and report only) |
 | `--vertical-attraction-radius` | 1.0 | Radius for cross-layer track attraction (mm) |
 | `--vertical-attraction-cost` | 0.0 | Cost bonus for aligning with tracks on other layers (0 = disabled) |
 
@@ -579,7 +586,7 @@ class GridRouteConfig:
     grid_step: float = 0.1        # mm grid resolution
 
     # A* algorithm
-    via_cost: int = 75            # via penalty in 0.1mm grid steps = 5mm of path (diff pairs place 2 vias)
+    via_cost: int = 75            # via penalty in 0.1mm grid steps = 7.5mm of path (diff pairs place 2 vias)
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # quick probe per direction to detect stuck routes
     heuristic_weight: float = 2.3
@@ -587,7 +594,7 @@ class GridRouteConfig:
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
     ripup_abandon_metric: str = 'stranded'  # tap rip-up abandon rule (docs/rip-up-reroute.md)
     max_setback_angle: float = 45.0  # degrees
-    routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
+    routing_clearance_margin: float = 1.0  # diff-pair via spacing only: track-to-via distance multiplier (1.0 = min DRC)
     hole_to_hole_clearance: float = 0.20  # mm - drill-to-drill fab floor
     board_edge_clearance: float = 0.0    # mm - clearance from board edge (0 = use clearance)
     proximity_heuristic_factor: float = 0.0  # factor for proximity-aware heuristic (0 = disabled)
@@ -613,6 +620,11 @@ class GridRouteConfig:
     # Track proximity (same layer)
     track_proximity_distance: float = 2.0  # mm
     track_proximity_cost: float = 0.0      # mm equivalent (0 = disabled)
+
+    # Pairwise keep-away between net groups (#1146)
+    keep_away: Tuple[str, ...] = ()        # 'AGG:VICTIM:GAP' rules
+    keep_away_free: float = 1.5            # mm around the routed net's own pads
+    keep_away_cost: float = 0.5            # mm equivalent per cell (0 = report only)
 
     # Vertical track alignment (cross-layer attraction)
     vertical_attraction_radius: float = 1.0  # mm
@@ -657,10 +669,13 @@ The `via_cost` parameter controls how much the router penalizes layer changes:
 | Value | Effect |
 |-------|--------|
 | 0-25 | Many vias, shorter paths |
-| 50 (default) | Balanced, discourages unnecessary vias |
-| 75-100 | Few vias, longer paths |
+| 75 (default) | Balanced, discourages unnecessary vias |
+| 100+ | Few vias, longer paths |
 
-For BGA escape routing, lower values (10-25) work well since vias are necessary.
+75 is the corpus-measured default (#586: against the old 50 it took the
+disconnection verdict down 8 and DRC down 13, and it composes with heuristic
+weight 2.3). 25 and 100 both measured worse. Do not lower it for BGA escape
+routing: 25 lost on a corpus that includes BGA escape boards.
 
 All cost knobs (via cost, proximity costs, attraction bonuses) are calibrated at a 0.1mm
 reference grid and scale internally so the cost per mm of path is the same at any
@@ -742,21 +757,24 @@ This encourages routes to avoid blocking future routing paths.
 
 ```bash
 python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
-    --ordering inside_out \
-    --via-cost 10 \
-    --heuristic-weight 1.2 \
-    --stub-proximity-radius 2.0 \
-    --stub-proximity-cost 5.0
+    --ordering inside_out
 ```
+
+Leave the via cost, heuristic weight and stub proximity at their defaults
+(75, 2.3, 0.2): a lower via cost or heuristic weight measured worse across
+the corpus (#586), and the stub penalty is near-optimal as shipped (#584).
 
 ### Long Routes (Few Vias)
 
 ```bash
 python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
-    --ordering mps \
-    --via-cost 50 \
-    --heuristic-weight 2.0
+    --ordering mps
 ```
+
+`--via-cost` is the knob that trades path length for vias: raising it above
+the default 75 buys fewer vias with longer routes, lowering it the reverse.
+The default is the corpus-measured setting, so compare a changed value
+against a default run on the same board before keeping it.
 
 ### Differential Pairs (LVDS)
 
@@ -772,10 +790,12 @@ python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" 
 
 ```bash
 python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
-    --grid-step 0.2 \
-    --heuristic-weight 2.0 \
-    --max-iterations 50000
+    --grid-step 0.2
 ```
+
+A coarser grid is the speed lever. Keep `--heuristic-weight` at 2.3 (lower
+is slower, not faster) and `--max-iterations` at its default: a smaller
+budget fails long routes instead of finishing them sooner.
 
 ### Fine-Pitch BGA
 

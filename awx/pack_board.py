@@ -162,9 +162,19 @@ def pack_whole(a):
     if not names:
         print('whole-board pack: --nets named no net on the board')
         return 2
+    # a DIFF PAIR's legs are HELD as laid: the pack pulls one lane taut on its own, and a leg pulled alone leaves its
+    # partner -- the pair router lays them at its pitch but where their tips, its dives and its corners spread them
+    # (K51: 92% of every leg at pitch, the rest at the balls' own spacing), so there is nothing to draw in. Their copper
+    # stays in the scope the pack's DRC gate reads: a single packed against a leg is still checked
+    import pairs as _pairs
+    scope = list(names)
+    legs = {l_ for pr in _pairs.pair_names(names).values() for l_ in pr if l_ in names}
+    names = [n for n in names if n not in legs]
+    if legs:
+        print(f'pack_board (whole board): {len(legs) // 2} diff pair(s) held as laid: {sorted(legs)}')
     kids = {byname[nm][0] for nm in names}
     import source_realize as _sr
-    v0 = set(_sr.drc_pairs(a.board, nets=names, pcb_data=pcb))   # the board as it came, before any edit
+    v0 = set(_sr.drc_pairs(a.board, nets=scope, pcb_data=pcb))   # the board as it came, before any edit
     lanes = replan.lane_items(pcb, pcb_f, names, byname)
 
     def k3(x, y):
@@ -410,7 +420,7 @@ def pack_whole(a):
     import re as _re
     by_nm = {c.members[0]: c for c in corridors}
     for _round in range(6):
-        new = [ln for ln in _sr.drc_pairs(a.board, nets=names, pcb_data=pcb) if ln not in v0]
+        new = [ln for ln in _sr.drc_pairs(a.board, nets=scope, pcb_data=pcb) if ln not in v0]
         if not new:
             break
         culprits = set()

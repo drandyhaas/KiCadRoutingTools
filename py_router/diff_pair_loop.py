@@ -42,11 +42,21 @@ from terminal_colors import RED, GREEN, RESET
 def _count_pn_overlaps(p_segs, n_segs, config) -> int:
     """Number of this pair's own P segments that sit below clearance to one of its
     N segments (intra-pair P/N overlap, the #215 class). A cheap self-DRC used to
-    decide whether the standard coupled route pinches its own pair."""
+    decide whether the standard coupled route pinches its own pair.
+
+    P and N are two nets, so KiCad grades them at the pair's own value
+    (#1134): max(clearance, class P, class N), then the layer rule.
+    route_diff raises the coupling gap to the class (#530) and to any
+    .kicad_dru rule binding the pair (#1145), so on a ruled layer this
+    counts where the connectors diverge, not the coupled run itself."""
+    if not n_segs:
+        return 0
+    n_net = n_segs[0].net_id
     cnt = 0
     for s in p_segs:
         if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
-                                    s.width, s.layer, n_segs) < config.clearance - 1e-6:
+                                    s.width, s.layer, n_segs) \
+                < config.pair_clearance(s.net_id, n_net, s.layer) - 1e-6:
             cnt += 1
     return cnt
 
@@ -1027,7 +1037,9 @@ def route_diff_pairs(
                         routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
                         target_swaps, results=results, obstacle_cache=obstacle_cache,
                         working_obstacles=state.working_obstacles,          # #806
-                        net_obstacles_cache=state.net_obstacles_cache)
+                        net_obstacles_cache=state.net_obstacles_cache,
+                        ripped_route_layer_costs=state.ripped_route_layer_costs,
+                        ripped_route_via_positions=state.ripped_route_via_positions)
 
                     if swap_success and swap_result:
                         # Calculate actual routed length from segments (includes connectors and via barrels)

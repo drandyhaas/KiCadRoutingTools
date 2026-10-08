@@ -219,8 +219,8 @@ ROWS = [
     # names. `tests/test_718_static_test_hygiene.py` is what caught it. The
     # windows below each carry the line only ONE half has.
     ('stamp_locked-locks-every-namesake', 's',
-     "        if key not in want:\n            continue\n        if re.search",
-     "        if _raw_ref not in want:\n            continue\n        if re.search",
+     "        if key not in want:\n            continue\n        if (re.search",
+     "        if _raw_ref not in want:\n            continue\n        if (re.search",
      (T_WRITER,), 'KILLED'),
 
     ('stamp_unlocked-unlocks-every-namesake', 's',

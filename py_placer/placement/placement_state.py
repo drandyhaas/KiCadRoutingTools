@@ -80,6 +80,26 @@ class PlacementState:
     vias: int = 0
 
     @property
+    def pile(self) -> bool:
+        """The poses carry no placement decisions (#1103, #1109).
+
+        `unplaced`, OR a staging ring (`s3_outside`: spread, not stacked, so
+        it reads neither unplaced nor partially unplaced -- run 36/37's
+        StickHub pile, 93% off the board), OR a heap: at least
+        `DUP_FRACTION` of the parts stacked in a way a placed board does not
+        explain (`stacked_suspect_refs`, which excuses far-side and marker
+        co-locations; the raw `duplicate_fraction` read a placed orangecrab
+        as a pile). The ONE pile test: emit_intent and board_brief both read
+        it, and the free-agent skill chooses its mode from it.
+        """
+        sig = self.signals or {}
+        n = max(1, self.n_footprints or 0)
+        return bool(self.unplaced or sig.get('s3_outside')
+                    or (self.partially_unplaced
+                        and len(self.stacked_suspect_refs) / n
+                        >= DUP_FRACTION))
+
+    @property
     def blocked(self) -> bool:
         """Either gate says a placement tool should not proceed."""
         return self.unplaced or self.has_copper
@@ -98,7 +118,10 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
     th.update(thresholds or {})
     st = PlacementState()
 
-    fps = [fp for fp in (pcb_data.footprints or {}).values() if fp.pads]
+    from kicad_parser import non_aperture_pads
+    # Aperture-only pads are not pads (#1143).
+    fps = [fp for fp in (pcb_data.footprints or {}).values()
+           if non_aperture_pads(fp)]
     st.n_footprints = len(fps)
     # ROUTED copper only (#908). A footprint's own drawn copper -- a SOT89
     # tab, a PCB antenna -- now parses as `graphic=True` Segments, and it is
@@ -336,8 +359,12 @@ def _global_rect(fp, side_boxes, rotate_local_bounds):
     return (fp.x + lx0, fp.y + ly0, fp.x + lx1, fp.y + ly1)
 
 
-def format_report(state: PlacementState, tool: str = 'placement') -> str:
-    """Human text for a refusal or a warning."""
+def format_report(state: PlacementState, tool: str = 'placement', *,
+                  allow_unplaced: bool = False, allow_routed: bool = False) -> str:
+    """Human text for a refusal or a warning. A condition the caller already
+    overrides gets no "Override with" advice (#1202: beautify_labels and
+    check_floorplan always pass allow_routed=True, ran and exited 0, and still
+    printed the refusal and its override)."""
     lines = []
     if state.unplaced:
         lines.append(
@@ -352,10 +379,15 @@ def format_report(state: PlacementState, tool: str = 'placement') -> str:
         lines.append(
             "  To see what the file currently contains:  "
             "python3 render_placement.py <board> -o state.png")
-        lines.append("  Override with --allow-unplaced.")
+        if not allow_unplaced:
+            lines.append("  Override with --allow-unplaced.")
     elif state.partially_unplaced:
         lines.append(f"{tool}: WARNING - {state.reasons[-1]}")
-    if state.has_copper:
+    if state.has_copper and allow_routed:
+        lines.append(
+            f"{tool}: this board carries {state.segments} segment(s) and "
+            f"{state.vias} via(s); proceeding with the copper left as it is.")
+    elif state.has_copper:
         lines.append(
             f"{tool}: this board carries {state.segments} segment(s) and "
             f"{state.vias} via(s). Placement moves FOOTPRINTS and does not move "
@@ -375,7 +407,8 @@ def gate_or_exit(pcb_data, pcb_file, tool: str, *, allow_unplaced: bool = False,
     """
     import sys
     st = assess_placement(pcb_data, pcb_file)
-    msg = format_report(st, tool)
+    msg = format_report(st, tool, allow_unplaced=allow_unplaced,
+                        allow_routed=allow_routed)
     blocking = (st.unplaced and not allow_unplaced) or (st.has_copper and not allow_routed)
     if msg:
         print(msg, file=sys.stderr if (blocking and not warn_only) else sys.stdout)

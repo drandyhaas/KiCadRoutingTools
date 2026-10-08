@@ -282,6 +282,23 @@ param can actually REACH it. Verified as a change detector: removing
 `bga_options` from the cap step's owners makes it name all ten dropped
 params and exit 1.
 
+## Declared cap rotations (test_1122_cap_rotation_gui.py)
+
+Needs KiCad's python (wx + pcbnew); re-execs into it automatically, and
+exits 2 without it (a killer gate for `tests/mutate_1120_1121_1122.py`).
+
+    python3 tests/gui_parity/test_1122_cap_rotation_gui.py
+
+#1122: the cap pass reads the intent's rotation claims through
+`fanout_clearance.declared_cap_rotations`, which resolves the blocks
+against the PCBData the GUI built from pcbnew, so the CLI test cannot
+speak for this front. On the CLI test's fixture (the U30 crop, clearance
+0.1, budget 0.6 / 2.0, C24 declared at 270 -- the case in which the run
+KEPT is the one without the decap gate) it asserts that a contradictory
+declaration stops the step and moves nothing, that the live C24 keeps
+its angle, and that the GUI moves the caps the CLI moves, to the same
+poses.
+
 ## Class-2 post-pass coverage (test_cli_postpass_coverage.py)
 
 The converter gate above covers the plan->params translation; this one covers
@@ -371,6 +388,38 @@ skip cleanly without KiCad python). Run any directly:
   renamed "In1.Cu" as copper. Real Planes/Route tabs, each arm with a
   negative control (the display-name mapping patched back in). On the
   pre-fix code the pour lands on F.Cu and a re-apply doubles it.
+- `test_1133_staged_save_widths.py` -- the GUI oracle leg
+  (`gui_utils.run_kicad_oracle_on_live_board`) on a real `pcbnew.SaveBoard`
+  of `flat_hierarchy`, whose save renumbers 94 of its 111 nets (pcbnew 8 ->
+  staged 81 for `/pic_programmer/PC-CLOCK-OUT`). A power width posted BY NAME
+  for one net must reach exactly that net on the staged board, and the track
+  the oracle lays must land on that net on the LIVE board (`SetNetCode`
+  receives the live netcode, not the save's id). Negative control: the live
+  netcode names another net (GND) in the save. KiCad's link source, the
+  routers and the sliver weld are stubbed; the wx-free half is
+  `tests/test_1133_oracle_width_keying.py`.
+- `test_1195_qfn_floors_gui.py` -- the fanout tab's REAL
+  `_apply_fanout_results` on a real `flat_hierarchy` board (via 0.5 / drill
+  0.3, no vias): a QFN step with no via leaves the via and drill floors, a QFN
+  step with no copper writes nothing, a BGA step lowers the via floors (the
+  control), and both fronts decide with
+  `fix_kicad_drc_settings.fanout_written_floors`. On the pre-fix tab it fails
+  3 checks: a stub QFN run lowered the via floor 0.5 -> 0.3.
+- `test_1187_live_web_floor.py` -- the narrow-pad-joint floor
+  (`connection_width_floor`) on a live board reads the board's design settings
+  through `PCBData.live_rules_provider`, at call time: after one GUI step's
+  writeback the SAME PCBData answers the lowered live floor while the
+  `.kicad_pro` on disk still declares the original, and a live
+  `min_connection` outranks `min_track_width`. On the pre-fix code it fails 3
+  checks (the floor read the stale file, 0.3 where the board said 0.15).
+- `test_581_fanout_via_in_pad_gui.py` -- the Basic tab's via-in-pad policy
+  (#581) reaches BOTH escape engines from the REAL fanout tab, on glasgow's
+  U30 (BGA) and U1 (QFN), engines spied: unticked with a 0.15 spin, each
+  receives `same_net_pad_clearance=0.15`; ticked (the control), -1.0. On the
+  pre-fix tab it fails 4 checks -- #621's move to the worker thread had dropped
+  the kwarg from both calls, and `test_engine_kwarg_parity` could not see it
+  because it read no `**kwargs` call (it now follows `GUI_KWARGS_DICTS`, and a
+  pair it cannot read FAILs instead of printing SKIP).
 - `test_movie_recorder.py` -- the Advanced tab's **Make routing movie** debug
   checkbox (#506): default OFF and inert while off; one routing step renders
   ONE movie; a plan run (`begin_group`/`end_group`, what the AI tab's Run

@@ -82,10 +82,10 @@ def main():
             "--fab-tier", "auto"])
         m_drop = re.search(r"single pass dropped (\d+) ball", txt2)
         check("contended board: single pass drops balls", m_drop is not None)
-        m_win = re.search(r"Escape priority wins: (\d+) -> (\d+) dropped", txt2)
+        m_win = re.search(r"Escape priority wins: (\d+) -> (\d+) net", txt2)
         check("priority rescue runs and wins", m_win is not None)
         if m_win:
-            check("rescue strictly reduces dropped balls",
+            check("rescue strictly reduces the nets with no escape",
                   int(m_win.group(2)) < int(m_win.group(1)),
                   f"{m_win.group(1)} -> {m_win.group(2)}")
         m2 = re.search(r'"escaped": (\d+), "failed": (\d+)', txt2)

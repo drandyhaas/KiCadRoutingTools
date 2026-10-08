@@ -232,14 +232,14 @@ _DARK = {
     'fanout_court':       (150, 150, 165),   # cf. place_court_front, 4.1 away
     'fanout_court_seed':  (52, 52, 60),      # cf. place_court_dim, 12.8 away
     'fanout_label':       (235, 235, 245),   # cf. place_label, 12.4 away
-    # movie_panels / make_film / cmd_timing -- the four near-identical greys
+    # the panels / make_film / cmd_timing -- the four near-identical greys
     'chrome_panel':       (14, 14, 18),      # _PANEL_BG, make_film card
     'chrome_panel_edge':  (44, 50, 58),      # evolve_movie.PANEL_EDGE
     'chrome_strip':       (28, 28, 34),      # _STRIP_BG, make_film strip
     'chrome_band':        (0, 0, 0),         # cmd_timing clock band
     # TWO text greys, 17.4 apart, and keeping them apart is a finding rather
     # than an oversight: `route_render._label` draws its HUD ON the picture at
-    # (240,240,240) while `movie_panels._STRIP_FG` and `make_film`'s caption
+    # (240,240,240) while the (retired) iso panel's strip and `make_film`'s caption
     # draw in a panel strip at (228,228,236). Merging them is a judgement #1012
     # gets to make ON A MEASUREMENT -- #1011 is value-preserving, and the
     # byte-identity gate caught the merge the moment it was attempted.
@@ -248,7 +248,7 @@ _DARK = {
     'chrome_text_dim':    (138, 146, 158),   # evolve_movie.DIM
     'chrome_text_faint':  (78, 84, 94),      # evolve_movie.FAINT
     'chrome_rule':        (42, 50, 44),
-    'chrome_error':       (196, 128, 128),   # movie_panels error text
+    'chrome_error':       (196, 128, 128),   # panel error text
     # editorial marks
     'status_tried':       (160, 78, 20),     # #1012: was (200,60,60) --
                                              # a red badge on a frame whose
@@ -430,14 +430,13 @@ LIGHT = Theme('light', _LIGHT, _DARK_MARKS, _LIGHT_LAYERS, 205)
 #: theme is worse than no theme.
 THEMES: Dict[str, Theme] = {'dark': DARK, 'light': LIGHT}
 
-DEFAULT_THEME_NAME = 'dark'
+DEFAULT_THEME_NAME = 'light'
 
 
 def theme(name=None, *, strict=True) -> Theme:
     """Resolve a theme by name, or a Theme straight through.
 
-    `strict` is the asymmetry `make_movie._panels_wanted` already established
-    and this copies deliberately: an unknown value passed IN CODE raises,
+    `strict` is a deliberate asymmetry: an unknown value passed IN CODE raises,
     naming the accepted set, because a typo in code is a bug and silently
     rendering the wrong movie hides it. An unknown value arriving from the
     ENVIRONMENT warns and falls back, because a typo in a shell must not abort
@@ -483,7 +482,8 @@ def layer_palette(copper_layers: Sequence[str],
     Moved here from `route_render` unchanged, so that a theme can supply a
     different set of ten without every caller learning about it.
     """
-    th = DARK if th is None else th
+    # the CONFIGURED default (#1081: light), like every other None-theme
+    th = default_theme() if th is None else th
     pal = th.layers
     out: Dict[str, RGB] = {}
     inner = 2

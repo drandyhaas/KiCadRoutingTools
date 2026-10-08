@@ -19,7 +19,8 @@ test_gui_engine_parity.py under KiCad's python.
 
 Example-driven checks only see a flag that a manifest uses AND a table here
 names. check_flag_coverage closes that for each FLAG_COVERAGE tool (route.py,
-route_diff.py, route_planes.py, bga_fanout.py): it enumerates EVERY flag the
+route_diff.py, route_planes.py, bga_fanout.py, qfn_fanout.py): it enumerates
+EVERY flag the
 real parser accepts and requires each to reach the GUI, or to be listed
 CLI-only or as a known gap with the reason. Its run_all half, with the
 negative controls, is tests/test_route_flag_plan_coverage.py.
@@ -167,7 +168,7 @@ def _plan_pairs(manifest):
         if i not in keep or is_check_cmd(argv):
             continue
         if any(os.path.basename(a) == 'place_fanout_clearance.py' for a in argv):
-            steps.append(m2p.cap_optimization_step(argv))
+            steps.append(m2p.cap_optimization_step(argv, cwd=_cwd))
             # A cap step is still appended (route_planes inheritance below
             # needs the sequence) but never enters `pairs`, because check_pair
             # validates against the ROUTE-step tables, where `--clearance` and
@@ -537,6 +538,9 @@ _MUST_RESOLVE_ON = {
         # #742: the CLI's --default-via-size on its OWN control. It must NOT
         # resolve as via_size -- see the change detector in check_cap_flags.
         'cap_default_via_size',
+        # #1067: the CLI's --intent, the path the cap pass loads its decap
+        # limits from.
+        'cap_intent_path',
         # the Basic-tab knobs a cap step legitimately drives: `clearance` is
         # the GUI's spelling of "--clearance was GIVEN" (#768), and grid_step
         # is the position snap the pass reads through get_shared_params.
@@ -835,14 +839,12 @@ PLANES_KNOWN_GAPS = {
                        "defaults.PLANE_MIN_THICKNESS",
     '--plane-max-iterations': "no control; planes_gui passes "
                               "defaults.MAX_ITERATIONS",
-    '--plane-proximity-cost': "no control; planes_gui passes 2.0",
-    '--plane-proximity-radius': "no control; planes_gui passes 3.0",
-    '--plane-track-via-clearance': "no control; planes_gui passes "
-                                   "defaults.PLANE_TRACK_VIA_CLEARANCE",
     '--voronoi-seed-interval': "no control; planes_gui passes 2.0",
 }
 
-BGA_CLI_ONLY = {'--output': ROUTE_CLI_ONLY['--output']}
+BGA_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in ('--enable-used-layers',
+                                               '--keep-thermal', '--output',
+                                               '--strict-sizes')}
 # KNOWN GAPS, PENDING ANDY'S DECISION (bga_fanout.py). (--diff-pairs and
 # --diff-pair-gap left when the BGA panel got its Coupled pairs field and its
 # own coupled-pair gap: 51 kept corpus steps on 36 boards carry both.)
@@ -853,6 +855,15 @@ BGA_KNOWN_GAPS = {
         "SetValue) and reset_params_to_defaults does not restore. Needs a "
         "special handler + reset line. 0 recorded uses"),
 }
+
+QFN_CLI_ONLY = dict(
+    {f: ROUTE_CLI_ONLY[f] for f in ('--enable-used-layers', '--keep-thermal',
+                                    '--output', '--strict-sizes')},
+    **{'--layer': "overrides the escape layer, default the part's MOUNTED "
+                  "layer -- which is what the QFN panel always routes on "
+                  "(the tab passes component_layer). Any other value floats "
+                  "the stubs off the SMD pads (#96; the CLI warns). 0 of "
+                  "1018 recorded qfn_fanout calls use it"})
 
 # The tools whose EVERY flag is held to account: the plan action a recorded
 # command converts to, and the probe -- a command that already names its
@@ -880,6 +891,11 @@ FLAG_COVERAGE = {
         probe=['python3', 'py_router/bga_fanout.py', 'in.kicad_pcb',
                'out.kicad_pcb', '--component', 'U1', '--nets', 'PROBE_NET'],
         cli_only=BGA_CLI_ONLY, known_gaps=BGA_KNOWN_GAPS, reset_gaps={}),
+    'qfn_fanout.py': dict(
+        action='fanout',
+        probe=['python3', 'py_router/qfn_fanout.py', 'in.kicad_pcb',
+               'out.kicad_pcb', '--component', 'U1', '--nets', 'PROBE_NET'],
+        cli_only=QFN_CLI_ONLY, known_gaps={}, reset_gaps={}),
 }
 
 # The widget classes the executor's _set_control can SET: its explicit
@@ -1370,7 +1386,8 @@ def check_cap_flags():
             '--max-displacement-cap', '6', '--displacement-growth', '2',
             '--max-passes', '7', '--cap-prefix', 'C',
             '--grid-step', '0.05', '--clearance', '0.1',
-            '--default-via-size', '0.42', '--no-rotate']
+            '--default-via-size', '0.42', '--no-rotate',
+            '--intent', 'x.intent.json']
     step = m2p.cap_optimization_step(argv)
     if step.get('action') != 'optimize_caps':
         return [('(step)', f"action is {step.get('action')!r}")]
@@ -1391,6 +1408,7 @@ def check_cap_flags():
             ('--grid-step', 'grid_step', 0.05),
             ('--clearance', 'clearance', 0.1),
             ('--default-via-size', 'cap_default_via_size', 0.42),
+            ('--intent', 'cap_intent_path', 'x.intent.json'),
             ('--no-rotate', 'cap_allow_rotation', False)):
         if params.get(key) != want:
             bad.append((flag, f"-> {key}={params.get(key)!r}, expected {want!r}"))
@@ -1421,7 +1439,7 @@ def check_cap_flags():
     bare = m2p.cap_optimization_step(
         ['python3', 'py_placer/place_fanout_clearance.py', 'in.kicad_pcb'])
     for _k in ('cap_board_edge_clearance', 'board_edge_clearance',
-               'cap_default_via_size', 'via_size'):
+               'cap_default_via_size', 'via_size', 'cap_intent_path'):
         if _k in (bare.get('params') or {}):
             bad.append(('(omitted)',
                         f'an unset flag was materialised into the plan as {_k}'))
@@ -1488,10 +1506,12 @@ def check_refused_tools():
             bad.append((tool, f"NOT refused -- converted to {step!r}"))
     for tool in ('place_optimize.py', 'place_route_loop.py',
                  'place_seed.py', 'place_reconstruct.py', 'place_portfolio.py',
-                 'place_pose.py', 'render_placement.py', 'beautify_labels.py'):
+                 'place_pose.py', 'render_placement.py', 'beautify_labels.py',
+                 'add_rule_area.py'):
         if tool not in m2p.REFUSED_TOOLS:
-            bad.append((tool, "dropped from REFUSED_TOOLS -- a placement tool "
-                              "that converts silently breaks the replay chain"))
+            bad.append((tool, "dropped from REFUSED_TOOLS -- a board tool with "
+                              "no plan step that converts silently breaks the "
+                              "replay chain"))
 
     # Chain integrity: a placement step between a fanout and a route must not
     # take either of them with it.

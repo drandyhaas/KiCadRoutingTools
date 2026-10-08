@@ -40,6 +40,22 @@ SIBLING_EXTS = (".kicad_pro", ".kicad_prl", ".kicad_dru",
                 ".design-brief.json")
 
 
+def copy_siblings(src_pcb: str, dst_pcb: str) -> list:
+    """Copy every existing sibling of ``src_pcb`` beside ``dst_pcb`` (the
+    board itself not copied): for a step that WRITES its own board and must
+    carry the project, the rules and the brief with it. Returns the copied
+    paths."""
+    copied = []
+    src_base = src_pcb[: -len(".kicad_pcb")] if src_pcb.endswith(".kicad_pcb") else os.path.splitext(src_pcb)[0]
+    dst_base = dst_pcb[: -len(".kicad_pcb")] if dst_pcb.endswith(".kicad_pcb") else os.path.splitext(dst_pcb)[0]
+    for ext in SIBLING_EXTS:
+        s = src_base + ext
+        if os.path.isfile(s) and os.path.abspath(s) != os.path.abspath(dst_base + ext):
+            shutil.copy2(s, dst_base + ext)
+            copied.append(dst_base + ext)
+    return copied
+
+
 def copy_board(src_pcb: str, dst_pcb: str) -> list:
     """Copy ``src_pcb`` to ``dst_pcb`` plus every existing sibling. Returns the list
     of copied paths. Raises FileNotFoundError if the source board is missing."""

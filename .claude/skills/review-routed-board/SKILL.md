@@ -22,15 +22,19 @@ python3 -X utf8 py_router/check_weird.py board.kicad_pcb 2>&1 | tee /tmp/review_
 `check_orphan_stubs` iterates SEGMENT endpoints and treats a via as an anchor,
 so it structurally cannot report a bad via; `check_weird` owns `dangling-via`
 (same-net copper on only one of the layers the barrel spans -- KiCad's
-`via_dangling`), `unsupported-via`, `stacked-copper` and `orphan-island`.
+`via_dangling`), `unsupported-via`, `stacked-copper`, `orphan-island` and
+`kicad-dangling` (a joint stub lying on one other track, which KiCad reports as
+`track_dangling` though both its ends touch copper).
 Measured on run 11's final board: `check_orphan_stubs` none, `check_weird`
 **3 dangling vias**, each independently confirmed.
 
 `check_drc.py` auto-grades at the clearance the routing steps wrote into the sibling
 `.kicad_pro` (the smallest clearance any step actually used, including auto-stepped
 fine-pitch taps), so the bare invocation above already grades at the true routed
-floor. Pass `--clearance <value>` only to override (e.g. to grade a hand-routed
-board with no routed-floor `.kicad_pro`).
+floor. Like KiCad, it floors that class at Board Setup `min_clearance` (#1210):
+an unrouted or hand-routed board whose project declares a minimum above its
+Default class grades at the minimum. Pass `--clearance <value>` only to override
+(e.g. to grade a hand-routed board with no routed-floor `.kicad_pro`).
 
 When the board was routed from an input you have, add `--baseline <the input
 board>`. `VIA-IN-PASTE` rows are vias whose barrel sits in a solder-paste
@@ -222,6 +226,10 @@ How to read it:
   so once rather than listing every net.
 - **Void on a plain low-speed net is usually noise.** Only escalate for nets that
   are genuinely impedance-controlled or high-speed.
+- **A void inside the antipad of the net's own via (or its P/N partner's) is a
+  layer change, not a slot.** check_impedance counts those as
+  `own_via_antipad_runs`, never as crossings. Whether a GND via sits beside the
+  transition is a separate return-path question.
 - **If `--coplanar-gap` was declared**, the audit's "NO ground beside" and "gap
   off-target" lengths are the real result: that copper was routed at a width
   assuming a ground that is not there. Some off-target length near via antipads
@@ -281,7 +289,9 @@ UNGRADED (not scored, not passed): impedance, length
 
 ### Next actions
 1. Run /diagnose-routing-failures with the routing logs for the 2 disconnected nets
-2. Re-run route_planes.py --add-gnd-vias for the 3 uncovered signal vias
+2. Re-run route_planes.py --add-gnd-vias for the 3 uncovered signal vias, then
+   a closing route.py whose --nets covers the poured nets (the re-pour leaves
+   its welds unverified until route.py's plane finalize runs)
 ```
 
 When connectivity or routing failures are found, recommend `/diagnose-routing-failures` as the follow-up rather than diagnosing inline here. If they trace to part positions (pad copper off the outline, unreachable pads, `check_assembly` not buildable), recommend `/pcb-free-agent full` instead of a router retry.

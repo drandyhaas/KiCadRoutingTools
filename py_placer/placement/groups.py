@@ -114,8 +114,27 @@ def parse_sources(spec: Optional[str]) -> Tuple[str, ...]:
     return tuple(out)
 
 
+def _pads(fp) -> list:
+    """`fp`'s pads without its aperture-only ones (#1143): a paste or mask
+    window is not a pin, so it moves neither a centroid, a row test nor a
+    chip's bounds (tigard J1's 8 paste windows put C25 2.43 mm from it where
+    its copper is 2.93 mm away)."""
+    from kicad_parser import non_aperture_pads
+    return non_aperture_pads(fp)
+
+
+def _pads_view(pcb_data):
+    """`pcb_data` as `chip_boundary.build_chip_list` reads it -- each
+    footprint's `.pads` only -- with the aperture-only pads dropped. The
+    router's own callers of `build_chip_list` are untouched."""
+    from types import SimpleNamespace
+    return SimpleNamespace(footprints={
+        r: SimpleNamespace(pads=_pads(f))
+        for r, f in (pcb_data.footprints or {}).items()})
+
+
 def _centroid(fp) -> Tuple[float, float]:
-    pts = [(p.global_x, p.global_y) for p in fp.pads]
+    pts = [(p.global_x, p.global_y) for p in _pads(fp)]
     if not pts:
         return (fp.x, fp.y)
     return (sum(p[0] for p in pts) / len(pts),
@@ -210,10 +229,11 @@ def _pads_are_collinear(fp, eps: float = 1e-6) -> bool:
     be the more direct signal, but the parser does not carry footprint attrs and
     adding one means touching both parse paths.
     """
-    if fp is None or not fp.pads:
+    pads = _pads(fp) if fp is not None else ()
+    if not pads:
         return False
-    xs = {round(p.global_x, 4) for p in fp.pads}
-    ys = {round(p.global_y, 4) for p in fp.pads}
+    xs = {round(p.global_x, 4) for p in pads}
+    ys = {round(p.global_y, 4) for p in pads}
     return len(xs) <= 1 or len(ys) <= 1
 
 
@@ -245,7 +265,8 @@ def _copper_pads(fp) -> int:
 def _chip_list(pcb_data):
     """The ChipBoundary objects this module calls ICs. ONE answer, one place."""
     from chip_boundary import build_chip_list
-    return [c for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
+    return [c for c in build_chip_list(_pads_view(pcb_data),
+                                       min_pads=DECAP_MIN_IC_PADS)
             if not _pads_are_collinear(pcb_data.footprints.get(c.reference))
             and _copper_pads(pcb_data.footprints.get(c.reference))
             >= DECAP_MIN_IC_PADS]
@@ -403,7 +424,8 @@ def chip_bounds_of(fp):
     quench, at a pose it is only considering) reads the election's margin."""
     from types import SimpleNamespace
     from chip_boundary import build_chip_list
-    got = build_chip_list(SimpleNamespace(footprints={'_': fp}), min_pads=1)
+    got = build_chip_list(SimpleNamespace(footprints={
+        '_': SimpleNamespace(pads=_pads(fp))}), min_pads=1)
     return got[0].bounds if got else None
 
 

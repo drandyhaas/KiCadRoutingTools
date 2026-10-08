@@ -17,7 +17,8 @@ iterations in a real chain.
 from __future__ import annotations
 
 
-def add_intent_arg(parser, *, required: bool = False, extra: str = "") -> None:
+def add_intent_arg(parser, *, required: bool = False, extra: str = "",
+                   summary: str = "") -> None:
     """`--intent`: the floorplan intent, for every CLI that quenches (#702).
 
     `required` because `place_seed` cannot run without one -- there the intent
@@ -25,8 +26,18 @@ def add_intent_arg(parser, *, required: bool = False, extra: str = "") -> None:
     that already exists. `extra` appends a per-tool clause, for a real
     difference in what the flag buys rather than a wording preference: the
     portfolio's intent is ALSO its hard rank gate and the source of its health
-    signals.
+    signals. `summary` REPLACES the quench paragraph, for a tool that is not a
+    quench and reads only part of the intent (#1067: place_fanout_clearance
+    holds the decap limits and nothing else), so one flag spelling, metavar
+    and default serve every CLI without a help text that lies about one.
     """
+    if summary:
+        parser.add_argument(
+            "--intent", metavar="JSON", required=required, default=None,
+            help="Floorplan intent JSON (`check_floorplan.py --emit-intent` "
+                 "writes a starter). " + summary
+                 + ((" " + extra) if extra else ""))
+        return
     parser.add_argument(
         "--intent", metavar="JSON", required=required, default=None,
         help="Floorplan intent JSON (`check_floorplan.py --emit-intent` writes "

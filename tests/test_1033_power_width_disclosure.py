@@ -436,21 +436,26 @@ def t_end_to_end():
 # ------------------------------------------------ GUI oracle payload parity
 def t_gui_oracle_payload():
     """The GUI's fallback plane-finalize oracle (posted as
-    results_data['plane_finalize_oracle'], run by swig_gui through
-    gui_utils.run_kicad_oracle_on_live_board) must receive the per-net widths
-    the CLI's oracle config (_ocfg) carries, or its weld ladder stops at a
-    different width. Every payload key must be a parameter of the applier
-    and be forwarded by swig_gui."""
+    results_data['plane_finalize_oracle'], run by routing_dialog through
+    kicad_ipc_adapter.apply_oracle_reconnect) must receive the per-net widths
+    the CLI's oracle leg gets, or its weld ladder stops at a different
+    width. They travel by net NAME (#1133: the applier's staged save numbers
+    its nets afresh), as one payload key the applier takes and routing_dialog
+    forwards, built from all three per-net width maps."""
     # ipc-migration: there is no gui_utils.run_kicad_oracle_on_live_board (a
-    # SWIG applier) and no swig_gui. routing_dialog.py BUILDS the oracle's
-    # GridRouteConfig from the payload itself, through its `_okw` key loop, so
-    # "the applier accepts it" is "it is a GridRouteConfig field" and "the
-    # dialog forwards it" is "the loop names it".
+    # SWIG applier) and no swig_gui. The IPC applier is read by AST, so this
+    # needs no kipy; it must also hand the oracle's copper back on pcb_data's
+    # ids (net_ids_by_name), since it names that copper's nets from pcb_data.
     import ast
-    import dataclasses
     sys.path.insert(0, ROOT)
-    from routing_config import GridRouteConfig
-    params = {f.name for f in dataclasses.fields(GridRouteConfig)}
+    adapter_src = open(os.path.join(ROOT, 'kicad_ipc_adapter.py'),
+                       encoding='utf-8').read()
+    params, applier_src = set(), ''
+    for node in ast.walk(ast.parse(adapter_src)):
+        if (isinstance(node, ast.FunctionDef)
+                and node.name == 'apply_oracle_reconnect'):
+            params = {a.arg for a in node.args.args + node.args.kwonlyargs}
+            applier_src = ast.get_source_segment(adapter_src, node) or ''
     src = open(os.path.join(ROOT, 'py_router', 'route.py'),
                encoding='utf-8').read()
     tree = ast.parse(src)
@@ -463,21 +468,21 @@ def t_gui_oracle_payload():
                 and isinstance(node.value, ast.Dict)):
             keys |= {k.value for k in node.value.keys
                      if isinstance(k, ast.Constant)}
-    gui_tree = ast.parse(open(os.path.join(ROOT, 'kicad_routing_plugin',
-                                           'routing_dialog.py'),
-                              encoding='utf-8').read())
-    forwarded = set()
-    for node in ast.walk(gui_tree):
-        if (isinstance(node, ast.For) and isinstance(node.target, ast.Name)
-                and node.target.id == '_k' and isinstance(node.iter, ast.Tuple)):
-            forwarded |= {e.value for e in node.iter.elts
-                          if isinstance(e, ast.Constant)}
-    check('GUI oracle payload carries the per-net widths',
+    gui_src = open(os.path.join(ROOT, 'kicad_routing_plugin',
+                                'routing_dialog.py'), encoding='utf-8').read()
+    check('GUI oracle payload carries the per-net widths, by name',
+          'net_widths_by_name' in keys
+          and not ({'power_net_widths', 'net_track_widths',
+                    'net_layer_widths'} & keys), sorted(keys))
+    check('GUI applier accepts and routing_dialog forwards net_widths_by_name',
+          'net_widths_by_name' in params
+          and "net_widths_by_name=_pfo.get('net_widths_by_name')" in gui_src)
+    check('GUI applier hands the oracle copper back on pcb_data ids',
+          'net_ids_by_name=' in applier_src, sorted(params))
+    from kicad_oracle import ORACLE_WIDTH_MAPS
+    check('the by-name payload covers every per-net width map',
           {'power_net_widths', 'net_track_widths',
-           'net_layer_widths'} <= keys, sorted(keys))
-    for k in ('power_net_widths', 'net_track_widths', 'net_layer_widths'):
-        check(f'GridRouteConfig takes {k} and routing_dialog forwards it',
-              k in params and k in forwarded, sorted(forwarded))
+           'net_layer_widths'} <= set(ORACLE_WIDTH_MAPS), ORACLE_WIDTH_MAPS)
 
 
 # ------------------------------------------- --strict-sizes, both ways

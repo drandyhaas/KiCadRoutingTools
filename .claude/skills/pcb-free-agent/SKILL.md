@@ -12,9 +12,15 @@ prescribe the process.
 
 Invocation: `/pcb-free-agent <mode> <board.kicad_pcb> [intent.json]`, where
 mode is `full`, `place` or `route`. With no mode, use `full` for an unplaced
-board and `route` for a placed one. `board_brief.py <board> --json`
-(`unplaced`, `has_copper`) is the positive test for which one; exit codes are
-not.
+board and `route` for a placed one. The positive test for which one is
+`python3 -X utf8 py_tools/board_brief.py <board> --json wk/<run>/brief.json`:
+read `pile` and `has_copper` on its `JSON_SUMMARY` line (the file carries
+them under `state`); exit codes are not the test. Read `pile`, not
+`unplaced`: a staging ring of parts around the outline is a pile but reads
+`unplaced: false` (#1109). The same line's `poured_nets` names the nets a
+copper pour already serves (`pours` in the file: layers, filled or not,
+coverage), which `has_copper` does not count; route.py's plane finalize
+serves those nets from the fill.
 
 **Measured basis.** Two runs used this contract before it became a skill:
 - **An 18-part 2-layer board, from a pile:** DONE in 12 min, 6 vias. The
@@ -52,6 +58,30 @@ not.
 - **Never emit the intent from a damaged board.** It records the damage as
   the spec: one such intent failed the correct board and passed a 142 mm²
   pile-up. Emit it from the brief, or edit it down.
+- **When a placed reference of the design exists, arm the decap rule from
+  it.** Add `--decaps-from <reference.kicad_pcb>` to the `--emit-intent`
+  call (a human layout, or an earlier placement), and say in your report
+  that you did. A pile has no decap distances to read, so without it the
+  rule stays unarmed: run 36 left StickHub's hub decaps 2.1-9.8 mm from
+  their pins, where the human board keeps them within 2.2 mm. A cap the
+  reference keeps within 5 mm of its chip and your board leaves beyond it is
+  then a `decap_ungraded` ERROR, named by ref (#1142). Nothing repairs it
+  automatically -- `--repair-decaps` covers `decap_distance` and
+  `decap_pin_distance` only -- so move the cap with `place_pose`.
+- **On a pile, read the emitter's decap line before you seed.** It says how
+  many caps the per-supply-pin stage can claim, and which only once their
+  owner ICs are seated. When `place_seed` then reports the decap stage
+  claimed 0 because no owner IC was seated before it, the first remedy is
+  to seat the owners first (a `fixed_poses` entry or a zoned block). The
+  other is an EXPERIMENT, not a fix: re-seed with
+  `--decap-claim-after-ics` and keep it only if it grades better on
+  routed outcome. It claims the decaps once the centroid stage has seated
+  their ICs, and the seed places every IC exactly as without it -- only
+  the polish that follows can move one (#1105). The line's stage-2.5
+  count assumes those early seats succeed. The corpus A/B rejected it as
+  a default: it marked `regress` on all 7 of its boards. On run 38's
+  StickHub pile (seed 0, run 38's own arguments) it claimed 16 caps and
+  cut the seed's grade errors 16 to 7.
 - **Give `--intent` to every placement tool.** It is a per-move gate only in
   tools that receive it. It stops a part LEAVING its zone; it never moves one
   back in.
@@ -78,13 +108,13 @@ Read `--help` before assuming a flag does not exist. Two runs declared
 | job | tools |
 |---|---|
 | score (the authority on `blocking`) | `py_tools/board_score.py <board> --intent <i> --json <out>`; `check_complete.py <board> --intent <i>` (fails closed) |
-| read the board | `py_tools/board_brief.py --json`, `py_tools/board_context.py --md` (per-part sheet: pin order, `CROSSED` pairs) |
+| read the board | `py_tools/board_brief.py <board> --json <out>`, `py_tools/board_context.py --md` (per-part sheet: pin order, `CROSSED` pairs) |
 | place from scratch | lock the fixed parts with `py_placer/place_pose.py` first, then `py_placer/place_seed.py` (about 5–15 min on a 250-part board; rank seeds with `py_placer/compare_seeds.py`) |
 | improve a placement | `py_placer/place_optimize.py --max-displacement 3` (the quench, for ROUGH placements), `py_placer/place_reconstruct.py` (structural damage), `place_seed --repair` (local violations) / `--reseat` (parts far off), `py_placer/place_portfolio.py --intent --lock --full-probe` (on a SEEDED board), `py_placer/converge.py poses --ref X` (rank one part's poses), `py_placer/place_fanout_clearance.py` |
 | placement vs routing, in a loop | `py_placer/place_route_loop.py` (when routing failed on congestion) |
 | check a placement | `py_tools/check_assembly.py` (read `buildable`), `py_tools/check_floorplan.py --intent` (`--plan-only` before seeding; `--health` for escape lanes), `py_tools/render_placement.py --json-out` (then LOOK at the PNG; `--before <prev> --pair` diffs findings by name), `py_router/check_drc.py --clearance-margin 0` on a copper-free board |
 | will it fit, can it escape | `py_tools/check_pockets.py`, `py_tools/check_channels.py --baseline <input> --gate`, `py_tools/check_capacity.py`, `py_tools/check_reachability.py --pad REF.PAD` |
-| route | `py_router/route_planes.py`, `py_router/bga_fanout.py`, `py_router/qfn_fanout.py`, `py_router/route.py`, `py_router/route_diff.py`, `py_router/repair_planes.py`; `py_router/check_pads.py` before fanout |
+| route | `py_router/route_planes.py` (pour first), `py_router/bga_fanout.py`, `py_router/qfn_fanout.py`, `py_router/route.py`, `py_router/route_diff.py`; `py_router/check_pads.py` before fanout. Not `py_router/repair_planes.py` (§4) |
 | check a routed board | `py_router/check_connected.py`, `py_router/check_drc.py --baseline <input>`, `py_router/check_weird.py`, `py_tools/kicad_unconnected.py --items` (zone-aware oracle) |
 | other skills | `plan-pcb-routing` (the routing recipe; its "Retrying a failed net" section), `diagnose-routing-failures`, `review-routed-board` (diff pairs, length, return vias) |
 
@@ -98,31 +128,83 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   (`place_pose set … --rot`, then `lock`, or the plan's `fixed_poses`). Then
   zone the rest and seed. The seeder puts undeclared parts at their
   connectivity centroid in the first rotation that fits.
+- **On a pile, rank the biggest IC's rotation before you keep a seed.** A
+  pile part keeps its input rotation, which is a generator default, and
+  `converge.py poses` cannot rank an IC's rotation once its decaps are packed
+  against its pins (its `dropped_by` says what vetoed each move). Rank it at
+  seed level, passing the same `--seed-args` you will seed with:
+  `python3 -X utf8 py_placer/rank_rotations.py <pile> --intent <intent.json> --out-dir wk/<run>/rot --probe --write-intent wk/<run>/intent_rot.json`
+  then seed from the written intent. `--jobs N` runs the control and the
+  angles' seeds N at a time with identical results; on a board where one
+  seed takes minutes, set it to your free cores. The seed holds that angle through its
+  polish and re-seat: a part the re-seat cannot put back at it is named on a
+  `NOT repaired` line (`reseat_declined`) and the seed exits 4, and
+  `place_portfolio --intent` turns it only within its declaration (#1121).
+  Without `--ref` it ranks the unlocked,
+  undeclared part with the most connected pads. It costs one `place_seed`
+  per angle plus one full-board probe per `--probe-top` angle (default 2).
+  Run 39 found StickHub's U1 at 270 instead of the pile's 0 by hand: seed
+  crossings 222 to 182, first-route blocking 31-37 to 16-19.
 - **Rotation and pin order.** A `CROSSED` pin-order pair in `board_context`
   costs a via per net at every rotation. After rotating an IC, re-seat its
   caps: one rotation left a decap at 9.57 mm while crossings and hpwl both
   improved.
-- **`place_pose` "legal" is not "buildable".** It does not see a same-net pad
-  stacked on another part's pad (#1064). After every pose change, run
-  `check_assembly` and read `buildable`, not `blocking`.
-- **`render_placement`'s pad-clearance list uses bounding boxes.** It can flag
-  an oval pad that `check_drc` passes (#1065). `check_drc` and `place_pose`
-  are the truth.
+- **`place_pose` refuses a pad stack, but "legal" is still not
+  "buildable".** Two parts' pad copper overlapping, any net, is
+  `check_assembly`'s `pad_intersection`; `place_pose` measures it with
+  the same function (#1064), so `legal` and `no_worse` see it and
+  `--near` looks for a pose off it. A snap re-grades at most
+  `--snap-tries` ranked poses, then as many nearer lattice ones, so it
+  can refuse with a no-worse pose still in reach: when place_pose's snap
+  census shows `candidates_tried` short of its `ranked` + `lattice`
+  counts, raise `--snap-tries` / `--radius` before reading it as "stuck".
+  Courtyards, bodies and coincident origins are
+  still `check_assembly`'s alone: after every pose change, run it and
+  read `buildable`, not `blocking`.
+- **`render_placement`'s pad-clearance list is the grader's** (#1065): each
+  pair is confirmed with `check_drc`'s exact pad check at the pose it
+  draws, so it agrees with `grade_pad_legality`, and so does the caption's
+  `pad-conflicts`; its `courtyard overlap` is the checklist's census
+  (#1126). Two render numbers are still bounding-box counts: the
+  pad-stack list (`b_body_overlap_pairs`; read stacks from
+  `check_assembly`) and the JSON `metrics`, the optimizer's own currency.
 - **Keep-out bands.** A pad in a `(keepout (tracks not_allowed))` band cannot
   be routed even on an empty board (#1031). Treat
   `checklist.a_off_outline.keepout_copper` like off-outline pad copper.
+- **A module antenna needs its copper keep-out WRITTEN, after placement.** A
+  design brief's `keepouts[]` grades placement only; no routing step reads it.
+  Once the module is placed, write the area onto the board in the module's own
+  frame, so a re-run after a move follows the part:
+  `python3 -X utf8 py_router/add_rule_area.py <in> <out> --name ANT_KEEPOUT --ref U1 --rect X0 Y0 X1 Y1`
+  (#1200). The router and KiCad then both keep copper out.
 - **A killed `place_*` job leaves no board.** Bound it by SCOPE instead: free
   only the refs the gate names, and lock the rest. Freeing 2 parts cleared
   both blocking pairs in 63 s, where whole-board sweeps ran over 10 min. For
   parts tens of mm off, use `--reseat`: `--repair` ran 5 min and attempted
   none of 11.
+- **Read `unseated_refs` after every `place_seed`.** A part in that
+  list is still in the staging pile, so seat it (`--repair`, or
+  `place_pose.py`) before any route. The exit-4 line names these parts; run
+  36 routed a board with C20 still in the pile and the router took GND off
+  the board to reach it.
 - **What the decap tools report:**
   - `place_seed --repair` counts a violator `repaired` only once its
     finding is gone; read `unresolved_refs` / `unresolved_by_rule` in its
     `JSON_SUMMARY` for the rest (#1066). Add `--repair-decaps` to seat
     charged caps at their IC's pin (opt-in; `decap_rung` says what it did);
-  - `place_fanout_clearance` can move a cap past `decap_pin_distance`
-    silently (#1067);
+  - `place_fanout_clearance` holds both decap limits when you pass it
+    `--intent` (#1067): no cap move takes a decap claim past its limit and
+    further than before, unless no clear pose keeps it -- then the cap
+    clears the foreign copper anyway and the claim it broke is named under
+    `Decap limit broken`. When it broke a claim or left a cap grazing, it
+    also runs the pass without the gate and keeps whichever ends with fewer
+    unresolved grazes, then fewer decap claims made worse (`Decap: ...`
+    says which).
+    It prints the decap grade before and after. It also holds the
+    intent's declared rotations in both passes (#1122); without
+    `--intent` it can turn a cap whose angle you declared.
+    Without `--intent` it can move a cap past `decap_pin_distance`
+    silently;
   - `place_seed --reseat`'s intent basis counts only the rules it prints
     (`intent[...]`, `accept_basis.intent_rules`) -- decap and proximity
     included since #1068.
@@ -150,9 +232,20 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   and `--json-out`), so reconciliation laps no longer hide broken nets. It
   does not grade the rest of the board, and it uses the router's fill model
   rather than KiCad's refill. Count the board's open nets with
-  `check_connected` or `board_score`. A broken POURED net is
-  `repair_planes.py`'s job (`components.broken.nets[].handler`), not
-  `route.py`'s.
+  `check_connected` or `board_score`.
+- **`route.py` finishes the planes; a repair step does not (#562, #1112).**
+  Pour first (`route_planes.py`), then route with the plane nets inside
+  `--nets` (`'*'` covers them). Pour-launch welds their pads, and the in-run
+  plane finalize taps and joins what the fill cannot reach, at that step's
+  own track and via sizes. A scoped round that names a few nets still lists
+  the plane nets: its copper can cut a pour, the finalize repairs only plane
+  nets in scope, and the improvement gate then reverts the round on the cut
+  plane net (`JSON_IMPROVEMENT_GATE` says
+  `rejected_on_excluded_plane_nets_alone`, #1114). A pour alone connects nothing, so if you pour
+  after routing, end the chain on another `route.py --nets '*'` with the same
+  size flags; the finalize runs even when that step has nothing else to
+  route. Do not end on `repair_planes.py`: it cannot know the sizes you
+  routed at, so it falls back to the board's net-class via and track.
 - **Widths are requests.** After each route, read
   `power_widths.<net>.under_mm`: one run asked for 0.3 mm on +3V3 and shipped
   34 % of it at 0.127 mm. Grade power widths with `board_score --net-min-widths`.
@@ -167,7 +260,10 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   steps of a chain, pass `--clearance-ceiling`, not `--clearance`.
 - **Hand-written copper:** stage each join with `py_tools/check_join.py` before
   committing it, and stamp it `(locked yes)`. Pad-edge arithmetic once made 42
-  shorts, and the plane repair rips unlocked hand joins.
+  shorts, and the plane repair rips unlocked hand joins. A lock freezes the
+  WHOLE net: one locked segment takes it out of every later rip and
+  `--force-reroute`, with no override. Lock a join once its net is done, and
+  unlock it in the board before re-routing that net.
 
 ## 5. Rules
 
@@ -210,8 +306,8 @@ Read `--help` before assuming a flag does not exist. Two runs declared
        --board <board> --kind placement --parent <the board it was made from> \
        --lever "<what you did, one line>" --score-file <board>.score.json
    ```
-   - Use `--kind completion` for a routed board. The film's placement panels
-     are drawn from the `placement` rows.
+   - Use `--kind completion` for a routed board. The film's benchmark band
+     is drawn from these rows.
    - `record` refuses (exit 2) a score whose `blocking` is not a non-negative
      number, such as a per-term dict; record board_score's own JSON.
    - **Close the ledger** with one `record --final --stop-condition <1|2|3|4>`
@@ -223,10 +319,12 @@ Read `--help` before assuming a flag does not exist. Two runs declared
 2. **The film**:
    ```bash
    python3 -X utf8 py_tools/make_film.py --from-ledger wk/<run>/ledger.jsonl \
-       --theme light --aspect 4:3 --layout sidebar --panels xray+iso \
-       --floorplan-intent <intent.json> -o wk/<run>/<run>_film.mp4
+       --theme light --aspect 4:3 -o wk/<run>/<run>_film.mp4
    ```
-   Look at a few frames before you call it done.
+   Look at a few frames before you call it done. Its last line says which
+   board box the film got: `make_film: WARNING board box: 2D X-ray` means
+   the 3D board did not render (in a fresh worktree, run `npm ci` in
+   `py_router/stage3d` and film again).
 3. **`wk/<run>/REPORT.md`**, containing:
    - **the result first:** a table of the mode's DONE conditions with measured
      values, the `blocking_by` breakdown, and vias / copper_mm / segments for

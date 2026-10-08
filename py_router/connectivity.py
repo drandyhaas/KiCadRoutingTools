@@ -184,6 +184,25 @@ def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
 COINCIDENCE_TOL = 0.02
 
 
+def lands_on_interior(t: float, seg_len_sq: float,
+                      tol: float = COINCIDENCE_TOL) -> bool:
+    """Whether a landing whose projection onto a segment sits at parameter
+    `t` is on the segment's INTERIOR (a T-junction or a mid-body anchor),
+    rather than at one of its ends (which the endpoint-degree counts own).
+
+    The band at each end is a DISTANCE, `tol`, capped at the old 2 % of the
+    length so a short segment keeps the interior it had (#1186). The band used
+    to be 2 % of the length alone: on One-Air-Max's 25.8 mm /SCL track it was
+    0.52 mm at each end, so a solid T 0.2 mm from the end read as a free end in
+    check_weird while every connectivity grade called the net connected, and
+    removing the "dangling" segment disconnected it."""
+    if not (0.0 < t < 1.0) or seg_len_sq <= 0.0:
+        return False
+    length = math.sqrt(seg_len_sq)
+    band = min(tol, 0.02 * length)
+    return t * length > band and (1.0 - t) * length > band
+
+
 def endpoint_reaches_pad(x, y, radius, layers, pad, unflashed_hole_only=False) -> set:
     """Which of `layers` a disc of copper -- centre (x, y), radius `radius` --
     both SHARES with `pad`'s copper and physically OVERLAPS. Empty set = no
@@ -344,6 +363,52 @@ def endpoint_reaches_via(x, y, radius, via, layers, copper_layers=None) -> bool:
     return math.hypot(x - via.x, y - via.y) <= max(vr + radius - 1e-6,
                                                    COINCIDENCE_TOL)
 
+
+
+def strict_joint_roots(segments, vias=(), pads=(), copper_layers=None) -> Dict[int, object]:
+    """{id(segment): root} for ONE net's segments, joined only where they
+    EXACTLY meet: a shared vertex on one layer (to the micron, as the
+    soft-joint detectors key vertices), or a vertex on the centre of a
+    same-net via spanning that layer or of a pad carrying copper there.
+
+    Cap overlap is deliberately NOT a joint here. A soft joint is a dangling
+    end that reaches the rest of the net ONLY by cap-overlapping another
+    (check_drc's definition); the detectors stated that and never tested it,
+    so two stubs fanning out of ONE vertex whose free ends happen to overlap
+    -- an oracle strap re-tracing a region join from the join's own vertex,
+    sonde_xilinx GND (#984) -- read as a near-open when nothing hangs on the
+    overlap. Two ends whose segments share a root here are already joined.
+
+    Conservative by construction: a segment end merely INSIDE a pad or via,
+    or landing mid-span on another segment, is not joined, so such a pair is
+    still flagged as before."""
+    from collections import defaultdict
+
+    def rk(x, y):
+        return (round(x, 3), round(y, 3))
+
+    uf = UnionFind()
+    vtx = {}
+    for s in segments:
+        node = ('s', id(s))
+        uf.find(node)
+        for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            uf.union(vtx.setdefault((s.layer, rk(x, y)), node), node)
+    via_at = defaultdict(list)
+    for v in vias or ():
+        via_at[rk(v.x, v.y)].append(v)
+    pad_at = defaultdict(list)
+    for p in pads or ():
+        pad_at[rk(p.global_x, p.global_y)].append(p)
+    if via_at or pad_at:
+        for (layer, key), node in vtx.items():
+            for v in via_at.get(key, ()):
+                if layer in via_copper_layers(v, copper_layers):
+                    uf.union(node, ('v', id(v)))
+            for p in pad_at.get(key, ()):
+                if endpoint_reaches_pad(key[0], key[1], 0.0, (layer,), p):
+                    uf.union(node, ('p', id(p)))
+    return {id(s): uf.find(('s', id(s))) for s in segments}
 
 
 _CLUSTER_MEMO: "OrderedDict[tuple, tuple]" = OrderedDict()
@@ -1751,11 +1816,22 @@ def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[floa
     Returns list of (x, y, layer) tuples - includes layer for same-layer filtering.
     """
     stubs = []
+    # One pass over the board's copper, not one per net: a builder asks for
+    # every unrouted net on every prepare.
+    wanted = set(net_ids)
+    segs_by_net: Dict[int, list] = {}
+    vias_by_net: Dict[int, list] = {}
+    for s in pcb_data.segments:
+        if s.net_id in wanted:
+            segs_by_net.setdefault(s.net_id, []).append(s)
+    for v in pcb_data.vias:
+        if v.net_id in wanted:
+            vias_by_net.setdefault(v.net_id, []).append(v)
     for net_id in net_ids:
-        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+        net_segments = segs_by_net.get(net_id, [])
         if len(net_segments) < 2:
             continue
-        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        net_vias = vias_by_net.get(net_id, [])
         groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) < 2:
             continue

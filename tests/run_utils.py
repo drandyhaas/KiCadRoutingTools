@@ -137,7 +137,7 @@ def _accident(out: str):
 
 
 def check(argv, *, refuse=None, code=None, accept=False, timeout=900,
-          cwd=None, allow=()):
+          cwd=None, allow=(), env=None):
     """Run `argv`; assert it refused FOR THE STATED REASON, or accepted.
 
     refuse : substring the refusal must contain -- the reason, not just failure.
@@ -145,6 +145,8 @@ def check(argv, *, refuse=None, code=None, accept=False, timeout=900,
     accept : assert success instead (exit 0 and no traceback).
     allow  : accident substrings that are legitimate here (e.g. a test that
              deliberately feeds a bad argument and wants argparse's message).
+    env    : the child's environment; None inherits this process's (#1117:
+             a sitecustomize injection rig needs its own PYTHONPATH).
 
     Returns the CompletedProcess. Raises AssertionError with the output on any
     mismatch -- including a failure that happened for an unrelated reason,
@@ -152,7 +154,7 @@ def check(argv, *, refuse=None, code=None, accept=False, timeout=900,
     """
     r = subprocess.run([str(a) for a in argv], capture_output=True, text=True,
                        encoding='utf-8', errors='replace',
-                       cwd=cwd or ROOT_DIR, timeout=timeout)
+                       cwd=cwd or ROOT_DIR, timeout=timeout, env=env)
     out = (r.stdout or '') + (r.stderr or '')
     tail = out[-1200:]
     acc = _accident(out)

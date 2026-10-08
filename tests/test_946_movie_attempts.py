@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The attempts band: three producers, one record type, one axis (#946, #1021).
+"""The search behind a film: three producers, one record type, one axis
+(#946, #1021).
 
 `place_route_loop` writes every round it tried -- kept and dropped -- and
 `make_movie.placement_chain` then skips every non-accepted one. Two docstrings
@@ -28,20 +29,24 @@ otherwise make falsely:
     invisible for having a null score;
   * **nothing is synthesised.** `movie_camera.synth_rounds` forbids exactly
     this extension in its own docstring;
-  * **the degradation arm returns the SAME list of the SAME images**, not a
-    copy that happens to look the same -- `compose_two_panel`'s contract, and
-    its rule that no OFF state may read like success;
   * **the shared record rule did not change `awx`'s line.** `best_so_far` is
     now one function with two policy flags; the control is an independent
     re-implementation of `Ribbon`'s original loop, compared row for row;
   * **`make_film` attaches the band BEFORE its badge loop**, asserted by pixel:
     `_badge` borders the frame it is given, so an after-attach band would leave
-    the border around the board only.
+    the border around the board only. The band is the stage3d frame's
+    benchmark band now: the attempts band's drawing (`attach`, `draw_track`)
+    was retired with every film layout but stage3d, and its tests with it.
 """
 import json
 import os
 import sys
 import tempfile
+
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
 
 RUN_ALL_TIMEOUT = 900
 
@@ -52,13 +57,11 @@ for _p in (ROOT, _TESTS, os.path.join(ROOT, 'py_router'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-try:
-    from PIL import Image, ImageDraw
-except ImportError as exc:
-    print('SKIP: needs Pillow (%s)' % exc)
+import importlib.util                                           # noqa: E402
+if importlib.util.find_spec('PIL') is None:
+    print('SKIP: needs Pillow (the film tests render)')
     sys.exit(77)
 
-import frame_layout as FL          # noqa: E402
 import movie_attempts as MA        # noqa: E402
 import render_theme as RT          # noqa: E402
 
@@ -409,150 +412,7 @@ def test_nothing_is_synthesised():
             fail('the malformed lines were read as %d row(s)'
                  % len(t.attempts))
     if len(_FAIL) == _mark:
-        print('  PASS: no sidecars, no ledger, no band')
-
-
-def test_the_off_arm_returns_the_same_objects():
-    _mark = len(_FAIL)
-    frames = [Image.new('RGB', (120, 80), (7, 7, 7)) for _ in range(4)]
-    ids = [id(f) for f in frames]
-    back, rep = MA.attach(frames, None, theme=RT.DARK)
-    if back is not frames:
-        fail('the OFF arm returned a different list object')
-    if [id(f) for f in back] != ids:
-        fail('the OFF arm replaced the Image objects')
-    if rep.get('drawn'):
-        fail('the OFF arm reported drawn=True')
-    if 'one attempt' not in MA.status_line(rep):
-        fail('the OFF arm does not say WHY: %r' % MA.status_line(rep))
-    # one attempt is also an OFF arm, and says something different
-    one = MA.Track((MA.Attempt(0, 'r0', 'round', None, True, False, 3.0,
-                               False, None),), 'failures', 'loop', '')
-    back2, rep2 = MA.attach(frames, one, theme=RT.DARK)
-    if back2 is not frames or rep2.get('drawn'):
-        fail('a single attempt drew a band')
-    # the SAME images too -- asserted on BOTH off arms, not only on the
-    # no-track one. A copy that happens to look the same is still a copy, and
-    # the contract is that the caller's list comes back untouched.
-    if [id(f) for f in back2] != ids:
-        fail('the single-attempt arm replaced the Image objects')
-    if 'one attempt on disk' not in (rep2.get('why') or ''):
-        fail('the single-attempt refusal is not named: %r' % rep2.get('why'))
-    if len(_FAIL) == _mark:
-        print('    %s' % MA.status_line(rep))
-        print('  PASS: no OFF state reads like success')
-
-
-def test_the_band_keeps_the_frame_invariant():
-    _mark = len(_FAIL)
-    with tempfile.TemporaryDirectory() as td:
-        t = MA.attempts_from_loop_dir(_loop_dir(td))
-    # A SHORT frame has no room for one, and says so rather than taking most
-    # of the picture: measured at 74% of an 86 px frame before the ceiling.
-    short = [Image.new('RGB', (560, 86), (7, 7, 7)) for _ in range(3)]
-    ids = [id(f) for f in short]
-    back, rep = MA.attach(short, t, theme='dark')
-    if rep.get('drawn'):
-        fail('a 560x86 frame drew a band anyway')
-    if [id(f) for f in back] != ids:
-        fail('the too-short arm rebuilt the frames')
-    if 'no room' not in (rep.get('why') or ''):
-        fail('the too-short refusal does not say why: %r' % rep.get('why'))
-    else:
-        print('    560x86: %s' % MA.status_line(rep))
-    for w, h in ((320, 200), (160, 160), (901, 309)):
-        frames = [Image.new('RGB', (w, h), (7, 7, 7)) for _ in range(5)]
-        n_before = len(frames)
-        back, rep = MA.attach(frames, t, theme='dark')
-        sizes = {f.size for f in back}
-        if len(sizes) != 1:
-            fail('%dx%d: the band left %d sizes: %s' % (w, h, len(sizes),
-                                                        sizes))
-        if len(back) != n_before:
-            fail('%dx%d: the band changed the frame COUNT %d -> %d'
-                 % (w, h, n_before, len(back)))
-        got = sizes.pop()
-        if got[0] != w:
-            fail('%dx%d: became %s -- the band grows the HEIGHT only'
-                 % (w, h, got))
-        if not rep.get('drawn'):
-            # A frame too short for a legible band declines, and both arms
-            # are correct -- what is NOT correct is growing by a band nobody
-            # can read, or shrinking.
-            if got != (w, h):
-                fail('%dx%d: declined but the frame still changed to %s'
-                     % (w, h, got))
-            print('    %4dx%-4d -> declined: %s'
-                  % (w, h, (rep.get('why') or '')[:54]))
-            continue
-        if got[1] <= h:
-            fail('%dx%d: drawn but the frame did not grow: %s' % (w, h, got))
-        if got[1] - h < MA.BAND_MIN_PX:
-            fail('%dx%d: band is %d px, below the %d px legibility floor'
-                 % (w, h, got[1] - h, MA.BAND_MIN_PX))
-        if (got[1] - h) > h * MA.BAND_MAX_FRAC:
-            fail('%dx%d: the band is %.0f%% of the frame -- a time series '
-                 'about the run must not dwarf the film it annotates'
-                 % (w, h, 100.0 * (got[1] - h) / h))
-        try:
-            FL.assert_frames_uniform([f.size for f in back])
-        except FL.FrameSizeError as exc:
-            fail('%dx%d: %s' % (w, h, exc))
-        print('    %4dx%-4d -> %s  (+%d px band)' % (w, h, got, got[1] - h))
-    if len(_FAIL) == _mark:
-        print('  PASS: one size, same count, height only')
-
-
-def test_the_band_actually_draws():
-    """A drawer wrapped in `except Exception: pass` returns None whether it
-    drew or not. Count the ink."""
-    _mark = len(_FAIL)
-    with tempfile.TemporaryDirectory() as td:
-        t = MA.attempts_from_loop_dir(_loop_dir(td))
-    bg = RT.DARK.rgb('ground')
-    img = Image.new('RGB', (700, 130), bg)
-    MA.draw_track(ImageDraw.Draw(img), FL.Box(0, 0, 700, 130), t,
-                  theme=RT.DARK)
-    cols = {c for _n, c in img.getcolors(1 << 20)}
-    if len(cols) < 4:
-        fail('the band drew %d colour(s) -- it swallowed an exception'
-             % len(cols))
-    for role in ('status_best', 'status_kept', 'op_descend'):
-        if RT.DARK.rgb(role) not in cols:
-            fail('%s never reached the canvas' % role)
-    if RT.DARK.rgb('status_dropped') not in cols:
-        fail('the ungraded round left no tick')
-    # an EMPTY track must leave the canvas untouched, or the check above is
-    # only measuring that something was drawn
-    blank = Image.new('RGB', (700, 130), bg)
-    MA.draw_track(ImageDraw.Draw(blank), FL.Box(0, 0, 700, 130), None,
-                  theme=RT.DARK)
-    if {c for _n, c in blank.getcolors(1 << 20)} != {bg}:
-        fail('draw_track put ink on the canvas with no track')
-    if len(_FAIL) == _mark:
-        print('    %d colours, record + kept + operator + ungraded all present'
-              % len(cols))
-        print('  PASS: the band draws, and an empty one draws nothing')
-
-
-def test_the_horizon_grows_with_the_film():
-    _mark = len(_FAIL)
-    with tempfile.TemporaryDirectory() as td:
-        t = MA.attempts_from_loop_dir(_loop_dir(td))
-    bg = RT.DARK.rgb('ground')
-    ink = []
-    for up in (0, 4, 8):
-        img = Image.new('RGB', (700, 130), bg)
-        MA.draw_track(ImageDraw.Draw(img), FL.Box(0, 0, 700, 130), t,
-                      upto=up, theme=RT.DARK)
-        ink.append(sum(n for n, c in img.getcolors(1 << 20)
-                       if c == RT.DARK.rgb('op_descend')))
-    if not (ink[0] < ink[1] < ink[2]):
-        fail('the graph does not grow with the horizon: %s' % ink)
-    else:
-        print('    operator ink at horizon 0/4/8: %s' % ink)
-    if len(_FAIL) == _mark:
-        print('  PASS: it grows with the film rather than spoiling it')
+        print('  PASS: no sidecars, no ledger, no track')
 
 
 def test_make_film_attaches_before_it_badges():
@@ -560,8 +420,9 @@ def test_make_film_attaches_before_it_badges():
 
     `_badge` draws nested rectangles around the WHOLE frame it is given. Attach
     the band afterwards and the border encloses only the board, so the bottom
-    rows of a badged frame stop being badge colour -- which is exactly the trap
-    `movie_panels.py:40-44` documents for panels.
+    rows of a badged frame stop being badge colour. The band is the stage3d
+    frame's benchmark band (the only film layout; it folded the attempts band
+    in), discovered from the loop sidecars.
     """
     _mark = len(_FAIL)
     try:
@@ -578,19 +439,18 @@ def test_make_film_attaches_before_it_badges():
         _variant(BOARD, bad, dx=-4.0, dy=3.0, n=4)
         shots = mf.parse_positional([BOARD, good, bad],
                                     [os.path.basename(bad)])
-        t = MA.attempts_from_loop_dir(_loop_dir(td))
-        # camera='auto' and this size deliberately: with the camera off a
-        # placement-only attempt changes NO copper, so its beat is one frame
-        # and nothing is badged -- the probe would then pass vacuously on an
-        # unbadged film. `test_film_composition` uses the same arm.
-        # `layout='split'` because the band now REFUSES a frame too short to
-        # carry it, and this board is 6.5:1 -- at size 400 its legacy frame is
-        # 400x62, where a legible band would be over a third of the picture.
-        # A declared layout gives the frame its own aspect and the band room.
-        off = mf.build_film(shots, size=400, fps=6.0, camera='auto',
-                            quiet=True, attempts_from='', layout='split')
-        on = mf.build_film(shots, size=400, fps=6.0, camera='auto',
-                           quiet=True, attempts=t, layout='split')
+        loop = _loop_dir(td)
+        # camera='auto' deliberately: with the camera off a placement-only
+        # attempt changes NO copper, so its beat is one frame and nothing is
+        # badged -- the probe would then pass vacuously on an unbadged film.
+        # `test_film_composition` uses the same arm. Size 1000: the band is
+        # declined under the stage3d board's 70% height floor below that.
+        off = mf.build_film(shots, size=1000, fps=6.0, camera='auto',
+                            quiet=True, attempts_from='',
+                            placement={'board3d': '2d'})
+        on = mf.build_film(shots, size=1000, fps=6.0, camera='auto',
+                           quiet=True, attempts_from=loop,
+                           placement={'board3d': '2d'})
         if not off or not on:
             fail('no frames')
             return
@@ -648,14 +508,24 @@ def test_a_card_and_a_band_in_one_film_are_one_size():
         _variant(BOARD, good, n=3)
         png = os.path.join(td, 'why.png')
         _I.new('RGB', (1234, 200), (10, 90, 160)).save(png)
-        t = MA.attempts_from_loop_dir(_loop_dir(td))
+        loop = _loop_dir(td)
         shots = ([mf.card_shot(png, 'the delta that motivated this')] +
                  mf.parse_positional([BOARD, good], []))
-        frames = mf.build_film(shots, size=300, fps=6.0, camera='off',
-                               quiet=True, attempts=t, layout='split')
-        if not frames:
+        # size 1000: below it the stage3d frame declines the band
+        frames = mf.build_film(shots, size=1000, fps=6.0, camera='off',
+                               quiet=True, attempts_from=loop,
+                               placement={'board3d': '2d'})
+        bare = mf.build_film(shots, size=1000, fps=6.0, camera='off',
+                             quiet=True, attempts_from='',
+                             placement={'board3d': '2d'})
+        if not frames or not bare:
             fail('no frames')
             return
+        from PIL import ImageChops
+        if ImageChops.difference(frames[-1].convert('RGB'),
+                                 bare[-1].convert('RGB')).getbbox() is None:
+            fail('BROKEN: no band was drawn, so the card/band size claim '
+                 'is vacuous')
         sizes = {f.size for f in frames}
         if len(sizes) != 1:
             fail('a film with a card AND a band has %d sizes: %s -- the card '
@@ -737,10 +607,6 @@ def test_place_and_route_is_one_graph():
         fail('a loop parent was not shifted into the loop half: %r' % shifted)
     if 'blocking' not in t.metric or 'failures' not in t.metric:
         fail('the joined axis does not say it is both terms: %r' % t.metric)
-    # and the joined track DRAWS, record line and all
-    im = Image.new('RGB', (800, 160))
-    if not MA.draw_track(ImageDraw.Draw(im), FL.Box(0, 0, 800, 160), t):
-        fail('the joined track declined to draw')
     if len(_FAIL) == _mark:
         print('  PASS: %d ledger laps + %d loop rounds -> one axis 0..%d (%s)'
               % (n_led, n_loop, idx[-1], t.note))
@@ -876,11 +742,17 @@ def test_a_blocking_that_is_not_a_count_is_ungraded_not_raised():
 
 
 def test_the_film_and_the_verdict_agree_on_what_a_blocking_is():
-    """#1077. `_blocking_value` MIRRORS `converge.blocking_value` (the router
-    side does not import the placer), so the two are pinned to agree here --
-    a mirror nobody compares drifts."""
+    """#1077/#1088. The film's `_blocking_value` IS converge's
+    `blocking_value` -- one function, imported from `ledger_score` -- so the
+    two cannot drift. It was a hand mirror pinned by the table below; the
+    table stays as a behaviour check on the one rule."""
     _mark = len(_FAIL)
     import converge
+    import ledger_score
+    if not (MA._blocking_value is converge.blocking_value
+            is ledger_score.blocking_value):
+        fail('the film and the verdict use different blocking rules again: '
+             '%r / %r' % (MA._blocking_value, converge.blocking_value))
     nan, inf = float('nan'), float('inf')
     table = (0, 3, 3.0, 2.5, -0.0, 10 ** 20, 10 ** 400, -10 ** 400,
              -1, -0.5, True, False, None,
@@ -911,10 +783,6 @@ TESTS = (
     test_the_staircase_is_the_loops_own_best,
     test_the_shared_record_rule_did_not_change_awx,
     test_nothing_is_synthesised,
-    test_the_off_arm_returns_the_same_objects,
-    test_the_band_keeps_the_frame_invariant,
-    test_the_band_actually_draws,
-    test_the_horizon_grows_with_the_film,
     test_make_film_attaches_before_it_badges,
     test_a_card_and_a_band_in_one_film_are_one_size,
     test_place_and_route_is_one_graph,

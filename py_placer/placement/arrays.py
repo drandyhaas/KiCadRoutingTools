@@ -522,8 +522,11 @@ def pose_free_chip_refs(pcb) -> set:
     from types import SimpleNamespace
     from . import groups as groups_mod
     out = set()
+    from kicad_parser import non_aperture_pads
     for ref, fp in (pcb.footprints or {}).items():
-        pads = list(fp.pads or ())
+        # the pins, not the paste/mask apertures (#1143): the stand-ins
+        # below carry no layers, so `_pads_are_collinear` cannot tell
+        pads = non_aperture_pads(fp)
         if len(pads) < groups_mod.DECAP_MIN_IC_PADS:
             continue
         if groups_mod._copper_pads(fp) < groups_mod.DECAP_MIN_IC_PADS:

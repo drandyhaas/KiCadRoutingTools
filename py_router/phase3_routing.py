@@ -19,7 +19,8 @@ from typing import List, Dict, Set, Optional, Tuple, Any
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig
 from routing_state import RoutingState, record_net_event
-from routing_context import build_single_ended_obstacles, build_incremental_obstacles
+from routing_context import (build_single_ended_obstacles, build_incremental_obstacles,
+                             carry_run_state)
 from single_ended_routing import route_multipoint_taps, route_net_with_obstacles, route_multipoint_main
 from connectivity import get_multipoint_net_pads, get_copper_connected_terminal_groups
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
@@ -27,6 +28,7 @@ from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
 from polarity_swap import get_canonical_net_id
 from pcb_modification import add_route_to_pcb_data
+from plane_fragility import fragility_on_copper_change
 from obstacle_map import (add_segments_list_as_obstacles, add_vias_list_as_obstacles,
                          remove_segments_list_from_obstacles, remove_vias_list_from_obstacles)
 from obstacle_cache import (
@@ -165,10 +167,33 @@ def _sink_record(sinks, ripped_ids, saved_result):
     The saved failed list belongs to the first (blocker) id; a diff-pair
     partner ripped alongside it was fully routed."""
     failed = list((saved_result or {}).get('failed_pads_info', []) or [])
+    first = []
     for s in sinks:
         for i, rid in enumerate(ripped_ids):
             if rid not in s:
                 s[rid] = failed if i == 0 else []
+                first.append((s, rid))
+    return first
+
+
+def _sink_unrecord(first_writes, routed_results):
+    """Take a RESTORED net back out of the rip-tree sinks this rip wrote it
+    into first (#1156).
+
+    The #354 abandon re-rips every net in a frame's subtree because a net
+    re-routed inside the cascade never saw the original tap. A net restored
+    to the copper it had at its FIRST rip in a frame's window was never
+    re-routed there: that copper predates the frame and coexisted with the
+    original tap, so ripping it again only strands it. Measured on glasgow:
+    /D5's victim retry ripped and restored /IO_Banks/U5, then /D3's abandon
+    re-ripped the whole subtree, U5 included, and its reroute failed -- the
+    net shipped with 0 segments and 0 vias, its BGA via-in-pad escape gone.
+    Only sinks this rip wrote first, and only when the restore took (a
+    collision-refused restore leaves the net out of routed_results, which the
+    re-rip loop already skips)."""
+    for s, rid in first_writes or ():
+        if rid in routed_results:
+            s.pop(rid, None)
 
 
 def _build_abandon_weight_fn(metric, pcb_data, state):
@@ -225,7 +250,8 @@ def _probe_abandon_world(stranded_ids, orig_tap_segs, orig_tap_vias, ctx):
         add_segments_list_as_obstacles(state.working_obstacles, orig_tap_segs, config)
         add_vias_list_as_obstacles(state.working_obstacles, orig_tap_vias, config, diagonal_margin=0.25)
         token = push_inflight_copper(pcb_data, orig_tap_segs, orig_tap_vias)
-    probe_cfg = _dc_replace(config, max_iterations=min(config.max_iterations, 50000))
+    probe_cfg = carry_run_state(
+        config, _dc_replace(config, max_iterations=min(config.max_iterations, 50000)))
     try:
         for rid in stranded_ids:
             if state.working_obstacles is not None and state.net_obstacles_cache:
@@ -233,7 +259,9 @@ def _probe_abandon_world(stranded_ids, orig_tap_segs, orig_tap_vias, ctx):
                     state.working_obstacles, pcb_data, config, rid,
                     ctx['all_unrouted_net_ids'], ctx['routed_net_ids'],
                     ctx['track_proximity_cache'], ctx['layer_map'],
-                    state.net_obstacles_cache)
+                    state.net_obstacles_cache,
+                    state.ripped_route_layer_costs,
+                    state.ripped_route_via_positions)
             else:
                 phase3_routed_ids = [x for x in ctx['routed_net_ids'] if x != rid]
                 obstacles, _ = build_single_ended_obstacles(
@@ -437,7 +465,8 @@ def _phase3_tap_relocation_retry(net_id, completed_result, pcb_data, config,
 
     retry_obstacles, _ = build_incremental_obstacles(
         working, pcb_data, config, net_id, all_unrouted_net_ids,
-        routed_net_ids, track_proximity_cache, layer_map, cache)
+        routed_net_ids, track_proximity_cache, layer_map, cache,
+        state.ripped_route_layer_costs, state.ripped_route_via_positions)
     retry = route_multipoint_taps(
         pcb_data, net_id, config, retry_obstacles, dict(completed_result),
         global_offset=global_tap_offset, global_total=total_tap_edges,
@@ -642,7 +671,8 @@ def run_phase3_tap_routing(
             obstacles, _ = build_incremental_obstacles(
                 state.working_obstacles, pcb_data, config, net_id,
                 all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                state.net_obstacles_cache
+                state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions
             )
         else:
             # Full rebuild needed when length matching modified segments
@@ -666,6 +696,9 @@ def run_phase3_tap_routing(
             pcb_data, net_id, config, obstacles, tap_input,
             global_offset=global_tap_offset, global_total=total_tap_edges, global_failed=global_tap_failed
         )
+        # Its taps are routed (or tried): its tap pads stop being
+        # stub-proximity sources for the nets routed after it.
+        state.multipoint_taps_done.add(net_id)
 
         if completed_result:
             # Update global progress counters
@@ -728,6 +761,11 @@ def run_phase3_tap_routing(
             if tap_segments or tap_vias:
                 tap_result = {'new_segments': tap_segments, 'new_vias': tap_vias}
                 add_route_to_pcb_data(pcb_data, tap_result, debug_lines=config.debug_lines)
+                # #466: Phase 3's taps carve the pours like any commit.
+                fragility_on_copper_change(config, pcb_data, tap_segments, tap_vias)
+                # ...and later nets see them in the net's track-proximity field.
+                track_proximity_cache[net_id] = compute_track_proximity_for_net(
+                    pcb_data, net_id, config, layer_map)
                 print(f"  Added {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
                 # IMPORTANT: Update completed_result['new_segments'] to match what's in pcb_data
@@ -886,6 +924,7 @@ def try_phase3_ripup(
     # frame's window (the #85 abandon metrics' before-world snapshot).
     subtree_ripped = {}
     child_sinks = rip_sinks + (subtree_ripped,)
+    ripped_first_writes = []   # #1156: (sink, net) this frame recorded first
 
     # The shared via-placement decline records the micron-exact copper that
     # boxes a pad (find_via_position_blocker) into pcb_data._via_unblock_blame;
@@ -1041,7 +1080,7 @@ def try_phase3_ripup(
 
         ripped_items.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
         ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
-        _sink_record(child_sinks, ripped_ids, saved_result)
+        ripped_first_writes.extend(_sink_record(child_sinks, ripped_ids, saved_result))
         # Invalidate obstacle cache for ripped nets and record rip events
         for rid in ripped_ids:
             if obstacle_cache is not None:
@@ -1059,7 +1098,8 @@ def try_phase3_ripup(
             obstacles, _ = build_incremental_obstacles(
                 state.working_obstacles, pcb_data, config, net_id,
                 all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                state.net_obstacles_cache
+                state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions
             )
         else:
             phase3_routed_ids = [rid for rid in routed_net_ids if rid != net_id]
@@ -1328,6 +1368,7 @@ def try_phase3_ripup(
                 state.ripped_route_layer_costs, state.ripped_route_via_positions,
                 refused_sink=state.collision_refused_net_ids
             )
+        _sink_unrecord(ripped_first_writes, routed_results)
 
     # #103 hint recording (hint-coverage): phase-3 tap edges were the last
     # failure path that never recorded its pre-existing blockers -- ecp5
@@ -1440,6 +1481,7 @@ def _retry_victim_main_with_ripup(
         return None, []
 
     nested_ripped = []
+    nested_first_writes = []   # #1156: (sink, net) this frame recorded first
     ripped_canonical_ids = set()
     last_blocked = blocked
     for N in range(1, config.max_rip_up_count + 1):
@@ -1488,7 +1530,7 @@ def _retry_victim_main_with_ripup(
             break
         nested_ripped.append((blocker.net_id, saved_result, ripped_ids, was_in_results))
         ripped_canonical_ids.add(get_canonical_net_id(blocker.net_id, diff_pair_by_net_id))
-        _sink_record(rip_sinks, ripped_ids, saved_result)
+        nested_first_writes.extend(_sink_record(rip_sinks, ripped_ids, saved_result))
         for rid in ripped_ids:
             record_net_event(state, rid, "ripped_by", {
                 "ripping_net_id": victim_id,
@@ -1501,7 +1543,8 @@ def _retry_victim_main_with_ripup(
             obstacles, _ = build_incremental_obstacles(
                 state.working_obstacles, pcb_data, config, victim_id,
                 all_unrouted_net_ids, routed_net_ids, track_proximity_cache,
-                layer_map, state.net_obstacles_cache)
+                layer_map, state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions)
         else:
             phase3_routed_ids = [rid for rid in routed_net_ids if rid != victim_id]
             obstacles, _ = build_single_ended_obstacles(
@@ -1560,6 +1603,7 @@ def _retry_victim_main_with_ripup(
                 state.ripped_route_layer_costs, state.ripped_route_via_positions,
                 refused_sink=state.collision_refused_net_ids
             )
+        _sink_unrecord(nested_first_writes, routed_results)
     return None, []
 
 
@@ -1604,7 +1648,8 @@ def _reroute_phase3_ripped_nets(
             obstacles, _ = build_incremental_obstacles(
                 state.working_obstacles, pcb_data, config, ripped_net_id,
                 all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                state.net_obstacles_cache
+                state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions
             )
         else:
             phase3_routed_ids = [rid for rid in routed_net_ids if rid != ripped_net_id]
@@ -1667,11 +1712,14 @@ def _reroute_phase3_ripped_nets(
             # was built to save and killed its pending taps.
             if ripped_net_id in state.pending_multipoint_nets:
                 state.pending_multipoint_nets[ripped_net_id] = result
+                state.multipoint_taps_done.discard(ripped_net_id)
             record_net_event(state, ripped_net_id, "reroute_phase1_exhausted",
                              {"taps_pending": True})
         elif result and not result.get('failed') and result.get('path'):
             main_vias = result.get('new_vias', [])
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
+            fragility_on_copper_change(config, pcb_data,      # #466
+                                       result.get('new_segments'), main_vias)
             _commit_net_result(results, routed_results, ripped_net_id, result,
                                pcb_data, config)
             routed_net_ids.append(ripped_net_id)
@@ -1694,6 +1742,7 @@ def _reroute_phase3_ripped_nets(
             # found in results[], leading to duplicate segments being written to output.
             if ripped_net_id in state.pending_multipoint_nets:
                 state.pending_multipoint_nets[ripped_net_id] = result
+                state.multipoint_taps_done.discard(ripped_net_id)
 
             # Update working obstacles
             if state.working_obstacles is not None and state.net_obstacles_cache is not None:
@@ -1725,7 +1774,8 @@ def _reroute_phase3_ripped_nets(
                     tap_obstacles, _ = build_incremental_obstacles(
                         state.working_obstacles, pcb_data, config, ripped_net_id,
                         all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                        state.net_obstacles_cache
+                        state.net_obstacles_cache,
+                        state.ripped_route_layer_costs, state.ripped_route_via_positions
                     )
                 else:
                     tap_obstacles = obstacles
@@ -1774,6 +1824,11 @@ def _reroute_phase3_ripped_nets(
                     if tap_segments or tap_vias:
                         tap_result_data = {'new_segments': tap_segments, 'new_vias': tap_vias}
                         add_route_to_pcb_data(pcb_data, tap_result_data, debug_lines=config.debug_lines)
+                        fragility_on_copper_change(config, pcb_data,      # #466
+                                                   tap_segments, tap_vias)
+                        track_proximity_cache[ripped_net_id] = \
+                            compute_track_proximity_for_net(
+                                pcb_data, ripped_net_id, config, layer_map)
                         print(f"    Re-routed {len(tap_segments)} tap segments, {len(tap_vias)} tap vias")
 
                         # IMPORTANT: Update tap_result['new_segments'] to match what's in pcb_data
@@ -1831,6 +1886,36 @@ def _reroute_phase3_ripped_nets(
         # treating them as strandings vetoes beneficial rip-ups and lowers
         # overall connectivity. Entries are
         # ((net_id, saved_result, ripped_ids, was_in_results), pads_lost).
+        if routed_results.get(ripped_net_id) is None:
+            # #1156 (#468, #655): a victim whose reroute failed must not ship
+            # with LESS copper than it started with. Phase 3 never asked: the
+            # #468 restore lived only in the reroute queue, so glasgow's
+            # /IO_Banks/U5 left this path with 0 segments and 0 vias, its BGA
+            # via-in-pad escape gone. Conflict-free saved copper comes back
+            # whole; otherwise the escape stub that still clears does. The
+            # call is idempotent, so a later abandon re-route of the same
+            # victim finds the stub and routes from it.
+            from rip_restore import try_terminal_restore
+            _tr = try_terminal_restore(
+                pcb_data, config, ripped_net_id,
+                working_obstacles=state.working_obstacles,
+                net_obstacles_cache=state.net_obstacles_cache)
+            if _tr in ('full', 'full_open'):
+                _sv, _rids, _wir = pcb_data._rip_saved[ripped_net_id]
+                restore_net(ripped_net_id, _sv, _rids, _wir,
+                            pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, diff_pair_by_net_id,
+                            remaining_net_ids, results, config,
+                            track_proximity_cache, layer_map,
+                            state.working_obstacles, state.net_obstacles_cache,
+                            state.ripped_route_layer_costs,
+                            state.ripped_route_via_positions,
+                            refused_sink=state.collision_refused_net_ids)
+                state.terminal_restores[ripped_net_id] = _tr
+                print(f"    RIP-RESTORE (#468): {net_name} back on its pre-rip "
+                      f"copper ({'connected' if _tr == 'full' else 'still OPEN'})")
+            elif _tr == 'stub':
+                state.terminal_restores[ripped_net_id] = 'stub'
         if routed_results.get(ripped_net_id) is None:
             item = (ripped_net_id, saved_result, ripped_ids, was_in_results)
             num_pads = len(pcb_data.pads_by_net.get(ripped_net_id, []))
@@ -1926,7 +2011,7 @@ def seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
         history_conflict=False)   # #590: own-tree re-ask, not contention
     if saved is None:
         return False
-    cfg_polish = _dc_replace(config, max_rip_up_count=0)
+    cfg_polish = carry_run_state(config, _dc_replace(config, max_rip_up_count=0))
     _reroute_phase3_ripped_nets(
         [(net_id, saved, ripped_ids, was_in)], pcb_data, cfg_polish, state,
         routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
@@ -2040,7 +2125,7 @@ def se_seam_reask(state, pcb_data, config, base_obstacles, gnd_net_id,
         return 0
     print(f"\n=== #444 SE seam re-ask: {len(candidates)} composed tree(s) "
           f"above {ratio_floor:.2f}x MST bound ===")
-    cfg_polish = _dc_replace(config, max_rip_up_count=0)
+    cfg_polish = carry_run_state(config, _dc_replace(config, max_rip_up_count=0))
     improved = 0
     for _ratio, _old_len, nid in candidates:
         name = pcb_data.nets[nid].name if nid in pcb_data.nets else str(nid)

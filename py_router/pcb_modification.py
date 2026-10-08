@@ -12,6 +12,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via
 from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
+from geometry_utils import point_to_segment_distance
 
 # Read once at import: both are checked inside per-segment cleanup loops (hot).
 _COLLAPSE_DEBUG = os.environ.get('KICAD_COLLAPSE_DEBUG')
@@ -72,8 +73,9 @@ def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
                     continue
                 t = ((x - s.start_x) * dx + (y - s.start_y) * dy) / seg_len_sq
                 # Strictly interior (endpoints are handled by the degree count) so a
-                # shared endpoint isn't double-counted as a T-junction.
-                if t <= 0.02 or t >= 0.98:
+                # shared endpoint isn't double-counted as a T-junction. Interior is
+                # a distance from both ends, not a fraction of the length (#1186).
+                if not lands_on_interior(t, seg_len_sq, tol):
                     continue
                 cx = s.start_x + t * dx
                 cy = s.start_y + t * dy
@@ -200,7 +202,7 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
 from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
-                          endpoint_reaches_via)
+                          endpoint_reaches_via, lands_on_interior)
 _STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
@@ -797,8 +799,9 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
 # round-capped segment meeting a convex pad rectangle) that erosion has an exact
 # closed form -- no shapely, so it runs in the KiCad-python GUI front too: in the
 # pad's axis-aligned local frame the eroded track is the segment buffered by
-# (r - e) (r = track half-width, e = floor/2, and r >= e because floor is the
-# thinnest track on the board), and the eroded pad is the rectangle shrunk by e.
+# (r - e) (r = track half-width, e = floor/2; a track with r < e is skipped,
+# since no floor-width web can exist through it), and the eroded pad is the
+# rectangle shrunk by e. The floor is the project's (connection_width_floor).
 # The joint survives IFF that buffered segment reaches the shrunk rectangle, i.e.
 #   dist(segment, pad_rect_shrunk_by_e) <= r - e.
 # When it does not, close_soft_joints adds a short connector from the endpoint to
@@ -854,11 +857,24 @@ def terminal_pad_web_shortfall(nlx, nly, elx, ely, hx, hy, r, e,
     return True, (tlx, tly)
 
 
+#: The exact web test's window: copper farther than this from the endpoint is
+#: not in its union, so removing it cannot change the verdict there.
+TERMINAL_WEB_RADIUS = 3.0
+
+
 def _pad_web_polygon(pad):
     """Shapely polygon of a pad's copper for the connection_width erosion test
-    (mirrors tests/stress/classify_connection_width.py). None for no-copper
-    NPTH pads or degenerate sizes."""
-    from shapely.geometry import Point, box
+    (tests/stress/classify_connection_width.py calls this). None for no-copper
+    NPTH pads or degenerate sizes.
+
+    Rounded shapes are built OUTWARD from their core, never by eroding the
+    box (#1161): an oval is the segment between its foci (a point when the
+    axes are equal) grown by half its short axis, and a roundrect is its box
+    shrunk by the corner radius and grown back. ``box.buffer(-r)`` with r the
+    half short axis collapsed every oval to an EMPTY polygon, so the exact
+    test never saw a pin-header pad. The roundrect radius is KiCad's:
+    rratio x the FULL short side, not the half side."""
+    from shapely.geometry import LineString, Point, box
     import shapely.affinity as aff
     if getattr(pad, 'pad_type', None) == 'np_thru_hole':
         return None
@@ -866,14 +882,27 @@ def _pad_web_polygon(pad):
     h = (pad.size_y or 0) / 2.0
     if w <= 0 or h <= 0:
         return None
+    cx, cy = pad.global_x, pad.global_y
     if pad.shape == 'circle':
-        return Point(pad.global_x, pad.global_y).buffer(w, quad_segs=32)
-    shp = box(pad.global_x - w, pad.global_y - h, pad.global_x + w, pad.global_y + h)
-    if pad.shape in ('oval', 'roundrect'):
-        rr = min(w, h) * (1.0 if pad.shape == 'oval'
-                          else (getattr(pad, 'roundrect_rratio', 0.25) or 0.25))
-        if rr > 1e-6:
-            shp = shp.buffer(-rr).buffer(rr, quad_segs=16)
+        return Point(cx, cy).buffer(w, quad_segs=32)
+    if pad.shape == 'oval':
+        rr = min(w, h)
+    elif pad.shape == 'roundrect':
+        rr = 2.0 * min(w, h) * (getattr(pad, 'roundrect_rratio', 0.25) or 0.25)
+    else:
+        rr = 0.0
+    rr = min(rr, w, h)
+    if rr <= 1e-6:
+        shp = box(cx - w, cy - h, cx + w, cy + h)
+    else:
+        ix, iy = w - rr, h - rr
+        if ix <= 1e-9 and iy <= 1e-9:
+            core = Point(cx, cy)
+        elif ix <= 1e-9 or iy <= 1e-9:
+            core = LineString([(cx - ix, cy - iy), (cx + ix, cy + iy)])
+        else:
+            core = box(cx - ix, cy - iy, cx + ix, cy + iy)
+        shp = core.buffer(rr, quad_segs=32)
     rot = getattr(pad, 'rect_rotation', 0) or 0
     if rot:
         shp = aff.rotate(shp, rot, origin=(pad.global_x, pad.global_y))
@@ -928,7 +957,7 @@ def circular_pad_web_shortfall(elx, ely, R, r, e, target_margin=0.0):
 
 
 def terminal_web_neck_exact(pcb_data, net_id, layer, ex, ey, floor,
-                            radius=3.0):
+                            radius=TERMINAL_WEB_RADIUS):
     """EXACT connection_width neck test at a terminal endpoint (ex, ey), by
     KiCad's own method: union the net's LOCAL copper on ``layer`` (same-net
     round-capped segments + pads within ``radius`` mm), erode by floor/2, and
@@ -975,14 +1004,14 @@ def terminal_web_neck_exact(pcb_data, net_id, layer, ex, ey, floor,
 
 
 def _board_min_track_width(pcb_data, scope_net_ids, config) -> float:
-    """The connection_width grading floor: the thinnest track on the board
-    (KiCad's scan_board_minima). Falls back to the configured track width."""
-    widths = [s.width for s in pcb_data.segments
-              if not getattr(s, 'graphic', False) and s.width and s.width > 0]
-    cfg_w = getattr(config, 'track_width', 0.0) or 0.0
-    if cfg_w > 0:
-        widths.append(cfg_w)
-    return min(widths) if widths else (cfg_w or 0.1)
+    """The connection_width floor the board ships graded at
+    (fix_kicad_drc_settings.connection_width_floor, #1187): the project's,
+    lowered to the run's track width and the thinnest track, as the
+    writeback will lower it. 0.1 when nothing records a floor."""
+    from fix_kicad_drc_settings import connection_width_floor
+    return connection_width_floor(
+        pcb_data, getattr(config, 'track_width', 0.0) or 0.0,
+        shipped=True) or 0.1
 
 
 def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
@@ -2187,7 +2216,7 @@ class StrictRemovalModel:
       * no NEW soft joint (#319: _soft_joint_pairs, the guard every
         subtractive pass runs), and no NEW narrow pad joint (#416: a terminal
         whose cap meets its pad through a web under ``web_floor``, the
-        board's thinnest track -- check_weird's narrow-pad-joint).
+        board's connection_width floor -- check_weird's narrow-pad-joint).
 
     Candidates are unlocked, non-graphic track segments outside
     ``readonly_ids``. They are tried in UNITS: every single segment, and every
@@ -2342,7 +2371,7 @@ class StrictRemovalModel:
             if L2 < 1e-9:
                 continue
             t = ((x - o.start_x) * dx + (y - o.start_y) * dy) / L2
-            if t <= 0.02 or t >= 0.98:
+            if not lands_on_interior(t, L2, tol):              # #1186
                 continue
             if math.hypot(x - (o.start_x + t * dx), y - (o.start_y + t * dy)) < \
                     max(tol, (o.width or 0.0) / 2 + 0.025):
@@ -2438,6 +2467,27 @@ class StrictRemovalModel:
                 return False
             if self._narrow_terminal(n, E) and not self._narrow_terminal(n, prev_E):
                 return False
+        # #1161: removed copper narrows a terminal's web wherever it sat in
+        # the exact test's window, not only at its own ends -- an in-pad
+        # wiggle widening a neighbouring end's joint is a different unit.
+        # Re-test every terminal end on a removed segment's layer within
+        # TERMINAL_WEB_RADIUS of it (vias are not in the web union).
+        if self._web_floor > 0:
+            gone = [self.segs[i] for i in E if i not in prev_E]
+            for i, s in enumerate(self.segs):
+                if i in E or getattr(s, 'graphic', False):
+                    continue
+                for (x, y), n in zip(((s.start_x, s.start_y), (s.end_x, s.end_y)),
+                                     self._seg_nodes[i]):
+                    if n in nodes or not any(
+                            g.layer == s.layer and point_to_segment_distance(
+                                x, y, g.start_x, g.start_y, g.end_x, g.end_y)
+                            < TERMINAL_WEB_RADIUS for g in gone):
+                        continue
+                    nodes.add(n)
+                    if self._narrow_terminal(n, E) and \
+                            not self._narrow_terminal(n, prev_E):
+                        return False
         return True
 
     # ---- the predicate ------------------------------------------------------
@@ -2623,6 +2673,162 @@ def strict_removable_segments(model) -> set:
     return out
 
 
+def sweep_dangling_via_branches(board, net_ids, protected_ids=frozenset(),
+                                max_rounds: int = 32, stats=None):
+    """Remove every via check_weird calls dangling or floating on ``net_ids``,
+    with the dead branch it ends (#1166). Mutates ``board.segments`` /
+    ``board.vias``; returns ``(removed segments, removed vias)``.
+
+    A via reached on one layer only joins nothing (KiCad's ``via_dangling``),
+    and no other pass removes one: prune_dead_end_segments and the sweep
+    count ANY same-net via as an anchor, so a branch ending on one is never a
+    dead end; trim_net_stub_debris skips multipoint nets; the strict collapse
+    never makes an input via worse and its units stop at vertices. StickHub
+    VIN shipped such a via ending a 6.8 mm spur; One-Air-Max shipped dead
+    branches running via to via, so removing one exposes the next.
+
+    Candidates are graded by the checker's own model (check_weird
+    ``via_support_parts``: tracks, pads and zones reaching the barrel). What
+    goes is the via and the chain its one supported layer carries away: from
+    the barrel through every plain vertex (exactly two segment ends meeting,
+    no via, pad or zone there) up to the first junction, tee, pad, via, zone
+    or free end. A via with several segments on its one layer goes alone.
+    Every removal is GATED on the net, before vs after: the pads stay as
+    connected as they were (check_net_connectivity), no dangling end appears
+    where there was none, and no new soft joint and no more dangling or
+    floating vias appear (a via the
+    removal exposes is the next round's candidate, so the pass iterates to a
+    fixed point). A net with a pad still disconnected is left alone: its
+    copper is what the next chain step welds to (#473). A pad is never
+    removed. Locked copper and ``protected_ids``
+    (``id()`` of input copper under --keep-input-copper) are never touched,
+    and a removal that would need one is skipped."""
+    from collections import defaultdict
+    from check_weird import (via_support_parts, _check_dangles,
+                             _check_unsupported_vias)
+    from check_connected import (check_net_connectivity, _point_in_pad,
+                                 point_in_polygon)
+    copper = list(getattr(board.board_info, 'copper_layers', None)
+                  or ['F.Cu', 'B.Cu'])
+    removed_s, removed_v = [], []
+    tol = 1e-3
+
+    def grade(nid, segs, vias, pads, zones):
+        r = check_net_connectivity(nid, segs, vias, pads, zones)
+        f = []
+        _check_dangles(nid, '', segs, vias, pads, zones, set(), f,
+                       copper_layers=copper)
+        _check_unsupported_vias(nid, '', segs, vias, pads, zones, copper, f)
+        return (len(r.get('disconnected_pads') or ()),
+                {(x['layer'], round(x['x'], 3), round(x['y'], 3))
+                 for x in f if x['category'] == 'dangling-end'},
+                sum(1 for x in f if x['category'] in ('dangling-via',
+                                                      'unsupported-via')),
+                _soft_joint_pairs(segs, vias, pads))
+
+    def keep_out(item):
+        return getattr(item, 'locked', False) or id(item) in protected_ids
+
+    def chain_from(v, s0, layer, segs, vias, pads, zones):
+        """The segments a dangling via's one layer carries away, or None."""
+        r = (getattr(v, 'size', 0.6) or 0.6) / 2.0
+        chain, cur = [s0], s0
+        # The far end is the one away from the barrel.
+        da = math.hypot(cur.start_x - v.x, cur.start_y - v.y)
+        db = math.hypot(cur.end_x - v.x, cur.end_y - v.y)
+        q = (cur.end_x, cur.end_y) if da <= db else (cur.start_x, cur.start_y)
+        while True:
+            if any(math.hypot(w.x - q[0], w.y - q[1]) <
+                   (getattr(w, 'size', 0.6) or 0.6) / 2.0 for w in vias
+                   if w is not v):
+                return chain
+            if any(_point_in_pad(q[0], q[1], p, margin=0.0) for p in pads
+                   if layer in (p.layers or ()) or any('*' in L for L in (p.layers or ()))
+                   or (p.drill and p.drill > 0)):
+                return chain
+            if any(z.layer == layer and point_in_polygon(q[0], q[1], z.polygon)
+                   for z in zones):
+                return chain
+            if math.hypot(q[0] - v.x, q[1] - v.y) < r:
+                return None        # the chain came back to its own via
+            ids = {id(c) for c in chain}
+            nxt = [o for o in segs if o.layer == layer and id(o) not in ids
+                   and (math.hypot(o.start_x - q[0], o.start_y - q[1]) < tol
+                        or math.hypot(o.end_x - q[0], o.end_y - q[1]) < tol)]
+            if len(nxt) != 1:
+                return chain       # a free end (0) or a junction (2+)
+            o = nxt[0]
+            if keep_out(o) or getattr(o, 'graphic', False):
+                return chain
+            chain.append(o)
+            q = ((o.end_x, o.end_y)
+                 if math.hypot(o.start_x - q[0], o.start_y - q[1]) < tol
+                 else (o.start_x, o.start_y))
+            if len(chain) > 4096:
+                return None
+
+    for _round in range(max_rounds):
+        progressed = False
+        for nid in sorted(net_ids):
+            segs = [s for s in board.segments if s.net_id == nid]
+            vias = [v for v in board.vias if v.net_id == nid]
+            if not vias:
+                continue
+            pads = board.pads_by_net.get(nid, [])
+            zones = [z for z in (getattr(board, 'zones', None) or [])
+                     if z.net_id == nid]
+            base = None
+            for v in list(vias):
+                if keep_out(v) or not any(w is v for w in vias):
+                    continue
+                span, fixed, by_seg = via_support_parts(v, segs, pads, zones,
+                                                        copper)
+                sup = set(fixed) | set(by_seg.values())
+                if len(sup) >= 2 or (len(sup) == 1 and len(span) <= 1):
+                    continue
+                gone_s = []
+                tsegs = [segs[i] for i in by_seg]
+                if len(sup) == 1 and not fixed and len(tsegs) == 1:
+                    s0 = tsegs[0]
+                    if keep_out(s0) or getattr(s0, 'graphic', False):
+                        continue
+                    gone_s = chain_from(v, s0, next(iter(sup)), segs, vias,
+                                        pads, zones)
+                    if gone_s is None:
+                        continue
+                if base is None:
+                    base = grade(nid, segs, vias, pads, zones)
+                if base[0]:
+                    # An UNFINISHED net keeps its copper (#473): a dangling
+                    # via there may be the landing site the next chain step
+                    # welds to, as the orphan sweep already respects.
+                    break
+                gid = {id(x) for x in gone_s}
+                t_segs = [s for s in segs if id(s) not in gid]
+                t_vias = [w for w in vias if w is not v]
+                after = grade(nid, t_segs, t_vias, pads, zones)
+                # No pad less connected, no dangling end where there was
+                # none (a branch another track tees into would free that
+                # track's end), no more dangling vias, no new soft joint.
+                if (after[0] > base[0] or (after[1] - base[1])
+                        or after[2] > base[2] or (after[3] - base[3])):
+                    continue
+                segs, vias, base = t_segs, t_vias, after
+                removed_s.extend(gone_s)
+                removed_v.append(v)
+                progressed = True
+        if removed_s or removed_v:
+            gs = {id(x) for x in removed_s}
+            gv = {id(x) for x in removed_v}
+            board.segments = [s for s in board.segments if id(s) not in gs]
+            board.vias = [v for v in board.vias if id(v) not in gv]
+        if not progressed:
+            break
+    if stats is not None:
+        stats['nets'] = len({x.net_id for x in removed_s + removed_v})
+    return removed_s, removed_v
+
+
 def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
                               keep_input_copper: bool = False,
                               protect_segment_ids=None,
@@ -2679,11 +2885,10 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
     vias_by_net = defaultdict(list)
     for v in pcb_data.vias:
         vias_by_net[v.net_id].append(v)
-    # The narrow-pad-joint floor as check_weird reads it: the thinnest track
-    # on the whole board (KiCad's scan_board_minima min_track_width).
-    _widths = [s.width for s in pcb_data.segments
-               if not getattr(s, 'graphic', False) and s.width and s.width > 0]
-    web_floor = min(_widths) if _widths else 0.0
+    # The narrow-pad-joint floor the board ships graded at: the project's,
+    # lowered as the writeback will lower it (connection_width_floor, #1187).
+    from fix_kicad_drc_settings import connection_width_floor
+    web_floor = connection_width_floor(pcb_data, shipped=True)
 
     removed_ids = set()
     dropped_via_ids = set()
@@ -7122,6 +7327,19 @@ def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
         new_net_obj = pcb_data.nets.get(new_net)
         if new_net_obj is not None:
             new_net_obj.pads.append(pad)
+
+
+def bump_copper_epoch(pcb_data) -> None:
+    """Mark pcb_data's copper as changed.
+
+    Memos that cache work derived from the copper key on this counter:
+    net_rescue's pristine rescue maps, the chip-pad escape memo
+    (net_queries._attach_pts_memo), the block-id geometry and via-placement
+    failure memos. add/remove_route_to_pcb_data bump it; a pass that edits
+    pcb_data.segments / .vias any other way -- in place, or by replacing the
+    lists -- must call this, or a later lookup serves work derived from copper
+    that no longer exists."""
+    pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
 
 
 def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = False,

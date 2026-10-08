@@ -16,10 +16,12 @@ grader, do not mirror it": a re-implementation disagreed 83 times, worst
 0.234mm). Where a call is impossible, the AGREEMENT has to be measured instead
 of assumed, and that is what the last case does.
 
-The verdict must not move. `check_assembly`'s five `not_buildable` conjuncts
-do not include either channel and this change does not add one -- gating on
-the coarse count would flip two human reference boards on a measurement
-artifact, which is the finding that produced this split in the first place.
+The verdict must not move on these boards. Gating on the COARSE count would
+flip two human reference boards on a measurement artifact, which is the
+finding that produced this split in the first place. #1096 made the per-pad
+channel's GATING subset a `not_buildable` conjunct -- a real distance past the
+outline on the true pad outlines, castellated pads left out -- and the
+census below is the argument that it flips no human reference board.
 """
 import json
 import os
@@ -106,10 +108,10 @@ def t_the_verdict_does_not_move():
     nb = sorted(n for n, (v, _c) in verdicts.items() if v != 'buildable '
                 '(blocking 0)')
     assert nb == ['rp2350_fpga_eensy_prePlane'], (
-        f'the NOT BUILDABLE set moved to {nb}. Neither off-outline channel is '
-        f'a not_buildable conjunct, and making one would flip human reference '
-        f'boards on a measurement artifact -- if that is intended, it is a '
-        f'decision to argue for here.')
+        f'the NOT BUILDABLE set moved to {nb}. Only the per-pad channel GATING '
+        f'subset is a not_buildable conjunct (#1096), and it must flip '
+        f'no human reference board -- a change that does is a decision to '
+        f'argue for here.')
     for name, (_v, code) in verdicts.items():
         assert code in (0, 4), f'{name} exited {code}'
     print(f'  PASS: {len(verdicts)} boards, 1 NOT BUILDABLE '

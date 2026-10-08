@@ -167,7 +167,7 @@ def main():
         name = net.name if net else f"net{net_id}"
         if args.net and name != args.net:
             continue
-        if args.nets and not fnmatch.fnmatch(name, args.nets):
+        if args.nets and not fnmatch.fnmatchcase(name, args.nets):
             continue
         is_zone = net_id in zoned
         if is_zone and not args.all and not args.net:

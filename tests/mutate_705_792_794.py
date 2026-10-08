@@ -133,9 +133,14 @@ ROWS = [
     # branch that already required `power & ic_nets[c]` to be non-empty. Kept
     # rather than dropped so it starts failing the day the election's shape
     # changes enough to make the branch reachable again.
+    # RE-SPELLED: `_elect_tethers` no longer binds a `nets` local, so the old
+    # mutant raised NameError on the first elected cap and read KILLED -- a
+    # survivor-row turned "WRONG" by a crash, not by a reachable branch (it
+    # did so at upstream main 8c739ec3 too). The mutant now spells the cap's
+    # nets itself, exactly as the deleted line read them.
     ('the-dead-electrical-recheck-is-restored', 'grp',
      "        out.append((ref, best, best_d))\n",
-     "        if best is not None and not (nets & ic_nets.get(best, set())):\n"
+     "        if best is not None and not ({p.net_id for p in fp.pads if p.net_id > 0} & ic_nets.get(best, set())):\n"
      "            continue\n"
      "        out.append((ref, best, best_d))\n",
      (T792P, T704), 'SURVIVED'),
@@ -186,7 +191,7 @@ ROWS = [
 
     ('the-pin-rules-exempt-filter-is-deleted', 'fp',
      "    caps = [c for c in on_rail\n"
-     "            if not any(fnmatch.fnmatch(c.reference, pat) for pat in exempt)]\n",
+     "            if not any(fnmatch.fnmatchcase(c.reference, pat) for pat in exempt)]\n",
      "    caps = list(on_rail)\n",
      (T705,), 'KILLED'),
 
@@ -242,10 +247,10 @@ ROWS = [
      "                    | {c for c, _ic, _d in beyond})\n"
      "        decap_scope = {r for r in tethered\n"
      "                       if r in state.parts\n"
-     "                       and not any(fnmatch.fnmatch(r, pat) for pat in exempt)}\n",
+     "                       and not any(fnmatch.fnmatchcase(r, pat) for pat in exempt)}\n",
      "        decap_scope = {r for r in state.parts\n"
      "                       if r[0] == 'C' and state.parts[r].pin_count == 2\n"
-     "                       and not any(fnmatch.fnmatch(r, pat) for pat in exempt)}\n",
+     "                       and not any(fnmatch.fnmatchcase(r, pat) for pat in exempt)}\n",
      (T792S,), 'KILLED'),
 
     ('the-put-back-is-deleted', 'sdr',

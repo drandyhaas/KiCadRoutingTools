@@ -16,6 +16,11 @@ import shutil
 import sys
 import tempfile
 
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # fixture_boards
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
@@ -95,7 +100,7 @@ def _count_renderers(boards, **kw):
     set_view calls, and capturing stderr."""
     import contextlib
     import io
-    made = {'ctor': 0, 'set_view': 0}
+    made = {'ctor': 0, 'set_view': 0, 'aims': 0}
     orig = RR.BoardRenderer
 
     class Counting(orig):
@@ -105,6 +110,10 @@ def _count_renderers(boards, **kw):
 
         def set_view(self, *a, **k):
             made['set_view'] += 1
+            # an AIM is a view; `set_view(None)` is the board re-fitting its
+            # own box (`__init__`, and `set_canvas` on a planned layout)
+            if (a[0] if a else k.get('view')) is not None:
+                made['aims'] += 1
             return super().set_view(*a, **k)
 
     RR.BoardRenderer = Counting
@@ -147,8 +156,10 @@ def test_no_stage_means_no_camera_and_one_renderer():
         made, err = _count_renderers(boards, **kw)
         assert made['ctor'] == 1, (why, f"{made['ctor']} renderers built "
                                    "(expected 1)")
-        # exactly the one inside __init__; the camera never aims it
-        assert made['set_view'] == 1, (why, made['set_view'])
+        # the camera never AIMS it. (#1081: the default film is stage3d, a
+        # planned layout, whose `set_canvas` re-fits the board box with a
+        # second set_view(None) -- not an aim; legacy has only __init__'s.)
+        assert made['aims'] == 0, (why, made)
         assert 'camera auto' not in err, (why, err)
 
 
@@ -159,8 +170,7 @@ def test_a_placement_chain_turns_the_camera_on_by_itself():
     so on stderr, even under quiet=True."""
     made, err = _count_renderers([SEED, PLACED])
     assert 'camera auto' in err, err
-    assert made['set_view'] > 1, ('the stage never aimed the camera',
-                                  made['set_view'])
+    assert made['aims'] > 0, ('the stage never aimed the camera', made)
     # --camera off on the same chain says what it skipped only when there is
     # something to skip: interf_u's boards carry no copper, and the whole chain
     # being copper-free is not "leading" boards skipped before routing.
@@ -285,17 +295,25 @@ def test_each_step_draws_its_own_boards_pads():
     every frame used to draw the final board's pads -- so a film opening on an
     unplaced pile showed the finished placement from frame one. Each step now
     re-points `r.pcb` at its own board. The opening frame of [SEED, PLACED]
-    must therefore be SEED's picture, not PLACED's."""
+    must therefore be SEED's picture, not PLACED's -- in the BOARD BOX: the
+    stage3d chrome around it (the rail's step label and progress, the layer
+    column) legitimately differs between a one-step and a two-step film."""
+    geom = []
     fr = A.build_boards([('seed', SEED, None), ('placed', PLACED, None)],
-                        PLACED, 200, 1, 150, 2, 6)
+                        PLACED, 200, 1, 150, 2, 6, geom_out=geom)
     seed_only = A.build_boards([('seed', SEED, None)], PLACED, 200, 1, 150, 2,
                                6)
     placed_only = A.build_boards([('placed', PLACED, None)], PLACED, 200, 1,
                                  150, 2, 6)
-    assert ImageChops.difference(fr[0].convert('RGB'),
-                                 seed_only[0].convert('RGB')).getbbox() is None
-    assert ImageChops.difference(fr[0].convert('RGB'),
-                                 placed_only[0].convert('RGB')).getbbox(), \
+    b = geom[0].board
+    box = (b.x, b.y, b.x + b.w, b.y + b.h)
+
+    def _board(f):
+        return f.convert('RGB').crop(box)
+    assert ImageChops.difference(_board(fr[0]),
+                                 _board(seed_only[0])).getbbox() is None
+    assert ImageChops.difference(_board(fr[0]),
+                                 _board(placed_only[0])).getbbox(), \
         'the opening frame still shows the FINAL board\'s pads'
 
 
@@ -440,12 +458,22 @@ def test_sidecar_loader_orders_by_round_not_by_name():
 
 # --- the camera in the pipeline ---------------------------------------------
 
+#: The last `_camera_frames` film's board box: the stage3d rail's progress
+#: bar advances on EVERY frame, so "the camera held" is a claim about the
+#: board box, not the whole frame.
+_BOARD_BOX = []
+
+
 def _camera_frames(size=240):
     d, n_moved = _work_dir()
     try:
         steps, final = MM.placement_chain(d)
         stage = Stage(load_round_sidecars(d), d, tween=6)
-        frames = A.build_boards(steps, final, size, 1, 150, 2, 6, stage=stage)
+        geom = []
+        frames = A.build_boards(steps, final, size, 1, 150, 2, 6, stage=stage,
+                                geom_out=geom)
+        b = geom[0].board
+        _BOARD_BOX[:] = [(b.x, b.y, b.x + b.w, b.y + b.h)]
         return frames, stage, n_moved
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -469,8 +497,11 @@ def test_the_camera_moves_and_then_holds():
     kinds = [k for k, _a, _b in log]
     assert 'establish' in kinds or 'transit' in kinds, kinds
 
+    box = _BOARD_BOX[0]
+
     def changed(i):
-        return ImageChops.difference(frames[i], frames[i + 1]).getbbox() is not None
+        return ImageChops.difference(frames[i].crop(box),
+                                     frames[i + 1].crop(box)).getbbox() is not None
 
     moved_any = False
     for kind, a, b in log:
@@ -594,10 +625,14 @@ def test_going_to_the_back_flips_the_board_and_mirrors_what_follows():
         assert flipped.tobytes() == ImageOps.mirror(plain).tobytes(),             "a frame emitted while looking at the back is not mirrored"
         assert flipped.tobytes() != plain.tobytes(), "the board is symmetric?"
 
-        # ...and the caption survives the flip the right way up: a mirrored
-        # frame WITH a caption must differ from the plain mirror.
+        # ...and the caption: every film frame has a rail (stage3d is the
+        # only film layout), so the caption is the RAIL's, drawn upright when
+        # the frame is composed -- none is stamped on the mirrored board. (The
+        # over-board caption that had to survive the flip upright was the
+        # rail-less legacy frame's, and went with it.)
+        assert st.movie.split_caption
         st._snap('round 2')
-        assert st.movie.frames[-1].tobytes() != flipped.tobytes()
+        assert st.movie.frames[-1].tobytes() == flipped.tobytes()
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

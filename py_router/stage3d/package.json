@@ -1,0 +1,11 @@
+{
+  "name": "krt-stage3d",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless renderer for the stage3d film's 3D board (#1081): drives the vendored three.js page in Chromium.",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "1.58.2"
+  }
+}

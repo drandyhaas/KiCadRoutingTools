@@ -844,10 +844,15 @@ def sync_pcb_data_segments(
     if not routed_results:
         return
 
+    # Rebuilds the copper lists in place (no add/remove_route): invalidate
+    # what was cached against the old ones.
+    from pcb_modification import bump_copper_epoch
+    bump_copper_epoch(pcb_data)
     routed_net_ids_set = set(routed_results.keys())
     seg_count_before = len(pcb_data.segments)
 
     # Remove only ROUTED segments (not original stubs) for routed nets
+    _old_segments = pcb_data.segments
     pcb_data.segments = [s for s in pcb_data.segments
                          if s.net_id not in routed_net_ids_set or id(s) in original_segment_ids]
     seg_count_after_remove = len(pcb_data.segments)
@@ -867,6 +872,24 @@ def sync_pcb_data_segments(
             pcb_data.segments.append(seg)
             total_added += 1
     print(f"\nSync pcb_data: {seg_count_before} -> {seg_count_after_remove} (kept stubs) -> {len(pcb_data.segments)} (after adding {total_added})")
+    # #466: the meanders moved copper the plane-fragility field has carved;
+    # refresh the windows of what left and what arrived.
+    if config is not None:
+        from plane_fragility import fragility_on_copper_change
+        _kept = set(id(s) for s in pcb_data.segments)
+        _moved = ([s for s in _old_segments if id(s) not in _kept]
+                  + [s for s in pcb_data.segments if s.net_id in routed_net_ids_set
+                     and id(s) not in original_segment_ids])
+        fragility_on_copper_change(config, pcb_data, _moved, [])
+        # The meandered nets' track-proximity fields follow their copper.
+        _tpc = getattr(state, 'track_proximity_cache', None) if state else None
+        _lm = getattr(state, 'layer_map', None) if state else None
+        if _tpc is not None and _lm is not None:
+            from obstacle_costs import compute_track_proximity_for_net
+            for _nid in routed_results:
+                if _nid in _tpc:
+                    _tpc[_nid] = compute_track_proximity_for_net(
+                        pcb_data, _nid, config, _lm)
 
     # Same reconciliation for VIAS (#874). Identity, not geometry: two distinct
     # objects at one point are two real barrels, and the writer holds each once.

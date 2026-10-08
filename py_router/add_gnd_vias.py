@@ -89,7 +89,8 @@ def add_gnd_vias_to_existing_board(
     signal_vias = [v for v in pcb_data.vias if v.net_id not in ground_ids and v.net_id != 0]
 
     if not signal_vias:
-        print("No signal vias found in board")
+        print("No signal vias found in board -- nothing needs a return via yet; a chain pours its planes before any "
+              "fanout or routing (#562), so run the GND return vias after routing")
         return []
 
     print(f"Checking {len(signal_vias)} signal vias for GND via placement")

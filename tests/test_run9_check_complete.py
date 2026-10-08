@@ -109,12 +109,26 @@ def main():
 
         # Declare a floor the board's own copper does not meet. This is the
         # ratchet's shape: the project once said one thing, the copper says
-        # another, and every checker reads the project.
+        # another, and every checker reads the project. The original board
+        # MEETS it -- its holes are 0.1 mm larger -- because a floor the
+        # original breaks too is the reference's, not this board's (#1198).
+        import re
         authored = os.path.join(tmp, 'authored.kicad_pcb')
-        shutil.copyfile(b, authored)
+        with open(b, encoding='utf-8') as fh:
+            text = fh.read()
+        with open(authored, 'w', encoding='utf-8') as fh:
+            fh.write(re.sub(r'\(drill (oval )?([0-9.]+)( [0-9.]+)?',
+                            lambda m: '(drill ' + (m.group(1) or '') + ' '.join(
+                                f'{float(x) + 0.1:g}' for x in
+                                (m.group(2), *(m.group(3) or '').split())),
+                            text))
         doc = {'board': {'design_settings': {'rules': {key: got + 0.05}}}}
         json.dump(doc, open(os.path.join(tmp, 'authored.kicad_pro'), 'w',
                             encoding='utf-8'))
+        ref_min = (scan_board_minima(authored) or {}).get(key)
+        check('the original board meets the declared floor',
+              isinstance(ref_min, (int, float)) and ref_min >= got + 0.05,
+              f'{key} {ref_min} vs {got + 0.05}')
 
         code, out = run(b, '--clearance', '0.15', '--skip-slow',
                         '--authored-from', authored)

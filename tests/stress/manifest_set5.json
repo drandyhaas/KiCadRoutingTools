@@ -184,7 +184,7 @@
     "packages": "4-layer,USB,MCU",
     "license": "see repo",
     "short_name": "core1106_cam",
-    "note": "Core1106 (RK-style) stereo camera board, 4-layer MIPI"
+    "note": "Core1106 (RK-style) stereo camera board, 4-layer MIPI. Source gone (checked 2026-10-08): repo exie1122/core1106-stereo-camera deleted or made private (owner still active, no successor repo); no fork, Software Heritage or Wayback copy. The only surviving copy is the corpus volume's re-saved board."
   },
   {
     "set": "set5",

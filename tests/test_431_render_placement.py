@@ -456,7 +456,9 @@ def test_json_out_writes_a_file_with_instrument_and_checklist():
         # #962 added the footprint GRAPHIC copper channel (and what it could
         # not measure) beside the two #937 channels. #1031 added the
         # rule-area keep-out band channel, always emitted.
+        # #1096 added the GATING subset of the pad channel.
         assert set(cl['a_off_outline']) == {'pad_copper', 'courtyard',
+                                            'pad_copper_gating',
                                             'graphic_copper',
                                             'graphic_copper_unmeasured',
                                             'keepout_copper',

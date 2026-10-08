@@ -248,9 +248,12 @@ class ConnectorGeometry:
         Pose-independent (local frame), so it is decided once per part."""
         hit = self._encloses.get(ref)
         if hit is None:
-            pads = ([p for p in (fp.pads or ())
-                     if getattr(p, 'pad_type', '') != 'np_thru_hole']
-                    or list(fp.pads or ()))
+            # Copper pads; else the non-aperture ones (an NPTH-only part).
+            # A paste/mask aperture is neither (#1143).
+            from kicad_parser import non_aperture_pads
+            from paste_apertures import pad_has_copper
+            pads = ([p for p in (fp.pads or ()) if pad_has_copper(p)]
+                    or non_aperture_pads(fp))
             if not pads:
                 hit = True
             else:

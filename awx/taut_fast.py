@@ -542,6 +542,42 @@ def _level_many(polys, ends, nids, obss, D, C, dnet, cnet, rounds, tol_h, step):
     return [done[s] if done[s] is not None else cur[s] for s in range(n)], used
 
 
+def pad_discs(caps, cnets):
+    """[(x, y, r, name, net)]: each pad a model draws as capsules (braid._build_obstacles: a rect or an oval; every
+    capsule but a track's 'seg:NET') as the one disc round them all -- a rect's its half diagonal, an oval's its half
+    length, each grown by the capsules' margin"""
+    pads = {}
+    for (a, b, r, n_), net in zip(caps, cnets):
+        if not str(n_).startswith('seg:'):
+            pads.setdefault((n_, net), []).append((a, b, r))
+    out = []
+    for (n_, net), cs in pads.items():
+        xs = [q[0] for a, b, _r in cs for q in (a, b)]
+        ys = [q[1] for a, b, _r in cs for q in (a, b)]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        out.append((cx, cy, max(max(math.hypot(a[0] - cx, a[1] - cy), math.hypot(b[0] - cx, b[1] - cy)) + r
+                                for a, b, r in cs), n_, net))
+    return out
+
+
+def _string_model(base, skip_d=frozenset(), skip_c=frozenset()):
+    """(D, disc nets, C, capsule nets) as the strings see a model: its discs, its TRACKS' capsules ('seg:NET'), and
+    each pad drawn as capsules (braid._build_obstacles: a rect or an oval) as the one disc round them all. A string is
+    pushed off a disc from its centre but off a capsule along the capsule's normal, and where it crosses the capsule that
+    normal runs along the string: a crossed track is a dive (transparent, below), a crossed pad would be let through.
+    `skip_d` / `skip_c`: the discs and capsules (by index) left out -- the base's own exclusions (relax_many)"""
+    discs = [(x, y, r) for i, (x, y, r, _n) in enumerate(base.discs) if i not in skip_d]
+    dnets = [n for i, n in enumerate(base.dnets) if i not in skip_d]
+    kept = [(c, n) for i, (c, n) in enumerate(zip(base.caps, base.cnets)) if i not in skip_c]
+    caps = [(a[0], a[1], b[0] - a[0], b[1] - a[1], r) for (a, b, r, n_), _net in kept if str(n_).startswith('seg:')]
+    cnets = [net for (_a, _b, _r, n_), net in kept if str(n_).startswith('seg:')]
+    for x, y, r, _n, net in pad_discs([c for c, _n in kept], [n for _c, n in kept]):
+        discs.append((x, y, r))
+        dnets.append(net)
+    return (np.array(discs, dtype=float).reshape(-1, 3), np.array([(-1 if v is None else v) for v in dnets], dtype=int),
+            np.array(caps, dtype=float).reshape(-1, 5), np.array([(-1 if v is None else v) for v in cnets], dtype=int))
+
+
 def relax_many(items, rounds: int = 400, start=None):
     """[(src, dst, obs)] -> [(points, rounds used)], every string relaxed
     together. The models must derive from one base (they share their
@@ -549,14 +585,18 @@ def relax_many(items, rounds: int = 400, start=None):
     if not items:
         return []
     base = items[0][2]
-    D = np.array([(x, y, r) for (x, y, r, _n) in base.discs], dtype=float).reshape(-1, 3)
-    C = np.array([(a[0], a[1], b[0] - a[0], b[1] - a[1], r) for (a, b, r, _n) in base.caps],
-                 dtype=float).reshape(-1, 5)
-    dnet = np.array([(-1 if v is None else v) for v in base.dnets], dtype=int)
-    cnet = np.array([(-1 if v is None else v) for v in base.cnets], dtype=int)
     ends = [(src, dst) for (src, dst, _o) in items]
     obss = [o for (_s, _d, o) in items]
     nids = [_own_net(o) for o in obss]
+    # (what every model leaves out but no string's own net is its BASE's own exclusion: a base derived from the board's
+    # full model (braid.build_obstacles) shares the full lists with those items marked out, where a base built without
+    # them never held them -- left out here, the strings see the model a direct build gives, item for item and in its
+    # order; each string's own net is masked below)
+    # (a batch of one net's models keeps that net's own items in, masked as ever: what they share is theirs too)
+    own_ = set(nids) if len(set(nids)) == 1 else set()
+    skip_d = {i for i in set.intersection(*(set(getattr(o, '_xd', ())) for o in obss)) if base.dnets[i] not in own_}
+    skip_c = {i for i in set.intersection(*(set(getattr(o, '_xc', ())) for o in obss)) if base.cnets[i] not in own_}
+    D, dnet, C, cnet = _string_model(base, skip_d, skip_c)
     # `start`: a polyline per item to relax from instead of the chord (the
     # exact solver's string, to be polished where its contacts did not settle)
     polys = [np.array(ts.densify(list(start[k]) if start and start[k] is not None else [src, dst], COARSE), dtype=float)

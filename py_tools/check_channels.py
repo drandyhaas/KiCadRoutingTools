@@ -301,7 +301,8 @@ def main():
                 .format(args.escape_band))
 
     import routing_defaults as defaults
-    from kicad_parser import parse_kicad_pcb, detect_package_type
+    from kicad_parser import (parse_kicad_pcb, detect_package_type,
+                              non_aperture_pads)
     from placement import routability
 
     # BOARD-FIRST. A lane is `track + clearance` wide, so BOTH of these decide
@@ -399,15 +400,18 @@ def main():
         for ref, fp in sorted((pcb.footprints or {}).items()):
             kind = None
             try:
+                # Reads the pins only, not paste windows (#1143, #1148).
                 kind = detect_package_type(fp)
             except Exception:
                 kind = None
             if kind in ('QFN', 'QFP', 'BGA'):
                 refs.append(ref)
                 continue
-            xs = sorted({round(p.global_x, 3) for p in (fp.pads or [])})
+            # Apertures (paste/mask windows) are not on the pin lattice (#1143).
+            _own = non_aperture_pads(fp)
+            xs = sorted({round(p.global_x, 3) for p in _own})
             gaps = [b - a for a, b in zip(xs, xs[1:]) if b - a > 1e-3]
-            if gaps and min(gaps) < pitch_floor and len(fp.pads or []) >= 8:
+            if gaps and min(gaps) < pitch_floor and len(_own) >= 8:
                 refs.append(ref)
         if not refs:
             print("  (no fine-pitch parts auto-detected; pass --refs)")

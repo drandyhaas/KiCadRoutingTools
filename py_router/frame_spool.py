@@ -183,7 +183,7 @@ def optional_pass(fn, name, out_size=None, ground=None, grow_px=0):
 
     A lazy pass runs while the encoder streams, long after the caller's own
     ``try`` around registering it has returned -- so without this, one frame
-    that an overlay (the attempts band, the run clock, the iso panel) failed
+    that an overlay (the attempts band, the run clock) failed
     to draw raised out of the encoder and lost the whole film, where the eager
     pass it replaced only lost the overlay. The first frame ``fn`` raises on
     drops the pass for THAT frame and every later one, said ONCE on stderr.

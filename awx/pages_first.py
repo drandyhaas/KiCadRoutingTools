@@ -49,9 +49,11 @@ from __future__ import annotations
 
 import math
 import os
+import awx_settings
 import time
 from typing import Dict, List, Optional, Tuple
 
+import route_layers
 import select_moves as sm
 import source_realize as sr
 from escape_moves import Move, DIRS
@@ -117,20 +119,20 @@ class Frame:
             return sg * (self.Ht + 0.5 + (a + self.Hu))
         return sg * (self.Ht + 0.5 + 2 * self.Hu + 1.0 + (self.Ht - sg * x))
 
-PAGES_DET = float(os.environ.get('PLAN_PAGES_DET', '40'))     # CP-SAT deterministic time. 40 (2026-09-14): at 20 the K41 solve stops FEASIBLE with 4 swimmers, at 40 with 2-3, 80 adds nothing; on the ladder 20 -> 40 took K41 87 -> 79/81 and K51 125 -> 115 complete, within the time budget (K41 92 s)
-PAGES_WORKERS = int(os.environ.get('PLAN_PAGES_WORKERS', '4'))
-PAGES_SWIM = float(os.environ.get('PLAN_PAGES_SWIM', '100'))  # vias: the price of a net left to swim
-PAIR_SWIM = float(os.environ.get('PLAN_PAIR_SWIM', '3') or 3)   # a pair leg's swim price, times PAGES_SWIM (2026-09-20: SDQS1 planned as a swimmer weaved 6 page crossings)
-PAGES_LOG = int(os.environ.get('PLAN_PAGES_LOG', '0'))        # 1 = per-net choice printed
-PAGES_ITERS = int(os.environ.get('PLAN_PAGES_ITERS', '3'))    # re-key on the chosen plan, at most this often
-PAGES_SIDEKEY = int(os.environ.get('PLAN_PAGES_SIDEKEY', os.environ.get('PLAN_PAGES_SIDERS', '1')))
-PAGES_SIDERS_MODE = int(os.environ.get('PLAN_PAGES_SIDERS', '1'))
-PAGES_STRICT = int(os.environ.get('PLAN_PAGES_STRICT', '1'))   # destination exclusions by the STRICT conflict test (the engine lays the geometry asked; non-strict let 14 verbatim berths collide at K41)
-PAGES_HINT = int(os.environ.get('PLAN_PAGES_HINT', '1'))      # 1 = the seed plan (the greedy's berths, the teeth as they stand) as the CP-SAT's solution hint. At DET 20 it measured WORSE standalone (K41 obj 2359.8 / 4 swimmers -> 2659.4 / 5); at DET 40 on the LADDER it is worth 2 vias at K41 (81 -> 79) and completion at K51 (106 / SA2 open -> 115 complete), 2026-09-14 pg2 vs pg3. On, with DET 40.
-PAGES_JOINKEY = int(os.environ.get('PLAN_PAGES_JOINKEY', '1'))  # 1 = a side exit's slot depends on its SOURCE class: lanes whose tooth is a joiner sit outermost of the block, by tooth position (the braid's exit-block rule)
+PAGES_DET = float(awx_settings.get('PLAN_PAGES_DET', '40'))     # CP-SAT deterministic time. 40 (2026-09-14): at 20 the K41 solve stops FEASIBLE with 4 swimmers, at 40 with 2-3, 80 adds nothing; on the ladder 20 -> 40 took K41 87 -> 79/81 and K51 125 -> 115 complete, within the time budget (K41 92 s)
+PAGES_WORKERS = int(awx_settings.get('PLAN_PAGES_WORKERS', '4'))
+PAGES_SWIM = float(awx_settings.get('PLAN_PAGES_SWIM', '100'))  # vias: the price of a net left to swim
+PAIR_SWIM = float(awx_settings.get('PLAN_PAIR_SWIM', '3') or 3)   # a pair leg's swim price, times PAGES_SWIM (2026-09-20: SDQS1 planned as a swimmer weaved 6 page crossings)
+PAGES_LOG = int(awx_settings.get('PLAN_PAGES_LOG', '0'))        # 1 = per-net choice printed
+PAGES_ITERS = int(awx_settings.get('PLAN_PAGES_ITERS', '3'))    # re-key on the chosen plan, at most this often
+PAGES_SIDEKEY = int(awx_settings.get('PLAN_PAGES_SIDEKEY', awx_settings.get('PLAN_PAGES_SIDERS', '1')))
+PAGES_SIDERS_MODE = int(awx_settings.get('PLAN_PAGES_SIDERS', '1'))
+PAGES_STRICT = int(awx_settings.get('PLAN_PAGES_STRICT', '1'))   # destination exclusions by the STRICT conflict test (the engine lays the geometry asked; non-strict let 14 verbatim berths collide at K41)
+PAGES_HINT = int(awx_settings.get('PLAN_PAGES_HINT', '1'))      # 1 = the seed plan (the greedy's berths, the teeth as they stand) as the CP-SAT's solution hint. At DET 20 it measured WORSE standalone (K41 obj 2359.8 / 4 swimmers -> 2659.4 / 5); at DET 40 on the LADDER it is worth 2 vias at K41 (81 -> 79) and completion at K51 (106 / SA2 open -> 115 complete), 2026-09-14 pg2 vs pg3. On, with DET 40.
+PAGES_JOINKEY = int(awx_settings.get('PLAN_PAGES_JOINKEY', '1'))  # 1 = a side exit's slot depends on its SOURCE class: lanes whose tooth is a joiner sit outermost of the block, by tooth position (the braid's exit-block rule)
 # PLAN_PAGES_MISMATCH: the price of an end whose layer is not its page, as
 # a multiple of a via (1 = as it was).
-PAGES_MISMATCH = float(os.environ.get('PLAN_PAGES_MISMATCH', '1') or 1)
+PAGES_MISMATCH = float(awx_settings.get('PLAN_PAGES_MISMATCH', '1') or 1)
 # THE INSTANCE, WRITTEN OUT (2026-09-15, session 9): PLAN_PAGES_DUMP=<dir>
 # writes every CP-SAT model this module solves, as built and hinted, to
 # <dir>/<board>_solve<n>.pb (binary CpModelProto) beside a .json naming the
@@ -138,16 +140,19 @@ PAGES_MISMATCH = float(os.environ.get('PLAN_PAGES_MISMATCH', '1') or 1)
 # takes a different greedy seed) can be re-solved offline against
 # deterministic time, and the objective / bound curve read off it. Inert
 # when unset: nothing in the solve changes.
-PAGES_DUMP = os.environ.get('PLAN_PAGES_DUMP', '')
+PAGES_DUMP = awx_settings.get('PLAN_PAGES_DUMP', '')
 import schedule as _schedule
 import braid as te
 # a row-line run and a column-line run on ONE layer that cross are a
 # conflict whatever the moves' kinds -- select_moves tests it only for
 # climbed moves at its default SEL_XING=1 (K41 pages-first pass 0:
 # 17 same-layer crossings of plain via-in-pad runs, laid as asked, DRC).
-# The planner's exclusions use the full test; the standard planner's
-# default is unchanged (its own SEL_XING=2 is the opt-in to measure).
-sm.SEL_XING = max(sm.SEL_XING, 2)
+# This planner's exclusions use the full test, passed as `xing` to each
+# conflict test it makes; the standard planner's default is unchanged.
+# (It used to be set here, select_moves.SEL_XING raised to 2 for the whole
+# process at import, so a caller's rule depended on whether anything had
+# imported this module yet.)
+PAGES_XING = max(sm.SEL_XING, 2)
 # the two-page schedule assigned EXACTLY (BRAID_EXACT_PAGES): a plan two
 # chains cover must be paged as two chains, which the greedy pager (the LIS
 # of one page first) can miss. In-process for the judge; the plan sidecar
@@ -165,7 +170,7 @@ sm.SEL_XING = max(sm.SEL_XING, 2)
 # wrong regime on the rung where the deficit is worst.
 # The braid SUBPROCESS was never affected -- braid.py does not import
 # this module, so every ladder number measured through chain_k.sh stands.
-_schedule.EXACT_PAGES = 0 if os.environ.get('BRAID_EXACT_PAGES') == '0' else 1
+_schedule.EXACT_PAGES = 0 if awx_settings.get('BRAID_EXACT_PAGES') == '0' else 1
 SCALE = 100                                                   # cost units -> ints
 
 
@@ -193,18 +198,27 @@ def current_tooth(st, nm) -> Optional[Move]:
     if p is None or p.component_ref != st['sref']:
         return None
     g = sr.measure_tooth(st['pcb'], nm, p, st['byname'])
-    if not g or g.get('direction') not in DIRS or g.get('layer') not in ('F.Cu', 'B.Cu'):
+    # (any routing layer: on three, a tooth laid on In2.Cu read as no tooth at all -- 17 of the zynq LVDS bus's
+    # 47, each then re-chosen off the menu every pass and its copper outside the ends' conflicts)
+    if not g or g.get('direction') not in DIRS or g.get('layer') not in route_layers.layers():
         return None
     return Move(net=nm, kind=g['kind'], direction=g['direction'], layer=g['layer'],
                 exit_pt=tuple(g['tooth']), vias=g['vias'], legs=[],
                 site=(tuple(g['site']) if g.get('site') else None))
 
 
-def _conflicts(cands: Dict[str, List[Move]], strict: bool) -> List[Tuple[str, int, str, int]]:
+def _conflicts(cands: Dict[str, List[Move]], strict: bool, stack: bool = False,
+               xing: Optional[int] = None) -> List[Tuple[str, int, str, int]]:
     """Every (net a, index, net b, index) whose two moves cannot both be
     laid, tested only between moves sharing a lane, a site or an exit
-    (bucketed: the all-pairs test is 10^6-10^7 calls at K41)."""
+    (bucketed: the all-pairs test is 10^6-10^7 calls at K41). `stack`:
+    two exits at one point on different layers do not conflict, and two on
+    one layer closer than select_moves._STACK_PITCH do (select_moves.
+    _conflict) -- so the exits are bucketed at that pitch. `xing`: the
+    crossing rule (select_moves.SEL_XING when not given -- the whole
+    route's ends model, whose greedy seed reads the same)."""
     buckets: Dict[tuple, List[Tuple[str, int]]] = {}
+    reach = any(getattr(m, 'street', 0) for ms in cands.values() for m in ms)
     for nm, ms in cands.items():
         for i, m in enumerate(ms):
             keys = set()
@@ -227,6 +241,11 @@ def _conflicts(cands: Dict[str, List[Move]], strict: bool) -> List[Tuple[str, in
                         keys.add(('xc', key[2], cx))
                 else:
                     keys.add(('xc', key[2], int(math.floor(key[1]))))
+            # ...and within a via's reach of it (select_moves._site_in_lane) when a STREET move is offered: its lanes
+            # stand a track pitch apart, inside the reach and outside the lane cells' tolerance
+            for key, a_, b_ in (sm._lane_spans(m) if reach else ()):
+                for c in q(key[1], sm._VIA_REACH):
+                    keys.add(('reach', key[0], c, key[2]))
             if m.site is not None:
                 # a site in another move's lane: bucket the lane through the
                 # site by its line, on both layers (a via spans them all)
@@ -234,10 +253,14 @@ def _conflicts(cands: Dict[str, List[Move]], strict: bool) -> List[Tuple[str, in
                 for axis, v in (('row', m.site[1]), ('col', m.site[0])):
                     cells = q(v) if strict else (round(v, 3),)
                     for c in cells:
-                        for L in ('F.Cu', 'B.Cu'):
+                        for L in route_layers.layers():
                             keys.add(('lane', axis, c, L))
-            for cx in q(m.exit_pt[0]):
-                for cy in q(m.exit_pt[1]):
+                    for c in (q(v, sm._VIA_REACH) if reach else ()):
+                        for L in route_layers.layers():
+                            keys.add(('reach', axis, c, L))
+            etol = max(sm._EXIT_TOL, sm._STACK_PITCH) if stack else sm._EXIT_TOL
+            for cx in q(m.exit_pt[0], etol):
+                for cy in q(m.exit_pt[1], etol):
                     keys.add(('exit', cx, cy))
             # SORTED: `keys` is a set of string-keyed tuples, whose iteration
             # order follows the process's hash seed -- and the ORDER the
@@ -260,7 +283,7 @@ def _conflicts(cands: Dict[str, List[Move]], strict: bool) -> List[Tuple[str, in
                 if a == b or (a, i, b, j) in seen or (b, j, a, i) in seen:
                     continue
                 seen.add((a, i, b, j))
-                if sm._conflict(cands[a][i], cands[b][j], strict=strict):
+                if sm._conflict(cands[a][i], cands[b][j], strict=strict, stack=stack, xing=xing):
                     out.append((a, i, b, j))
     return out
 
@@ -563,7 +586,7 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     # Without this the re-solve is INFEASIBLE and the greedy choice, which
     # knows no pairs, stands (K36 pf8: SODT0 held between SCK's dogbones,
     # SDQ11/SDQ8 standing between SDQS1's teeth).
-    if fixed and int(os.environ.get('PLAN_PAIRS', os.environ.get('BRAID_PAIRS', '0')) or 0):
+    if fixed and int(awx_settings.get('PLAN_PAIRS', awx_settings.get('BRAID_PAIRS', '0')) or 0):
         import pairs as _pairs
         _dg = st['dgrid']
         _reach_b = 1.3 * max(_dg.pitch_x, _dg.pitch_y)
@@ -679,7 +702,7 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     import pairs as _pairs
     n_pair_c = 0
     _pair_legs = set()        # a pair's legs swim at PAIR_SWIM times the price: a swimming pair weaves both legs
-    if int(os.environ.get('PLAN_PAIRS', os.environ.get('BRAID_PAIRS', '0')) or 0):
+    if int(awx_settings.get('PLAN_PAIRS', awx_settings.get('BRAID_PAIRS', '0')) or 0):
         _pair_legs = {leg for pr in _pairs.pair_names(names).values() for leg in pr}
         _dg, _sg = st['dgrid'], st['sgrid']
         _reach = {'berths': 1.3 * max(_dg.pitch_x, _dg.pitch_y),
@@ -877,10 +900,10 @@ def _solve(st, board, log, fixed, learned, src_free, seed, src_seed, hold_s=None
     excl_d = []
     Sreal = {n: [mv for mv in S[n] if mv.legs] for n in names}
     idx_real = {n: [i for i, mv in enumerate(S[n]) if mv.legs] for n in names}
-    excl_d = _conflicts(D, strict=bool(PAGES_STRICT))
+    excl_d = _conflicts(D, strict=bool(PAGES_STRICT), xing=PAGES_XING)
     for (a, i, b, j) in excl_d:
         m.AddBoolOr([xd[a][i].Not(), xd[b][j].Not()]); nconf += 1
-    for (a, i, b, j) in _conflicts(Sreal, strict=True):
+    for (a, i, b, j) in _conflicts(Sreal, strict=True, xing=PAGES_XING):
         m.AddBoolOr([xs[a][idx_real[a][i]].Not(), xs[b][idx_real[b][j]].Not()]); nconf += 1
     if learned:
         sig_d = {n: [sr.move_sig(mv) for mv in D[n]] for n in names}

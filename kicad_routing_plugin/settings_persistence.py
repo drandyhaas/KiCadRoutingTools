@@ -81,6 +81,9 @@ def get_dialog_settings(dialog):
         'via_proximity_cost': dialog.via_proximity_cost.GetValue(),
         'track_proximity_distance': dialog.track_proximity_distance.GetValue(),
         'track_proximity_cost': dialog.track_proximity_cost.GetValue(),
+        'keep_away': dialog.keep_away.GetValue(),
+        'keep_away_free': dialog.keep_away_free.GetValue(),
+        'keep_away_cost': dialog.keep_away_cost.GetValue(),
         'vertical_attraction_radius': dialog.vertical_attraction_radius.GetValue(),
         'vertical_attraction_cost': dialog.vertical_attraction_cost.GetValue(),
         'ripped_route_avoidance_radius': dialog.ripped_route_avoidance_radius.GetValue(),
@@ -212,7 +215,9 @@ def get_dialog_settings(dialog):
         'fanout_bga_cap_max_passes': dialog.fanout_tab.bga_options.cap_max_passes.GetValue(),
         'fanout_bga_cap_prefix': dialog.fanout_tab.bga_options.cap_prefix.GetValue(),
         'fanout_bga_cap_default_via_size': dialog.fanout_tab.bga_options.cap_default_via_size.GetValue(),
+        'fanout_bga_cap_intent_path': dialog.fanout_tab.bga_options.cap_intent_path.GetValue(),  # #1067
         'fanout_bga_cap_allow_rotation': dialog.fanout_tab.bga_options.cap_allow_rotation.GetValue(),
+        'fanout_bga_cap_beneath_only': dialog.fanout_tab.bga_options.cap_beneath_only.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
         # #381 D7: QFN-specific track width / clearance (default 0.1/0.1).
         'fanout_qfn_track_width': dialog.fanout_tab.qfn_options.qfn_track_width.GetValue(),
@@ -416,6 +421,12 @@ def restore_dialog_settings(dialog, settings):
         dialog.track_proximity_distance.SetValue(settings['track_proximity_distance'])
     if 'track_proximity_cost' in settings:
         dialog.track_proximity_cost.SetValue(settings['track_proximity_cost'])
+    if 'keep_away' in settings:
+        dialog.keep_away.SetValue(settings['keep_away'])
+    if 'keep_away_free' in settings:
+        dialog.keep_away_free.SetValue(settings['keep_away_free'])
+    if 'keep_away_cost' in settings:
+        dialog.keep_away_cost.SetValue(settings['keep_away_cost'])
     if 'vertical_attraction_radius' in settings:
         dialog.vertical_attraction_radius.SetValue(settings['vertical_attraction_radius'])
     if 'vertical_attraction_cost' in settings:
@@ -698,11 +709,16 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.cap_max_passes.SetValue(settings['fanout_bga_cap_max_passes'])
     if 'fanout_bga_cap_prefix' in settings:
         dialog.fanout_tab.bga_options.cap_prefix.SetValue(settings['fanout_bga_cap_prefix'])
+    if 'fanout_bga_cap_intent_path' in settings:   # #1067
+        dialog.fanout_tab.bga_options.cap_intent_path.SetValue(
+            settings['fanout_bga_cap_intent_path'] or '')
     if 'fanout_bga_cap_default_via_size' in settings:
         dialog.fanout_tab.bga_options.cap_default_via_size.SetValue(
             settings['fanout_bga_cap_default_via_size'])
     if 'fanout_bga_cap_allow_rotation' in settings:
         dialog.fanout_tab.bga_options.cap_allow_rotation.SetValue(settings['fanout_bga_cap_allow_rotation'])
+    if 'fanout_bga_cap_beneath_only' in settings:
+        dialog.fanout_tab.bga_options.cap_beneath_only.SetValue(settings['fanout_bga_cap_beneath_only'])
     if 'fanout_qfn_extension' in settings:
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
     if 'fanout_qfn_track_width' in settings:

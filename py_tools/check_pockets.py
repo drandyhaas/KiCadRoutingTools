@@ -235,8 +235,11 @@ def copper_touched_bins(pcb, bin_mm):
     for v in pcb.vias:
         r = max(v.size, 0.0) / 2.0
         stamp_box(v.x - r, v.y - r, v.x + r, v.y + r)
+    from kicad_parser import pad_is_aperture_only
     for plist in (getattr(pcb, 'pads_by_net', {}) or {}).values():
         for p in plist:
+            if pad_is_aperture_only(p):
+                continue            # a paste/mask window is not copper (#1143)
             hx, hy = p.size_x / 2.0, p.size_y / 2.0
             stamp_box(p.global_x - hx, p.global_y - hy,
                       p.global_x + hx, p.global_y + hy)

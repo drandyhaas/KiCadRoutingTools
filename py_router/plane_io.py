@@ -9,7 +9,8 @@ import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
-from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
+from kicad_parser import (PCBData, parse_kicad_pcb, _unescape_kicad_string,
+                          layer_list_tokens)
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, via_net_name,
                           move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads,
@@ -350,11 +351,12 @@ def _zone_layer_span(element_text: str) -> set:
     """Every copper layer a zone block declares.
 
     Handles both spellings: `(layer "B.Cu")` and the multi-layer
-    `(layers "F.Cu" "B.Cu")`, which is ONE physical pour.
+    `(layers "F.Cu" "B.Cu")`, which is ONE physical pour -- with the names
+    quoted or, as KiCad 6 writes a rule area's `(layers F&B.Cu)`, bare.
     """
-    m = re.search(r'\(layers\s+((?:"[^"]+"\s*)+)\)', element_text)
+    m = re.search(r'\(layers\s+([^()]*)\)', element_text)
     if m:
-        return set(re.findall(r'"([^"]+)"', m.group(1)))
+        return set(layer_list_tokens(m.group(1)))
     m = re.search(r'\(layer\s+"([^"]+)"\)', element_text)
     return {m.group(1)} if m else set()
 

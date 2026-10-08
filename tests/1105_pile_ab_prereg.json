@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "kind": "preregistration",
+  "issue": 1105,
+  "written": "2026-10-04",
+  "purpose": "Fixes, BEFORE any pile number exists, how #1105's stage-3.5 decap claim is measured on the issue's own basis (a pile seeded from an intent emitted with --decaps-from) and what would make it a default. The corpus decap rows (tests/test_placement_ab.py, decap-after-ics/-within-limit/-after-queue) re-seed AS-PLACED boards under the auto intent, whose limit is ceil(max) of each board's own tethers, so their OFF seeds are already near-clean and the basis cannot see the failure #1105 reports.",
+  "base": {
+    "branch": "fix/1105-1125-1129-decap-ladder",
+    "commit": "bea2b055",
+    "pr_1140_head": "7739a0f2",
+    "pr_1130_head": "11069fdb",
+    "stack_exact_confirm": "not implemented at this commit; #1127 is decided before the decisive run, which records its state"
+  },
+  "boards": [
+    "esp_prog.kicad_pcb",
+    "splitflap_driver.kicad_pcb",
+    "tigard.kicad_pcb",
+    "watchy.kicad_pcb",
+    "glasgow_revC.kicad_pcb",
+    "ulx3s.kicad_pcb",
+    "orangecrab_ext_pll.kicad_pcb"
+  ],
+  "input": {
+    "stager": "tests/stress/stage_unaided.py stage(): every non-mechanical part at the outline's bbox centre, rotation 0; the mechanical refs keep their pose and are written to mechanical.json beside the pile",
+    "where": "<row workdir>/pile/<board>; the arms are written OUTSIDE pile/, because stage() arms the unaided provenance regime over its directory"
+  },
+  "intent": {
+    "how": "the CLI, so mechanical.json is compiled into fixed_poses as a run sees it",
+    "argv": ["py_tools/check_floorplan.py", "<pile>", "--allow-unplaced", "--emit-intent", "<row workdir>/intent.json", "--decaps-from", "kicad_files/<board>"],
+    "one_file_for": ["off", "on", "grade"],
+    "refuse_unless": ["context.pose_claims_withheld is true", "decaps.max_distance_mm is declared"]
+  },
+  "seed": {
+    "engine": "seeder.seed_from_intent with random.Random('0') and QUENCH_BASE's floors (clearance 0.2, board_edge_clearance 0.55, grid_step 0.1), no polish",
+    "scope": "place_seed's own rule without --force: seed_refs = stacked_suspect_refs when the pile is partially unplaced, else every unlocked part",
+    "group_sources": ["kicad", "sheet"]
+  },
+  "signal": "intent_errors",
+  "ignore_nets": ["GND"],
+  "arbiter_guards": ["crossings", "hpwl", "unseated", "body_blocking"],
+  "unread_guards": {
+    "why": "the ladder arbitrates on the arbiter guards, so on those 'regress 0' holds by construction; these columns are ones the arbiter never reads, so a ladder that games its arbiter shows up here",
+    "inversions": {"rel": 0.05},
+    "body_advisory": {"abs": 0},
+    "edge_facing_pads": {"abs": 0}
+  },
+  "eligibility": {
+    "rule": "decided from INPUTS before any seed: a board is a trial board iff its emitted pile intent arms decaps.max_distance_mm and its seeder_forecast scope is >= 1; a _pile_intent() refusal makes it ineligible",
+    "ineligible_rows": "run as pinned rows with expect 'neutral', so a regression on one still fails its pin; nothing is dropped after seeing an outcome",
+    "record": "whether decaps.max_pin_distance_mm is armed or withheld, per board"
+  },
+  "candidate": {
+    "why_one": "a best-of-N ladder inflates 'improve' under the null (7/8 per board for three coin-flip variants); after_queue + within_limit is the one family whose corpus rows improved boards with no guard rise",
+    "decap_claim_after_ics": true,
+    "DECAP_LATE_WITHIN_LIMIT": true,
+    "DECAP_LATE_AT": "after_queue"
+  },
+  "ladder": {
+    "runs": "two full seeds: OFF on a deepcopy of the board data from a saved RNG state, then the candidate from the same state; never a mid-seed fork",
+    "skip": "if OFF leaves 0 decap_* errors, only OFF runs",
+    "keep_rule": "keep the candidate iff its decap_* errors strictly fall and no arbiter guard rises and its intent_errors do not rise; else keep OFF",
+    "default_scope": "seed_from_intent (whole-board or pile-only seeds, i.e. place_seed with or without --force); reseat_scope stays off"
+  },
+  "pilot": {
+    "script": "tests/measure_1105_pile_variants.py",
+    "variants": ["after-ics", "within-limit", "after-queue"],
+    "go_rule": "the CANDIDATE (after-queue) improves -- signal falls, no arbiter guard rises, intent_errors do not rise -- on >= max(1, N-1) of the N eligible boards; otherwise STOP and report, and #1105 is not closed by this PR",
+    "note": "the other two variants are diagnostics only and cannot change the candidate"
+  },
+  "decisive": {
+    "taken_on": "the final engine, after #1127's decision",
+    "pass_requires_all": [
+      "(i) the pile-ladder rows pass gate() -- >= 3 eligible boards, improve on >= N-1, regress on none -- with the arbiter guards AND the unread guards at the tolerances above",
+      "(ii) tests/measure_1105_pile_polished.py: place_seed's CLI with its polish, OFF vs ladder, under --ignore-nets none and GND: decap_* errors and intent errors fall on >= N-1 eligible boards and rise on none",
+      "(iii) tests/test_placement_probe.py on >= 3 eligible piles, OFF vs ladder polished boards, --extra-nets = the rail net (seeder._decap_rail) of every cap stage 3.5 claimed in the kept arm: routed failed, open and unconnected counts rise on none",
+      "(iv) tests/measure_1105_ladder_cost.py: the ladder's seed+grade wall time is <= 3.0x the OFF seed+grade wall time on every board"
+    ],
+    "then": "a scratch flip of DECAP_CLAIM_AFTER_ICS_DEFAULT to 'ladder', the full A/B table, no seed row may turn regress and every DRIFT is read; the flip is committed with --write-baseline",
+    "corpus_rows": "decap-ladder-<board> rows on the existing corpus basis are PINNED change detectors; that they cannot regress is true by construction and is said so, not claimed as evidence"
+  },
+  "stop_rule": "any failed condition: STOP, report the numbers to the user, push nothing that says Closes #1105"
+}

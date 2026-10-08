@@ -166,46 +166,52 @@ def _calls(path, fname):
         nm = n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", None)
         if nm != fname:
             continue
-        names, keys, uses_args = set(), {}, False
-        for kw in n.keywords:
-            if not kw.arg:
-                continue
-            names.add(kw.arg)
-            v = kw.value
-            uses_args = uses_args or any(
-                isinstance(s, ast.Name) and s.id == "args" for s in ast.walk(v))
-            # See through `not config.get('foo', ...)` (e.g. crossing_layer_check):
-            # the negation hid the read from this gate, so 'no_crossing_layer_check'
-            # never even made the #511 dead-key baseline.
-            if isinstance(v, ast.UnaryOp) and isinstance(v.op, ast.Not):
-                v = v.operand
-            # `config.get('x') or fallback` (repair board_edge_clearance):
-            # the read is the first operand.
-            if isinstance(v, ast.BoolOp) and v.values:
-                v = v.values[0]
-            if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-                    and v.func.attr == "get" and v.args
-                    and isinstance(v.args[0], ast.Constant) and isinstance(v.args[0].value, str)):
-                recv = v.func.value.id if isinstance(v.func.value, ast.Name) else "?"
-                keys[kw.arg] = (recv, v.args[0].value)
-            elif isinstance(v, ast.Subscript) and isinstance(v.slice, ast.Constant) \
-                    and isinstance(v.slice.value, str):
-                recv = v.value.id if isinstance(v.value, ast.Name) else "?"
-                keys[kw.arg] = (recv, v.slice.value)
-            # comparisons like config.get('x','').upper()=='ALL' (no_bga_zone):
-            # dig out the buried .get read.
-            elif isinstance(v, ast.Compare):
-                for sub in ast.walk(v):
-                    if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
-                            and sub.func.attr == "get" and sub.args
-                            and isinstance(sub.args[0], ast.Constant)
-                            and isinstance(sub.args[0].value, str)):
-                        recv = sub.func.value.id \
-                            if isinstance(sub.func.value, ast.Name) else "?"
-                        keys[kw.arg] = (recv, sub.args[0].value)
-                        break
-        out.append((n.lineno, names, keys, uses_args))
+        out.append((n.lineno,) + _kwarg_info(n.keywords))
     return out
+
+
+def _kwarg_info(keywords):
+    """(kwarg names, {kwarg -> (receiver, key) read}, uses_args) of one call's
+    keywords -- see _calls."""
+    names, keys, uses_args = set(), {}, False
+    for kw in keywords:
+        if not kw.arg:
+            continue
+        names.add(kw.arg)
+        v = kw.value
+        uses_args = uses_args or any(
+            isinstance(s, ast.Name) and s.id == "args" for s in ast.walk(v))
+        # See through `not config.get('foo', ...)` (e.g. crossing_layer_check):
+        # the negation hid the read from this gate, so 'no_crossing_layer_check'
+        # never even made the #511 dead-key baseline.
+        if isinstance(v, ast.UnaryOp) and isinstance(v.op, ast.Not):
+            v = v.operand
+        # `config.get('x') or fallback` (repair board_edge_clearance):
+        # the read is the first operand.
+        if isinstance(v, ast.BoolOp) and v.values:
+            v = v.values[0]
+        if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
+                and v.func.attr == "get" and v.args
+                and isinstance(v.args[0], ast.Constant) and isinstance(v.args[0].value, str)):
+            recv = v.func.value.id if isinstance(v.func.value, ast.Name) else "?"
+            keys[kw.arg] = (recv, v.args[0].value)
+        elif isinstance(v, ast.Subscript) and isinstance(v.slice, ast.Constant) \
+                and isinstance(v.slice.value, str):
+            recv = v.value.id if isinstance(v.value, ast.Name) else "?"
+            keys[kw.arg] = (recv, v.slice.value)
+        # comparisons like config.get('x','').upper()=='ALL' (no_bga_zone):
+        # dig out the buried .get read.
+        elif isinstance(v, ast.Compare):
+            for sub in ast.walk(v):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "get" and sub.args
+                        and isinstance(sub.args[0], ast.Constant)
+                        and isinstance(sub.args[0].value, str)):
+                    recv = sub.func.value.id \
+                        if isinstance(sub.func.value, ast.Name) else "?"
+                    keys[kw.arg] = (recv, sub.args[0].value)
+                    break
+    return names, keys, uses_args
 
 
 def _widest(calls):
@@ -220,15 +226,70 @@ def _cli_main_call(calls):
     return _widest(argsy if argsy else calls)
 
 
+# GUI engine calls made with `**dict`, keyed by the GUI call name: the
+# (method, variable) whose `variable = dict(...)` the gate reads instead.
+# #621 moved the fanout calls onto a worker thread -- the UI thread builds
+# `engine_kw`, the worker calls the engine with **kwargs -- and this gate,
+# reading only the call's own keywords, then found no GUI call site and
+# printed SKIP under an OK verdict for seven weeks, while the move had
+# dropped same_net_pad_clearance (#581) from both fanout tabs.
+GUI_KWARGS_DICTS = {
+    "generate_bga_fanout": ("_run_bga_fanout", "engine_kw"),
+    "generate_qfn_fanout": ("_run_qfn_fanout", "engine_kw"),
+}
+
+
+def _gui_calls(path, fname):
+    """_calls for the GUI side: a call made with **dict is read from the
+    dict(...) GUI_KWARGS_DICTS names for it."""
+    if fname not in GUI_KWARGS_DICTS:
+        return _calls(path, fname)
+    method, var = GUI_KWARGS_DICTS[fname]
+    out = []
+    for fn in ast.walk(ast.parse(open(path).read())):
+        if not (isinstance(fn, ast.FunctionDef) and fn.name == method):
+            continue
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                    and isinstance(n.value.func, ast.Name) and n.value.func.id == "dict"
+                    and any(isinstance(t, ast.Name) and t.id == var for t in n.targets)):
+                out.append((n.lineno,) + _kwarg_info(n.value.keywords))
+    return out
+
+
+def _unread_starstar(path, fname):
+    """Lines of fname calls passing **X that GUI_KWARGS_DICTS does not map:
+    kwargs this gate cannot see, so it must not report the pair as checked."""
+    if fname in GUI_KWARGS_DICTS:
+        return []
+    out = []
+    for n in ast.walk(ast.parse(open(path).read())):
+        if isinstance(n, ast.Call) and any(kw.arg is None for kw in n.keywords):
+            nm = n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", None)
+            if nm == fname:
+                out.append(n.lineno)
+    return out
+
+
 def check_class1():
     """Every kwarg the CLI main passes is also passed at the GUI call site."""
     failures = []
     print("CLASS 1 -- kwargs the CLI passes but the GUI does not")
     for cli, gui, cli_fn, gui_fn in PAIRS:
         cln, cset, _, _ = _cli_main_call(_calls(os.path.join(REPO, cli), cli_fn))
-        gln, gset, _, _ = _widest(_calls(os.path.join(REPO, gui), gui_fn))
+        gln, gset, _, _ = _widest(_gui_calls(os.path.join(REPO, gui), gui_fn))
+        # A pair this gate cannot read is a FAIL, never a SKIP: a SKIP printed
+        # above an OK verdict is how the fanout pairs went unchecked (#621).
+        unread = _unread_starstar(os.path.join(REPO, gui), gui_fn)
+        if unread:
+            print(f"  {gui_fn:24} FAIL (GUI calls it with **kwargs this gate cannot read)")
+            failures.append(f"{gui_fn}: {gui}:{unread} passes **kwargs -- name the dict(...) "
+                            f"that builds them in GUI_KWARGS_DICTS")
+            continue
         if not cset or not gset:
-            print(f"  {gui_fn:24} SKIP (call site not found: cli={bool(cset)} gui={bool(gset)})")
+            print(f"  {gui_fn:24} FAIL (call site not found: cli={bool(cset)} gui={bool(gset)})")
+            failures.append(f"{gui_fn}: call site not found (cli={cli}: {bool(cset)}, "
+                            f"gui={gui}: {bool(gset)}) -- the pair is unchecked")
             continue
         missing = sorted(k for k in (cset - gset) if k not in CLI_ONLY_OK)
         exempt = sorted(k for k in (cset - gset) if k in CLI_ONLY_OK)
@@ -293,7 +354,14 @@ def check_class2():
                   getattr(f, "qfn_options", None))
         failures = []
         for fn, gui, pools in supplies:
-            _, _, keys, _ = _widest(_calls(os.path.join(REPO, gui), fn))
+            _, _, keys, _ = _widest(_gui_calls(os.path.join(REPO, gui), fn))
+            if not keys:
+                # Every one of these calls reads its dialog through config/shared;
+                # none read is this gate not seeing the call (the #621 fanout
+                # pairs printed "OK (0 config-read kwargs)"), not a clean call.
+                print(f"  {fn:24} FAIL  (0 config-read kwargs -- the gate cannot see this call)")
+                failures.append(f"{fn}: no config read found at the GUI call site ({gui})")
+                continue
             dead = []
             for kwarg, (recv, key) in sorted(keys.items()):
                 pool = pools.get(recv)

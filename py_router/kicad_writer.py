@@ -676,7 +676,7 @@ def _polygons_overlap(pa, pb, eps: float = 0.02,
 
     Two things must not count as overlap, and each bit us in turn:
 
-    * ADJACENCY. route_planes' Voronoi cells tile the board, so neighbours
+    * ADJACENCY. route_planes' split regions tile the layer, so neighbours
       share a boundary and their vertices lie exactly ON each other's edges --
       where the even-odd rule is undefined, so a plain point-in-polygon test
       calls adjacent pairs "overlapping".
@@ -935,17 +935,30 @@ def npth_slot_keepout_polygons(pcb_data, dilate: float,
     return out
 
 
-def generate_keepout_zone_sexpr(layers: List[str],
-                                polygon_points: List[Tuple[float, float]],
-                                name: str,
-                                use_net_name: bool = False) -> str:
-    """Rule-area zone blocking only copper POUR (tracks/vias/pads stay
-    allowed -- the router enforces its own clearances). Used for the NPTH
-    slot edge keepouts (#448). use_net_name=True emits the KiCad 10 net
-    header (same switch as generate_zone_sexpr)."""
+#: The five keep-out flags of a KiCad rule area, in the order KiCad writes them.
+RULE_AREA_FLAGS = ('tracks', 'vias', 'pads', 'copperpour', 'footprints')
+
+
+def generate_rule_area_sexpr(layers: List[str],
+                             polygon_points: List[Tuple[float, float]],
+                             name: str,
+                             not_allowed=('tracks', 'vias', 'copperpour'),
+                             use_net_name: bool = False) -> str:
+    """A KiCad keep-out rule area: `(zone ... (keepout ...))` on `layers`,
+    forbidding each RULE_AREA_FLAGS member in `not_allowed` and allowing the
+    rest. The parser reads it back into ``board_info.keepouts``, which the
+    router stamps (`add_rule_area_keepout_obstacles`) and placement grades.
+    use_net_name=True emits the KiCad 10 net header (same switch as
+    generate_zone_sexpr)."""
+    bad = set(not_allowed)
+    unknown = bad - set(RULE_AREA_FLAGS)
+    if unknown:
+        raise ValueError(f"unknown rule-area flag(s): {sorted(unknown)}")
     pts_str = " ".join(f"(xy {x:.6f} {y:.6f})" for x, y in polygon_points)
     layers_str = " ".join(f'"{l}"' for l in layers)
     net_lines = '(net "")' if use_net_name else '(net 0)\n\t\t(net_name "")'
+    flags = "\n".join(f"\t\t\t({k} {'not_allowed' if k in bad else 'allowed'})"
+                      for k in RULE_AREA_FLAGS)
     return f'''	(zone
 		{net_lines}
 		(layers {layers_str})
@@ -957,11 +970,7 @@ def generate_keepout_zone_sexpr(layers: List[str],
 		)
 		(min_thickness 0.25)
 		(keepout
-			(tracks allowed)
-			(vias allowed)
-			(pads allowed)
-			(copperpour not_allowed)
-			(footprints allowed)
+{flags}
 		)
 		(fill
 			(thermal_gap 0.5)
@@ -973,6 +982,19 @@ def generate_keepout_zone_sexpr(layers: List[str],
 			)
 		)
 	)'''
+
+
+def generate_keepout_zone_sexpr(layers: List[str],
+                                polygon_points: List[Tuple[float, float]],
+                                name: str,
+                                use_net_name: bool = False) -> str:
+    """Rule-area zone blocking only copper POUR (tracks/vias/pads stay
+    allowed -- the router enforces its own clearances). Used for the NPTH
+    slot edge keepouts (#448). use_net_name=True emits the KiCad 10 net
+    header (same switch as generate_zone_sexpr)."""
+    return generate_rule_area_sexpr(layers, polygon_points, name,
+                                    not_allowed=('copperpour',),
+                                    use_net_name=use_net_name)
 
 
 def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
@@ -1573,7 +1595,9 @@ def remove_segments_from_content(content: str, segments: List,
 
     start_re = re.compile(r'\(start\s+([\d.-]+)\s+([\d.-]+)\)')
     end_re = re.compile(r'\(end\s+([\d.-]+)\s+([\d.-]+)\)')
-    layer_re = re.compile(r'\(layer\s+"?([^")]+)"?\)')
+    # Singular, or KiCad 9's mask-exposed (layers "F.Cu" "F.Mask"), which the
+    # parser models on its copper layer (#1158) -- so the strip must find it.
+    layer_re = re.compile(r'\(layer\s+"?([^")]+)"?\)|\(layers\s+"([^"]+\.Cu)"')
     net_name_re = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
     net_id_re = re.compile(r'\(net\s+(\d+)\)')
 
@@ -1626,7 +1650,7 @@ def remove_segments_from_content(content: str, segments: List,
                 net_token = _canon(int(mi.group(1))) if mi else None
             key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
                           pos_key(float(me.group(1)), float(me.group(2))),
-                          ml.group(1), net_token)
+                          ml.group(1) or ml.group(2), net_token)
             if targets.get(key, 0) > 0:
                 targets[key] -= 1
                 keep = False

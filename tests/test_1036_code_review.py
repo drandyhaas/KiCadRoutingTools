@@ -9,8 +9,7 @@
       the one `make_movie.resolve_max_frames`: None -> $KICAD_MOVIE_MAX_FRAMES
       -> 2400, and an explicit value (0 = none) wins. It used to hand None to
       build_boards, which reads it as "no budget".
-  4. An invalid $KICAD_RENDER_THEME warns ONCE per film, not per frame; a
-     caller's IsoOpts is not mutated.
+  4. An invalid $KICAD_RENDER_THEME warns ONCE per film, not per frame.
   5a. A synthesised placement step that also lays copper plays that copper
       through the normal reveal (its trace), not a silent snap.
   5b. Stage keys boards by resolved absolute path: two chain boards with one
@@ -19,14 +18,14 @@
       count changed is not read as a move. A uuid two blocks SHARE is no
       identity: those pair by reference, so cap_chain against itself moves
       nothing.
-  6.  A part overhanging the outline is placed; only a part entirely off it
-      counts as unplaced.
+  6.  (The placement inventory's "an overhanging part is placed" went with
+      the inventory: the stage3d layer column shows none.)
   7.  `leading_copper_free` ignores `(arc` inside a zone's `(pts ...)`.
   GIF: a strided GIF holds EXACTLY `GIF_MAX_FRAMES`.
   Camera detection: a routing chain (no footprint pose changed) costs no
       board parse to learn that, and keeps the camera off; a move or a
       rotation alone still goes through the full diff.
-  Lazy overlays: a frame the attempts band or the run clock fails to draw
+  Lazy overlays: a frame the benchmark band or the run clock fails to draw
       drops THAT overlay for the rest of the film, said once, and the film
       is still written, one size throughout; a frame that cannot be PRODUCED
       is re-raised as itself, never reported as "mp4 encode failed".
@@ -41,6 +40,11 @@ import os
 import shutil
 import sys
 import tempfile
+
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
 
 RUN_ALL_TIMEOUT = 900
 
@@ -201,23 +205,20 @@ def test_make_film_resolves_the_frame_budget_like_make_movie():
         print('  PASS: make_film and make_movie resolve one budget: %r' % got)
 
 
-def test_an_invalid_theme_warns_once_and_iso_opts_are_not_mutated():
+def test_an_invalid_theme_warns_once():
     _mark = len(_FAIL)
     import env_knobs
     import make_movie
-    import movie_panels
     old = os.environ.get('KICAD_RENDER_THEME')
     os.environ['KICAD_RENDER_THEME'] = 'chartreuse'
     env_knobs.refresh()
     err = io.StringIO()
-    opts = movie_panels.IsoOpts(max_renders=0)
     tmp = tempfile.mkdtemp(prefix='t1036th_')
     try:
         with contextlib.redirect_stderr(err):
             make_movie.make_movie([BOARD], out=os.path.join(tmp, 'm.gif'),
                                   size=200, quiet=True, attempts=False,
-                                  layout='split', aspect='16:9',
-                                  panels='xray+iso', iso_opts=opts,
+                                  aspect='16:9',
                                   # a run clock, so the per-FRAME clock band
                                   # (the path that warned once per frame)
                                   # is drawn
@@ -234,11 +235,8 @@ def test_an_invalid_theme_warns_once_and_iso_opts_are_not_mutated():
     n = err.getvalue().count("'chartreuse' is not one of")
     if n != 1:
         fail('an invalid $KICAD_RENDER_THEME warned %d times' % n)
-    if opts.theme is not None:
-        fail("the caller's IsoOpts was mutated: theme %r" % (opts.theme,))
     if len(_FAIL) == _mark:
-        print('  PASS: one warning for the film; the IsoOpts passed in is '
-              'unchanged')
+        print('  PASS: one warning for the film')
 
 
 def test_a_placement_step_that_lays_copper_plays_it():
@@ -378,12 +376,20 @@ def test_a_shared_uuid_is_not_an_identity():
               'moves nothing, and a real move is still C2 alone')
 
 
-def _two_attempts_track():
-    import movie_attempts as MA
-    return MA.Track(tuple(MA.Attempt(i, 'r%d' % i, 'round',
-                                     (i - 1) if i else None, True, False,
-                                     float(10 - i), False, 'b')
-                          for i in range(4)), 'failures', 'loop', 'x')
+def _two_lap_ledger(d):
+    """A converge ledger with three laps: enough for a benchmark band."""
+    t0 = 1.7e9
+    rows = [{'iteration': 0, 'kind': 'placement', 'accepted': True, 't': t0,
+             'score': {'blocking': 40}},
+            {'iteration': 1, 'kind': 'completion', 'accepted': True,
+             't': t0 + 900, 'score': {'blocking': 3}},
+            {'iteration': 2, 'kind': 'completion', 'accepted': True,
+             't': t0 + 1800, 'score': {'blocking': 0}}]
+    p = os.path.join(d, 'ledger.jsonl')
+    with open(p, 'w', encoding='utf-8') as f:
+        for r in rows:
+            f.write(json.dumps(r) + '\n')
+    return p
 
 
 def _gif_frames(path):
@@ -398,41 +404,44 @@ def test_a_failing_overlay_costs_the_overlay_not_the_film():
     _mark = len(_FAIL)
     import cmd_timing
     import make_movie
-    import movie_attempts as MA
+    import movie_benchmark as MB
     clock = os.path.join(_TESTS, 'fixtures', 'cmd_timing',
                          'synthetic_run.jsonl')
     tmp = tempfile.mkdtemp(prefix='t1036ov_')
 
-    def _film(name, **kw):
+    def _film(name, size=400, **kw):
         err = io.StringIO()
         out = os.path.join(tmp, name + '.gif')
         got = None
         with contextlib.redirect_stderr(err):
-            # 400 px: at 200 the band declines (over its share of the frame)
             try:
-                got = make_movie.make_movie([BOARD], out=out, size=400,
+                got = make_movie.make_movie([BOARD], out=out, size=size,
                                             quiet=True, camera='off',
-                                            placement_panel=False, **kw)
+                                            placement_panel=False,
+                                            board3d='2d', **kw)
             except Exception as exc:                            # noqa: BLE001
                 # the regression itself: the overlay's error escaped
                 err.write(' RAISED %s: %s' % (type(exc).__name__, exc))
         return got, err.getvalue()
 
     try:
-        # the attempts band: the probe draw passes, frame 2's draw raises
-        ok_path, _e = _film('band_ok', attempts=_two_attempts_track())
-        orig, calls = MA.draw_track, [0]
+        # the benchmark band (the attempts band's successor on the one
+        # stage3d frame): the probe draw passes, frame 2's draw raises.
+        # 1000 px: at 400 the band declines under the board's 70% floor.
+        led = _two_lap_ledger(tmp)
+        ok_path, _e = _film('band_ok', size=1000, attempts_ledger=led)
+        orig, calls = MB.draw_band, [0]
 
         def _boom(*a, **k):
             calls[0] += 1
             if calls[0] >= 3:
                 raise RuntimeError('band draw failed (injected)')
             return orig(*a, **k)
-        MA.draw_track = _boom
+        MB.draw_band = _boom
         try:
-            got, err = _film('band', attempts=_two_attempts_track())
+            got, err = _film('band', size=1000, attempts_ledger=led)
         finally:
-            MA.draw_track = orig
+            MB.draw_band = orig
         # the run clock: frame 2's band raises
         c_ok, _e2 = _film('clock_ok', attempts=False, timing=clock)
         c_orig, c_calls = cmd_timing.add_clock_band, [0]
@@ -447,7 +456,10 @@ def test_a_failing_overlay_costs_the_overlay_not_the_film():
             c_got, c_err = _film('clock', attempts=False, timing=clock)
         finally:
             cmd_timing.add_clock_band = c_orig
-        for what, path, e, ctl in (('attempts band', got, err, ok_path),
+        if calls[0] < 3:
+            fail('BROKEN: the benchmark band was never drawn, so its arm '
+                 'pins nothing')
+        for what, path, e, ctl in (('benchmark band', got, err, ok_path),
                                    ('run clock', c_got, c_err, c_ok)):
             if not (path and os.path.isfile(path)):
                 fail('%s: a failed overlay frame lost the film: %r'
@@ -608,41 +620,6 @@ def test_a_routing_chain_costs_no_parse_to_find_nothing_moved():
               'a move and a rotation alone are still diffed')
 
 
-def test_an_overhanging_part_is_placed():
-    _mark = len(_FAIL)
-
-    class _Pad(object):
-        def __init__(self, x, y):
-            self.global_x, self.global_y, self.size_x, self.size_y = \
-                x, y, 1.0, 1.0
-
-    class _F(object):
-        def __init__(self, x, y, pads):
-            self.x, self.y, self.pads = x, y, pads
-
-    class _BI(object):
-        board_bounds = (0.0, 0.0, 10.0, 10.0)
-        copper_layers = ['F.Cu', 'B.Cu']
-
-    pcb = type('P', (), {})()
-    pcb.board_info = _BI()
-    pcb.footprints = {
-        'J1': _F(10.8, 5.0, [_Pad(9.6, 5.0), _Pad(11.5, 5.0)]),   # overhangs
-        'R1': _F(5.0, 5.0, [_Pad(5.0, 5.0)]),
-        'C9': _F(30.0, 30.0, [_Pad(30.0, 30.0)]),                  # in a pile
-    }
-    m = A.Movie.__new__(A.Movie)
-    m.want_panel, m.unplaced, m.inventory = True, False, {}
-    m.refresh_placement(pcb, None)
-    placed = sum(a for a, _b in m.inventory.values())
-    if placed != 2:
-        fail('placed %d of 3 -- the overhanging J1 must count, the pile C9 '
-             'must not: %r' % (placed, m.inventory))
-    if len(_FAIL) == _mark:
-        print('  PASS: 2 of 3 placed: the overhanging connector is placed, '
-              'the part off the board is not')
-
-
 def test_leading_copper_free_ignores_arcs_inside_pts():
     _mark = len(_FAIL)
     import make_movie
@@ -690,13 +667,12 @@ def test_a_strided_gif_holds_exactly_the_cap():
 TESTS = (
     test_make_film_closes_its_spools_on_failure,
     test_make_film_resolves_the_frame_budget_like_make_movie,
-    test_an_invalid_theme_warns_once_and_iso_opts_are_not_mutated,
+    test_an_invalid_theme_warns_once,
     test_a_placement_step_that_lays_copper_plays_it,
     test_duplicate_references_pair_by_uuid,
     test_a_shared_uuid_is_not_an_identity,
     test_a_failing_overlay_costs_the_overlay_not_the_film,
     test_a_routing_chain_costs_no_parse_to_find_nothing_moved,
-    test_an_overhanging_part_is_placed,
     test_leading_copper_free_ignores_arcs_inside_pts,
     test_a_strided_gif_holds_exactly_the_cap,
 )

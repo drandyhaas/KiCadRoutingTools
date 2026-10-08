@@ -18,6 +18,7 @@ MAP=(
   "a500_2meg_chip_ram|a500_2meg_chip_ram"
   "a591|a591"
   "amigaa500dram|amigaa500dram"
+  "c64_250407|c64_250407"
   "cider|cider"
   "computie_68kboard|computie_68kboard"
   "gottagofazt3r|gottagofazt3r"

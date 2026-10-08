@@ -181,7 +181,10 @@ The quench is deterministic by design (#457), so re-running it never produces
 a different placement: every run walks into the same local minimum. When the
 question is "what are my placement OPTIONS", this tool generates them: legal
 seeded perturbations of the input placement (`jitter` disc offsets, `poses`
-rotation variants pruned by `pair_order` inversions, `swap` block-interior
+rotation variants pruned by `pair_order` inversions -- a part whose rotation
+a block declares is turned only into that declaration (#1121; an
+`arrays[].rotation` is not held) -- `swap`
+block-interior
 position exchanges), each quenched with the ordinary engine, scored **without
 routing**, pruned to a diverse slate, probe-routed at the top, and presented
 as per-candidate renders plus `portfolio.json`.
@@ -252,6 +255,7 @@ parts, and parts outside `seed_refs`, count as placed before stage 0):
 | 2.45 | one declared array as ONE row (`_seat_array` -> `_seat_block`, #1051): the served part's pin order, one rotation, one pitch, a capped pose count (`ARRAY_SEAT_POSE_CAP`). A row not seated whole goes to `array_unseated` and its members are seated one by one |
 | 2.5 / 2.6 | the decap-governed caps, one per supply pin; what the pin stage declines is put back into its zone. `decap_stage` says what it claimed, and why when nothing -- on an unzoned seed, that no owner IC is seated before the stage (#1053) |
 | 3 | everything else, at the nearest legal pose to its connectivity centroid |
+| 3.5 | opt-in (`--decap-claim-after-ics`, #1105): inside stage 3, at the first scoped cap after the queue's last owner IC, the pin claim again over the owner ICs stage 3 seated (never one 2.5 served). It draws no RNG, so every part seated before it -- every IC -- is seated as without it; a cap it declines keeps its own turn. Stage 3's target jitter is drawn for every queue entry before the claim or the `after_queue` reorder, so the parts seated after it are aimed exactly as without it too. `decap_stage.late` says what it did. Rejected as a default by the `decap-*` A/B rows |
 | 3c / 3b | the eviction rung (`--evict-depth`, below), then the gated anchor re-seat rounds |
 
 `place_seed`'s `JSON_SUMMARY` carries what stages 0, 2.45 and 2.5 did, judged
@@ -289,10 +293,18 @@ part with no contained legal pose at it falls back to its 90° lattice (noted
 in the output — measured: an LDO with 0 legal poses at rot 0 and 3 at rot 90
 on a packed board). A part whose rotation is a *decision* (pin order, the U3
 rot-180 case) DECLARES it: a block's `rotation` / `rotation_candidates` (#893,
-honoured by the seat search and held by the quench), an array's `rotation`
+honoured by the seat search -- `place_seed`'s post-polish re-seat included
+since #1117, which names a part it cannot put back at its angle in
+`reseat_declined` rather than turning it; stage 1's edge seat applies a
+declared `rotation`, and a `rotation_candidates` set at a member that fits
+the edge since #1120, walking on to the next member when that one's seat
+only crowds what is placed since #1125 -- and held by the
+quench, whose swaps no longer trade a declared angle away), an array's
+`rotation`
 (the row is seated at one angle and the quench only translates it), or a
 `fixed_poses[]` entry's `rot` (seated exactly, then locked). Explore rotations
-deliberately with `place_portfolio.py --strategy poses`.
+deliberately with `place_portfolio.py --strategy poses`, which with `--intent`
+explores a part a block declares only within its declaration (#1121).
 
 ### The eviction rung (`--evict-depth`, #630, #699)
 
@@ -521,11 +533,44 @@ added here because the repo had a stamper and no un-stamper.
 
 Legality is RELATIVE: `grade_pad_legality` on the candidate against the same
 grade on the input, refusing (exit 4, nothing written) only a request that
-makes a category worse. An absolute gate would refuse poses no worse than
+makes a category worse. A pad stack (two parts' pad copper overlapping, any
+net -- check_assembly's `pad_intersection`) is a category since #1064,
+measured by `legality.pad_intersection_pairs`, the function check_assembly's
+channel now is. An absolute gate would refuse poses no worse than
 where the part already sits — and would refuse to arrange the unplaced pile
 this tool exists for. `--strict-legal` is the absolute arm, `--force` the
 waiver, and a KiCad `(locked yes)` is refused unless the same call `unlock`s
 it. See `docs/utilities.md` for the full contract.
+
+The SEARCH's own stack test (`legality.pads_ok` refusing a new
+`PairShortfall.stack`) is still measured on pad BOXES, conservative by
+design. `legality.STACK_EXACT_CONFIRM` (#1127, default off) confirms each box
+hit on the pads' outlines with `_exact_pad_stack`, the check check_assembly
+makes. `tests/measure_1127_stack_gate_census.py` measured it before any
+default: the corpus seeds and quenches almost never reach a box stack, and
+the placement A/B did not pass (the census and its numbers are in #1127), so
+it stays off.
+
+A second, pre-registered look (`tests/1127_stack_ab_prereg.json`) split the
+toggle into a LICENCE fix and the exact gate itself. The licence fix targets
+box mode's seed baseline, which records a box-only near-touch at the seed as
+a stack and so licenses a later real one with that neighbour. Its census,
+`tests/measure_1127_licence_census.py`, counts on an OFF run, inside the
+engine call only, every `pads_ok` decision the licence or the exact gate
+would take differently. It found 0 licence holes in every cell, StickHub
+included. On the committed corpus that zero is structural: no input carries
+a box-only licence, and a pile has none by `_degenerate_refs`. The exact gate
+has trial cells (a flip at the `pads_ok` verdict or at any pair level) on
+rp2350 and ulx3s only -- and only ONE call on the whole corpus changed a
+`pads_ok` verdict (ulx3s quench, R27). That is 2 boards per engine against
+the 3 CLAUDE.md's rule needs, so the run stopped there (STOP A) and nothing
+changed default. (The STOP comes from the plan and that rule; the prereg's
+own `family_B.combine` wording would have allowed a GO with no engine at 3
+boards, a defect in that text, disclosed in
+`tests/measure_1127_stack_modes_ab.py`'s docstring.) Two findings stand: the PAD conjunct is box currency too, so on the
+#1064 C4/Y1 grid the exact gate clears only 6 of the 35 box-only refusals; and
+the census does not observe `relocate.exact_refusal`, `place_pose`,
+`reseat`, `portfolio` or `perturb`.
 
 ## place_fanout_clearance.py — decoupling-cap clearance repair (issue #130)
 
@@ -569,6 +614,7 @@ python py_placer/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb -
 | `--default-via-size` | 0.3 mm | Fallback only, for vias with no readable size. Honoured by the grader **and** the via-nudge since #732; before that the nudge priced such a via at a hard-coded 0.5 and the two disagreed. |
 | `--board-edge-clearance` | the board's own `min_copper_edge_clearance` when it asks for MORE, else 0.55 mm | Copper-to-Edge.Cuts margin for a moved cap **and** for a via the #313 nudge relocates -- one number since #733, where the nudger gated its own emitted copper at the bare `--clearance` and parked it 0.30 mm inside the band the cap mover reserves. Resolved by the shared engine, so the GUI plugin and `animate_fanout_clearance.py` get the same answer; TIGHTEN-only on an omitted flag, because `fix_project_for_output` pins this field up to the 0.20 fab floor on every board the chain writes. A given value is honoured as typed. |
 | `--lock` | – | Extra reference patterns to pin in place |
+| `--intent` | – | Floorplan intent JSON (#1067). Its decap limits (`decaps.max_distance_mm`, `decaps.max_pin_distance_mm`, each at error severity) are HELD no worse per claim, through the quench's own tether gate (`quench.TetherGateView`): a move may not take a claim past its limit and further than the board as it stands. A LADDER, not a wall: a cap whose every clear pose breaks a claim clears the foreign copper anyway (a short is worse than a far decap) and the claim is named (`Decap limit broken to clear foreign copper`, `decap.broken`). A hold made early can cost a claim later, or box another cap in, so a gated run that broke a claim or left a cap grazing is compared with the same pass without the gate, on a pristine copy, and the result with fewer unresolved grazes, then fewer decap claims made worse, is kept (`decap.compared`; measured on run 34's real board, which is not committed: the ungated one is kept, 1 claim worse against 2). Only the kept run's lines are printed. The decap grade before and after and a `JSON_SUMMARY` are printed after the summary line. Its declared rotations (`blocks[].rotation`, `rotation_candidates`) are held too (#1122): a cap declared at one angle is never turned away from it, and one with candidates turns only within them, on its own quarter-turn lattice -- in BOTH passes, because the one without the decap gate is often the one kept (`Declared rotations (intent)` names the caps, `declared_rotations` in the summary). Two blocks declaring one part (any part, as every intent gate refuses) at different angles exit 2 before anything is written or recorded, and a rotation block that resolves to no part is printed as an `INTENT WARN`. A hold has a price: a held cap can leave a graze the free pass would clear (it stays on the `Unresolved` line and in the `unresolved` key), and declaring one cap can change which other cap the run leaves grazing. Nothing else in the intent is read. An unreadable file exits 2 before anything is written or recorded. Omitted, the run is unchanged. The GUI fanout tab's `cap_intent_path` is the same parameter. |
 | *(no flag)* track-scoped `.kicad_dru` rules | the board's own custom rules | What the #313 via-nudge charges between the connector copper it draws and a foreign **track**. KiCad stores a track-to-track requirement as a custom rule scoped to a net class (`A.Type=='track' && B.Type=='track' && A.NetClass=='X'`); netclasses cannot express it, and before #735 this pass could not read it, so on a declaring board it drew connectors closer to foreign copper than `check_drc` accepts -- an under-block, which ships the violation rather than refusing the landing. **RAISE-only** over the pair's already-resolved value, and **tracks only**: the cap-pad, board-pad and via arms are exempt by KiCad's own condition, not by omission. The board's value is a **PREFERENCE, not a gate**, the same shape as the drill floors above: the sweep runs every drill rung honouring the rule first and only falls back to the base requirement if nothing clears, saying so on stdout -- because a hard gate would abandon the via and leave the pad-via graze this pass exists to remove, which `check_drc` counts too. Resolved by the shared engine through the same `kicad_dru.track_pair_clearance` `check_drc` grades with, so the GUI plugin and `animate_fanout_clearance.py` get the same answer; an unsaved GUI board has no path to read a `.kicad_dru` from and keeps the netclass value. No board in this repo ships a `.kicad_dru`, so the channel is inert on the whole tracked corpus. |
 | *(no flag)* drill-to-drill floors | the board's own `min_hole_to_hole` when it asks for MORE, else the fab tier's 0.20 (via-hole to via-hole) and 0.45 (via-hole to pad-hole) | What the #313 via-nudge charges when it relocates a barrel. Board-first and RAISE-only since #756; before that both were flat literals, so on a board declaring above 0.20 the pass parked a via at 0.20 while `check_drc` graded the same drill pair at the declared value and flagged it. Resolved by the shared engine off the board's sibling `.kicad_pro`, so the GUI plugin and `animate_fanout_clearance.py` get the same answer; an unsaved GUI board has no project to read and keeps the fab floors. The board's value is a PREFERENCE, not a gate: the nudge sweeps for a landing that clears it and falls back to the fab floor rather than abandoning the repair, so it can never place a via worse than it would have before. `--fab-tier` cannot move these floors (both tiers declare 0.20/0.45); a `--fab-overrides` file can, but note `place_fanout_clearance.py` accepts neither flag — the fab tier reaches this pass only as the process-wide value some other step set, which is how the GUI's Fanout tab supplies it. The pad-hole floor stays stricter than `check_drc`'s pad-drill arm (which grades at the single hole-to-hole value) by `max(d, 0.45) - max(0.20, d)` — 0.25 mm on a board declaring nothing, decaying to 0 at 0.45. Deliberate: 0.45 is the JLC fab minimum and nothing else in the repo enforces it. |
 

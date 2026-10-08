@@ -389,3 +389,79 @@ def simplify_path(path):
 
     result.append(path[-1])
     return result
+
+
+# ---------------------------------------------------------------------------
+# Overlap thickness (#1094), shared since #1111
+# ---------------------------------------------------------------------------
+# Moved here VERBATIM from placement/legality.py so check_pads (#1111) measures
+# a custom pad's copper overlap with the ruler the placement graders use --
+# calling it, not mirroring it -- without the router importing placement.
+# legality keeps `overlap_thickness` as a thin wrapper over this one.
+
+#: The area (mm2) below which a polygon part is a sliver, not a region:
+#: placement.legality's `EPS`, which the moved code compared against.
+AREA_EPS_MM2 = 1e-6
+
+
+#: The precision (mm) `overlap_thickness` measures a non-rectangular region
+#: to: the last decimal `depth_mm` is rounded to. A rectangle is exact.
+THICKNESS_TOL_MM = 1e-4
+
+
+def _areal_parts(geom):
+    """The Polygon parts of any geometry: an intersection can be a Polygon, a
+    MultiPolygon, or a collection that also carries lines and points."""
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == 'Polygon':
+        return [geom] if geom.area > AREA_EPS_MM2 else []
+    out = []
+    for g in getattr(geom, 'geoms', ()):
+        out.extend(_areal_parts(g))
+    return out
+
+
+#: Public name for the placement graders (#1123, via
+#: `check_pads.custom_pad_copper`); the body stays where #1111 anchored it.
+areal_parts = _areal_parts
+
+
+def _inscribed_radius(poly) -> float:
+    """Radius of the largest circle inside `poly`, to `THICKNESS_TOL_MM`.
+    shapely 2.1 has `maximum_inscribed_circle`; before it, `polylabel` finds
+    the same centre (the pole of inaccessibility)."""
+    import shapely
+    mic = getattr(shapely, 'maximum_inscribed_circle', None)
+    if mic is not None:
+        return float(mic(poly, tolerance=THICKNESS_TOL_MM).length)
+    from shapely.ops import polylabel
+    return float(poly.boundary.distance(
+        polylabel(poly, tolerance=THICKNESS_TOL_MM)))
+
+
+def overlap_thickness(geom) -> float:
+    """How thick an overlap region is, in mm: twice the radius of the largest
+    circle it contains, over its thickest part.
+
+    For a rectangle that is its shorter side -- the rect channel's
+    `min(dx, dy)` -- and a rectangular region is measured exactly so, with
+    no search. The shorter side of the region's minimum ROTATED rectangle,
+    which this replaced, spans the whole region instead of its thickness: a
+    part tucked into a stepped courtyard's corner notch, grazing both arms
+    0.2 mm deep, read 2.2 mm and tripped the 0.3 mm blocking floor, and two
+    disjoint slivers read as one region as wide as the gap between them.
+    """
+    best = 0.0
+    for p in _areal_parts(geom):
+        mrr = p.minimum_rotated_rectangle
+        cs = list(mrr.exterior.coords) if hasattr(mrr, 'exterior') else []
+        if len(cs) < 4:
+            continue
+        short = min(math.hypot(cs[1][0] - cs[0][0], cs[1][1] - cs[0][1]),
+                    math.hypot(cs[2][0] - cs[1][0], cs[2][1] - cs[1][1]))
+        if abs(mrr.area - p.area) <= 1e-9 * max(1.0, mrr.area):
+            best = max(best, short)            # the region IS a rectangle
+        else:
+            best = max(best, min(short, 2.0 * _inscribed_radius(p)))
+    return best

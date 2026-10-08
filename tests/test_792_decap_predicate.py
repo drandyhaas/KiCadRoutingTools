@@ -352,9 +352,33 @@ def test_a_two_terminal_passive_is_not_an_IC_however_it_is_rotated():
         bad += [(os.path.basename(path), r) for r in G.chip_refs(p2)
                 if G._copper_pads(p2.footprints[r]) < 4]
     assert not bad, bad[:5]
+    # The paste half of this trap is now closed TWICE: #1143's `_pads_view`
+    # drops aperture-only pads before `build_chip_list` counts them, so C28
+    # never reaches the copper-pad gate at all, and no corpus part is excluded
+    # by that gate alone any more (measured: 0). What only the gate still
+    # refuses is a pad that is NOT an aperture and carries no copper either --
+    # an NPTH peg whose layers name no `.Cu`. Built from C28 so the shape is a
+    # real one: its two paste windows become two such pegs.
+    import copy
+    from chip_boundary import build_chip_list
+    from types import SimpleNamespace
+    f = copy.deepcopy(pcb.footprints['C28'])
+    pegs = [p for p in f.pads
+            if not any(str(l).endswith('.Cu') for l in (p.layers or ()))]
+    assert len(pegs) == 2, [(p.pad_number, p.layers) for p in f.pads]
+    for p in pegs:
+        p.pad_type, p.drill, p.layers = 'np_thru_hole', 0.5, ['*.Mask']
+    peg_pcb = SimpleNamespace(footprints={'C28': f})
+    # ANTI-VACUITY: the pads-only view must still hand it over as a chip, or
+    # the gate below proves nothing.
+    assert [c.reference for c in build_chip_list(
+        G._pads_view(peg_pcb), min_pads=G.DECAP_MIN_IC_PADS)] == ['C28']
+    assert not G._pads_are_collinear(f)
+    assert G._copper_pads(f) == 2, G._copper_pads(f)
+    assert 'C28' not in G.chip_refs(peg_pcb), 'two NPTH pegs made C28 an IC'
     print("  PASS: rp2350 C28 and R9 are 4-pad/2-copper parts at -45 degrees, "
           "not collinear, and not chips; no corpus part reaches the chip list "
-          "on paste apertures")
+          "on paste apertures; two copperless NPTH pegs do not make one")
 
 
 TESTS = [

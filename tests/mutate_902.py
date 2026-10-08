@@ -367,11 +367,12 @@ ROWS = [
      "                rot = math.radians(fp.rotation or 0.0)",
      "                rot = 0.0",
      (T961,), KILLED),
+    # RE-ANCHORED for #1143: the copper filter is `pad_has_copper` and the
+    # fallback drops apertures; the mutant still counts the NPTH pads.
     ('marker-counts-npth-pads', 'cg',
-     "            pads = ([p for p in (fp.pads or ())\n"
-     "                     if getattr(p, 'pad_type', '') != 'np_thru_hole']\n"
-     "                    or list(fp.pads or ()))",
-     "            pads = list(fp.pads or ())",
+     "            pads = ([p for p in (fp.pads or ()) if pad_has_copper(p)]\n"
+     "                    or non_aperture_pads(fp))",
+     "            pads = non_aperture_pads(fp)",
      (T961,), KILLED),
     ('marker-verdict-shared-between-parts', 'cg',
      "        hit = self._encloses.get(ref)",

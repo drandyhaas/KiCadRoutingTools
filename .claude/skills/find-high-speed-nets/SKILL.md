@@ -469,6 +469,9 @@ not allowed to lower the board-wide clearance, so the engine now **floors the ga
 to clearance** (`route_diff` raises `diff_pair_gap` to `max(gap, clearance)` before
 routing). Plan the two so this floor never has to bite: **pick `--clearance` first,
 then set `--diff-pair-gap` ≥ that** — for tight coupling, put BOTH at the fab floor.
+A `.kicad_dru` clearance rule raises the gap the same way (#1145): a layer rule on a
+layer the pair routes on, or a track rule on the pair's class. The `--impedance`
+widths are solved at the raised gap.
 
 **Width and spacing: choose them near the fab floor (~0.1 mm), overriding the
 net class.** The stock Default net class is usually wide (e.g. `diff_pair_gap`

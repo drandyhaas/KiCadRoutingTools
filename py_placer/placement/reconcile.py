@@ -777,6 +777,9 @@ def anchor_blocks(pcb, board_path: str, mechanical: Dict, *,
         if fp is None:
             skipped[ref] = 'not on this board'
             continue
+        # `fp.pads` on purpose (#1143): "the seeder never places it" is the
+        # quench's question, and the quench keeps a part whose only pads are
+        # paste/mask apertures movable -- so such a part is anchored.
         if not fp.pads:
             skipped[ref] = ('pad-less: the seeder never places it, so it is '
                             'reconciled rather than anchored')

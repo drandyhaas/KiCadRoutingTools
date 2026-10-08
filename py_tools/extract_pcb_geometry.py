@@ -51,7 +51,7 @@ def extract_geometry(pcb: PCBData, net_patterns: Optional[List[str]] = None) -> 
         """Check if net name matches any of the patterns."""
         if not patterns:
             return True
-        return any(fnmatch.fnmatch(net_name, p) for p in patterns)
+        return any(fnmatch.fnmatchcase(net_name, p) for p in patterns)
 
     # Build net ID to name mapping
     net_names = {net_id: net.name for net_id, net in pcb.nets.items()}

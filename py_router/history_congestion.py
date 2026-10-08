@@ -16,32 +16,35 @@ history is the principled version of that finding: per-CELL and cumulative
 where the rip ghosts are per-NET and transient.
 
 Conflict events (all in mm-equivalent, composed like every other soft
-source). v2 re-targeted the charging after the v1 study (see the #590 issue
-thread): the whole-footprint rip stamp was measured NEGATIVE (it prices the
-victim's entire corridor -- almost all of it never contested -- and, once the
-victim reroutes, permanently prices vacated ground) and the raw-frontier
-charge mostly lands on static copper no rip can clear. PathFinder charges
-only the OVERUSED nodes; the engine's analog is:
+source). PathFinder charges only the OVERUSED nodes; the engine's analog is
+the contest, and the shipped default (below) charges all three events:
 
-  * a CONTEST (primary, full increment) -- the intersection of a FAILED
+  * a CONTEST (full increment) -- the intersection of a FAILED
     search's blocked frontier with a routed net's copper: ground one net
     holds and another just stalled against. ``analyze_frontier_blocking``
     already computes exactly these cells per blocker (its rip-candidate
     ranking); they are charged there, BEFORE any rip, so a ripped blocker's
     reroute already sees its contested ground priced and relocates instead
     of re-taking it.
-  * a RIP's whole footprint (v1, ``KICAD_HISTORY_RIP_WEIGHT``, default 0) --
-    kept only for A/B against the v1 behavior.
-  * a FAILED search's raw blocked frontier (v1,
-    ``KICAD_HISTORY_BLOCKED_WEIGHT``, default 0) -- ditto.
+  * a RIP's whole footprint (``KICAD_HISTORY_RIP_WEIGHT``, shipped 1.0).
+  * a FAILED search's raw blocked frontier
+    (``KICAD_HISTORY_BLOCKED_WEIGHT``, shipped 0.25).
 
-Repeat contests ESCALATE (``KICAD_HISTORY_ESCALATE``): the second charge of
-a cell adds max(inc, escalate x accumulated), i.e. at the default 1.0 the
-cell's price DOUBLES per repeat (0.1, 0.2, 0.4, ...). A routing call has only
-a handful of rip rounds -- a flat increment cannot build a useful gradient in
-that many iterations, and ground contested once (the productive-churn BGA
-escape regime, 0802 study) stays near-free while ground fought over
-repeatedly prices itself out fast.
+History of that choice (see the #590 issue thread): v2 made the contest the
+primary event and demoted the other two to weight 0, on a local diagnosis
+(a few boards) that the rip stamp priced mostly uncontested, vacated
+corridor and the frontier charge mostly static copper. The corpus A/B
+reversed that for the rip stamp: the contest alone, and contests plus
+frontier without rip stamps, both measured WORSE than baseline, while all
+three together was the best arm.
+
+Repeat contests can ESCALATE (``KICAD_HISTORY_ESCALATE``): with a value
+above 0, the second charge of a cell adds max(inc, escalate x accumulated),
+so at 1.0 the cell's price DOUBLES per repeat (0.1, 0.2, 0.4, ...). That was
+v2's default, on the reasoning that a routing call has only a handful of rip
+rounds to build a gradient in. On the corpus it walled off fine-pitch BGA
+escape fields, where approaches are mandatory and contests repeat, so the
+shipped value is 0: a repeat adds the flat increment again.
 
 Scope is ONE routing call: the field is created/reset at batch start and
 attached to the config, like congestion v2's bins. No decay (v1) -- decay is
@@ -50,8 +53,9 @@ rounds.
 
 PROMOTED TO A SHIPPED DEFAULT (2026-08-13) at the "v1flat_01" settings: cost
 0.1, cap 0.5, rip_weight 1.0, blocked_weight 0.25, escalate 0 -- the flat
-diffuse field. It was the best arm of every one tested, on three independent
-corpora, and on sets 1-10 it recovers ~40 of the ~41-net gap that opened
+diffuse field. It was the best arm of every one tested, on the two corpora
+that compared arms (sets 1-10 and 11-20; sets 21-27 ran it against off
+only), and on sets 1-10 it recovers ~40 of the ~41-net gap that opened
 between v0.20.2 and HEAD while keeping HEAD's DRC advantage (66 vs the
 release's 144).
 
@@ -75,24 +79,23 @@ Knobs via environment:
   KICAD_HISTORY_COST            mm-equivalent added to each contested cell per
                                 conflict event (0 = disabled; SHIPPED 0.1)
   KICAD_HISTORY_CAP             ceiling on the accumulated per-cell history in
-                                mm-equivalent (0 = uncapped; a cap keeps
-                                PRODUCTIVE churn -- the fine-pitch BGA escape
-                                field, where the 0802 study found 15 rips
-                                converge -- from walling itself off)
-  KICAD_HISTORY_ESCALATE        repeat-contest multiplier: re-charging a cell
-                                adds max(inc, escalate x accumulated). 1.0
-                                (default) doubles per repeat; 0 = flat v1
-                                accumulation
-  KICAD_HISTORY_RIP_WEIGHT      fraction of the increment for the v1
-                                whole-footprint rip stamp (default 0 = off;
-                                measured negative in the v1 screen)
+                                mm-equivalent (0 = uncapped; SHIPPED 0.5; a
+                                cap keeps PRODUCTIVE churn -- the fine-pitch
+                                BGA escape field, where the 0802 study found
+                                15 rips converge -- from walling itself off)
+  KICAD_HISTORY_ESCALATE        repeat-contest multiplier: when > 0,
+                                re-charging a cell adds max(inc, escalate x
+                                accumulated), so 1.0 doubles per repeat.
+                                SHIPPED 0 = flat accumulation
+  KICAD_HISTORY_RIP_WEIGHT      fraction of the increment for the
+                                whole-footprint rip stamp (SHIPPED 1.0;
+                                0 = off)
   KICAD_HISTORY_RADIUS          mm added to the copper half-width when
-                                stamping a v1 rip (default 0.25 ~ one
+                                stamping a rip (default 0.25 ~ one
                                 clearance)
   KICAD_HISTORY_BLOCKED_WEIGHT  fraction of the increment charged to a failed
-                                search's RAW blocked frontier (default 0 =
-                                off; the contest event charges the useful
-                                subset at full weight)
+                                search's RAW blocked frontier (SHIPPED 0.25;
+                                0 = off)
   KICAD_HISTORY_MAX_CELLS       growth guard: past this many cells, each new
                                 event EVICTS the lowest-weight cells to make
                                 room -- chronological refusal would unprice
@@ -161,8 +164,9 @@ class HistoryField:
         """Charge every packed cell key in ``cells``.
 
         Fresh cells take ``inc`` mm-equivalent; cells already in the field
-        take ``max(inc, escalate x accumulated)`` -- at the default escalate
-        1.0 a repeat contest DOUBLES the cell's price (0 = flat +inc, v1).
+        take another flat ``inc`` at the shipped escalate 0, or
+        ``max(inc, escalate x accumulated)`` when escalate > 0 (at 1.0 a
+        repeat contest DOUBLES the cell's price).
 
         Kept O(field) per event, not O(field log field): ``keys`` is sorted,
         ``np.unique`` returns the event's cells sorted, so the new cells go in
@@ -371,10 +375,10 @@ def _disk_offsets(radius_grid: int) -> np.ndarray:
 def record_rip(config: GridRouteConfig, saved_result: dict,
                layer_map: Optional[Dict[str, int]]) -> None:
     """Rip event. The contested-cell charge already happened at blocking
-    analysis (record_contested, which identified this rip's victim); the v1
-    whole-footprint stamp here is kept behind KICAD_HISTORY_RIP_WEIGHT
-    (default 0 -- it was measured negative: it prices the victim's entire
-    corridor, almost all of it never contested)."""
+    analysis (record_contested, which identified this rip's victim); this
+    adds the whole-footprint stamp at KICAD_HISTORY_RIP_WEIGHT x the
+    increment (shipped 1.0; the corpus A/B found it the ingredient doing the
+    work, after v2 had demoted it to 0)."""
     field = _field(config)
     if field is None or not saved_result:
         return

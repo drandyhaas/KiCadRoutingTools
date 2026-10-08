@@ -140,12 +140,16 @@ def part_inputs(pcb_data, ref: str):
     fp = (pcb_data.footprints or {}).get(ref)
     if fp is None:
         return None
+    # The part's pad field; an aperture-only pad (a paste/mask window) is not
+    # part of it, netted or not (#1143).
+    from kicad_parser import non_aperture_pads
+    own = non_aperture_pads(fp)
     pads = [(float(p.global_x), float(p.global_y), int(getattr(p, 'net_id', 0) or 0))
-            for p in (fp.pads or ())
+            for p in own
             if (getattr(p, 'net_id', 0) or 0) > 0]
     if not pads:
         return None
-    all_pads = [(float(p.global_x), float(p.global_y)) for p in (fp.pads or ())]
+    all_pads = [(float(p.global_x), float(p.global_y)) for p in own]
     xs = [x for x, _ in all_pads]
     ys = [y for _, y in all_pads]
     rect = (min(xs), min(ys), max(xs), max(ys))
@@ -155,7 +159,7 @@ def part_inputs(pcb_data, ref: str):
     for other, ofp in (pcb_data.footprints or {}).items():
         if other == ref:
             continue
-        for p in (ofp.pads or ()):
+        for p in non_aperture_pads(ofp):
             nid = getattr(p, 'net_id', 0) or 0
             if nid in nets:
                 partners.setdefault(nid, []).append(

@@ -45,6 +45,7 @@ import env_knobs
 from typing import List, Optional, Set, Tuple
 
 from kicad_parser import PCBData, Segment, Via
+from pcb_modification import bump_copper_epoch
 from routing_config import GridRouteConfig
 
 
@@ -129,6 +130,10 @@ def relocate_tap(pcb_data: PCBData, config: GridRouteConfig,
     pcb_data.vias = [v for v in pcb_data.vias if id(v) != id(via)]
     stub_ids = {id(s) for s in stubs}
     pcb_data.segments = [s for s in pcb_data.segments if id(s) not in stub_ids]
+    # The rescue route runs next, on this board: the geometry memos
+    # (_via_place_fail_memo, _blockid_geom_memo) must not answer for the
+    # via that was just removed.
+    bump_copper_epoch(pcb_data)
 
     new_data = precompute_net_obstacles(
         pcb_data, nid, config, extra_clearance=0.0,
@@ -188,6 +193,7 @@ def retap_pad(pcb_data: PCBData, config: GridRouteConfig,
         remove_net_obstacles_from_cache(working_obstacles, entry)
         pcb_data.vias.append(new_via)
         pcb_data.segments.extend(_stub_segs)
+        bump_copper_epoch(pcb_data)
         net_obstacles_cache[nid] = precompute_net_obstacles(
             pcb_data, nid, config, extra_clearance=0.0,
             diagonal_margin=defaults.DIAGONAL_MARGIN)
@@ -202,7 +208,7 @@ def retap_pad(pcb_data: PCBData, config: GridRouteConfig,
         # believe is absent.
         pcb_data.vias.append(new_via)
         pcb_data.segments.extend(_stub_segs)
-        pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
+        bump_copper_epoch(pcb_data)
     print(f"  TAP RELOCATION: re-tapped {pad.component_ref}.{pad.pad_number} "
           f"with a fresh via at ({new_via.x:.2f}, {new_via.y:.2f})")
     return new_via
@@ -219,6 +225,7 @@ def restore_tap(pcb_data: PCBData, working_obstacles,
     remove_net_obstacles_from_cache(working_obstacles, token['new_data'])
     pcb_data.vias.append(token['via'])
     pcb_data.segments.extend(token['stubs'])
+    bump_copper_epoch(pcb_data)
     net_obstacles_cache[nid] = token['old_data']
     add_net_obstacles_from_cache(working_obstacles, token['old_data'])
     v = token['via']

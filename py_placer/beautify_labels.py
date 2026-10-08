@@ -168,6 +168,13 @@ Exit codes:
         for res in unplaced:
             print(f"  {res.reference}: {res.reason}")
 
+    # #1202: v1 models no silkscreen graphics (placement/labels.py), so a
+    # label may land on a neighbour's drawn silk. Say so where the count is
+    # read, not only in a module docstring.
+    print("silk graphics not checked: a label may overlap a neighbour's drawn "
+          "silk -- grade with KiCad's silk_overlap")
+    summary['silk_graphics_checked'] = False
+
     if args.report_json:
         from dataclasses import asdict
         with open(args.report_json, 'w', encoding='utf-8') as f:

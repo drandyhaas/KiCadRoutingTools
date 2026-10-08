@@ -7,8 +7,8 @@
      ends on it; a static frame and the end of a camera film both fill >=85%
      of the box on the limiting axis.
   2. **The rail's left title is never a later board's name.**
-  3. **The iso caption follows the type scale** and shortens by dropping
-     parts (yaw first) -- never by cutting a word.
+  3. (The iso caption's check went with the iso panel: stage3d is the only
+     film layout.)
   4. **Layer cells are shaped like the board**, in a 2x2 grid in a tall
      column, one row in a wide box.
   5. **Every panel keeps the gutter**: no text within `gutter_px` of its box.
@@ -19,6 +19,11 @@ Needs Pillow; renders small in-repo boards, no kicad-cli.
 """
 import os
 import sys
+
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
 
 RUN_ALL_TIMEOUT = 900
 
@@ -74,31 +79,33 @@ def test_the_board_fills_its_box():
     _mark = len(_FAIL)
     ground = RT.theme('dark').rgb('ground')
     worst = (9.0, None)
-    for lk in ('stacked', 'sidebar', 'split', 'inset', 'legacy'):
-        for rk in ('16:9', '9:16', '1:1', '4:3'):
-            geo = []
-            fr = A.build_boards([('s', ROUTED, None)], ROUTED, 400, 1, None,
-                                2, 6, layout=lk, aspect=rk, geom_out=geo,
-                                theme='dark')
-            f = _fill(fr[0], geo[0].board, ground)
-            if f < worst[0]:
-                worst = (f, (lk, rk))
-            if f < 0.85:
-                fail('%s/%s: the board spans %.0f%% of its %dx%d box'
-                     % (lk, rk, 100 * f, geo[0].board.w, geo[0].board.h))
+    # the stage3d frame (the only layout) at every named ratio, and a
+    # board-only extreme one
+    for rk in ('16:9', '9:16', '1:1', '4:3', '4:1'):
+        geo = []
+        fr = A.build_boards([('s', ROUTED, None)], ROUTED, 400, 1, None,
+                            2, 6, aspect=rk, geom_out=geo, theme='dark',
+                            board3d='2d')
+        f = _fill(fr[0], geo[0].board, ground)
+        if f < worst[0]:
+            worst = (f, rk)
+        if f < 0.85:
+            fail('%s: the board spans %.0f%% of its %dx%d box'
+                 % (rk, 100 * f, geo[0].board.w, geo[0].board.h))
     # ...and a CAMERA film ends on the board, not on the pile overview
     import movie_camera as MC
     st = MC.Stage(MC.synth_rounds([SEED, PLACED]), '', tween=3)
     geo = []
     fr = A.build_boards([('a', SEED, None), ('b', PLACED, None)], PLACED,
-                        400, 1, None, 2, 6, stage=st, layout='split',
-                        aspect='16:9', geom_out=geo, theme='dark')
+                        400, 1, None, 2, 6, stage=st,
+                        aspect='16:9', geom_out=geo, theme='dark',
+                        board3d='2d')
     f = _fill(fr[-1], geo[0].board, ground)
     if f < 0.85:
         fail('the camera film ends with the board at %.0f%% of its box -- '
              'still at the pile overview' % (100 * f))
     if len(_FAIL) == _mark:
-        print('  PASS: 20 static frames fill >= %.0f%% (worst %s); the camera '
+        print('  PASS: 5 static frames fill >= %.0f%% (worst %s); the camera '
               'film ends at %.0f%%' % (100 * worst[0], worst[1], 100 * f))
 
 
@@ -120,42 +127,6 @@ def test_the_title_is_never_a_later_boards_name():
         fail('--title does not win')
     if len(_FAIL) == _mark:
         print('  PASS: %r for one directory, %r for a spread chain' % (t, t2))
-
-
-def test_the_iso_caption_drops_parts_and_never_cuts_a_word():
-    _mark = len(_FAIL)
-    from route_render import load_font
-    d = ImageDraw.Draw(Image.new('RGB', (10, 10)))
-    font = load_font(RC.type_px('caption', 788))
-    parts = [('placed_v2', 1), ('yaw 56 deg', 2),
-             ('3D models 213/224', 0, '213/224 3D')]
-    full = '  |  '.join(p[0] for p in parts) + ' 3D'
-    words = set(full.replace('|', ' ').split())
-    seen = []
-    for w in range(40, int(d.textlength(full, font=font)) + 20, 7):
-        txt = RC.fit_parts(d, parts, font, w)
-        if txt and d.textlength(txt, font=font) > w:
-            fail('%d px: %r overflows' % (w, txt))
-        for tok in txt.replace('|', ' ').replace('…', ' ').split():
-            if tok not in words:
-                fail('%d px: %r cuts a word (%r)' % (w, txt, tok))
-                break
-        if 'yaw' in txt and 'placed_v2' not in txt:
-            fail('%d px: the board name went before the yaw: %r' % (w, txt))
-        if txt and '213/224' not in txt:
-            fail('%d px: the model count was cut: %r' % (w, txt))
-        seen.append(txt)
-    if not any(t == 'placed_v2  |  3D models 213/224' for t in seen):
-        fail('the yaw is never the first part dropped: %r' % sorted(set(seen)))
-    # the caption's size is the TYPE SCALE's, not the box's
-    import movie_panels as MP
-    pan, _e = MP.iso_panel((330, 392), None, parts, caption_px=12)
-    strip = pan.convert('RGB').getpixel((2, 391))
-    if strip != MP._colours(None)[1]:
-        fail('the caption strip is not where a 12 px caption puts it')
-    if len(_FAIL) == _mark:
-        print('  PASS: %d widths; drops yaw, then name; the count is kept or '
-              'shortened by whole words' % len(seen))
 
 
 def test_layer_cells_have_the_boards_shape_in_a_grid():
@@ -214,22 +185,22 @@ def test_every_panel_keeps_the_gutter():
     from kicad_parser import parse_kicad_pcb
     pcb = parse_kicad_pcb(ROUTED)
     r = _R(pcb)
-    inv = RP.inventory_counts(pcb, ())
     n = 0
-    for lk, rk, iso in (('stacked', '4:3', True), ('sidebar', '1:1', True),
-                        ('split', '16:9', False), ('stacked', '9:16', True)):
-        g = FL.plan_frame(r.bounds, layout=lk, ratio=FL.parse_ratio(rk),
-                          size=1400, panel=True, iso=iso)
+    for rk in ('4:3', '1:1', '16:9', '9:16'):
+        lk = 'stage3d'
+        g = FL.plan_frame(r.bounds, ratio=FL.parse_ratio(rk), size=1400)
         gut = RC.gutter_px(g.frame.w)
-        inner = g.panel_split[1] if (iso and g.panel_split) else g.panel
-        for event, unplaced in (('moving 5 part(s)', True), ('route', False),
-                                ('input', False)):
+        inner = g.panel
+        if inner is None:
+            fail('%s: the stage3d frame dropped its layer column' % rk)
+            continue
+        # one content on every frame -- the layer strip and the board's
+        # numbers -- whatever the event
+        for event in ('moving 5 part(s)', 'route', 'input'):
             im = Image.new('RGB', (g.frame.w, g.frame.h))
             rec = _Rec(ImageDraw.Draw(im))
-            A._draw_panel(rec, g, r, {'event': event, 'unplaced': unplaced,
-                                      'inventory': inv, 'live': (),
-                                      'live_v': ()},
-                          iso_in_panel=iso)
+            A._draw_panel(rec, g, r, {'event': event, 'live': (),
+                                      'live_v': ()})
             for txt, bb in rec.boxes:
                 n += 1
                 if (bb[0] < inner.x + gut - 1 or bb[1] < inner.y + gut - 1
@@ -239,7 +210,7 @@ def test_every_panel_keeps_the_gutter():
                          '%r' % (lk, rk, event, txt, bb, gut, tuple(inner)))
                     break
     if len(_FAIL) == _mark:
-        print('  PASS: %d panel texts over 4 layouts x 3 contents, all '
+        print('  PASS: %d panel texts over 4 ratios x 3 events, all '
               'inside the gutter' % n)
 
 
@@ -253,7 +224,7 @@ def test_the_event_key_is_in_the_rail_not_on_the_board():
         fail('a layout with a rail still draws the key over the board')
     m.split_caption = False
     if m._key_overlay() is None:
-        fail('legacy (no rail) lost its key')
+        fail('a frame with no rail (build_single) lost its key')
     rail = FL.Box(0, 0, 1400, 36)
     im = Image.new('RGB', (1400, 60))
     rec = _Rec(ImageDraw.Draw(im))
@@ -267,14 +238,13 @@ def test_the_event_key_is_in_the_rail_not_on_the_board():
         if bb[3] > rail.y + rail.h:
             fail('a key label leaves the rail: %r' % (bb,))
     if len(_FAIL) == _mark:
-        print('  PASS: key in the rail on a railed layout; corner key kept '
-              'for legacy')
+        print('  PASS: key in the rail on a railed frame; corner key kept '
+              'for a frame with no rail')
 
 
 TESTS = (
     test_the_board_fills_its_box,
     test_the_title_is_never_a_later_boards_name,
-    test_the_iso_caption_drops_parts_and_never_cuts_a_word,
     test_layer_cells_have_the_boards_shape_in_a_grid,
     test_every_panel_keeps_the_gutter,
     test_the_event_key_is_in_the_rail_not_on_the_board,

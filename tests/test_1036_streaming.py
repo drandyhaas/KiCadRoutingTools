@@ -29,6 +29,11 @@ import subprocess
 import sys
 import tempfile
 
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
+
 RUN_ALL_FAST_OK = False
 
 _TESTS = os.path.dirname(os.path.abspath(__file__))

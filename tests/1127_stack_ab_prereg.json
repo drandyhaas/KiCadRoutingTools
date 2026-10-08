@@ -1,0 +1,109 @@
+{
+ "schema": 1,
+ "kind": "preregistration",
+ "issue": 1127,
+ "written": "2026-10-05",
+ "purpose": "Fixes, BEFORE any census or A/B number exists, how the stack gate's two changes are measured and what would make either a default. PR #1144's census (tests/measure_1127_stack_gate_census.py) measured one bundled toggle and was NO-GO: the seed reached 2 trial boards, where the rule needs 3, and the quench regressed on StickHub. Research since then split that toggle into two changes that answer different questions. (L) is a LICENCE fix. In box mode `seed_baseline` records a box-only near-touch at the seed as a stack, and `pads_ok` then admits a later REAL stack with that neighbour. (FULL) is the exact gate itself: #1127's false refusals. This file decides each one separately.",
+ "base": {
+  "branch": "fix/1127-1142-1143-stack-licence-decap-paste",
+  "commit": "2ccd14dd",
+  "upstream_main": "31873435",
+  "engine_state": "#1143 (aperture-only pads) and #1142 (per-cap decap_ungraded) applied; legality.STACK_EXACT_CONFIRM (#1144) still the only stack switch"
+ },
+ "arms": {
+  "off": {"legality.STACK_MODE": "box"},
+  "licence": {"legality.STACK_MODE": "licence"},
+  "full": {"legality.STACK_MODE": "exact"},
+  "definitions": {
+   "box": "today's gate: the stack conjunct is box(cur) and not box(base)",
+   "licence": "box semantics, except for a pair whose seed baseline is a BOX-ONLY licence (box stack at the seeds, no exact stack). That pair is judged exactly on both sides, so the conjunct is box(cur) and not box(base), OR box(base) and not exact(base) and exact(cur)",
+   "exact": "exact(cur) and not exact(base): #1144's STACK_EXACT_CONFIRM=True"
+  },
+  "why_no_c_only": "A box baseline with an exact candidate mixes currencies, which #725's rule forbids: a pair would be judged against a baseline in a different unit. OFF -> L -> FULL attributes each step without it.",
+  "census_arm": "off only. The census observes an OFF run through a shim and evaluates every pads_ok call in all three modes; it changes no decision"
+ },
+ "boards": [
+  "esp_prog.kicad_pcb",
+  "splitflap_driver.kicad_pcb",
+  "tigard.kicad_pcb",
+  "glasgow_revC.kicad_pcb",
+  "ulx3s.kicad_pcb",
+  "orangecrab_ext_pll.kicad_pcb",
+  "watchy.kicad_pcb",
+  "rp2350_fpga_eensy_prePlane.kicad_pcb",
+  "kit-dev-coldfire-xilinx_5213.kicad_pcb"
+ ],
+ "piles": {
+  "boards": "the same nine",
+  "stager": "test_placement_ab._pile_inputs(board, d, require_decaps=False): stage_unaided piles, intent through the CLI with --decaps-from the board itself. The decaps requirement is lifted because pile eligibility for #1127 has nothing to do with decaps",
+  "engines": ["seed"],
+  "seed_scope": "place_seed's own: seed_refs as _pile_inputs returns them",
+  "expectation_stated_in_advance": "L is OFF on a pile: every movable part is in `_degenerate_refs`, which gets a ZERO baseline, so there is no licence. Piles can only matter to FULL"
+ },
+ "diagnostic": {
+  "stickhub": "KiCad 10's StickHub demo through test_1094_rotated_courtyards.stickhub(). Census and A/B are run and printed, but it is NEVER counted and NEVER a row: it is CC BY-NC-SA and cannot be a committed board"
+ },
+ "engines": {
+  "seed": {"how": "test_placement_ab._run_seed(board, out, intent, {}, ignore_nets=['GND'], engine_flags=<arm>)", "intent": "test_placement_ab._intent_for(board, [], d) on the corpus; the pile's own intent on a pile"},
+  "quench": {"how": "test_placement_ab._run(board, out, intent, dict(QUENCH_BASE, ignore_nets=['GND']), engine_flags=<arm>)", "intent": "test_placement_ab._intent_for(board, [], d)"}
+ },
+ "census": {
+  "script": "tests/measure_1127_licence_census.py",
+  "observes": "every LegalityContext.pads_ok call in an OFF run, re-evaluated per neighbour in all three modes. An L-HOLE is a call OFF admits and L refuses. A C-FLIP is a call OFF refuses and FULL admits. Both are attributed to the caller, and C-flips are also counted at any pair_shortfall level",
+  "attribution": "every pad_intersection_pairs stack in the OFF output is classed as: box-only licence, genuine licence (exact stack at the seeds), over-cap pair, pile part, or unexplained",
+  "controls_before_any_count_is_read": [
+   "positive: the esp_prog C4/Y1 grid (121 poses at 315 degrees, #1064) registers its 35 box-only poses as C-flips AT THE PAIR LEVEL (the any-level count over the grid's 121 pads_ok calls is exactly 35), and at least one of them survives to the pads_ok level",
+   "positive: a constructed licence witness (C4 seeded at a box-only pose, then moved to an exact-stack pose) registers as an L-hole",
+   "self-check: the shim's OFF verdict equals the real pads_ok return on every call",
+   "purity: the esp_prog seed is placement-identical with and without the shim"
+  ],
+  "on_a_failed_control": "the census is broken; exit 2 and no count is read"
+ },
+ "family_A": {
+  "change": "off -> licence",
+  "kind": "a CONSTRAINT fix, judged by the hard-constraint precedent at tests/test_placement_ab.py:240-247, not by the objective-term rule",
+  "cells": "every (board, engine) cell whose OFF census has >= 1 L-hole call, piles included",
+  "signal": "body_blocking",
+  "guards": {"seed": ["crossings", "hpwl", "unseated"], "quench": ["crossings", "hpwl", "body_advisory"]},
+  "sound_means_all_of": {
+   "S1": "a property test: on every sampled pose L refuses everything OFF refuses, and each extra refusal is an exact stack by pad_intersection_pairs",
+   "S2": "in the L-arm runs, every licence refusal the engine makes is confirmed by posing the board and calling pad_intersection_pairs: 100%",
+   "S3": "the RAW body_blocking columns satisfy L <= OFF in every cell. The columns are read, not the mark, because a guard regression masks the signal (#694)",
+   "S4": "no L-arm output stack is classed as a box-only licence. Over-cap stacks are listed separately"
+  },
+  "ships_if": "S1-S4 all hold. The guard marks are measured, recorded, and pinned as the rows' expect, not used as a veto, per the precedent",
+  "if_no_cell": "L0. If no committed cell has an L-hole but StickHub does, L is provably inert on the corpus seed and quench: identical decisions on the OFF trajectory. It then ships as pure soundness, on zero DRIFT over the full table plus the esp_prog witness; the StickHub numbers go in the text only. If StickHub has none either, L is dropped"
+ },
+ "family_B": {
+  "change": "licence -> full",
+  "kind": "a RELAXATION, judged by the objective-term rule",
+  "trial_cells": "every (board, engine) cell whose OFF census has >= 1 C-flip, at pads_ok level or at any pair_shortfall level. This is a mechanism rule fixed before any outcome: a cell with neither an L-hole nor a C-flip gives identical outputs in all three arms",
+  "signals": {"seed": "intent_errors", "quench": "crossings"},
+  "guards": {"seed": ["crossings", "hpwl", "unseated", "body_blocking"], "quench": ["hpwl", "body_blocking", "body_advisory"]},
+  "signals_why": "kept from #1144's census. They were fixed before #1144's numbers existed, and changing them now would be fitting to the data",
+  "mark": "test_placement_ab._verdict(licence_result, full_result, {signal, guard})",
+  "go_per_engine": "test_placement_ab.gate()'s rule over the engine's trial cells, merged by board name (a board's corpus cell and pile cell count once): N >= 3 distinct boards, improve on >= N-1, regress on none. An engine with fewer than 3 trial boards is held to 'no cell regresses'",
+  "combine": "STACK_MODE is one global setting: every engine with >= 3 trial boards passes, and no cell of any engine regresses",
+  "also_required": [
+   "FULL body_blocking <= OFF body_blocking in every cell",
+   "summed FULL engine seconds <= 1.5 x summed L engine seconds over the cells run"
+  ]
+ },
+ "sat_prover": {
+  "what": "an oriented-rectangle separating-axis test that only ever proves CLEAN before check_drc is called; never a stack",
+  "ships_if": "zero disagreements with _exact_pad_stack (fuzz plus a replay of every confirm call in the arm that ships), it resolves >= 25% of confirm calls, and confirm time falls >= 20%, all measured under the arm that ships"
+ },
+ "ship": {
+  "full_go_and_sound": "default 'exact'; Closes #1127 and the licence issue",
+  "only_licence_sound": "default 'licence'; closes the licence issue; Refs #1127",
+  "neither": "STOP and report to the user; Refs #1127; Phases 4-5 reverted with git revert"
+ },
+ "stop_rule": "The decisive run is tests/measure_1127_stack_modes_ab.py on the engine at its commit, taken once. A failed control, an unexplained shim mismatch or a crash is 'not taken', never a verdict. Arms, cells, signals, guards and thresholds are not edited after a number exists. A change to any of them is a new pre-registration with its own sha pin",
+ "amendments": [
+  {
+   "date": "2026-10-05",
+   "what": "census control 1 reworded from '35 box-only poses register as C-flips' to the pair-level count (exactly 35) plus at least one at the pads_ok level",
+   "why": "Running the controls, before any census cell or A/B number existed, gave 6 pads_ok-level C-flips, not 35. Of the 35 box-only poses, 29 are refused by pads_ok's PAD conjunct in every mode: a box-currency clearance or overlap with Y1's different-net pads (C4 nets 5,2; Y1 nets 5,3,2,2). Only 6 are refused by the stack conjunct alone. The any-level count is exactly 35. The original wording conflated #1144's pair-level census with the pads_ok verdict. It was the control's expectation that was wrong, not the census, and no outcome had been seen. The finding stands on its own: the pad-clearance channel is box currency too, so even FULL clears only 6 of #1064's 35 false refusals on that grid"
+  }
+ ]
+}

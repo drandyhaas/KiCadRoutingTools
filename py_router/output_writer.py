@@ -76,8 +76,10 @@ def write_routed_output(
     # netclass floors.
     from fix_kicad_drc_settings import seed_project_for_output
     seed_project_for_output(output_file, input_file)
-    with open(input_file, 'r', encoding='utf-8') as f:
-        content = f.read()
+    # Read the way KiCad reads it (#1149): the teardrop pass below walks pad
+    # blocks by their parens, as the next step's parser will.
+    from kicad_parser import read_board_text
+    content = read_board_text(input_file, quiet=True)
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)

@@ -451,6 +451,14 @@ def main():
         return len([x for x in check_weird(board, tolerance=0)[0]
                     if x['category'] == 'soft-joint'])
 
+    def _flagged_ends(board):
+        """(soft joints, dangling ends) for the via rows. Their two stubs both
+        leave pad 1's centre, so their ends already meet THERE: since #984 a
+        pair joined elsewhere is not a soft joint, and an end the via does not
+        anchor reads as what it is, a dangling end."""
+        c = _cats(check_weird(board, tolerance=0)[0])
+        return c.get('soft-joint', 0), c.get('dangling-end', 0)
+
     pcb, segs, pads = _land(pad_layer='F.Cu', seg_layer='B.Cu')
     conn = check_net_connectivity(NET, segs, [], pads, [])
     results.append(("an other-layer pad anchors nothing: check_connected "
@@ -508,8 +516,8 @@ def main():
                     "(check_connected)",
                     conn_f['num_components'] > 1
                     or bool(conn_f['disconnected_pads'])))
-    results.append(("...and check_weird agrees: still a soft joint",
-                    _sj(pcb_f) == 1))
+    results.append(("...and check_weird agrees: both ends still flagged",
+                    _flagged_ends(pcb_f) == (0, 2)))
 
     # 15. Copper-layer GRAPHICS (#337) are immutable input art. They were
     #     soft-joint CANDIDATES here and nowhere else -- _check_dangles refuses
@@ -605,8 +613,8 @@ def main():
                     "check_connected calls this net SPLIT",
                     conn_b['num_components'] > 1
                     or bool(conn_b['disconnected_pads'])))
-    results.append(("...and check_weird agrees: still a soft joint",
-                    _sj(pcb_b) == 1))
+    results.append(("...and check_weird agrees: both ends still flagged",
+                    _flagged_ends(pcb_b) == (0, 2)))
     #     Control: the same via and the same geometry on a layer the barrel
     #     DOES occupy anchors the ends, so the row above is the LAYER test
     #     firing and not the predicate refusing every via.
@@ -742,6 +750,176 @@ def main():
     results.append(("the same cap deeper into the round pad is NOT flagged",
                     not [x for x in check_weird(_rim(0.52), tolerance=0)[0]
                          if x['category'] == 'narrow-pad-joint']))
+
+    # 21. A T near a LONG segment's end (#1186). "Interior" was 2 % of the
+    #     length, so on a 25.8 mm track a solid T 0.2 mm from the end (t =
+    #     0.992) was neither interior nor a coincident endpoint: check_weird
+    #     called it a free end while check_connected called the net
+    #     connected, and removing the "dangling" segment disconnected it.
+    #     Interior is a distance from both ends now (One-Air-Max /SCL). The
+    #     track runs on past its end (degree 2 there), as /SCL does: with a
+    #     bare end the pair reads as a soft joint instead.
+    from pcb_modification import prune_dead_end_segments
+    _tpads = [_pad(0, 0, size=0.6, num='1'),
+              _pad(25.6, -1.5, size=0.6, num='1', ref='U2'),
+              _pad(25.8, 3, size=0.6, num='2', ref='U2')]
+    _tsegs = [_seg(0, 0, 25.8, 0, width=0.25),
+              _seg(25.6, 0, 25.6, -1.5, width=0.25),
+              _seg(25.8, 0, 25.8, 3, width=0.25)]
+    _tc = check_net_connectivity(NET, _tsegs, [], _tpads, [])
+    results.append(("precondition: the near-end T is connected copper",
+                    _tc['num_components'] == 1 and not _tc['disconnected_pads']))
+    results.append(("a T 0.2 mm from a 25.8 mm track's end is no dangling-end",
+                    not [x for x in check_weird(_pcb(_tsegs, pads=_tpads),
+                                                tolerance=0)[0]
+                         if x['category'] == 'dangling-end']))
+    _kept, _removed = prune_dead_end_segments(list(_tsegs), pads=_tpads,
+                                              tol=COINCIDENCE_TOL)
+    results.append(("...and the dead-end pruner keeps both segments",
+                    not _removed))
+    #     Control: the same stub 0.6 mm off the track's centreline does not
+    #     touch it, and is still a dangling end.
+    _tmiss = [_seg(0, 0, 25.8, 0, width=0.25),
+              _seg(25.6, -0.6, 25.6, -1.5, width=0.25),
+              _seg(25.8, 0, 25.8, 3, width=0.25)]
+    results.append(("the stub moved off the track is still a dangling-end",
+                    len([x for x in check_weird(_pcb(_tmiss, pads=_tpads),
+                                                tolerance=0)[0]
+                         if x['category'] == 'dangling-end']) >= 1))
+    #     Control: a short segment keeps the interior the 2 % band gave it.
+    _short = [_seg(0, 0, 0.5, 0, width=0.1),
+              _seg(0.25, 0, 0.25, -1.5, width=0.1)]
+    _spads = [_pad(0, 0, size=0.2, num='1'), _pad(0.5, 0, size=0.2, num='2'),
+              _pad(0.25, -1.5, size=0.2, num='1', ref='U2')]
+    results.append(("a T in a 0.5 mm segment's middle is still anchored",
+                    not [x for x in check_weird(_pcb(_short, pads=_spads),
+                                                tolerance=0)[0]
+                         if x['category'] == 'dangling-end']))
+
+    # 22. The narrow-pad-joint floor is the PROJECT's (#1187). It was the
+    #     thinnest track on the board, so re-routing complex_hierarchy's one
+    #     0.2032 mm rescue at 0.4 flipped two unrelated pad joints to
+    #     narrow-pad-joint while the project -- and the KiCad grade, staged
+    #     from it -- still said 0.2032. A 0.8 mm track meets a 1.6 mm round
+    #     pad through a ~0.40 mm lens here.
+    import json as _json
+    import tempfile as _tempfile
+
+    def _webpcb(pro=None, rescue=False):
+        _p = _pcb([_seg(6, 0, 1.12, 0, width=0.8)]
+                  + ([_seg(-9, -9, -8, -9, width=0.2032)] if rescue else []),
+                  pads=[_pad(0, 0, size=1.6, num='1'),
+                        _pad(6, 0, size=1.6, num='2', ref='U2')])
+        if pro is not None:
+            _td = _tempfile.mkdtemp(prefix='t1187_')
+            _bp = os.path.join(_td, 'b.kicad_pcb')
+            open(_bp, 'w').close()
+            with open(os.path.join(_td, 'b.kicad_pro'), 'w') as _f:
+                _json.dump({'board': {'design_settings': {'rules': pro}}}, _f)
+            _p.source_path = _bp
+        return _p
+
+    def _web(pro=None, rescue=False):
+        return len([x for x in check_weird(_webpcb(pro, rescue), tolerance=0)[0]
+                    if x['category'] == 'narrow-pad-joint'])
+
+    _p0203 = {'min_track_width': 0.2032}
+    results.append(("under a 0.2032 project floor the 0.40 mm web is clean, "
+                    "with the thin rescue track and without it",
+                    _web(_p0203, rescue=True) == 0 and _web(_p0203) == 0))
+    results.append(("the author's min_connection outranks min_track_width",
+                    _web({'min_connection': 0.6, 'min_track_width': 0.2032}) == 1))
+    results.append(("a project floor above the web flags it",
+                    _web({'min_track_width': 0.6}) == 1))
+    #     Control: with no project the floor is still the thinnest track
+    #     (#416), so a project-less board keeps its old verdicts.
+    results.append(("no project: the floor is the thinnest track, as before",
+                    _web() == 1 and _web(rescue=True) == 0))
+    #     The REPAIR passes ask what the board ships graded at, mid-run: the
+    #     project lowered to the thinnest track and the run's width, as the
+    #     writeback lowers it (KiCad grades one board-wide floor, which must
+    #     admit every track).
+    from fix_kicad_drc_settings import connection_width_floor as _cwf
+    _p06 = {'min_track_width': 0.6}
+    results.append(("shipped floor: the project's when the copper is wider",
+                    abs(_cwf(_webpcb(_p0203), shipped=True) - 0.2032) < 1e-9))
+    results.append(("shipped floor: lowered to a thinner track and the width",
+                    abs(_cwf(_webpcb(_p06, rescue=True), shipped=True) - 0.2032) < 1e-9
+                    and abs(_cwf(_webpcb(_p06), 0.3, shipped=True) - 0.3) < 1e-9
+                    and abs(_cwf(_webpcb(_p06, rescue=True)) - 0.6) < 1e-9))
+    #     Why the repair follows the writeback down: the run's own 0.2032
+    #     track meets its pad through a lens below 0.2032. Priced at the
+    #     project's 0.6 alone it would be skipped (no 0.6 web exists through
+    #     it) and ship as a narrow-pad-joint once the writeback lowers the
+    #     grade to 0.2032. The shipped floor firms it.
+    from types import SimpleNamespace as _NS
+    from pcb_modification import close_soft_joints as _csj
+
+    def _thin_lens():
+        _p = _webpcb(_p06)
+        _p.segments = [_seg(6, 0, 0.88, 0, width=0.2032)]
+        return _p
+    _tl = _thin_lens()
+    _csj([], _tl, None, _NS(track_width=0.8, clearance=0.2))
+    with open(os.path.splitext(_tl.source_path)[0] + '.kicad_pro', 'w') as _f:
+        _json.dump({'board': {'design_settings': {'rules': {
+            'min_track_width': 0.2032}}}}, _f)     # what the writeback writes
+    results.append(("the repair firms a thin track's sub-floor lens the "
+                    "lowered grade flags",
+                    len(_tl.segments) == 2
+                    and not [x for x in check_weird(_tl, tolerance=0)[0]
+                             if x['category'] == 'narrow-pad-joint']))
+    _tl0 = _thin_lens()
+    _tl0_pro = os.path.splitext(_tl0.source_path)[0] + '.kicad_pro'
+    with open(_tl0_pro, 'w') as _f:
+        _json.dump({'board': {'design_settings': {'rules': {
+            'min_track_width': 0.2032}}}}, _f)
+    results.append(("control: unfirmed, that lens IS a narrow-pad-joint at "
+                    "the lowered grade",
+                    len([x for x in check_weird(_tl0, tolerance=0)[0]
+                         if x['category'] == 'narrow-pad-joint']) == 1))
+    #     The GUI's declared rules are its LIVE board's (live_rules_provider),
+    #     read when the floor is asked for: mid-plan the file beside the live
+    #     board is still the original while the steps lowered the floors in
+    #     memory, and a PCBData built before a step's writeback is in use
+    #     after it. The provider outranks the file.
+    _live = {'min_track_width': 0.6, 'min_connection': 0.0}
+    _lp = _webpcb(_p0203)
+    _lp.live_rules_provider = lambda: dict(_live)
+    _before = _cwf(_lp)
+    _live['min_track_width'] = 0.127              # a later step's writeback
+    results.append(("a live rules provider outranks the file, read at call time",
+                    abs(_before - 0.6) < 1e-9 and abs(_cwf(_lp) - 0.127) < 1e-9
+                    and abs(_cwf(_lp, shipped=True) - 0.127) < 1e-9))
+
+    # 23. KiCad's track_dangling on a joint stub lying on ONE other track
+    #     (#1217). KiCad counts an item touching both ends of a segment for the
+    #     nearer end only, so a 35 um stub whose far end is mid-body on track T
+    #     and whose root is inside T's copper dangles in KiCad's DRC (rp2350's
+    #     GND at (151.05, 97.525)); the T-junction rule credited both ends.
+    def _kd(segs, vias=(), pads=None):
+        pads = pads if pads is not None else [_pad(-2, 0, num='1'),
+                                              _pad(2, 0, num='2', ref='U2')]
+        return [x for x in check_weird(_pcb(segs, vias=vias, pads=pads),
+                                       tolerance=0)[0]
+                if x['category'] == 'kicad-dangling']
+    _trk = _seg(-2, 0, 2, 0, width=0.25)
+    _stub = _seg(0.03, 0.02, 0.0, 0.0, width=0.25)     # both ends on _trk
+    results.append(("a stub lying on one other track is kicad-dangling",
+                    len(_kd([_trk, _stub])) == 1))
+    #     Controls: a short link in a CHAIN (each neighbour holds one end
+    #     nearer) is not; nor is a stub at a via or with a pad at its root,
+    #     where KiCad's verdict turns on details this check does not model.
+    _chain = [_seg(-2, 0, -0.05, 0, width=0.25), _seg(-0.05, 0, 0.05, 0, width=0.25),
+              _seg(0.05, 0, 2, 0, width=0.25)]
+    results.append(("a short link in a chain is not kicad-dangling",
+                    not _kd(_chain)))
+    results.append(("a stub ending at a via is left to KiCad",
+                    not _kd([_trk, _stub], vias=[_via(0.0, 0.0)])))
+    results.append(("a stub with a pad at its root is left to KiCad",
+                    not _kd([_trk, _stub],
+                            pads=[_pad(-2, 0, num='1'), _pad(2, 0, num='2', ref='U2'),
+                                  _pad(0.03, 0.02, size=0.2, num='3', ref='U3')])))
 
     # 11. The reporter, which is what #696 actually broke: a finding whose
     #     category is missing from CATEGORIES counted toward the headline and

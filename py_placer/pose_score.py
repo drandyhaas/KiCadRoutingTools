@@ -134,6 +134,35 @@ class PoseUnrankable(KeyError):
         return self.reason
 
 
+def _same_rot(a, b) -> bool:
+    d = abs(float(a) - float(b)) % 360.0
+    return min(d, 360.0 - d) <= 1e-6
+
+
+def veto_phrase(dropped_by: Dict, top: int = 3) -> str:
+    """`rank_poses`' `dropped_by` as one line, most frequent check first:
+    `pads 290 (C12 88, C13 61, C9 40); courtyard 33 (U2 20)` (#1113)."""
+    out = []
+    for chk, d in list((dropped_by or {}).items())[:top]:
+        blk = ', '.join(f"{r} {n}" for r, n in d.get('blockers') or ())
+        out.append(f"{chk} {d['count']}" + (f" ({blk})" if blk else ''))
+    return '; '.join(out) or 'nothing'
+
+
+def in_place_phrase(dropped_in_place_by) -> str:
+    """The in-place vetoes grouped by (check, blocker): `pads_under_body (J9)
+    at 0, 90, 180, 270` (#1113). The top-N cut of `veto_phrase` can drop the
+    one check that refused the part's own spot."""
+    groups: Dict = {}
+    for d in dropped_in_place_by or ():
+        groups.setdefault((d['check'], d.get('blocker')), []).append(d['rot'])
+    return '; '.join(
+        f"{chk}" + (f" ({blk})" if blk else '') + ' at '
+        + ', '.join(f"{r:g}" for r in rots)
+        for (chk, blk), rots in sorted(groups.items(),
+                                       key=lambda kv: (-len(kv[1]), kv[0][0])))
+
+
 def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
                step: float = 0.5, rotations: Sequence[float] = ROTATIONS,
                limit: int = 12, allow_rotations: bool = True,
@@ -154,6 +183,15 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     at the part's OWN (x, y) that candidate_valid vetoed. An empty ranked list
     whose dropped_in_place includes the part's current rotation says "the
     knobs veto even staying put", which is a knob problem, not a pose answer.
+
+    #1113: and it says WHICH check vetoed each one -- `dropped_by` ({check:
+    {count, blockers: [[ref, n], ...] (top 3), blockers_distinct}}, from
+    `QuenchState.candidate_veto`, the same predicate candidate_valid is),
+    `dropped_in_place_by` ([{rot, check, blocker}]), `evaluated_total`, and
+    `all_moves_vetoed`: nothing survived but the part's own pose. A part
+    whose rotation its neighbours were packed around reads exactly that way,
+    and a one-part move cannot judge such a rotation (`veto_phrase` says it
+    in one line).
     """
     st = state if state is not None else make_state(pcb_data, board_path, **state_kw)
     part = st.parts.get(ref) if hasattr(st, 'parts') else None
@@ -163,8 +201,9 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
             raise PoseUnrankable(
                 f"{ref} is not a footprint block on this board", code=2,
                 why='it is not a footprint block on this board')
+        from kicad_parser import non_aperture_pads
         why = ('it has no pads and no courtyard, so the placement state '
-               'carries no geometry for it' if not fp.pads else
+               'carries no geometry for it' if not non_aperture_pads(fp) else
                'the placement state does not carry it as a movable part')
         raise PoseUnrankable(
             f"{ref} cannot be ranked: {why}. Place it with `place_pose set` "
@@ -196,6 +235,15 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     scored = []
     dropped_total = 0
     dropped_in_place = []
+    dropped_by: Dict[str, Dict] = {}
+    dropped_in_place_by = []
+    evaluated = 0
+    # ONE predicate call per candidate: the #702 refusal tallies count calls.
+    _veto = getattr(st, 'candidate_veto', None)
+    if _veto is None:       # a duck-typed state without the #1113 labels
+        def _veto(r, x, y, rot):
+            return None if st.candidate_valid(r, x, y, rot) else (
+                'unattributed', None)
     for dx, dy in _offsets(radius, step):
         # THE SWEEP, which `--limit` never bounded: limit truncates the sorted
         # RESULT on the last line of this function, while every candidate here
@@ -210,10 +258,19 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
             break
         for rot in rots:
             x, y = x0 + dx, y0 + dy
-            if not st.candidate_valid(ref, x, y, rot):
+            evaluated += 1
+            veto = _veto(ref, x, y, rot)
+            if veto is not None:
                 dropped_total += 1
+                _chk, _blk = veto
+                _d = dropped_by.setdefault(_chk, {'count': 0, '_b': {}})
+                _d['count'] += 1
+                if _blk is not None:
+                    _d['_b'][_blk] = _d['_b'].get(_blk, 0) + 1
                 if dx == 0.0 and dy == 0.0:
                     dropped_in_place.append(rot)
+                    dropped_in_place_by.append(
+                        {'rot': rot, 'check': _chk, 'blocker': _blk})
                 continue
             st.apply_move(ref, x, y, rot)
             cost = st.total_cost()
@@ -236,6 +293,22 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     if diagnostics is not None:
         diagnostics['dropped_total'] = dropped_total
         diagnostics['dropped_in_place'] = dropped_in_place
+        diagnostics['dropped_in_place_by'] = dropped_in_place_by
+        diagnostics['evaluated_total'] = evaluated
+        diagnostics['dropped_by'] = {
+            chk: {'count': d['count'],
+                  'blockers': [[r, n] for r, n in sorted(
+                      d['_b'].items(), key=lambda kv: (-kv[1], kv[0]))[:3]],
+                  'blockers_distinct': len(d['_b'])}
+            for chk, d in sorted(dropped_by.items(),
+                                 key=lambda kv: (-kv[1]['count'], kv[0]))}
+        # Nothing survived but staying put (or nothing at all): the reading
+        # a one-part move gives a part its neighbours were packed around.
+        diagnostics['all_moves_vetoed'] = bool(dropped_total) and all(
+            p['dist_mm'] == 0 and _same_rot(p['rot'], rot0) for p in scored)
+        diagnostics['in_place_evaluated'] = any(
+            _same_rot(r, rot0) for r in rots)
+        diagnostics['input_rotation'] = rot0
     # cost, then least disturbance, then a stable rotation order
     scored.sort(key=lambda p: (p['cost'], p['dist_mm'], p['rot']))
     return scored[:limit]

@@ -101,6 +101,35 @@ def test_stub_message_says_unrouted():
     print("  PASS: stub path inserts the stub and says UNROUTED")
 
 
+def test_inflight_copper_blocks_a_full_restore():
+    """Copper stamped in the working map but not yet in pcb_data -- a phase-3
+    tap while its victims are re-routed (push_inflight_copper) -- is board
+    copper to a restore. #1156's phase-3 victim restore graded pcb_data alone
+    and put keks's /SRAM0_D9 back across /SRAM_A4's in-flight tap: 33 shorts
+    on one route step. The same payload with the window closed restores
+    whole (the control)."""
+    from plane_pad_tap import push_inflight_copper, pop_inflight_copper
+    payload = lambda: {1: ({'new_segments': [_seg(0, 0, 1, 0, 1),
+                                             _seg(1, 0, 5, 0, 1)],
+                            'new_vias': []}, {1}, True)}
+    pcb = _board()
+    pcb._rip_saved = payload()
+    token = push_inflight_copper(pcb, [_seg(2.5, -1.0, 2.5, 1.0, 2)], [])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            verdict = try_terminal_restore(pcb, CONFIG, 1)
+    finally:
+        pop_inflight_copper(pcb, token)
+    assert verdict == 'stub', (
+        f"in-flight foreign copper across the payload must refuse the full "
+        f"restore (stub expected), got {verdict!r}")
+    pcb2 = _board()
+    pcb2._rip_saved = payload()
+    assert try_terminal_restore(pcb2, CONFIG, 1) == 'full', (
+        "control: with no window open the same payload restores whole")
+    print("  PASS: in-flight copper blocks a full restore; closed window restores")
+
+
 def test_reroute_loop_counts_success_only_on_full():
     import reroute_loop
     src = inspect.getsource(reroute_loop)

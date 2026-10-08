@@ -25,6 +25,17 @@ in-run plane finalize spawns nested sub-runs) and holds the corpus invariant
 from the issue: every net check_connected reports disconnected is in
 failed_single, open_single, failed_multipoint or pad_pairs_open -- and the
 file equals merge_route_summaries(log).
+
+That chain ends either way, by environment. Where KiCad is installed, the
+finalize's oracle legs run and the run breaks three nets while connecting
+GND and +3V3. The improvement gate (#600) then REJECTS it and the output is
+the input board, on which the plane nets are open (the pour deferred their
+pads to this step). By #1173's contract the file then says
+`"shipped": "input board"` and its tallies describe the rejected attempt. So
+on that path the invariant is held against what the document does name for
+the shipped board: the attempt's failures, or a net the attempt would have
+connected (`improvement_gate.gained`). Where KiCad is absent the run is kept
+and the plain invariant applies.
 """
 import importlib.util
 import json
@@ -110,8 +121,10 @@ def test_issue_literal_disjoint_case():
     m = merge_summaries(sums, regrade=rg)
     assert sorted(m['failed_single']) == ['A', 'B', 'C'], m['failed_single']
     assert m['scope'] == 'merged'
-    assert (m['successful'], m['failed']) == (1, 1), (
-        "successful/failed count the whole run's routing scope (X, A)")
+    # `successful` counts the routing scope (X, A); `failed` every net the
+    # run ships broken, the laps' B and C included (#1215).
+    assert (m['successful'], m['failed']) == (1, 3), (
+        "successful counts the routing scope, failed what ships broken")
     mn = summary_min(m)
     assert mn['failed_single'] == ['A', 'B', 'C'] and mn['routed'] == 1
     print("  PASS: A, B and C present, scope merged")
@@ -152,7 +165,9 @@ def test_regrade_keeps_bucket_meanings():
     assert rg['multipoint_pads_connected'] == 6, rg  # M 3 + L 3
     assert rg['unowned_broken'] == ['V'], rg['unowned_broken']
     assert rg['recovered'] == [], rg['recovered']
-    assert (rg['successful'], rg['failed']) == (1, 4), rg
+    # #1215: `failed` counts every net the run ships broken, V (collateral,
+    # outside the scope) included -- not len(scope) - successful.
+    assert (rg['successful'], rg['failed']) == (1, 5), rg
     m = merge_summaries(sums, regrade=rg)
     deficit = m['multipoint_pads_total'] - m['multipoint_pads_connected']
     assert len(m['failed_single']) + len(m['open_single']) + deficit == 6
@@ -271,12 +286,31 @@ def test_e2e_invariant_with_in_run_plane_finalize():
                    | set(doc.get('open_single') or [])
                    | {d['net_name'] for d in doc.get('failed_multipoint') or []}
                    | {p['net'] for p in doc.get('pad_pairs_open') or []})
-        missing = _disconnected(out) - buckets
+        named, path = buckets, 'run kept'
+        if doc.get('shipped') == 'input board':
+            # #1173: the gate rejected the run and shipped the input board,
+            # so the tallies describe the rejected attempt. The document must
+            # say so, the output must BE the input, and every net open on it
+            # must still be named: as an attempt failure, or as a net the
+            # attempt connected and the revert gave back.
+            gate = doc.get('improvement_gate') or {}
+            assert gate.get('verdict') == 'reject', (
+                f"shipped 'input board' without a rejecting gate: {gate}")
+            assert 'rejected attempt' in (doc.get('shipped_note') or ''), (
+                "a reverted run's file does not say its tallies are the "
+                "rejected attempt's")
+            with open(planes, 'rb') as a, open(out, 'rb') as b:
+                assert a.read() == b.read(), (
+                    "the file says the input board shipped, and the output "
+                    "differs from the input")
+            named = buckets | set(gate.get('gained') or [])
+            path = f"gate reverted, gained {sorted(gate.get('gained') or [])}"
+        missing = _disconnected(out) - named
         assert not missing, (
             f"check_connected reports {sorted(missing)} disconnected, and "
-            f"--json-out carries them in no failure bucket")
+            f"--json-out names them nowhere ({path})")
         print(f"  PASS: {len(raw)} summaries, file == log merge, "
-              f"disconnected nets all reported ({sorted(buckets)})")
+              f"disconnected nets all reported ({path}; {sorted(named)})")
 
 
 if __name__ == '__main__':

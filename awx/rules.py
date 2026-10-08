@@ -44,6 +44,12 @@ THE QUANTITIES, and the formula that produced each literal
     fan_clear  = clearance. The fanout lays at the spec; there is no second
                        clearance.
     via_size / via_drill  0.25 / 0.15
+    grid       0.025   the routing grid the chain plans and routes on (``braid.GRID``, the
+                       config's ``grid_step``).
+    pair_gap   = hug + a grid diagonal  (``pairs.GAP``) -- a pair's P-to-N edge
+                       gap. The pose router's short test (``gap < clearance``)
+                       runs on the legs it GENERATES on the grid, and at a
+                       corner the inner leg lands up to a grid diagonal closer.
     lane_slice 0.232   = track + hug -- one
                        lane's centre-to-centre slice: two parallel tracks of
                        width w at clearance c sit at pitch w + c.
@@ -87,16 +93,21 @@ once, near the top of ``main()``::
 
 `install` writes the values into the module-level constants the chain
 already reads (``topo_strings.TRACK``, ``braid.CLEAR``, ...) and
-re-evaluates the constants derived from them. The literals stay as each
-module's DEFAULT, so a module imported without an install behaves exactly
-as it did before this file existed -- which is what makes the chain
+re-evaluates the constants derived from them -- every one another module
+derives at import, too, so an install leaves each module exactly as a
+fresh import under the same rules does (test_622_rules_supplied). A module
+initializes its constants from `active()`: with nothing installed or
+supplied that is DEFAULT, the literals, so a module behaves exactly as it
+did before this file existed -- which is what makes the chain
 byte-identical BY CONSTRUCTION rather than by measurement. (Measured too;
 see the README section.)
 
-Today `install_defaults()` installs exactly what the modules already hold,
-so it is inert. That is the point: it is the SEAM. When the main router
-drives the topo chain it will call ``install(Rules.from_router_config(cfg))``
-instead, and one call moves the whole chain onto the router's geometry.
+A RUN'S RULES are supplied by its driver through one setting (SETTING,
+`as_setting` / `supplied`): route_bus.py resolves the chain's sizes as
+route.py resolves its own and builds them with
+``Rules.from_router_config(cfg, fan_track=...)``. A stage in a process of
+its own imports its modules under the setting; `install_defaults()`
+installs the supplied rules when there are some, else DEFAULT (inert).
 
 Why install-into-constants rather than making each constant a function: the
 chain's consumers read these through module ATTRIBUTES at call time
@@ -108,7 +119,7 @@ installing.
 DEBT THIS FILE DOES NOT PAY (recorded, not fixed)
 -------------------------------------------------
   * ``braid.BLOCK_GAP`` 0.45, ``LEG_W``, ``LEG_REQ``, ``LEG_O``,
-    ``CROSS_TUBE``, ``HEAD_RUN`` are constants with no formula behind them;
+    ``HEAD_RUN`` are constants with no formula behind them;
     only the lane-slice floors of the two pitches are modelled.
   * the 0.025 routing grid in ``braid.setup`` is sized against the fanout's
     0.25 stub packing ("the legal minimum, track + clearance = 0.227, plus
@@ -121,7 +132,9 @@ DEBT THIS FILE DOES NOT PAY (recorded, not fixed)
 """
 
 KRT_TOOL = {'scope': [], 'kind': 'utility'}   # #937: a research tool (awx), catalogued, shown at no door
+import math
 import os
+import awx_settings
 import sys
 from dataclasses import dataclass, field
 
@@ -132,6 +145,7 @@ TRACK = 0.127             # the braid's lane track (5 mil)
 HUG_OVER = 0.005          # ...and the hug's 5 um over the spec
 VIA_SIZE = 0.25
 VIA_DRILL = 0.15
+GRID = 0.025              # the routing grid the chain plans and routes on (braid.setup)
 FAN_TRACK = 0.1           # the production engine's fanout stub width
 LANE_PITCH = 0.35         # braid.LPITCH
 EXIT_PITCH = 0.38         # braid.MINP
@@ -156,6 +170,7 @@ class Rules:
     track: float = TRACK
     via_size: float = VIA_SIZE
     via_drill: float = VIA_DRILL
+    grid: float = GRID
     hole_to_hole: float = None
     edge_clearance: float = None
     fan_track: float = FAN_TRACK
@@ -177,6 +192,12 @@ class Rules:
         return self.clearance
 
     @property
+    def pair_gap(self):
+        """A pair's P-to-N edge gap: the hug and a grid diagonal (the inner leg of a turn the pose router
+        generates on the grid lands up to that much closer). ``pairs.GAP``."""
+        return _r(self.hug + math.sqrt(2) * self.grid)
+
+    @property
     def lane_slice(self):
         """One lane's slice, track + hug. 0.232."""
         return _r(self.track + self.hug)
@@ -191,6 +212,10 @@ class Rules:
     @property
     def via_need(self):
         return self.via_size / 2 + self.hug + self.track / 2 + 0.03  # braid.VIA_NEED
+
+    @property
+    def lane_min(self):
+        return self.track + self.hug + 0.02          # braid.LANE_MIN
 
     @property
     def end_keep(self):
@@ -254,6 +279,7 @@ class Rules:
             track=track,
             via_size=_r(via_size) if via_size is not None else VIA_SIZE,
             via_drill=_r(via_drill) if via_drill is not None else VIA_DRILL,
+            grid=_r(get('grid_step')) if get('grid_step') is not None else GRID,
             hole_to_hole=get('hole_to_hole_clearance'),
             edge_clearance=get('board_edge_clearance'),
             fan_track=_r(fan_track) if fan_track is not None else track,
@@ -268,13 +294,14 @@ class Rules:
         """One line per quantity -- what a stage prints, so the numbers it
         is using are visible rather than assumed."""
         out = [f'rules ({self.source}):']
-        for k in ('clearance', 'track', 'via_size', 'via_drill',
+        for k in ('clearance', 'track', 'via_size', 'via_drill', 'grid',
                   'hole_to_hole', 'edge_clearance', 'fan_track',
                   'lane_pitch', 'exit_pitch'):
             v = getattr(self, k)
             out.append(f'  {k:16s} {"-" if v is None else v}')
         out.append(f'  {"hug (derived)":16s} {self.hug}   clearance + {HUG_OVER}')
         out.append(f'  {"lane_slice":16s} {self.lane_slice}   track + hug')
+        out.append(f'  {"pair_gap":16s} {self.pair_gap}   hug + a grid diagonal')
         for n in self.notes:
             out.append(f'  note: {n}')
         return '\n'.join(out)
@@ -283,21 +310,62 @@ class Rules:
 DEFAULT = Rules()
 """The chain's constants.
 
-Every module's constant is initialized from this, so a module used without
-an install behaves exactly as it did when the numbers were literals.
+Every module's constant is initialized from `active()`, which is this when
+nothing is supplied, so a module used without an install or a supply
+behaves exactly as it did when the numbers were literals.
 """
+
+
+# ------------------------------------------------------- supplying a run's rules
+
+SETTING = 'AWX_RULES'
+"""The setting a driver supplies a run's rules through (awx_settings: given
+for a stage in the driver's own process, the environment for a stage in a
+process of its own): `as_setting(rules)`, the numeric fields as
+``name=value`` pairs (a float's repr reads back to the same float; ``none``
+for an unset floor). route_bus.py resolves the chain's sizes as route.py
+resolves its own and supplies them to every stage; without it every stage
+has the constants."""
+
+_NUMBERS = ('clearance', 'track', 'via_size', 'via_drill', 'grid', 'hole_to_hole', 'edge_clearance', 'fan_track',
+            'lane_pitch', 'exit_pitch')
+
+
+def as_setting(rules):
+    """``rules`` as the value of SETTING."""
+    return ' '.join(f'{k}={"none" if getattr(rules, k) is None else repr(float(getattr(rules, k)))}'
+                    for k in _NUMBERS)
+
+
+def supplied():
+    """The rules SETTING supplies, or None."""
+    raw = awx_settings.get(SETTING)
+    if not raw:
+        return None
+    d = {}
+    for tok in raw.split():
+        k, v = tok.split('=', 1)
+        if k not in _NUMBERS:
+            raise ValueError(f'{SETTING}: no rule {k!r}')
+        d[k] = None if v == 'none' else float(v)
+    return Rules(source=f'supplied ({SETTING})', **d)
 
 
 # --------------------------------------------------------------- installing
 
 ACTIVE = None
-"""The Rules the last `install` put in place (None = the modules carry their
-defaults, which are DEFAULT's values). `active()` reads it."""
+"""The Rules the last `install` put in place (None = the modules carry what
+they were initialized with). `active()` reads it."""
 
 
 def active():
-    """The rules in force in this process."""
-    return ACTIVE if ACTIVE is not None else DEFAULT
+    """The rules in force in this process: the last installed, else the
+    supplied (SETTING), else DEFAULT. A module initializes its constants
+    from it, so a stage that never installs -- run in a process of its own,
+    the run's rules supplied -- still reads the run's."""
+    if ACTIVE is not None:
+        return ACTIVE
+    return supplied() or DEFAULT
 
 
 def install(rules, verbose=False):
@@ -358,13 +426,40 @@ def install(rules, verbose=False):
     put('braid', 'VIA_DRILL', rules.via_drill)
     put('braid', 'HALF_SEP', rules.half_sep)
     put('braid', 'VIA_NEED', rules.via_need)
+    put('braid', 'LANE_MIN', rules.lane_min)
     put('braid', 'END_KEEP', rules.end_keep)
     put('braid', 'LPITCH', rules.lane_pitch)
     put('braid', 'MINP', rules.exit_pitch)
+    put('braid', 'GRID', rules.grid)
+
+    # pairs: the pair gap (unless the invocation set its own, BRAID_PAIR_GAP)
+    if not float(awx_settings.get('BRAID_PAIR_GAP', '0') or 0):
+        put('pairs', 'GAP', rules.pair_gap)
 
     # source_realize: the production engine's fanout geometry
     put('source_realize', 'FAN_TRACK', rules.fan_track)
     put('source_realize', 'FAN_CLEAR', rules.fan_clear)
+
+    # the constants other modules DERIVE from these at import, each in its module's own expression and order, so an
+    # install leaves every module exactly as a fresh import under the same rules does (test_622_rules_supplied): a
+    # module imported before the install -- a GUI's process, an earlier stage in the driver's -- is not re-imported
+    put('braid', 'WRAP_REACH', 10 * rules.lane_min)
+    put('braid', 'PAIR_FANIN', float(awx_settings.get('BRAID_PAIR_FANIN', '10') or 0) * rules.lane_min)
+    for m in _modules('pairs'):
+        if not float(awx_settings.get('BRAID_PAIR_SEP', '0') or 0):
+            put('pairs', 'MAX_SEP', 2.0 * rules.lane_pitch)
+        pp = rules.track + m.GAP                                  # pairs.pitch(TRACK), after GAP above
+        put('braid', 'PP', pp)
+        put('braid', 'PAIR_DIVE_EXTRA', float(awx_settings.get('BRAID_PAIR_DIVE_EXTRA', '2') or 0) * pp)
+        put('braid', 'PAIR_FANIN_BAND', float(awx_settings.get('BRAID_PAIR_FANIN_BAND', '2') or 0) * pp)
+        put('braid', 'PAIR_APPROACH', float(awx_settings.get('BRAID_PAIR_APPROACH', '4.5') or 0) * pp)
+    stack = rules.track + rules.clearance + HUG_OVER
+    put('select_moves', '_STACK_PITCH', stack)
+    put('whole_ends', 'DUP_TOL', stack / 2)
+    put('whole_ends', '_LANE_PITCH', rules.lane_min)
+    put('whole_ends', '_CHG_ROOM', 2 * 1.1 * rules.via_need)
+    put('plan_audit', 'TINY', rules.track / 25)
+    put('whole_feedback', 'FRONT', 2 * rules.via_need + rules.lane_min)
 
     # the module that binds braid's constants into its OWN locals at
     # import time -- rebind it, in case it was imported before this call
@@ -394,16 +489,13 @@ def install(rules, verbose=False):
 
 
 def install_defaults(verbose=False):
-    """What a stage's ``main()`` calls: put the chain's constants in place.
-
-    Inert today -- it installs exactly what the modules already hold -- and
-    that is the point. It is the seam: when the main router drives the topo
-    chain, this call becomes
-    ``install(Rules.from_router_config(cfg))`` and the whole chain moves
-    onto the router's geometry at once.
-    """
-    install(DEFAULT, verbose=verbose)
-    return DEFAULT
+    """What a stage's ``main()`` calls: put the run's rules in place -- the
+    ones the driver supplied (SETTING: route_bus.py's, the router's sizes
+    through `Rules.from_router_config`), else the chain's constants, which
+    is what the modules already hold (inert)."""
+    r = supplied() or DEFAULT
+    install(r, verbose=verbose)
+    return r
 
 
 def main(argv=None):

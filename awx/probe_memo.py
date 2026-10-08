@@ -23,20 +23,23 @@ process that runs at that K):
 Every key carries the CODE HASH (every .py of awx/ and py_router/, the
 router binary's version) and the KNOB HASH (the BRAID_/PROBE_/PLAN_/
 TAUT_ environment), so an edit to anything that lays or judges copper
-starts a cold memo rather than serving a stale verdict. PROBE_MEMO=0
-turns the whole thing off; PROBE_MEMO_DIR moves the store.
+starts a cold memo rather than serving a stale verdict. OFF BY DEFAULT:
+PROBE_MEMO=1 turns it on (a harness that probes the same bench again and
+again -- evolve.py and the chain scripts set it); PROBE_MEMO_DIR moves the
+store.
 """
 import glob
 import hashlib
 import json
 import os
+import awx_settings
 import sys
 import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENABLED = os.environ.get('PROBE_MEMO', '1') != '0'
-MEMO_DIR = os.environ.get('PROBE_MEMO_DIR') or os.path.join(HERE, 'tmp', 'memo')
+ENABLED = awx_settings.get('PROBE_MEMO', '0') not in ('', '0')    # a harness's (evolve.py, the chains): off by default
+MEMO_DIR = awx_settings.get('PROBE_MEMO_DIR') or os.path.join(HERE, 'tmp', 'memo')
 KNOB_PREFIXES = ('BRAID_', 'PROBE_', 'PLAN_', 'TAUT_')
 KNOB_NAMES = ('DST_CLIMB', 'SRC_CLIMB')
 
@@ -52,7 +55,7 @@ def code_hash():
     global _code_hash
     if _code_hash is not None:
         return _code_hash
-    pin = os.environ.get('PROBE_MEMO_CODE')
+    pin = awx_settings.get('PROBE_MEMO_CODE')
     if pin:
         _code_hash = 'pin:' + pin
         return _code_hash
@@ -81,7 +84,7 @@ def code_hash():
 
 
 def knob_hash(extra=None):
-    items = sorted((k, v) for k, v in os.environ.items()
+    items = sorted((k, v) for k, v in awx_settings.environ().items()
                    if k.startswith(KNOB_PREFIXES) or k in KNOB_NAMES)
     items = [(k, v) for k, v in items if k not in ('PROBE_MEMO', 'PROBE_MEMO_DIR', 'PROBE_MEMO_CODE')]
     if extra:

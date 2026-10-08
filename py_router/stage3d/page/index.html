@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>stage3d</title>
+<style>html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+canvas { display: block; }</style>
+<!-- Served by render.mjs through page.route (http://stage3d.local/), never
+     file:// -- Chromium refuses ES-module imports from a null origin. -->
+<script type="importmap">
+{ "imports": {
+    "three": "http://stage3d.local/vendor/three/build/three.module.js",
+    "three/addons/": "http://stage3d.local/vendor/three/examples/jsm/" } }
+</script>
+<script type="module" src="http://stage3d.local/page/stage3d.mjs"></script>
+</head>
+<body></body>
+</html>

@@ -1045,7 +1045,7 @@ def apply_step_selection(step, dialog, all_steps=None):
         matched_display = set()
         for display_name, base_name, p_id, n_id in tab.pair_panel.all_pairs:
             cands = [base_name, nets_by_id.get(p_id, ""), nets_by_id.get(n_id, "")]
-            if any(fnmatch.fnmatch(c, w) or c == w
+            if any(fnmatch.fnmatchcase(c, w) or c == w
                    for w in wanted for c in cands if c):
                 matched_display.add(display_name)
         if not matched_display:

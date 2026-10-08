@@ -17,6 +17,11 @@ import subprocess
 import sys
 import tempfile
 
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -161,7 +166,7 @@ def test_the_film_shows_the_attempts_and_marks_them():
         #    nested rectangles around the WHOLE frame, so (0,0) is always badge
         #    colour on a badged frame and never on an unbadged one -- and
         #    unlike the mid-height pixel it is LAYOUT-INDEPENDENT.
-        #    `movie_panels.py:40-46` records that the old probe is exactly why
+        #    The retired iso panel recorded that the old probe is exactly why
         #    panels could never be wired into the film: stacking one moves
         #    `height//2` into the panel and reddens this test for a reason that
         #    has nothing to do with badging. It is moved here, once, for good.
@@ -193,7 +198,9 @@ def test_a_diagnostic_card_is_spliced_in_at_frame_size():
         frames = mf.build_film(shots, size=400, fps=6.0, camera='off',
                                quiet=True)
         assert len({f.size for f in frames}) == 1, "one size across the film"
-        assert frames[0].getpixel((5, 5)) == (14, 14, 18), \
+        import render_theme as _rt
+        assert frames[0].getpixel((5, 5)) == \
+            _rt.default_theme().rgb('chrome_panel'), \
             "a leading card opens the film, ahead of the input snapshot"
     print("  PASS: cards are letterboxed to frame size and placed in order")
 
@@ -275,43 +282,46 @@ def test_a_part_move_never_gets_fewer_than_ten_frames():
     print(f"  PASS: moves floored at {MIN_MOVE_FRAMES} through the tween AND "
           f"the budget")
 
-def test_the_movie_layout_knobs_reach_the_film():
-    """`$KICAD_MOVIE_LAYOUT` / `$KICAD_MOVIE_ASPECT` apply to a film as they do
-    to make_movie. build_film passed a None layout/aspect straight through,
-    and build_boards reads None as 'legacy', so both knobs were no-ops on the
-    render that actually shows placement. Spies on the renderer's inputs: the
-    rendering itself is covered by the tests above."""
+def test_the_movie_aspect_knob_reaches_the_film():
+    """`$KICAD_MOVIE_ASPECT` applies to a film as it does to make_movie.
+    build_film passed a None aspect straight through, so the knob was a no-op
+    on the render that actually shows placement. Spies on the renderer's
+    inputs: the rendering itself is covered by the tests above. There is no
+    layout to pass any more (stage3d is the only one), so none is."""
     import animate_route
     import env_knobs
     import make_film as mf
     seen = {}
 
     def spy(*a, **k):
-        seen['got'] = (k.get('layout'), k.get('aspect'))
+        seen['got'] = k.get('aspect')
+        seen['layout'] = 'layout' in k
         return []
 
-    names = ('KICAD_MOVIE_LAYOUT', 'KICAD_MOVIE_ASPECT')
+    names = ('KICAD_MOVIE_ASPECT',)
     saved = {n: os.environ.get(n) for n in names}
     real = animate_route.build_boards
     shots = mf.parse_positional([BOARD], [])
     try:
         animate_route.build_boards = spy
-        os.environ['KICAD_MOVIE_LAYOUT'] = 'split'
         os.environ['KICAD_MOVIE_ASPECT'] = '16:9'
         env_knobs.refresh()
         mf.build_film(shots, size=300, fps=6.0, camera='off', quiet=True)
-        assert seen.get('got') == ('split', '16:9'), \
-            f"the env knobs did not reach the film: {seen.get('got')}"
+        assert seen.get('got') == '16:9', (
+            f"the env knob did not reach the film: {seen.get('got')}")
+        assert not seen.get('layout'), 'build_film still passes a layout'
         mf.build_film(shots, size=300, fps=6.0, camera='off', quiet=True,
-                      layout='stacked', aspect='4:3')
-        assert seen['got'] == ('stacked', '4:3'), \
-            f"an explicit layout/aspect must win over the env: {seen['got']}"
+                      aspect='4:3')
+        assert seen['got'] == '4:3', (
+            f"an explicit aspect must win over the env: {seen['got']}")
         for n in names:
             os.environ.pop(n, None)
         env_knobs.refresh()
         mf.build_film(shots, size=300, fps=6.0, camera='off', quiet=True)
-        assert seen['got'] == ('legacy', None), \
-            f"with neither set, legacy and the board's own aspect: {seen['got']}"
+        # with nothing declared the stage3d frame's own 16:9 applies, so
+        # none is passed
+        assert seen['got'] is None, (
+            f"with nothing set, no forced aspect: {seen['got']}")
     finally:
         animate_route.build_boards = real
         for n, v in saved.items():
@@ -320,8 +330,8 @@ def test_the_movie_layout_knobs_reach_the_film():
             else:
                 os.environ[n] = v
         env_knobs.refresh()
-    print("  PASS: $KICAD_MOVIE_LAYOUT/ASPECT reach build_film; explicit "
-          "arguments win")
+    print("  PASS: $KICAD_MOVIE_ASPECT reaches build_film; an explicit "
+          "aspect wins")
 
 
 if __name__ == '__main__':

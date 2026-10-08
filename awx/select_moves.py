@@ -20,7 +20,7 @@ silent assignment is impossible to audit.
 from __future__ import annotations
 
 import math
-import os
+import awx_settings
 from typing import (Callable, Dict, List, Optional, Sequence,
                     Tuple)
 
@@ -68,11 +68,14 @@ def _lane_spans_compute(m: Move) -> List[Tuple[Tuple, float, float]]:
         # a move synthesized from copper the engine laid (replan.synth_move)
         # carries no legs: it occupies no lane the selector can price
         return []
-    if not getattr(m, 'climb', 0):
+    street = getattr(m, 'street', 0)
+    if not getattr(m, 'climb', 0) and not street:
         return [_lane_span(m)]
     out = []
     for (p, q, L) in m.legs:
-        if L != m.layer:
+        # (a STREET dog-bone's every layer: its stub runs on the pad's own layer down a line into the band and along
+        # a lane there, across the plain escapes' gaps; a climb's own-layer leg is a 45-degree one, which no lane holds)
+        if L != m.layer and not street:
             continue
         if abs(p[0] - q[0]) < 1e-6 and abs(p[1] - q[1]) > 1e-6:
             out.append((('col', round(p[0], 3), L), min(p[1], q[1]), max(p[1], q[1])))
@@ -113,13 +116,18 @@ def _seg_hits_box(a: Pt, b: Pt, box) -> bool:
 
 
 # SEL_XING (2026-09-10): a row-gap run and a column-gap run on one layer
-# that cross are a conflict (see _conflict). 1 (default) = for pairs with
-# a climbing move, whose long legs cross the plain stubs' gaps
-# (K28: 13 bans -> 0 with it); 2 = every pair, which reaches the plain
-# menu and changed the flag-off K28 chain for the worse (37 vias / 692 mm
-# on the frozen source against 36 / 670: the seed dodges the two bans the
-# passes used to repair, and picks worse); 0 = off.
-SEL_XING = int(os.environ.get('SEL_XING', '1'))
+# that cross are a conflict (see _conflict). 1 = for pairs with a climbing
+# move, whose long legs cross the plain stubs' gaps (K28: 13 bans -> 0 with
+# it); 2 = every pair; 0 = off. The default is the JUDGE's: 2 under
+# PLAN_JUDGE=ends (the whole route: every crossing of two escapes on one
+# layer is a stub the engine lays over another), 1 under the braid's judges
+# (where 2 reached the plain menu and changed the K28 chain for the worse:
+# 37 vias / 692 mm on the frozen source against 36 / 670). The whole
+# route's ends model (whole_ends, through pages_first._conflicts) and the
+# greedy berths it starts from both read it -- ONE rule for the seed and
+# the judge. A caller meaning another rule passes `xing` (pages_first's own
+# planner: 2); nothing sets this module value at import.
+SEL_XING = int(awx_settings.get('SEL_XING', '2' if awx_settings.get('PLAN_JUDGE') == 'ends' else '1'))
 
 
 def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
@@ -556,7 +564,8 @@ def score(choice: Dict[str, Move], groups, geo: 'Corridor',
 _TOUCH = 1e-6        # two spans that meet at a point DO conflict (see below)
 
 
-def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool:
+def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True, stack: bool = False,
+              xing: Optional[int] = None) -> bool:
     """Two moves that cannot both be laid: a shared lane stretch or a
     shared site -- and, `strict`, a lane matched within `tol` (half a
     fine-pitch gap) or one's via site in the other's lane. The strict
@@ -570,7 +579,12 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
     there it took the restricted K19 plan from floor 12 to 20, moved
     SDQ0 from the south face to the west, split the corridor in two and
     left 5 lanes open (2026-08-30, measured after the fact: the ladder
-    had been run on fanout boards recorded before the change)."""
+    had been run on fanout boards recorded before the change). `stack`
+    (the whole route's ends): two exits at one point conflict only on one
+    layer (an F lane stacks over a B one), and two on one layer closer
+    than _STACK_PITCH do. `xing`: the crossing rule (SEL_XING's values),
+    SEL_XING when not given -- a caller meaning another rule passes it"""
+    xing = SEL_XING if xing is None else xing
     spans, ospans = _lane_spans(m), _lane_spans(om)
     for key, a, b in spans:
         for ok, oa, ob in ospans:
@@ -592,8 +606,9 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
             # a row-gap run and a column-gap run on ONE layer that cross:
             # two stubs through one point
             if ok[0] != key[0] and ok[2] == key[2] and (
-                    SEL_XING >= 2 or (SEL_XING and (
-                        getattr(m, 'climb', 0) or getattr(om, 'climb', 0)))):
+                    xing >= 2 or (xing and (
+                        getattr(m, 'climb', 0) or getattr(om, 'climb', 0)
+                        or getattr(m, 'street', 0) or getattr(om, 'street', 0)))):
                 (rk, ra, rb), (ck, ca, cb) = ((key, a, b), (ok, oa, ob)) if key[0] == 'row' \
                     else ((ok, oa, ob), (key, a, b))
                 if ra - tol < ck[1] < rb + tol and ca - tol < rk[1] < cb + tol:
@@ -608,17 +623,29 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
     if any(_site_in_lane(om, key, a, b) for key, a, b in spans) \
             or any(_site_in_lane(m, ok, oa, ob) for ok, oa, ob in ospans):
         return True
-    # two teeth cannot share one exit point, whatever their layers: the
-    # braid orders lanes by their offset at the array, and two lanes at
-    # one offset have no pitch between them (K28: SA6 on F and SBA1 on B
-    # at DU1's (146.35, 62.56), a corridor of two, both refused)
+    # two teeth cannot share one exit point: the braid orders lanes by their
+    # offset at the array, whatever their layers, and two lanes at one
+    # offset have no pitch between them (K28: SA6 on F and SBA1 on B at
+    # DU1's (146.35, 62.56), a corridor of two, both refused). `stack`
+    # (the whole route, which orders each layer's lanes on their own and
+    # stacks an F lane over a B lane as a human does): only on ONE layer --
+    # K15's SDQS1 could not leave the source's east face on B under
+    # SDQ11's F tooth, and left 5 mm north through the balls instead
     if (abs(m.exit_pt[0] - om.exit_pt[0]) < _EXIT_TOL
-            and abs(m.exit_pt[1] - om.exit_pt[1]) < _EXIT_TOL):
+            and abs(m.exit_pt[1] - om.exit_pt[1]) < _EXIT_TOL
+            and (not stack or m.layer == om.layer)):
+        return True
+    # ...and in the whole route (`stack`) two exits on ONE layer hold two lanes side by side from there on: a track
+    # and a clearance apart at least (K35: SA12's tooth laid between SDQ14's and SDQ0's on F, 0.22 and 0.20 from
+    # them -- clear of the shared-exit rule, and no geometry could lay the three lanes on)
+    if stack and m.layer == om.layer and \
+            math.hypot(m.exit_pt[0] - om.exit_pt[0], m.exit_pt[1] - om.exit_pt[1]) < _STACK_PITCH:
         return True
     return False
 
 
 _EXIT_TOL = 0.16    # half a fine-pitch gap
+_STACK_PITCH = _rules.active().track + _rules.active().clearance + _rules.HUG_OVER   # two lanes' centres side by side
 
 
 _VIA_REACH = 0.30   # via radius + clearance + half a track, rounded up

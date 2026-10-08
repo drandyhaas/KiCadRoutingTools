@@ -1236,9 +1236,13 @@ def build_routing_obstacle_map(
         # The exact capsule keep-out measures from the real segment, so the blocked
         # halo matches the true clearance envelope without the grid-rounding that used
         # to leave connection traces within clearance of signal copper (#146/#173).
+        # #498 layer rule (#434 cross-class), then the #735 track-to-track
+        # rule (#1135): the route is a track, and so is this segment
         seg_expansion_mm = (route_track_w / 2 + seg.width / 2
-                            + config.layer_clearance(  # #498 (#434 cross-class)
-                                route_layer, config.obstacle_clearance(seg.net_id)))
+                            + config.track_obstacle_clearance(
+                                seg.net_id, config.layer_clearance(
+                                    route_layer,
+                                    config.obstacle_clearance(seg.net_id))))
         # FFI batching (2026-08-14): same pattern as the via loop above --
         # accumulate, then one Rust call for the whole (single-layer) set.
         # #815: SPAN form (789,803 calls / 10.4% on glasgow_revC). Same

@@ -106,6 +106,12 @@ not.**
 | `cross_side_stacks` | 2 / 1 | +0.030 | fails |
 | `align`, `corridor_cut`, `orient`, `locked_contact_pairs` | 0 / 0 | - | **no verdict** (constant everywhere) |
 
+`pad_clearance_pairs` in this study was measured before #1065, on
+render's bounding-box pad census. Render now reports the grader's own
+census (`legality.pad_pair_conflict`, the same rows as
+`grade_pad_legality`'s `worst`), which can only remove a pair the boxes
+found: on the 22 tracked boards, 22 pairs became 7.
+
 The ten that pass do so at a two-sided p of **0.031**, the floor for a 6-board
 sign test.
 

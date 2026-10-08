@@ -371,6 +371,38 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         obstacles.add_blocked_via_spans_batch(
             np.ascontiguousarray(_vall.astype(np.int32)))
 
+    # #1181: the INTERIOR of every filled copper graphic. The loop above
+    # stamps only the perimeter, so a via wholly inside a filled shape touched
+    # no obstacle (One-Air-Max USB1's shield, esp_prog U2's tab). Graphics are
+    # immutable, so the interior is permanent -- except the rows a shape's ONE
+    # own-pad net may lift, which are recorded beside the perimeter's own-pad
+    # rows and stamped on the real map so the lift can reach them.
+    from check_drc import filled_graphic_shapes, filled_graphic_lift_nets
+    _filled = filled_graphic_shapes(pcb_data)
+    if _filled:
+        _clip = getattr(pcb_data.board_info, 'board_bounds', None)
+        _fps = getattr(pcb_data, 'footprints', None) or {}
+        for _sh in _filled:
+            if _sh.net_id in nets_to_route_set:
+                continue
+            _gx, _gy = filled_graphic_interior_cells(pcb_data, coord, _sh, _clip)
+            if not len(_gx):
+                continue
+            _lift = (filled_graphic_lift_nets(_sh, _own_pad_nets, _fps)
+                     if _own_pad_nets else frozenset())
+            _target = _real_obstacles if _lift else obstacles
+            _li = layer_map.get(_sh.layer)
+            if _li is not None:
+                _rows = filled_graphic_interior_spans(_gx, _gy, _li)
+                _target.add_blocked_cell_spans_batch(_rows)
+                for _ln in _lift:
+                    _own_pad_rows.setdefault(_ln, []).append(_rows)
+            # A via spans the stack, so the interior blocks one on any layer.
+            _vrows = filled_graphic_interior_spans(_gx, _gy)
+            _target.add_blocked_via_spans_batch(_vrows)
+            for _ln in _lift:
+                _own_pad_via_rows.setdefault(_ln, []).append(_vrows)
+
     # Add vias as obstacles (excluding nets we'll route)
     _n_vias = len(pcb_data.vias)
     for _via_i, via in enumerate(pcb_data.vias):
@@ -881,6 +913,57 @@ def _block_cells_sel(obstacles: GridObstacleMap, gx_sel, gy_sel, layer_idxs,
     for li in layer_idxs:
         layer_col = np.full((cells.shape[0], 1), li, dtype=np.int32)
         add(np.hstack([cells, layer_col]))
+
+
+def filled_graphic_interior_cells(pcb_data, coord: GridCoord, shape,
+                                  clip_bounds=None):
+    """``(gx, gy)`` int32 arrays: the cells a FILLED copper graphic's interior
+    covers (#1181), minus the cells under its own footprint's pads.
+
+    The perimeter segments already stamp a band around the outline; this is
+    the rest of the copper, which was free to every net, so a via could sit
+    wholly inside the shape. Cells under the owning part's pads are never
+    stamped here: a pad lying inside its own tab is its own obstacle for every
+    other net and its net's target, and stamping its cells would seal it --
+    #907's failure mode, which #908's per-segment lift exists to avoid.
+    """
+    from check_pads import pad_outline_polygon
+    gx_lo, gy_lo, nx, ny, inside, _ = _rasterize_polygon_box(
+        shape.ring, coord, 0.0, clip_bounds=clip_bounds)
+    if inside is None or not inside.any():
+        return np.empty(0, np.int32), np.empty(0, np.int32)
+    mask = inside
+    fp = ((getattr(pcb_data, 'footprints', None) or {}).get(shape.owner_ref)
+          if shape.owner_ref else None)
+    if fp is not None:
+        from net_queries import expand_pad_layers
+        for pad in fp.pads:
+            if shape.layer not in expand_pad_layers(pad.layers or [], [shape.layer]):
+                continue
+            for poly in (getattr(pad, 'polygons', None) or [pad_outline_polygon(pad)]):
+                p_lo_x, p_lo_y, p_nx, _p_ny, p_in, _ = _rasterize_polygon_box(
+                    poly, coord, 0.0, clip_bounds=clip_bounds)
+                if p_in is None or not p_in.any():
+                    continue
+                pgx, pgy = _box_masked_cells(p_lo_x, p_lo_y, p_nx, p_in)
+                sel = ((pgx >= gx_lo) & (pgx < gx_lo + nx)
+                       & (pgy >= gy_lo) & (pgy < gy_lo + ny))
+                if not sel.any():
+                    continue
+                if mask is inside:
+                    mask = inside.copy()
+                mask[(pgy[sel].astype(np.int64) - gy_lo) * nx
+                     + (pgx[sel].astype(np.int64) - gx_lo)] = False
+    return _box_masked_cells(gx_lo, gy_lo, nx, mask)
+
+
+def filled_graphic_interior_spans(gx, gy, layer_idx=None):
+    """Cells as SPAN rows (#815 form): ``(K, 3)`` [gx, gy, gy], or ``(K, 4)``
+    with the layer when `layer_idx` is given."""
+    if layer_idx is None:
+        return np.ascontiguousarray(np.column_stack([gx, gy, gy]).astype(np.int32))
+    return np.ascontiguousarray(np.column_stack(
+        [gx, gy, gy, np.full(len(gx), layer_idx, dtype=np.int32)]).astype(np.int32))
 
 
 def _polygon_grid_cells(points_mm, coord: GridCoord):
@@ -1955,8 +2038,12 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
                 "writeback relaxed in the project"
                 if path in _HOLE_CLR_ORIGIN else "the board's own "
                 "min_hole_clearance")
-        print(f"Copper-to-hole clearance {v:g}mm (from {_src}, above the "
-              f"{defaults.NPTH_TO_TRACK_CLEARANCE}mm fab floor)")
+        # #1217: the floor holds copper off NPTH walls only; a via drill and a
+        # PTH barrel are held at copper clearance. Say so where the number is
+        # announced, or it reads as a promise for every hole.
+        print(f"Copper-to-hole {v:g}mm for NPTH holes (from {_src}, above the "
+              f"{defaults.NPTH_TO_TRACK_CLEARANCE}mm fab floor); plated holes "
+              f"and vias: copper clearance")
     return v
 
 
@@ -2202,6 +2289,20 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     if _nb_vias:
         _vall = np.concatenate(_nb_vias) if len(_nb_vias) > 1 else _nb_vias[0]
         obstacles.add_blocked_vias_batch(np.ascontiguousarray(_vall.astype(np.int32)))
+    # #1181: a net-tagged filled graphic of this net is copper inside too.
+    from check_drc import filled_graphic_shapes
+    for _sh in filled_graphic_shapes(pcb_data):
+        if _sh.net_id != net_id:
+            continue
+        _gx, _gy = filled_graphic_interior_cells(
+            pcb_data, coord, _sh, getattr(pcb_data.board_info, 'board_bounds', None))
+        if not len(_gx):
+            continue
+        _li = layer_map.get(_sh.layer)
+        if _li is not None:
+            obstacles.add_blocked_cell_spans_batch(
+                filled_graphic_interior_spans(_gx, _gy, _li))
+        obstacles.add_blocked_via_spans_batch(filled_graphic_interior_spans(_gx, _gy))
 
 
 def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,

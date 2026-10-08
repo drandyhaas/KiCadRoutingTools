@@ -70,13 +70,14 @@ _WK_DEPENDENT = {
     # those literals support -- runs on a clean clone and is what keeps
     # this file from being green-while-covering-nothing when wk/ is absent.
     'test_788_marginal_literals.py': ['wk/703/study'],
-    # #1036 CORROBORATION only: the run-32 value checks (glide inventory,
-    # band labels on the real ledger) run when a machine has run 32; every
-    # claim in the file is also pinned on tracked kicad_files/ boards, and the
-    # absent case is SAID in the summary line, not passed silently.
-    'test_1036_review_fixes.py': ['wk/run32'],
-    'test_1036_attempts_axis.py': ['wk/run32'],
+    # #1042 CORROBORATION only: the run-32 table check runs when a machine
+    # has run 32; every claim in the file is also pinned on tracked
+    # kicad_files/ boards, and the absent case is SAID in the summary line,
+    # not passed silently.
     'test_1042_placement_panels.py': ['wk/run32'],
+    # #1124 CORROBORATION only: the run-32 no-floor arm. Every other arm runs
+    # on tracked boards or a synthetic one, and the absent case is SAID.
+    'test_1124_film_grader_census.py': ['wk/run32'],
     # #887 CORROBORATION only. The regression lives in
     # test_887_cmd_timing_reader.py, against two small tracked fixtures, and
     # passes in full on a clean clone. This arm re-derives run 24's published
@@ -734,6 +735,10 @@ _BASELINE_GATES = {
     'tests/878_far_face_currency.json':
         'tests/test_878_far_face_currency.py',
     'tests/placement_ab_baseline.json': 'tests/test_placement_ab.py',
+    # #1105: fixed before any pile number existed; the gate pins its sha256.
+    'tests/1105_pile_ab_prereg.json': 'tests/test_1105_pile_prereg.py',
+    # #1127: fixed before the licence census and the stack-mode A/B.
+    'tests/1127_stack_ab_prereg.json': 'tests/test_1127_prereg.py',
     'tests/placement_calibration_recovered.json':
         'tests/test_803_calibration_claims.py',
     'tests/placement_calibration_rows.json':
@@ -753,6 +758,12 @@ _BASELINE_GATES = {
 #: Committed baselines with NO gate, each with its reason. Being on this list
 #: is a DISCLOSURE, not an exemption -- see `_UNGATED_BASELINE_COUNT`.
 _BASELINE_UNGATED = {
+    # Upstream main (8c739ec3) committed this without registering it, so
+    # test_718 failed there too; registered here when the branch merged it.
+    'tests/run_all_durations.json':
+        'run_all.py\'s measured per-test wall seconds (written by '
+        '--write-durations / run_all_modal.py), read by `shard` to balance '
+        'shards; a timing table, not a verdict, so no test re-derives it',
     'tests/797_seed_exclusive_baseline.json':
         'no test names it; its own `reproduce` key carries a two-command '
         'recipe, which is a recipe rather than a gate',
@@ -785,7 +796,7 @@ _BASELINE_UNGATED = {
 #: it guards would make this agree with whatever the map currently says, and
 #: the point is that another ungated baseline be a decision somebody takes
 #: rather than a line somebody adds.
-_UNGATED_BASELINE_COUNT = 7
+_UNGATED_BASELINE_COUNT = 8     # 7 before run_all_durations.json
 
 #: And the total the walk must CONSIDER. Without it the check goes vacuous in
 #: silence: widen an exclusion to `tests/` and every baseline disappears, while
@@ -797,7 +808,7 @@ _UNGATED_BASELINE_COUNT = 7
 #: verbatim, because the print string has since been reworded and the counts
 #: have moved -- a "measured" line spliced from two versions is exactly what
 #: #879 is about.)
-_DECLARED_BASELINE_COUNT = 22
+_DECLARED_BASELINE_COUNT = 25     # 23 before #1127's pre-registration; 24 before run_all_durations.json
 
 #: Committed JSON/JSONL under `tests/` that is an INPUT, not a recorded
 #: measurement. Full-path regexes, each with its reason.
@@ -1075,8 +1086,17 @@ _UNRESOLVABLE = {}
 #: added `mutate_1051.py`; 60 until the staged placement skills were retired
 #: for pcb-free-agent and `mutate_890.py` (whose only target was
 #: loop_driver.py) went with them; 59 before #1066, #1068 and #1044 added
-#: `mutate_1066.py`, `mutate_1068.py` and `mutate_1044.py`.
-_BATTERY_COUNT = 62
+#: `mutate_1066.py`, `mutate_1068.py` and `mutate_1044.py`; 64 before
+#: #1104 added `mutate_1104.py`; 65 before #1105, #1113 and #1067 added
+#: `mutate_1105.py`, `mutate_1113.py` and `mutate_1067.py`; 68 before #1117
+#: added `mutate_1117.py`; 69 before #1115 added `mutate_1115.py`; 70 before
+#: #1111 added `mutate_1111.py`; 71 before #1065 added `mutate_1065.py`; 72
+#: before #1064 added `mutate_1064.py`; 73 before #1120, #1121 and #1122 added
+#: `mutate_1120_1121_1122.py`; 74 before #1123 and #1124 added
+#: `mutate_1123_1124.py`; 75 before #1125, #1126, #1128 and #1129 added
+#: `mutate_1125_1126_1128_1129.py`; 76 before #1127 added `mutate_1127.py`;
+#: 77 before #1142 and #1143 added `mutate_1142_1143.py`.
+_BATTERY_COUNT = 78
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

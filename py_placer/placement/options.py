@@ -235,6 +235,7 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
     from placement.legality import (CONTAINER_RATIO, footprint_side,
                                     rotate_local_bounds)
     from placement.utility import compute_footprint_bbox_local
+    from kicad_parser import non_aperture_pads
     per_side = {'F.Cu': 0.0, 'B.Cu': 0.0}
     # #878. TWO dicts, because they answer two different questions and the
     # tree needed both. `per_side` is the POPULATION charge -- each part once,
@@ -252,7 +253,7 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
         box = cy.get(ref)
         if box:
             from_courtyard += 1
-        elif fp.pads:
+        elif non_aperture_pads(fp):     # aperture-only pads are not pads (#1143)
             # NOT max(global_x) - min(global_x): the pad-CENTRE span omits the
             # pads' own size, so a two-pad part measures ZERO width along its
             # pad axis (esp_prog C1: [0.0, 1.778] against a real 2.794x1.016)

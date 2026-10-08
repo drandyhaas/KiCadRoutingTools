@@ -61,6 +61,11 @@ STUB_PROXIMITY_RADIUS = 2.0  # mm
 NECKDOWN_LENGTH = 2.5  # mm of narrow track from the pad on neck-down routes (issue #72)
 NECKDOWN_TAPER_LENGTH = 0.5  # mm narrow->wide width taper (0 = abrupt)
 TRACK_PROXIMITY_DISTANCE = 2.0  # mm
+# #1146 pairwise keep-away: band cost per cell (mm equivalent; 0 = measure
+# and report only) and the radius around the routed net's own pads where the
+# band is not priced.
+KEEP_AWAY_COST = 0.5
+KEEP_AWAY_FREE = 1.5  # mm
 BGA_PROXIMITY_RADIUS = 7.0  # mm
 BGA_PROXIMITY_COST = 0.2
 
@@ -349,6 +354,8 @@ PARAM_RANGES = {
     'via_proximity_cost': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
     'track_proximity_distance': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'track_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'keep_away_free': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
+    'keep_away_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'routing_clearance_margin': {'min': 0.5, 'max': 2.0, 'inc': 0.1, 'digits': 1},
     'hole_to_hole_clearance': {'min': 0.0, 'max': 1.0, 'inc': 0.05, 'digits': 3},
     'board_edge_clearance': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 3},

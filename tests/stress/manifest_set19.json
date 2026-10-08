@@ -18,7 +18,7 @@
     "lane": "retro_compute",
     "license": "see repo",
     "short_name": "apple1_mainboard",
-    "note": "Apple-1 replica mainboard: all-DIP THT logic, 6502 + DRAM row, card-edge expansion slots, 2-layer"
+    "note": "Apple-1 replica mainboard: all-DIP THT logic, 6502 + DRAM row, card-edge expansion slots, 2-layer. Source gone (checked 2026-10-08): repo jgw4/apple-1 deleted (owner jgw4 still active; split the project into new repos on 2026-09-14); no fork, Software Heritage or Wayback copy. The only surviving copy is the corpus volume's re-saved board."
   },
   {
     "set": "set19",
@@ -249,7 +249,7 @@
     "lane": "retro_compute",
     "license": "see repo",
     "short_name": "apple1_aci_card",
-    "note": "Apple-1 Cassette Interface card: card-edge fingers into Apple-1 slot, DIP logic"
+    "note": "Apple-1 Cassette Interface card: card-edge fingers into Apple-1 slot, DIP logic. Source gone (checked 2026-10-08): repo jgw4/apple-1 deleted (owner split the project into new repos on 2026-09-14); no fork, Software Heritage or Wayback copy. The only surviving copy is the corpus volume's re-saved board."
   },
   {
     "set": "set19",

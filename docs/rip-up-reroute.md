@@ -50,7 +50,11 @@ Validator-named blockers — identities proved by geometry validators such as vi
 
 ## Ripping Pre-Existing Routes
 
-By default only nets routed **in the current run** are rip-up candidates; tracks and vias already committed on the input board are left untouched, so re-running the router never disturbs existing routing. `route.py --rip-existing-nets PATTERN [PATTERN …]` opts specific pre-existing routed nets into the rip-up machinery: when one of them blocks a net the router is trying to route, it may be ripped up and re-routed like an in-run net. Use it on a board that a previous run (or another tool) already routed and that now needs a new net threaded through congested copper. Pass `'*'` to allow any non-plane net. Without the flag the default holds — pre-existing committed tracks are never ripped.
+Copper already committed on the input board can be ripped in two ways.
+
+**By default**, small pre-existing nets are rip candidates: a net that is unprotected (#521), not KiCad-locked, not zone-backed, not `!`-negated in `--nets`, and has at most 30 segments and 6 vias may be ripped when it blocks a net being routed. The rip is custody-backed: the victim is rerouted in the same run, or its original copper is restored, or -- when copper routed since the rip occupies its corridor -- at least its escape stub is kept (#468, #1156). The in-run plane finalize's pad repair may likewise rip a signal net that blocks a plane tap, under the same custody. `KICAD_RIP_PREEXISTING=0` and `KICAD_FINALIZE_RIP=0` switch the two off. The improvement gate still grades the result, so a run that broke more than it connected is reverted.
+
+**`route.py --rip-existing-nets PATTERN [PATTERN …]`** extends the authority past those limits to the matching pre-existing routed nets, whatever their size: when one of them blocks a net the router is trying to route, it may be ripped up and re-routed like an in-run net. Use it on a board that a previous run (or another tool) already routed and that now needs a new net threaded through congested copper. Pass `'*'` to allow any non-plane net. Protected nets need their exact name, and KiCad-locked copper is never ripped. The failure hint names which blocking nets this run could already rip, so the flag is only prescribed for the ones it would add.
 
 One exception: the end-of-run oracle-reconnect pass may auto-grant `--rip-existing-nets` authority over pre-existing blockers that earlier failure hints named (capped at 12). That escalation always respects the run's own net filter — a net the caller excluded by pattern (`'!GND'` while planes pour in a later step) is excluded *by plan* and is never auto-ripped; only an explicit operator `--rip-existing-nets` can override that.
 
@@ -135,8 +139,13 @@ IMPROVEMENT GATE: this run broke 3 previously-connected net(s) [/BMS.Can_L, /BMS
 
 The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
 (`lost`, `gained`, `worsened`,
-`disconnected_pads_before/after`, `nets_compared`, `verdict`), so a chain can
-assert on it instead of grepping prose.
+`disconnected_pads_before/after`, `nets_compared`, `verdict`, and, when a
+poured net outside `--nets` got worse, `excluded_plane_nets` /
+`rejected_on_excluded_plane_nets_alone`), so a chain can
+assert on it instead of grepping prose. The `--json-out` file carries the
+same report under `improvement_gate` (#1173), and after a revert it also
+says `"shipped": "input board"`, with a `shipped_note` saying that its
+tallies describe the rejected attempt, not the shipped board.
 
 **The head line names every net it judged on (#1032)**, each list at its own
 clause: `broke N [lost nets], worsened K [net before->after], connected M`.
@@ -149,12 +158,18 @@ A pad-count-only rejection used to name nothing.
 finalize does not repair such a net (`finalize_excluded_nets`), so a lap that
 cuts its pour leaves those pads open, and the gate counts them: shipping the
 lap would ship the cut. Put the poured nets in `--nets` when the lap may cross
-their pours, so its finalize repairs what it cuts.
+their pours, so its finalize repairs what it cuts. The gate says so when it
+happens (#1114): such nets are listed as `excluded_plane_nets` in the JSON and
+on a line of their own in the report, and when the verdict would have been
+`accept` without them, `rejected_on_excluded_plane_nets_alone` is true and the
+report says the verdict rests on them ALONE, with that remedy in place of the
+advice below.
 
 **If you see `REVERTED`, the retry did not fail to run — it ran and was
 rejected.** Re-running it with *more* rip authority is the one response
 guaranteed not to help; change the approach instead (thinner, finer grid,
-different layer budget, or accept the open net and report it).
+different layer budget, or accept the open net and report it) -- unless the
+report says the verdict rests on excluded plane nets alone, above.
 
 `KICAD_IMPROVEMENT_GATE=0` disables the gate — for A/B measurement, or when you
 deliberately want the regressed board on disk to inspect it.

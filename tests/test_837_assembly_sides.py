@@ -515,9 +515,10 @@ def main():
     # one `run_all.py --fast` cannot see, because this file is classified
     # integration, so a red here reads as a green suite.
     # 6 since #959 (#1000), which added `edge_connectors[].side`; 7 since
-    # #1051/#1052/#1054 (`arrays[]`, `fixed_poses[]`, `blocks[].rigid`).
+    # #1051/#1052/#1054 (`arrays[]`, `fixed_poses[]`, `blocks[].rigid`); 8
+    # since #1142 (`decaps.within_radius_refs`, `decaps.within_radius_mm`).
     check("reader version names the field it learned",
-          fp.READER_VERSION == 7, fp.READER_VERSION)
+          fp.READER_VERSION == 8, fp.READER_VERSION)
 
     check("graded every fixture", graded == len(EXPECT), f"{graded}")
     print(f"\n{'FAIL' if FAILURES else 'PASS'}: #837 census over {graded} "

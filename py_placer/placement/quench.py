@@ -41,6 +41,7 @@ from typing import Dict, List, NamedTuple, Sequence, Tuple, Set, Optional
 import numpy as np
 
 from kicad_parser import PCBData, local_to_global
+from paste_apertures import pad_has_copper as _pad_has_copper
 from connectivity import compute_mst_edges
 from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
@@ -66,6 +67,17 @@ ROTATIONS = [0.0, 90.0, 180.0, 270.0]
 _CONTAINMENT_GATE = os.environ.get('KRT_NO_CONTAINMENT_GATE', '') != '1'
 EPS_IMPROVE = 1e-6
 
+#: #1113: every label `QuenchState.candidate_veto` can return, in the order
+#: candidate_valid asks (intent first, the tether last); 'unattributed' is a
+#: refusal no label covered and is a bug for `tests/test_1113_pose_veto.py`.
+VETO_CHECKS = ('intent', 'board_bbox', 'outline', 'waived_drill',
+               'waived_pads', 'body_overlap', 'courtyard', 'body_contained',
+               'pads_under_body', 'keepout_band', 'pads', 'tether',
+               'escape_overlap')
+#: mm2 of .Fab body overlap `_body_overlap_at` counts: bodies that abut
+#: (a shared edge, area 0) are not overlapping.
+_BODY_OVERLAP_EPS = 1e-6
+
 #: The floorplan rules the quench ENFORCES per move (#702), as opposed to the
 #: ones it is merely graded on afterwards. Exported so `test_placement_ab.py`
 #: and the docs detector read the enforced set FROM the engine instead of
@@ -85,7 +97,9 @@ EPS_IMPROVE = 1e-6
 #: invariant under every move this engine can make and `assembly_side` (#837)
 #: is invariant for the same reason one level up, `envelope` is a claim about
 #: the intent file, `decap_ungraded` is a claim about what the GRADE covers
-#: rather than about any pose, `legality` is a whole-board budget rather than
+#: rather than about any pose (since #1142 an ERROR for a cap a --decaps-from
+#: reference holds, which this gate still does not hold -- docs/floorplan-
+#: intent.md, the quench table), `legality` is a whole-board budget rather than
 #: a per-pose predicate, `pins_to_edge` is always-warn advice for a reviewer,
 #: and `array_formation` (#1051) is held by construction -- a declared array
 #: is a rigid group that only translates -- rather than priced per pose.
@@ -405,7 +419,8 @@ class IntentProbe:
     def _tether_guard_values(self) -> Tuple[float, ...]:
         """The LICENCE's view: as the gate reads each term. They differ for a
         decap pair past the search radius -- the grade stops grading it
-        (`decap_ungraded`, warn), so the count drops; the gate keeps
+        (`decap_ungraded`: a warn, or per cap an error the tether count
+        still does not see, #1142), so the count drops; the gate keeps
         measuring it, so the licence sees a cap that walked further from its
         IC as the regression it is, not as a fix (phase-2 verifier: esp_prog
         C3, radius 2.2, moved 1mm out, read `1 -> 0` and licensed)."""
@@ -691,7 +706,8 @@ class _Part:
     __slots__ = ('ref', 'pads_local', 'pin_count', 'bounds_by_rot',
                  'seed_x', 'seed_y', 'x', 'y', 'rot', 'locked',
                  'nets', 'halo', 'footprint_name', 'orig_rot',
-                 'side', 'has_tht', 'sides', 'tht_by_rot')
+                 'side', 'has_tht', 'sides', 'tht_by_rot', 'padbox_local',
+                 'padbox_by_rot')
 
     def __init__(self, ref, fp, courtyard_sides, locked, halo_base, halo_coef,
                  body_local=None):
@@ -727,6 +743,16 @@ class _Part:
             if lb is None:
                 lb = compute_footprint_bbox_local(fp)
         self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
+        # #1101: the PAD copper box, for a board whose project waives the
+        # courtyard rule -- the seat then spaces pads, not courtyards. None
+        # for a pad-less footprint (a logo occupies no copper).
+        # `fp.pads`, not `non_aperture_pads` (#1143, deliberately): an
+        # aperture-only part stays a MOVABLE quench part (see the zero-pad
+        # branch in QuenchState), so it keeps a pad box -- the bbox
+        # fallback, since its apertures are not extent.
+        self.padbox_local = (compute_footprint_bbox_local(fp)
+                             if fp.pads else None)
+        self.padbox_by_rot: Dict[float, Tuple[float, float, float, float]] = {}
         tlb = through_pad_bounds_local(fp) if self.has_tht else None
         self.tht_by_rot = ({r: _rotate_local_bounds(*tlb, r) for r in ROTATIONS}
                            if tlb is not None else None)
@@ -756,6 +782,19 @@ class _Part:
         b = self.bounds_by_rot.get(rot % 360)
         if b is None:
             b = self.bounds_by_rot[0.0]
+        return (x + b[0], y + b[1], x + b[2], y + b[3])
+
+    def padbox(self, x=None, y=None, rot=None):
+        """The part's pad-copper box at a pose (#1101), or None (no pads)."""
+        if self.padbox_local is None:
+            return None
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rot = (self.rot if rot is None else rot) % 360
+        b = self.padbox_by_rot.get(rot)
+        if b is None:
+            b = self.padbox_by_rot[rot] = _rotate_local_bounds(
+                *self.padbox_local, rot)
         return (x + b[0], y + b[1], x + b[2], y + b[3])
 
     def tht_rect(self, x=None, y=None, rot=None):
@@ -964,6 +1003,15 @@ class QuenchState:
         no_courtyard = []
         outline_locked = []   # #829, reported below
         for ref, fp in pcb_data.footprints.items():
+            # `fp.pads`, not `non_aperture_pads` -- the one #1143 site left
+            # reading every pad, deliberately. A part whose only pads are
+            # paste/mask apertures (a logo) stays MOVABLE here: the seeder
+            # seats such a part by its courtyard when the intent fixes its
+            # pose (test_1051_hardening's copperless logo), and taking it
+            # down this branch would lock it as a static obstacle, which the
+            # fixed-pose stage then refuses as "already placed" (Phase-1
+            # verifier). A truly pad-less footprint is refused that way too,
+            # which is a separate, older question.
             if not fp.pads:
                 # Zero-pad footprints (graphics-only mechanical parts, logos
                 # with a courtyard) used to be dropped entirely -- neither
@@ -1033,7 +1081,38 @@ class QuenchState:
         # `keepouts_for` is EMPTY on every board that declares no keep-out --
         # which is every board in the corpus today -- and `pose_ok` guards on
         # that emptiness, so the whole channel is inert unless asked for.
-        self.keepouts = tuple(keepouts or ())
+        # #1098: plus the mating region of every PCB-edge plug on the board
+        # (derived from the footprint; a declared `mating:<ref>` wins), so
+        # no seat, nudge or swap puts a part on a USB tongue whatever the
+        # intent says. Empty on a board with no such plug.
+        from . import floorplan as _fpk
+        # #1101: the board's OWN `courtyards_overlap` severity, read the way
+        # check_assembly reads it (#1095, `legality.courtyard_severity_of`:
+        # an `ignore` this repo's old route steps wrote is not the author's).
+        # At `ignore` the author said courtyards may overlap and KiCad checks
+        # none; refusing them here made StickHub's port capacitors unseatable
+        # -- the column between the JST ports is 1.14 mm between courtyards,
+        # and the human's caps overlap them by 0.68 mm. Pads, holes and .Fab
+        # bodies are still checked. Inert on every board that does not say
+        # `ignore` (none in the tracked corpus).
+        try:
+            from .legality import courtyard_severity_of as _cso
+            self.courtyards_ignored = _cso(pcb_file)[0] == 'ignore'
+        except Exception:                                    # noqa: BLE001
+            self.courtyards_ignored = False
+        self.keepouts = _fpk.with_derived_keepouts(keepouts, pcb_data,
+                                                   pcb_file)
+        # A plug SEATED at its edge is the mechanical fact its keep-out is
+        # derived from: moved inland, the region would go with it and the
+        # parts it kept off the tongue would be free to return (#1098
+        # review). So the search never moves it -- as with a KiCad lock.
+        # Only while it IS seated (`seated_plugs`): a plug a declared
+        # `mating:` keep-out names but which sits in the staging pile, or
+        # hangs across an edge, must stay free, or the seeder writes it back
+        # where it was and reports nothing unseated.
+        for _ref in _fpk.seated_plugs(self.keepouts, pcb_data, pcb_file):
+            if _ref in self.parts:
+                self.parts[_ref].locked = True
         self.keepouts_for: Dict[str, Tuple[Dict, ...]] = {}
         if self.keepouts:
             from . import floorplan as _fp
@@ -1733,6 +1812,11 @@ class QuenchState:
             others = ((o, self.parts[o]) for o in self._neighbors[ref])
         else:
             others = self.parts.items()
+        if getattr(self, 'courtyards_ignored', False):
+            # #1104: the courtyard is waived, so the overlap term is the pad
+            # and hole one the waived seat asks (#1101), absolutely.
+            return board, self._waived_overlap(ref, x, y, rot, others,
+                                               exclude, limit, board)
         clr = self.clearance
         rect = rects[0]
         tht = part.has_tht
@@ -1802,6 +1886,59 @@ class QuenchState:
             return True
         return all(v <= t.threshold
                    for v, t in zip(self.intent_terms(ref, rects), spec))
+
+    def _waived_overlap(self, ref, x, y, rot, others, exclude, limit, board):
+        """`violation_parts`' overlap term on a courtyard-waived project
+        (#1104): per neighbour on a shared face, the absolute pad + hole
+        shortfall (`pair_shortfall`), a pad short or stack counted as the
+        clearance, and a stacked drill hole likewise -- the questions the
+        #1101 waived seat asks, as a distance rather than a verdict."""
+        from .seeder import _drill_conflict
+        part = self.parts[ref]
+        x = part.x if x is None else x
+        y = part.y if y is None else y
+        rot = part.rot if rot is None else rot
+        ctx = self.legality_ctx
+        drilled = self._drilled_refs()
+        clr = self.clearance
+        overlap = 0.0
+        for other_ref, other in others:
+            if other_ref == ref or (exclude and other_ref in exclude):
+                continue
+            if not (part.sides & other.sides):
+                continue
+            if (ref in drilled and other_ref in drilled and _drill_conflict(
+                    self, ref, (x, y, rot), other_ref,
+                    (other.x, other.y, other.rot))):
+                overlap += clr
+            if ctx is not None:
+                sf = ctx.pair_shortfall(ref, other_ref, pose_a=(x, y, rot))
+                overlap += max(0.0, sf.pad) + max(0.0, sf.hole)
+                if sf.pad_overlap or sf.stack:
+                    overlap += clr
+            else:
+                # The waived seat's own fallback: pad boxes at the clearance.
+                mine, ob = part.padbox(x, y, rot), other.padbox()
+                if mine is not None and ob is not None:
+                    gap = rect_gap(mine, ob)
+                    if gap < clr:
+                        overlap += clr - gap
+            if limit is not None and board + overlap > limit:
+                break
+        return overlap
+
+    def _drilled_refs(self):
+        """Refs with any drilled pad (plated or not), cached -- the parts a
+        hole-to-hole check can concern (#1101)."""
+        got = getattr(self, '_drilled_cache', None)
+        if got is None:
+            got = frozenset(
+                r for r, fp in (self.pcb_data.footprints or {}).items()
+                if any(max(float(getattr(p, 'drill', 0) or 0),
+                           float(getattr(p, 'drill_w', 0) or 0)) > 0
+                       for p in fp.pads))
+            self._drilled_cache = got
+        return got
 
     def keepout_clear(self, ref, rects) -> bool:
         """The keep-out slice of `intent_clear`, absolute (#701's policy).
@@ -1952,8 +2089,12 @@ class QuenchState:
         """
         self.intent_rejected_by_site[site] = (
             self.intent_rejected_by_site.get(site, 0) + 1)
+        _first = None
         for rule, _name, _c, _u in self.intent_blockers(ref, x, y, rot, rects):
             self.intent_rejected[rule] = self.intent_rejected.get(rule, 0) + 1
+            _first = _first or f"{rule}:{_name}"
+        if self._why is not None and site == 'candidate_valid':
+            self._veto('intent', _first)    # #1113
 
     def _note_swap_refusal(self, ra, rb) -> None:
         """Attribute a refused swap to whichever HALF of it was refused.
@@ -1966,16 +2107,49 @@ class QuenchState:
         pa, pb = self.parts[ra], self.parts[rb]
         self.intent_rejected_by_site['swap'] = (
             self.intent_rejected_by_site.get('swap', 0) + 1)
-        for who, (x, y, rot) in ((ra, (pb.x, pb.y, pb.rot)),
-                                 (rb, (pa.x, pa.y, pa.rot))):
+        for who, (x, y, rot), cur in ((ra, (pb.x, pb.y, pb.rot), pa.rot),
+                                      (rb, (pa.x, pa.y, pa.rot), pb.rot)):
             for rule, _n, _c, _u in self.intent_blockers(who, x, y, rot):
                 self.intent_rejected[rule] = self.intent_rejected.get(rule, 0) + 1
+            # #1117: the declared-rotation half has no intent_blockers rule.
+            if not _declared_admits(self.declared_rotations.get(who), rot,
+                                    cur):
+                self.intent_rejected['rotation'] = (
+                    self.intent_rejected.get('rotation', 0) + 1)
         if self._tether_active:
             # #1043: both halves at once, since a tether between the two (two
             # caps on one pin's rail) reads both poses.
             for rule, _n, _c, _u in self.tether_failures(
                     {ra: (pb.x, pb.y, pb.rot), rb: (pa.x, pa.y, pa.rot)}):
                 self.intent_rejected[rule] = self.intent_rejected.get(rule, 0) + 1
+
+    #: #1113: the check that refused the candidate `candidate_veto` is
+    #: asking about, filled by `_veto` on candidate_valid's rejection paths.
+    #: None outside a `candidate_veto` call, so the labels cost one attribute
+    #: test on a rejection and nothing on an admission.
+    _why = None
+
+    def _veto(self, check, blocker=None, **detail):
+        """Record `check` as the reason the current candidate is refused,
+        unless an earlier conjunct already gave one (#1113)."""
+        if self._why is not None and 'check' not in self._why:
+            self._why.update(detail, check=check, blocker=blocker)
+
+    def candidate_veto(self, ref, x, y, rot,
+                       exclude: Optional[Set[str]] = None):
+        """`None` when `candidate_valid` admits the pose, else `(check,
+        blocker)`: the conjunct that refused it (`VETO_CHECKS`) and the part
+        it was refused against, when there is one (#1113). It CALLS
+        candidate_valid, so the two can never disagree; the labels are
+        written on candidate_valid's own rejection paths."""
+        self._why = {}
+        try:
+            if self.candidate_valid(ref, x, y, rot, exclude):
+                return None
+            why = self._why
+        finally:
+            self._why = None
+        return (why.get('check', 'unattributed'), why.get('blocker'))
 
     def candidate_valid(self, ref, x, y, rot, exclude: Optional[Set[str]] = None):
         """True when the pose is legal, or -- when the part sits OFF THE BOARD --
@@ -2022,6 +2196,8 @@ class QuenchState:
             return False
         legal = not (rect[0] < self.usable[0] or rect[1] < self.usable[1]
                      or rect[2] > self.usable[2] or rect[3] > self.usable[3])
+        if not legal and self._why is not None:
+            self._veto('board_bbox')
         # Real outline / cutout gate, three-level short-circuit: board-level
         # opt-out, cached per-part reachable-edge list, then the exact test
         # against only those edges.
@@ -2030,7 +2206,70 @@ class QuenchState:
             if near and self.edge_gate.rect_blocked(
                     rect, edges=near, skip_rings=self._owned_rings(ref)):
                 legal = False
-        if legal:
+                if self._why is not None:
+                    self._veto('outline')
+        if legal and getattr(self, 'courtyards_ignored', False):
+            # #1101: courtyards waived by the project, so the neighbour test
+            # asks the PAD question instead, ABSOLUTELY and at each pair's own
+            # requirement (net class, pad override -- what the grade prices),
+            # never at the seat's ladder clearance: pricing pad boxes at
+            # `self.clearance` let four StickHub pairs sit under their 0.15 mm
+            # net class at --clearance 0.1 (#1101 verifier). The seed-relative
+            # `pads_ok` below cannot stand in: on a pile the seed poses
+            # already overlap, so it admits anything.
+            mine = part.padbox(x, y, rot)
+            if mine is not None:
+                if self._neighbors is not None and ref in self._neighbors:
+                    others = ((o, self.parts[o]) for o in self._neighbors[ref])
+                else:
+                    others = self.parts.items()
+                ctx = self.legality_ctx
+                clr = self.clearance
+                drilled = self._drilled_refs()
+                from .seeder import _drill_conflict
+                for other_ref, other in others:
+                    if other_ref == ref or (exclude and other_ref in exclude):
+                        continue
+                    if not (part.sides & other.sides):
+                        continue
+                    # Hole to hole is not the pad question and the courtyard
+                    # that used to keep holes apart is waived (#1101 review).
+                    if (ref in drilled and other_ref in drilled
+                            and _drill_conflict(
+                                self, ref, (x, y, rot), other_ref,
+                                (other.x, other.y, other.rot))):
+                        legal = False
+                        if self._why is not None:
+                            self._veto('waived_drill', other_ref)
+                        break
+                    if ctx is not None:
+                        # No padbox prefilter: a padbox is built from pad
+                        # ANCHORS, and offset-drill copper sits millimetres
+                        # past it; pair_shortfall early-outs on its own
+                        # copper extent (#1101 review).
+                        sf = ctx.pair_shortfall(ref, other_ref,
+                                                pose_a=(x, y, rot))
+                        if (sf.pad > EPS_IMPROVE or sf.pad_overlap
+                                or sf.stack or sf.hole > EPS_IMPROVE):
+                            legal = False
+                            if self._why is not None:
+                                self._veto('waived_pads', other_ref)
+                            break
+                    else:
+                        ob = other.padbox()
+                        if ob is not None and rect_gap(mine, ob) < clr:
+                            legal = False
+                            if self._why is not None:
+                                self._veto('waived_pads', other_ref)
+                            break
+            # The courtyard is body + margin, and the project waived the
+            # MARGIN. Two bodies in one place are still two parts colliding,
+            # and the containment conjunct below only refuses half of a body
+            # or more: without this, two parts seated with 40% of their
+            # .Fab bodies overlapping, pads clear (#1101 review).
+            if legal and self._body_overlap_at(ref, x, y, rot, exclude):
+                legal = False
+        elif legal:
             if self._neighbors is not None and ref in self._neighbors:
                 others = ((o, self.parts[o]) for o in self._neighbors[ref])
             else:
@@ -2049,6 +2288,8 @@ class QuenchState:
                     gap = part.gap_to(other, rects)
                     if gap is not None and gap < clr:
                         legal = False
+                        if self._why is not None:
+                            self._veto('courtyard', other_ref, path='tht')
                         break
                     continue
                 # Fast path: two plain SMD parts, same side. The per-axis test is
@@ -2070,6 +2311,8 @@ class QuenchState:
                     continue                    # provably clear
                 if rect_gap(rect, r) < clr:
                     legal = False
+                    if self._why is not None:
+                        self._veto('courtyard', other_ref, path='smd')
                     break
         if legal:
             # BODY layer. A pose that buries this part inside another part's
@@ -2092,13 +2335,22 @@ class QuenchState:
             # Same marker/container exemption as the prevention gate, or a
             # displaced fiducial could never come home under a connector.
             legal = not self._body_contained_at(ref, x, y, rot, exclude)
+            # #1106: the checker grades a body-less part's pads under a
+            # drawn body at EVERY severity, so the seat refuses it here, on
+            # both the waived and the courtyard path --
+            # a body drawn larger than its courtyard leaves room the
+            # courtyard test above does not see (review: J9 under a
+            # +-3.5 mm body behind a +-1 mm courtyard, at `error`).
+            if legal and self._pads_under_body_at(ref, x, y, rot, exclude):
+                legal = False
         if legal and self.legality_ctx is not None:
             # Pad+drill layer: courtyard-clear does not imply pad-clear (pads
             # overhanging courtyards, exchanged nets, NPTH holes). Baseline-
             # relative: the pose may not worsen any pair vs the SEED, and a
             # NEW different-net pad intersection is never admitted.
             legal = self.legality_ctx.pads_ok(
-                ref, x, y, rot, self._pad_neighbors(ref), exclude=exclude)
+                ref, x, y, rot, self._pad_neighbors(ref), exclude=exclude,
+                why=self._why)
         if legal:
             # #1043: the tether conjunct LAST, at every `return True`, not
             # beside the #702 check above. It is the one conjunct that poses
@@ -2121,11 +2373,36 @@ class QuenchState:
             ref, x, y, rot, exclude=exclude, limit=cur_board)
         if not (cand_overlap <= EPS_IMPROVE
                 and cand_board < cur_board - EPS_IMPROVE):
+            if (self._why is not None and cand_overlap > EPS_IMPROVE
+                    and self._why.get('check') in ('board_bbox', 'outline')):
+                # #1113: a part coming home from off the board, refused for
+                # OVERLAP -- the board term the ordinary path named is not
+                # what stopped it (a courtyard label keeps its blocker).
+                self._why.clear()
+                self._veto('escape_overlap')
+            return False
+        # #1113: past here the ESCAPE rule's own conjuncts decide, so a
+        # refusal below is theirs, not the ordinary path's board term.
+        if self._why is not None:
+            self._why.clear()
+        # #1101: ...and the same BODY conjunct the ordinary path has. Coming in
+        # from the pile, a part whose courtyard is small and whose drawn body
+        # is large (StickHub's lying-down electrolytic C38: a 6.3 x 11.5 mm
+        # .Fab over a pad-sized courtyard) overlaps no courtyard, so this
+        # branch seated it on top of eleven parts -- and, before #1101, inside
+        # Y1's body. The branch never asked about bodies.
+        if self._body_contained_at(ref, x, y, rot, exclude):
+            return False
+        # #1106: and the body-less half of it. Measured on run 38's pile:
+        # the waived seat refused J9 under U1's LQFP body, then this branch
+        # accepted the same pose for a part "coming home" from the pile.
+        if self._pads_under_body_at(ref, x, y, rot, exclude):
             return False
         # The unfreeze branch gets the SAME pad/hole conjunct: a part may move
         # back toward the board only without worsening any pad pair.
         if self.legality_ctx is not None and not self.legality_ctx.pads_ok(
-                ref, x, y, rot, self._pad_neighbors(ref), exclude=exclude):
+                ref, x, y, rot, self._pad_neighbors(ref), exclude=exclude,
+                why=self._why):
             return False
         return self._tether_gate(ref, x, y, rot)
 
@@ -2145,6 +2422,17 @@ class QuenchState:
         there is no ordering hazard between them.
         """
         pa, pb = self.parts[ra], self.parts[rb]
+        # #1117: a declared ROTATION binds a ref the same way. The swap hands
+        # each part the other's angle, and the #893 pin lived only in the
+        # nudge's candidate list, so two parts of one footprint declared at
+        # different angles traded them and the seed graded clean (there is
+        # no rule_rotation to catch it).
+        if self.declared_rotations and not (
+                _declared_admits(self.declared_rotations.get(ra), pb.rot,
+                                 pa.rot)
+                and _declared_admits(self.declared_rotations.get(rb), pa.rot,
+                                     pb.rot)):
+            return False
         return (self.intent_ok(ra, pb.x, pb.y, pb.rot)
                 and self.intent_ok(rb, pa.x, pa.y, pa.rot)
                 and (not self._tether_active
@@ -2268,7 +2556,8 @@ class QuenchState:
         the measurement `IntentProbe` counts, never the gate's. No cache is
         read or written (the gate's caches are keyed by ITS term index), and
         a decap pair the live election puts beyond the search radius reads 0,
-        because the grade calls it `decap_ungraded` (warn) however it was
+        because the grade calls it `decap_ungraded` (a warn, or per cap an
+        error under a --decaps-from intent, #1142) however it was
         elected at build -- the gate deliberately keeps measuring that pair,
         which is stricter than the grade and therefore not a count of it."""
         return self._tether_measure(t, None, None, grade_view=True)
@@ -2441,6 +2730,8 @@ class QuenchState:
         fails = self.tether_failures({ref: (x, y, rot)})
         if not fails:
             return True
+        if self._why is not None:
+            self._veto('tether', f"{fails[0][0]}:{fails[0][1]}")
         tally = self.intent_rejected_by_site
         tally[site] = tally.get(site, 0) + 1
         for rule, _n, _c, _u in fails:
@@ -2634,11 +2925,185 @@ class QuenchState:
         key = (ref, rot % 360)
         local = self._fab_cache.get(key)
         if local is None:
-            own = 'B' if str(getattr(p, 'side', 'F')).upper().startswith('B')                 else 'F'
+            own = self._fab_side(p)
             lb = sides.get(own) or next(iter(sides.values()))
             local = rotate_local_bounds(*lb, rot)
             self._fab_cache[key] = local
         return (x + local[0], y + local[1], x + local[2], y + local[3])
+
+    @staticmethod
+    def _fab_side(p):
+        """The side whose .Fab drawing `fab_rect` and `fab_shape` read:
+        the part's already-resolved `side`, upper-cased defensively."""
+        return 'B' if str(getattr(p, 'side', 'F')).upper().startswith('B') \
+            else 'F'
+
+    def fab_shape(self, ref, x=None, y=None, rot=None):
+        """The part's DRAWN .Fab body at a pose (board-frame geometry), on the
+        side `fab_rect` picks, or None when its footprint draws no .Fab.
+        Lazy, like `fab_rect`: nothing is read until the first call."""
+        if getattr(self, '_fab_shapes', None) is None:
+            try:
+                from placement.parser import extract_fab_shapes
+                self._fab_shapes = extract_fab_shapes(self.pcb_file) or {}
+            except Exception:                                # noqa: BLE001
+                self._fab_shapes = {}
+        p = self.parts.get(ref)
+        sides = self._fab_shapes.get(ref)
+        if p is None or not sides:
+            return None
+        own = self._fab_side(p)
+        got = sides.get(own) or next(iter(sides.values()))
+        return legality.place_local_shape(
+            got[0], p.x if x is None else x, p.y if y is None else y,
+            p.rot if rot is None else rot)
+
+    def _body_overlap_at(self, ref, x, y, rot, exclude=None):
+        """Would this pose put any of `ref`'s .Fab body over a same-side
+        neighbour's? `fab_rect` is the broad phase and the drawn bodies
+        decide, as check_assembly's fab channel measures them (#1094), so a
+        diagonal part is not refused on its box. Marker and container parts
+        are exempt (`body_exempt_refs`); a part with no .Fab is unjudged.
+
+        For a board whose project waives the courtyard rule (#1101), where
+        the courtyard no longer keeps bodies apart."""
+        exempt = self.body_exempt_refs()
+        if ref in exempt:
+            return False
+        ra = self.fab_rect(ref, x, y, rot)
+        if ra is None:
+            return False
+        part = self.parts[ref]
+        if self._neighbors is not None and ref in self._neighbors:
+            others = [(o, self.parts[o]) for o in self._neighbors[ref]]
+        else:
+            others = list(self.parts.items())
+        mine = None
+        for other_ref, other in others:
+            if other_ref == ref or (exclude and other_ref in exclude):
+                continue
+            if other_ref in exempt or other.side != part.side:
+                continue
+            rb = self.fab_rect(other_ref)
+            if rb is None or rect_overlap_area(ra, rb) <= _BODY_OVERLAP_EPS:
+                continue
+            if mine is None:
+                mine = self.fab_shape(ref, x, y, rot)
+            theirs = self.fab_shape(other_ref)
+            if mine is None or theirs is None:
+                if self._why is not None:
+                    self._veto('body_overlap', other_ref)
+                return True            # unmeasurable: the rects overlap
+            if mine.intersection(theirs).area > _BODY_OVERLAP_EPS:
+                if self._why is not None:
+                    self._veto('body_overlap', other_ref)
+                return True
+        return False
+
+    def _bodyless_refs(self):
+        """Pad-bearing parts that draw NO body (#1106), cached -- the
+        checker's own set: `grade_body_overlap` judges a part by its drawn
+        body (.Fab, else a usable silk outline, `body.board_bodies`) and
+        asks the pads-under-body question only of a part with neither. A
+        part with a silk body but no .Fab is NOT body-less here: reading
+        .Fab alone put esp_prog's silk-only U2 in this set and refused quench
+        moves the checker allows (8 esp_prog poses moved, review)."""
+        got = getattr(self, '_bodyless_cache', None)
+        if got is None:
+            fps = getattr(self.pcb_data, 'footprints', {}) or {}
+            try:
+                from placement.body import board_bodies
+                bodies = board_bodies(self.pcb_data, self.pcb_file)
+            except Exception:                                # noqa: BLE001
+                bodies = None
+            out = set()
+            for r in self.parts:
+                fp = fps.get(r)
+                if fp is None or not any(
+                        _pad_has_copper(p) for p in fp.pads or ()):
+                    continue
+                if bodies is None:
+                    drawn = self.fab_rect(r)
+                else:
+                    g = bodies.get(r)
+                    drawn = g.drawn_local if g is not None else None
+                if drawn is None:
+                    out.add(r)
+            got = frozenset(out)
+            self._bodyless_cache = got
+        return got
+
+    def _pads_under_body_at(self, ref, x, y, rot, exclude=None):
+        """Would `ref` at this pose put a BODY-LESS part's pad copper under a
+        same-face drawn body (#1106)? Either direction of the move: `ref`
+        body-less landing under a neighbour's body, or `ref`'s body landing
+        over a body-less neighbour. `legality.pads_under_body_frac` at
+        `CONTAINMENT_FRAC`, the checker's predicate; marker and container
+        parts are exempt, as in the checker's gate. The body-less set is the
+        checker's own (`_bodyless_refs`); the covering body is read from .Fab
+        only, which is still the checker's gate, since a pair whose body
+        came from silk never gates. Rect broad phase first, so a board with
+        no body-less part pays a set lookup."""
+        bodyless = self._bodyless_refs()
+        if not bodyless:
+            return False
+        exempt = self.body_exempt_refs()
+        if ref in exempt:
+            return False
+        fps = getattr(self.pcb_data, 'footprints', {}) or {}
+        part = self.parts[ref]
+        if ref in bodyless:
+            box = part.padbox(x, y, rot)
+            if box is None:
+                return False
+            mine_pads = None
+            for other_ref, other in self.parts.items():
+                if (other_ref == ref or other_ref in bodyless
+                        or (exclude and other_ref in exclude)
+                        or other_ref in exempt
+                        or not (part.sides & other.sides)):
+                    continue
+                orect = self.fab_rect(other_ref)
+                if orect is None or rect_gap(box, orect) > 0.0:
+                    continue
+                theirs = self.fab_shape(other_ref)
+                if theirs is None:
+                    continue
+                if mine_pads is None:
+                    mine_pads = legality.bodyless_pad_shape(fps[ref], x, y,
+                                                            rot)
+                if (legality.pads_under_body_frac(mine_pads, theirs)
+                        >= legality.CONTAINMENT_FRAC):
+                    if self._why is not None:
+                        self._veto('pads_under_body', other_ref)
+                    return True
+            return False
+        mrect = self.fab_rect(ref, x, y, rot)
+        if mrect is None:
+            return False
+        mine_body = None
+        for other_ref in bodyless:
+            if (other_ref == ref or (exclude and other_ref in exclude)
+                    or other_ref in exempt):
+                continue
+            other = self.parts[other_ref]
+            if not (part.sides & other.sides):
+                continue
+            ob = other.padbox()
+            if ob is None or rect_gap(mrect, ob) > 0.0:
+                continue
+            if mine_body is None:
+                mine_body = self.fab_shape(ref, x, y, rot)
+                if mine_body is None:
+                    return False
+            theirs_pads = legality.bodyless_pad_shape(
+                fps[other_ref], other.x, other.y, other.rot)
+            if (legality.pads_under_body_frac(theirs_pads, mine_body)
+                    >= legality.CONTAINMENT_FRAC):
+                if self._why is not None:
+                    self._veto('pads_under_body', other_ref)
+                return True
+        return False
 
     def body_exempt_refs(self):
         """Refs whose body may legitimately swallow or be swallowed.
@@ -2701,6 +3166,8 @@ class QuenchState:
                 continue
             frac = containment_frac(area, ra, rb)
             if frac is not None and frac >= CONTAINMENT_FRAC:
+                if self._why is not None:
+                    self._veto('body_contained', other_ref)
                 return True
         return False
 
@@ -2820,9 +3287,18 @@ class QuenchState:
                 oob_count += 1
                 oob_amount += amt
                 oob_area += self.edge_gate.out_of_board_area(p.rect)
-        out = {'overlap_area': legality.placement_overlap_area(parts),
+        overlap = legality.placement_overlap_area(parts)
+        out = {'overlap_area': overlap,
                'oob_count': oob_count, 'oob_amount': oob_amount,
                'oob_area': oob_area, 'hpwl': self.hpwl()}
+        if getattr(self, 'courtyards_ignored', False):
+            # #1104: the project waives courtyard overlap (#1101's
+            # predicate), so it is not a legality cost here -- the decap
+            # rung, the reseat/evict gates and the portfolio all compare this
+            # key, and each refused the moves the waiver exists for. The
+            # measurement is kept, under its own name, for disclosure.
+            out['overlap_area'] = 0.0
+            out['overlap_area_waived'] = overlap
         out.update(self.pad_legality_metrics())
         return out
 
@@ -3068,6 +3544,58 @@ class QuenchState:
                         and ra[3] + m >= rb[1] and rb[3] + m >= ra[1]):
                     lst.append(oref)
             self._neighbors[ref] = lst
+
+
+class TetherGateView:
+    """QuenchState's #1043 tether gate on parts that are not a QuenchState
+    (#1067: `place_fanout_clearance`'s near-BGA caps).
+
+    The methods ARE QuenchState's -- bound here as class attributes, not
+    copied -- so a candidate is judged by the same measurement and the same
+    per-claim rule the quench applies: past its limit AND worse than the live
+    board refuses (`tether_failures` / `tether_ok`). `parts` maps each MOVABLE
+    ref to an object with `x`, `y`, `rot` and `locked`; every other part is
+    read at its file pose, which is right for an engine that moves only those
+    parts. `note_move()` must follow every applied move: it clears the two
+    caches QuenchState's `apply_move` clears.
+    """
+
+    _exact_tethers = False
+    _build_tethers = QuenchState._build_tethers
+    tether_terms_for = QuenchState.tether_terms_for
+    _pose_of = QuenchState._pose_of
+    _posed_fp = QuenchState._posed_fp
+    _chip_bounds = QuenchState._chip_bounds
+    _tether_value = QuenchState._tether_value
+    tether_graded_value = QuenchState.tether_graded_value
+    _tether_measure = QuenchState._tether_measure
+    _incumbent_tether = QuenchState._incumbent_tether
+    tether_failures = QuenchState.tether_failures
+    _iter_tether_failures = QuenchState._iter_tether_failures
+    tether_ok = QuenchState.tether_ok
+
+    def __init__(self, pcb_data, pcb_file, parts, tethers):
+        self.pcb_data = pcb_data
+        self.pcb_file = pcb_file
+        self.parts = parts
+        self._tether_terms = []
+        self._tethers_of = {}
+        self._inc_tval = {}
+        self._tgap = {}
+        self._posed = {}
+        self._bounds = {}
+        self._tether_override = None
+        self._tether_bodies = None
+        self.tethers = dict(tethers or {})
+        if self.tethers:
+            self._build_tethers()
+        self._tether_active = bool(self._tether_terms)
+
+    def note_move(self):
+        """A part in `parts` moved: the incumbent values and the static
+        partial minima are stale (QuenchState.apply_move's two clears)."""
+        self._inc_tval.clear()
+        self._tgap.clear()
 
 
 def merge_groups(groups: Dict[str, List[str]], rigid: Dict[str, List[str]],
@@ -3491,6 +4019,26 @@ def _candidate_rotations(part: _Part, allow_rotations: bool,
     return [(b + r) % 360 for b in bases for r in ROTATIONS]
 
 
+def _same_angle(a, b) -> bool:
+    return abs((a - b + 180.0) % 360.0 - 180.0) < 1e-6
+
+
+def _declared_admits(declared, rot, current=None) -> bool:
+    """Whether a declared rotation claim (#893; `(rotation, candidates)`, or
+    None for no claim) admits the angle `rot` -- the swap phase's half of the
+    pin `_candidate_rotations` puts on the nudge (#1117). A part handed its
+    `current` angle is never refused: a swap that changes no angle cannot
+    make a declaration worse. An earlier version of this gate refused it --
+    even under `--no-rotate`, where no move can turn anything -- and lost a
+    16 mm wirelength win (#1117's second verifier)."""
+    if declared is None:
+        return True
+    if current is not None and _same_angle(rot, current):
+        return True
+    return any(_same_angle(rot, a)
+               for a in _candidate_rotations(None, True, declared))
+
+
 def quench(pcb_data: PCBData, pcb_file: str,
            max_displacement: float = 10.0,
            swap_max_displacement: Optional[float] = None,
@@ -3595,7 +4143,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
     if ignore_nets:
         import fnmatch
         for net_id, net in pcb_data.nets.items():
-            if any(fnmatch.fnmatch(net.name, pat) for pat in ignore_nets):
+            if any(fnmatch.fnmatchcase(net.name, pat) for pat in ignore_nets):
                 ignore_net_ids.add(net_id)
         print(f"Ignoring {len(ignore_net_ids)} nets for airwire scoring")
 
@@ -3603,7 +4151,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
     if lock_refs:
         import fnmatch
         for ref in pcb_data.footprints:
-            if any(fnmatch.fnmatch(ref, pat) for pat in lock_refs):
+            if any(fnmatch.fnmatchcase(ref, pat) for pat in lock_refs):
                 extra_locked.add(ref)
         print(f"Locked via --lock: {', '.join(sorted(extra_locked))}")
 
@@ -4033,7 +4581,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         # silent swap rejection -- "two instances of one
                         # footprint that never swap look exactly like a pair
                         # with nothing to gain".
-                        if ((state._intent_active or state._tether_active)
+                        if ((state._intent_active or state._tether_active
+                             or state.declared_rotations)
                                 and not state.swap_intent_ok(ra, rb)):
                             state._note_swap_refusal(ra, rb)
                             swaps_skipped_intent += 1
@@ -4144,14 +4693,23 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 # #1043: the tether terms' refs and rules count too -- a
                 # decaps-only intent must not report `rules_enforced: []`
                 # while refusing poses on `decap_distance`.
+                # #1117: and the declared rotations (of parts this state
+                # holds), which the swap refuses on as rule `rotation` -- a
+                # GATE rule, not a grade rule: floorplan has no
+                # rule_rotation. Without them an earlier version of this
+                # gate reported "enforced over 0 bound part(s)" on a
+                # rotation-only intent while refusing swaps.
                 'refs_bound': len(set(state._intent_spec)
                                   | set(state.keepouts_for)
-                                  | set(state._tethers_of)),
+                                  | set(state._tethers_of)
+                                  | (set(state.declared_rotations)
+                                     & set(state.parts))),
                 'rules_enforced': sorted(
                     {t.rule for ref in (set(state._intent_spec)
                                         | set(state.keepouts_for))
                      for t in state.intent_spec_for(ref)}
-                    | {t.rule for t in state._tether_terms}),
+                    | {t.rule for t in state._tether_terms}
+                    | ({'rotation'} if state.declared_rotations else set())),
             }
         if state._tether_active:
             by_rule: Dict[str, int] = {}

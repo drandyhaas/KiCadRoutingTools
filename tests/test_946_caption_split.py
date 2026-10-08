@@ -28,6 +28,11 @@ import os
 import re
 import sys
 
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
+
 RUN_ALL_FAST_OK = True
 
 _TESTS = os.path.dirname(os.path.abspath(__file__))
@@ -63,8 +68,7 @@ def test_the_156_char_case_keeps_every_field():
     """The claim, measured: no field is dropped because another was long."""
     _mark = len(_FAIL)
     th = RT.DARK
-    g = FL.plan_frame((0, 0, 185, 100), layout='sidebar', size=900,
-                      panel=True)
+    g = FL.plan_frame((0, 0, 185, 100), size=900)
     img = Image.new('RGB', (g.frame.w, g.frame.h), th.rgb('ground'))
     d = ImageDraw.Draw(img)
     RC.draw_rail(d, g.rail, 'a_217_part_board', 'lap 3 of 5  -  route',
@@ -98,7 +102,7 @@ def test_the_156_char_case_keeps_every_field():
 def test_a_long_line_ellipsises_inside_its_own_region():
     _mark = len(_FAIL)
     th = RT.DARK
-    g = FL.plan_frame((0, 0, 185, 100), layout='sidebar', size=700, panel=True)
+    g = FL.plan_frame((0, 0, 185, 100), size=700)
     img = Image.new('RGB', (g.frame.w, g.frame.h), th.rgb('ground'))
     d = ImageDraw.Draw(img)
     RC.draw_rail(d, g.rail, LONG_EVENT, 'lap 1 of 1', theme=th)
@@ -152,8 +156,10 @@ def test_the_over_board_strip_is_gone_when_a_rail_carries_it():
 
     The claim: a caption drawn over the copper AND repeated in the rail is a
     duplicate, and a duplicate sitting on the board is worse than no strip at
-    all. So the over-board strip exists on `legacy` (no rail) and not on a
-    layout that reserves one.
+    all. So the over-board strip exists on a frame with no rail -- the bare
+    renderer `build_single` uses, now the only one (the legacy frame was
+    this control until stage3d became the only layout) -- and not on the
+    stage3d frame, which reserves one.
     """
     _mark = len(_FAIL)
     import animate_route as A
@@ -167,13 +173,23 @@ def test_the_over_board_strip_is_gone_when_a_rail_carries_it():
         steps = [('step1 route', board, None), ('step2 route', b, None)]
         ink = {}
         for layout in ('legacy', 'split'):
-            m = A.build_boards(steps, b, 300, 1, 150, 2, 3, layout=layout)
+            # DARK, explicitly: the strip is counted by its fill colour,
+            # which is distinct from the board only on the dark ground
+            if layout == 'split':
+                m = A.build_boards(steps, b, 300, 1, 150, 2, 3,
+                                   theme='dark', board3d='2d')
+            else:
+                # no frame planned, no rail: build_single's own path
+                r, layers = A._renderer(b, None, 300, 1, 150, theme='dark')
+                mv = A.Movie(r, layers)
+                mv.snapshot('step2 route')
+                m = mv.frames
             if not m:
                 fail('%s: no frames' % layout)
                 continue
             # `_label` stamps the strip in `chrome_strip` at the TOP LEFT of
             # the BOARD; count that colour in the first 30 rows of the board
-            # box, which on legacy is the whole frame's top.
+            # box, which on the bare frame is the whole frame's top.
             import render_theme as _rt
             strip = _rt.DARK.rgb('chrome_band')   # _label's own box fill
             f = m[len(m) // 2].convert('RGB')
@@ -182,14 +198,14 @@ def test_the_over_board_strip_is_gone_when_a_rail_carries_it():
                               if c == strip)
         if 'legacy' in ink and 'split' in ink:
             if not ink['legacy']:
-                fail('BROKEN TEST: legacy drew no over-board strip at all, so '
+                fail('BROKEN TEST: no rail drew no over-board strip at all, so '
                      'this cannot tell suppression from an empty frame')
             elif ink['split'] >= ink['legacy']:
-                fail('the over-board strip survives on a layout WITH a rail: '
-                     'legacy %d px vs split %d px -- that is a duplicate '
+                fail('the over-board strip survives on a frame WITH a rail: '
+                     'no rail %d px vs stage3d %d px -- that is a duplicate '
                      'sitting on the copper' % (ink['legacy'], ink['split']))
             else:
-                print('    over-board strip: legacy %d px, split %d px'
+                print('    over-board strip: no rail %d px, stage3d %d px'
                       % (ink['legacy'], ink['split']))
     # and the switch is still conditional on a rail EXISTING, by name
     src = open(os.path.join(ROOT, 'py_router', 'animate_route.py'),
@@ -199,8 +215,8 @@ def test_the_over_board_strip_is_gone_when_a_rail_carries_it():
     if not re.search(r'split_caption\s*=\s*bool\([^)]*\.rail\.h', src):
         fail('the suppression is not conditional on a rail existing')
     if len(_FAIL) == _mark:
-        print('  PASS: suppressed only when a rail exists; legacy keeps its '
-              'strip')
+        print('  PASS: suppressed only when a rail exists; a frame with no '
+              'rail keeps its strip')
 
 
 TESTS = (

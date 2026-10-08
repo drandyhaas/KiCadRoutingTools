@@ -101,9 +101,10 @@ LAYERS like this:
 - **Check the fanout escape layers first.** If BGA fanout has already run
   (escape stubs + vias exist), list which layers the escape stubs land on —
   `python3 -c "...count segments per layer under the BGA courtyard..."` or eye
-  the board. A solid plane assigned to a layer carrying escape stubs will rip
-  or strand those escapes (route_planes rips blockers; every rip risks a
-  casualty). Prefer solid-plane layers the escapes do NOT use.
+  the board. A solid plane assigned to a layer carrying escape stubs is
+  carved up by them: the pour never rips anything (#562), it flows around
+  foreign copper, so that plane arrives as islands the route step must then
+  join. Prefer solid-plane layers the escapes do NOT use.
 - **On 6+ layer boards**, solid GND planes go nearest the outer signal layers,
   split power on a middle layer, and the layers at the BGA escape depth stay
   signal-routable (a human 8-layer DDR3 corpus board planes In3/In4 and routes
@@ -112,8 +113,13 @@ LAYERS like this:
   3x layer cost turns the board into single-layer routing (a dense 2-layer
   corpus board's human original puts 47% of routed length on B.Cu and pours
   GND around the routes afterward). Recommend: route signals on both layers,
-  then GND + many-pad rail pours on both sides + stitching (`route_planes.py`
-  after `route.py`, or zones poured around existing copper).
+  then GND + many-pad rail pours on both sides (`route_planes.py` after
+  `route.py`, or zones poured around existing copper), with stitching only
+  when the speed tier calls for it (`/plan-pcb-routing`'s finalize-planes
+  step). **Then close the chain with another `route.py` whose `--nets` covers
+  the poured nets** (`"*"` does): a pour alone connects nothing, and only that
+  step's in-run plane finalize welds and taps the poured pads at the chain's
+  own sizes (#562, #1112). Never end on the pour, or on `repair_planes.py`.
 - **Say which layer costs the signal steps should use.** When one inner layer
   is planed and one is free, recommend `--layer-costs` ~1.0-1.5 for the free
   inner layer (3.0 starves it and pushes everything onto F/B).

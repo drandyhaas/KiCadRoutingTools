@@ -28,6 +28,7 @@ for _sib in ('py_placer', 'py_tools'):
 
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
+from keep_away import split_keep_away_specs
 # board_minima_from_live is NOT imported here (IPC): it is main's SWIG twin
 # of fix_kicad_drc_settings.scan_board_minima, and exists only to avoid
 # re-parsing the board inside a wx TIMER dispatch, where the allocation
@@ -850,6 +851,14 @@ class DifferentialTab(wx.Panel):
         # Merge configs
         config = {**routing_config, **diff_config}
 
+        # #1146: refuse a malformed keep-away rule before routing starts.
+        try:
+            from keep_away import parse_keep_away_rules
+            parse_keep_away_rules(config.get('keep_away'))
+        except ValueError as e:
+            wx.MessageBox(str(e), "Invalid Keep-away Rule", wx.OK | wx.ICON_WARNING)
+            return
+
         # Remember the routed floors so _apply_results_to_board can make the live
         # board's DRC constraints consistent with them (issue #160).
         self._diff_drc_config = dict(config)
@@ -1053,6 +1062,11 @@ class DifferentialTab(wx.Panel):
                 track_proximity_distance=config.get('track_proximity_distance', 2.0),
                 track_proximity_cost=config.get('track_proximity_cost',
                                                 defaults.TRACK_PROXIMITY_COST),
+                # #1146: the Advanced tab's keep-away rules (shared with the
+                # route tab), as route_diff.py --keep-away.
+                keep_away=split_keep_away_specs(config.get('keep_away')) or None,
+                keep_away_free=config.get('keep_away_free', defaults.KEEP_AWAY_FREE),
+                keep_away_cost=config.get('keep_away_cost', defaults.KEEP_AWAY_COST),
                 crossing_layer_check=not config.get('no_crossing_layer_check', False),
                 can_swap_to_top_layer=config.get('can_swap_to_top_layer', False),
                 swappable_net_patterns=config.get('swappable_nets'),

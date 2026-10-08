@@ -117,9 +117,12 @@ class TestContainmentDisclosure(unittest.TestCase):
             doc = json.load(open(jp, encoding='utf-8'))
             self.assertEqual(doc['buildable'], True)
             self.assertEqual(doc['blocking'], 0)
-            self.assertEqual(doc['contained'], 2)
+            # The two fiducials, plus (#1106) two body-less test points
+            # whose pads sit under J4's body: markers all, so all waived.
+            self.assertEqual(doc['contained'], 4)
             pairs = {(c['a'], c['b']) for c in doc['containments']}
-            self.assertEqual(pairs, {('FID2', 'J5'), ('FID1', 'J4')})
+            self.assertEqual(pairs, {('FID2', 'J5'), ('FID1', 'J4'),
+                                     ('J4', 'TP26'), ('J4', 'TP27')})
             # Both are WAIVED by part class, and both are still reported --
             # that omission is the whole fix (run-22 lost D4-inside-SW2 to an
             # edge_class waiver that no geometry ever tested).

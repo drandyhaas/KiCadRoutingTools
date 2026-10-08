@@ -138,6 +138,45 @@ c = _cmp({1: (True, 0), 2: (False, 2)}, {1: (False, 3), 2: (True, 0)},
 check("a lap that cuts GND off 3 pads while connecting /SIG is rejected",
       c['lost'] == ['GND'] and gate_verdict(c) == 'reject')
 
+# #1114: a zone net outside --nets is never repaired by the in-run finalize
+# (it is excluded BY PLAN), so a scoped round that cuts its pour is rejected
+# on it. The verdict stands -- shipping would ship the cut -- but the report
+# must say the plane net is the whole reason, and what to do about it.
+from improvement_gate import excluded_plane_attribution  # noqa: E402
+_nm = {1: 'GND', 2: '/SIG', 3: '/OTHER'}
+_b = {1: (False, 1), 2: (False, 2), 3: (True, 0)}
+_a = {1: (False, 23), 2: (True, 0), 3: (True, 0)}
+c = _cmp(_b, _a, names=_nm)
+x = excluded_plane_attribution(_b, _a, _nm.get, ['GND'])
+check("#1114 GND 1->23 with /SIG connected is still rejected",
+      gate_verdict(c) == 'reject')
+check("#1114 the rejection rests on the excluded plane net alone",
+      x == {'nets': ['GND'], 'alone': True})
+c['excluded_plane_nets'] = x['nets']
+c['rejected_on_excluded_plane_nets_alone'] = x['alone']
+r = format_report(c, gate_verdict(c), 'REVERTED')
+check("#1114 the report names it as outside --nets and the sole reason",
+      "outside this run's --nets" in r and 'GND' in r and 'ALONE' in r)
+# ...not alone: /OTHER loses more pads than /SIG gains, so the round is
+# rejected without GND too.
+_a2 = {**_a, 3: (False, 3)}
+x = excluded_plane_attribution(_b, _a2, _nm.get, ['GND'])
+check("#1114 a second, in-scope casualty: named, but not 'alone'",
+      x == {'nets': ['GND'], 'alone': False})
+check("#1114 an excluded net the run did not worsen is not named",
+      excluded_plane_attribution(_b, _a, _nm.get, ['/OTHER'])
+      == {'nets': [], 'alone': False})
+check("#1114 no exclusion list: nothing named",
+      excluded_plane_attribution(_b, _a, _nm.get, None)
+      == {'nets': [], 'alone': False})
+# The route.py call site reads the finalize's own record, by name.
+_src = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), 'py_router', 'route.py'),
+    encoding='utf-8').read()
+check("#1114 route.py feeds the gate the finalize's exclusion record",
+      "summary.get('finalize_excluded_nets')" in _src
+      and "summary['finalize_excluded_nets'] = _excluded9" in _src)
+
 # The head line caps its list.
 c = _cmp({i: (True, 0) for i in range(10)}, {i: (False, 2) for i in range(10)})
 _head = format_report(c, gate_verdict(c), 'x').splitlines()[0]
@@ -218,12 +257,33 @@ if os.path.isfile(_BOARD):
         try:
             _ig.gate_verdict = lambda cmp: 'reject'
             # CLI front: the output file must come back as the INPUT board.
+            _js = os.path.join(_tmp, 'out.json')
             _route.batch_route(_routed, _out, _names, track_width=0.2,
                                clearance=0.2, grid_step=0.1,
-                               force_reroute=True)
+                               force_reroute=True, json_out=_js)
             check("CLI: a rejected run reverts the output to the input board",
                   os.path.isfile(_out)
                   and open(_out, 'rb').read() == _before)
+            # #1173: --json-out is written before the gate; after a revert it
+            # must say what shipped instead of standing as the attempt's.
+            import json as _json
+            _doc = _json.load(open(_js)) if os.path.isfile(_js) else {}
+            check("CLI: --json-out carries the verdict after a revert",
+                  (_doc.get('improvement_gate') or {}).get('verdict') == 'reject')
+            check("CLI: ...and says the input board shipped",
+                  _doc.get('shipped') == 'input board'
+                  and 'rejected attempt' in (_doc.get('shipped_note') or ''))
+            check("CLI: ...keeping the attempt's tallies (not an empty file)",
+                  'successful' in _doc)
+            # ...and the log says the same (#830's one-document rule).
+            from route_summary import merge_route_summaries as _mrs
+            _log = ('JSON_SUMMARY: ' + _json.dumps({'successful': 1, 'failed': 0})
+                    + '\nJSON_IMPROVEMENT_GATE: '
+                    + _json.dumps(_doc.get('improvement_gate') or {}) + '\n')
+            _m = _mrs(_log) or {}
+            check("log merge: the revert reads the same from the log",
+                  _m.get('shipped') == 'input board'
+                  and _m.get('improvement_gate') == _doc.get('improvement_gate'))
             # GUI front: the applier must be handed nothing to apply.
             _ok, _f, _t, _data = _route.batch_route(
                 _routed, '', _names, track_width=0.2, clearance=0.2,
@@ -237,6 +297,21 @@ if os.path.isfile(_BOARD):
                   (_data.get('improvement_gate') or {}).get('verdict') == 'reject')
             check("GUI: diagnostics survive the rejection",
                   'blockers' in _data and 'pad_pairs_open' in _data)
+        finally:
+            _ig.gate_verdict = _orig_verdict
+        try:
+            # Control: an accepted run's file carries the verdict too, and no
+            # claim that the input shipped.
+            _out2 = os.path.join(_tmp, 'out2.kicad_pcb')
+            _js2 = os.path.join(_tmp, 'out2.json')
+            _ig.gate_verdict = lambda cmp: 'accept'
+            _route.batch_route(_routed, _out2, _names, track_width=0.2,
+                               clearance=0.2, grid_step=0.1,
+                               force_reroute=True, json_out=_js2)
+            _doc2 = _json.load(open(_js2)) if os.path.isfile(_js2) else {}
+            check("CLI: an accepted run's --json-out carries its verdict",
+                  (_doc2.get('improvement_gate') or {}).get('verdict') == 'accept'
+                  and 'shipped' not in _doc2)
         finally:
             _ig.gate_verdict = _orig_verdict
             shutil.rmtree(_tmp, ignore_errors=True)

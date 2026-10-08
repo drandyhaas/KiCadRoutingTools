@@ -157,6 +157,10 @@ class RoutingState:
     # Multi-point routing: track nets needing Phase 3 completion
     # Maps net_id -> main_result dict with 'multipoint_pad_info' and 'routed_pad_indices'
     pending_multipoint_nets: Dict[int, Dict] = field(default_factory=dict)
+    # Of those, the nets whose taps Phase 3 has routed (or tried to): no longer
+    # stub-proximity sources. The pending dict itself keeps them, because
+    # the Phase 3 reroute of a ripped net reads it.
+    multipoint_taps_done: Set[int] = field(default_factory=set)
 
     # Layer swap tracking
     all_segment_modifications: List = field(default_factory=list)

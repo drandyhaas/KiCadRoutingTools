@@ -2606,7 +2606,8 @@ def route_disconnected_regions(
     if plane_layer_idx is None:
         print(f"  Error: plane_layer '{plane_layer}' not in layer_map")
         return [], [], 0, []
-    routing_layers = list(layer_map.keys())
+    routing_layers = [l for l, _ in sorted(layer_map.items(),
+                                           key=lambda kv: kv[1])]
 
     # Build list of existing vias and through-hole pads from this net (can be
     # reused as layer transitions). pad_is_plated_through, not "'*.Cu' in
@@ -2644,7 +2645,8 @@ def route_disconnected_regions(
         h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost,
         via_proximity_cost=0,
-        layer_costs=config.get_layer_costs(),
+        # One cost per layer_map index, by NAME (#1185).
+        layer_costs=config.layer_costs_for(routing_layers),
         proximity_heuristic_cost=config.get_proximity_heuristic_cost()
     )
 
@@ -3083,9 +3085,10 @@ def route_disconnected_regions(
             # unbridged (#508 finding 14) and the plane region split, which the
             # run reports -- strictly better than shipping copper shorted to a
             # signal net, which nothing downstream would have caught.
-            # Floored at `min_track_width`: the cap is about not drawing a
-            # disc where a joint belongs, not about going under the caller's
-            # declared minimum. Without the floor an advanced-tier via
+            # Floored at `min_track_width` (or at the strap's own width, when
+            # the #217 last resort drew it narrower): the cap is about not
+            # drawing a disc where a joint belongs, not about going under the
+            # caller's declared minimum. Without the floor an advanced-tier via
             # (--via-size below min_track_width) would silently emit a bridge
             # thinner than the run asked for -- a narrowing with no disclosure,
             # which is not how this repo reports them (design_rules.narrowed).
@@ -3186,7 +3189,12 @@ def via_bridge_width(leg, track_width, via_size, min_track_width,
     step's own INPUT -- overlapping by up to 160um. Nine segment-segment
     violations, and shorts rather than grazes. Capped at the via diameter, and
     FLOORED at `min_track_width` so an advanced-tier via cannot silently emit a
-    bridge thinner than the run asked for.
+    bridge thinner than the run asked for -- or at the strap's own width when
+    that is narrower. The #217 last resort draws a strap at the run's
+    --track-width when its corridor refuses `min_track_width`; holding that
+    strap's bridge to `min_track_width` asked the same corridor for the width
+    it had just refused, so the bridge was skipped and the plane left split
+    (#1112). The run's own track width is not thinner than the run asked for.
 
     CLEARANCE. The bridge is not a `route_points` leg, so `wide_route_clear` --
     which only ever sees same-layer legs of the routed path -- never saw it,
@@ -3199,8 +3207,10 @@ def via_bridge_width(leg, track_width, via_size, min_track_width,
     the region stays split, which the run reports -- strictly better than
     copper shorted to a signal net, which nothing downstream catches.
     """
-    cap = max(min_track_width, min(track_width, via_size))
-    for w in (cap, min_track_width):
+    floor = (min(min_track_width, track_width) if track_width > 0
+             else min_track_width)
+    cap = max(floor, min(track_width, via_size))
+    for w in (cap, floor):
         if w <= 0:
             continue
         if pcb_data is None or net_id is None or wide_route_clear(
@@ -3308,6 +3318,9 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         return best
 
     _clr_max_by_layer = {}
+    # the widest #735 track rule: the segment prefilter must reach it (#1135)
+    _trk = getattr(config, 'track_clearances', None) or {}
+    _trk_max = max(_trk.values()) if _trk else 0.0
     # #617: the board's own copper-to-hole floor, resolved once per call
     # (cached per board path inside the helper). Raise-only, so a board that
     # declares nothing keeps this predicate's decisions bit-identical.
@@ -3331,7 +3344,7 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                 continue
             if _seg_pt(x1, y1, x2, y2, v.x, v.y) < req - EPS:
                 return False
-        sreq = half + _shalf + clr_max
+        sreq = half + _shalf + max(clr_max, _trk_max)
         _lh = hash(layer)
         for si in np.nonzero((_slay == _lh)
                              & (bb[0] - sreq <= _sxhi)
@@ -3341,8 +3354,11 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
             s = _segs_l[si]
             if s.layer != layer:
                 continue
-            req = half + s.width / 2.0 + config.layer_clearance(  # #498
-                layer, config.obstacle_clearance(s.net_id))
+            # #498 layer rule, then the #735 track rule (#1135): the leg is a
+            # track, and so is this foreign segment
+            req = half + s.width / 2.0 + config.track_obstacle_clearance(
+                s.net_id, config.layer_clearance(
+                    layer, config.obstacle_clearance(s.net_id)))
             if not (bb[0] - req <= max(s.start_x, s.end_x)
                     and min(s.start_x, s.end_x) <= bb[2] + req
                     and bb[1] - req <= max(s.start_y, s.end_y)
@@ -3557,7 +3573,11 @@ def build_base_obstacles(
                 _block_segment_via_obstacle(obstacles, seg, coord,
                                             via_seg_expansion_mm)
             continue
-        seg_expansion_mm = track_width / 2 + seg.width / 2 + _seg_clr + cushion
+        # #1135: the track stamp also takes the .kicad_dru track-to-track rule
+        # (#735, raise-only; the via stamp below does not -- it binds tracks)
+        seg_expansion_mm = (track_width / 2 + seg.width / 2
+                            + config.track_obstacle_clearance(seg.net_id, _seg_clr)
+                            + cushion)
         _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         # Also block vias along this segment - must include segment width for proper clearance
         via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + _seg_clr + cushion
@@ -3839,7 +3859,8 @@ def route_plane_connection_wide(
             h_weight=config.heuristic_weight,
             turn_cost=config.turn_cost,
             via_proximity_cost=0,
-            layer_costs=config.get_layer_costs(),
+            # One cost per routing_layers index, by NAME (#1185).
+            layer_costs=config.layer_costs_for(routing_layers),
             proximity_heuristic_cost=config.get_proximity_heuristic_cost()
         )
 

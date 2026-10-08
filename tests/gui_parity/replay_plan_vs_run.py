@@ -90,7 +90,7 @@ Usage:
                         apples-to-oranges (the GUI then runs a different step
                         list than the CLI reference); use regen in that case.
     --raw-plan          skip parse_plan_result's plan augmentation (the #479
-                        late-pinch repair_planes guard the GUI appends), for a
+                        late-pinch guard the GUI appends: a final route step), for a
                         strictly like-for-like step count vs the CLI chain
     --max-steps N       run only the first N plan steps (bisecting)
     --gui-board PATH    skip the replay; compare this already-replayed board
@@ -267,7 +267,7 @@ def load_plan(info, source='saved', augment=True):
 
     `steps` are what the GUI would hold after Load...: the plan JSON put through
     the REAL parse_plan_result (which validates, inserts optimize_caps and
-    appends the #479 late-pinch repair_planes guard) unless augment=False.
+    appends the #479 late-pinch guard, a final route step) unless augment=False.
     `cli_names[i]` is the BASENAME of the CLI chain board plan step i
     corresponds to (or None when the step has no CLI counterpart). Names, not
     paths: the caller resolves them against whichever reference dir is in use,

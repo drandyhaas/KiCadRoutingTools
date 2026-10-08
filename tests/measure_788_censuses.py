@@ -48,8 +48,10 @@ CHECK_ASSEMBLY = os.path.join(ROOT, 'py_tools', 'check_assembly.py')
 
 #: study predictor name -> check_assembly JSON key. Every pair here is a claim
 #: that the two are meant to be the same quantity; the run says how close they
-#: get. `pad_conflict_pairs` is an alias of `pad_clearance_pairs` in the row
-#: (metrics vs checklist), so it is not a seventh comparison.
+#: get. `pad_conflict_pairs` (the row's `metrics`, the optimizer's
+#: bounding-box census) is NOT the same count as `pad_clearance_pairs` (the
+#: checklist, the grader's census since #1065), so it is not compared here:
+#: only the checklist claims to be check_assembly's quantity.
 PAIRS = (
     ('pad_copper', 'oob_pad_count'),
     ('pad_clearance_pairs', 'pad_conflicts'),

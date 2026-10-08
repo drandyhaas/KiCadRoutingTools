@@ -173,13 +173,18 @@ class TestRun23Board(unittest.TestCase):
         self.assertNotIn(('C25', 'JP2'), census)
 
     def test_full_census_is_carried(self):
-        """The 15-pair census the user SAW must be in the JSON, waivers and
-        all -- J1<->SW1 (7.0mm2, edge-waived) is the one a reader asks about
-        first."""
+        """The census the user SAW must be in the JSON, waivers and all --
+        J1<->SW1 (7.0mm2, edge-waived) is the one a reader asks about first.
+
+        The user saw 15 pairs; 14 are real. #1094 grades a courtyard as
+        drawn, and G***<->TP1 (0.143mm2) was the corner of the bbox of TP1's
+        ROUND courtyard touching the logo's +/-0.5mm fiction -- the circle
+        itself does not reach it, so the pair is gone and must stay gone."""
         _r, doc = _grade(PLACED)
         census = {(q['a'], q['b']) for q in doc['courtyard_pairs']}
         self.assertIn(('J1', 'SW1'), census)
-        self.assertGreaterEqual(len(census), 15)
+        self.assertNotIn(('G***', 'TP1'), census)
+        self.assertGreaterEqual(len(census), 14)
 
 
 class TestRenderCourtyardTruth(unittest.TestCase):
@@ -248,10 +253,15 @@ class TestRenderCourtyardTruth(unittest.TestCase):
         """The C_COURT_OVL fill must be present INSIDE the J4<->U6
         intersection region -- the picture, not only the key."""
         from PIL import Image
+        sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+        import render_theme
+        # the render's own theme (the default, #1081: light) -- the child
+        # inherits this process's environment, so it resolves the same one
+        fill = render_theme.default_theme().rgb('defect_courtyard')
         img = Image.open(self.png_f).convert('RGB')
         w, h = img.size
         hits = sum(1 for _x in range(0, w, 7) for _y in range(0, h, 7)
-                   if img.getpixel((_x, _y)) == (255, 120, 40))
+                   if img.getpixel((_x, _y)) == fill)
         self.assertGreater(
             hits, 20, 'no courtyard-interpenetration fill in the render')
 

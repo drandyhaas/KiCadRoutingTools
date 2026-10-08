@@ -131,13 +131,17 @@ ZONED_BOARD = '''(kicad_pcb
 '''
 
 
-def test_a_poured_net_is_routed_to_the_plane_repair(tmpdir=None):
-    """WHICH STEP fixes a break is decided by one fact: is the net poured?
+def test_a_poured_net_is_handed_to_route_py(tmpdir=None):
+    """Every break is route.py's, poured or not (#1112).
 
-    route.py cannot tap a pour, so a stranded plane pad handed to it is work that
-    cannot succeed -- measured, `broken` sat at 14 across two iterations of
-    route.py calls and fell to 11 in ONE repair_planes.py call. The
-    classification must therefore be read off the board's zones, not guessed.
+    Since #562 route.py ends every run with the in-run plane finalize, which
+    taps and joins a broken poured net at the route step's own track/via sizes.
+    The handler used to send poured nets to repair_planes.py, on a measurement
+    taken before the finalize existed, and a run that obeyed it repaired at the
+    board's class via instead of the sizes the chain routed at. Poured-ness is
+    still read off the board's zones (it is what `poured_nets` publishes), but
+    what it changes -- the net must be inside route.py's --nets -- travels in
+    `poured_nets_meaning`, not in a second handler.
     """
     import tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -153,9 +157,10 @@ def test_a_poured_net_is_routed_to_the_plane_repair(tmpdir=None):
 
     assert conn['poured_nets'] == ['GND'], \
         f"a zone naming its net as (net \"GND\") must be seen, got {conn['poured_nets']}"
-    assert conn['broken_detail']['GND']['handler'] == 'repair_planes'
+    assert conn['broken_detail']['GND']['handler'] == 'route', \
+        f"a broken poured net is route.py's (#1112), got {conn['broken_detail']['GND']}"
     assert conn['broken_detail']['FLASH_CS']['handler'] == 'route'
-    print('  PASS: poured nets go to the plane repair, the rest to route.py')
+    print('  PASS: poured and unpoured breaks both go to route.py')
 
 
 def test_zone_connect_pad_property_is_not_mistaken_for_a_zone():
@@ -241,14 +246,25 @@ def test_poured_nets_is_spelled_the_way_the_board_spells_it():
 
 
 def test_poured_nets_carries_its_meaning_in_the_payload():
-    """It means "the handler is repair_planes", NOT "this is a
-    plane". A consumer read it the second way and removed 332 of 545 pads
-    (72%) from its own analysis. The sentence has to travel WITH the list --
-    a comment in board_score.py is invisible to whoever reads the JSON."""
+    """It means "this net owns a zone, so route.py's plane finalize fixes it
+    when the net is in --nets", NOT "this is a plane". A consumer read it the
+    second way and removed 332 of 545 pads (72%) from its own analysis. The
+    sentence has to travel WITH the list -- a comment in board_score.py is
+    invisible to whoever reads the JSON.
+
+    It must also carry what #1112 found missing: the net has to be inside
+    route.py's --nets (the finalize skips a zone net outside its scope), and
+    it must not send the reader to a standalone repair_planes.py run, which
+    repairs at the board's class via and track rather than at the sizes the
+    chain routed at."""
     conn = _parse(SAMPLE)
     meaning = conn.get('poured_nets_meaning', '')
     assert meaning and 'NOT' in meaning and 'ignore-nets' in meaning, \
         f'poured_nets must publish what it means, got {meaning!r}'
+    assert 'route.py' in meaning and '--nets' in meaning, \
+        f'poured_nets must say the net has to be in route.py --nets, got {meaning!r}'
+    assert 'repair_planes' not in meaning, \
+        f'poured_nets must not send a broken net to repair_planes (#1112), got {meaning!r}'
     print('  PASS: poured_nets ships its own definition')
 
 

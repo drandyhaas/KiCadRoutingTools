@@ -38,15 +38,19 @@ def bga_board(via_size_in_field=0.3, pitch=0.65):
 
 
 def main():
-    # 1. Escalation: gap 0.65-0.25=0.40, needed (0.40-0.15)/2 = 0.125
-    #    (above the 0.1 4-layer fab floor). Resolves to 0.125 AND drops the
-    #    ledger floor with it.
+    # 1. Escalation: gap 0.65-0.25=0.40 less the 0.15 min width and the web's
+    #    margin (plane_lattice.WEB_MARGIN: a neck exactly at the min width is
+    #    the fill's own rounding to keep or drop), halved: 0.12 -- above the
+    #    0.1 4-layer fab floor. Resolves to it AND drops the ledger floor with it.
+    import plane_lattice
+    want = plane_lattice.clearance_to_thread(0.65, 0.25, 0.15)
+    assert abs(want - 0.12) < 1e-6, want
     clearance_ledger.reset()
     zc = _resolve_zone_clearance(None, 0.2, 0.15,
                                  bga_board(via_size_in_field=0.25), 0.4,
                                  ['GND'])
-    assert abs(zc - 0.125) < 1e-6, zc
-    assert abs(clearance_ledger.effective(0.2) - 0.125) < 1e-6, \
+    assert abs(zc - want) < 1e-6, zc
+    assert abs(clearance_ledger.effective(0.2) - want) < 1e-6, \
         clearance_ledger.get_min()
 
     # 2. Explicit tight --zone-clearance (no BGA pressure): honored, and the

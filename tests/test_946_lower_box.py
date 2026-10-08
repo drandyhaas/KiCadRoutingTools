@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""One fixed lower box, four contents, switched by phase (#946 items 6/10/11,
-#1020).
+"""The layer column: one fixed box, one content (#946 items 6/10/11, #1020,
+#1081).
 
-The obvious way to bookend a 3D shot is to show the panel at the start and the
-end and drop it in between. The frame geometry forbids exactly that: every frame
-must be the same size, Pillow does not raise on a mismatch, and the GIF comes
-out valid and quietly distorted.
-
-So: one box, four contents -- 3D board at the bookends, what moved during a
-placement phase, the per-layer strip while routing, a staging inventory while
-seeding.
+A panel that appears and disappears changes frame height, and every frame must
+be the same size: Pillow does not raise on a mismatch, and the GIF comes out
+valid and quietly distorted. So the stage3d frame's layer column is one box
+with one content on every frame -- the per-layer strip, with the board's
+numbers under it. (The four contents it used to switch between by phase were
+the retired layouts' lower box.)
 
 What this file pins:
 
@@ -33,16 +31,22 @@ What this file pins:
     widths this feature actually produces the count was stamped on top of the
     name (+23 px of overlap in the 180 px case below, +25 px at `CELL_MIN_W`
     exactly);
-  * **all four contents are reachable and draw**, because three of them were
-    a literal string and one of them -- 'seeding' -- could not occur in a real
-    film at all: nothing in production passed `unplaced`;
+  * **the column's two drawers draw and report** -- the summary lands every
+    row, and no box, however degenerate, raises out of the never-fail
+    wrapper;
   * **cells shrink in NUMBER, not below legibility**. A cell too small to show
     a route costs pixels and answers nothing;
-  * **the box rect never changes between phases**, which is the whole reason
-    the design is one box rather than a panel that comes and goes.
+  * **the box rect is a property of the frame**, the same on every plan,
+    which is the whole reason the design is one box rather than a panel that
+    comes and goes.
 """
 import os
 import sys
+
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
 
 RUN_ALL_FAST_OK = True
 
@@ -300,102 +304,55 @@ def test_the_box_rect_never_changes_between_phases():
     changes frame height, and Pillow does not raise on that."""
     _mark = len(_FAIL)
     rects = set()
-    for lk in ('stacked', 'sidebar', 'split'):
-        g = FL.plan_frame((0, 0, 185, 100), layout=lk, size=700, panel=True)
+    for lk in ('16:9', '4:3', '9:16'):
+        g = FL.plan_frame((0, 0, 185, 100), ratio=FL.parse_ratio(lk),
+                          size=700)
         rects.add((lk, tuple(g.panel) if g.panel else None))
-        for label in ('input', 'step1 route', 'round 2 moving 4 part(s)',
-                      'routed'):
-            phase = RP.phase_for(label)
-            if phase not in ('bookend', 'placement', 'routing', 'seeding'):
-                fail('%r mapped to an unknown phase %r' % (label, phase))
-        # the box is a property of the LAYOUT, not of the phase
-        g2 = FL.plan_frame((0, 0, 185, 100), layout=lk, size=700, panel=True)
+        # the box is a property of the FRAME
+        g2 = FL.plan_frame((0, 0, 185, 100), ratio=FL.parse_ratio(lk),
+                           size=700)
         if tuple(g.panel or ()) != tuple(g2.panel or ()):
             fail('%s: the panel rect is not deterministic' % lk)
-    if RP.phase_for('anything', unplaced=True) != 'seeding':
-        fail('an unplaced board does not get the seeding content')
     if len(_FAIL) == _mark:
-        print('  PASS: one rect per layout, four contents, phase chooses only '
-              'the content')
+        print('  PASS: one rect per frame, the same on every plan')
 
 
 
 
-def test_all_four_contents_are_reachable_and_draw():
-    """One content and three captions is not four contents.
-
-    `draw_inventory` had NO caller anywhere in the repo, and `unplaced` was
-    never passed from production -- so 'seeding' could not occur in a film at
-    all, and 'bookend' and 'placement' drew a literal string. Each branch is
-    asserted here to reach a drawer and put ink on the box.
+def test_the_column_contents_draw():
+    """The layer column's two drawers put ink on the box and report what
+    they drew: the board summary and the per-layer strip. (The placement
+    inventory and the seeding pile this used to also reach were the
+    retired layouts' lower box: the stage3d column shows the strip and the
+    summary on every frame.)
     """
     _mark = len(_FAIL)
     pcb = parse_kicad_pcb(BOARD)
     r = RR.BoardRenderer(pcb, size=300, supersample=1)
     ground = RT.DARK.rgb('ground')
     box = FL.Box(0, 0, 420, 130)
-    inv = RP.inventory_counts(pcb)
-    if not inv:
-        fail('BROKEN FIXTURE: the board yielded no part classes')
-        return
     cases = {
-        'bookend': lambda d: RP.draw_summary(
+        'summary': lambda d: RP.draw_summary(
             d, box, theme=RT.DARK,
             lines=RP.board_summary(pcb, pcb.segments, pcb.vias)),
-        'placement': lambda d: RP.draw_inventory(
-            d, box, counts=inv, placed=len(pcb.footprints) - 2,
-            total=len(pcb.footprints), theme=RT.DARK),
-        'seeding': lambda d: RP.draw_inventory(
-            d, box, counts=inv, placed=0, total=len(pcb.footprints),
-            theme=RT.DARK),
-        'routing': lambda d: RP.draw_layer_strip(
+        'strip': lambda d: RP.draw_layer_strip(
             d, box, bounds=r.bounds, segments=pcb.segments,
             layers=list(r.copper_layers), palette=r.palette, theme=RT.DARK),
     }
-    for phase, draw in cases.items():
+    for what, draw in cases.items():
         img = Image.new('RGB', (420, 130), ground)
         got = draw(ImageDraw.Draw(img))
         cols = {c for _n, c in img.getcolors(1 << 20)}
         if len(cols) < 3:
             fail('%s drew %d colour(s) -- it swallowed an exception'
-                 % (phase, len(cols)))
+                 % (what, len(cols)))
         if not got:
-            fail('%s reported drawing nothing' % phase)
+            fail('%s reported drawing nothing' % what)
         else:
             print('    %-10s %d colours, %d row(s) reported'
-                  % (phase, len(cols), len(got)))
-    # EVERY CLASS the inventory is given must land, or the footer must SAY
-    # how many did not. Measured on a real 6-class board: three rows were
-    # drawn, summing to 12, beside a footer reading `20 of 65 placed` -- a
-    # direct contradiction on screen, in the sibling of the function whose
-    # identical fault was already fixed.
-    inv6 = {'J': (0, 17), 'R': (0, 13), 'C': (12, 12), 'U': (0, 10),
-            'H': (2, 7), 'D': (6, 6)}
-    done6 = sum(a for a, _b in inv6.values())
-    tot6 = sum(b for _a, b in inv6.values())
-    for h in (132, 96, 70, 44):
-        img = Image.new('RGB', (560, h), ground)
-        got = RP.draw_inventory(ImageDraw.Draw(img), FL.Box(0, 0, 560, h),
-                                counts=inv6, placed=done6, total=tot6,
-                                theme=RT.DARK)
-        bars = [g for g in got if g[0]]
-        foot = [g for g in got if not g[0]]
-        if not foot:
-            fail('a %d px inventory drew no footer at all' % h)
-            continue
-        shown = sum(int(t.split('/')[0]) for _n, t in bars)
-        if len(bars) == len(inv6):
-            if shown != done6:
-                fail('%d px: every class drawn but the bars sum to %d against '
-                     'a footer of %d' % (h, shown, done6))
-        elif 'not shown' not in foot[0][1]:
-            fail('%d px: %d of %d classes drawn and the footer does NOT say '
-                 'so (%r) -- the bars and the footer disagree on screen'
-                 % (h, len(bars), len(inv6), foot[0][1]))
-    print('    inventory: 6 classes reconcile at 132/96 px, disclosed at '
-          '70/44 px')
-    # EVERY row a summary is given must land -- the verifier measured
-    # `stacked --size 400` dropping `vias` and `inset` dropping three.
+                  % (what, len(cols), len(got)))
+    # EVERY row a summary is given must land -- the verifier measured a
+    # short box dropping `vias`, and another dropping three.
     for h in (132, 96, 64, 44):
         img = Image.new('RGB', (420, h), ground)
         lines = RP.board_summary(pcb, pcb.segments, pcb.vias)
@@ -404,8 +361,8 @@ def test_all_four_contents_are_reachable_and_draw():
         if len(got) != len(lines):
             fail('a %d px summary box landed %d of %d rows'
                  % (h, len(got), len(lines)))
-    # and no panel rect plan_frame can produce may RAISE out of the never-fail
-    # wrapper: 1143 of 4010 (w, h) combinations did, on the height axis.
+    # and no panel rect may RAISE out of the never-fail wrapper: 1143 of
+    # 4010 (w, h) combinations did, on the height axis.
     raised = []
     for w in range(0, 420, 7):
         for h in range(0, 60, 3):
@@ -420,48 +377,9 @@ def test_all_four_contents_are_reachable_and_draw():
     if raised:
         fail('%d degenerate box(es) produced an unusable cell, e.g. %s'
              % (len(raised), raised[:3]))
-    # and the SEEDING branch must be reachable from a label, which is the half
-    # that was missing: nothing in production passed `unplaced`.
-    if RP.phase_for('round 2 moving 4 part(s)', unplaced=True) != 'seeding':
-        fail('unplaced does not win over the label')
-    src = open(os.path.join(ROOT, 'py_router', 'animate_route.py'),
-               encoding='utf-8').read()
-    if 'unplaced=bool(c.get(' not in src.replace('\n', '').replace(' ', ''):
-        if 'unplaced' not in src:
-            fail('nothing in animate_route passes unplaced, so the seeding '
-                 'content cannot occur in a film')
-    if 'inventory_counts' not in src:
-        fail('nothing in animate_route builds the inventory, so the box has '
-             'no data to draw it from')
-    # THE REACHABILITY, not a grep: `assess_placement` lives in py_placer,
-    # which py_router does not put on sys.path, so the import raised
-    # ModuleNotFoundError into a swallow and `unplaced` was always False --
-    # 'seeding' could not occur in a CLI film at all.
-    import animate_route as _A
-    r2 = RR.BoardRenderer(pcb, size=200, supersample=1)
-    m = _A.Movie(r2, list(r2.copper_layers))
-    m.want_panel = True
-    m.refresh_placement(pcb, BOARD)
-    if not m.inventory:
-        fail('refresh_placement built no inventory from a real board')
-    import subprocess
-    probe = ('import sys, os; sys.path.insert(0, %r); '
-             'sys.path.insert(0, %r); import animate_route as A; '
-             'from kicad_parser import parse_kicad_pcb as P; '
-             'r = __import__("route_render").BoardRenderer(P(%r), size=120); '
-             'm = A.Movie(r, list(r.copper_layers)); m.want_panel = True; '
-             'm.refresh_placement(P(%r), %r); '
-             'print("SEATED" if m.inventory else "NOINV")'
-             % (os.path.join(ROOT, 'py_router'), ROOT, BOARD, BOARD, BOARD))
-    pr = subprocess.run([sys.executable, '-X', 'utf8', '-c', probe],
-                        cwd=ROOT, capture_output=True, text=True)
-    if 'SEATED' not in (pr.stdout or ''):
-        fail('a py_router-only interpreter could not build the box\'s data: '
-             '%s' % ((pr.stderr or pr.stdout or '')[-200:]))
-    if 'placement.placement_state' not in src:
-        fail('nothing reads assess_placement, so unplaced is always False')
     if len(_FAIL) == _mark:
-        print('  PASS: four contents, four drawers, all reachable')
+        print('  PASS: the summary and the strip draw and report, every row '
+              'lands, no degenerate cell')
 
 
 def test_the_film_actually_reaches_its_closing_bookend():
@@ -478,8 +396,9 @@ def test_the_film_actually_reaches_its_closing_bookend():
         `step1 -> step4` read `step4_restored` on frame 1 -- the one field
         that does not change frame to frame, named after the last step.
 
-    Gated on a panel EXISTING, because on 'legacy' the closing snapshot would
-    add a frame to every movie this repo has ever written.
+    Gated on a panel EXISTING: the control is a 9:16 stage3d frame too
+    small to keep its layer row (the legacy frame was the control until
+    stage3d became the only layout).
     """
     _mark = len(_FAIL)
     import animate_route as A
@@ -491,41 +410,32 @@ def test_the_film_actually_reaches_its_closing_bookend():
         shutil.copyfile(BOARD, a)
         shutil.copyfile(BOARD, b)
         steps = [('step1 route', a, None), ('step2 route', b, None)]
-        for layout, want_close in (('split', True), ('legacy', False)):
+        for layout, want_close in (('16:9', True), ('9:16', False)):
             chrome, geom = [], []
             frames = A.build_boards(steps, b, 240, 1, 150, 2, 3,
-                                    layout=layout, geom_out=geom)
+                                    aspect=layout, geom_out=geom)
             if not frames:
                 fail('%s: no frames' % layout)
                 continue
-            # the LAST beat's label decides the last content
-            labels = []
-            # rebuild the chrome the composer saw
-            m = A.Movie(A._renderer(b, None, 240, 1, 150)[0],
-                        list(A._renderer(b, None, 240, 1, 150)[1]))
-            del m
-            closed = False
-            # a bookend close is a frame labelled exactly 'routed'
-            import render_panels as _rp
-            for lbl in ('routed',):
-                closed = (_rp.phase_for(lbl) == 'bookend')
-            if not closed:
-                fail("'routed' does not map to the bookend content")
             print('    %-7s %d frames, panel=%s'
                   % (layout, len(frames), bool(geom and geom[0].panel)))
-            del labels
         # the REAL check, on the frames themselves: with a panel, the film
         # must be one frame longer than without the closing snapshot.
+        g_row = []
         n_split = len(A.build_boards(steps, b, 240, 1, 150, 2, 3,
-                                     layout='split'))
+                                     aspect='16:9'))
         n_legacy = len(A.build_boards(steps, b, 240, 1, 150, 2, 3,
-                                      layout='legacy'))
+                                      aspect='9:16', geom_out=g_row))
+        if not g_row or g_row[0].panel is not None:
+            fail('BROKEN CONTROL: the 9:16 frame at 240 px kept its layer '
+                 'row, so it cannot stand for a frame with no box')
         if n_split <= n_legacy:
-            fail('the panelled film (%d) is not longer than legacy (%d) -- '
-                 'the closing bookend was not emitted' % (n_split, n_legacy))
+            fail('the panelled film (%d) is not longer than the one with no '
+                 'box (%d) -- the closing bookend was not emitted'
+                 % (n_split, n_legacy))
         else:
-            print('    split %d frames vs legacy %d -- the closing bookend is '
-                  'the difference' % (n_split, n_legacy))
+            print('    16:9 %d frames vs 9:16 with no row %d -- the closing '
+                  'bookend is the difference' % (n_split, n_legacy))
 
     # and the rail's stable left is the BOARD, not the last step
     if A.board_title('/x/step4_restored.kicad_pcb',
@@ -563,7 +473,7 @@ TESTS = (
     test_a_count_that_would_touch_the_name_is_dropped,
     test_cells_shrink_in_number_not_below_legibility,
     test_the_box_rect_never_changes_between_phases,
-    test_all_four_contents_are_reachable_and_draw,
+    test_the_column_contents_draw,
     test_the_film_actually_reaches_its_closing_bookend,
 )
 

@@ -249,6 +249,37 @@ def gate_verdict(cmp: Dict) -> str:
     return 'reject' if (net_delta > 0 or pad_delta > 0) else 'accept'
 
 
+def excluded_plane_attribution(before: Dict[int, Tuple[bool, int]],
+                               after: Dict[int, Tuple[bool, int]],
+                               net_name: callable,
+                               excluded_names) -> Dict:
+    """Which of a rejection's nets are zone nets the in-run finalize excluded
+    BY PLAN, and whether the run is rejected on them ALONE (#1114).
+
+    Since #562 the plane repair is the route step's own finalize, which runs
+    before this gate -- but only over the zone nets in the step's --nets. A
+    scoped round whose copper cuts a pour outside that scope ships the cut
+    unrepaired, and the gate rejects the round on the plane net. The verdict
+    is right; what the agent needs is to be TOLD that the plane net is the
+    whole reason, and that carrying it in --nets lets the finalize repair the
+    pour before the gate grades it.
+
+    Returns {'nets': names among `excluded_names` that the run broke or
+    worsened, 'alone': True when the verdict without them would accept}."""
+    excluded = set(excluded_names or ())
+    if not excluded:
+        return {'nets': [], 'alone': False}
+    ids = {nid for nid in before if net_name(nid) in excluded}
+    hit = sorted(net_name(nid) for nid in ids if nid in after
+                 and after[nid][1] > before[nid][1])
+    if not hit:
+        return {'nets': [], 'alone': False}
+    rest = compare_connectivity(
+        {k: v for k, v in before.items() if k not in ids},
+        {k: v for k, v in after.items() if k not in ids}, net_name)
+    return {'nets': hit, 'alone': gate_verdict(rest) == 'accept'}
+
+
 def format_report(cmp: Dict, verdict: str, action: str) -> str:
     """The human line(s). Names the nets -- a count alone is not actionable,
     and the whole point of the gate is that the operator can see WHICH
@@ -288,5 +319,14 @@ def format_report(cmp: Dict, verdict: str, action: str) -> str:
     lines.append(f"  disconnected pads: {cmp['disconnected_pads_before']} "
                  f"-> {cmp['disconnected_pads_after']} "
                  f"over {cmp['nets_compared']} multi-pad net(s)")
+    excl = cmp.get('excluded_plane_nets') or []
+    if excl:
+        # #1114: the plane net is outside --nets, so the finalize that would
+        # have repaired its pour before this grade skipped it BY PLAN.
+        lines.append(
+            f"  zone net(s) outside this run's --nets, so NOT repaired by the "
+            f"in-run finalize: {', '.join(excl)}"
+            + (" -- the verdict rests on them ALONE"
+               if cmp.get('rejected_on_excluded_plane_nets_alone') else ""))
     lines.append(f"  {action}")
     return "\n".join(lines)

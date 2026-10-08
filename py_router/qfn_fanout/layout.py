@@ -12,6 +12,26 @@ from kicad_parser import Pad, Footprint, local_to_global
 from qfn_fanout.types import QFNLayout, PadInfo
 
 
+def single_line_reason(footprint: Footprint) -> Optional[str]:
+    """Why ``footprint`` is not a QFN/QFP because its pads span a single
+    line (#1195), or None. A perimeter package's pad field is wider than a
+    pad in BOTH directions; an edge-finger row or a single-row header is not,
+    and analysing one as a QFN gave a 0 edge tolerance, no edge pads, a 0.5 mm
+    fallback pitch and "Found 0 pads to fanout" on an exit-0 run."""
+    pads = [p for p in footprint.pads if getattr(p, 'pad_type', '') != 'np_thru_hole']
+    if len(pads) < 2:
+        return None
+    xs = [p.local_x for p in pads]
+    ys = [p.local_y for p in pads]
+    width, height = max(xs) - min(xs), max(ys) - min(ys)
+    pad_min = min(min(p.size_x, p.size_y) for p in pads) or 0.0
+    if min(width, height) >= max(pad_min, 1e-3):
+        return None
+    return (f"its {len(pads)} pads span a single line "
+            f"({max(width, height):.2f} x {min(width, height):.2f} mm, "
+            f"narrower than a pad across)")
+
+
 def analyze_qfn_layout(footprint: Footprint) -> Optional[QFNLayout]:
     """
     Analyze a footprint to extract QFN layout parameters.
@@ -25,6 +45,8 @@ def analyze_qfn_layout(footprint: Footprint) -> Optional[QFNLayout]:
     pads = footprint.pads
     if len(pads) < 4:
         return None
+    if single_line_reason(footprint):
+        return None                       # not a perimeter package (#1195)
 
     # Get bounding box from pad positions in the LOCAL (footprint) frame.
     x_positions = [p.local_x for p in pads]

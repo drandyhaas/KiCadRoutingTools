@@ -283,33 +283,35 @@ def refresh() -> None:
     # CLI/GUI parity story for a feature with no GUI control of its own.
     g['MOVIE_CAMERA'] = _s('KICAD_MOVIE_CAMERA', 'off')
 
-    # #887: the second movie panel. 'xray' (default) is the single full-frame
-    # board view every movie has always been; 'xray+iso' stacks a kicad-cli 3D
-    # render under it. Same shape and same reason as MOVIE_CAMERA above -- the
-    # GUI recorder passes no movie parameters at all (movie_recorder.py:160 is
-    # `make_movie(boards, out=out, quiet=True)`), so one variable is how a
-    # feature with no dialog control of its own reaches every front end at once.
-    g['MOVIE_PANELS'] = _s('KICAD_MOVIE_PANELS', 'xray')
+    # RETIRED movie knobs: `stage3d` is the only film layout, so these
+    # select nothing any more. Read ONLY so a value still set in someone's
+    # shell is SAID (once, by `frame_layout.warn_retired_knobs`) rather than
+    # ignored in silence. KICAD_MOVIE_PANELS was #887's iso panel;
+    # KICAD_MOVIE_LAYOUT chose between the retired layouts.
+    g['MOVIE_RETIRED'] = {k: os.environ[k]
+                          for k in ('KICAD_MOVIE_LAYOUT', 'KICAD_MOVIE_PANELS')
+                          if os.environ.get(k)}
 
-    # #946/#1012: the render theme. 'dark' (default) is the domain convention
-    # -- KiCad's own canvas, and what every existing pixel-probing test
-    # assumes. Same shape and same reason as MOVIE_CAMERA and MOVIE_PANELS
+    # #946/#1012: the render theme. 'light' (default since #1081, at the
+    # requester's call: the stage3d film's mockup is light) for EVERY render;
+    # 'dark' -- KiCad's own canvas -- is one flag or variable away. Same shape and same reason as MOVIE_CAMERA
     # above: the GUI recorder passes no render parameters at all
     # (movie_recorder.py:160 is `make_movie(boards, out=out, quiet=True)`), so
     # one variable is how a feature with no dialog control of its own reaches
     # every front end at once. The knob is for a PRODUCER making a figure for a
     # light-background document, not for a viewer -- a rendered file's ground
     # cannot be changed afterwards.
-    g['RENDER_THEME'] = _s('KICAD_RENDER_THEME', 'dark')
+    g['RENDER_THEME'] = _s('KICAD_RENDER_THEME', 'light')
 
-    # #946/#1018: the named frame layout, and the target aspect. 'legacy'
-    # (default) is EXACTLY the frame every movie has always had -- the frame IS
-    # the board's bounding box -- so every existing artifact stays bit-for-bit
-    # what it was. 'auto' is the adaptive stacked-vs-sidebar rule, read from
-    # board_bounds. Same shape and same reason as MOVIE_CAMERA and
-    # MOVIE_PANELS: one variable reaches every front end at once.
-    g['MOVIE_LAYOUT'] = _s('KICAD_MOVIE_LAYOUT', 'legacy')
+    # #946/#1018: the film's target aspect ('' = the stage3d frame's own
+    # 16:9). Same shape and same reason as MOVIE_CAMERA: one variable
+    # reaches every front end at once.
     g['MOVIE_ASPECT'] = _s('KICAD_MOVIE_ASPECT', '')
+    # #1081: the stage3d board -- 'auto' (the 3D board when this machine can
+    # render it, else the X-ray, said), '2d' (always the X-ray) or 'blender'
+    # (the hi-fi Cycles backend, #1089). The one way a front end with no
+    # flag of its own -- the GUI recorder, place_route_loop -- chooses.
+    g['MOVIE_BOARD3D'] = _s('KICAD_MOVIE_BOARD3D', 'auto')
 
     # #1036: the routing movie's FRAME BUDGET. A per-segment route trace
     # (KICAD_ROUTE_TRACE=1) plays one frame per event, and run 32's 22-board
@@ -529,11 +531,16 @@ def refresh() -> None:
     # per-cell bump at each conflict event. See history_congestion.py.
     # v2 (contest-targeted): the primary event charges the frontier∩blocker
     # INTERSECTION (the cells one net holds and another stalled against) at
-    # the full increment; the v1 whole-footprint rip stamp and raw-frontier
-    # charge were measured negative/inert and now default OFF behind weights.
+    # the full increment. v2 switched the v1 whole-footprint rip stamp and
+    # raw-frontier charge off on a local diagnosis, not a measurement; the
+    # corpus then put the rip stamp back (the contest alone, and contests plus
+    # frontier without rip stamps, both measured worse), and the frontier
+    # ships at 0.25 only as part of the winning arm -- no "rips + contests,
+    # no frontier" arm was ever run.
     # #590 SHIPPED DEFAULT = the "v1flat_01" arm: the flat diffuse field at dose
     # 0.1 / cap 0.5, whole-footprint rip stamps at full weight, raw frontier at
-    # 0.25, and NO escalation. Best of every arm tested on three corpora; see
+    # 0.25, and NO escalation. Best of every arm on the two corpora that
+    # compared arms (sets 1-10, 11-20; sets 21-27 ran it against off); see
     # the promotion note in history_congestion.py for the evidence AND for the
     # caveat (the win is concentrated on congested boards; a pre-registered
     # sets 21-27 test did not clear its own bar). KICAD_HISTORY_COST=0 restores

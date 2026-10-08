@@ -128,6 +128,28 @@ def t_it_narrows_before_it_gives_up():
           f'(cap-only answer: {wide_ok})')
 
 
+def t_a_narrow_strap_bridges_at_its_own_width():
+    """The floor is the run's minimum OR the strap's own width, whichever is
+    smaller. The region joiner's last resort (#217) draws a strap at the
+    run's --track-width when the corridor refuses min_track_width (0.2 by
+    default); holding that strap's bridge to 0.2 asks the same corridor for
+    the width it just refused, so the bridge is skipped and the plane stays
+    split (#1112). 0.1 is not thinner than the run asked for: it is the
+    width the run routes at."""
+    from plane_region_connector import via_bridge_width
+    # A victim close enough that 0.2 cannot clear and 0.1 can.
+    v = [Segment(start_x=88.0, start_y=-54.72, end_x=89.0, end_y=-54.72,
+                 width=0.12, layer='F.Cu', net_id=36)]
+    cfg = _cfg(clearance=0.05)
+    narrow = via_bridge_width(LEG_F, 0.1, VIA_SIZE, MIN_W, _pcb(v), 19, cfg)
+    at_min = via_bridge_width(LEG_F, MIN_W, VIA_SIZE, MIN_W, _pcb(v), 19, cfg)
+    check('t_a_narrow_strap_bridges_at_its_own_width',
+          narrow is not None and abs(narrow - 0.1) < 1e-9 and at_min is None,
+          f'a 0.1 strap bridges at {narrow}; a strap at the 0.2 minimum is '
+          f'still refused there ({at_min}), so the floor moved only for '
+          f'narrow straps')
+
+
 def t_no_model_means_no_veto():
     """A caller with no pcb_data/net_id still gets a bridge -- the gate may
     tighten the width, never withhold copper it cannot assess."""
@@ -157,6 +179,7 @@ def main():
     t_it_is_floored_at_the_declared_minimum()
     t_the_real_short_is_refused()
     t_it_narrows_before_it_gives_up()
+    t_a_narrow_strap_bridges_at_its_own_width()
     t_no_model_means_no_veto()
     t_the_emitter_routes_through_the_core()
     print()

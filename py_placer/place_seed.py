@@ -64,6 +64,18 @@ ladder tried clears it, by ref, with the pads and why the seat could not move.
 An edge seat prefers a pose that clears the floor and otherwise keeps the seat
 it always chose, since an unseated connector is an unrouted one. Like
 `connector_requirements`, it never changes an exit code.
+
+And `reseat_declined` (#1117) on every summary of a seed (not of --repair /
+--reseat, which run no post-polish re-seat):
+the parts the post-polish re-seat could not put back into their zone, out of
+a keep-out or out of another block's exclusive zone, by ref, with the rules
+they broke and the rotation claim the search was held to. The re-seat
+searches a declared part's `rotation` / `rotation_candidates` ladder ONLY,
+never the fallback lattice, and the polish's swaps refuse to trade a declared
+angle away, so a declared angle survives the polish. A part the re-seat
+declines stays where the polish left it, named on a `NOT repaired` line, and
+its grade error stands, so the seed exits 4. Before #1117 a declared part was
+instead turned to fit and the seed exited 0.
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -98,7 +110,7 @@ def _split_pinned(graded, output_file, intent):
     def pinned(v):
         ref = getattr(v, 'ref', None)
         return bool(ref) and (ref in locked
-                              or any(fnmatch.fnmatch(ref, p) for p in pats))
+                              or any(fnmatch.fnmatchcase(ref, p) for p in pats))
     return ([v for v in graded.errors if not pinned(v)],
             [v for v in graded.errors if pinned(v)])
 
@@ -260,9 +272,19 @@ def seed_structure_summary(result, graded, written):
               f"refused" + (f" ({', '.join(sorted(refused))})"
                             if refused else ''))
     if decap and decap.get('armed'):
+        late = decap.get('late') or {}
+        if not late.get('armed'):
+            tail = ('; stage 3.5 is off (--decap-claim-after-ics arms it)'
+                    if late else '')
+        else:
+            tail = (f"; {late.get('claimed')} after the centroid stage seated "
+                    f"their owner IC(s) (3.5: "
+                    + (', '.join(late.get('owners') or ()) or 'none') + ")"
+                    + (f" -- {late['reason']}" if late.get('reason') else ''))
         print(f"  NOTE: decap stage: {decap.get('claimed')} of "
               f"{decap.get('scope')} cap(s) claimed at a supply pin"
-              + (f" -- {decap['reason']}" if decap.get('reason') else ''))
+              + (f" -- {decap['reason']}" if decap.get('reason') else '')
+              + tail)
     return {'arrays_formed': formed, 'array_unseated': unseated_rows,
             'fixed_seated': fixed, 'fixed_refused': refused,
             'decap_stage': decap}
@@ -288,6 +310,50 @@ def fixed_pose_reason(summary):
             f"JSON_SUMMARY. It was still written, for inspection.")
 
 
+#: How a decline line names what a re-seat had to stay clear of (#1117).
+_CLEAR_OF = {'keepout': 'keep-out', 'zone_exclusive': 'exclusive zone of another block'}
+
+
+def reseat_decline_record(ref, errors, repairable, zone, claim):
+    """The `reseat_declined` entry for `ref` (#1117): the repairable rules IT
+    broke (not another part's, not a rule the re-seat does not repair), its
+    zone's name, and the rotation claim the search was held to."""
+    rot, cands = claim or (None, None)
+    return {'rules': sorted({v.rule for v in errors
+                             if v.ref == ref and v.rule in repairable}),
+            'zone': zone.name if zone is not None else None,
+            'rotation': rot,
+            'rotation_candidates': list(cands) if cands else None}
+
+
+def reseat_decline_line(ref, rec):
+    """The console line for a part the post-polish re-seat could not put back
+    (#1117). `rec` is its `reseat_declined` entry.
+
+    A declared angle is named as the claim it is: the re-seat searched only
+    that ladder, and a reader who sees the grade error must not conclude the
+    part could have been turned. An undeclared part searched its current
+    angle and each quarter turn, and says so.
+    """
+    zone = rec.get('zone')
+    clear = [_CLEAR_OF[r] for r in (rec.get('rules') or ()) if r in _CLEAR_OF]
+    where = ' '.join(([f"in zone {zone!r}"] if zone else [])
+                     + ([f"clear of the declared {' and '.join(clear)}"]
+                        if clear else [])) or 'anywhere on the board'
+    rot, cands = rec.get('rotation'), rec.get('rotation_candidates')
+    if rot is not None:
+        how = (f"at its declared rotation {rot:g} -- the angle is the claim, "
+               f"not a fallback")
+    elif cands:
+        how = (f"at any of its declared rotation_candidates "
+               f"[{', '.join(f'{c:g}' for c in cands)}] -- the angles are the "
+               f"claim, not a fallback")
+    else:
+        how = "at its current angle or any quarter turn of it"
+    return (f"  NOT repaired, {ref}: no legal pose {where} {how}. It stays "
+            f"where the polish left it, and its grade error stands")
+
+
 def gate_reason(unseated, own, my_pads, hole_delta, band=()):
     """The one stderr line that says WHY this seed did not pass its gate.
 
@@ -306,7 +372,25 @@ def gate_reason(unseated, own, my_pads, hole_delta, band=()):
     if not (unseated or own or my_pads or hole_delta or band):
         return None
     tail = " It was still written, for inspection."
-    if unseated or own:
+    if unseated:
+        # #1099: NAME them. Run 36's seed exited 4 with this line and no
+        # refs, the agent read "grade errors" and routed a board with C20
+        # still in the staging pile. An unseated part is not on the board.
+        names = (sorted(unseated)
+                 if isinstance(unseated, (list, tuple, set, frozenset))
+                 else [])
+        shown = ', '.join(names[:12]) + (f" ... +{len(names) - 12} more"
+                                         if len(names) > 12 else '')
+        if not names:
+            return ("place_seed: the seed does NOT satisfy its intent -- see "
+                    "the errors above." + tail)
+        return (f"place_seed: {len(names)} part(s) UNSEATED, still in the "
+                f"staging pile and NOT placed: {shown}. The seed does NOT "
+                f"satisfy its intent -- seat them (--repair, or "
+                f"place_pose.py) before routing."
+                + (" There are grade errors above as well." if own else '')
+                + tail)
+    if own:
         return ("place_seed: the seed does NOT satisfy its intent -- see the "
                 "errors above." + tail)
     ch = []
@@ -384,6 +468,27 @@ Examples:
                         "pads face the edge, more crossings and pin-order "
                         "inversions). Opt in when that trade is the one you "
                         "want; a tie keeps the input rotation first.")
+    p.add_argument("--diagonal-rotations", action="store_true",
+                   help="Also try the 45-degree lattice (#1099): a part that "
+                        "fits at no 90-degree angle at any clearance step "
+                        "gets a second pass at 45/135/225/315 relative to its "
+                        "current angle, and a decoupling cap on a chip seated "
+                        "off the 90-degree lattice tries the chip's angles "
+                        "first. A part that fits orthogonally seats exactly "
+                        "as it would without this. OFF by default: "
+                        "tests/test_placement_ab.py measured it inert on all "
+                        "five tracked boards it was tried on. Use it when "
+                        "the design's reference placement is diagonal.")
+    p.add_argument("--decap-claim-after-ics",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="Stage 3.5 (#1105): once the centroid stage has seated "
+                        "the owner ICs the per-supply-pin decap stage (2.5) "
+                        "found unplaced -- every IC on a pile or a flat board "
+                        "-- claim their decaps at their supply pins, before "
+                        "the caps' own centroid turn. ICs seat exactly as "
+                        "without it. Omitted, the seeder's measured default "
+                        "(DECAP_CLAIM_AFTER_ICS_DEFAULT) applies; "
+                        "JSON_SUMMARY.decap_stage.late says what it did.")
     p.add_argument("--evict-depth", type=int, default=0, choices=(0, 1, 2),
                    metavar="N",
                    help="Eviction rung (#630, #699). At every depth a part "
@@ -680,9 +785,7 @@ Examples:
                 #: fnmatch, so a literal reference carrying glob
                 #: metacharacters -- `D[1]` -- would resolve to `D1` and then
                 #: report "matches no reference on this board". Escape them.
-                def _literal(ref):
-                    return ''.join('[%s]' % c if c in '*?[]' else c
-                                   for c in ref)
+                from placement.utility import literal_ref_glob as _literal
                 for _r in args.reseat_region:
                     _in = refs_in_rect(cur_pcb, tuple(_r))
                     print("  region [%g,%g]-[%g,%g]: %d part(s)%s"
@@ -727,7 +830,8 @@ Examples:
                 # The same flag, not a second one: it was parsed and
                 # silently ignored on this path (#699).
                 evict_depth=args.evict_depth,
-                min_gain=args.reseat_min_gain)
+                min_gain=args.reseat_min_gain,
+                decap_claim_after_ics=args.decap_claim_after_ics)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
             # Over the SCOPE only: the line prints it as "{n} re-seated
@@ -1030,7 +1134,9 @@ Examples:
         anchors_first=args.anchors_first,
         anchor_rounds=args.anchor_rounds,
         evict_depth=args.evict_depth,
-        rotate_by_facing=args.rotate_by_facing)
+        rotate_by_facing=args.rotate_by_facing,
+        diagonal_rotations=args.diagonal_rotations,
+        decap_claim_after_ics=args.decap_claim_after_ics)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
@@ -1109,6 +1215,10 @@ Examples:
                                clearance=args.clearance,
                                board_edge_clearance=args.board_edge_clearance)
 
+    # #1117: parts the post-polish re-seat below could NOT put back, by ref.
+    # Bound before the `try` so the key is present (empty) on every summary
+    # from here on, including --no-polish, where the re-seat never runs.
+    reseat_declined = {}
     try:
         graded = _grade()
         # The quench has no zone term, so a polish nudge can walk a declared
@@ -1142,6 +1252,13 @@ Examples:
                 pcb_cur = parse_kicad_pcb(args.output_file)
                 blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
                                                        sources)
+                # #1117: the declared angles, from the same blocks the zones
+                # and the grade use. Without them `_try_place` searched its
+                # fallback lattice (the polished angle, then each quarter
+                # turn), so this re-seat could turn a part whose rotation the
+                # intent declares -- e.g. the `rotation:<ref>` block
+                # rank_rotations --write-intent hands to the next seed.
+                _declared = floorplan.rotations_for_ref(intent, blocks2)
                 st = pose_score.make_state(
                     pcb_cur, args.output_file, clearance=args.clearance,
                     board_edge_clearance=args.board_edge_clearance,
@@ -1194,14 +1311,37 @@ Examples:
                     if getattr(st.parts[ref], 'locked', False):
                         pinned.append(ref)
                         continue
+                    _claim = _declared.get(ref)
+                    _ladder = floorplan.declared_ladder(_claim)
+                    # A candidate SET: the angle the polish chose goes first
+                    # when it is one of them. Both are inside the
+                    # declaration, and the nudge picked it as a strict
+                    # improvement; the author's order would discard that for
+                    # no reason (#1117's code review: [0, 90] re-seated a part
+                    # the polish had turned to 90 back to 0).
+                    if _ladder and len(_ladder) > 1:
+                        _cur = st.parts[ref].rot % 360.0
+                        _ladder = sorted(_ladder, key=lambda c: abs(
+                            (c - _cur + 180.0) % 360.0 - 180.0) >= 1e-6)
                     clr = seeder._try_place(
                         st, ref, sp['new_x'], sp['new_y'], set(),
                         constraint=z.rect if z is not None else None,
-                        tol=intent.zone_tolerance(z) if z is not None else 0.5)
+                        tol=intent.zone_tolerance(z) if z is not None else 0.5,
+                        rotations=_ladder)
                     if clr is not None:
                         p2 = st.parts[ref]
                         fixes.append({'reference': ref, 'new_x': p2.x,
                                       'new_y': p2.y, 'new_rotation': p2.rot})
+                    else:
+                        # #1117: the part stays where the polish left it --
+                        # reverting it would recreate the overlap the comment
+                        # above measured -- and its grade error stands, so
+                        # the seed exits 4. What changes is that the decline
+                        # is NAMED (it used to print nothing), and that a
+                        # declared part is no longer turned to fit, which
+                        # used to be an exit 0 on a turned part.
+                        reseat_declined[ref] = reseat_decline_record(
+                            ref, graded.errors, _repairable, z, _claim)
                 if pinned:
                     # Named, never silent: a reader who sees the grade error
                     # and no repair line would otherwise conclude the repair
@@ -1213,6 +1353,8 @@ Examples:
                           f"between the board and the intent, and only its "
                           f"author can say which is wrong. Unlock it, or move "
                           f"the claim off it")
+                for ref in sorted(reseat_declined):
+                    print(reseat_decline_line(ref, reseat_declined[ref]))
                 if fixes:
                     print(f"  polish walked "
                           f"{', '.join(f['reference'] for f in fixes)} out of "
@@ -1328,6 +1470,12 @@ Examples:
                # sees only `unseated_refs` cannot tell a declaration it must
                # revisit from a board that is simply full.
                'rotation_unseated': result.get('rotation_unseated') or {},
+               # #1117: parts the post-polish re-seat could not put back, by
+               # ref, with the rules they broke and the claim it held them
+               # to. NOT `rotation_unseated`, which names parts the seed did
+               # not SEAT: these were seated, and stay where the polish left
+               # them.
+               'reseat_declined': reseat_declined,
                # #975: declared edge connectors seated with pad copper inside
                # the board-edge floor because no pose the seat ladder tried
                # clears it -- the alternative was not seating them.

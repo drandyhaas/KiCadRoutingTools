@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """``kicad-cli pcb render`` -- the 3D isometric view of a board (#887).
 
-Everything in here shells out; nothing in here touches a pixel. That split is
-deliberate: ``movie_panels`` owns the compositing and can be tested in full with
-this module monkeypatched, so the planner, the frame map and the status line are
-all green before a single subprocess runs.
+Everything in here shells out; nothing in here touches a pixel. It was the
+film's iso panel's renderer until stage3d became the only film layout; it
+stays as this standalone CLI, and `stage3d` reuses `resolve_cli` and
+`model_dirs` to find kicad-cli and the 3D model libraries.
 
     python3 py_router/kicad_iso_render.py board.kicad_pcb -o iso.png
 
@@ -25,7 +25,7 @@ machine's KiCad. It resolves the binary through ``kicad_oracle.find_kicad_cli``
 * **Cost is ~2-4 s at ``basic``, and CONTENTION matters more than the board.**
   Across tigard, lvds, ulx3s (225 models) and glasgow_revC (224), 3 reps each,
   a quiet serial pass ran 1.4-2.7 s and spread under 2x, with glasgow
-  consistently slowest; running four at once -- what ``--iso-jobs 4`` actually
+  consistently slowest; running four at once -- what four workers actually
   does -- ran 1.9-4.2 s. ``--quality high`` is about 3x that, 5.0-7.5 s, which
   is why ``basic`` is the default. So a render per FRAME is out of the question
   and a render per chain STEP is affordable -- and eight of them run about 2.4x
@@ -59,15 +59,14 @@ if _HERE not in sys.path:
 ISO_ROTATE = (-45.0, 0.0, 45.0)
 
 #: A HANG GUARD on one subprocess, not a budget. The distinction matters in this
-#: repo: the cost cap for the iso panel is a COUNT of renders
-#: (``movie_panels.IsoOpts.max_renders``), which is deterministic, and this is
+#: repo: a cost cap is a COUNT of renders, which is deterministic, and this is
 #: only here so a wedged child cannot stall a movie forever. Same category as
 #: ``kicad_oracle.ORACLE_DRC_TIMEOUT``.
 ISO_RENDER_HANG_GUARD_S = 120.0
 
 #: Ask for MORE than the box, because the letterbox throws most of it away.
-#: kicad-cli frames the board with a wide margin and the caller crops to the
-#: alpha box (``movie_panels._alpha_crop``), so the pixels that survive are only
+#: kicad-cli frames the board with a wide margin and a caller crops to the
+#: alpha box, so the pixels that survive are only
 #: the board -- measured around 0.6 of the canvas on each axis. At the old 1.15
 #: that left the cropped board being UPSCALED into the panel, which is the blur
 #: this constant exists to prevent; 1.8 keeps it a downscale. Renders cost
@@ -370,7 +369,7 @@ def render_many(jobs, cli, workers=None, **kw):
     So at `basic` -- the default, and what the panel uses unless asked otherwise
     -- a render is reproducible and the movie is too. At `high` kicad-cli is not
     reproducible against ITSELF, run to run, on one thread; nothing here can make
-    it so, and `--iso-jobs` is not what changes the answer. Said out loud because
+    it so, and the worker count is not what changes the answer. Said out loud because
     an earlier version of this comment had it backwards, claiming byte
     instability at basic on the strength of one noisy sample.
     """

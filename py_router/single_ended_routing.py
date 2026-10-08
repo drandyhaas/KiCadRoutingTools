@@ -10,6 +10,7 @@ import math
 import time
 import numpy as np
 from contextlib import contextmanager
+from operator import attrgetter
 from typing import Dict, List, Optional, Set, Tuple
 from terminal_colors import YELLOW, GREEN, RESET
 
@@ -59,6 +60,7 @@ def _unblock_debug() -> bool:
 # kernels skip the bulk of the board's pads. Generous (~10x the largest realistic
 # margin) so routing stays byte-for-byte identical.
 _FOREIGN_PAD_WINDOW = 5.0  # mm
+_LAYER_OF = attrgetter('layer')
 # KICAD_SEG_DIST_EXACT=1 replaces the sampled sweep in _seg_foreign_seg_dist
 # with the exact segment-to-segment distance. Default OFF (2026-09-19): the
 # sweep is main's behaviour, and the exact distance changes copper on every
@@ -183,11 +185,13 @@ def _foreign_pad_arrays(pcb_data, layer):
     return arr
 
 
-def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None):
+def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
+                         net_clearances=None):
     """Exact min edge distance from sample points to the CUSTOM pads of other
     nets (check_drc.point_to_pad_distance -- the model kicad-cli agrees with to
     ~0.1um). Windowed by each pad's bbox + _FOREIGN_PAD_WINDOW; same
-    base_clearance local-override adjustment as the vectorized kernels."""
+    base_clearance local-override and #436 net-class excess adjustments as
+    the vectorized kernels."""
     if not custom:
         return 1e9
     from check_drc import point_to_pad_distance
@@ -201,6 +205,9 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None):
         adj = 0.0
         if base_clearance is not None:
             adj = max((getattr(pad, 'local_clearance', 0.0) or 0.0) - base_clearance, 0.0)
+            if net_clearances:
+                adj = max(adj, net_clearances.get(nid, base_clearance)
+                          - base_clearance)
         # Branch-and-bound prune (exact-result-preserving): the polygons are
         # stored in GLOBAL coordinates, so the distance from a sample point to
         # the polygon's bounding BOX is a valid lower bound on its edge
@@ -262,7 +269,8 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
     against a pad in a wider (e.g. controlled-impedance) class. Inert when None."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
-    best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance)
+    best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance,
+                                       net_clearances)
     if cx.size == 0:
         return best_custom
     R = _FOREIGN_PAD_WINDOW
@@ -311,7 +319,7 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     sx = x1 + (x2 - x1) * _t
     sy = y1 + (y2 - y1) * _t
     best_custom = _custom_pad_min_dist(
-        custom, net_id, list(zip(sx, sy)), base_clearance)
+        custom, net_id, list(zip(sx, sy)), base_clearance, net_clearances)
     if cx.size == 0:
         return best_custom
     R = _FOREIGN_PAD_WINDOW
@@ -389,8 +397,11 @@ def _foreign_seg_arrays(pcb_data, layer):
     # length and its tail are still checked. Unset (the default), every
     # call pays the #803 digest as before.
     if not getattr(pcb_data, '_foreign_seg_arr_trust', False):
+        # attrgetter builds the same tuple as a generator over sg.layer at C
+        # speed -- this digest runs on every call (2026-10-08: 227 us of a
+        # 746 us query on an 8.9k-segment board).
         sig = sig + (sum(map(id, segs)), sum(map(id, vias)),
-                     hash(tuple(sg.layer for sg in segs)))
+                     hash(tuple(map(_LAYER_OF, segs))))
     cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
     if cache is None or cache[0] != sig:
         cache = (sig, {})
@@ -458,7 +469,7 @@ def _cached_own_pad_nets(pcb_data):
     return out
 
 
-def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows):
+def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows, validated=False):
     """Boolean mask of foreign-array rows that are NOT foreign to `net_id`.
 
     #908: a footprint's own copper carries no net, so it is foreign to every
@@ -468,8 +479,12 @@ def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows):
     same exemption for the geometric terminal-graze / short gate, which reads
     copper directly rather than the map. Foreign nets are untouched: a row is
     exempt only for the nets its own footprint's pads put on it.
+
+    `validated`: the caller called _foreign_seg_arrays for this layer just
+    now, so the cache is current and its signature need not be recomputed.
     """
-    _foreign_seg_arrays(pcb_data, layer)
+    if not validated:
+        _foreign_seg_arrays(pcb_data, layer)
     per_layer = pcb_data._foreign_seg_arr_cache[1]
     key = (layer, 'exempt', net_id)
     hit = per_layer.get(key)
@@ -484,11 +499,12 @@ def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows):
     return mask
 
 
-def _foreign_seg_bboxes(pcb_data, layer):
+def _foreign_seg_bboxes(pcb_data, layer, validated=False):
     """(min_x, max_x, min_y, max_y) arrays of the foreign segments+vias
     on `layer`, built with -- and valid exactly as long as -- the arrays
-    of _foreign_seg_arrays."""
-    _foreign_seg_arrays(pcb_data, layer)
+    of _foreign_seg_arrays. `validated` as in _foreign_seg_exempt."""
+    if not validated:
+        _foreign_seg_arrays(pcb_data, layer)
     return pcb_data._foreign_seg_arr_cache[1][(layer, 'bbox')]
 
 
@@ -519,10 +535,12 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
     R = _FOREIGN_PAD_WINDOW
-    fminx, fmaxx, fminy, fmaxy = _foreign_seg_bboxes(pcb_data, layer)
+    # The arrays were validated just above; the helpers would each pay the
+    # cache signature again (two thirds of a query's time, 2026-10-08).
+    fminx, fmaxx, fminy, fmaxy = _foreign_seg_bboxes(pcb_data, layer, validated=True)
     near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
             (fmaxy >= min(y1, y2) - R) & (fminy <= max(y1, y2) + R) & (nid != net_id))
-    near &= ~_foreign_seg_exempt(pcb_data, layer, net_id, nid.size)
+    near &= ~_foreign_seg_exempt(pcb_data, layer, net_id, nid.size, validated=True)
     if not near.any():
         return 1e9
     ax, ay, bx, by, hw = fax[near], fay[near], fbx[near], fby[near], fhw[near]
@@ -766,6 +784,25 @@ def _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by):
     return np.where(crossing, 0.0, d)
 
 
+def _pair_floor(config, net_id, layer=None):
+    """`(base_clearance, net_clearances)` for the foreign-distance helpers
+    above, so a caller's uniform `dist >= base + w/2` check enforces the
+    clearance check_drc grades each pair at (#1136): the moving net's own
+    floor (`pair_clearance(net, net)`, max(clearance, its class)) with each
+    foreign net's class excess folded in by the helper; on a layer a
+    .kicad_dru rule governs, the rule REPLACES the pair value, so the base is
+    the rule and no class excess is folded. With nothing declared this is
+    `(config.clearance, None)`, the arguments these callers always passed."""
+    pc = getattr(config, 'pair_clearance', None)
+    if pc is None:
+        return config.clearance, None
+    own = pc(net_id, net_id)
+    rules = getattr(config, 'layer_clearances', None) or {}
+    if layer is not None and layer in rules:
+        return config.layer_clearance(layer, own), None
+    return own, (getattr(config, 'net_clearances', None) or None)
+
+
 def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     """Re-validate a registered #189 unblock via against CURRENT copper (#339).
 
@@ -775,10 +812,14 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     emitted 0.45 via grazed it by 39um). Try the registered size first, then
     the fab-floor ladder's smaller vias (shrink-to-fit, same spirit as #189's
     escalation); return the first that clears foreign copper mm-exactly, or
-    None when nothing fits (caller keeps the registered size -- honest DRC)."""
+    None when nothing fits (caller keeps the registered size -- honest DRC).
+
+    Each foreign item is priced at the clearance check_drc grades the pair at
+    (#1136, `_pair_floor`): per copper layer against tracks and pads, the
+    stack against vias. A board that declares no class and no .kicad_dru
+    rule reads `config.clearance` throughout."""
     from fab_tiers import escalation_rungs
     import routing_defaults as defaults
-    clearance = config.clearance
     eps = defaults.UNBLOCK_REFIT_MARGIN_MM
     layers = [l for l in (pcb_data.board_info.copper_layers or []) if l.endswith('.Cu')]
     ncu = len(layers) or 2
@@ -790,18 +831,29 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
         pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
         if pair[0] < rec[0] - 1e-9 and pair not in cands:
             cands.append(pair)
+    _own, _ncl = _pair_floor(config, net_id)
+    _stack = (config.stack_clearance(_own)
+              if hasattr(config, 'stack_clearance') else _own)
+    _per_layer = {layer: _pair_floor(config, net_id, layer) for layer in layers}
     for vs, dr in cands:
-        need = vs / 2.0 + clearance - eps
         ok = True
         for layer in layers:
-            if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
+            _base, _lncl = _per_layer[layer]
+            need = vs / 2.0 + _base - eps
+            if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer,
+                                     net_clearances=_lncl,
+                                     base_clearance=_base) < need:
                 ok = False
                 break
             if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer,
-                                    base_clearance=clearance) < need:
+                                    base_clearance=_base,
+                                    net_clearances=_lncl) < need:
                 ok = False
                 break
-        if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
+        if ok and _seg_foreign_via_dist(
+                pcb_data, net_id, x, y, x, y,
+                layers[0] if layers else 'F.Cu', net_clearances=_ncl,
+                base_clearance=_stack) < vs / 2.0 + _stack - eps:
             ok = False
         # #671: _seg_foreign_via_dist is FOREIGN-only, and copper clearance
         # should be -- two same-net barrels may touch. The DRILL hole-to-hole
@@ -868,6 +920,27 @@ def _fab_track_floor(pcb_data) -> float:
     return fab_floors(n)['track_width']
 
 
+#: An edge gap within this of the rule is AT the rule (#1159). 1 nm: the writer
+#: emits coordinates to 1 nm, so nothing finer survives into the file.
+NECK_GRAZE_TOL = 1e-6
+
+
+def _hard_terminal_why(entry):
+    """What a `_neck_terminal_grazes` hard entry is, for the refusal message.
+
+    An entry is ``(segment, raw edge distance, short_by)``: `short_by` is None
+    for a physical overlap and the clearance shortfall (mm) for a graze that
+    only a narrower terminal could clear under ``--escalation off`` (#1159 --
+    a 0.5 mm gap is not an overlap)."""
+    s, d_raw, short_by = entry
+    if short_by is None:
+        return (f"terminal copper on {s.layer} would OVERLAP a foreign track/via "
+                f"(edge dist {d_raw:.3f}mm < floor half-width)", "a short")
+    return (f"terminal copper on {s.layer} is {short_by * 1000:.1f}um inside a "
+            f"foreign object's clearance and --escalation off forbids necking it",
+            "a clearance violation")
+
+
 def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None):
     """Neck a TERMINAL-connection segment that grazes foreign copper, down to `floor`.
 
@@ -882,7 +955,8 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     still can't clear is left for the DRC report. Only segments touching a terminal
     point are considered (the A* body keep-outs already enforce clearance mid-route).
 
-    Returns ``(necked, hard)``. `hard` lists terminal segments whose RAW
+    Returns ``(necked, hard)``; each `hard` entry is ``(segment, raw edge
+    distance, short_by)`` (see `_hard_terminal_why`). `hard` lists terminal segments whose RAW
     geometric centreline sits closer than floor/2 to foreign track/via copper:
     even at the fab-floor width the copper physically OVERLAPS the foreign net
     -- a shipped SHORT no neck can fix (ux pf8/pf9: a GND terminal bridge into
@@ -929,24 +1003,31 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
                                       base_clearance=own_l, net_clearances=nc),
                 _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
                                       net_clearances=nc, base_clearance=own_l))
-        allowed_half = d - own_l - 1e-4  # 1e-4: stay just inside the rule
-        if allowed_half < s.width / 2.0 - 1e-9:
+        # #1159: a graze is an edge gap BELOW the rule. Copper exactly at the
+        # rule is legal (the writer emits 1 nm coordinates, so 1 nm is the
+        # only tolerance the test needs); the 1e-4 margin belongs to the neck
+        # TARGET, once a real graze exists, and never to the trigger.
+        short_by = own_l - (d - s.width / 2.0)
+        if short_by > NECK_GRAZE_TOL:
+            allowed_half = d - own_l - 1e-4  # 1e-4: stay just inside the rule
             # Hard test BEFORE necking, on the RAW track/via distance: a
             # centreline within floor/2 of a foreign copper EDGE overlaps it
             # at any emittable width -- a physical short, not a graze.
             d_raw = _seg_foreign_seg_dist(pcb_data, net_id, s.start_x,
                                           s.start_y, s.end_x, s.end_y, s.layer)
             if d_raw < floor / 2.0 - 1e-6:
-                hard.append((s, d_raw))
+                hard.append((s, d_raw, None))
                 continue
             new_w = max(floor, 2.0 * allowed_half)
             if new_w < s.width - 1e-9:
                 # --escalation off: a graze that only a narrower terminal can
                 # clear is a refusal, not narrower copper. It joins the hard
-                # list so the caller fails the route and reports it (#842).
+                # list so the caller fails the route and reports it (#842),
+                # carrying how far short of the rule it is (#1159): it is a
+                # clearance graze, not a short.
                 from fab_tiers import may_narrow, note_narrowing
                 if not may_narrow():
-                    hard.append((s, d_raw))
+                    hard.append((s, d_raw, short_by))
                     continue
                 note_narrowing(net_id, 'track_width', s.width, new_w, 'terminal neck')
                 s.width = round(new_w, 4)
@@ -999,12 +1080,17 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     fx, fy = pts[term_idx]
     if abs(ox - fx) < 1e-9 and abs(oy - fy) < 1e-9:
         return False  # exact endpoint already is the grid cell
-    margin = config.clearance + config.get_net_track_width(net_id, ol) / 2.0
+    # #1136: each foreign pad at the clearance check_drc grades the pair at
+    # on this layer (the base, with the foreign class excess folded per pad).
+    _base, _ncl = _pair_floor(config, net_id, ol)
+    margin = _base + config.get_net_track_width(net_id, ol) / 2.0
     if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol,
-                            base_clearance=config.clearance) >= margin:
+                            base_clearance=_base,
+                            net_clearances=_ncl) >= margin:
         return False  # grid cell already clear -> nothing to fix
     if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol,
-                            base_clearance=config.clearance) < margin:
+                            base_clearance=_base,
+                            net_clearances=_ncl) < margin:
         return False  # exact endpoint also too close (placement) -> can't fix here
     nx, ny = pts[neighbor_idx]
     # Only relocate the endpoint of a SHORT terminal segment. simplify_path (caller,
@@ -1016,7 +1102,8 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     if math.hypot(nx - fx, ny - fy) > 1.5 * config.grid_step:
         return False  # long terminal segment -> keep grid end + short stub
     if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol,
-                             base_clearance=config.clearance) < margin - 1e-6:
+                             base_clearance=_base,
+                             net_clearances=_ncl) < margin - 1e-6:
         return False  # merged terminal segment would graze -> keep grid + stub
     pts[term_idx] = (ox, oy)
     return True
@@ -2265,10 +2352,9 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # terminals legitimately overlap future nets' stubs (the probe map
     # excluded them), so the short gate must not veto the prediction.
     if _hard157 and not config.plan_probe:
-        _hs, _hd = _hard157[0]
-        print(f"  {YELLOW}terminal copper on {_hs.layer} would OVERLAP a "
-              f"foreign track/via (edge dist {_hd:.3f}mm < floor half-width) "
-              f"-- rejecting the route rather than shipping a short{RESET}")
+        _why, _ships = _hard_terminal_why(_hard157[0])
+        print(f"  {YELLOW}{_why} -- rejecting the route rather than shipping "
+              f"{_ships}{RESET}")
         return {
             'failed': True,
             'iterations': total_iterations,
@@ -2863,6 +2949,21 @@ def _net_pads_near(pcb_data, net_id, cells, coord):
                                                  str(t[1].pad_number)))]
 
 
+# _SCOPE_OVERRIDES_NOTE. A source/target override is the one thing that lets
+# the A* into a cell another net's copper blocks (an allowed cell only lifts a
+# BGA zone), and the multipoint main loop and the tap loop route every edge of
+# a net on ONE map. Overrides used to accumulate there: an earlier edge's
+# endpoints, and its #189 unblock via -- overridden on EVERY layer, and still
+# committed to the board after the edge failed -- stayed open for every later
+# edge, which could then pass THROUGH them. Measured on esp_prog: /+3.3V's tap
+# into U2.3 failed the short check, and the fallback retry reached the
+# leftover unblock via on B.Cu through /RTS's clearance, changed layer there,
+# and shipped a 0.3 mm approach 0.200 mm from /RTS -- an interior point of the
+# retry, so neither the terminal neck nor the short check saw it. Each edge
+# (each main-edge attempt) now clears the overrides before marking its own;
+# an unblock via registered DURING the edge stays for that edge's retry.
+
+
 def _register_unblock_via(obstacles, vgx, vgy, layer_names):
     """Expose a placed via cell on every layer and let the router transit/place a
     free via there (so the retry A* can reach the pad through it)."""
@@ -3402,6 +3503,35 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
         _FRAG_MM = 1.0
     _COPPER_RUNGS = env_knobs.POUR_LAUNCH_COPPER
     _DEEP_MM = 0.5
+    # Content memo behind the one above (2026-10-08): every reroute of a plane
+    # net builds a NEW grouping object, so the identity memo missed on calls
+    # whose inputs were unchanged -- 57 s of zynq_ad9364's route step. The key
+    # is everything the scan reads: the terminals' positions, each one's
+    # component, the layers and grid, and this net's zones with their fill
+    # models. A model is replaced, not mutated, when fills are invalidated, and
+    # the entry holds the zones and models so their ids cannot be reused.
+    # Skipped under POUR_LAUNCH_COPPER, which also reads the caller's island
+    # cells.
+    _ck = _models = None
+    if not _COPPER_RUNGS:
+        try:
+            _zs = [z for z in (pcb_data.zones or []) if z.net_id == net_id
+                   and z.layer in layer_names]
+            _models = [(z, get_zone_model(pcb_data, z)) for z in _zs]
+            _ck = (net_id, tuple(layer_names),
+                   tuple(sorted(vars(coord).items())), _FRAG_MM,
+                   tuple((_i[3], _i[4]) for _i in pad_info),
+                   tuple(pad_components.get(_j, _j)
+                         for _j in range(len(pad_info))),
+                   tuple((id(z), id(m)) for z, m in _models))
+            _lru = getattr(pcb_data, '_pour_launch_lru', None)
+            _hit = _lru.get(_ck) if _lru is not None else None
+            if _hit is not None:
+                _lru.move_to_end(_ck)
+                pcb_data._pour_launch_memo = (_mk, pad_components, _hit[0])
+                return _hit[0]
+        except Exception:
+            _ck = None
     out = {}
     _bare_kept = 0
     try:
@@ -3483,6 +3613,14 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
         print(f"  POUR-LAUNCH: {_bare_kept} bare fill region(s) kept by the "
               f"zone island policy are not yet nodes (deferred)")
     pcb_data._pour_launch_memo = (_mk, pad_components, out)
+    if _ck is not None:
+        from collections import OrderedDict as _OD
+        _lru = getattr(pcb_data, '_pour_launch_lru', None)
+        if _lru is None:
+            _lru = pcb_data._pour_launch_lru = _OD()
+        _lru[_ck] = (out, _models)
+        while len(_lru) > 128:
+            _lru.popitem(last=False)
     return out
 
 
@@ -4102,7 +4240,12 @@ def route_multipoint_main(
         targets = _augment_all_blocked_pad_side(targets, pad_b_obj, config,
                                                 obstacles)
 
-        # Mark source/target cells (same-net pad cells; safe to accumulate)
+        # Mark source/target cells -- THIS attempt's only. An override lets
+        # the A* enter a cell another net's clearance blocks, so it belongs to
+        # the endpoints it was made for; left on the map it is a hole a later
+        # attempt can route THROUGH, as interior copper the terminal neck and
+        # short check never examine (_SCOPE_OVERRIDES_NOTE).
+        obstacles.clear_source_target_cells()
         for gx, gy, layer in sources + targets:
             obstacles.add_source_target_cell(gx, gy, layer)
 
@@ -4316,10 +4459,9 @@ def route_multipoint_main(
         # Terminal-bridge SHORT gate (ux pf9): the main edge's terminal copper
         # overlaps a foreign track/via at any width -- fail the edge so the
         # rip/retry ladder finds another approach instead of shipping a short.
-        _hs, _hd = _hard_p1[0]
-        print(f"  {YELLOW}Phase 1 terminal copper on {_hs.layer} would OVERLAP "
-              f"a foreign track/via (edge dist {_hd:.3f}mm) -- failing the "
-              f"edge rather than shipping a short{RESET}")
+        _why, _ships = _hard_terminal_why(_hard_p1[0])
+        print(f"  {YELLOW}Phase 1 {_why} -- failing the edge rather than "
+              f"shipping {_ships}{RESET}")
         return {'failed': True, 'iterations': total_iterations}
     # Fab-floor via dropped inside a boxed main-edge pad to unblock it (#189);
     # a #535 off-pad escape ships its pad->via stub alongside.
@@ -4853,7 +4995,8 @@ def _route_multipoint_taps_impl(
                         targets.append(_cell)
                         _tset.add(_cell)
 
-        # Mark source/target cells
+        # Mark source/target cells -- THIS edge's only (_SCOPE_OVERRIDES_NOTE).
+        obstacles.clear_source_target_cells()
         for gx, gy, layer in sources + targets:
             obstacles.add_source_target_cell(gx, gy, layer)
 
@@ -5060,10 +5203,9 @@ def _route_multipoint_taps_impl(
             # rip/retry ladder finds another approach. (A #189 unblock via
             # already registered for this edge stays in the map -- a
             # conservative over-block for later edges, never a short.)
-            _hs, _hd = _hard_tap[0]
-            print(f"      {YELLOW}terminal copper on {_hs.layer} would "
-                  f"OVERLAP a foreign track/via (edge dist {_hd:.3f}mm) -- "
-                  f"failing the MST edge rather than shipping a short{RESET}")
+            _why, _ships = _hard_terminal_why(_hard_tap[0])
+            print(f"      {YELLOW}{_why} -- failing the MST edge rather than "
+                  f"shipping {_ships}{RESET}")
             edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
             failed_edges.add(edge_key)
             blocked_cells = list(blocked_cells) + _via_conflict_extra

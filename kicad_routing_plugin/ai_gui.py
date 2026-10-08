@@ -434,11 +434,6 @@ class AITab(wx.Panel):
         ctrl_box = wx.StaticBox(self, label="AI")
         ctrl_sizer = wx.StaticBoxSizer(ctrl_box, wx.VERTICAL)
 
-        # Availability status (kept current by _refresh_backend_ui)
-        self.status_label = wx.StaticText(self, label="")
-        self.status_label.Wrap(280)
-        ctrl_sizer.Add(self.status_label, 0, wx.ALL, 5)
-
         # Backend / model / effort selection
         sel_grid = wx.FlexGridSizer(cols=2, hgap=5, vgap=5)
         sel_grid.AddGrowableCol(1)
@@ -612,17 +607,16 @@ class AITab(wx.Panel):
         self._refresh_backend_ui()
 
     def _refresh_backend_ui(self):
-        """Point the status label, combo suggestions, tooltips, and button
+        """Point the CLI status note, combo suggestions, tooltips, and button
         enablement at the selected backend."""
         backend = self._current_backend()
         self._last_backend = backend
         cli_path = backend.find_cli()
-        if cli_path:
-            self.status_label.SetLabel(f"{backend.label} CLI found: {cli_path}")
-        else:
-            self.status_label.SetLabel(
-                backend.not_found_message() + " Then reopen this dialog.")
-        self.status_label.Wrap(280)
+        # The transcript, not a label: a CLI path has no spaces to wrap at
+        # and ran past the control column.
+        note = backend.cli_status(cli_path)
+        if note not in self.output_ctrl.GetValue():
+            self.output_ctrl.AppendText(note + "\n")
         params = self._backend_params[backend.id]
         self.model_choice.Set(list(backend.model_suggestions))
         self.model_choice.SetValue(params['model'] or DEFAULT_CHOICE)

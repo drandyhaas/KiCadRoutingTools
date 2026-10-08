@@ -502,5 +502,29 @@
     "license": "see repo",
     "short_name": "stm32h7s3_som",
     "note": "STM32H7S3 system-on-module (phancak/STM32H7_Board, MIT): 4 layers, 100x50mm, 112 footprints, 800 zones. An LQFP-176 STM32H7S3 shares its FMC bus (16 data, 13 address) between an SDRAM and a NAND (MX30LF1G18AC on TSOP-48), behind a 62-pin Amphenol board-to-board connector (38 BTB nets) -- a parallel memory bus on a 4-layer module without a BGA anywhere."
+  },
+  {
+    "set": "set30",
+    "repo": "bwack/C64-250407-Replica-KiCad",
+    "path": "250407_.kicad_pcb",
+    "branch": "main",
+    "file": "c64_250407.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/bwack/C64-250407-Replica-KiCad/9bf17bb868248b12fb12210d66be3a37ec4ab832/250407_.kicad_pcb",
+    "github_url": "https://github.com/bwack/C64-250407-Replica-KiCad/blob/9bf17bb868248b12fb12210d66be3a37ec4ab832/250407_.kicad_pcb",
+    "archive_url": "",
+    "archive_member": "",
+    "size_kb": 2689,
+    "layers_est": 2,
+    "footprints": 227,
+    "routable_nets": 227,
+    "max_pads": 44,
+    "kicad_version": 20241229,
+    "has_kicad_pro": true,
+    "tier": "hard",
+    "packages": "BGA,FPGA/SoC,high-speed",
+    "lane": "retro_bus",
+    "license": "see repo",
+    "short_name": "c64_250407",
+    "note": "Commodore 64 ASSY 250407 motherboard replica (bwack/C64-250407-Replica-KiCad v1.3, CERN-OHL-1.2). TWO layers, 390x180mm, 227 footprints, all through-hole except 40 SMD pads on 5 parts (CN2/CN3 edge fingers, JP1, VR1, VR2): 1161 PTH + 16 NPTH pads. 6510 CPU, VIC-II, SID, two CIAs, PLA, ROMs and eight DRAMs on a multi-drop A0-A15/D0-D7 bus (11-12 pads per net), 61 Earth/+5V pour zones. Its routing replicates Commodore's hand-taped artwork (6582 segments, 574 vias): buses horizontal on F.Cu, vertical on B.Cu. Admitted 2026-10-08 as the public stand-in for issue #1219, a 2-layer all-through-hole pinball MPU whose owner reported the router's output as spaghetti. Source artifacts: 8 net-tagged copper graphics on CAN+5V (#513: KiCad reports that net unconnected on every run) and 12 footprints sharing the reference REF** (#726)."
   }
 ]

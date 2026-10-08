@@ -103,8 +103,9 @@ _DECLARED = {
             'tests/mutate_834_835.py. Unifying it is a behaviour change no '
             'corpus board can witness, so it needs its own issue, not a '
             'ride-along on #878.'),
-    ('py_placer/placement/quench.py', 'QuenchState.fab_rect'):
-        (1, 'reads an already-resolved `p.side`, not a layer, and adds a '
+    ('py_placer/placement/quench.py', 'QuenchState._fab_side'):
+        (1, 'the one .Fab side pick `fab_rect` and `fab_shape` (#1101) '
+            'share. Reads an already-resolved `p.side`, not a layer, and adds a '
             'defensive .upper(). `side_of_layer` has none, so converting '
             'would silently drop the hardening.'),
     ('py_router/movie_camera.py', '_moved_side'):
@@ -117,6 +118,20 @@ _DECLARED = {
         (1, 'runs inside KiCad pcbnew, where py_placer is imported only '
             'lazily inside try blocks and is not guaranteed importable. Its '
             'or-F.Cu default is behaviour-identical to side_of_layer.'),
+    # #1081: the stage3d film's 3D board reads a part's side off the layer
+    # string the parser (or the stage record) already carries.
+    ('py_router/stage3d/scene.py', '_local_pad'):
+        (1, 'the stage3d film (#1081), in py_router: importing placement.legality would invert the layer graph (py_placer imports py_router, not the reverse); a PAD face rule (F/B/through), not a part side.'),
+    ('py_router/stage3d/scene.py', 'build_scene'):
+        (1, 'the stage3d film (#1081), in py_router: importing placement.legality would invert the layer graph (py_placer imports py_router, not the reverse).'),
+    ('py_router/stage3d/scene.py', 'export_glb'):
+        (1, 'the stage3d film (#1081), in py_router: importing placement.legality would invert the layer graph (py_placer imports py_router, not the reverse); the F/B tag of the GLB pose table.'),
+    ('py_router/stage3d/timeline.py', 'activity_sides'):
+        (1, 'the stage3d film (#1081), in py_router: importing placement.legality would invert the layer graph (py_placer imports py_router, not the reverse); the resting layer of the moving parts decides which face the '
+            'camera shows.'),
+    ('py_router/stage3d/blender_scene.py', 'main'):
+        (1, 'runs INSIDE Blender, which has none of this repo on its path; '
+            'the same F/B read as scene.py.'),
     # main spells this site `PlacementTab._apply_pose`. The IPC port folded
     # that method into `_apply_ipc` -- kipy has no `Flip()`, so applying a
     # pose and applying the copper are one commit here. Same single

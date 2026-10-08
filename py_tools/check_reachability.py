@@ -144,13 +144,15 @@ def _relief_for(pcb, r, track_mm, clearance):
         return []
 
     def _bbox(ref):
+        from kicad_parser import non_aperture_pads
         fp = pcb.footprints.get(ref)
-        if not fp or not fp.pads:
+        pads = non_aperture_pads(fp) if fp else ()   # #1143
+        if not pads:
             return None
-        xs0 = [p.global_x - p.size_x / 2.0 for p in fp.pads]
-        ys0 = [p.global_y - p.size_y / 2.0 for p in fp.pads]
-        xs1 = [p.global_x + p.size_x / 2.0 for p in fp.pads]
-        ys1 = [p.global_y + p.size_y / 2.0 for p in fp.pads]
+        xs0 = [p.global_x - p.size_x / 2.0 for p in pads]
+        ys0 = [p.global_y - p.size_y / 2.0 for p in pads]
+        xs1 = [p.global_x + p.size_x / 2.0 for p in pads]
+        ys1 = [p.global_y + p.size_y / 2.0 for p in pads]
         return (min(xs0), min(ys0), max(xs1), max(ys1))
 
     ra, rb = _bbox(a['ref']), _bbox(b['ref'])

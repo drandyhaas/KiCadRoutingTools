@@ -329,6 +329,17 @@ def _clashes_with_seated(state, ref, pose, poses) -> bool:
     if not poses:
         return False
     part = state.parts[ref]
+    if getattr(state, 'courtyards_ignored', False):
+        # #1104: the project waives courtyards; the pad copper is what may
+        # not overlap (the #1101 seat's question, at its coarsest).
+        a_pb = part.padbox(*pose)
+        for other, opose in poses.items():
+            op = state.parts[other]
+            b_pb = op.padbox(*opose)
+            if (a_pb is not None and b_pb is not None
+                    and (part.sides & op.sides) and _rects_overlap(a_pb, b_pb)):
+                return True
+        return False
     a_ct, a_tht = part.rects(*pose)
     for other, opose in poses.items():
         op = state.parts[other]

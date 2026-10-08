@@ -112,14 +112,17 @@ def _pn_self_overlaps(new_segments, p_net_id, n_net_id, config, pcb_data=None) -
     if not all_p or not all_n:
         return False
     # Only the NEW segments need testing as the moving party -- pre-existing
-    # stub-vs-stub spacing was already DRC-valid before this leg.
+    # stub-vs-stub spacing was already DRC-valid before this leg. P and N are
+    # graded at the pair's own value, class and layer rule (#1134).
     for s in new_p:
         if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
-                                    s.width, s.layer, all_n) < config.clearance - 1e-6:
+                                    s.width, s.layer, all_n) \
+                < config.pair_clearance(p_net_id, n_net_id, s.layer) - 1e-6:
             return True
     for s in new_n:
         if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
-                                    s.width, s.layer, all_p) < config.clearance - 1e-6:
+                                    s.width, s.layer, all_p) \
+                < config.pair_clearance(p_net_id, n_net_id, s.layer) - 1e-6:
             return True
     return False
 
@@ -441,11 +444,28 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
     """True if every relocation fan via clears (at check_drc's clearance) the
     other fan vias, the existing vias, all foreign pads, and all foreign tracks.
     The via legitimately sits on its own relocated pad and connects to its own-net
-    stub, so own-net pads/segments are excluded."""
+    stub, so own-net pads/segments are excluded.
+
+    A fan via and ANOTHER net's copper are priced at the clearance check_drc
+    grades the pair at (#1136): the stack against a via (the partner's fan
+    via included), the track's layer against a track, the copper the two
+    share against a pad (`pad_pair_clearance_before_override`, the pad's
+    override applied below as it always was). A SAME-net via or pad (the
+    via and pad passes have no net filter) keeps the flat `config.clearance`
+    it was tested at: check_drc grades no clearance between them, so no pair
+    value applies, and relaxing that test is not this change. A board that
+    declares no class and no .kicad_dru rule reads `config.clearance`
+    throughout."""
     from check_drc import (check_via_via_overlap, check_pad_via_overlap,
                            check_via_segment_overlap, check_via_drill_overlap,
                            check_pad_drill_via_overlap)
     clearance = config.clearance
+
+    _inert = config.pair_clearance_inert()
+
+    def _via_clr(a, b):
+        return (clearance if a == b
+                else config.pair_clearance(a, b, kind='stack'))
     h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
     margin = _DRC_CLEARANCE_MARGIN
     # A fan entry's via is None when apply_bare_pad_target_via REUSED an existing
@@ -459,7 +479,8 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
 
     for i, v in enumerate(fan_vias):
         for w in fan_vias[i + 1:]:
-            if check_via_via_overlap(v, w, clearance, margin)[0]:
+            if check_via_via_overlap(v, w, _via_clr(v.net_id, w.net_id),
+                                     margin)[0]:
                 return False
             if h2h and check_via_drill_overlap(v, w, h2h, margin)[0]:
                 return False
@@ -469,7 +490,8 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
         for ev in pcb_data.vias:
             if id(ev) in fan_ids:
                 continue
-            if check_via_via_overlap(v, ev, clearance, margin)[0]:
+            if check_via_via_overlap(v, ev, _via_clr(v.net_id, ev.net_id),
+                                     margin)[0]:
                 return False
             if h2h and check_via_drill_overlap(v, ev, h2h, margin)[0]:
                 return False
@@ -480,9 +502,13 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
                 # Per-pad clearance override (#326/#513 item 2) wins where larger,
                 # mirroring _bare_pad_pair_vias_fit and check_drc's grading. No
                 # margin slack when the override governs (the via-nudge cannot fix
-                # a via boxed between two long override pads).
-                pad_clr = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-                pad_margin = margin if pad_clr == clearance else 0.0
+                # a via boxed between two long override pads). #1136: the
+                # override is weighed against the pair's own value.
+                pad_base = (clearance if _inert or pad.net_id == v.net_id
+                            else config.pad_pair_clearance_before_override(
+                                pad, v.net_id))
+                pad_clr = max(pad_base, getattr(pad, 'local_clearance', 0.0) or 0.0)
+                pad_margin = margin if pad_clr == pad_base else 0.0
                 if check_pad_via_overlap(pad, v, pad_clr, routing_layers, pad_margin)[0]:
                     return False
                 if h2h and check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
@@ -490,7 +516,8 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
         for seg in pcb_data.segments:
             if seg.net_id == v.net_id:
                 continue  # own-net stub the via connects to
-            if check_via_segment_overlap(v, seg, clearance, margin)[0]:
+            if check_via_segment_overlap(v, seg, config.pair_clearance(
+                    v.net_id, seg.net_id, seg.layer), margin)[0]:
                 return False
     return True
 

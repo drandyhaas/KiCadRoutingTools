@@ -101,14 +101,18 @@ Examples:
     return p
 
 
-def _run_place_seed(args, seed, out_board):
+def run_place_seed(input_file, intent, seed, out_board, *, ignore_nets=None,
+                   seed_args=()):
+    """One place_seed subprocess, run with cwd=ROOT: `(CompletedProcess,
+    JSON_SUMMARY dict)`, the dict empty when no summary was printed. Shared
+    with rank_rotations.py (#1113), so a seed arm there is exactly one here."""
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(ROOT, 'py_placer', 'place_seed.py'), args.input_file, out_board,
-            '--intent', args.intent, '--seed', str(seed)]
-    if args.ignore_nets:
-        argv += ['--ignore-nets'] + list(args.ignore_nets)
-    if args.seed_args:
-        argv += list(args.seed_args)
+            os.path.join(ROOT, 'py_placer', 'place_seed.py'), input_file, out_board,
+            '--intent', intent, '--seed', str(seed)]
+    if ignore_nets:
+        argv += ['--ignore-nets'] + list(ignore_nets)
+    if seed_args:
+        argv += list(seed_args)
     r = subprocess.run(argv, capture_output=True, text=True,
                        encoding='utf-8', errors='replace', cwd=ROOT)
     summary = {}
@@ -119,6 +123,26 @@ def _run_place_seed(args, seed, out_board):
             except ValueError:
                 pass
     return r, summary
+
+
+def _run_place_seed(args, seed, out_board):
+    return run_place_seed(args.input_file, args.intent, seed, out_board,
+                          ignore_nets=args.ignore_nets,
+                          seed_args=args.seed_args)
+
+
+def probe_nets(ignore_nets):
+    """The full-board probe's net patterns: every net but the ignored ones."""
+    return ['*'] + [f'!{p}' for p in (ignore_nets or [])]
+
+
+def probe_full(board, nets, route_args):
+    """One full-board probe route (`converge.probe_route`, no timeout --
+    #713). Shared with rank_rotations.py (#1113)."""
+    from converge import probe_route
+    pr = probe_route(board, nets, extra_args=route_args or [])
+    pr['probe_kind'] = 'full'
+    return pr
 
 
 def main():
@@ -142,7 +166,7 @@ def main():
         pass
 
 
-    full_nets = ['*'] + [f'!{p}' for p in (args.ignore_nets or [])]
+    full_nets = probe_nets(args.ignore_nets)
     rows = []
     for seed in args.seeds:
         out_board = os.path.join(args.out_dir, f'seed_{seed}.kicad_pcb')
@@ -182,10 +206,7 @@ def main():
                 continue
         print(f"[seed {seed}] probing full board "
               f"({len(full_nets)} pattern(s))")
-        from converge import probe_route
-        row['probe'] = probe_route(out_board, full_nets,
-                                   extra_args=args.route_args or [])
-        row['probe']['probe_kind'] = 'full'
+        row['probe'] = probe_full(out_board, full_nets, args.route_args)
         if row['probe']['failures'] is None:
             # Previously silent: the only print sat on the success path, so a
             # seed that produced no verdict vanished from the console AND from

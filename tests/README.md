@@ -40,7 +40,16 @@ Three things to know before you trust its output:
 
 - **`run_all.py --shard` does the splitting**, so discovery and classification
   have ONE source of truth -- the driver never globs `test_*.py` itself. A
-  local run and a 50-way fan-out therefore cover the same set.
+  local run and a 50-way fan-out therefore cover the same set. The slices are
+  packed longest-first onto the least-loaded shard from the measured wall
+  seconds in `tests/run_all_durations.json` (a new test is priced at the
+  median of its kind; with no table it falls back to a strided split by
+  name). `--write-durations` refreshes the table from a GREEN run; commit it
+  when the suite's cost shape has moved. Each shard's banner says whether it
+  was balanced, and on how many measured tests. No balancing beats the
+  slowest single test, so a test of independent rows may declare
+  `RUN_ALL_PARTS = N` and take `--part I/N`: it then runs as N units
+  (`test_placement_ab.py[3/8]`), each sharded on its own.
 - **The verdict is each shard's own exit code**, never the parsed counts. A
   container that OOMs prints no summary line at all, and a driver that decided
   on parsed counts would read that silence as zero failures. A shard that
@@ -486,15 +495,15 @@ bash stress_status.sh                              # DONE/RUNNING/TODO + free sl
 ```
 
 See `tests/stress/README.md` for the full pipeline, the per-board run
-procedure (`RUNBOOK.md`), the ~4 GB-per-job memory watchdog (`run_limited.sh`),
+procedure (`RUNBOOK.md`), the ~12 GB-per-step memory watchdog (`run_limited.sh`),
 the **deterministic no-LLM replay** of a recorded run (`redo_stress_test.py` +
-the command manifest `run_limited.sh` records — fast, reproducible, and the way
+the command manifest the tools record — fast, reproducible, and the way
 to A/B an engine change), and the list of kicad_parser issues the corpus
 preparation currently works around.
 
 The whole suite can also be driven by Claude Code with the `/stress-test-router`
 skill (see `docs/claude-skills.md`): it prepares the corpus if missing, runs the
-boards through the disk-driven queue manager (4 concurrent under the memory cap),
+boards through the disk-driven queue manager (admitted by load, under the per-step memory cap),
 aggregates the results, and drafts GitHub issues for new findings (filed only
 after user approval).
 

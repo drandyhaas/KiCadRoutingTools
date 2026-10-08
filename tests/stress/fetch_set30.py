@@ -37,6 +37,18 @@ h616's per-netclass DDR skew limits, imx6ulz_4l's length-window rules,
 sam9g25's `(layer outer)` rules conditioned on `A.insideCourtyard`, and
 cider's JLCPCB 4-layer rule set.
 
+c64_250407 joined 2026-10-08 as the public stand-in for issue #1219: a
+2-layer all-through-hole pinball MPU (a Bally AS-2518-35 recreation, not
+public) whose owner reported the router's output as spaghetti. It is
+bwack's Commodore 64 ASSY 250407 replica -- 2 layers, 390x180mm, 227
+footprints, a multi-drop A0-A15/D0-D7 bus across eight DRAMs and the
+ROMs, and a routed reference that replicates Commodore's hand-taped
+artwork (buses horizontal on F.Cu, vertical on B.Cu, 574 vias).
+validate_candidate PASS (tier hard); dedupe best 0.044 (set12's abn6502)
+against the 463 corpus boards whose raw_url still resolved (13 now 404,
+and mez_rx is archive-only), with no shared symbol UUIDs. set30 is now
+22 boards, 7 of them 2-layer.
+
 Downloads each board and its sibling project files -- the .kicad_pro (DRC floor,
 #441) and the .kicad_dru (per-layer clearance rules, #498) --
 into $STRESS_DIR/sources/github_set30/. After fetching, run `bash prep_set30.sh`

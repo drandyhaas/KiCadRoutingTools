@@ -36,7 +36,8 @@ __all__ = ['merge_summaries', 'merge_route_summaries', 'summary_min',
            'write_summary_file', 'SUMMARY_RE', 'SUMMARY_MIN_RE', 'REGRADE_RE',
            'RECONCILE_ABORTED', 'EFFORT_KEYS', 'SUMMARY_SINK',
            'RECONCILE_RAISED', 'FINAL_REGRADE', 'reset_run_state',
-           'named_nets', 'regrade_record']
+           'named_nets', 'regrade_record', 'GATE_RE',
+           'apply_improvement_gate']
 
 SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
 # #962: `fab_notes`' ship-time via_in_pad record, printed after the summaries
@@ -44,6 +45,28 @@ VIA_IN_PAD_RE = re.compile(r'VIA_IN_PAD_JSON: (\{.*\})')
 # #1069: the outermost run's final-board re-grade, printed once, after every
 # JSON_SUMMARY of that run and before --json-out is written.
 REGRADE_RE = re.compile(r'JSON_REGRADE: (\{.*\})')
+# #1173: the outermost run's improvement-gate verdict, printed once after every
+# JSON_SUMMARY of that run. route.py publishes it on --json-out as well.
+GATE_RE = re.compile(r'JSON_IMPROVEMENT_GATE: (\{.*\})')
+
+
+def apply_improvement_gate(merged: Optional[Dict], gate: Optional[Dict]):
+    """Set the improvement gate's verdict on a merged document (#1173): the
+    report under ``improvement_gate`` and, when it REVERTED the output to the
+    input board, ``shipped`` / ``shipped_note`` -- the tallies then describe
+    the rejected attempt, not the board that ships. route.py's --json-out
+    writer and `merge_route_summaries` both call this, so the file and the log
+    stay one document (#830)."""
+    if merged is None or gate is None:
+        return merged
+    merged['improvement_gate'] = gate
+    if gate.get('verdict') == 'reject':
+        merged['shipped'] = 'input board'
+        merged['shipped_note'] = (
+            'the improvement gate REJECTED this run and the output is the '
+            'input board; every tally in this file describes the rejected '
+            'attempt, not the shipped board')
+    return merged
 
 # ONE summary sink per PROCESS (#1069). It used to live in route.py, which is
 # `__main__` when run from the CLI -- and the plane finalize reaches its repair
@@ -416,8 +439,11 @@ def regrade_record(summaries: List[Dict], grades: Dict[str, Dict],
     'failed_pads': [{x, y, component_ref, pad_number}, ...]}} for every net the
     run owns (`named_nets` of its summaries, plus nets whose copper it
     changed). `routing_scope` is the outermost pass's routing scope (its
-    single-ended net list), which `successful` / `failed` count, as the
-    router always has. `disturbed_only` names the nets graded ONLY because the
+    single-ended net list), which `successful` counts. `failed` counts every
+    net the run ships broken (#1215): the distinct nets of failed_single,
+    open_single and failed_multipoint -- a net this run ripped and could not
+    re-route is outside pass 1's list, and `len(scope) - successful` read 0
+    for it. `disturbed_only` names the nets graded ONLY because the
     run changed their copper; the caller has already dropped those that were
     no worse than on the input board.
 
@@ -488,7 +514,8 @@ def regrade_record(summaries: List[Dict], grades: Dict[str, Dict],
         'multipoint_pads_total': mp_total,
         'multipoint_pads_connected': mp_conn,
         'successful': len(routed),
-        'failed': len(scope) - len(routed),
+        'failed': len(set(failed_single) | set(open_single)
+                      | {d['net_name'] for d in failed_mp}),
         # Disclosure: broken nets NO summary classified (caught only because
         # the run changed their copper), and nets some summary left failing
         # that the shipped board has connected.
@@ -533,7 +560,8 @@ def _apply_regrade(merged: Dict, regrade: Dict, summaries: List[Dict]) -> None:
         merged['pad_pairs_connected'] = max(
             0, merged['pad_pairs_total'] - _deficit)
     merged['regrade'] = {k: regrade.get(k) for k in (
-        'board', 'graded_nets', 'seconds', 'unowned_broken', 'recovered')}
+        'board', 'graded_nets', 'seconds', 'unowned_broken', 'recovered',
+        'broken_by_run')}
 
 
 def merge_route_summaries(log: str) -> Optional[Dict]:
@@ -559,6 +587,10 @@ def merge_route_summaries(log: str) -> Optional[Dict]:
     vip = VIA_IN_PAD_RE.findall(log)
     if merged is not None and vip:
         merged['via_in_pad'] = json.loads(vip[-1])
+    # #1173: the gate's verdict, when it follows the run's last summary.
+    gt = list(GATE_RE.finditer(log))
+    if gt and gt[-1].start() > log.rfind(raw[-1]):
+        apply_improvement_gate(merged, json.loads(gt[-1].group(1)))
     return merged
 
 

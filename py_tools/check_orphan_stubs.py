@@ -137,10 +137,53 @@ def _endpoint_connected(pt: Tuple[float, float], segments: List[Dict],
             continue
         # Nearest point on the whole segment (endpoints included): catches
         # T-junction taps, near-coincident endpoints, and collinear overlap.
+        # The end cap's own half-width counts here as it does against vias
+        # and pads (#1167): copper overlap is copper overlap.
         t = max(0.0, min(1.0, ((px - sx) * dx + (py - sy) * dy) / seg_len_sq))
-        if math.hypot(px - (sx + t * dx), py - (sy + t * dy)) < s.get('width', 0.0) / 2 + tol:
+        if math.hypot(px - (sx + t * dx), py - (sy + t * dy)) < \
+                s.get('width', 0.0) / 2 + margin:
             return True
-    return False
+    return _reverse_t_anchored(pt, segments, vias, tol)
+
+
+def _reverse_t_anchored(pt, segments, vias, tol) -> bool:
+    """Reverse T (#1167): another same-net track's VERTEX, or a via barrel,
+    landing on the BODY of the stub that owns ``pt`` anchors it -- check_weird's
+    mid-body-anchor rule. A tap smoothing re-anchored on a trunk's old diagonal
+    overlaps the trunk along its body while its free end overhangs; every other
+    checker calls that connected. The tail past the anchor must be a
+    sub-visible nib (at most 3 x the track width, check_weird's allowance): a
+    longer tail is still a dead end."""
+    px, py = pt
+    own = next((s for s in segments if s['start'] == pt or s['end'] == pt), None)
+    if own is None:
+        return False
+    (sx, sy), (ex, ey) = own['start'], own['end']
+    free_is_start = own['start'] == pt
+    dx, dy = ex - sx, ey - sy
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-9:
+        return False
+    w = own.get('width', 0.0)
+    probes = [(vx, vy, vsize) for vx, vy, vsize in (vias or ())]
+    for o in segments:
+        if o is own:
+            continue
+        for v in (o['start'], o['end']):
+            probes.append((v[0], v[1], o.get('width', 0.0)))
+    from connectivity import lands_on_interior
+    cands = []
+    for ox, oy, osize in probes:
+        t = ((ox - sx) * dx + (oy - sy) * dy) / L2
+        if not lands_on_interior(t, L2):                # #1186, as check_weird
+            continue
+        if math.hypot(ox - (sx + t * dx), oy - (sy + t * dy)) < (osize + w) / 2 - 1e-6:
+            cands.append(t)
+    if not cands:
+        return False
+    t = min(cands) if free_is_start else max(cands)
+    tail = (t if free_is_start else 1.0 - t) * math.sqrt(L2)
+    return tail <= max(tol, 3 * w)
 
 
 def find_orphan_stubs(filename: str, net_name: Optional[str] = None,

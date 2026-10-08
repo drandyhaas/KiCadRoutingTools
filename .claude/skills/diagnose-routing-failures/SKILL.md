@@ -130,4 +130,4 @@ python3 -X utf8 py_router/route.py board_routed.kicad_pcb board_retry.kicad_pcb 
     2>&1 | tee /tmp/route_retry.txt
 ```
 
-Routing only the failed nets preserves the successful routes (already in the input file) and is much faster than a full re-run. After the retry, re-check with `check_connected.py`, and if nets still fail, repeat the diagnosis on the new log — the failure mode often changes after the first fix.
+Routing only the failed nets preserves the successful routes (already in the input file) and is much faster than a full re-run. **On a board with pours, add the poured nets to `--nets` too** (#1032): the retry's copper can cut a pour, and its in-run plane finalize repairs only the poured nets inside its scope. A broken poured net is retried the same way, with `route.py`, never a standalone `repair_planes.py` (#1112). After the retry, re-check with `check_connected.py`, and if nets still fail, repeat the diagnosis on the new log — the failure mode often changes after the first fix.

@@ -497,8 +497,11 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
 _MERGE_MEMO: dict = {}
 # Cap: entries pin their keyed objects alive (keepalive against id() reuse), so
 # the memo must not grow unbounded in a long-lived GUI session. Cleared wholesale
-# on overflow -- this is a within-run speedup, not a correctness cache.
+# on overflow -- this is a within-run speedup, not a correctness cache. Bounded
+# by bytes too: each entry pins a stacked copy of every source, and a board's
+# fragility field alone can be a million rows.
 _MERGE_MEMO_MAX = 32
+_MERGE_MEMO_BYTES_MAX = 256 * 2 ** 20
 
 
 def merge_track_proximity_costs(obstacles: GridObstacleMap,
@@ -569,9 +572,12 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
     if env_knobs.PROXIMITY_SUM_MODE == 'zoned' and config is not None:
         _zone_rects = proximity_max_zone_rects(config, GridCoord(config.grid_step))
     key = id(per_net_costs)
+    # The member arrays' ids IN FULL, not a sum of their low bits: two
+    # different compositions summing to the same value would replay the
+    # wrong costs. The entry pins its arrays, so a live id is never reused.
     sig = (len(arrays_to_merge),
            sum(len(a) for a in arrays_to_merge),
-           sum(id(a) & 0xFFFFFFFF for a in arrays_to_merge),
+           tuple(id(a) for a in arrays_to_merge),
            env_knobs.PROXIMITY_SUM_MODE,
            env_knobs.PROXIMITY_SOFTCAP_ALPHA,
            tuple(_zone_rects) if _zone_rects else None)
@@ -620,23 +626,12 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
         # Bound first, then store WITH keepalive refs (see the note above):
         # per_net_costs and the member arrays are held so their ids cannot be
         # recycled while this entry is live.
-        if len(_MERGE_MEMO) >= _MERGE_MEMO_MAX:
+        if (len(_MERGE_MEMO) >= _MERGE_MEMO_MAX
+                or sum(e[1].nbytes for e in _MERGE_MEMO.values())
+                + all_costs.nbytes > _MERGE_MEMO_BYTES_MAX):
             _MERGE_MEMO.clear()
         _MERGE_MEMO[key] = (sig, all_costs, per_net_costs, arrays_to_merge)
     obstacles.set_layer_proximity_batch(all_costs)
-
-
-def _maybe_build_attraction_field(obstacles, config):
-    """P3 (Rust 0.18.5): precompute the per-layer attraction field so the
-    hot path is an O(1) lookup. hasattr-guarded so an older .so (no method)
-    keeps the exact scan fallback."""
-    if getattr(config, 'vertical_attraction_cost', 0) and \
-            hasattr(obstacles, 'build_attraction_field'):
-        from routing_config import GridCoord
-        coord = GridCoord(config.grid_step)
-        radius = coord.to_grid_dist(config.vertical_attraction_radius)
-        bonus = config.scaled_cell_units(config.vertical_attraction_cost)
-        obstacles.build_attraction_field(radius, bonus)
 
 
 def add_cross_layer_tracks(obstacles: GridObstacleMap, pcb_data: PCBData,

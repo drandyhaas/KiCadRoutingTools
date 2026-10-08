@@ -18,9 +18,11 @@ boards). For a full-board outline the fallback prices only a board-edge
 band -- near-useless; the exact fill is the real lever.
 
 Delivery reuses the congestion-field transport (#424 Phase D): the field is
-computed once at batch start into (N, 4) [layer, gx, gy, cost] rows under a
-reserved track_proximity_cache key; merge_track_proximity_costs re-applies
-it on every per-net prepare in every path. Vias in fragile cells pay
+computed once at batch start into (N, 4) [layer, gx, gy, cost] rows, one
+track_proximity_cache entry per pour NET (`fragility_cache_key`);
+merge_track_proximity_costs re-applies them on every per-net prepare in every
+path, leaving out the routed net's own pours (`without_own_fragility`): a
+same-net track joins its plane, it cannot cut it. Vias in fragile cells pay
 via_proximity_cost x the cell cost through the Rust via branch (the C6
 coupling), which is exactly right: a via is a permanent hole in the plane.
 
@@ -67,8 +69,70 @@ import numpy as np
 from kicad_parser import PCBData
 from routing_config import GridCoord, GridRouteConfig
 
-# Reserved track_proximity_cache key (B1 uses -1, congestion -2).
-PLANE_FRAGILITY_CACHE_KEY = -3
+def fragility_cache_key(net_id) -> tuple:
+    """track_proximity_cache key of one pour net's fragility rows.
+
+    One key per pour NET rather than one for every pour, so a builder can
+    leave the routed net's OWN pours out: a plane net routed in the step (the
+    #562 route step takes them, and the finalize's joins and reconnects do
+    too) used to pay fragility on its own pour's necks, where it belongs, and
+    its vias 10x that."""
+    return ('frag', net_id)
+
+
+def without_own_fragility(cache, net_ids):
+    """`cache` without the fragility rows of `net_ids`' own pours -- the
+    same dict when there are none, so the merge memo keeps its key."""
+    own = {k for k in (fragility_cache_key(n) for n in net_ids)
+           if cache.get(k) is not None and len(cache[k]) > 0}
+    if not own:
+        return cache
+    return {k: v for k, v in cache.items() if k not in own}
+
+
+def _dedup_max(out: np.ndarray) -> np.ndarray:
+    """Rows of `out` reduced to one per (layer, gx, gy) cell, keeping the
+    largest cost: overlapping same-layer pours of one net emit the shared
+    cells once per zone, and a consumer that sums rows would double-charge
+    them."""
+    # Sort order is (layer, gx, gy, cost, original index). Packing the four
+    # columns into one offset int64 key lets a single stable (radix) argsort
+    # produce the identical permutation a 4-key lexsort does, at a fraction
+    # of the cost; the lexsort fallback covers a grid so large the packing
+    # would overflow.
+    o64 = out.astype(np.int64)
+    mins = o64.min(axis=0)
+    spans = o64.max(axis=0) - mins + 1
+    if int(spans[0]) * int(spans[1]) * int(spans[2]) * int(spans[3]) < (1 << 62):
+        cell_key = ((o64[:, 0] - mins[0]) * spans[1]
+                    + (o64[:, 1] - mins[1])) * spans[2] + (o64[:, 2] - mins[2])
+        order = np.argsort(cell_key * spans[3] + (o64[:, 3] - mins[3]),
+                           kind='stable')
+        out = out[order]
+        same = np.diff(cell_key[order]) == 0
+    else:
+        order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
+        out = out[order]
+        same = ((np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0)
+                & (np.diff(out[:, 2]) == 0))
+    keep = np.ones(len(out), dtype=bool)
+    keep[:-1][same] = False   # the sort put the max cost last per cell
+    return out[keep]
+
+
+def _publish_by_net(cache, rows_by_net, published=()):
+    """Write each pour net's deduped rows under its own key, and drop the
+    keys in `published` that this publish no longer carries. Returns the
+    keys written."""
+    keys = set()
+    for net_id, rows in rows_by_net.items():
+        if rows:
+            key = fragility_cache_key(net_id)
+            cache[key] = _dedup_max(np.vstack(rows))
+            keys.add(key)
+    for key in set(published) - keys:
+        cache.pop(key, None)
+    return keys
 
 
 def fragility_cost_mm() -> float:
@@ -192,6 +256,7 @@ class FragilityField:
         self.cache = cache
         self.refreshes = 0
         self.refresh_s = 0.0
+        self._published = {fragility_cache_key(st.net_id) for st in states}
 
     @classmethod
     def _disc(cls, r: int) -> np.ndarray:
@@ -324,40 +389,24 @@ class FragilityField:
         self.refresh_s += _time.perf_counter() - t0
 
     def publish(self):
-        rows = [st.rows for st in self.states if st.rows is not None]
-        if rows:
-            out = np.vstack(rows)
-            # Same max-cost dedup the STATIC field applies (review DRC-7):
-            # overlapping same-layer pours emit the shared cells once per
-            # zone, and the initial registration lexsorts to per-cell max --
-            # a refresh that just vstacks re-introduces the duplicates, so a
-            # cost consumer that sums rows double-charges overlap cells
-            # relative to the static field.
-            # Sort order is (layer, gx, gy, cost, original index). Packing the
-            # four columns into one offset int64 key lets a single stable
-            # (radix) argsort produce the identical permutation the 4-key
-            # lexsort did, at a fraction of the cost; the lexsort fallback
-            # covers a grid so large the packing would overflow.
-            o64 = out.astype(np.int64)
-            mins = o64.min(axis=0)
-            spans = o64.max(axis=0) - mins + 1
-            if int(spans[0]) * int(spans[1]) * int(spans[2]) * int(spans[3]) < (1 << 62):
-                cell_key = ((o64[:, 0] - mins[0]) * spans[1]
-                            + (o64[:, 1] - mins[1])) * spans[2] + (o64[:, 2] - mins[2])
-                order = np.argsort(cell_key * spans[3] + (o64[:, 3] - mins[3]),
-                                   kind='stable')
-                out = out[order]
-                same = np.diff(cell_key[order]) == 0
-            else:
-                order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
-                out = out[order]
-                same = ((np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0)
-                        & (np.diff(out[:, 2]) == 0))
-            keep = np.ones(len(out), dtype=bool)
-            keep[:-1][same] = False   # sort put max cost last per cell
-            self.cache[PLANE_FRAGILITY_CACHE_KEY] = out[keep]
-        else:
-            self.cache.pop(PLANE_FRAGILITY_CACHE_KEY, None)
+        by_net: Dict[int, list] = {}
+        for st in self.states:
+            if st.rows is not None:
+                by_net.setdefault(st.net_id, []).append(st.rows)
+        self._published = _publish_by_net(self.cache, by_net, self._published)
+
+
+def carve_in_memory_copper(config, pcb_data) -> None:
+    """Carve ALL of pcb_data's copper out of a just-registered dynamic field.
+
+    The field is rasterized from a fill of the board FILE (or the live board
+    as filled when the GUI started routing), so a batch handed an in-memory
+    PCBData -- a reconcile lap or plane-finalize sub-run (GUI and CLI), the
+    GUI's own runs -- would price pour necks as they were before this run's
+    copper landed. One full refresh brings it to the copper as it is;
+    idempotent for copper the fill already has."""
+    fragility_on_copper_change(config, pcb_data, pcb_data.segments,
+                               pcb_data.vias)
 
 
 def fragility_on_copper_change(config, pcb_data, segments, vias) -> None:
@@ -416,8 +465,8 @@ def compute_plane_fragility_cells_ex(pcb_data: PCBData,
                                      config: GridRouteConfig):
     """(cells, geometry): the rows of `compute_plane_fragility_cells` plus the
     `_geometry` record saying which copper they were rasterized from."""
-    cells, _states, geometry = _compute_cells_and_states(pcb_data, config,
-                                                         want_states=False)
+    cells, _states, geometry, _by_net = _compute_cells_and_states(
+        pcb_data, config, want_states=False)
     return cells, geometry
 
 
@@ -426,10 +475,10 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     cost_mm = fragility_cost_mm()
     if cost_mm <= 0:
         return (np.empty((0, 4), dtype=np.int32), [],
-                _geometry('none', why='KICAD_PLANE_FRAGILITY_COST=0'))
+                _geometry('none', why='KICAD_PLANE_FRAGILITY_COST=0'), {})
     if not pcb_data.zones:
         return (np.empty((0, 4), dtype=np.int32), [],
-                _geometry('none', why='the board has no zones'))
+                _geometry('none', why='the board has no zones'), {})
     try:
         width_mm = float(os.environ.get('KICAD_PLANE_FRAGILITY_WIDTH', '2.0') or 2.0)
     except ValueError:
@@ -560,6 +609,7 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
                   f"({max(xs):.4f},{max(ys):.4f})")
 
     states = []
+    rows_by_net: Dict[int, list] = {}
     for znet, zlayer, zpoly in polys:
         li = layer_index.get(zlayer)
         if li is None or len(zpoly) < 3:
@@ -595,25 +645,21 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
             costs,
         ])
         rows.append(zone_rows)
+        rows_by_net.setdefault(znet, []).append(zone_rows)
         if want_states:
             states.append(_PourState(li, zlayer, znet, gx0, gy0,
                                      mask, dist, zone_rows,
                                      net_name=_zname))
 
     if not rows:
-        return np.empty((0, 4), dtype=np.int32), [], geometry
-    out = np.vstack(rows)
+        return np.empty((0, 4), dtype=np.int32), [], geometry, {}
     # overlapping zones on one layer: keep the max cost per cell
-    order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
-    out = out[order]
-    keep = np.ones(len(out), dtype=bool)
-    same = (np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0) & (np.diff(out[:, 2]) == 0)
-    keep[:-1][same] = False  # lexsort put max cost last within a cell group
-    return out[keep], states, geometry
+    return _dedup_max(np.vstack(rows)), states, geometry, rows_by_net
 
 
 def register_plane_fragility(pcb_data: PCBData, config: GridRouteConfig,
-                             track_proximity_cache: Dict) -> None:
+                             track_proximity_cache: Dict,
+                             dynamic: bool = None) -> None:
     """Compute and register the field under the reserved cache key (no-op
     when disabled or no zones). With KICAD_PLANE_FRAGILITY_DYNAMIC on (the
     default), also arm the #466 incremental field on `config` so the
@@ -624,14 +670,18 @@ def register_plane_fragility(pcb_data: PCBData, config: GridRouteConfig,
     `batch_route`'s JSON summary can disclose an outline fallback, and
     above all a MACHINE-DEPENDENT one, to whatever grades the run. Set even
     when the field is empty, so a summary never has to guess between "no
-    zones" and "nobody recorded it"."""
-    dynamic = os.environ.get('KICAD_PLANE_FRAGILITY_DYNAMIC', '1') != '0'
-    cells, states, geometry = _compute_cells_and_states(pcb_data, config,
-                                                        want_states=dynamic)
+    zones" and "nobody recorded it".
+
+    `dynamic` False registers the static field whatever the environment says,
+    for an engine with no commit hooks to keep a dynamic one current."""
+    if dynamic is None:
+        dynamic = os.environ.get('KICAD_PLANE_FRAGILITY_DYNAMIC', '1') != '0'
+    cells, states, geometry, rows_by_net = _compute_cells_and_states(
+        pcb_data, config, want_states=dynamic)
     config._plane_fragility_geometry = geometry
     if not len(cells):
         return
-    track_proximity_cache[PLANE_FRAGILITY_CACHE_KEY] = cells
+    _publish_by_net(track_proximity_cache, rows_by_net)
     n_zones = len({(z.layer, z.net_id) for z in pcb_data.zones})
     mode = 'static'
     if dynamic and states:

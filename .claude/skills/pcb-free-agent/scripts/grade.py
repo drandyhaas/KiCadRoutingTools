@@ -46,6 +46,8 @@ def _poses(board):
     sys.path.insert(0, os.path.join(ROOT, 'py_router'))
     from kicad_parser import parse_kicad_pcb
     pcb = parse_kicad_pcb(board)
+    # `f.pads` on purpose (#1143): these are the poses a run can MOVE, and
+    # the quench moves a part whose only pads are paste/mask apertures.
     return {k: (round(f.x, 4), round(f.y, 4), round((f.rotation or 0) % 360, 3),
                 f.layer)
             for k, f in pcb.footprints.items() if f.pads}
@@ -105,7 +107,11 @@ def grade(board, baseline, intent=None, mode='full', label=None, out_dir=None,
                                 '--json-out', rj, '-o',
                                 os.path.join(tmp, 'render.png'), '--quiet'])
     off = ((_load(rj) or {}).get('checklist') or {}).get('a_off_outline') or {}
-    out['off_outline_pad_copper'] = off.get('pad_copper')
+    # #1096: the gating subset (castellated edges exempt), the list
+    # check_assembly's verdict reads; an older render has only pad_copper.
+    out['off_outline_pad_copper'] = (off.get('pad_copper_gating')
+                                     if 'pad_copper_gating' in off
+                                     else off.get('pad_copper'))
     out['off_outline_graphic_copper'] = off.get('graphic_copper')
     # a pad in a (keepout (tracks not_allowed)) band cannot be routed (#1031)
     out['keepout_copper'] = off.get('keepout_copper')

@@ -49,8 +49,8 @@
     "path": "bmc-breakout-board.kicad_pcb",
     "branch": "main",
     "file": "dcscm_breakout.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/antmicro/dc-scm-breakout-board/main/bmc-breakout-board.kicad_pcb",
-    "github_url": "https://github.com/antmicro/dc-scm-breakout-board/blob/main/bmc-breakout-board.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/antmicro/dc-scm-breakout-board/230216d638dbdfc4c7e4059ae43b110dc832e202/bmc-breakout-board.kicad_pcb",
+    "github_url": "https://github.com/antmicro/dc-scm-breakout-board/blob/230216d638dbdfc4c7e4059ae43b110dc832e202/bmc-breakout-board.kicad_pcb",
     "size_kb": 9532,
     "layers_est": 6,
     "footprints": 167,
@@ -63,7 +63,7 @@
     "lane": "bmc_dcscm",
     "license": "see repo",
     "short_name": "dcscm_breakout",
-    "note": "DC-SCM BMC breakout board, 6 layers, 170-pad card-edge breakout"
+    "note": "DC-SCM BMC breakout board, 6 layers, 170-pad card-edge breakout. raw_url re-pinned 2026-10-08 to 230216d6, the commit that served the corpus's version: 2026-09-28 push to main brought in a side branch whose commit 97528a5 (2026-08-27, '[#103846] Rename kicad project') renamed bmc-breakout-board.* -> dc-scm-breakout-board.* (and heavily revised the board: ~17 MB, KiCad 10 format). That commit also carries a .kicad_dru (248 B, one diff-pair rule on In2.Cu), which the corpus has never fetched; recorded runs graded without it."
   },
   {
     "set": "set26",
@@ -181,8 +181,8 @@
     "path": "renode-reference-platform.kicad_pcb",
     "branch": "main",
     "file": "stm32h7_renode_ref.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/antmicro/stm32h7-renode-reference-platform/main/renode-reference-platform.kicad_pcb",
-    "github_url": "https://github.com/antmicro/stm32h7-renode-reference-platform/blob/main/renode-reference-platform.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/antmicro/stm32h7-renode-reference-platform/f2da5115fbfa1bd11d4c8cf1f17f88f376a1b538/renode-reference-platform.kicad_pcb",
+    "github_url": "https://github.com/antmicro/stm32h7-renode-reference-platform/blob/f2da5115fbfa1bd11d4c8cf1f17f88f376a1b538/renode-reference-platform.kicad_pcb",
     "size_kb": 23409,
     "layers_est": 6,
     "footprints": 400,
@@ -195,7 +195,7 @@
     "lane": "mcu_dev",
     "license": "see repo",
     "short_name": "stm32h7_renode_ref",
-    "note": "STM32H7 Renode reference platform, 6 layers / 400 fp"
+    "note": "STM32H7 Renode reference platform, 6 layers / 400 fp. raw_url re-pinned 2026-10-08 to f2da5115, the commit that served the corpus's version: 2026-09-28 push to main brought in commit 8780d50 ('Rename project', authored 2026-06-16) renaming renode-reference-platform.* -> stm32h7-renode-reference-platform.* (board revised since)."
   },
   {
     "set": "set26",

@@ -334,17 +334,29 @@ def _min_step(vals: Sequence[float]) -> float:
     return min((b - a for a, b in zip(vals, vals[1:])), default=float('inf'))
 
 
+def _pads(fp) -> list:
+    """`fp`'s pads without its aperture-only ones (#1143): a thermal pad's
+    split paste windows are not pads, and read as pads they collapse the
+    lattice step (tigard U3 read 0.033 mm; its pins read 0.108). Bound
+    lazily, as this module keeps a stdlib-only import surface at module scope.
+    """
+    from kicad_parser import non_aperture_pads
+    return non_aperture_pads(fp)
+
+
 def pad_pitch(fp) -> float:
     """The part's own minimum pad-to-pad spacing, in mm.
 
     Read off the pad lattice rather than parsed from the footprint NAME: a
     house library's `MY_LIB:U_TINY` carries no pitch in its name, and a name
-    that does carry one can disagree with the geometry.
+    that does carry one can disagree with the geometry. Aperture-only pads
+    are not on the lattice (`_pads`).
     """
-    if len(fp.pads) < 2:
+    pads = _pads(fp)
+    if len(pads) < 2:
         return float('inf')
-    xs = sorted({round(p.local_x, 3) for p in fp.pads})
-    ys = sorted({round(p.local_y, 3) for p in fp.pads})
+    xs = sorted({round(p.local_x, 3) for p in pads})
+    ys = sorted({round(p.local_y, 3) for p in pads})
     return min(_min_step(xs), _min_step(ys))
 
 
@@ -371,17 +383,18 @@ def fine_pitch_parts(pcb_data, min_pads: int = MIN_PADS) -> List[str]:
     out: List[str] = []
     for ref in sorted(pcb_data.footprints):
         fp = pcb_data.footprints[ref]
-        if len(fp.pads) < min_pads:
+        pads = _pads(fp)
+        if len(pads) < min_pads:
             continue
         name = (fp.footprint_name or '').upper()
-        smd = sum(1 for p in fp.pads if p.drill == 0)
-        tht = sum(1 for p in fp.pads if p.drill > 0)
+        smd = sum(1 for p in pads if p.drill == 0)
+        tht = sum(1 for p in pads if p.drill > 0)
         if tht > smd and 'PGA' not in name:
             continue
         pitch = pad_pitch(fp)
         named = any(k in name for k in _ARRAY_KEYS)
         fine = (pitch <= FINE_PITCH_MM
-                or (len(fp.pads) > LARGE_PAD_COUNT
+                or (len(pads) > LARGE_PAD_COUNT
                     and pitch <= FINE_PITCH_LARGE_MM))
         # A named array package still has to BE fine-pitch to have a lane
         # problem: a 1.27mm BGA escapes without help.
@@ -676,9 +689,14 @@ def _lane_parts(pcb_data, pcb_file, track_width, clearance):
 
 
 def _part_rect(fp) -> Tuple[float, float, float, float]:
-    """The part's pad bounding box in board coordinates."""
-    xs = [p.global_x for p in fp.pads]
-    ys = [p.global_y for p in fp.pads]
+    """The part's pad bounding box in board coordinates (aperture-only pads
+    skipped, `_pads`). A part with no other pad gets the degenerate box at its
+    origin rather than a `min()` of nothing."""
+    pads = _pads(fp)
+    if not pads:
+        return fp.x, fp.y, fp.x, fp.y
+    xs = [p.global_x for p in pads]
+    ys = [p.global_y for p in pads]
     return min(xs), min(ys), max(xs), max(ys)
 
 
@@ -884,7 +902,8 @@ class PadCorridors(object):
 
 class FaceAssignment(NamedTuple):
     """Every pad of one part and the face it escapes through (#850)."""
-    #: `((pad, face | None), ...)` in `fp.pads` order. `None` is INTERIOR: the
+    #: `((pad, face | None), ...)` in `fp.pads` order, aperture-only pads
+    #: skipped (#1143). `None` is INTERIOR: the
     #: pad is not on the part's own copper box, so it cannot leave sideways at
     #: any pitch and needs a via. Rolling one into a face's demand blames the
     #: face for a fanout problem.
@@ -893,7 +912,8 @@ class FaceAssignment(NamedTuple):
     pitch_mm: float
     pitch_source: str            # 'pad_lattice' | 'lane_fallback'
     #: The answer the BOX half alone gave, index-aligned with `faces` because
-    #: both are built in one pass over `fp.pads` (#862). NOT a count: the two
+    #: both are built in one pass over the part's pins (`_pads`, #862,
+    #: #1143). NOT a count: the two
     #: ledgers count over different populations -- `part_escape` drops
     #: `ignore_net_ids`, `face_lane_ledger` applies an owner filter -- so a
     #: count taken here would close the identity
@@ -987,7 +1007,7 @@ def assign_faces(fp, geom, *, lane_mm, fallback_rect=None,
 
     out = []
     boxes = []
-    for pad in (fp.pads or []):
+    for pad in _pads(fp):
         box = None if geom is None else _pad_box(geom, pad)
         bf = face_of(pad, rect, pitch, pad_box=box)
         boxes.append(bf)
@@ -1431,7 +1451,7 @@ def _blocked_span(pcb_data, ref, rect, face, reach,
         if other == ref:
             continue
         ofp = pcb_data.footprints[other]
-        if not ofp.pads:
+        if not _pads(ofp):
             continue
         oth = None if own is None else sides.get(other)
         if own is not None:

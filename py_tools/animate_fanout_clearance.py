@@ -74,9 +74,13 @@ class _Recorder:
 # Shared with render_placement / the movie camera (#431). Moved to
 # movie_camera.py rather than copied: these are pure functions and the versions
 # there are byte-for-byte these, verified over net ids -2..399 and t in [0,1],
-# so docs/fanout-cap-placement.gif is unchanged. movie_camera imports no PIL and
+# so docs/fanout-cap-placement.gif was unchanged by the move (it was drawn in the
+# dark theme; since #1081 the default is light, so a regeneration without
+# $KICAD_RENDER_THEME=dark draws it light). movie_camera imports no PIL and
 # no pygame at module scope precisely so this import stays cheap here.
-from render_theme import DARK as _TH
+# the CONFIGURED default theme (#1081: light, or $KICAD_RENDER_THEME)
+from render_theme import default_theme as _default_theme
+_TH = _default_theme()
 from movie_camera import (lerp_rect as _lerp_rect, net_color as _net_color,
                           smoothstep as _smoothstep)
 
@@ -265,12 +269,23 @@ def main():
     p.add_argument("--cap-prefix", default="C,R,FB")
     p.add_argument("--lock", nargs="+", default=None, metavar="REF")
     p.add_argument("--max-passes", type=int, default=30)
+    from placement.cli_gates import add_intent_arg, load_intent_or_exit
+    add_intent_arg(p, summary=(
+        "Its decap limits and declared rotations are held while caps move, "
+        "exactly as place_fanout_clearance.py --intent holds them (#1067, "
+        "#1122). The GIF "
+        "records the gated pass; when the run keeps the pass without the "
+        "gate instead (its `Decap:` line says so), the GIF is not of the "
+        "result kept."))
     # animation controls
     p.add_argument("--size", type=int, default=900, help="GIF size in px")
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--sub-frames", type=int, default=14,
                    help="Interpolated frames per cap move (smoothness)")
     args = p.parse_args()
+    intent, _rc = load_intent_or_exit(args)
+    if _rc:
+        return _rc
 
     if args.output_file is None:
         base, _ = os.path.splitext(args.input_file)
@@ -278,6 +293,16 @@ def main():
 
     print(f"Loading {args.input_file}...")
     pcb_data = parse_kicad_pcb(args.input_file)
+    if intent is not None:
+        # #1122: a part two blocks declare at different angles is refused
+        # before anything moves, as place_fanout_clearance refuses it.
+        from placement import floorplan as _fp1122
+        from placement.fanout_clearance import declared_cap_rotations
+        try:
+            declared_cap_rotations(intent, pcb_data)
+        except _fp1122.IntentError as exc:
+            print(f"cannot use intent {args.intent}: {exc}", file=sys.stderr)
+            return 2
 
     rec = _Recorder()
     repair_fanout_clearance(
@@ -292,7 +317,7 @@ def main():
         displacement_growth=args.displacement_growth,
         allow_rotations=not args.no_rotate, cap_prefix=args.cap_prefix,
         lock_refs=args.lock, max_passes=args.max_passes,
-        on_move=rec,
+        on_move=rec, intent=intent,
     )
 
     if not rec.frames or len(rec.frames) < 2:

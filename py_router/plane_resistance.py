@@ -656,7 +656,7 @@ def print_multi_net_resistance(results: Dict[str, Dict]):
     print(ascii_safe(f"  {'Net':<25} {'Path(mm)':<10} {'AvgW(mm)':<10} {'R(mΩ)':<10} {'Imax(A)':<12}"))
     print(f"  {'-'*74}")
 
-    any_extrapolated = False
+    any_extrapolated = any_diag = False
     for net_name, result in results.items():
         if result:
             r_str = f"{result['resistance']*1000:.3f}" if result['resistance'] < float('inf') else "N/A"
@@ -667,12 +667,18 @@ def print_multi_net_resistance(results: Dict[str, Dict]):
             else:
                 i_str = f"{result['max_current']:.2f}*"
                 any_extrapolated = True
-            print(f"  {net_name:<25} {result['path_length']:<10.1f} {result['avg_width']:<10.1f} {r_str:<10} {i_str:<12}")
+            diag = result.get('path_basis') == 'diagonal'
+            any_diag = any_diag or diag
+            print(f"  {net_name + (' +' if diag else ''):<25} {result['path_length']:<10.1f} {result['avg_width']:<10.1f} "
+                  f"{r_str:<10} {i_str:<12}")
         else:
             print(f"  {net_name:<25} {'N/A':<10} {'N/A':<10} {'N/A':<10} {'N/A':<12}")
 
     print(f"  {'-'*74}")
     print(f"  Path = longest MST route, AvgW = avg polygon width along path")
+    if any_diag:
+        print(f"  + no route between the net's vias (none yet: the pour runs before any routing) -- "
+              f"Path is its region's bounding diagonal")
     print(f"  Imax = IPC-2221 chart fit; inner layers carry 2221's 2x derating, "
           f"which IPC-2152 overturned")
     if any_extrapolated:

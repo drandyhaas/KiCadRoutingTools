@@ -93,9 +93,24 @@ _DECLARED = {
                      'not a body -- the refusal must read copper'),
     # -- goes through the model; the call here is not a ladder.
     (os.path.join('py_placer', 'placement', 'legality.py'),
-     'part_local_bounds'): (1, 'the +/-0.5mm fiction for a part the model '
+     '_part_local_bounds_and_bodies'): (1, 'the +/-0.5mm fiction for a part the model '
                             'reports as SOURCE_NONE; the ladder itself is '
                             'body.board_bodies'),
+    # -- #1098: the plug's mating region and who is in it, on the QUENCH's
+    #    ladder (courtyard, else pads) on purpose: the seat enforces the
+    #    keep-out on those rects, and the checker must grade the SAME rect
+    #    or the generator is looser than the checker.
+    (os.path.join('py_placer', 'placement', 'floorplan.py'),
+     'derived_mating_keepouts'): (1, "the plug's own COURTYARD is the "
+                                  'region; a body is not the question'),
+    (os.path.join('py_placer', 'placement', 'floorplan.py'),
+     '_plug_seat_rect'): (1, "the plug's own COURTYARD reaching the "
+                          'outline is what "seated" means'),
+    (os.path.join('py_placer', 'placement', 'floorplan.py'),
+     'seated_plugs'): (1, 'reads the courtyards `_plug_seat_rect` tests'),
+    (os.path.join('py_placer', 'placement', 'floorplan.py'),
+     'mating_keepout_findings'): (3, "the quench's rect, so seat and "
+                                  'checker grade one currency (#1098 D3)'),
     (os.path.join('py_tools', 'board_brief.py'),
      'parts_section'): (1, 'fallback only, when the model returns no box; '
                         'the extent itself is body.occupancy_local'),
@@ -104,19 +119,21 @@ _DECLARED = {
     #    here, and the one a follow-up issue owns.
     (os.path.join('py_placer', 'placement', 'quench.py'),
      '_Part.__init__'): (
-        2, 'the SEARCH ladder, now the OFF ARM of `body_model` (#916). '
+        3, 'the SEARCH ladder, now the OFF ARM of `body_model` (#916). '
         '`placement.body` supplies `occupancy_local` when the flag is armed; '
-        'these two calls remain as the unarmed path, deliberately, so the '
+        'two of these calls remain as the unarmed path, deliberately, so the '
         'A/B control arm is the OLD CODE rather than a re-derivation that '
-        'happens to agree. NOTE FOR WHOEVER FLIPS THE DEFAULT: this census '
-        'compares COUNTS and PRESENCE, never this sentence, so it cannot tell '
-        'you the reason has gone stale -- update it by hand when the default '
-        'moves. Adopting the model changes which poses `seeder.pose_ok` '
-        'admits (it reads these baked bounds) and so the basin the anneal '
-        'lands in: an engine change needing its own A/B, not a ride-along on '
-        'a reporting one. Measured at #896: it grows 23 of 1349 corpus parts '
-        'and shrinks none, on 4 of 22 boards. Re-measured at #916 on '
-        'esp_prog: 5 parts grow, 0 shrink, largest U2 5.707 -> 27.04 mm2.'),
+        'happens to agree. The THIRD is `padbox_local` (#1101), the PAD '
+        'copper box of the waived-courtyard seat -- a pad question, not a '
+        'body one. NOTE FOR WHOEVER FLIPS THE DEFAULT: this census compares '
+        'COUNTS and PRESENCE, never this sentence, so it cannot tell you the '
+        'reason has gone stale -- update it by hand when the default moves. '
+        'Adopting the model changes which poses `seeder.pose_ok` admits (it '
+        'reads these baked bounds) and so the basin the anneal lands in: an '
+        'engine change needing its own A/B, not a ride-along on a reporting '
+        'one. Measured at #896: it grows 23 of 1349 corpus parts and shrinks '
+        'none, on 4 of 22 boards. Re-measured at #916 on esp_prog: 5 parts '
+        'grow, 0 shrink, largest U2 5.707 -> 27.04 mm2.'),
     (os.path.join('py_placer', 'placement', 'quench.py'),
      'QuenchState.__init__'): (1, 'builds the courtyard map the _Part OFF arm '
                                'consumes; the armed path reads '
@@ -142,10 +159,23 @@ _DECLARED = {
      'beautify_labels'): (1, 'reads the courtyard map _world_courtyard '
                           'consumes; same argument'),
     (os.path.join('py_placer', 'placement', 'fanout_clearance.py'),
-     '_Repair.__init__'): (3, 'the #313 via-nudge cap model, which prices its '
+     '_Repair.__init__'): (2, 'the #313 via-nudge cap model, which prices its '
                            'own clearance ceiling (#768/#769) and is the one '
                            'PLACEMENT step that lays copper; a separate '
                            'question from what a part body is'),
+    (os.path.join('py_placer', 'placement', 'fanout_clearance.py'),
+     'ball_field_box'): (1, "the same cap model's BGA ball field, factored out "
+                         'of _Repair.__init__ so the joint fanout '
+                         '(awx/joint_escape.movable_refs) asks the cap step '
+                         'its own question'),
+    (os.path.join('py_placer', 'placement', 'fanout_clearance.py'),
+     'movable_cap_refs'): (2, 'the same cap model: which caps the cap step '
+                           'may move (near a ball field, unlocked), factored '
+                           'out of _Repair.__init__ with ball_field_box'),
+    (os.path.join('py_placer', 'placement', 'fanout_clearance.py'),
+     'package_box'): (1, "the same cap model: the BGA's package a part must "
+                      'stay beneath under --beneath-only (the courtyard of '
+                      'the BGA itself, not a part body question)'),
 
     # -- convertible, and simply not in this PR. Each is a candidate for the
     #    follow-up, and saying so is the point: a reader can tell a decision

@@ -64,6 +64,11 @@ REFUSED_TOOLS = {
         'generates a SLATE of placements to choose between; the plan format has '
         'no placement step, and picking one is a decision, not a replayable '
         'step. Run it on the CLI and start the plan from the adopted board'),
+    'rank_rotations.py': (
+        'seeds the board once per candidate angle of one part and writes the '
+        'ranking (#1113); the plan format has no placement step, and choosing '
+        'an angle is a decision. Run it on the CLI and start the plan from '
+        'the board seeded at the chosen angle'),
     'place_pose.py': (
         'applies a pose the MODEL chose (#892); the plan format has no '
         'placement step, and a pose is a decision rather than a replayable '
@@ -73,6 +78,10 @@ REFUSED_TOOLS = {
     'beautify_labels.py': (
         'tidies reference-designator silkscreen; no plan step yet -- run it '
         'before/after the plan'),
+    'add_rule_area.py': (
+        'writes a copper keep-out rule area that every later route step obeys '
+        '(#1200); the plan format has no step for it. Run it on the CLI and '
+        'start the plan from its output'),
 }
 
 # CLI flag -> plan params key (numbers parsed; lists collected).
@@ -91,6 +100,10 @@ FLAG_PARAMS = {
     # the generic fallthrough carried it as 'ordering', which matches no
     # dialog control, so a replayed plan silently routed in default order.
     '--ordering': 'ordering_strategy',
+    # #1146: the keep-away free radius and cost (Advanced-tab spin controls of
+    # the same names).
+    '--keep-away-free': 'keep_away_free',
+    '--keep-away-cost': 'keep_away_cost',
     # route_planes' --zone-clearance is type=float (a value, NOT a toggle); it
     # must consume its argument here. It briefly lived in BOOL_FLAGS, which
     # dropped the value and set zone_clearance=True -> the plan executor's
@@ -184,10 +197,17 @@ LIST_FLAGS = {
     # side accepts the same raw spec strings (fanout_gui parses them like
     # the CLI main does).
     '--plane-net-layers': 'plane_net_layers',
+    # #1146: route.py's keep-away rules (AGG:VICTIM:GAP strings). The plan
+    # executor space-joins the list into the Advanced tab's one-line
+    # `keep_away` text control, whose parser splits on whitespace again.
+    '--keep-away': 'keep_away',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
 }
+# LIST_FLAGS whose argparse action is 'extend': every occurrence ADDS to the
+# list, where a plain nargs='+' flag repeated keeps only its last value.
+EXTEND_LIST_FLAGS = {'--keep-away'}
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
     '--smoothing': 'smoothing',      # #536 octolinear smoothing (default ON)
@@ -468,7 +488,10 @@ def parse_command(argv):
             while i < len(argv) and not argv[i].startswith('--'):
                 vals.append(_num(argv[i]))
                 i += 1
-            lists[a] = vals
+            if a in EXTEND_LIST_FLAGS:
+                lists.setdefault(a, []).extend(vals)
+            else:
+                lists[a] = vals
         elif a in ('--group', '--group-scope', '--group-by'):
             # #459 placement blocks: these must land as TOP-LEVEL step keys,
             # not in params. ai_plan's route action reads step["group"] /
@@ -584,7 +607,7 @@ def parse_command(argv):
     # it still did (26 kept bga_fanout steps on 18 corpus boards).
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--plane-net-layers'):
+              '--rip-existing-nets', '--plane-net-layers', '--keep-away'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step
@@ -648,14 +671,19 @@ CAP_FLAG_PARAMS = {
     # and the tolerance that draws a connector segment back to a stub, so a
     # replay that dropped it produced different COPPER.
     '--default-via-size': 'cap_default_via_size',
+    # #1067: the floorplan intent whose decap limits the cap pass holds. A
+    # path, carried as written; the GUI resolves a relative one against the
+    # board's folder.
+    '--intent': 'cap_intent_path',
 }
 # Deliberately NOT mapped, and why:
 #   --lock              nargs='+' extra locked refs; the GUI has no control.
 #   --verbose           console verbosity, not a routing parameter.
-CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False)}  # inverted sense
+CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False),  # inverted sense
+                  '--beneath-only': ('cap_beneath_only', True)}
 
 
-def cap_optimization_step(argv):
+def cap_optimization_step(argv, cwd=None):
     """A place_fanout_clearance.py invocation -> a standalone `optimize_caps` plan
     step (matching ai_plan.py's live format), carrying the non-default cap_*
     knobs so a loaded plan optimizes caps the way the recorded run did."""
@@ -665,6 +693,12 @@ def cap_optimization_step(argv):
         a = argv[i]
         if a in CAP_FLAG_PARAMS and i + 1 < len(argv):
             params[CAP_FLAG_PARAMS[a]] = _num(argv[i + 1]); i += 2
+            # #1067: the CLI read a relative intent from ITS cwd; the GUI
+            # would read it from the board's folder. Make it absolute here.
+            if (CAP_FLAG_PARAMS[a] == 'cap_intent_path' and cwd
+                    and not os.path.isabs(argv[i - 1])):
+                params['cap_intent_path'] = os.path.normpath(
+                    os.path.join(cwd, argv[i - 1]))
         elif a in CAP_BOOL_FLAGS:
             key, val = CAP_BOOL_FLAGS[a]; params[key] = val; i += 1
         else:
@@ -712,7 +746,7 @@ def plan_steps_from_manifest(manifest, keep_files=False):
             continue  # pruned out, or a check/grade command (no GUI step)
         if any(os.path.basename(a) == 'place_fanout_clearance.py' for a in argv):
             # standalone optimize_caps step, matching the live GUI plan (see above)
-            step = cap_optimization_step(argv)
+            step = cap_optimization_step(argv, cwd=_cwd)
             step['_files'] = [a for a in argv if a.endswith('.kicad_pcb')]
             steps.append(step)
             continue

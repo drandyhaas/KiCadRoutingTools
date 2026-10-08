@@ -55,21 +55,36 @@ def _tree_rss_kb(pid):
     Linux: read /proc directly -- no subprocess spawns (the ps path forks
     twice per 0.5s sample), and it works in slim containers that carry no
     procps at all (the Modal image's silent 0-MB rows). Elsewhere: ps, the
-    same tree-RSS method run_limited.sh uses for its memory watchdog."""
+    same tree-RSS method run_limited.sh uses for its memory watchdog.
+
+    Each PROCESS counts once, by its thread-group id. Under gVisor (Modal's
+    sandbox) the children file lists a child's THREADS as well, and every
+    thread's status reports the whole process's VmRSS: one 19-thread
+    `kicad-cli pcb drc` under route.py was summed 19 times, so schoko's route
+    step read 10.5 GB for ~1.3 GB of memory (761 MB route.py + 515 MB
+    kicad-cli, measured in-process 2026-10-08)."""
     if os.path.isdir(f"/proc/{pid}"):
-        total = 0
+        total, seen = 0, set()
+        pids = [str(pid)]
         try:
-            pids = [str(pid)]
             with open(f"/proc/{pid}/task/{pid}/children") as f:
                 pids += f.read().split()
-            for p_ in pids:
-                with open(f"/proc/{p_}/status") as f:
-                    for line in f:
-                        if line.startswith("VmRSS:"):
-                            total += int(line.split()[1])
-                            break
         except Exception:
             pass
+        for p_ in pids:
+            try:
+                tgid, rss = p_, 0
+                with open(f"/proc/{p_}/status") as f:
+                    for line in f:
+                        if line.startswith("Tgid:"):
+                            tgid = line.split()[1]
+                        elif line.startswith("VmRSS:"):
+                            rss = int(line.split()[1])
+            except Exception:
+                continue                   # exited between the two reads
+            if tgid not in seen:
+                seen.add(tgid)
+                total += rss
         return total
     total = 0
     try:

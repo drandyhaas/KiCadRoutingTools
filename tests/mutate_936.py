@@ -46,6 +46,9 @@ TARGETS = {
     'bs': os.path.join(REPO, 'py_tools', 'board_score.py'),
     'bst': os.path.join(REPO, 'py_placer', 'board_store.py'),
     'cv': os.path.join(REPO, 'py_placer', 'converge.py'),
+    # #1088: blocking_defect / blocking_value live here now, imported by
+    # converge, check_complete and the film alike
+    'ls': os.path.join(REPO, 'py_router', 'ledger_score.py'),
     'dfl': os.path.join(REPO, 'tests', 'test_doc_flag_liveness.py'),
     't431': os.path.join(REPO, 'tests', 'test_431_skill_commands.py'),
     'prun': os.path.join(REPO, 'kicad_routing_plugin', 'placement_run.py'),
@@ -64,9 +67,12 @@ T_CC = 'tests/test_run9_check_complete.py'
 #: (name, target, old, new, tests that must notice, expectation)
 ROWS = [
     # ---- C1: the handler names a tool that exists ---------------------------
+    # #1112 made every break route.py's; the mutation restores a poured-net
+    # branch naming the dead tool.
     ('handler-returns', 'bs',
-     "        v['handler'] = ('repair_planes' if name in poured",
-     "        v['handler'] = ('route_disconnected_planes' if name in poured",
+     "        v['handler'] = 'route'",
+     "        v['handler'] = ('route_disconnected_planes' if name in poured "
+     "else 'route')",
      (T_WORKLIST,), KILLED),
 
     # ---- C2, C3, C4: RETIRED -------------------------------------------------
@@ -98,24 +104,24 @@ ROWS = [
      "    b = score.get('blocking')\n",
      (T_CONVERGE,), KILLED),
     # One row per clause of the rule: each lets one kind of non-count rank.
-    ('blocking-bool-is-a-count', 'cv',
+    ('blocking-bool-is-a-count', 'ls',
      "    if isinstance(b, bool):\n        return (f'the boolean",
      "    if False:\n        return (f'the boolean",
      (T_CONVERGE,), KILLED),
-    ('blocking-nonfinite-is-a-count', 'cv',
+    ('blocking-nonfinite-is-a-count', 'ls',
      "    if isinstance(b, float) and not math.isfinite(b):\n",
      "    if False:\n",
      (T_CONVERGE,), KILLED),
-    ('blocking-past-float-is-a-count', 'cv',
+    ('blocking-past-float-is-a-count', 'ls',
      "    if b > sys.float_info.max:\n        return (f'an integer",
      "    if False:\n        return (f'an integer",
      (T_CONVERGE,), KILLED),
     # `isfinite` converts an int to float: a 400-digit count raised.
-    ('isfinite-on-an-int-again', 'cv',
+    ('isfinite-on-an-int-again', 'ls',
      "    if isinstance(b, float) and not math.isfinite(b):\n",
      "    if not math.isfinite(b):\n",
      (T_CONVERGE,), KILLED),
-    ('blocking-negative-is-a-count', 'cv',
+    ('blocking-negative-is-a-count', 'ls',
      "    if b < 0:\n        return f'negative",
      "    if False:\n        return f'negative",
      (T_CONVERGE,), KILLED),

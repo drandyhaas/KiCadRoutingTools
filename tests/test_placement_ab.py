@@ -40,6 +40,7 @@ only per-key evidence can, and prose cannot be re-run at all.
 Usage:
     python3 -X utf8 tests/test_placement_ab.py            # the default table
     python3 -X utf8 tests/test_placement_ab.py --row corridor-ulx3s
+    python3 -X utf8 tests/test_placement_ab.py --part 2/8   # every 8th row from the 3rd
     python3 -X utf8 tests/test_placement_ab.py --list
     python3 -X utf8 tests/test_placement_ab.py --self-test   # gate logic only
     python3 -X utf8 tests/test_placement_ab.py --write-baseline
@@ -69,6 +70,9 @@ BOARDS = os.path.join(ROOT, 'kicad_files')
 # with four more measured 36.5 min on a box also running a second full
 # table and three place_seed arms (8 cores).
 RUN_ALL_TIMEOUT = 5400
+# run_all runs the table as this many `--part i/N` units, so one shard does
+# not carry every row (the whole table is ~40 min of one core).
+RUN_ALL_PARTS = 8
 
 DEFAULT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'placement_ab_baseline.json')
@@ -521,6 +525,46 @@ ROWS = [
     },
 ]
 
+# --- #1099: the seeder's diagonal fallback, OFF vs ON -----------------------
+# NOT ADOPTED as a default: measured NEUTRAL on all five boards, the two arms
+# writing identical poses footprint for footprint -- none of the unseated
+# parts on tigard (2), orangecrab (4), ulx3s (2) or rp2350 (1) is one the
+# diagonals seat, and esp_prog seats everything. No evidence either way, so
+# the flag stays opt-in (`place_seed --diagonal-rotations`) and these rows
+# are a change detector. The 90-degree lattice is searched at every clearance
+# step first; only a part it seats NOWHERE gets a second pass at 45/135/225/
+# 315 (and a cap on a chip seated off the lattice tries the chip's angles
+# first). So a board whose parts all seat orthogonally writes the same poses
+# in both arms, and the signal is `unseated`: the parts left in the pile.
+# The four trial boards are the ones whose seed leaves parts unseated today
+# (decaps-auto / band-edge baselines); esp_prog is the neutral control.
+_DIAG_BOARDS = ('tigard.kicad_pcb', 'orangecrab_ext_pll.kicad_pcb',
+                'ulx3s.kicad_pcb', 'rp2350_fpga_eensy_prePlane.kicad_pcb',
+                'esp_prog.kicad_pcb')
+ROWS += [
+    {
+        'name': f'diag-seed-{b[:-len(".kicad_pcb")]}',
+        'board': b,
+        'corridors': [],
+        'engine': 'seed',
+        'seed_off': {'diagonal_rotations': False},
+        'seed_on': {'diagonal_rotations': True},
+        'ignore_nets': ['GND'],
+        'signal': 'unseated',
+        'guard': ('crossings', 'hpwl', 'inversions', 'body_blocking'),
+        'expect': 'neutral',
+        'rejected': True,
+        'why': ('MECHANISM: prefer, then fall back. A part the 90-degree '
+                'lattice seats nowhere at any clearance step is offered the '
+                'diagonals instead of staying in the pile; every part that '
+                'seats orthogonally is seated exactly as in the OFF arm. The '
+                'guards catch the cost: a diagonal part is judged on its '
+                'rotated box (conservative), and every part seated after it '
+                'sees it as an obstacle.'),
+    }
+    for b in _DIAG_BOARDS
+]
+
 # #959 (#1002): `check_floorplan --emit-intent`'s decap derivation, OFF vs
 # AUTO. The product path the default would change: a PLACED board is
 # emitted (auto derives `decaps.max_distance_mm` = ceil(max) of its own
@@ -571,6 +615,76 @@ ROWS += [
     for b in ('esp_prog.kicad_pcb', 'splitflap_driver.kicad_pcb',
               'tigard.kicad_pcb', 'ulx3s.kicad_pcb',
               'orangecrab_ext_pll.kicad_pcb', 'glasgow_revC.kicad_pcb')
+]
+
+# #1105: seeder stage 3.5, the per-supply-pin decap claim run again once the
+# centroid stage has seated the owner ICs that stage 2.5 found unplaced --
+# every IC on a flat board or a pile. Same intents, signal and guards as the
+# `decap-owners-*` rows PR #1110 measured for its stage 2.5a (which seated
+# the owner ICs EARLY and regressed on all four flat boards; the rows and
+# their baseline were removed with it in a14f68f3, and are in f61f9118), so
+# the two read column for column. Two variants, both arms explicit so the rows measure the same thing
+# whichever way the defaults point: `decap-after-ics-*` keeps every seat the
+# claim finds; `decap-within-limit-*` undoes one that lands past the decap
+# limit (`seeder.DECAP_LATE_WITHIN_LIMIT`); `decap-after-queue-*` also holds
+# the caps back until the rest of the queue is seated
+# (`seeder.DECAP_LATE_AT`).
+#
+# REJECTED, all three (#1105): no family improves on N-1 boards without a
+# regression -- the IC poses are unchanged, so what costs the guards is the
+# claim itself (a cap at a supply pin instead of its own net centroid, and
+# the 2-pin parts seated after it). `seeder.DECAP_CLAIM_AFTER_ICS_DEFAULT`
+# stays False and `place_seed --decap-claim-after-ics` opts in to the first
+# family, the one that claims the most caps on a pile. Kept as change
+# detectors with their measured marks; the numbers are in the baseline.
+_AFTER_ICS_BOARDS = ('esp_prog', 'splitflap_driver', 'tigard', 'watchy',
+                     'glasgow_revC', 'ulx3s', 'orangecrab_ext_pll')
+#: (family, board) -> the measured mark of a rejected row.
+_AFTER_ICS_MARKS = {
+    ('decap-within-limit', 'esp_prog'): 'neutral',
+    # #1141: the within-limit check measures as the grade does since then
+    ('decap-within-limit', 'orangecrab_ext_pll'): 'improve',
+    ('decap-after-queue', 'splitflap_driver'): 'neutral',
+    ('decap-after-queue', 'tigard'): 'improve',
+    ('decap-after-queue', 'glasgow_revC'): 'neutral',
+    ('decap-after-queue', 'ulx3s'): 'improve',
+}
+ROWS += [
+    {
+        'name': f'{name}-{b}',
+        'board': f'{b}.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_intents': {'off': 'auto', 'on': 'auto', 'grade': 'auto'},
+        'seed_off': {'decap_claim_after_ics': False},
+        'seed_on': {'decap_claim_after_ics': True},
+        'seeder_flags': {'off': {}, 'on': flags},
+        'ignore_nets': ['GND'],
+        'signal': 'intent_errors',
+        'guard': ('crossings', 'hpwl', 'unseated', 'body_blocking'),
+        'rejected': True,
+        'expect': _AFTER_ICS_MARKS.get((name, b), 'regress'),
+        'why': ('MECHANISM: stage 3 seats by pin count, so every owner IC is '
+                'seated before any 2-pin cap, and the ON arm runs the pin '
+                'claim at the first scoped cap after the last owner IC. The '
+                'claim draws no RNG, so every IC pose is the OFF arm\'s; only '
+                'the caps (at a supply pin instead of their own net '
+                'centroid) and the parts seated after them move'
+                + (', and a seat landing past the decap limit (as the grade '
+                   'measures it) is undone so that cap keeps its centroid '
+                   'turn' if flags.get(
+                       'DECAP_LATE_WITHIN_LIMIT') else '')
+                + ('; the caps wait until every other part is seated.'
+                   if flags.get('DECAP_LATE_AT') == 'after_queue' else '.')),
+    }
+    for name, flags in (
+        ('decap-after-ics', {'DECAP_LATE_WITHIN_LIMIT': False,
+                             'DECAP_LATE_AT': 'after_last_owner'}),
+        ('decap-within-limit', {'DECAP_LATE_WITHIN_LIMIT': True,
+                                'DECAP_LATE_AT': 'after_last_owner'}),
+        ('decap-after-queue', {'DECAP_LATE_WITHIN_LIMIT': True,
+                               'DECAP_LATE_AT': 'after_queue'}))
+    for b in _AFTER_ICS_BOARDS
 ]
 
 # --- #1051 / #1053 / #1043 / #1052: declared structure, OFF vs ON ----------
@@ -975,7 +1089,8 @@ def _ignore_ids(pcb, patterns):
 
 
 def _run_seed(board_path, out_path, intent, seed_kw,
-              group_sources=GROUP_SOURCES, ignore_nets=(), grade_intent=None):
+              group_sources=GROUP_SOURCES, ignore_nets=(), grade_intent=None,
+              engine_flags=None):
     """One SEED (from the intent, every part re-seated) + write + the same
     independent grade `_run` applies. The engine switch for a row that
     measures the seeder rather than the quench: `place_seed`'s path, minus
@@ -996,18 +1111,108 @@ def _run_seed(board_path, out_path, intent, seed_kw,
 
     pcb = parse_kicad_pcb(board_path)
     t0 = time.time()
-    res = seeder.seed_from_intent(
-        pcb, board_path, intent, random.Random('0'),
-        group_sources=group_sources, clearance=QUENCH_BASE['clearance'],
-        board_edge_clearance=QUENCH_BASE['board_edge_clearance'],
-        grid_step=QUENCH_BASE['grid_step'], **seed_kw)
+    with _module_flags(engine_flags):
+        res = seeder.seed_from_intent(
+            pcb, board_path, intent, random.Random('0'),
+            group_sources=group_sources, clearance=QUENCH_BASE['clearance'],
+            board_edge_clearance=QUENCH_BASE['board_edge_clearance'],
+            grid_step=QUENCH_BASE['grid_step'], **seed_kw)
     write_placed_output(board_path, out_path, res['placements'])
     for ext in ('.kicad_pro', '.kicad_dru'):
         src = os.path.splitext(board_path)[0] + ext
         if os.path.exists(src):
             shutil.copy2(src, os.path.splitext(out_path)[0] + ext)
-    return _grade_row(out_path, grade_intent or intent, group_sources,
-                      ignore_nets, t0, len(res.get('unseated') or ()))
+    graded = _grade_row(out_path, grade_intent or intent, group_sources,
+                        ignore_nets, t0, len(res.get('unseated') or ()))
+    # What the decap stages did, for a reader of the --json report. Not a
+    # BASELINE_KEYS column, so it is never recorded or compared.
+    graded['decap_stage'] = res.get('decap_stage')
+    return graded
+
+
+#: #1105's pile basis, fixed before any pile number existed and pinned by
+#: tests/test_1105_pile_prereg.py. The pile rows and the pilot read it.
+PILE_PREREG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           '1105_pile_ab_prereg.json')
+
+
+class PileIneligible(AssertionError):
+    """The pile's emitted intent does not arm the decap rule the row's signal
+    reads (the pre-registration's eligibility rule): the board is run as a
+    pinned-neutral row, never silently skipped."""
+
+
+def _pile_inputs(board_path, d, require_decaps=True):
+    """#1105's basis (`PILE_PREREG`): `board_path` staged as an UNAIDED pile
+    under `d/pile/` -- `stage_unaided.stage`, every non-mechanical part at the
+    outline's bbox centre at rotation 0, the mechanical refs carried in a
+    `mechanical.json` beside it -- and its intent emitted through the CLI
+    with `--decaps-from` the board itself, once, for both arms and the grade.
+
+    THE CLI, not `emit_intent`: only `check_floorplan`'s main compiles the
+    `mechanical.json` it discovers into `fixed_poses`, which is what decides
+    the owners seated before stage 2.5 when a run starts from this pile.
+
+    `stage` ARMS the unaided provenance regime over `d/pile/`, so the arms
+    must be written outside it (the caller writes `d/off`, `d/on`).
+
+    Returns `(pile, intent, doc, seed_refs)`: `seed_refs` is place_seed's
+    own scope without --force -- the stacked suspects of a partially-unplaced
+    board, else None (every unlocked part).
+
+    Raises AssertionError -- never skips -- when the staged board does not
+    read as a pile, because that would measure a placed board under a pile's
+    name; `PileIneligible` when the intent arms no decap limit, unless
+    `require_decaps` is False -- #1127's stack-mode piles
+    (`tests/1127_stack_ab_prereg.json`) ask nothing of the decap rule."""
+    import subprocess
+    from kicad_parser import parse_kicad_pcb
+    from placement import floorplan
+    from placement.placement_state import assess_placement
+    stress = os.path.join(ROOT, 'tests', 'stress')
+    if stress not in sys.path:
+        sys.path.insert(0, stress)
+    from stage_unaided import stage
+    pdir = os.path.join(d, 'pile')
+    os.makedirs(pdir, exist_ok=True)
+    pile = os.path.join(pdir, os.path.basename(board_path))
+    stage(board_path, pile)
+    st = assess_placement(parse_kicad_pcb(pile), pile)
+    if not (st.unplaced or st.partially_unplaced):
+        raise AssertionError(f"{pile}: staged, but assess_placement does not "
+                             f"read it as unplaced ({'; '.join(st.reasons[:2])})")
+    ipath = os.path.join(d, 'pile_intent.json')
+    r = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join(ROOT, 'py_tools', 'check_floorplan.py'), pile,
+         '--allow-unplaced', '--emit-intent', ipath,
+         '--decaps-from', board_path],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        cwd=ROOT)
+    if r.returncode != 0 or not os.path.isfile(ipath):
+        raise AssertionError(f"{pile}: check_floorplan --emit-intent exited "
+                             f"{r.returncode}: {(r.stdout + r.stderr)[-800:]}")
+    with open(ipath, encoding='utf-8') as fh:
+        doc = json.load(fh)
+    if not (doc.get('context') or {}).get('pose_claims_withheld'):
+        raise AssertionError(f"{ipath}: the emitter did not treat {pile} as a "
+                             f"pile (no context.pose_claims_withheld)")
+    if require_decaps and (doc.get('decaps') or {}).get(
+            'max_distance_mm') is None:
+        raise PileIneligible(
+            f"{ipath}: --decaps-from {os.path.basename(board_path)} armed no "
+            f"decaps.max_distance_mm ("
+            f"{(doc.get('context') or {}).get('decap_census', {}).get('derivation')})")
+    seed_refs = (set(st.stacked_suspect_refs)
+                 if st.partially_unplaced and not st.unplaced else None)
+    return pile, floorplan.load_intent(ipath), doc, seed_refs
+
+
+def _pile_forecast(doc):
+    """The emitted pile intent's `seeder_forecast` (what the pin stages can
+    claim), the input the eligibility rule reads; {} when none was taken."""
+    return ((doc.get('context') or {}).get('decap_census') or {}).get(
+        'seeder_forecast') or {}
 
 
 def _grade_row(out_path, grade_intent, group_sources, ignore_nets, t0,
@@ -1109,7 +1314,7 @@ def _run_repair(seeded_path, out_path, intent, repair_kw,
 
 
 def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES,
-         grade_intent=None):
+         grade_intent=None, engine_flags=None):
     """One quench + write + independent grade. Returns the measured row.
 
     `group_sources` is NOT optional in spirit, only in signature. Every block
@@ -1130,8 +1335,9 @@ def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES,
     pcb = parse_kicad_pcb(board_path)
     metrics = {}
     t0 = time.time()
-    placements = quench(pcb, pcb_file=board_path, metrics_out=metrics,
-                        **quench_kw)
+    with _module_flags(engine_flags):
+        placements = quench(pcb, pcb_file=board_path, metrics_out=metrics,
+                            **quench_kw)
     write_placed_output(board_path, out_path, placements)
     for ext in ('.kicad_pro', '.kicad_dru'):
         src = os.path.splitext(board_path)[0] + ext
@@ -1266,6 +1472,47 @@ def _verdict(off, on, row):
     return 'neutral', [f"{key} unchanged at {a}"]
 
 
+class _module_flags:
+    """Set `placement` module flags named `module.FLAG` for one ENGINE call,
+    and restore them (#1127: `legality.STACK_EXACT_CONFIRM`). A row's
+    `engine_flags` reach the seed or the quench only -- never the grade,
+    which builds its own `pose_score` state and must read both arms with one
+    ruler. An unknown module or flag raises: a typo would otherwise measure
+    the OFF arm twice and read like a term with no effect."""
+
+    def __init__(self, flags):
+        self.flags = dict(flags or {})
+        self.saved = []
+
+    def __enter__(self):
+        import importlib
+        try:
+            for name, v in self.flags.items():
+                mod_name, _, flag = name.rpartition('.')
+                if not mod_name or not flag:
+                    raise AssertionError(f"engine flag {name!r}: expected "
+                                         f"'module.FLAG'")
+                mod = importlib.import_module('placement.' + mod_name)
+                if not hasattr(mod, flag):
+                    raise AssertionError(f"placement.{mod_name} has no flag "
+                                         f"{flag!r}")
+                self.saved.append((mod, flag, getattr(mod, flag)))
+                setattr(mod, flag, v)
+        except BaseException:
+            # A refusal part-way would otherwise leave the flags set before
+            # it on for the rest of the process: __exit__ never runs when
+            # __enter__ raises.
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        for mod, flag, v in reversed(self.saved):
+            setattr(mod, flag, v)
+        self.saved = []
+        return False
+
+
 class _seeder_flags:
     """Set `placement.seeder` module flags for one arm, and restore them.
     For a behaviour the engine holds as module state rather than a kwarg --
@@ -1326,6 +1573,10 @@ def run_row(row, workdir):
         if not row.get('repair_on') and not row.get('repair_off'):
             raise AssertionError(f"{row['name']}: a repair row states "
                                  f"neither repair_on nor repair_off")
+        if row.get('engine_flags'):
+            raise AssertionError(f"{row['name']}: the repair engine does not "
+                                 f"read engine_flags -- the row would "
+                                 f"measure one engine twice")
         _ign = list(row.get('ignore_nets') or ())
         intent = _intent_for(board, row['corridors'], d,
                              row.get('zone_flags'),
@@ -1362,24 +1613,40 @@ def run_row(row, workdir):
         # grade, same print.
         si = row.get('seed_intents')
         flags = row.get('seeder_flags') or {}
+        eflags = row.get('engine_flags') or {}
         if (not row.get('seed_on') and not row.get('seed_off') and not si
-                and not flags):
+                and not flags and not eflags):
             raise AssertionError(f"{row['name']}: a seed row states neither "
                                  f"seed_on/seed_off nor seed_intents -- it "
                                  f"would measure the same seed twice")
         _ign = list(row.get('ignore_nets') or ())
         i_off = i_on = i_grade = intent
-        if si:
+        seed_board, scope = board, {}
+        if row.get('input') == 'pile':
+            # #1105: the issue's own basis -- an unaided pile of this board,
+            # one CLI-emitted --decaps-from intent for both arms and the
+            # grade, seeded with place_seed's own scope.
+            if si:
+                raise AssertionError(f"{row['name']}: a pile row's intent is "
+                                     f"the pile's own; seed_intents is not "
+                                     f"read")
+            seed_board, i_off, _pdoc, _refs = _pile_inputs(board, d)
+            i_on = i_grade = i_off
+            if _refs is not None:
+                scope = {'seed_refs': _refs}
+        elif si:
             i_off, i_on = _mk(si['off'], 'off'), _mk(si['on'], 'on')
             i_grade = _mk(si['grade'], 'grade')
         with _seeder_flags(flags.get('off')):
-            off = _run_seed(board, os.path.join(d, 'off.kicad_pcb'), i_off,
-                            dict(row.get('seed_off') or {}),
-                            ignore_nets=_ign, grade_intent=i_grade)
+            off = _run_seed(seed_board, os.path.join(d, 'off.kicad_pcb'),
+                            i_off, dict(row.get('seed_off') or {}, **scope),
+                            ignore_nets=_ign, grade_intent=i_grade,
+                            engine_flags=eflags.get('off'))
         with _seeder_flags(flags.get('on')):
-            on = _run_seed(board, os.path.join(d, 'on.kicad_pcb'), i_on,
-                           dict(row.get('seed_on') or {}), ignore_nets=_ign,
-                           grade_intent=i_grade)
+            on = _run_seed(seed_board, os.path.join(d, 'on.kicad_pcb'), i_on,
+                           dict(row.get('seed_on') or {}, **scope),
+                           ignore_nets=_ign, grade_intent=i_grade,
+                           engine_flags=eflags.get('on'))
         mark, notes = _verdict(off, on, row)
         expected = row.get('expect')
         tag = mark.upper()
@@ -1433,16 +1700,17 @@ def run_row(row, workdir):
         kw_on['corridor_specs'] = row['corridors']
     # A row that states no difference measures nothing, and reads exactly like
     # a flag that never reached the engine.
-    if kw_on == kw_off:
+    _ef = row.get('engine_flags') or {}
+    if kw_on == kw_off and (_ef.get('on') or {}) == (_ef.get('off') or {}):
         raise AssertionError(
             f"{row['name']}: quench_on {row.get('quench_on')} / gate_intents "
             f"{row.get('gate_intents')} leave the ON kwargs identical to OFF"
             f" -- the row would measure the same run twice")
 
     off = _run(board, os.path.join(d, 'off.kicad_pcb'), intent, kw_off,
-               grade_intent=i_grade)
+               grade_intent=i_grade, engine_flags=_ef.get('off'))
     on = _run(board, os.path.join(d, 'on.kicad_pcb'), intent, kw_on,
-              grade_intent=i_grade)
+              grade_intent=i_grade, engine_flags=_ef.get('on'))
     mark, notes = _verdict(off, on, row)
     expected = row.get('expect')
     tag = mark.upper()
@@ -2006,6 +2274,36 @@ def _self_test():
             pass
         else:
             raise AssertionError(f'_emit_kwargs{bad} must refuse')
+    # 33. (#1127) an engine flag is set for the call and restored after it,
+    #     even when the call raises; an unknown flag or a name with no module
+    #     refuses rather than running the OFF arm twice.
+    from placement import legality as _lg
+    _was = _lg.STACK_EXACT_CONFIRM
+    with _module_flags({'legality.STACK_EXACT_CONFIRM': not _was}):
+        assert _lg.STACK_EXACT_CONFIRM is (not _was)
+    assert _lg.STACK_EXACT_CONFIRM is _was
+    try:
+        with _module_flags({'legality.STACK_EXACT_CONFIRM': not _was}):
+            raise KeyError('engine')
+    except KeyError:
+        pass
+    assert _lg.STACK_EXACT_CONFIRM is _was
+    for bad in ({'legality.NO_SUCH_FLAG': True}, {'STACK_EXACT_CONFIRM': True}):
+        try:
+            with _module_flags(bad):
+                pass
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f'_module_flags({bad}) must refuse')
+    # ...and a refusal part-way restores the flags set before it
+    try:
+        with _module_flags({'legality.STACK_EXACT_CONFIRM': not _was,
+                            'legality.NO_SUCH_FLAG': 1}):
+            pass
+    except AssertionError:
+        pass
+    assert _lg.STACK_EXACT_CONFIRM is _was, 'a partial enter leaked a flag'
 
 
 def _self_test_live():
@@ -2036,12 +2334,27 @@ def _self_test_live():
     assert not bad, '\n'.join(bad)
 
 
+def _part(text):
+    """'I/N' -> (I, N), 0 <= I < N."""
+    try:
+        i, n = (int(x) for x in text.split('/'))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--part wants I/N, got {text!r}")
+    if not 0 <= i < n:
+        raise argparse.ArgumentTypeError(f"--part {text}: need 0 <= I < N")
+    return i, n
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--row', action='append',
                    help='Run only these table rows (repeatable)')
     p.add_argument('--list', action='store_true', help='List rows and exit')
+    p.add_argument('--part', type=_part, default=None, metavar='I/N',
+                   help='Run every N-th row from the I-th (0-based), after '
+                        '--row: one of N disjoint slices of the table '
+                        '(run_all splits the table this way)')
     p.add_argument('--workdir', default=None,
                    help='Where to write boards (default: a temp dir)')
     p.add_argument('--json', '--json-out', dest='json', default=None,
@@ -2100,6 +2413,15 @@ def main(argv=None):
     if not rows:
         print("no such row; try --list", file=sys.stderr)
         return 2
+    if args.part:
+        _pi, _pn = args.part
+        rows = rows[_pi::_pn]
+        print(f"part {_pi}/{_pn}: {len(rows)} row(s): "
+              f"{', '.join(r['name'] for r in rows) or 'none'}")
+        if not rows:
+            # More parts than rows is a legitimate split, not an error.
+            print("part is EMPTY -- nothing to run, asserting nothing")
+            return 0
     if not 0.0 <= args.float_tol < 1.0:
         # Negative flagged identical values as DRIFT; large silenced real
         # reversals. Neither is a tolerance.

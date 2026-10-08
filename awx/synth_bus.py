@@ -90,6 +90,7 @@ KRT_TOOL = {'scope': [], 'kind': 'actor'}   # #937: a research tool (awx), catal
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 
@@ -120,13 +121,17 @@ def uid(*parts) -> str:
 # --- the pin patterns -------------------------------------------------------
 
 def pattern_perm(kind: str, K: int, seed: int = 0, blocks: int = 2,
-                 inversions: int | None = None):
+                 inversions: int | None = None, shift: int = 1):
     """pi[i] = the DESTINATION rank of the lane whose SOURCE rank is i.
 
     Every pattern is a function of (kind, K, seed, blocks, inversions)
     alone -- no clock, no board, no global state."""
     if kind == 'sorted':
         return list(range(K))
+    if kind == 'rotate':
+        # a CYCLIC shift: the lanes' order round the destination kept, its start moved -- crossing-free on one
+        # layer once the lanes past the cut go round the other way (truth_wind), r(K-r) crossings through one cut
+        return [(i + shift) % K for i in range(K)]
     if kind == 'reversed':
         return list(range(K - 1, -1, -1))
     if kind == 'blocks':
@@ -283,6 +288,274 @@ def optimum(ids, edges, tooth_layer=None, berth_layer=None):
         b = sum(price(n, 'B.Cu') for n in p0) + sum(price(n, 'F.Cu') for n in p1)
         tot += min(a, b)
     return tot, comps, 'exact (min over the proper 2-colourings)'
+
+
+def layer_names(NL):
+    """the routing layers of a case routed on NL of them, in the whole route's order (route_layers: F.Cu and B.Cu
+    first, then the inner ones from the top)"""
+    return ['F.Cu', 'B.Cu'] + [f'In{i}.Cu' for i in range(1, NL - 1)]
+
+
+def whole_lane_layers(ids, edges, NL, tooth_layer=None, berth_layer=None, work=60.0):
+    """The WHOLE-LANE optimum on NL routing layers: each lane on ONE layer end to end, two crossing lanes on different
+    ones -- a proper NL-colouring of the crossing graph -- a lane on layer p paying [tooth != p] + [berth != p] (a via
+    at each end its escape is not on p; both ends on F for a peripheral lane). On two layers this is `optimum`'s
+    2-colouring. Exact by CP-SAT (one worker, a deterministic work limit): (vias, how); vias None where the crossing
+    graph has no NL-colouring (a permutation graph is perfect: exactly where NL lanes or more all cross each other)"""
+    from ortools.sat.python import cp_model
+    L = layer_names(NL)
+    tl, bl = tooth_layer or {}, berth_layer or {}
+    m = cp_model.CpModel()
+    x = {(n, q): m.NewBoolVar('') for n in ids for q in range(NL)}
+    for n in ids:
+        m.AddExactlyOne(x[(n, q)] for q in range(NL))
+    for i, j in edges:
+        for q in range(NL):
+            m.AddBoolOr([x[(i, q)].Not(), x[(j, q)].Not()])
+    m.Minimize(sum(((tl.get(n, 'F.Cu') != L[q]) + (bl.get(n, 'F.Cu') != L[q])) * x[(n, q)]
+                   for n in ids for q in range(NL)))
+    s = cp_model.CpSolver()
+    s.parameters.num_workers = 1
+    s.parameters.max_deterministic_time = work
+    r = s.Solve(m)
+    if r == cp_model.INFEASIBLE:
+        return None, f'no {NL}-colouring of the crossing graph (more than {NL - 1} lanes all cross): a lane must change ' \
+                     f'layer mid-channel'
+    if r == cp_model.OPTIMAL:
+        return int(round(s.ObjectiveValue())), f'exact (min over the proper {NL}-colourings)'
+    return None, f'undecided in its work ({s.StatusName(r)})'
+
+
+def exact_layers(order_src, order_dst, NL, tooth_layer=None, berth_layer=None, kmax=4, work=120.0):
+    """The EXACT optimum on NL routing layers, in VIAS: the least over every routing of the channel whose inverted pairs
+    each cross once, in ANY order a planar braid allows -- three lanes that all cross do so in one of the two orders a
+    braid can, a lane's crossings at distinct places -- with mid-channel layer changes: each lane's runs between its
+    changes (at most `kmax`) on one layer each, two lanes on different layers where they cross, a lane's two ends on its
+    escapes' layers (F for a peripheral one), each change a via. `exact_dp`, on two layers, is exact for the
+    straight-line crossing order only; this takes the order free, so it is never above it. What it is exact FOR: one
+    homotopy class (no lane round an array), and no room in the channel priced. CP-SAT, one worker, a deterministic work
+    limit: (vias, how), how saying whether the optimum was proved"""
+    import itertools
+    from ortools.sat.python import cp_model
+    L = layer_names(NL)
+    tl = {n: L.index((tooth_layer or {}).get(n, 'F.Cu')) for n in order_src}
+    bl = {n: L.index((berth_layer or {}).get(n, 'F.Cu')) for n in order_src}
+    rs = {n: i for i, n in enumerate(order_src)}
+    rd = {n: i for i, n in enumerate(order_dst)}
+    Ln = list(order_src)
+    X = [(a, b) for a, b in itertools.combinations(Ln, 2) if (rs[a] < rs[b]) != (rd[a] < rd[b])]
+    m = cp_model.CpModel()
+    H = 2 * len(X) + 2
+    t = {k: m.NewIntVar(1, H, '') for k in X}
+    for i, j, k in itertools.combinations(Ln, 3):            # (in source order)
+        ij, ik, jk = (i, j) in t, (i, k) in t, (j, k) in t
+        if ij and ik and jk:
+            b_ = m.NewBoolVar('')
+            m.Add(t[(i, j)] < t[(i, k)]).OnlyEnforceIf(b_); m.Add(t[(i, k)] < t[(j, k)]).OnlyEnforceIf(b_)
+            m.Add(t[(j, k)] < t[(i, k)]).OnlyEnforceIf(b_.Not()); m.Add(t[(i, k)] < t[(i, j)]).OnlyEnforceIf(b_.Not())
+        elif ij and ik:
+            m.Add(t[(i, j)] < t[(i, k)])
+        elif ik and jk:
+            m.Add(t[(j, k)] < t[(i, k)])
+    ev = {n: [k for k in X if n in k] for n in Ln}
+    for n in Ln:
+        if len(ev[n]) > 1:
+            m.AddAllDifferent([t[k] for k in ev[n]])
+    before, ys, acts = {}, {}, []
+    for n in Ln:
+        cs = [m.NewIntVar(0, H + 1, '') for _ in range(kmax)]
+        act = [m.NewBoolVar('') for _ in range(kmax)]
+        for q in range(kmax):
+            m.Add(cs[q] <= H).OnlyEnforceIf(act[q]); m.Add(cs[q] == H + 1).OnlyEnforceIf(act[q].Not())
+            if q:
+                m.Add(cs[q] > cs[q - 1]).OnlyEnforceIf(act[q]); m.AddImplication(act[q], act[q - 1])
+        for key in ev[n]:
+            bits = []
+            for q in range(kmax):
+                bb = m.NewBoolVar('')
+                m.Add(cs[q] < t[key]).OnlyEnforceIf(bb); m.Add(cs[q] > t[key]).OnlyEnforceIf([bb.Not(), act[q]])
+                m.AddImplication(bb, act[q]); bits.append(bb)
+            before[(n, key)] = bits
+        y = [m.NewIntVar(0, NL - 1, '') for _ in range(kmax + 1)]
+        m.Add(y[0] == tl[n]); m.Add(y[kmax] == bl[n])
+        for q in range(kmax):
+            m.Add(y[q + 1] != y[q]).OnlyEnforceIf(act[q]); m.Add(y[q + 1] == y[q]).OnlyEnforceIf(act[q].Not())
+        ys[n] = y
+        acts += act
+    for key in X:
+        a, b = key
+        la = []
+        for n in (a, b):
+            i_ = m.NewIntVar(0, kmax, '')
+            m.Add(i_ == sum(before[(n, key)]))
+            l_ = m.NewIntVar(0, NL - 1, '')
+            m.AddElement(i_, ys[n], l_)
+            la.append(l_)
+        m.Add(la[0] != la[1])
+    m.Minimize(sum(acts))
+    s = cp_model.CpSolver()
+    s.parameters.num_workers = 1
+    s.parameters.max_deterministic_time = work
+    r = s.Solve(m)
+    if r == cp_model.OPTIMAL:
+        return int(round(s.ObjectiveValue())), f'exact over {NL} layers, every braid order and mid-channel changes'
+    if r == cp_model.FEASIBLE:
+        return None, f'not proved in its work (best {int(s.ObjectiveValue())}, bound {int(s.BestObjectiveBound())})'
+    return None, f'no plan ({s.StatusName(r)}; at most {kmax} changes a lane)'
+
+
+def wind_length(w, n, k):
+    """the length of lane n going round the destination with winding k (-1, 0, 1): its unrolled place u = q + k P;
+    on the facing face straight to its berth, else to the box's corner on that side and round its perimeter"""
+    import math
+    u = w['q'][n] + k * w['P']
+    t = w['tooth'][n]
+    if u <= w['Wd']:
+        return math.dist(t, w['NW']) + (w['Wd'] - u)
+    if u < w['Wd'] + w['H']:
+        return math.dist(t, (w['NW'][0], w['NW'][1] + (u - w['Wd'])))
+    return math.dist(t, w['SW']) + (u - w['Wd'] - w['H'])
+
+
+def wind_cut_k(w, n, c):
+    """lane n's winding (-1, 0, 1) with ONE cut round the destination at c (a place round it, as q; not on the facing
+    face): its place taken in the turn of the perimeter between the cut and itself that holds the facing face"""
+    q, P, Wd, H = w['q'][n], w['P'], w['Wd'], w['H']
+    if c > Wd + H:                       # (on the south or the far face: past it, round the north)
+        return -1 if q > c else 0
+    return 1 if q < c else 0             # (on the north face: short of it, round the south)
+
+
+def truth_wind(w, NL, via_mm=7.5, work=60.0):
+    """The WINDING optimum on NL routing layers: each lane on ONE layer end to end and going round the destination
+    one of three ways (its unrolled place round it u = q + k P, k = -1, 0, 1; `w` the sidecar's 'wind') -- the turn
+    of the perimeter from its tooth's side round to its berth, never past the facing face again -- two lanes a before
+    b on one layer keeping their source order in that place and not wound past each other's berths, 0 < u_b - u_a < P
+    (on one layer they cannot cross; a lane wound past another's berth crosses it, its order kept or not), a lane off
+    F.Cu paying a via at each end; its length the box-hugging path its winding takes (wind_length). By CP-SAT, one
+    worker, a deterministic work limit:
+      'lb'     -- 2 x (K - the most lanes planar on F.Cu with their windings free): a lane off F.Cu anywhere pays two,
+                  mid-channel changes or not, so no routing has fewer;
+      'vias'   -- the fewest vias of the whole-lane plans, 'vias_len' the least length at them;
+      'opt' / 'opt_len' -- the plan the router's own price ranks first (via_mm a via plus its length), and how many
+                  of its lanes wind past the cut ('wound');
+    each with whether it was proved ('*_proved') -- every lane's way round FREE. And the same with ONE CUT round the
+    destination for every lane, the best cut (wind_cut_k: 'cut_vias', 'cut_opt', 'cut_len', 'cut_at'), and with
+    that cut on the FAR face (the whole frame's: 'far_vias', 'far_opt', 'far_len', 'far_at')"""
+    from ortools.sat.python import cp_model
+    K = len(w['q'])
+    S = 100                                             # (0.01 mm)
+    KS = (-1, 0, 1)
+    PS = round(w['P'] * S)
+    # (a lane's place round the destination: from the facing face's far corner on the north to its far corner on the
+    # south the long way, a turn of the perimeter -- wound further, it would pass its own tooth's side again)
+    lo_, hi_ = (w['Wd'] + w['H'] - w['P']) * S, (w['Wd'] + w['P']) * S
+    U = {(n, k): round((w['q'][n] + k * w['P']) * S) for n in range(K) for k in KS}
+    ok = {(n, k) for (n, k), u in U.items() if lo_ < u < hi_}
+    LN = {(n, k): round(wind_length(w, n, k) * S) for n in range(K) for k in KS}
+    planar = lambda a, ka, b, kb: 0 < U[(b, kb)] - U[(a, ka)] < PS
+
+    def solve(m, obj, maximize=False):
+        (m.Maximize if maximize else m.Minimize)(obj)
+        sv = cp_model.CpSolver()
+        sv.parameters.num_workers = 1
+        sv.parameters.max_deterministic_time = work
+        st = sv.Solve(m)
+        return sv, st
+
+    # the most lanes planar on F.Cu
+    m = cp_model.CpModel()
+    on = [m.NewBoolVar('') for _ in range(K)]
+    z = {(n, k): m.NewBoolVar('') for n in range(K) for k in KS}
+    for n in range(K):
+        m.AddExactlyOne(z[(n, k)] for k in KS)
+        for k in KS:
+            if (n, k) not in ok:
+                m.Add(z[(n, k)] == 0)
+    for a in range(K):
+        for b in range(a + 1, K):
+            for ka in KS:
+                for kb in KS:
+                    if not planar(a, ka, b, kb):
+                        m.AddBoolOr([on[a].Not(), on[b].Not(), z[(a, ka)].Not(), z[(b, kb)].Not()])
+    sv, st = solve(m, sum(on), maximize=True)
+    lb = 2 * (K - round(sv.BestObjectiveBound())) if st in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None
+
+    def whole(price_via, fixed=None):
+        """(vias, length, wound, proved) of the best whole-lane plan at price_via a via (in 0.01 mm), every lane's
+        winding free or `fixed` {lane: k}"""
+        m = cp_model.CpModel()
+        x = {(n, p): m.NewBoolVar('') for n in range(K) for p in range(NL)}
+        z = {(n, k): m.NewBoolVar('') for n in range(K) for k in KS}
+        for n in range(K):
+            m.AddExactlyOne(x[(n, p)] for p in range(NL))
+            m.AddExactlyOne(z[(n, k)] for k in KS)
+            for k in KS:
+                if (n, k) not in ok or (fixed is not None and fixed[n] != k):
+                    m.Add(z[(n, k)] == 0)
+        for a in range(K):
+            for b in range(a + 1, K):
+                for ka in KS:
+                    for kb in KS:
+                        if not planar(a, ka, b, kb):
+                            for p in range(NL):
+                                m.AddBoolOr([x[(a, p)].Not(), x[(b, p)].Not(), z[(a, ka)].Not(), z[(b, kb)].Not()])
+        vias = sum(2 * x[(n, p)] for n in range(K) for p in range(1, NL))
+        length = sum(LN[(n, k)] * z[(n, k)] for n in range(K) for k in KS)
+        sv, st = solve(m, price_via * vias + length)
+        if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        v = sum(2 * sv.Value(x[(n, p)]) for n in range(K) for p in range(1, NL))
+        ln = sum(LN[(n, k)] * sv.Value(z[(n, k)]) for n in range(K) for k in KS) / S
+        wound = sum(sv.Value(z[(n, k)]) for n in range(K) for k in KS if k)
+        return v, round(ln, 2), wound, st == cp_model.OPTIMAL
+
+    lex = whole(10 ** 7)
+    own = whole(round(via_mm * S))
+    out = {'lb': lb, 'vias': lex and lex[0], 'vias_len': lex and lex[1], 'vias_proved': bool(lex and lex[3]),
+           'opt': own and own[0], 'opt_len': own and own[1], 'wound': own and own[2],
+           'opt_proved': bool(own and own[3]), 'via_mm': via_mm}
+    # ONE cut for every lane: at the middle of each gap between two berths round the destination (a face's corner
+    # counted as a gap's end), anywhere but the facing face -- and on the far face alone, the whole frame's
+    P, Wd, H = w['P'], w['Wd'], w['H']
+    cuts = {}
+    for a_, b_ in ((0.0, Wd), (Wd + H, P)):
+        pts = [a_] + sorted(v for v in w['q'] if a_ <= v <= b_) + [b_]
+        for i in range(len(pts) - 1):
+            if pts[i + 1] - pts[i] > 1e-6:
+                c = (pts[i] + pts[i + 1]) / 2
+                cuts[round(c, 4)] = c
+    for key, sel in (('cut', lambda c: True), ('far', lambda c: c >= 2 * Wd + H)):
+        best_lex = best_own = None
+        for c in sorted(v for v in cuts.values() if sel(v)):
+            fx = {n: wind_cut_k(w, n, c) for n in range(K)}
+            if any((n, k) not in ok for n, k in fx.items()):
+                continue
+            a1, a2 = whole(10 ** 7, fx), whole(round(via_mm * S), fx)
+            if a1 and (best_lex is None or (a1[0], a1[1]) < (best_lex[0][0], best_lex[0][1])):
+                best_lex = (a1, c)
+            if a2 and (best_own is None or via_mm * a2[0] + a2[1] < via_mm * best_own[0][0] + best_own[0][1]):
+                best_own = (a2, c)
+        out.update({f'{key}_vias': best_lex and best_lex[0][0], f'{key}_opt': best_own and best_own[0][0],
+                    f'{key}_len': best_own and best_own[0][1], f'{key}_at': best_own and round(best_own[1], 3)})
+    return out
+
+
+def truth_layers(order_src, order_dst, NL, tooth_layer=None, berth_layer=None):
+    """the three answers on NL routing layers, bracketing each other: the LIS lower bound (any lane off F leaves it and
+    comes back, at 2 vias -- on any number of layers), the whole-lane optimum (an NL-colouring) and the exact optimum
+    (every braid order, mid-channel changes) -- {'lb', 'whole', 'whole_how', 'exact', 'exact_how', 'opt'}: `opt` the
+    proved optimum (the exact model's, else the lower bound where a whole-lane plan meets it), else None"""
+    ids = list(order_src)
+    edges = crossing_edges(order_src, order_dst)
+    rs = {n: i for i, n in enumerate(order_src)}
+    lb = 2 * (len(ids) - lis_len([rs[n] for n in order_dst])) if not (tooth_layer or berth_layer) else None
+    whole, whole_how = whole_lane_layers(ids, edges, NL, tooth_layer, berth_layer)
+    if lb is not None and whole is not None and whole == lb:
+        return {'lb': lb, 'whole': whole, 'whole_how': whole_how, 'exact': lb,
+                'exact_how': 'the whole-lane plan meets the lower bound', 'opt': lb}
+    exact, exact_how = exact_layers(order_src, order_dst, NL, tooth_layer, berth_layer)
+    return {'lb': lb, 'whole': whole, 'whole_how': whole_how, 'exact': exact, 'exact_how': exact_how, 'opt': exact}
 
 
 def lower_bound(order_src, order_dst):
@@ -1219,6 +1492,50 @@ def judge_report(ids, s, d, order_src, order_dst, tooth_layer=None,
 
 # --- the board --------------------------------------------------------------
 
+INNER_LAYERS = '\t\t(4 "In1.Cu" signal)\n\t\t(6 "In2.Cu" signal)\n'
+INNER_STACK = ''.join(
+    f'\t\t\t(layer "{nm}"\n\t\t\t\t(type "{ty}")\n\t\t\t\t(thickness {th})\n'
+    + ('\t\t\t\t(material "FR4")\n\t\t\t\t(epsilon_r 4.5)\n\t\t\t\t(loss_tangent 0.02)\n' if ty != 'copper' else '')
+    + '\t\t\t)\n'
+    for nm, ty, th in (('dielectric 1', 'prepreg', 0.2), ('In1.Cu', 'copper', 0.035), ('dielectric 2', 'core', 1.065),
+                       ('In2.Cu', 'copper', 0.035), ('dielectric 3', 'prepreg', 0.2)))
+
+
+def inner_stack(copper):
+    """the inner layers' header lines and the stackup between F.Cu and B.Cu for `copper` (an even count above 4):
+    In1.Cu .. In(copper - 2).Cu, prepreg and core alternating, the board 1.6 mm thick"""
+    n_in = copper - 2
+    lay = ''.join(f'\t\t({4 + 2 * i} "In{i + 1}.Cu" signal)\n' for i in range(n_in))
+    diel = (1.6 - 0.035 * copper) / (n_in + 1)
+    rows = []
+    for i in range(n_in + 1):
+        rows.append((f'dielectric {i + 1}', 'prepreg' if i % 2 == 0 else 'core', round(diel, 4)))
+        if i < n_in:
+            rows.append((f'In{i + 1}.Cu', 'copper', 0.035))
+    stack = ''.join(
+        f'\t\t\t(layer "{nm}"\n\t\t\t\t(type "{ty}")\n\t\t\t\t(thickness {th})\n'
+        + ('\t\t\t\t(material "FR4")\n\t\t\t\t(epsilon_r 4.5)\n\t\t\t\t(loss_tangent 0.02)\n' if ty != 'copper' else '')
+        + '\t\t\t)\n'
+        for nm, ty, th in rows)
+    return lay, stack
+
+
+def head(copper=2):
+    """the board's header, its layers and stackup: F.Cu and B.Cu, and with `copper` 4 In1.Cu and In2.Cu between them
+    (the three-layer whole route's tests: ROUTE_LAYERS=F.Cu,B.Cu,In2.Cu), with 6 In1.Cu .. In4.Cu (five and six)"""
+    h = HEAD.format(version=VERSION)
+    if copper in (4, 6):
+        one = '\t\t(0 "F.Cu" signal)\n'
+        assert h.count(one) == 1
+        lay, stack = (INNER_LAYERS, INNER_STACK) if copper == 4 else inner_stack(copper)
+        h = h.replace(one, one + lay)
+        core = h[h.index('\t\t\t(layer "dielectric 1"'):h.index('\t\t\t(layer "B.Cu"')]
+        h = h.replace(core, stack)
+    elif copper != 2:
+        raise SystemExit(f'synth_bus: --copper {copper}: 2, 4 or 6')
+    return h
+
+
 HEAD = '''(kicad_pcb
 \t(version {version})
 \t(generator "synth_bus")
@@ -1298,14 +1615,27 @@ HEAD = '''(kicad_pcb
 '''
 
 
-def pad_block(name, lx, ly, rot, net_id, net_name, side, key, pad=PAD):
+# --closed: an unused ball's drill, plated through (0.6 pads at 0.8 pitch leave 0.2 mm between them, a lane needs
+# 0.337: no lane under an array on any layer)
+CLOSED_DRILL = 0.3
+
+
+def pad_block(name, lx, ly, rot, net_id, net_name, side, key, pad=PAD, drill=None):
     """One ball. A net-0 ball carries NO `(net ...)` node, exactly as the
-    bench's unconnected H3 balls do."""
+    bench's unconnected H3 balls do. `drill`: the ball plated THROUGH, its
+    copper on every layer (--closed)."""
     lay = 'F' if side == 'F' else 'B'
     # the KiCad 10 net dialect, which is the bench's: a pad names its net and
     # there is NO top-level net table (`extract_nets` synthesises the ids from
     # first appearance). A `(net N "NAME")` node here parses as no net at all.
     net = f'\n\t\t\t(net "{net_name}")' if net_id else ''
+    if drill:
+        return (f'\t\t(pad "{name}" thru_hole circle\n'
+                f'\t\t\t(at {lx:.4f} {ly:.4f}{"" if not rot else " %g" % rot})\n'
+                f'\t\t\t(size {pad} {pad})\n\t\t\t(drill {drill})\n'
+                f'\t\t\t(layers "*.Cu" "*.Mask"){net}\n'
+                f'\t\t\t(uuid "{uid(key, name)}")\n'
+                f'\t\t)\n')
     return (f'\t\t(pad "{name}" smd circle\n'
             f'\t\t\t(at {lx:.4f} {ly:.4f}{"" if not rot else " %g" % rot})\n'
             f'\t\t\t(size {pad} {pad})\n'
@@ -1315,10 +1645,11 @@ def pad_block(name, lx, ly, rot, net_id, net_name, side, key, pad=PAD):
 
 
 def array_block(ref, cx, cy, rows, cols, rot, side, assign, pitch=PITCH, pad=PAD,
-                pad_inner=None):
+                pad_inner=None, inner_drill=None):
     """A BGA array footprint. `assign` maps (row, col) -> (net_id, net_name);
     every other ball is net 0 -- a real package's power and ground balls,
-    and an obstacle either way."""
+    and an obstacle either way; `inner_drill`, those plated through at that
+    drill, the interior closed on every layer (--closed)."""
     w, h = (cols - 1) * pitch, (rows - 1) * pitch
     key = ref
     out = [f'\t(footprint "Synth:BGA-{rows}x{cols}_P{pitch}mm"\n'
@@ -1354,7 +1685,8 @@ def array_block(ref, cx, cy, rows, cols, rot, side, assign, pitch=PITCH, pad=PAD
             ly = -h / 2 + r * pitch
             out.append(pad_block(f'{row_name(r)}{c + 1}', lx, ly, rot, nid, nname,
                                  side, key,
-                                 pad if nid else (pad_inner or pad)))
+                                 pad if nid else (pad_inner or pad),
+                                 drill=None if nid else inner_drill))
     out.append('\t)\n')
     return ''.join(out)
 
@@ -1378,6 +1710,146 @@ def cap_block(ref, cx, cy, side, key):
                    f'\t\t\t(uuid "{uid(key, i)}")\n\t\t)\n')
     out.append('\t)\n')
     return ''.join(out)
+
+
+def rot_at(rot):
+    """the angle a footprint's or a pad's `(at x y A)` carries: none for 0 (a pad's angle in the file is its
+    ABSOLUTE one, the footprint's rotation included)"""
+    return f' {rot:g}' if rot % 360 else ''
+
+
+def rotated(x, y, ox, oy, rot):
+    """(x, y) + the local offset (ox, oy) turned by `rot` degrees as KiCad turns a footprint's pads
+    (kicad_parser.local_to_global)"""
+    c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+    return x + ox * c + oy * s, y - ox * s + oy * c
+
+
+def smd2_block(ref, cx, cy, side, key, orient, pw, ph, dx, name='C', rot=0.0):
+    """A two-pad SMD passive: pads `pw` x `ph` (along x before turning) at
+    +-`dx`, side by side along x (`orient` 'h') or along y ('v'); the whole
+    part turned by `rot` degrees."""
+    lay = 'F' if side == 'F' else 'B'
+    out = [f'\t(footprint "Synth:{name}"\n\t\t(layer "{lay}.Cu")\n'
+           f'\t\t(uuid "{uid(key)}")\n\t\t(at {cx:.4f} {cy:.4f}{rot_at(rot)})\n'
+           f'\t\t(attr smd)\n'
+           f'\t\t(property "Reference" "{ref}"\n\t\t\t(at 0 -1 0)\n'
+           f'\t\t\t(layer "{lay}.SilkS")\n\t\t\t(uuid "{uid(key, "ref")}")\n'
+           f'\t\t\t(effects\n\t\t\t\t(font\n\t\t\t\t\t(size 0.6 0.6)\n'
+           f'\t\t\t\t\t(thickness 0.1)\n\t\t\t\t)\n\t\t\t)\n\t\t)\n']
+    for i, d in ((1, -dx), (2, dx)):
+        at, size = (f'{d} 0', f'{pw} {ph}') if orient == 'h' else (f'0 {d}', f'{ph} {pw}')
+        out.append(f'\t\t(pad "{i}" smd roundrect\n\t\t\t(at {at}{rot_at(rot)})\n'
+                   f'\t\t\t(size {size})\n'
+                   f'\t\t\t(layers "{lay}.Cu" "{lay}.Mask" "{lay}.Paste")\n'
+                   f'\t\t\t(roundrect_rratio 0.25)\n'
+                   f'\t\t\t(uuid "{uid(key, i)}")\n\t\t)\n')
+    out.append('\t)\n')
+    return ''.join(out)
+
+
+def sot23_block(ref, cx, cy, side, key, rot=0.0):
+    """A SOT-23 (KiCad's land pattern: two pads at x -1.1375, y +-0.95, one at
+    x +1.1375, each 1.325 x 0.6), turned by `rot` degrees: three pads, so one
+    island however its pads stand."""
+    lay = 'F' if side == 'F' else 'B'
+    out = [f'\t(footprint "Synth:SOT-23"\n\t\t(layer "{lay}.Cu")\n'
+           f'\t\t(uuid "{uid(key)}")\n\t\t(at {cx:.4f} {cy:.4f}{rot_at(rot)})\n'
+           f'\t\t(attr smd)\n'
+           f'\t\t(property "Reference" "{ref}"\n\t\t\t(at 0 -2 0)\n'
+           f'\t\t\t(layer "{lay}.SilkS")\n\t\t\t(uuid "{uid(key, "ref")}")\n'
+           f'\t\t\t(effects\n\t\t\t\t(font\n\t\t\t\t\t(size 0.6 0.6)\n'
+           f'\t\t\t\t\t(thickness 0.1)\n\t\t\t\t)\n\t\t\t)\n\t\t)\n']
+    for i, (px, py) in enumerate(((-1.1375, -0.95), (-1.1375, 0.95), (1.1375, 0.0)), 1):
+        out.append(f'\t\t(pad "{i}" smd roundrect\n\t\t\t(at {px} {py}{rot_at(rot)})\n'
+                   f'\t\t\t(size 1.325 0.6)\n'
+                   f'\t\t\t(layers "{lay}.Cu" "{lay}.Mask" "{lay}.Paste")\n'
+                   f'\t\t\t(roundrect_rratio 0.25)\n'
+                   f'\t\t\t(uuid "{uid(key, i)}")\n\t\t)\n')
+    out.append('\t)\n')
+    return ''.join(out)
+
+
+def pth_row_block(ref, cx, cy, n, orient, pitch, pad, drill, key, rot=0.0):
+    """N plated through-hole pads in a row (a pin header, or a row of via-sized
+    barrels) along x ('h') or y ('v'), centred on (cx, cy): net 0, copper on
+    every layer, so both of the bus's layers go round or between them; the
+    row turned by `rot` degrees."""
+    out = [f'\t(footprint "Synth:PTH_1x{n}_P{pitch}"\n\t\t(layer "F.Cu")\n'
+           f'\t\t(uuid "{uid(key)}")\n\t\t(at {cx:.4f} {cy:.4f}{rot_at(rot)})\n'
+           f'\t\t(attr through_hole)\n'
+           f'\t\t(property "Reference" "{ref}"\n\t\t\t(at 0 -1.5 0)\n'
+           f'\t\t\t(layer "F.SilkS")\n\t\t\t(uuid "{uid(key, "ref")}")\n'
+           f'\t\t\t(effects\n\t\t\t\t(font\n\t\t\t\t\t(size 0.8 0.8)\n'
+           f'\t\t\t\t\t(thickness 0.12)\n\t\t\t\t)\n\t\t\t)\n\t\t)\n']
+    for i in range(n):
+        t = (i - (n - 1) / 2) * pitch
+        at = f'{t:.4f} 0' if orient == 'h' else f'0 {t:.4f}'
+        out.append(f'\t\t(pad "{i + 1}" thru_hole circle\n\t\t\t(at {at}{rot_at(rot)})\n'
+                   f'\t\t\t(size {pad} {pad})\n\t\t\t(drill {drill})\n'
+                   f'\t\t\t(layers "*.Cu" "*.Mask")\n'
+                   f'\t\t\t(uuid "{uid(key, i)}")\n\t\t)\n')
+    out.append('\t)\n')
+    return ''.join(out)
+
+
+def npth_block(ref, cx, cy, d, key):
+    """A mounting hole: one non-plated hole of diameter `d`, written as KiCad's
+    own MountingHole footprints write it (*.Cu *.Mask, no net)."""
+    return (f'\t(footprint "Synth:MountingHole_{d}mm"\n\t\t(layer "F.Cu")\n'
+            f'\t\t(uuid "{uid(key)}")\n\t\t(at {cx:.4f} {cy:.4f})\n'
+            f'\t\t(attr exclude_from_pos_files exclude_from_bom)\n'
+            f'\t\t(property "Reference" "{ref}"\n\t\t\t(at 0 {-d / 2 - 1:.3f} 0)\n'
+            f'\t\t\t(layer "F.SilkS")\n\t\t\t(uuid "{uid(key, "ref")}")\n'
+            f'\t\t\t(effects\n\t\t\t\t(font\n\t\t\t\t\t(size 0.8 0.8)\n'
+            f'\t\t\t\t\t(thickness 0.12)\n\t\t\t\t)\n\t\t\t)\n\t\t)\n'
+            f'\t\t(pad "" np_thru_hole circle\n\t\t\t(at 0 0)\n'
+            f'\t\t\t(size {d} {d})\n\t\t\t(drill {d})\n'
+            f'\t\t\t(layers "*.Cu" "*.Mask")\n'
+            f'\t\t\t(uuid "{uid(key, "h")}")\n\t\t)\n\t)\n')
+
+
+# the kinds --part writes: (writer of (ref, x, y, layer, orient, n, pitch, d, key, rot) -> text); a row of 0402s
+# turned as one part would be, about its middle
+PART_KINDS = {
+    'c0402': lambda r, x, y, L, o, n, p_, d, k, a: smd2_block(r, x, y, L, k, o, 0.54, 0.64, 0.48, 'C_0402', a),
+    'c0603': lambda r, x, y, L, o, n, p_, d, k, a: smd2_block(r, x, y, L, k, o, 0.9, 0.95, 0.775, 'C_0603', a),
+    'row': lambda r, x, y, L, o, n, p_, d, k, a: ''.join(
+        smd2_block(f'{r}_{i + 1}', *rotated(x, y, (i - (n - 1) / 2) * p_ if o == 'h' else 0.0,
+                                            (i - (n - 1) / 2) * p_ if o == 'v' else 0.0, a),
+                   L, f'{k}_{i}', 'h' if o == 'v' else 'v', 0.54, 0.64, 0.48, 'C_0402', a) for i in range(n)),
+    'sot23': lambda r, x, y, L, o, n, p_, d, k, a: sot23_block(r, x, y, L, k, a + (90 if o == 'v' else 0)),
+    'pth': lambda r, x, y, L, o, n, p_, d, k, a: pth_row_block(r, x, y, n, o, p_, 1.7, 1.0, k, a),
+    'vias': lambda r, x, y, L, o, n, p_, d, k, a: pth_row_block(r, x, y, n, o, p_, 0.6, 0.3, k, a),
+    'npth': lambda r, x, y, L, o, n, p_, d, k, a: npth_block(r, x, y, d, k),
+}
+PART_DEFAULTS = {'row': (4, 1.0), 'pth': (4, 2.54), 'vias': (4, 1.0)}
+
+
+def parse_part(spec):
+    """KIND@ANCHOR:U:V[:opt...] -> dict; opts: F|B (layer), h|v (orientation), nN (count), pP (pitch, mm),
+    dD (a hole's diameter, mm), rR (the part turned R degrees, as KiCad turns a footprint)"""
+    try:
+        kind, rest = spec.split('@', 1)
+        anchor, u_, v_, *opts = rest.split(':')
+        u_, v_ = float(u_), float(v_)
+    except ValueError:
+        raise SystemExit(f'--part {spec!r}: want KIND@ANCHOR:U:V[:F|B][:h|v][:nN][:pP][:dD][:rR]')
+    if kind not in PART_KINDS or anchor not in ('sw', 'nw', 'dw', 'ds', 'dn', 'sf', 'ch'):
+        raise SystemExit(f'--part {spec!r}: KIND one of {sorted(PART_KINDS)}, ANCHOR sw|nw|dw|ds|dn|sf|ch')
+    n_, p_ = PART_DEFAULTS.get(kind, (1, 0.0))
+    out = {'kind': kind, 'anchor': anchor, 'u': u_, 'v': v_, 'layer': 'F', 'orient': 'h', 'n': n_, 'pitch': p_,
+           'd': 3.2, 'rot': 0.0}
+    for o in opts:
+        if o in ('F', 'B'):
+            out['layer'] = o
+        elif o in ('h', 'v'):
+            out['orient'] = o
+        elif o[:1] in 'npdr' and o[1:]:
+            out[{'n': 'n', 'p': 'pitch', 'd': 'd', 'r': 'rot'}[o[0]]] = int(o[1:]) if o[0] == 'n' else float(o[1:])
+        else:
+            raise SystemExit(f'--part {spec!r}: unknown option {o!r}')
+    return out
 
 
 def obstacle_block(ref, cx, cy, w, h, key, pitch=1.0):
@@ -1431,7 +1903,7 @@ def build(a):
                          f'--depth {depth} < K={K}: not enough non-corner balls '
                          f'on the facing face')
     pi = pattern_perm(a.pattern, K, seed=a.seed, blocks=a.blocks,
-                      inversions=a.inversions)
+                      inversions=a.inversions, shift=getattr(a, 'shift', 1))
     assert sorted(pi) == list(range(K)), 'the pattern is not a permutation'
 
     # Geometry: source west, destination east, the channel along +x.
@@ -1458,7 +1930,39 @@ def build(a):
         return out[:n]
 
     src_slots = face_slots(K, cols, east=True)
-    dst_slots = face_slots(K, cols, east=False)
+    # RING lanes (--ring-n / --ring-s, 2026-10-02): that many lanes end on the
+    # destination's NORTH / SOUTH face instead of the face toward the source,
+    # so the whole route hands them from its trunk to a ring round the
+    # destination's corner. Their ranks follow the destination's PERIMETER as
+    # the channel sees it -- the north face east to west, the facing column
+    # top to bottom, the south face west to east -- so a lane order that is
+    # planar across the channel stays planar round the corners, and the truth
+    # below (crossings = inversions of that order) is unchanged. Corner balls
+    # are skipped as on the facing face; the facing column's lanes are centred,
+    # or packed against its north / south corner (--w-align), where they crowd
+    # the ring's lanes turning past it
+    nN, nS = max(0, getattr(a, 'ring_n', 0) or 0), max(0, getattr(a, 'ring_s', 0) or 0)
+    nE = max(0, getattr(a, 'ring_e', 0) or 0)
+    dcols = getattr(a, 'dst_cols', None) or cols
+    if nN or nS or nE:
+        nW = K - nN - nS - nE
+        if nW < 0 or depth > 1 or max(nN, nS) > dcols - 2 or nW > rows - 2 - 2 * off or nE > rows - 2 \
+                or (nE and (dcols < 3 or a.dst_rot)):
+            raise SystemExit(f'--ring-n {nN} --ring-s {nS} --ring-e {nE} of K={K}: needs depth 1, at most '
+                             f'--dst-cols - 2 = {dcols - 2} a face, at most {rows - 2} on the far face (with '
+                             f'--dst-cols 3 or more, the destination unturned) and the rest ({nW}) on the facing '
+                             f'column ({rows - 2 - 2 * off})')
+        free = rows - 2 - 2 * off - nW
+        r0 = 1 + off + {'north': 0, 'south': free}.get(getattr(a, 'w_align', 'centre'), free // 2)
+        dst_slots = ([(0, c) for c in range(nN, 0, -1)] + [(r, 0) for r in range(r0, r0 + nW)]
+                     + [(rows - 1, c) for c in range(1, nS + 1)])
+        # FAR-FACE lanes (--ring-e): the destination's far column, bottom to top -- round the perimeter after the
+        # south face, so the planted order stays one cycle round the destination; reached round its north side
+        # or its south, which the truth leaves to each lane (truth_wind)
+        e0 = 1 + (rows - 2 - nE) // 2
+        dst_slots += [(r, dcols - 1) for r in range(e0 + nE - 1, e0 - 1, -1)]
+    else:
+        dst_slots = face_slots(K, dcols, east=False)
     names = [f'SYN{i:02d}' for i in range(K)]
     # --pairs N: N DIFFERENTIAL PAIRS among the bus (2026-09-20), each two
     # nets whose balls are NEIGHBOURS at both arrays -- adjacent in the
@@ -1488,23 +1992,30 @@ def build(a):
 
     h = (rows - 1) * PITCH
     wsrc = (cols - 1) * PITCH
+    wdst = (dcols - 1) * PITCH
     sx, sy = 0.0, 0.0
-    dx = wsrc / 2 + a.gap + wsrc / 2
-    txt = [HEAD.format(version=VERSION)]
+    dx = wsrc / 2 + a.gap + wdst / 2
+    # --dst-dy: the destination moved across the channel, so the bus arrives
+    # at it at an angle (and turns onto its rings at another)
+    dy = getattr(a, 'dst_dy', 0.0) or 0.0
+    txt = [head(a.copper)]
     # `--margin-y` walls the channel: generous by default (no escape is
     # edge-clearance bound), small enough and a lane cannot ride round an
     # array at all, which is what the channel-confined optimum assumes
     m, my = 6.0, a.margin_y
-    x0, y0 = sx - wsrc / 2 - m, sy - h / 2 - my
-    x1, y1 = sx + dx + wsrc / 2 + m, sy + h / 2 + my
+    x0, y0 = sx - wsrc / 2 - m, min(sy, sy + dy) - h / 2 - my
+    x1, y1 = sx + dx + wdst / 2 + m, max(sy, sy + dy) + h / 2 + my
     txt.append(f'\t(gr_rect\n\t\t(start {x0:.3f} {y0:.3f})\n'
                f'\t\t(end {x1:.3f} {y1:.3f})\n'
                f'\t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n'
                f'\t\t(fill no)\n\t\t(layer "Edge.Cuts")\n\t\t(uuid "{uid("edge")}")\n\t)\n')
+    # --closed: the unused balls plated through (at --pad-inner, else 0.6), each interior closed on every layer
+    closed = getattr(a, 'closed', False)
+    p_in, d_in = (a.pad_inner or 0.6, CLOSED_DRILL) if closed else (a.pad_inner, None)
     txt.append(array_block(a.src, sx, sy, rows, cols, 0, 'F', src_assign, PITCH,
-                           a.pad, a.pad_inner))
-    txt.append(array_block(a.dst, sx + dx, sy, rows, cols, a.dst_rot, 'F', dst_assign,
-                           PITCH, a.pad, a.pad_inner))
+                           a.pad, p_in, inner_drill=d_in))
+    txt.append(array_block(a.dst, sx + dx, sy + dy, rows, dcols, a.dst_rot, 'F', dst_assign,
+                           PITCH, a.pad, p_in, inner_drill=d_in))
     # foreign parts: a row of caps on the BACK face under each array, as
     # the corpus bench carries -- they take room out of the B page's
     # escape field without touching a bus net
@@ -1512,7 +2023,34 @@ def build(a):
         f = i / max(1, a.caps - 1) if a.caps > 1 else 0.5
         cy = sy - h / 2 + f * h
         txt.append(cap_block(f'C{i + 1}', sx, cy, 'B', f'cap{i}'))
-        txt.append(cap_block(f'C{a.caps + i + 1}', sx + dx, cy, 'B', f'capd{i}'))
+        txt.append(cap_block(f'C{a.caps + i + 1}', sx + dx, cy + dy, 'B', f'capd{i}'))
+    # --hcap CORNER:U:V:LAYER:ORIENT -- a 0402 at the destination's north- or
+    # south-west corner, where the trunk hands its lanes to a ring: its centre
+    # U mm west of the facing column's balls and V mm past the corner ball along
+    # the face (negative: beside the facing column, as zynq's C98 stands by
+    # U2), on F or B, its pads along x (h) or y (v)
+    # --part KIND@ANCHOR:U:V[:opts] -- a foreign part anywhere round the bus,
+    # placed from an ANCHOR: `sw` / `nw` the destination's corner ball (U west
+    # of its facing column, V past the corner along the face -- negative:
+    # beside the facing column); `dw` the facing column's middle (U west, V
+    # south); `ds` / `dn` the south / north face's west end (U east along the
+    # face, V out from it); `sf` the source's facing column's middle (U east,
+    # into the channel, V south); `ch` the channel (U east of the source's
+    # facing column, V south of the bus's middle)
+    hcaps = []
+    xw, yn, ys = sx + dx - wdst / 2, sy + dy - h / 2, sy + dy + h / 2
+    xs = sx + wsrc / 2
+    specs = [f'c0402@{c_.split(":", 1)[0]}:{c_.split(":", 1)[1]}' for c_ in (getattr(a, 'hcap', None) or [])]
+    for j, spec in enumerate(specs + list(getattr(a, 'part', None) or [])):
+        q = parse_part(spec)
+        u_, v_ = q['u'], q['v']
+        cx_, cy_ = {'sw': (xw - u_, ys + v_), 'nw': (xw - u_, yn - v_), 'dw': (xw - u_, sy + dy + v_),
+                    'ds': (xw + u_, ys + v_), 'dn': (xw + u_, yn - v_), 'sf': (xs + u_, sy + v_),
+                    'ch': (xs + u_, sy + v_)}[q['anchor']]
+        ref_ = {'npth': 'H', 'pth': 'J', 'vias': 'TP'}.get(q['kind'], 'CH') + str(j + 1)
+        txt.append(PART_KINDS[q['kind']](ref_, cx_, cy_, q['layer'], q['orient'], q['n'], q['pitch'], q['d'],
+                                         f'part{j}', q['rot']))
+        hcaps.append(dict(q, ref=ref_, x=round(cx_, 4), y=round(cy_, 4)))
     # the part IN the corridor: the bus has to fan in around it
     obs = None
     if a.obstacle_h > 0 and a.obstacle_w > 0:
@@ -1525,6 +2063,34 @@ def build(a):
                'room_above': round((oy - a.obstacle_h / 2) - y0, 3),
                'room_below': round(y1 - (oy + a.obstacle_h / 2), 3)}
     txt.append(')\n')
+
+    # --- the winding geometry (far-face lanes, or a cyclic pattern): each lane's tooth, its berth's place round the
+    # destination's box grown by a pitch (the escapes' ring), unrolled from its north-east corner -- the north face
+    # east to west, the facing face, the south face, the far face south to north -- and the box's two corners on
+    # the source's side, which a lane going round passes (truth_wind)
+    wind = None
+    if nE or a.pattern == 'rotate':
+        g = PITCH
+        bx = lambda cx_, cy_, rows_, cols_, r, c: (cx_ - (cols_ - 1) * PITCH / 2 + c * PITCH,
+                                                   cy_ - (rows_ - 1) * PITCH / 2 + r * PITCH)
+        xW, yT = bx(sx + dx, sy + dy, rows, dcols, 0, 0)
+        xE, yB = bx(sx + dx, sy + dy, rows, dcols, rows - 1, dcols - 1)
+        Wd, H = (xE - xW) + 2 * g, (yB - yT) + 2 * g
+
+        def unroll(r, c):
+            x, y = bx(sx + dx, sy + dy, rows, dcols, r, c)
+            if c == 0:
+                return Wd + (y - (yT - g)), (xW - g, y)
+            if r == 0:
+                return (xE + g) - x, (x, yT - g)
+            if r == rows - 1:
+                return Wd + H + (x - (xW - g)), (x, yB + g)
+            return 2 * Wd + H + ((yB + g) - y), (xE + g, y)
+        q, berth = zip(*(unroll(*dst_slots[pi[i]]) for i in range(K)))
+        wind = {'P': round(2 * Wd + 2 * H, 4), 'Wd': round(Wd, 4), 'H': round(H, 4),
+                'NW': [round(xW - g, 4), round(yT - g, 4)], 'SW': [round(xW - g, 4), round(yB + g, 4)],
+                'tooth': [[round(v, 4) for v in bx(sx, sy, rows, cols, *src_slots[i])] for i in range(K)],
+                'q': [round(v, 4) for v in q], 'berth': [[round(v, 4) for v in b] for b in berth]}
 
     # --- the truth, from the planted pattern ---
     ids = list(range(K))
@@ -1549,6 +2115,10 @@ def build(a):
         'row_offset': off,
         'pad': a.pad, 'pad_inner': a.pad_inner, 'margin_y': a.margin_y,
         'dst_rot': a.dst_rot, 'caps': a.caps,
+        'ring_n': nN, 'ring_s': nS, 'dst_cols': dcols, 'dst_dy': dy, 'parts': hcaps,
+        **({'ring_e': nE, 'shift': getattr(a, 'shift', 1), 'wind': wind} if wind else {}),
+        **({'closed': True} if getattr(a, 'closed', False) else {}),
+        'w_align': getattr(a, 'w_align', 'centre'),
         'crossings': len(edges),
         'inversions': len(edges),
         'lis': lis,
@@ -1577,7 +2147,9 @@ def main(argv=None):
     ap.add_argument('out', nargs='?', help='the .kicad_pcb to write (omit with --self-test)')
     ap.add_argument('--k', type=int, default=8, help='bus width')
     ap.add_argument('--pattern', default='sorted',
-                    choices=('sorted', 'reversed', 'blocks', 'interleave', 'riffle', 'shuffle'))
+                    choices=('sorted', 'reversed', 'blocks', 'interleave', 'riffle', 'shuffle', 'rotate'))
+    ap.add_argument('--shift', type=int, default=1,
+                    help="--pattern rotate: each lane's destination rank its source rank plus this, cyclically")
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--blocks', type=int, default=2)
     ap.add_argument('--inversions', type=int, default=None)
@@ -1616,6 +2188,36 @@ def main(argv=None):
                          'so a lane cannot ride around an array')
     ap.add_argument('--dst-rot', type=float, default=0.0)
     ap.add_argument('--caps', type=int, default=0)
+    ap.add_argument('--ring-n', type=int, default=0,
+                    help='lanes ending on the destination\'s NORTH face (a ring round its corner), not the facing one')
+    ap.add_argument('--ring-s', type=int, default=0,
+                    help='lanes ending on the destination\'s SOUTH face')
+    ap.add_argument('--closed', action='store_true',
+                    help='the arrays\' unused balls plated THROUGH (at --pad-inner, else 0.6; drill 0.3): each '
+                         'interior closed on every layer, so a lane reaching a ball on another face goes round the '
+                         'array rather than under it (a ball\'s dog-bone vias leave streets a lane fits through)')
+    ap.add_argument('--ring-e', type=int, default=0,
+                    help='that many lanes end on the destination\'s FAR face (its side away from the source), '
+                         'after the south face round it -- each reached round its north side or its south, which '
+                         'the truth leaves to the lane (truth_wind; the sidecar\'s "wind")')
+    ap.add_argument('--dst-cols', type=int, default=None,
+                    help='the destination\'s columns (default --cols): its north and south faces hold this minus 2')
+    ap.add_argument('--w-align', default='centre', choices=('centre', 'north', 'south'),
+                    help='with ring lanes: the facing column\'s lanes centred, or packed against its north / south corner')
+    ap.add_argument('--dst-dy', type=float, default=0.0,
+                    help='the destination moved this far across the channel, mm (+ south): the bus arrives at an angle')
+    ap.add_argument('--hcap', action='append', default=[],
+                    help='CORNER:U:V:LAYER:ORIENT -- a 0402 at the destination\'s nw / sw corner, U mm west of its '
+                         'facing column, V mm past its corner ball along the face (negative: beside it), F|B, h|v. '
+                         'Repeatable; the same as --part c0402@CORNER:U:V:LAYER:ORIENT')
+    ap.add_argument('--part', action='append', default=[],
+                    help='KIND@ANCHOR:U:V[:F|B][:h|v][:nN][:pP][:dD][:rR] -- a foreign part: KIND c0402, c0603, row '
+                         '(N 0402s, pitch P), sot23, pth (an N-pin header, 2.54), vias (N via-sized barrels, 1.0), '
+                         'npth (a hole of diameter D, 3.2); ANCHOR sw / nw (the destination\'s corner), dw (its '
+                         'facing column), ds / dn (its south / north face), sf (the source\'s facing column), ch (the '
+                         'channel) -- see build(); turned R degrees as KiCad turns a footprint. Repeatable')
+    ap.add_argument('--copper', type=int, default=2, choices=(2, 4, 6),
+                    help='copper layers: 2 (F.Cu, B.Cu), 4 (In1.Cu and In2.Cu between them) or 6 (In1.Cu .. In4.Cu)')
     ap.add_argument('--pairs', type=int, default=0,
                     help='differential pairs among the bus: two neighbouring nets each, '
                          'named SYPj_P / SYPj_N')

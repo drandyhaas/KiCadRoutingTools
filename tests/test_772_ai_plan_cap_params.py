@@ -52,7 +52,7 @@ CAP_KNOBS = (
     'cap_max_displacement', 'cap_max_displacement_cap',
     'cap_displacement_growth', 'cap_board_edge_clearance',
     'cap_max_passes', 'cap_prefix', 'cap_default_via_size',
-    'cap_allow_rotation',
+    'cap_intent_path', 'cap_allow_rotation',
 )
 
 
@@ -126,6 +126,35 @@ class TestTheEdgeClearanceIsRehomed(unittest.TestCase):
     def test_the_grid_step_row_exists(self):
         self.assertEqual(_literal(M2P, 'CAP_FLAG_PARAMS')['--grid-step'],
                          'grid_step')
+
+    def test_the_intent_row_exists(self):
+        """#1067: a recorded `--intent` replays as the panel's
+        cap_intent_path, the control the engine's `intent` is loaded from."""
+        self.assertEqual(_literal(M2P, 'CAP_FLAG_PARAMS')['--intent'],
+                         'cap_intent_path')
+
+    def test_a_relative_intent_replays_against_the_recorded_cwd(self):
+        """#1067: the CLI read a relative `--intent` from the directory it
+        was recorded in; the GUI would resolve it against the board's
+        folder. The converter makes it absolute from the recorded cwd, and
+        leaves an absolute path, or a step with no cwd, as recorded."""
+        sys.path.insert(0, os.path.dirname(M2P))
+        import manifest_to_plan as m2p
+        argv = ['python3', 'py_placer/place_fanout_clearance.py',
+                'in.kicad_pcb', 'out.kicad_pcb', '--intent',
+                'wk/run/intent.json']
+        cwd = os.path.join(_ROOT, 'some', 'run')
+        got = m2p.cap_optimization_step(argv, cwd=cwd)['params']
+        self.assertEqual(got['cap_intent_path'], os.path.normpath(
+            os.path.join(cwd, 'wk/run/intent.json')))
+        absolute = os.path.join(_ROOT, 'x.intent.json')
+        got = m2p.cap_optimization_step(argv[:-1] + [absolute],
+                                        cwd=cwd)['params']
+        self.assertEqual(got['cap_intent_path'], absolute)
+        got = m2p.cap_optimization_step(argv)['params']
+        self.assertEqual(got['cap_intent_path'], 'wk/run/intent.json')
+        self.assertIn('step = cap_optimization_step(argv, cwd=_cwd)',
+                      _src(M2P), 'main() must hand the recorded cwd over')
 
     def test_the_generic_loop_skips_the_legacy_spelling_on_a_cap_step(self):
         src = _src(AI_PLAN)

@@ -113,7 +113,10 @@ def classify_part(fp, ref: str) -> PartClass:
     pin functions. Never reads a coordinate."""
     name = (getattr(fp, 'footprint_name', '') or '').lower()
     pref = _prefix(ref)
-    pads = getattr(fp, 'pads', None) or []
+    # Aperture-only pads (paste/mask windows) are not pads (#1143): a
+    # mounting hole with a paste ring is still NPTH-only.
+    from kicad_parser import non_aperture_pads
+    pads = non_aperture_pads(fp)
 
     # Structural: NPTH-only part = mounting hole (the strongest rule in the
     # advisor, restated here as a class).
@@ -254,7 +257,9 @@ def default_band(cls: str, fp, observed_overhang: float = 0.0
         return {'min': 0.0, 'max': round(mx, 3)}
     # receptacle: the shell face may protrude a little past the pad field;
     # bound by half the part's SMALLER extent (the depth axis) capped at 2.
-    pads = getattr(fp, 'pads', None) or []
+    # Aperture-only pads are not part of the pad field (#1143).
+    from kicad_parser import non_aperture_pads
+    pads = non_aperture_pads(fp)
     if pads:
         xs = [getattr(p, 'global_x', 0.0) for p in pads]
         ys = [getattr(p, 'global_y', 0.0) for p in pads]

@@ -13,8 +13,8 @@ traceback or an import failure as a broken test rather than a held guard:
   * only the alias removed -> the legacy `bus` name resolves nowhere;
   * only the row removed -> the fixture's --bus expectation fails;
   * a made-up flag added to route.py's parser and to nothing else, and one
-    each in route_diff.py's, route_planes.py's and bga_fanout.py's parsers,
-    each named on its own tool's owners;
+    each in route_diff.py's, route_planes.py's, bga_fanout.py's and
+    qfn_fanout.py's parsers, each named on its own tool's owners;
   * a --no-X flag "fixed" with a plain alias onto its POSITIVE checkbox;
   * a stale CLI-only entry for a flag that reaches the GUI;
   * the route selection no longer reading --component's refs;
@@ -38,8 +38,9 @@ if _TESTS not in sys.path:
 
 import run_utils                                              # noqa: E402
 
-# The four tools the gate enumerates; the precondition checks each one.
-TOOLS = ('route.py', 'route_diff.py', 'route_planes.py', 'bga_fanout.py')
+# The tools the gate enumerates; the precondition checks each one.
+TOOLS = ('route.py', 'route_diff.py', 'route_planes.py', 'bga_fanout.py',
+         'qfn_fanout.py')
 
 
 def _src(path):
@@ -74,6 +75,7 @@ ROUTE = 'py_router/route.py'
 ROUTE_DIFF = 'py_router/route_diff.py'
 ROUTE_PLANES = 'py_router/route_planes.py'
 BGA_FANOUT = 'py_router/bga_fanout/__init__.py'
+QFN_FANOUT = 'py_router/qfn_fanout/__init__.py'
 GATE_REL = 'tests/gui_parity/test_manifest_plan_parity.py'
 
 
@@ -174,7 +176,7 @@ class NegativeControls(unittest.TestCase):
     def test_a_made_up_flag_on_each_other_tool(self):
         """One per tool, each refused on ITS OWN action's owners: the probe,
         the owner chain and the lists are per tool, and a control that only
-        exercised route.py would prove nothing about the other three."""
+        exercised route.py would prove nothing about the others."""
         for path, anchor, flag, owners in (
                 (ROUTE_DIFF,
                  'parser.add_argument("--ac-couple-match", action="store_true",',
@@ -185,7 +187,10 @@ class NegativeControls(unittest.TestCase):
                 (BGA_FANOUT,
                  "parser.add_argument('--check-for-previous', "
                  "action='store_true',",
-                 '--zz-bga-probe', "fanout owners ['bga_options'")):
+                 '--zz-bga-probe', "fanout owners ['bga_options'"),
+                (QFN_FANOUT,
+                 "parser.add_argument('--layer', '-l', default=None,",
+                 '--zz-qfn-probe', "fanout owners ['bga_options'")):
             with self.subTest(tool=path):
                 restore = self._mutate(
                     path, anchor,
@@ -217,8 +222,8 @@ class NegativeControls(unittest.TestCase):
         """The largest fix the enumeration found: 26 kept bga_fanout steps
         whose future-pour declaration the converter collected and never
         copied into the step."""
-        self._mutate(M2P, "'--rip-existing-nets', '--plane-net-layers'):",
-                     "'--rip-existing-nets'):")
+        self._mutate(M2P, "'--rip-existing-nets', '--plane-net-layers', '--keep-away'):",
+                     "'--rip-existing-nets', '--keep-away'):")
         self._run(refuse='--plane-net-layers: NOT REACHED -- the converter '
                          'consumes it and emits nothing')
 

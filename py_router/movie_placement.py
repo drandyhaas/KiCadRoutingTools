@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """The placement progress panels, in placement currency (#1042).
 
-`movie_attempts` keeps the routed VERDICT on its axis and deliberately keeps
-placement proxies off it ("ON A PLACEMENT RUN THE AXIS IS STILL THE ROUTED
-RESULT", #1021): a copper-free placement lap scores `blocking` ~250 on that
-axis because every net is unrouted, while the thing the lap was doing moved
-elsewhere. So placement gets its OWN panels, beside the verdict band and never
-on its axis:
+The routed VERDICT keeps placement proxies off its axis ("ON A PLACEMENT RUN
+THE AXIS IS STILL THE ROUTED RESULT", #1021): a copper-free placement lap
+scores `blocking` ~250 on that axis because every net is unrouted, while the
+thing the lap was doing moved elsewhere. So placement gets its OWN panels,
+never on that axis. On the stage3d frame (the only film layout) they are the
+film's one band when there is no ledger for a benchmark band -- a placement
+chain made from boards alone:
 
-  1. **Legality** (log y): pads off the outline (parts), pad-conflict pairs,
-     overlap mm² -- with the floor the KiCad-locked parts set, in the legend.
+  1. **Legality** (log y): parts whose pad copper gates off the outline, the
+     grader's pad-clearance pairs, the courtyard census area -- render's
+     checklist, never the optimizer's box metrics (#1124) -- with the floor
+     the KiCad-locked parts set (those pairs with a locked member), in the
+     legend.
   2. **Arrangement** (a SCREEN, not the verdict): airwire crossings and hpwl
      as step lines, each on its own axis, with dashed benchmark lines when a
      benchmark board is given.
@@ -24,7 +28,8 @@ Plus **downstream-defect flags**: a ledger row `kind == classification`,
 pixel interpolation, not evaluated placements. Every number is measured on the
 film's own boards, IN PROCESS, by the named instruments' own functions
 (`render_placement.PlacementModel` / `legality_findings` -- the numbers
-`render_placement --json-out` writes -- and `check_floorplan.main`), cached per
+`render_placement --json-out` writes: its checklist for legality, its metrics
+for crossings and hpwl -- and `check_floorplan.main`), cached per
 board sha. Never a subprocess of `sys.executable`: inside KiCad that is the
 pcbnew binary, and a child built that way hangs
 (`kicad_routing_plugin/deps_check.py`).
@@ -33,8 +38,8 @@ pcbnew binary, and a child built that way hangs
 least two copper-free boards AND a part moved between them (poses parsed, no
 instrument run). **No placement, no panel**; nothing is synthesised.
 
-**x is RUN TIME** when the ledger carries `t` -- the same domain the verdict
-band draws (`movie_attempts.ledger_time_domain`), so a re-entry sits where it
+**x is RUN TIME** when the ledger carries `t`
+(`movie_attempts.ledger_time_domain`), so a re-entry sits where it
 happened. Without a clock it is the board order, and the header says so.
 
 **Readable or not drawn.** Each plot is at least `PLOT_MIN_PX` tall and every
@@ -76,10 +81,6 @@ PLOT_MIN_PX = 48
 #: The band may take at most this share of the frame when it carries the
 #: placement panels; past it they are declined, and the status line says so.
 BAND_MAX_FRAC = 0.48
-#: Side by side, placement takes the FIRST of these shares of the band's
-#: width that holds all three panels whole (the verdict keeps >= 42%).
-SIDE_FRACS = (0.46, 0.52, 0.58)
-SIDE_FRAC = SIDE_FRACS[0]
 #: Which panels survive a narrow box, in order.
 PRIORITY = ('intent', 'legality', 'arrangement')
 #: Left-to-right order of the panels that are drawn.
@@ -87,7 +88,7 @@ ORDER = ('legality', 'arrangement', 'intent')
 TITLES = {'legality': 'LEGALITY (log y)', 'arrangement': 'ARRANGEMENT (screen)',
           'intent': 'INTENT'}
 #: The SCREEN statement: a footer line of its own, always drawn whole.
-SCREEN_NOTE = 'not the verdict -- see band'
+SCREEN_NOTE = 'a screen, not the verdict'
 #: Series colours: every pair a reader must tell apart is a different role
 #: (off-outline vs conflict pairs, conflict pairs vs crossings), and the
 #: frame marker is not the intent series' gold.
@@ -107,12 +108,13 @@ class Beat(NamedTuple):
     board: str
     label: str
     first: int                  # the frame it is shown from (its landing)
-    off_outline: Optional[int]  # parts with pad copper off the outline
-    conflict_pairs: Optional[int]
-    overlap_mm2: Optional[float]
+    # The legality four are render's checklist (#1124, `_legality_census`):
+    off_outline: Optional[int]  # a_off_outline.pad_copper_gating, parts
+    conflict_pairs: Optional[int]   # b_pad_clearance_pairs
+    overlap_mm2: Optional[float]    # b_courtyard_overlap_mm2
     crossings: Optional[int]
     hpwl: Optional[float]
-    locked_pairs: Optional[int]  # metrics.locked_contact_pairs: the floor
+    locked_pairs: Optional[int]  # those pairs with a c_locked_refs member: the floor
     floorplan: Optional[int]
     floorplan_source: str        # FP_INSTRUMENT | 'ledger row N' | ''
     ledger_index: Optional[int]
@@ -146,8 +148,7 @@ class Fit(NamedTuple):
 
 class BandPlan(NamedTuple):
     band_h: int
-    mode: str                   # 'side' | 'stacked' | 'placement' | 'declined'
-    verdict_h: int
+    mode: str                   # 'placement' | 'declined'
     place_h: int
     why: str
 
@@ -170,6 +171,45 @@ def _tools_path():
 
 
 _CACHE: Dict[str, dict] = {}
+
+
+def _legality_census(model, fnd):
+    """The LEGALITY panel's four numbers, from render's checklist -- the
+    grader's census, never the optimizer's box metrics (#1124). Each is a key
+    `render_placement --json-out` writes:
+
+      off_outline     len(checklist.a_off_outline.pad_copper_gating)
+      conflict_pairs  len(checklist.b_pad_clearance_pairs)
+      locked_pairs    the b_pad_clearance_pairs rows with a member in
+                      checklist.c_locked_refs: the floor
+      overlap_mm2     checklist.b_courtyard_overlap_mm2 (every courtyard
+                      pair, waived included -- so not zeroed under a #1104
+                      project waiver, where metrics.overlap_area reads 0)
+
+    `metrics.pad_conflict_pairs` and `locked_contact_pairs` are the quench's
+    bounding-box currency: on glasgow_revC 10 pairs where render's checklist
+    names 1, and six locked FID/MK contacts the grader confirms none of.
+
+    It reads only what `legality_findings` already computed, so it costs
+    nothing. NOT MEASURED is None, never 0: without a legality context the
+    pad lists sit at their empty defaults (render's caption falls back for
+    the same reason), and with no outline there is nothing to be off.
+    """
+    ran = getattr(getattr(model, 'state', None), 'legality_ctx', None) \
+        is not None
+    pairs = fnd.get('pad_conflict_pairs_refs') or []
+    locked = set(fnd.get('locked_refs') or ())
+    return {
+        'off_outline': (len(fnd.get('oob_refs_pad_copper_gating') or [])
+                        if ran and not getattr(model, 'no_outline', False)
+                        else None),
+        'conflict_pairs': len(pairs) if ran else None,
+        'locked_pairs': (sum(1 for a, b, *_rest in pairs
+                             if a in locked or b in locked)
+                         if ran else None),
+        'overlap_mm2': (None if fnd.get('courtyard_census_error')
+                        else fnd.get('courtyard_overlap_mm2')),
+    }
 
 
 def measure_board(path, cache=None):
@@ -207,14 +247,9 @@ def measure_board(path, cache=None):
                 else:
                     fnd = RP.legality_findings(model)
                     m = model.metrics
-                    off = fnd.get('oob_refs_pad_copper')
-                    res = {'off_outline': (len(off) if isinstance(off, list)
-                                           else None),
-                           'conflict_pairs': m.get('pad_conflict_pairs'),
-                           'overlap_mm2': m.get('overlap_area'),
-                           'crossings': m.get('crossings'),
-                           'hpwl': m.get('hpwl'),
-                           'locked_pairs': m.get('locked_contact_pairs')}
+                    res = dict(_legality_census(model, fnd),
+                               crossings=m.get('crossings'),
+                               hpwl=m.get('hpwl'))
     except Exception as exc:                                   # noqa: BLE001
         res = {'unmeasured': 'render_placement raised %s'
                % type(exc).__name__}
@@ -308,7 +343,7 @@ def is_placement_board(path):
     """A board is a placement beat when it carries NO COPPER -- the boards of
     the placement half, the ones #1042's table measures. A routed board whose
     parts moved (a clearance nudge) is a routing step: its legality is read
-    off copper these panels do not model, and the verdict band covers it."""
+    off copper these panels do not model, and the routed verdict covers it."""
     import re
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
@@ -414,8 +449,8 @@ def build_track(steps, marks, *, ledger=None, benchmark=None, intent=None,
     if not intent and not rows:
         notes.append('no --intent and no ledger: intent unmeasured')
 
-    # RUN TIME: the ledger's own `t`, over the same domain the verdict band
-    # draws. A board no row names (the pile: the run's INPUT) sits at the
+    # RUN TIME: the ledger's own `t`, over the ledger's whole domain
+    # (`ledger_time_domain`). A board no row names (the pile: the run's INPUT) sits at the
     # start; a later unnamed board holds the previous beat's time.
     dom = None
     try:
@@ -518,6 +553,15 @@ def _measure_draw():
 
 
 def _floor(track):
+    """The conflict count the KiCad-locked parts hold up, when every pair
+    left has a locked member. Both counts come from ONE census, the grader's
+    (#1124): locked pairs are a subset of the conflict pairs, so `conflict
+    <= locked` means they are equal. It used to compare two box counts:
+    every glasgow board counts six FID/MK box contacts (FID1-6 against
+    MK1/3/4) as locked, and wherever those six were every pair left --
+    run 32's placed boards and every board routed from them (placed,
+    placed_v2, placed_v3, placed_v3b, frozen, A_bga, C2_route, routed_c3)
+    -- it drew "floor 6" for pairs the grader confirms none of."""
     lb = track.beats[-1]
     if (lb.conflict_pairs is not None and lb.locked_pairs
             and lb.conflict_pairs <= lb.locked_pairs):
@@ -706,120 +750,50 @@ def fit(track, width, frame_h, max_h=None, d=None):
     return out
 
 
-def _side_fit(track, W, H, d, max_h=None):
-    """`(frac, Fit)` for three panels SIDE BY SIDE: the `SIDE_FRACS` share
-    whose panels need the least height (wider panels wrap fewer legend
-    lines), the smaller share on a tie. None when three fit in none."""
-    best = None
-    for frac in SIDE_FRACS:
-        f = fit(track, int(W * frac), H, max_h=max_h, d=d)
-        if f is not None and len(f.names) == 3 and (
-                best is None or f.need_h < best[1].need_h):
-            best = (frac, f)
-    return best
+def plan_band(track, W, H):
+    """How tall the placement panels' band must be for this frame.
 
-
-def plan_band(track, W, H, verdict):
-    """How tall the band must be for this frame, and how it splits.
-
-    Side by side (placement left, verdict right) when all three panels fit
-    in one of `SIDE_FRACS` of the width; else stacked, placement on top. The
-    band never exceeds `BAND_MAX_FRAC` of the frame: the verdict graph gives
-    up height down to its own floor first, and past that the panels are
-    DECLINED (`mode == 'declined'`, with why) rather than drawn unreadable."""
-    import movie_attempts as MA
+    The panels' own need, under `BAND_MAX_FRAC` of the frame and the
+    stage3d board's height floor; past that they are DECLINED
+    (`mode == 'declined'`, with why) rather than drawn unreadable. (The
+    side-by-side and stacked arms beside the verdict graph went with the
+    verdict band: on the stage3d frame the panels take the band alone.)"""
     import frame_layout as FL
     cap = int(BAND_MAX_FRAC * H)
-    if W >= FL.ISO_SIDE_ASPECT * H:
-        # LANDSCAPE: the panel is a side column and the band the one bottom
-        # row, so the band is all that stands between the board box and
-        # BOARD_MIN_SHARE of the frame -- after the rail and the foot.
-        chrome = (max(FL.RAIL_MIN_PX, FL.even(H * FL.RAIL_FRAC))
-                  + max(FL.FOOT_MIN_PX, FL.even(H * FL.FOOT_FRAC)))
-        cap = min(cap, H - chrome
-                  - int(math.ceil(FL.BOARD_MIN_SHARE * H)))
-    vh = MA.band_height(W, H) if verdict else 0
-    if verdict and not vh:
-        verdict = False
-    d = _measure_draw()
-    if verdict:
-        sf = _side_fit(track, W, H, d)
-        if sf is not None:
-            h = max(vh, sf[1].need_h)
-            if h <= cap:
-                return BandPlan(h + h % 2, 'side', h, h,
-                                '3 panels beside the verdict')
-    f = fit(track, W, H, d=d)
+    # The stage3d frame (the only film layout) keeps its board box at
+    # STAGE3D_BOARD_H_FRAC of the height after the rail and the foot, and
+    # shrinks, then declines, a band that would breach that. So the band is
+    # SIZED under the same floor here: a band planned taller than the frame
+    # will keep is drawn into a box too short for the panels it was sized
+    # for (measured: panels sized at 200 px drawn into a 1000x118 box).
+    chrome = (max(FL.RAIL_MIN_PX, FL.even(H * FL.RAIL_FRAC))
+              + max(FL.FOOT_MIN_PX, FL.even(H * FL.FOOT_FRAC)))
+    need = int(math.ceil(FL.STAGE3D_BOARD_H_FRAC * H))
+    cap = min(cap, H - chrome - (need + need % 2))
+    f = fit(track, W, H, d=_measure_draw())
     if f is None:
-        return BandPlan(vh, 'declined', vh, 0,
+        return BandPlan(0, 'declined', 0,
                         'the frame is too narrow for one readable panel')
-    if not verdict:
-        if f.need_h > cap:
-            return BandPlan(0, 'declined', 0, 0,
-                            'panels need %d px, the band may take %d'
-                            % (f.need_h, cap))
-        return BandPlan(f.need_h + f.need_h % 2, 'placement', 0, f.need_h,
-                        '%d panel(s)' % len(f.names))
-    if vh + f.need_h > cap:
-        vh = max(MA.BAND_MIN_PX, cap - f.need_h)
-    if vh + f.need_h > cap:
-        full = MA.band_height(W, H)
-        return BandPlan(full, 'declined', full, 0,
-                        'panels need %d px above a %d px verdict graph, the '
-                        'band may take %d' % (f.need_h, vh, cap))
-    h = vh + f.need_h
-    return BandPlan(h + h % 2, 'stacked', vh, f.need_h,
-                    '%d panel(s) above the verdict' % len(f.names))
+    if f.need_h > cap:
+        return BandPlan(0, 'declined', 0,
+                        'panels need %d px, the band may take %d'
+                        % (f.need_h, cap))
+    return BandPlan(f.need_h + f.need_h % 2, 'placement', f.need_h,
+                    '%d panel(s)' % len(f.names))
 
 
-def band_px(track, verdict):
+def band_px(track):
     """The callable `build_boards(attempts_band=)` sizes the band with. Its
     `.plans` list keeps every plan it made, so the caller can say whether
     the panels were declined."""
     plans = []
 
     def _px(W, H):
-        p = plan_band(track, W, H, verdict)
+        p = plan_band(track, W, H)
         plans.append(p)
         return p.band_h
     _px.plans = plans
     return _px
-
-
-def split_band(box, both, track=None, frame_h=None):
-    """`(placement_box, verdict_box)` inside the reserved band.
-
-    With both, and a track to fit: SIDE by side when three panels fit in one
-    of `SIDE_FRACS` of the width at this height (the same order `plan_band`
-    tries), else STACKED with placement on top at exactly the height its
-    panels need, and the verdict below. With no track (a caller that planned
-    no panels) the old proportions. With placement only, it takes the band;
-    with no box, `(None, None)`."""
-    if box is None:
-        return None, None
-    if not both:
-        return box, None
-    if track is not None:
-        import movie_attempts as MA
-        fh = frame_h or box.h * 6
-        d = _measure_draw()
-        # max_h: the frame can be TALLER than the one planned (a legacy
-        # frame grows by its band), and a larger type size then steps down
-        sf = _side_fit(track, box.w, fh, d, max_h=box.h)
-        if sf is not None:
-            pw = int(box.w * sf[0])
-            return box._replace(w=pw), box._replace(x=box.x + pw,
-                                                    w=box.w - pw)
-        f = fit(track, box.w, fh, max_h=box.h - MA.BAND_MIN_PX, d=d)
-        if f is None:
-            return box, None
-        return (box._replace(h=f.need_h),
-                box._replace(y=box.y + f.need_h, h=box.h - f.need_h))
-    if box.w >= 5 * box.h:
-        pw = int(box.w * SIDE_FRAC)
-        return box._replace(w=pw), box._replace(x=box.x + pw, w=box.w - pw)
-    ph = int(box.h * 0.48)
-    return box._replace(h=ph), box._replace(y=box.y + ph, h=box.h - ph)
 
 
 # ---------------------------------------------------------------------------
@@ -871,7 +845,7 @@ def draw_panels(d, box, track, *, cur=None, theme=None, frame_h=720,
     Returns True when drawn.
 
     **Never half-drawn**: a failure repaints the box and says so in one
-    line, the way `movie_attempts.draw_track` falls back."""
+    line."""
     if track is None or not track.beats or box is None or box.w < 60:
         return False
     try:

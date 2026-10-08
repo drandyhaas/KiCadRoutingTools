@@ -104,7 +104,8 @@ KNOWN_MODULES = (
 # Scripts whose flag set a consumer may want to pin.
 FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
                 'repair_planes.py', 'place_route_loop.py',
-                'place_optimize.py', 'check_drc.py', 'check_floorplan.py')
+                'place_optimize.py', 'check_drc.py', 'check_floorplan.py',
+                'bga_fanout.py', 'qfn_fanout.py')
 # NOT here, deliberately: `place_pose.py`. This tuple's contract, enforced by
 # `tests/test_798_registrar_flags.py`, is that every flag the source registers
 # is visible in `--help` as an option and accepted by the top-level parser.
@@ -434,7 +435,12 @@ def script_flags(path, _depth=1):
                         os.path.join(root, mod, '__init__.py')):
                 if (os.path.isfile(sib) and os.path.abspath(sib) != me
                         and (own_package or not _builds_own_parser(sib))):
-                    flags.update(script_flags(sib, _depth - 1))
+                    # The shim->package hop does not spend the level: the
+                    # package is this script, and its registrars (fab tier,
+                    # escalation, the DRC-settings flags) are one level from
+                    # IT. Spending it there hid 10 flags of each fanout.
+                    flags.update(script_flags(
+                        sib, _depth if own_package else _depth - 1))
         # #798, the per-FUNCTION pass. Additive, and rooted at the REPO rather
         # than beside the script, because the layout the scripts import across
         # is the repo's, not the directory's.

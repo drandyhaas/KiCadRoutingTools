@@ -77,7 +77,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 
 **Power & planes** — see [Plane Routing](docs/route-plane.md) and [Power Nets](docs/power-nets.md)
 - [Wider power-net routing](docs/power-nets.md) with automatic neck-down at fine-pitch pads
-- Plane pours (pads are welded by the route step, #562) and multi-net Voronoi plane layers with resistance / max-current reporting
+- Plane pours (pads are welded by the route step, #562) and plane layers several nets share (split round spines routed on the layer) with resistance / max-current reporting
 - Disconnected-plane-region repair (region joins + pad taps) and GND return-via placement
 
 **Signal integrity**
@@ -462,7 +462,7 @@ python py_router/route_planes.py kicad_files/input.kicad_pcb --nets VCC --plane-
 # Pour planes (the pour places no taps: the route step welds plane pads)
 python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
-# Multiple nets sharing same layer via Voronoi partitioning (use | separator)
+# Multiple nets sharing one layer, split round spines routed on it (use | separator)
 python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu
 
 # Dry run to see what would be placed
@@ -475,8 +475,13 @@ python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-
 > finishes with an in-run *plane finalize* that applies this same engine
 > (pad taps + region joins), the plane-copper cleanup, and a KiCad-oracle
 > completion check — so a pours-first chain repairs its planes automatically.
-> `KICAD_PLANE_FINALIZE=0` is the kill switch. Use the standalone script
-> below for a board routed OUTSIDE that chain (e.g. hand-edited copper).
+> `KICAD_PLANE_FINALIZE=0` is the kill switch. The finalize runs even when
+> the route step finds nothing else to route (#1112), so a chain should end
+> on `route.py`, never on this script. Use the standalone script below for a
+> board routed OUTSIDE that chain (e.g. hand-edited copper); its track and
+> via default to the board's Default net class, not to the sizes a chain
+> routed at, so pass `--track-width` / `--via-size` / `--via-drill` if they
+> differ.
 
 After creating power planes, regions may become split by vias and traces from other nets. Use `repair_planes.py` to reconnect them:
 
@@ -668,7 +673,8 @@ KiCadRoutingTools/
 │   ├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
 │   ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
 │   ├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
-│   ├── plane_zone_geometry.py    # Voronoi zone computation for multi-net layers
+│   ├── plane_zone_geometry.py    # Voronoi cells for a shared plane layer's split
+│   ├── plane_split_raster.py     # Raster finishing of a shared plane layer's split
 │   ├── plane_resistance.py       # Plane resistance and current capacity calculations
 │   ├── plane_region_connector.py # Detect and route between disconnected plane regions
 │   ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
@@ -793,6 +799,7 @@ One-line summaries below (all of these modules live in `py_router/`); the
 | `obstacle_map.py` | Obstacle map building from PCB data |
 | `obstacle_cache.py` | Net obstacle caching for incremental obstacle map builds |
 | `obstacle_costs.py` | Stub and track proximity cost calculations |
+| `keep_away.py` | Pairwise keep-away between net groups (#1146): the per-net band cost and the in-band report |
 | `bresenham_utils.py` | Bresenham line-walking utilities for grid-based segment operations |
 | `geometry_utils.py` | Shared geometry calculations (point-to-segment distance, segment intersection, UnionFind) |
 | `routing_constants.py` | Shared constants (default layer stack, power net patterns, tolerances) |

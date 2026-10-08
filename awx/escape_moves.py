@@ -60,6 +60,8 @@ class Move:
     site: Optional[Pt] = None       # via location, if any
     climb: int = 0                  # rows/columns the run travels ALONG the
                                     # array before leaving (enumerate_moves climb=)
+    street: int = 0                 # 1: a via in an empty band of the array
+                                    # (enumerate_moves street=)
 
     def __repr__(self) -> str:
         s = (f'{self.kind}/{self.direction}/{self.layer[0]} '
@@ -99,14 +101,22 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     clear: Callable[[Pt, Pt, str], bool],
                     via_clear: Callable[[Pt, str], bool] = None,
                     margin: float = 0.0, climb: int = 0,
-                    own_line: bool = False) -> List[Move]:
+                    own_line: bool = False, straight: bool = False,
+                    street: int = 0, street_pitch: float = 0.0,
+                    street_dirs: Optional[Sequence[str]] = None) -> List[Move]:
     """Every escape move this pad has. `clear(p, q, layer)` says whether
     a track from p to q on `layer` is free of foreign copper;
     `via_clear(p, layer)` whether a via barrel fits at p (checked on
     every layer by the caller). Moves whose geometry is blocked are not
     returned, so an empty list means this pad is boxed in. `own_line`
     adds the pad's OWN column (or row) line to the climb lanes of a
-    via-in-pad start -- see the climb block."""
+    via-in-pad start -- see the climb block. `straight` adds the surface
+    escape straight out along the pad's own row or column line, wherever
+    `clear` allows it: an edge ball, or one whose balls outward are not
+    populated. `street` adds the STREET dog-bones: a via in an empty band
+    of the array, on a lane `street_pitch` from the next, at `street`
+    sites along it, the run leaving by `street_dirs` (every face when
+    None) -- see the street block."""
     net = getattr(pad, 'net_name', '') or ''
     net = net.split('/')[-1]
     px, py = pad.global_x, pad.global_y
@@ -143,6 +153,17 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                 out.append(Move(net, 'surface', d, home, e, 0,
                                 [((px, py), gate, home),
                                  (gate, e, home)]))
+    # ...and (`straight`) straight out along its OWN line: the rule above
+    # assumes other balls stand on it, but `clear` refuses the move where
+    # they do -- an edge ball, or empty positions outward, leave that way
+    # (14 of the human's 50 teeth at K51), and the half pitches of the
+    # row lines are as usable as the gaps between them
+    if straight:
+        for d in DIRS:
+            e = edge(d)
+            if clear((px, py), e, home):
+                out.append(Move(net, 'surface', d, home, e, 0,
+                                [((px, py), e, home)]))
 
     # --- via_in_pad: dive where the pad is, leave on another layer
     for L in others:
@@ -269,6 +290,93 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                                                 + [((gx, gy), turn, L), (turn, e, L)],
                                                 site=(site if kind == 'dogbone' else (px, py)),
                                                 climb=k))
+
+    # --- STREET: an array's EMPTY lattice rows (or columns) between two
+    # groups of balls -- DU1's 3.2 mm between its north and south halves --
+    # hold no pad on either layer. A ball on one side runs on its own layer
+    # into the band (down its own line, or a row further out, down the next
+    # gap), along a LANE of the band to a via SITE, and leaves along that
+    # lane on the other layer. The lanes stand `street_pitch` apart (a
+    # track and a clearance: the band's width is lanes, not half pitches),
+    # centred between the band's two half lines (a plain dog-bone's), at
+    # least a lane from each, a ball taking those in its own half (and the
+    # middle one: its stub crosses no lane the other side's ball stands
+    # on); the sites stand at the stub's line and then
+    # `street - 1` half pitches along the lane toward the face the run
+    # leaves by. The human's berths at DU1: 20 of its 30 signal vias stand
+    # in that band, 15 of them 0.8 to 3.8 mm from their ball.
+    if street > 0 and street_pitch > 0:
+        def bands(vals, lo, hi, pitch):
+            """(the ball line before, the ball line after) every run of
+            empty lattice lines between lo and hi"""
+            if pitch <= 0:
+                return []
+            lat = [lo + k * pitch for k in range(int(round((hi - lo) / pitch)) + 1)]
+            has = lambda v: any(abs(v - w) < pitch / 4 for w in vals)
+            found, k = [], 0
+            while k < len(lat):
+                if has(lat[k]):
+                    k += 1
+                    continue
+                j = k
+                while j + 1 < len(lat) and not has(lat[j + 1]):
+                    j += 1
+                if k > 0 and j + 1 < len(lat):
+                    found.append((lat[k - 1], lat[j + 1]))
+                k = j + 1
+            return found
+        for axis, bl in ((1, bands(grid.ys, y0, y1, grid.pitch_y)),
+                         (0, bands(grid.xs, x0, x1, grid.pitch_x))):
+            h_ = hy if axis == 1 else hx         # a half pitch across the band
+            hc = hx if axis == 1 else hy         # ...and along it
+            pc = (px, py)[axis]
+            lo_c, hi_c = (x0, x1) if axis == 1 else (y0, y1)
+            pt = (lambda al, ac: (al, ac)) if axis == 1 else (lambda al, ac: (ac, al))
+            for (a_, b_) in bl:
+                if pc <= a_ + 1e-6:
+                    sgn = 1
+                elif pc >= b_ - 1e-6:
+                    sgn = -1
+                else:
+                    continue
+                n1, n2 = a_ + h_, b_ - h_          # the half lines
+                nl = int((n2 - n1 - 2 * street_pitch) / street_pitch + 1e-9) + 1
+                mid = (n1 + n2) / 2
+                for i in range(max(nl, 0)):
+                    v = mid + (i - (nl - 1) / 2) * street_pitch
+                    if (v - mid) * sgn > street_pitch / 2:
+                        continue                 # the far half's lanes are the other side's
+                    for g in (0, -1, 1):
+                        c = (px, py)[1 - axis] + g * hc
+                        if g:
+                            gate = pt(c, pc + sgn * h_)
+                            legs_f = [((px, py), gate, home), (gate, pt(c, v), home)]
+                        else:
+                            legs_f = [((px, py), pt(c, v), home)]
+                        if not all(clear(p, q, L_) for p, q, L_ in legs_f):
+                            continue
+                        for d in (('left', 'right') if axis == 1 else ('up', 'down')):
+                            if street_dirs is not None and d not in street_dirs:
+                                continue
+                            dd = DIRS[d][1 - axis]
+                            e0 = edge(d)
+                            for t in range(street):
+                                s_ = c + dd * t * hc
+                                if not (lo_c < s_ < hi_c):
+                                    break
+                                site = pt(s_, v)
+                                legs = legs_f + ([(pt(c, v), site, home)] if t else [])
+                                if t and not clear(pt(c, v), site, home):
+                                    break
+                                if via_clear and not all(via_clear(site, lay) for lay in layers):
+                                    continue
+                                e = (e0[0], site[1]) if axis == 1 else (site[0], e0[1])
+                                for L in others:
+                                    if clear(site, e, L):
+                                        out.append(Move(net, 'dogbone', d, L, e, 1,
+                                                        legs + [(site, e, L)],
+                                                        site=site, street=1))
+                        break
     return out
 
 

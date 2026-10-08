@@ -88,6 +88,9 @@ ROWS = [
      "    if False:\n"
      "        return claim[0] % 360.0",
      (T983,), 'KILLED'),
+    # #1120 applies a set, so this mutant is no longer "measures where it
+    # does not write": it is "takes the first member whether or not it
+    # fits", which C7 (WIDE, [0, 90]: 0 is wider than the edge) kills.
     ('candidate-set-measured-at-its-first-entry', 'sd',
      "    if claim is not None and claim[0] is not None:\n"
      "        return claim[0] % 360.0",

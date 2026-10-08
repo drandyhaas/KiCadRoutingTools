@@ -88,7 +88,8 @@ RULE_PAIR_TYPES = frozenset({'segment-segment-track-rule'})
 # placement or routing lap can change a fab spec it did not write, so
 # counting them in `blocking` would make 0 unreachable there.
 # Pass --baseline <input board> and check_drc accepts those as
-# `inherited-via-in-paste`; what is left is disclosed here.
+# `inherited-via-in-paste`; what is left is then a site the run created, and
+# counts in `blocking` (#1171).
 VIA_PASTE_TYPES = frozenset({'via-in-paste'})
 
 _DRC_TOTAL = re.compile(r'^FOUND (\d+) DRC VIOLATIONS', re.M)
@@ -151,6 +152,12 @@ def _tool_path(root: str, tool: str) -> str:
     return os.path.join(root, tool)
 
 
+#: Wall seconds per sub-checker this run, published as SCORE_JSON
+#: `tool_seconds` (#1202 comment: a 61-minute score could not be attributed
+#: after the fact, because nothing recorded which child took the time).
+TOOL_SECONDS: dict = {}
+
+
 def run_tool(root: str, tool: str, *args) -> tuple:
     """(returncode, combined output). -X utf8 for the Ω/µ the tools print.
 
@@ -160,8 +167,11 @@ def run_tool(root: str, tool: str, *args) -> tuple:
     inner checker's EXIT=0). The outer invocation is the evidence unit."""
     cmd = [sys.executable, '-X', 'utf8', _tool_path(root, tool)] + [str(a) for a in args]
     env = dict(os.environ, KRT_NO_BANNER='1')
+    import time as _time
+    t0 = _time.monotonic()
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                        encoding='utf-8', errors='replace', env=env)
+    TOOL_SECONDS[tool] = TOOL_SECONDS.get(tool, 0.0) + (_time.monotonic() - t0)
     return p.returncode, p.stdout
 
 
@@ -188,92 +198,30 @@ def _unescape_net_name(s: str) -> str:
 
 
 # WHAT `poured_nets` MEANS, carried in the payload beside the value itself.
-# It is "this net has at least one zone on the board", which is exactly the
-# fact that picks the REPAIR HANDLER for a broken net -- and it is NOT a list
-# of plane nets. Measured on neo6502: the 61 zone-backed nets covered 332 of
-# 545 pads (72%), including all of /A0../A15, because that board pours many
-# signal nets; a consumer that read it as "the planes, safe to ignore" removed
-# most of the board from its own analysis. Emitting the sentence next to the
-# list is the point -- a comment in this file is not visible to the consumer
-# reading the JSON, and that is who got this wrong.
+# It is "this net has at least one zone on the board", which decides HOW a
+# broken net gets fixed (route.py's in-run plane finalize, which only runs on
+# nets inside that step's --nets) -- and it is NOT a list of plane nets.
+# Measured on neo6502: the 61 zone-backed nets covered 332 of 545 pads (72%),
+# including all of /A0../A15, because that board pours many signal nets; a
+# consumer that read it as "the planes, safe to ignore" removed most of the
+# board from its own analysis. Emitting the sentence next to the list is the
+# point -- a comment in this file is not visible to the consumer reading the
+# JSON, and that is who got this wrong.
 POURED_NETS_MEANING = (
-    'nets with at least one zone on the board, i.e. a broken one of these is '
-    "repair_planes.py's job rather than route.py's. This is NOT a list "
-    'of plane/power nets and is NOT a safe --ignore-nets population: a board '
-    'that pours signal nets puts them in here too (measured: 332 of 545 pads).')
+    'nets with at least one zone on the board. A broken one of these is fixed '
+    "by route.py with the net inside its --nets: the step's in-run plane "
+    "finalize (#562) taps and joins it at that step's own track and via "
+    "sizes, checked against KiCad's exact fill, and runs even when the step "
+    'has nothing else to route (#1112). This is NOT a list of plane/power '
+    'nets and is NOT a safe --ignore-nets population: a board that pours '
+    'signal nets puts them in here too (measured: 332 of 545 pads).')
 
 
-def score_connectivity(root: str, board: str) -> dict:
-    """Unrouted and broken nets, from check_connected.py.
-
-    This is the authoritative, zone/fill-aware answer -- it reconciles
-    pour-backed nets against KiCad's exact fill in both directions, which the
-    router's own tally does not do.
-    """
-    rc, out = run_tool(root, 'check_connected.py', board)
-    if 'ALL NETS FULLY CONNECTED' in out:
-        return {'ran': True, 'count': 0, 'unrouted': 0, 'broken': 0, 'nets': []}
-    m = _CONN_TOTAL.search(out)
-    if not m:
-        return skipped(f'check_connected.py produced no summary (rc={rc})')
-    unrouted = int(u.group(1)) if (u := _CONN_UNROUTED.search(out)) else 0
-    broken_nets = int(b.group(1)) if (b := _CONN_BROKEN.search(out)) else 0
-    # `broken` counts SEPARATIONS, not nets. Counting nets makes a net split into
-    # 10 pieces score the same as one split into 2, so the score ranked a board
-    # that had just taken GND from 10 components to 6 (23 stranded pads to 5) as
-    # WORSE, and the run had to be delivered against its own gate. Each net needs
-    # (components - 1) more joins to be whole, so that is the honest unit: it is
-    # 0 exactly when the net is connected, and it falls monotonically as repairs
-    # land. `broken_nets` is kept for the report.
-    comps = [int(c) for c in _CONN_COMPONENTS.findall(out)]
-    broken = sum(max(0, c - 1) for c in comps) if comps else broken_nets
-    # Net names, so the ledger can say WHICH nets failed and a later round can
-    # tell "the same nets every time" (parameters) from "different nets"
-    # (congestion) -- the Step 9 classification needs this distinction.
-    unrouted_names = re.findall(r'^\s{4}(\S+) \(\d+ pads\)', out, re.M)
-    broken_names = re.findall(r'^\s{2}(\S+) \(net \d+\):', out, re.M)
-    nets = unrouted_names + broken_names
-
-    # PER-NET DETAIL FOR `broken`, because a COUNT IS NOT A WORK LIST. `unrouted`
-    # is actionable from its names alone -- the net has no copper, route it. A
-    # `broken` net needs three more things before anyone can act: WHICH net, how
-    # many pieces (a 5-way split and a 2-way split are different jobs), and WHERE
-    # the stranded pads are. All three are already in check_connected's output and
-    # were being parsed and dropped, so `blocking_by.broken: 14` was a number with
-    # nothing behind it. Measured consequence: a run drove `unrouted` to 0 using
-    # the per-net width detail as its model, and left `broken` untouched at 14
-    # across two iterations because it had nothing equivalent to work from.
-    #
-    # The pad REF matters as much as the count. A break whose stranded pad sits on
-    # a do-not-fit part is not a functional defect and must not be chased forever;
-    # a break on a plane net wants repair_planes.py, not route.py. The
-    # ref is what lets the caller tell those apart.
-    detail, cur = {}, None
-    for line in out.splitlines():
-        if (mm := re.match(r'^\s{2}(\S+) \(net \d+\):\s*$', line)):
-            cur = mm.group(1)
-            detail[cur] = {'components': None, 'joins_needed': None,
-                           'stranded_pads': []}
-        elif cur and (mc := re.match(r'^\s+Disconnected components:\s*(\d+)', line)):
-            detail[cur]['components'] = int(mc.group(1))
-            detail[cur]['joins_needed'] = max(0, int(mc.group(1)) - 1)
-        elif cur and (mp := re.match(
-                r'^\s+\(([-\d.]+),\s*([-\d.]+)\) on (\S+)(?:\s+\[(\S+)\])?', line)):
-            detail[cur]['stranded_pads'].append(
-                {'x': float(mp.group(1)), 'y': float(mp.group(2)),
-                 'layer': mp.group(3), 'ref': mp.group(4)})
-
-    # NAME THE TOOL, not just the defect. Which step fixes a break is decided by
-    # ONE fact the board already carries: is the net POURED? A stranded pad on a
-    # plane net cannot be reached by route.py at all -- it needs a tap via, which
-    # is repair_planes.py's job -- and a run that reaches for route.py on
-    # everything watches the count sit still. Measured: `broken` held at 14 across
-    # two iterations of route.py calls, then fell to 11 in ONE
-    # repair_planes.py call once the plane nets were separated out.
-    #
-    # Poured-ness is read off the board's own zones, so this is a fact and not a
-    # guess. Everything else is `route`; the DNF case stays a human call, which is
-    # what the stranded pad's `ref` is in the list for.
+def poured_net_names(board: str) -> set:
+    """Nets with at least one zone on the board, read off the file text
+    (POURED_NETS_MEANING). Its own function so a fully connected board
+    reports them too (#1202: `poured_nets` read [] next to its own
+    meaning on a board carrying a GND zone)."""
     poured = set()
     try:
         with open(board, encoding='utf-8', errors='replace') as f:
@@ -308,9 +256,87 @@ def score_connectivity(root: str, board: str) -> dict:
                 poured.add(_unescape_net_name(zn.group(1)))
     except OSError:
         pass
+    return poured
+
+
+def score_connectivity(root: str, board: str) -> dict:
+    """Unrouted and broken nets, from check_connected.py.
+
+    This is the authoritative, zone/fill-aware answer -- it reconciles
+    pour-backed nets against KiCad's exact fill in both directions, which the
+    router's own tally does not do.
+    """
+    rc, out = run_tool(root, 'check_connected.py', board)
+    if 'ALL NETS FULLY CONNECTED' in out:
+        return {'ran': True, 'count': 0, 'unrouted': 0, 'broken': 0, 'nets': [],
+                'poured_nets': sorted(poured_net_names(board)),
+                'poured_nets_meaning': POURED_NETS_MEANING}
+    m = _CONN_TOTAL.search(out)
+    if not m:
+        return skipped(f'check_connected.py produced no summary (rc={rc})')
+    unrouted = int(u.group(1)) if (u := _CONN_UNROUTED.search(out)) else 0
+    broken_nets = int(b.group(1)) if (b := _CONN_BROKEN.search(out)) else 0
+    # `broken` counts SEPARATIONS, not nets. Counting nets makes a net split into
+    # 10 pieces score the same as one split into 2, so the score ranked a board
+    # that had just taken GND from 10 components to 6 (23 stranded pads to 5) as
+    # WORSE, and the run had to be delivered against its own gate. Each net needs
+    # (components - 1) more joins to be whole, so that is the honest unit: it is
+    # 0 exactly when the net is connected, and it falls monotonically as repairs
+    # land. `broken_nets` is kept for the report.
+    comps = [int(c) for c in _CONN_COMPONENTS.findall(out)]
+    broken = sum(max(0, c - 1) for c in comps) if comps else broken_nets
+    # Net names, so the ledger can say WHICH nets failed and a later round can
+    # tell "the same nets every time" (parameters) from "different nets"
+    # (congestion) -- the Step 9 classification needs this distinction.
+    unrouted_names = re.findall(r'^\s{4}(\S+) \(\d+ pads\)', out, re.M)
+    broken_names = re.findall(r'^\s{2}(\S+) \(net \d+\):', out, re.M)
+    nets = unrouted_names + broken_names
+
+    # PER-NET DETAIL FOR `broken`, because a COUNT IS NOT A WORK LIST. `unrouted`
+    # is actionable from its names alone -- the net has no copper, route it. A
+    # `broken` net needs three more things before anyone can act: WHICH net, how
+    # many pieces (a 5-way split and a 2-way split are different jobs), and WHERE
+    # the stranded pads are. All three are already in check_connected's output and
+    # were being parsed and dropped, so `blocking_by.broken: 14` was a number with
+    # nothing behind it. Measured consequence: a run drove `unrouted` to 0 using
+    # the per-net width detail as its model, and left `broken` untouched at 14
+    # across two iterations because it had nothing equivalent to work from.
+    #
+    # The pad REF matters as much as the count. A break whose stranded pad sits on
+    # a do-not-fit part is not a functional defect and must not be chased forever,
+    # and the ref is what lets the caller tell it apart.
+    detail, cur = {}, None
+    for line in out.splitlines():
+        if (mm := re.match(r'^\s{2}(\S+) \(net \d+\):\s*$', line)):
+            cur = mm.group(1)
+            detail[cur] = {'components': None, 'joins_needed': None,
+                           'stranded_pads': []}
+        elif cur and (mc := re.match(r'^\s+Disconnected components:\s*(\d+)', line)):
+            detail[cur]['components'] = int(mc.group(1))
+            detail[cur]['joins_needed'] = max(0, int(mc.group(1)) - 1)
+        elif cur and (mp := re.match(
+                r'^\s+\(([-\d.]+),\s*([-\d.]+)\) on (\S+)(?:\s+\[(\S+)\])?', line)):
+            detail[cur]['stranded_pads'].append(
+                {'x': float(mp.group(1)), 'y': float(mp.group(2)),
+                 'layer': mp.group(3), 'ref': mp.group(4)})
+
+    # NAME THE TOOL, not just the defect. Every break is route.py's (#1112). A
+    # stranded pad on a POURED net is reached by route.py's in-run plane finalize
+    # (#562: the repair engine's taps and joins plus the KiCad exact-fill
+    # reconnect, at the route step's own track/via sizes), provided the net is
+    # inside that step's --nets. This used to say `repair_planes`, on a
+    # measurement taken three days BEFORE the finalize landed (`broken` held at
+    # 14 under route.py, fell to 11 in one repair call), and a run that obeyed it
+    # ended its chain on a standalone repair at the board's 0.5 mm class via
+    # around copper routed with 0.3 mm vias: the repair cannot know the chain's
+    # sizes, because the .kicad_pro writeback never lowers the class's via/track
+    # draw defaults (#842). The finalize also runs when route.py finds nothing
+    # else to route (#1112), so a break only KiCad's exact fill sees is reached
+    # too. The DNF case stays a human call, which is what the stranded pad's
+    # `ref` is in the list for.
+    poured = poured_net_names(board)
     for name, v in detail.items():
-        v['handler'] = ('repair_planes' if name in poured
-                        else 'route')
+        v['handler'] = 'route'
 
     return {'ran': True, 'count': int(m.group(1)), 'unrouted': unrouted,
             'broken': broken, 'broken_nets': broken_nets,
@@ -365,8 +391,8 @@ def unrouted_shape(board: str, unrouted_names) -> dict:
             'open': sorted(open_nets)}
 
 
-#: check_assembly's five `not_buildable` conjuncts, by the JSON key each one
-#: publishes (check_assembly.py:508-510). `blocking` -- pad INTERSECTIONS -- is
+#: check_assembly's seven `not_buildable` conjuncts, by the JSON key each one
+#: publishes (check_assembly's `not_buildable = ...` line). `blocking` -- pad INTERSECTIONS -- is
 #: the first of them and is the only one this component used to read (#918).
 #:
 #: THEY ARE NOT DISJOINT AND THEY ARE NOT ONE CURRENCY, which is why `count`
@@ -391,7 +417,8 @@ def unrouted_shape(board: str, unrouted_names) -> dict:
 #: --baseline, so check_assembly publishes null rather than 0. Reported as
 #: unmeasured, never counted as clean.
 ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
-                      'containment_blocking', 'courtyard_blocking_gating')
+                      'containment_blocking', 'courtyard_blocking_gating',
+                      'oob_pad_copper_gating_count', 'mating_keepout_count')
 
 #: The conjuncts that can ACTUALLY flip the verdict while `blocking` is 0, in
 #: this scorer's invocation. Two, not four:
@@ -401,11 +428,17 @@ ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
 #:     passed, and board_score never passes one.
 #: Written down because the issue, and this file's first draft, claimed all
 #: four -- and a motivating case that cannot occur is not a motivating case.
-ASSEMBLY_LIVE_CONJUNCTS = ('coincident_origins', 'containment_blocking')
+#: #1096 added `oob_pad_copper_gating_count`: pad copper past the outline
+#: (true pad outlines, castellated pads left out) gates the
+#: verdict, and it does not need `blocking` to fire. It overlaps `unrouted` /
+#: `broken` (such a part's nets cannot be routed) and adds at most 1 through
+#: the NOT-BUILDABLE floor, deliberately: CLAUDE.md ranks it first.
+ASSEMBLY_LIVE_CONJUNCTS = ('coincident_origins', 'containment_blocking',
+                           'oob_pad_copper_gating_count', 'mating_keepout_count')
 
 
 def assembly_component(doc: dict, rc: int) -> dict:
-    """check_assembly's VERDICT, not one of its five conjuncts (#918).
+    """check_assembly's VERDICT, not one of its seven conjuncts (#918).
 
     `not_buildable` is `blocking or locked_contact or stack_groups or
     containment_blocking or courtyard_gating`. This component read `blocking`
@@ -450,8 +483,9 @@ def assembly_component(doc: dict, rc: int) -> dict:
     if not isinstance(buildable, bool):
         return skipped(
             "check_assembly published no `buildable` key: `blocking` alone is "
-            "1 of its 5 not_buildable conjuncts (check_assembly.py:508-510), "
-            "and this component will not re-derive the other four")
+            "1 of its 7 not_buildable conjuncts (check_assembly's "
+            "`not_buildable` line), and this component will not re-derive "
+            "the other six")
     if (rc == 4) != (not buildable):
         return skipped(
             f"check_assembly contradicts itself: exit {rc} with "
@@ -859,7 +893,7 @@ def score_net_widths(board: str, spec_file: str) -> dict:
 
     failures, detail = 0, {}
     for name, widths in sorted(seen.items()):
-        req = next((mm for pat, mm in want.items() if fnmatch.fnmatch(name, pat)),
+        req = next((mm for pat, mm in want.items() if fnmatch.fnmatchcase(name, pat)),
                    None)
         if req is None:
             continue
@@ -881,7 +915,7 @@ def score_net_widths(board: str, spec_file: str) -> dict:
                             'length_under_share': (round(_und / _tot, 4)
                                                    if _tot > 0 else 0.0)}
     unmatched = [p for p in want
-                 if not any(fnmatch.fnmatch(n, p) for n in seen)]
+                 if not any(fnmatch.fnmatchcase(n, p) for n in seen)]
     return {'ran': True, 'count': failures, 'nets': detail,
             'patterns_matching_no_routed_net': unmatched}
 
@@ -1099,7 +1133,9 @@ def build_parser():
                    help='the board this one was derived from (the unrouted '
                         'input). check_drc then accepts the vias it already had '
                         'in a paste opening as inherited, and grades a graze of '
-                        'footprint graphic copper that a part MOVE created (#962)')
+                        'footprint graphic copper that a part MOVE created (#962). '
+                        'A via-in-paste left after that is the run\'s own and '
+                        'counts in BLOCKING (#1171)')
     p.add_argument('--clearance', type=float,
                    help='grade DRC at this clearance. OMIT IT unless you know '
                         'better than the board: check_drc then reads the '
@@ -1222,6 +1258,13 @@ def main():
     advisory = {'drc_rule_pairs': rule_pairs,
                 'drc_via_in_paste': drc.get('via_in_paste')
                 or {'ran': drc.get('ran'), 'count': None, 'by_type': {}}}
+    # #1171: with --baseline, check_drc has already accepted every via the
+    # input had under solder (`inherited-via-in-paste`), so what is left is a
+    # site THIS run made -- a via it laid or re-laid there, or a part it moved
+    # onto one -- and the advisory rationale above ("a via the input already
+    # had") no longer holds. It blocks like any other defect.
+    if args.baseline:
+        parts['drc_via_in_paste'] = advisory.pop('drc_via_in_paste')
 
     # A component that was ASKED for and could not run leaves blocking unknown.
     # Reporting 0 there would let the loop stop on a board nothing graded.
@@ -1253,7 +1296,9 @@ def main():
              **({'placement': placement} if placement is not None else {}),
              'components': {**parts, **advisory},
              'floors': _floors(args.board, sizes),
-             'connectivity_nets': conn.get('nets', [])}
+             'connectivity_nets': conn.get('nets', []),
+             'tool_seconds': {k: round(v, 2)
+                              for k, v in sorted(TOOL_SECONDS.items())}}
     # Self-check the payload against the board it just graded (see
     # audit_net_names). Computed AFTER `score` is assembled so it audits what is
     # actually published, not what this function believes it published.

@@ -55,6 +55,9 @@ from collections import Counter
 ARGV = [a for a in sys.argv[1:] if not a.startswith('--')]
 OPTS = dict(a[2:].split('=', 1) for a in sys.argv[1:] if a.startswith('--'))
 os.environ.setdefault('SRC_CLIMB', '0')        # the chain's menus for our own reading (see plan_loop)
+# a harness: the caches the router leaves off, on (the probe memo's closed worlds, the taut strings)
+os.environ.setdefault('PROBE_MEMO', '1')
+os.environ.setdefault('TAUT_MEMO', '1')
 # THE BENCH REACHES EVERY OPERATOR (2026-09-19, the zynq article): replan
 # defaults to the H3 bench and DU1, and the three replan calls below used
 # to pass neither, so on a second article every descent re-fanned the

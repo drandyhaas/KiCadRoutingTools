@@ -99,8 +99,17 @@ def main():
     check('pads-only answer has the pad net and NOT the track net',
           pads_only.get(id(art)) == frozenset({0, 1}),
           f'{pads_only.get(id(art))}')
-    check('the checker\'s answer DOES include the touching track\'s net',
-          3 in (checker.get(id(art)) or set()), f'{checker.get(id(art))}')
+    # #1181: a track never grants a FOOTPRINT's copper its net -- KiCad gives
+    # that copper none -- so here the checker equals the pads-only answer.
+    # Board-level art still takes a touching track's net (#337), which is the
+    # arm the subset chain's top term is for.
+    check('the checker\'s answer does NOT give footprint copper the track\'s net',
+          checker.get(id(art)) == pads_only.get(id(art)), f'{checker.get(id(art))}')
+    art.owner_ref = ''
+    board_art = graphic_effective_nets(pcb, include_mutable=True)
+    check('for board-level art the checker DOES include the touching track\'s net',
+          3 in (board_art.get(id(art)) or set()), f'{board_art.get(id(art))}')
+    art.owner_ref = 'U1'
     check('subset chain holds: own <= pads-only <= checker',
           own[id(art)] <= pads_only[id(art)] <= checker[id(art)])
 

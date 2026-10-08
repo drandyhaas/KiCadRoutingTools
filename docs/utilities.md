@@ -15,7 +15,9 @@ Options:
   --clearance FLOAT    Track-to-track clearance in mm. Default: auto-detected from
                        the sibling .kicad_pro Default net-class clearance (the value
                        the routing steps recorded as actually used, incl. auto-stepped
-                       fine-pitch taps); falls back to 0.2 if no project is found.
+                       fine-pitch taps), floored at Board Setup min_clearance as
+                       KiCad's DRC does (#1210); falls back to 0.2 if no project is
+                       found.
   --via-clearance FLOAT  Via-to-track clearance in mm (uses --clearance if not set)
   --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm
                                   (default: 0.20, the JLC fab floor — same as routing)
@@ -189,7 +191,14 @@ The verdict is `placement.legality.grade_pad_legality` — the same numbers
 request is refused when it makes a category worse — the counts (pad conflicts,
 hole conflicts, pads off-board) **and their magnitudes** (`pad_shortfall`,
 `oob_pad_amount`; a count arm alone accepted a part moved from 2.0 mm off the
-board to 204.66 mm off it, measured on `flat_hierarchy`) — and **never for
+board to 204.66 mm off it, measured on `flat_hierarchy`) — plus **pad
+stacks** (#1064): two parts' pad copper overlapping on a shared side, ANY
+net, measured by check_assembly's own `legality.pad_intersection_pairs`
+(`pad_stack_count`, `pad_stack_area` summed over every stacked pad pair, and
+`pad_stack_pairs` as a
+set, so a new stack is refused when the totals tie). The pad-conflict grade
+skips same-net pads, so esp_prog's C4 put on Y1's same-net pad (0.0412 mm²)
+used to exit 0 here and read NOT BUILDABLE in check_assembly — and **never for
 damage the board already had**:
 an absolute gate is False for a large share of parts on a real board before
 anything moves, so it would refuse poses no worse than where the part already
@@ -266,6 +275,72 @@ is bounded by SCOPE -- the net patterns above. Each probe row carries a
 `status` (`ok` / `crashed` / `no_summary` / `screened`) so an absent verdict
 names its cause instead of being an undifferentiated `failures: null`.
 
+## Rule-Area Writer (`add_rule_area.py`)
+
+Writes a copper keep-out rule area -- `(zone ... (keepout ...))` -- onto a board
+(#1200). A module's PCB antenna needs one on every layer; the router stamps
+a rule area (`obstacle_map.add_rule_area_keepout_obstacles`), placement grades
+it, and KiCad reports copper inside it as `items_not_allowed`.
+
+```bash
+python3 py_router/add_rule_area.py in.kicad_pcb out.kicad_pcb \
+    --name ANT_KEEPOUT --ref U1 --rect -9 -18 9 -12
+```
+
+The area is `--rect X0 Y0 X1 Y1` or `--polygon X,Y X,Y X,Y ...` in board mm,
+or, with `--ref`, in that footprint's local frame as the file stores it -- the
+frame its pads' `(at)` positions are written in, already mirrored for a part on
+the back -- so re-running after the part moves puts the area where the part
+now is. It goes on every copper layer unless `--layers` names some, and
+forbids `tracks vias copperpour` unless `--forbid` lists others (pads and
+footprints stay allowed by default). A board-level rule area of the same
+`--name` is replaced, so the command is idempotent; the output gets the
+input's siblings. Exit 0 written, 2 for a usage error, a `--ref` the board
+does not have, or a layer it does not have.
+
+## Rotation Ranker (`rank_rotations.py`)
+
+Ranks ONE part's rotations by what `place_seed` and its polish produce at each
+(#1113). A pile part keeps its input rotation -- a generator default -- and a
+one-part move cannot rank a large IC's rotation once the seed has packed its
+decaps against its pins (`converge.py poses` then vetoes every other angle and
+says so in `dropped_by`). So the rotation is judged at SEED level.
+
+```bash
+python py_placer/rank_rotations.py pile.kicad_pcb --intent floorplan.json \
+    --out-dir rot --probe --write-intent floorplan_rot.json
+```
+
+Per candidate angle (the input angle and its quarter turns; the 45-degree set
+too with `--diagonal-rotations`; or `--rotations`), the intent plus one block
+declaring the part's `rotation`, then `place_seed` for every `--seeds` value,
+exactly as `compare_seeds.py` runs it. The written board is read back: a part
+left unseated, or written at another angle, is a hard fail and ranks last. An
+angle where a seed's re-seat could not put the part back (`reseat_declined`,
+#1117) ranks after every angle whose seeds held it, and still ranks. The
+rest rank by unseated parts, then a probe verdict when `--probe` routed it
+(the top `--probe-top` angles, full-board, no timeout), then median crossings,
+hpwl and grade errors; a tie goes to the earlier angle in the ladder (the
+input angle when it is ranked). Any other seed that fails its intent gate is
+not a tier -- on a pile most do, for repairable reasons -- but each angle reports
+how many of its seeds did, and the winner line says so. A CONTROL arm seeds
+the same seeds with the intent as given (no rotation declared): it is the
+baseline the winner line compares with, because the seeder may turn the part
+itself, and it is reported, never ranked. Its median runs over the seeds that
+left no part in the pile (`unseated` 0), and the winner line names any it
+excluded (#1202). `--jobs N` runs up to N `place_seed` arms at once; each is an
+independent seeded subprocess writing its own board, so N changes no result. Without `--ref` it ranks the
+unlocked, undeclared, non-connector part with the most connected pads (at least
+`--min-pads`). Writes `rotations.json` (every row, every angle's spread, the
+ranking, `separated` when the winner's worst seed beats the runner-up's best)
+and a `JSON_SUMMARY`; `--write-best` copies the winning board with its
+siblings and `--write-intent` writes the intent with the winning rotation
+declared. Exit 0 with a winner; 2 for usage errors; 3 when place_seed will
+not seed the board (it looks placed -- pass `--seed-args='--force'`); 4 when
+nothing is rankable: the part is locked, already has a declared rotation or a
+fixed pose, no part is eligible, the zone plan is refused, or every angle
+hard-failed.
+
 ## Plane-Fragility Placement Score (`plane_score.py`)
 
 Pours the named plane nets on a scratch copy of a board (full-outline
@@ -310,7 +385,7 @@ python3 -X utf8 py_placer/placement_score.py board.kicad_pcb --intent floorplan.
 | `pin_order_crossings` | part pairs whose pad order CROSSES, so a router must pay a via or a detour |
 | `cluster_to_pin` | worst distance from a passive to the pin it serves, mm — declared `proximity` claims first, the decap election for the rest |
 | `plane_cut_proxy` | length of each net's chord lying INSIDE a locked part's body, summed. Two-layer boards only; ground and rails excluded |
-| `balance` | pad-area first moment along the board's long axis, as a fraction of span |
+| `balance` | pad-area first moment along the board's long axis, as a fraction of span. Copper pads only: NPTH and paste/mask-aperture pads are excluded, and the term names that population as its `basis` (#1143), so a lap scored before #1143 is reported `not-comparable` against one scored after it rather than as a move |
 
 **There is no aggregate and no weight.** Laps are compared by `compare_terms`,
 which is PARETO: `better` only when no measured term regressed, `mixed` naming
@@ -523,8 +598,11 @@ python py_tools/check_orphan_stubs.py original.kicad_pcb modified.kicad_pcb --co
 
 An orphan stub is a trace endpoint that:
 1. Has only one connected segment (degree-1 node in the connectivity graph)
-2. Is NOT near a via
-3. Is NOT near a through-hole pad
+2. Does not overlap same-net copper with its end cap: a via, a pad (by its
+   real outline), another track's body, or a same-net zone outline
+3. Is NOT a reverse T: no other same-net track vertex or via lands on the
+   stub's own body within 3 track widths of the free end (check_weird's
+   mid-body-anchor rule, #1167)
 
 These represent traces that end without a proper electrical connection.
 
@@ -595,6 +673,21 @@ Only pads that share a copper layer are compared, so edge-connector fingers on o
 sides and a part's top/bottom ground pads never false-trip. Net-0 (no-connection) pads -
 fiducials, mechanical pads - are ignored. The exit code is the number of overlapping
 pairs (0 = clean), so it gates a pipeline.
+
+A pad is measured by its outline: rect corners turned by the pad's angle, and
+round, oval and roundrect corners as arcs. A CUSTOM pad's outline is only its box,
+so a pair involving one that overlaps on outlines is re-measured on the real copper
+(#1111): the union of the pad's parsed primitives, and the depth is the thickness of
+the shared copper. A solder jumper's interleaved teeth (KiCad's StickHub demo, JP1:
+0.150 mm apart, 0.150 mm overlap on the boxes) no longer reads as a short, and the
+re-measure can only remove a pair the outlines found. A custom pad the parser could
+not draw (a `gr_curve` primitive) stays measured on its box. The placement
+graders read the same copper (`check_pads.custom_pad_copper`, #1123): a part's
+occupancy and its pad copper past the outline, at the file pose and at a
+trial pose, where the pad's box is re-derived for the new angle. As in KiCad, two
+copies of one UNCONNECTED pin (KiCad gives each its own `unconnected-(...)` net)
+and a footprint's `net_tie_pad_groups` are not shorts; two copies of one number
+on real nets are. An `F&B.Cu` pad is on both outer layers.
 
 ### Examples
 
@@ -1140,7 +1233,8 @@ which that pass does not yet handle.
 
 Read-only scan for **weird copper** a routed board should not have: dangling
 trace ends and tails, near-open **soft joints** (same-net segments that overlap
-by their end caps instead of meeting endpoint-to-endpoint), redundant copper
+by their end caps instead of meeting endpoint-to-endpoint, and meet nowhere
+else -- two stubs leaving one vertex are not one, #984), redundant copper
 **loops/cycles**, **removable** segments (copper that can be deleted without
 disconnecting the net), **stacked** duplicate copper, and **floating** vias
 (vias touching no copper on any layer). It never modifies the board — use it as
@@ -1388,7 +1482,7 @@ When routing used `--clearance-ceiling` (#530; formerly the implicit meaning of
 **clearance** DOWN to the ceiling, so KiCad grades the copper at what was
 actually routed rather than at the (usually aspirational) stock class. Without
 it the classes are preserved (each net routed at its own class; `--clearance`
-alone sets only the Default class). In the GUI the **Class ceiling** checkbox
+alone sets only the Default class). In the GUI the **Clearance ceiling** checkbox
 next to Min Clearance is the switch.
 
 The **GUI plugin** does the equivalent on the live board via the pcbnew API

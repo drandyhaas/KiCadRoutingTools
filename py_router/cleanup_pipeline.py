@@ -617,6 +617,10 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             print(f"{label}Merged {_mc_stats.get('joints', 0)} collinear joint(s) "
                   f"on {_mc_nets} net(s): -{_mc_n} redundant segment(s) (#811)")
 
+    # The passes above edit pcb_data's copper in place; anything cached
+    # against the old copper must not answer for the new.
+    from pcb_modification import bump_copper_epoch
+    bump_copper_epoch(pcb_data)
     return out
 
 

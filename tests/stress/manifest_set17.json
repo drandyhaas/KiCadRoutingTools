@@ -257,8 +257,8 @@
     "path": "hardware/v2/legboard/legboard.kicad_pcb",
     "branch": "main",
     "file": "hexapod_legbrd.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/quick-brown-bot/hexapod/main/hardware/v2/legboard/legboard.kicad_pcb",
-    "github_url": "https://github.com/quick-brown-bot/hexapod/blob/main/hardware/v2/legboard/legboard.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/quick-brown-bot/hexapod/6b4f75bed5d65037928c67c6cf33a929ddaa2ad3/hardware/v2/legboard/legboard.kicad_pcb",
+    "github_url": "https://github.com/quick-brown-bot/hexapod/blob/6b4f75bed5d65037928c67c6cf33a929ddaa2ad3/hardware/v2/legboard/legboard.kicad_pcb",
     "size_kb": 347,
     "layers_est": 2,
     "footprints": 17,
@@ -270,7 +270,7 @@
     "lane": "industrial_auto",
     "license": "see repo",
     "short_name": "hexapod_legbrd",
-    "note": "servo leg controller: RS-485 daisy chain, motor drivers, odd narrow outline"
+    "note": "servo leg controller: RS-485 daisy chain, motor drivers, odd narrow outline. raw_url re-pinned 2026-10-08 to 6b4f75be, the commit that served the corpus's version: 2026-07-31 commit 11720a5 ('Remove v2 hardware/firmware/docs, flatten v1 into top-level layout') deleted hardware/v2/; the board exists on no branch now."
   },
   {
     "set": "set17",

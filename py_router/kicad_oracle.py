@@ -438,7 +438,7 @@ def _pad_cluster_rung(pcb_data, net_id, x, y, layer, comps, tol):
     group, else (None, []) when no pad contains the point.
     """
     from check_drc import point_to_pad_distance
-    from check_connected import _pads_copper_touch
+    from check_connected import _pads_join
     comp_of_seg, comp_of_via, segs, vias, _ = comps
 
     def _pad_on_layer(p):
@@ -464,7 +464,9 @@ def _pad_cluster_rung(pcb_data, net_id, x, y, layer, comps, tol):
 
     # Overlap group: the hit pad plus same-net pads its copper touches
     # (transitive, but these groups are tiny -- dual-pad footprints).
-    # Cheap bounding-circle prefilter before the exact perimeter test.
+    # Cheap bounding-circle prefilter before the exact test, which is
+    # physical as exact_clusters' is (#1157): a sibling 15 um away is
+    # another cluster, and a weld on it would not reach this one.
     group, stack, seen = [hit], [hit], {id(hit)}
     while stack:
         base = stack.pop()
@@ -476,7 +478,7 @@ def _pad_cluster_rung(pcb_data, net_id, x, y, layer, comps, tol):
             if math.hypot(p.global_x - base.global_x,
                           p.global_y - base.global_y) > reach:
                 continue
-            if _pads_copper_touch(base, p, tol):
+            if _pads_join(base, p, tol):
                 seen.add(id(p))
                 group.append(p)
                 stack.append(p)
@@ -535,7 +537,7 @@ def _cluster_points(pcb_data, net_id, x, y, layer, comps, tol=0.06):
     checked shape-accurately (check_drc.point_to_pad_distance <= tol, the
     same geometry check_connected._pads_copper_touch applies to degenerate
     points). A containing pad resolves to a comps component when it -- or
-    an overlapping same-net sibling pad (_pads_copper_touch) -- reaches
+    an overlapping same-net sibling pad (_pads_join) -- reaches
     tracked copper; a bare pad group instead contributes its pads' centers
     as the copper extent (still root=None: pads carry no comps label).
 
@@ -947,6 +949,66 @@ def clamp_emitted_width(route_points, extra_conn, used_width, nominal_width,
     return w
 
 
+def widen_link_legs(route_points, used_width, pcb_data, net_id, config,
+                    piece_mm=None):
+    """An oracle link's legs as ``[(x1, y1, x2, y2, layer, width)]`` (#1169):
+    each at the NET's own requested width wherever that copper clears, and at
+    ``used_width`` only through the pinch.
+
+    The width ladder above re-routes the WHOLE link at each width and stops at
+    the first that does not fit, and the exact-fill tier has no ladder at all,
+    so one pinch anywhere shipped the whole strap at the class width
+    (complex_hierarchy: GND 74.0 of 92.9 mm under its requested 0.6, all of it
+    oracle copper, where 58.6 mm of it fits at 0.6). This is the bulk route's
+    piecewise rule (#1033, ``_widen_fitting_pieces``) applied to the copper
+    about to be written, judged by the same exact check every oracle width
+    decision uses (``wide_route_clear``: foreign copper, board edge, NPTH
+    drills): a leg that clears whole ships wide whole; otherwise it is cut
+    into ``_WIDEN_PIECE_MM`` pieces and each is judged with its own end caps.
+    Both tiers emit through it."""
+    from plane_region_connector import wide_route_clear
+    from single_ended_routing import _WIDEN_PIECE_MM
+    piece = piece_mm or _WIDEN_PIECE_MM
+    bec = getattr(config, 'board_edge_clearance', 0.0)
+    out = []
+    for k in range(len(route_points) - 1):
+        x1, y1, l1 = route_points[k]
+        x2, y2, l2 = route_points[k + 1]
+        if l1 != l2 or (abs(x1 - x2) < 1e-9 and abs(y1 - y2) < 1e-9):
+            continue
+        try:
+            want = float(config.get_net_track_width(net_id, l1))
+        except Exception:                                   # noqa: BLE001
+            want = used_width
+        if want <= used_width + 1e-9:
+            out.append((x1, y1, x2, y2, l1, used_width))
+            continue
+
+        def _ok(a, b, _l=l1, _w=want):
+            return wide_route_clear([(a[0], a[1], _l), (b[0], b[1], _l)], _w,
+                                    pcb_data, net_id, config,
+                                    board_edge_clearance=bec)
+        if _ok((x1, y1), (x2, y2)):
+            out.append((x1, y1, x2, y2, l1, want))
+            continue
+        n = int(math.ceil(math.hypot(x2 - x1, y2 - y1) / piece))
+        if n <= 1:
+            out.append((x1, y1, x2, y2, l1, used_width))
+            continue
+        pts = [(x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n) for i in range(n)]
+        pts.append((x2, y2))
+        flags = [_ok(pts[i], pts[i + 1]) for i in range(n)]
+        i = 0
+        while i < n:
+            j = i
+            while j < n and flags[j] == flags[i]:
+                j += 1
+            out.append((pts[i][0], pts[i][1], pts[j][0], pts[j][1], l1,
+                        want if flags[i] else used_width))
+            i = j
+    return out
+
+
 def emitted_copper_clear(route_points, extra_conn, width, pcb_data, net_id,
                          config):
     """True when the copper about to be written -- `route_points` at `width`
@@ -1123,8 +1185,48 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
     return None
 
 
+def _seed_edge_clearance(config):
+    """The edge keep-out the obstacle map stamps for `config`: its
+    board_edge_clearance, else its clearance (obstacle_map's own fallback)."""
+    bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
+    return bec if bec > 0 else (getattr(config, 'clearance', 0.0) or 0.0)
+
+
+def seeds_clear_of_edge(seeds, pcb_data, edge_clearance, track_half):
+    """`seeds` ((x, y[, layer]) tuples) without those a strap could not START
+    at: within `edge_clearance + track_half` of the board edge (#1168).
+
+    A source/target cell OVERRIDES the static board-edge keep-out in the
+    obstacle map (it has to: a seed is where the route must be allowed to
+    begin), so a seed inside the band hands the A* a start in copper the
+    run's own edge floor forbids. The exact-fill tier's seeds are fill
+    interior points, and the fill they come from is refilled against the
+    PROJECT's edge rule -- sonde_xilinx declares 0.01 mm, the run pins 0.2,
+    and its GND strap ended 0.0275 mm inside the band. Measured against
+    every Edge.Cuts ring (outlines and cutouts), else the board bounds."""
+    if not seeds or not edge_clearance or edge_clearance <= 0:
+        return list(seeds or ())
+    need = edge_clearance + track_half - 1e-9
+    import numpy as np
+    xy = np.asarray([(p[0], p[1]) for p in seeds], dtype=float)
+    from check_drc import board_edge_geometry
+    rings, _outer, _cuts = board_edge_geometry(pcb_data.board_info)
+    if rings:
+        import shapely
+        from shapely.geometry import LineString, MultiLineString
+        lines = MultiLineString([LineString(list(r) + [r[0]]) for r in rings])
+        d = shapely.distance(lines, shapely.points(xy))
+    else:
+        bb = getattr(pcb_data.board_info, 'board_bounds', None)
+        if not bb:
+            return list(seeds)
+        d = np.minimum.reduce([xy[:, 0] - bb[0], bb[2] - xy[:, 0],
+                               xy[:, 1] - bb[1], bb[3] - xy[:, 1]])
+    return [p for p, dd in zip(seeds, d) if dd >= need]
+
+
 def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
-                          track_half=0.1):
+                          track_half=0.1, edge_clearance=0.0):
     """Strap endpoints from KiCad's EXACT fill (kicad_exact_fill): the two
     clusters' nearest approach, as (src_seeds, tgt_seeds, pa, pb, layer).
 
@@ -1384,8 +1486,11 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
                 if _win[0] <= px <= _win[2]
                 and _win[1] <= py <= _win[3]][:400]
 
-    src = _side_seeds(pa, a_pts)
-    tgt = _side_seeds(pb, b_pts)
+    # #1168: never a seed the run's own edge floor forbids.
+    src = seeds_clear_of_edge(_side_seeds(pa, a_pts), pcb_data,
+                              edge_clearance, track_half)
+    tgt = seeds_clear_of_edge(_side_seeds(pb, b_pts), pcb_data,
+                              edge_clearance, track_half)
     if not src or not tgt:
         return None
     layer = pa[2] if pa[2] else (al or bl)
@@ -1405,7 +1510,15 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
     whole segment is exact-checked against foreign copper with shape-aware
     pad distances (a circumscribed-radius test false-blocks every BGA
     corridor: 0.23mm pads at 0.25mm offset leave 8um of real margin that a
-    0.163mm circumradius eats). Returns a kicad_parser.Segment or None."""
+    0.163mm circumradius eats). Returns a kicad_parser.Segment or None.
+
+    Each foreign item is priced at the value check_drc grades the pair at
+    (#1137): `config.pair_clearance` for a track (kind 'track': the weld IS a
+    track) or a via (met on `layer`), and for a pad the class and the layer
+    rule on `layer` (`pad_pair_clearance_before_override`), raised to the
+    pad's override as before. An NPTH hole has no net and keeps the flat
+    clearance. With no class map and no .kicad_dru rule every term is what
+    it was."""
     import math as _m
     from kicad_parser import Segment, pad_is_plated_through
     from geometry_utils import point_to_segment_distance
@@ -1460,7 +1573,8 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
     for s in pcb_data.segments:
         if s.net_id == net_id or s.layer != layer:
             continue
-        need = reach + s.width / 2.0 + clr
+        need = reach + s.width / 2.0 + config.pair_clearance(
+            net_id, s.net_id, layer, kind='track')
         for px, py in pts:
             if point_to_segment_distance(px, py, s.start_x, s.start_y,
                                          s.end_x, s.end_y) < need:
@@ -1468,7 +1582,8 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
     for v in pcb_data.vias:
         if v.net_id == net_id:
             continue
-        need = reach + v.size / 2.0 + clr
+        need = reach + v.size / 2.0 + config.pair_clearance(
+            net_id, v.net_id, layer)
         for px, py in pts:
             if _m.hypot(v.x - px, v.y - py) < need:
                 return None
@@ -1489,7 +1604,12 @@ def _direct_sliver_weld(pcb_data, net_id, ax, ay, bx, by, layer, config,
                 layer in expand_pad_layers(pad.layers, cu_layers)
             if not on_layer:
                 continue
-            need = reach + max(clr, getattr(pad, 'local_clearance', 0) or 0)
+            # the pad's override only RAISES the value here, as it always
+            # did: the class and rule term is what #1137 changes
+            need = reach + max(
+                config.pad_pair_clearance_before_override(pad, net_id,
+                                                          layer=layer),
+                getattr(pad, 'local_clearance', 0) or 0)
             for px, py in pts:
                 if _pt_pad_dist(px, py, pad) < need:
                     return None
@@ -1558,6 +1678,127 @@ def _via_drill_radius(via, fallback: float) -> float:
     return d / 2.0
 
 
+#: The per-net WIDTH maps a GridRouteConfig keys by net id, which a caller
+#: hands the oracle by NAME (#1133): the weld's power-layer discipline
+#: (power_net_widths membership) and its width ladder (get_net_track_width).
+ORACLE_WIDTH_MAPS = ('power_net_widths', 'net_track_widths', 'net_layer_widths')
+
+
+def oracle_net_widths_by_name(config, nets, fields=ORACLE_WIDTH_MAPS) -> dict:
+    """``config``'s per-net width maps keyed by net NAME, for
+    ``oracle_reconnect(net_widths_by_name=...)``: {field: {net name: value}},
+    only the non-empty ones. ``nets`` is the run's ``pcb_data.nets``, the id
+    space the maps are keyed in (on the GUI, pcbnew's netcodes, which the
+    staged save the oracle parses does not keep, #1133)."""
+    out = {}
+    for f in fields:
+        named = {}
+        for nid, v in (getattr(config, f, None) or {}).items():
+            name = getattr(nets.get(nid), 'name', None)
+            if name:
+                named[name] = dict(v) if isinstance(v, dict) else v
+        if named:
+            out[f] = named
+    return out
+
+
+def oracle_net_ids_by_name(nets) -> dict:
+    """{net name: net id} of the CALLER's board (``pcb_data.nets``), for
+    ``oracle_reconnect(net_ids_by_name=...)``. The no-net name '' is 0."""
+    out = {'': 0}
+    for nid, net in nets.items():
+        name = getattr(net, 'name', None)
+        if name:
+            out[name] = nid
+    return out
+
+
+def rekey_by_name(by_name, nets) -> dict:
+    """A {net name: value} map re-keyed onto ``nets``' own ids
+    ({net_id: Net}, a parsed board's ``pcb_data.nets``). Names the board does
+    not carry are dropped. The oracle re-parses its board every round, and on
+    the GUI path that board is a pcbnew save whose ids need not be the
+    caller's (#1137/#1133), so every per-net map crosses into it by name."""
+    out = {}
+    if not by_name:
+        return out
+    for nid, net in nets.items():
+        name = getattr(net, 'name', None)
+        if name and name in by_name:
+            out[nid] = by_name[name]
+    return out
+
+
+def _stitch_via_clear(pcb_data, net_id, x, y, config, h2h) -> bool:
+    """#649b: may a stitching via of `net_id` (config.via_size /
+    config.via_drill, the whole stack) go at (x, y)? False when it comes
+    within clearance of a foreign segment, via or pad, or within `h2h`
+    hole-to-hole of any drill.
+
+    Each foreign item is priced at the value check_drc grades the pair at
+    (#1137): a track meets the via on the track's layer
+    (`config.pair_clearance`, kind 'layer'), a via meets it on every layer
+    (kind 'stack'), a pad on the copper layers it shares with a through via
+    (`pad_pair_clearance_before_override`: class and layer rules; this check
+    never read a pad override and still does not). The pad keeps its
+    circumscribed radius; hole-to-hole is a different term and stays as it
+    was. With no class map and no .kicad_dru rule every clearance term is
+    `config.clearance`, as before."""
+    from geometry_utils import point_to_segment_distance
+    vr = config.via_size / 2.0
+    vdr = config.via_drill / 2.0
+    for s2 in pcb_data.segments:
+        if s2.net_id != net_id and point_to_segment_distance(
+                x, y, s2.start_x, s2.start_y, s2.end_x, s2.end_y) < (
+                vr + s2.width / 2
+                + config.pair_clearance(net_id, s2.net_id, s2.layer)):
+            return False
+    for v2 in pcb_data.vias:
+        d2 = math.hypot(v2.x - x, v2.y - y)
+        if d2 < vdr + _via_drill_radius(v2, config.via_drill) + h2h:
+            return False
+        if v2.net_id != net_id and d2 < (
+                vr + v2.size / 2
+                + config.pair_clearance(net_id, v2.net_id, kind='stack')):
+            return False
+    for fp2 in pcb_data.footprints.values():
+        for pd2 in fp2.pads:
+            d2 = math.hypot(pd2.global_x - x, pd2.global_y - y)
+            if pd2.net_id != net_id and d2 < (
+                    vr + max(pd2.size_x, pd2.size_y) / 2
+                    + config.pad_pair_clearance_before_override(pd2, net_id)):
+                return False
+            if pd2.drill and pd2.drill > 0 and d2 < vdr + pd2.drill / 2 + h2h:
+                return False
+    return True
+
+
+def oracle_via_rungs(config, pcb_data, net_id):
+    """The via sizes an oracle link tries, largest first (#1170): its own,
+    then the first rung ``fab_tiers.escalation_rungs`` allows when that is
+    smaller -- the tier's standard floor under ``fab`` (0.45/0.2, the literal
+    this replaces), the board's own declared floor under ``board``, and
+    nothing under ``off``, where the link fails and is reported instead of
+    shipping a via the policy forbids. One descent rung, as before: deeper
+    rungs are the rescue ladder's."""
+    out = [(config.via_size, config.via_drill)]
+    try:
+        from fab_tiers import escalation_rungs
+        n = len(getattr(getattr(pcb_data, 'board_info', None),
+                        'copper_layers', None) or ()) or 2
+        _rf = getattr(config, 'rule_floors', None)
+        rungs = escalation_rungs(
+            n, extra_floors=_rf(net_id) if callable(_rf) else None)
+    except Exception:                                   # noqa: BLE001
+        rungs = []
+    if rungs:
+        vs = round(float(rungs[0]['via_diameter']), 4)
+        vd = round(float(rungs[0]['via_drill']), 4)
+        if vs < config.via_size - 1e-9:
+            out.append((vs, vd))
+    return out
+
+
 def oracle_reconnect(board_file: str, net_names, config,
                      track_via_clearance: float,
                      hole_to_hole_clearance: float,
@@ -1566,9 +1807,36 @@ def oracle_reconnect(board_file: str, net_names, config,
                      verbose: bool = False,
                      progress_callback=None,
                      cancel_check=None,
-                     project_from: str = None) -> dict:
+                     project_from: str = None,
+                     net_clearances_by_name: Optional[Dict[str, float]] = None,
+                     net_widths_by_name: Optional[Dict[str, dict]] = None,
+                     net_ids_by_name: Optional[Dict[str, int]] = None
+                     ) -> dict:
     """Route the exact missing links kicad-cli reports for `net_names` on
     `board_file`, in place, until KiCad is satisfied or no progress.
+
+    `net_clearances_by_name` (#1137) is the caller's RESOLVED net-class map
+    ({net name: mm}, after its --clearance-ceiling clamp). It travels by NAME
+    because this function re-parses `board_file` every round, and on the GUI
+    path that file is a pcbnew save whose nets are numbered afresh: an
+    id-keyed map would land on other nets. It is re-keyed onto each parse's
+    own ids (`rekey_by_name`), so the weld obstacle maps, the escalation and
+    the admission checks price every foreign net at its class, and each
+    link's routing floor is its own net's class. None or {}: the config's own
+    map, i.e. the flat clearance when the caller's config carries none.
+    `net_widths_by_name` (#1133) carries the per-net width maps the same way
+    ({field: {net name: value}} for the fields in ORACLE_WIDTH_MAPS, built by
+    `oracle_net_widths_by_name`); each one given replaces the config's own.
+    `net_ids_by_name` ({net name: id} of the CALLER's board,
+    `oracle_net_ids_by_name`) is the way back: every object returned in
+    new_segments / new_vias / removed_segments / removed_vias then carries
+    the caller's net id instead of the id of the parse that made it (an
+    object whose net the caller does not have is dropped, never shipped on a
+    guessed net). None: the parse's ids, as before.
+    The board's .kicad_dru track-to-track rules (#735) are installed on every
+    parse too (#1135), read beside `project_from` (else `board_file`) and
+    resolved against the parse's own nets, over this call's scope nets.
+    `config` is never mutated: the oracle works on a private copy.
 
     progress_callback(current, total, label) fires per round (0, 0, label:
     the kicad-cli DRC run is indeterminate) and per link (k, N, label) --
@@ -1642,6 +1910,58 @@ def oracle_reconnect(board_file: str, net_names, config,
             config = replace(config, board_edge_clearance=_eff_edge)
     except Exception:
         pass
+    # A private copy (#1137): the class map is re-keyed per round and the
+    # routing floor set per link below, and the caller's config must not
+    # carry either away. A field-for-field copy, so a board with no map
+    # routes exactly as before.
+    config = replace(config)
+    _ncl_by_name = dict(net_clearances_by_name or {})
+    _bad_fields = set(net_widths_by_name or {}) - set(ORACLE_WIDTH_MAPS)
+    if _bad_fields:
+        raise ValueError(f"net_widths_by_name: unknown field(s) "
+                         f"{sorted(_bad_fields)}; expected {ORACLE_WIDTH_MAPS}")
+    _w_by_name = {f: dict(m) for f, m in (net_widths_by_name or {}).items()}
+    # #1135: the .kicad_dru track-to-track rules. Read from the rules source
+    # the caller names (`project_from`: the real project, as the exact-fill
+    # refill stages it -- a GUI staged save has no .kicad_dru sibling) and
+    # resolved on each parse below, so the map is keyed by THAT board's ids
+    # whichever front staged it. No rules file: nothing is installed.
+    _track_src = project_from or board_file
+    try:
+        from kicad_dru import read_board_track_clearances
+        _track_live = bool(read_board_track_clearances(_track_src)[0])
+    except Exception:                                       # noqa: BLE001
+        _track_live = False
+
+    def _install_net_maps(pcb):
+        """Install the by-name maps on the board just parsed, by ITS ids."""
+        if _ncl_by_name:
+            config.net_clearances = rekey_by_name(_ncl_by_name, pcb.nets)
+        # #1133: the weld's power-layer discipline and width ladder read
+        # these by net id, so they follow the parse too
+        for _f, _m in _w_by_name.items():
+            setattr(config, _f, rekey_by_name(_m, pcb.nets))
+        if _track_live:
+            # #1135: effective over this call's scope nets, as batch_route's
+            # is over its routed set (raise-only on seg-vs-seg pairs: the
+            # weld router's maps, the escalation, the sliver weld)
+            from kicad_dru import install_track_clearances
+            try:
+                install_track_clearances(
+                    config, None, _track_src, pcb,
+                    routed_net_ids=[nid for nid, n in pcb.nets.items()
+                                    if n.name in names])
+            except Exception as _te:                        # noqa: BLE001
+                # the leg is an earner, never a blocker: route on without
+                # the raise rather than lose the whole recheck
+                print(f"  KiCad-oracle recheck: .kicad_dru track rules not "
+                      f"installed ({_te})")
+        # `pad_pair_clearance` resolves a `*.Cu` pad's shared layers over the
+        # BOARD's copper list, as check_drc does; the callers' configs record
+        # their routed subset (or the default two) when they had no board.
+        _cu = list(getattr(pcb.board_info, 'copper_layers', None) or [])
+        if _cu:
+            config.board_copper_layers = _cu
 
     names = set(net_names)
     routed = failed = rounds = cross_board = 0
@@ -1659,6 +1979,18 @@ def oracle_reconnect(board_file: str, net_names, config,
     # delete -- the file strip has no pcbnew equivalent.
     removed_board_segments = []
     removed_board_vias = []
+    # #1133: the NET NAME of every returned object, read off the parse that
+    # made it (keyed by id(): the objects live in the lists above for the
+    # whole call), so `net_ids_by_name` can put it back on the caller's ids.
+    _obj_net_names = {}
+
+    def _note_net_names(pcb):
+        by_id = {nid: n.name for nid, n in pcb.nets.items()}
+        by_id.setdefault(0, '')
+        for _o in (emitted_segments + emitted_vias + removed_board_segments
+                   + removed_board_vias):
+            if id(_o) not in _obj_net_names:
+                _obj_net_names[id(_o)] = by_id.get(_o.net_id)
     attempted = {}  # (net, endpoints) -> attempt count (graduated retries)
     # #562 custody: links no copper can ever join (cross-board) stay in
     # `links` and keep counting in `remaining`, so a caller that treats
@@ -1836,6 +2168,7 @@ def oracle_reconnect(board_file: str, net_names, config,
 
         pcb_data = parse_kicad_pcb(board_file)
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
+        _install_net_maps(pcb_data)
         routing_layers = pcb_data.board_info.copper_layers
         layer_map = {name: i for i, name in enumerate(routing_layers)}
 
@@ -2001,6 +2334,15 @@ def oracle_reconnect(board_file: str, net_names, config,
             if net_id is None:
                 failed += 1
                 continue
+            if config.net_clearances:
+                # #1137: this link's own class is the floor its obstacle maps
+                # price every foreign net from, so `obstacle_clearance` is
+                # the pair value max(own, foreign); `_obs_key` below carries
+                # net_id, so a map built at one net's floor is never reused
+                # for another's.
+                config.net_clearance_floor = max(
+                    config.clearance,
+                    config.net_clearances.get(net_id, 0.0))
             _key = (net_name, round(ax, 2), round(ay, 2),
                     round(bx, 2), round(by, 2))
             _attempt = attempted.get(_key, 0)
@@ -2086,7 +2428,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                     _ex = _exact_fill_endpoints(
                         pcb_data, net_id, net_name,
                         (ax, ay, al, akind), (bx, by, bl, bkind),
-                        _ex_map, track_half=config.track_width / 2)
+                        _ex_map, track_half=config.track_width / 2,
+                        edge_clearance=_seed_edge_clearance(config))
                 except Exception as _xe2:
                     if verbose:
                         print(f"    (exact-fill tier error: {_xe2})")
@@ -2106,12 +2449,10 @@ def oracle_reconnect(board_file: str, net_names, config,
                 print(f"    {net_name}: exact-fill tier: strapping "
                       f"nearest approach ({_pa[0]:.2f},{_pa[1]:.2f})<->"
                       f"({_pb[0]:.2f},{_pb[1]:.2f}) [{_elayer}]")
-                # Via ladder like the main path: nominal, then the fab-floor
-                # rung (a 0.71 via has nowhere to drop in a dense pocket).
-                for _vs, _vd in ((config.via_size, config.via_drill),
-                                 (0.45, 0.2)):
-                    if _vs > config.via_size:
-                        continue
+                # Via ladder like the main path: nominal, then the first
+                # rung the escalation policy allows (a 0.71 via has nowhere
+                # to drop in a dense pocket).
+                for _vs, _vd in oracle_via_rungs(config, pcb_data, net_id):
                     # #658: the tier routes with the same per-net power
                     # layer discipline as the main ladder (closure over
                     # _pw_cfg, bound per link before any tier call).
@@ -2146,8 +2487,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                     from net_rescue import _attempt_edge
                     _gap2 = (math.hypot(_pb[0] - _pa[0], _pb[1] - _pa[1]),
                              _pa[0], _pa[1], _pb[0], _pb[1])
+                    # #1137: the round's re-keyed class map (None when there
+                    # is none), so the escalation's own obstacle map prices
+                    # foreign nets at their class too
                     _esc2, _esc2_cfg = _attempt_edge(
-                        pcb_data, net_id, _gap2, config, None,
+                        pcb_data, net_id, _gap2, config,
+                        config.net_clearances or None,
                         strict_endpoints=True)
                 except Exception:
                     _esc2 = None
@@ -2178,8 +2523,11 @@ def oracle_reconnect(board_file: str, net_names, config,
                 if _esc2 and not _esc2.get('failed'):
                     _e2segs = _esc2.get('new_segments') or []
                     _e2vias = _esc2.get('new_vias') or []
-                    import clearance_ledger
-                    clearance_ledger.record(_esc2_cfg.clearance)
+                    from plane_pad_tap import note_clearance_used
+                    note_clearance_used(pcb_data, _esc2_cfg.clearance,
+                                        net_id=net_id,
+                                        requested=config.clearance,
+                                        site='oracle rescue')
                     for _s in _e2segs:
                         new_sexprs.append(generate_segment_sexpr(
                             (_s.start_x, _s.start_y), (_s.end_x, _s.end_y),
@@ -2304,7 +2652,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                         _cg = _exact_fill_endpoints(
                             pcb_data, net_id, net_name,
                             (ax, ay, al, akind), (bx, by, bl, bkind),
-                            _exm6, track_half=config.track_width / 2)
+                            _exm6, track_half=config.track_width / 2,
+                            edge_clearance=_seed_edge_clearance(config))
                     except Exception as _ce:
                         if verbose:
                             print(f"    (cluster gap derivation failed: "
@@ -2380,11 +2729,9 @@ def oracle_reconnect(board_file: str, net_names, config,
             result = None
             used_via_size, used_via_drill = config.via_size, config.via_drill
             # Via-size ladder: a 0.5 via has nowhere to drop in a QFN pocket
-            # (lumenpnp U5); the fab-floor 0.45/0.2 rung mirrors the
-            # fine-pitch tap escalation.
-            for vs, vd in ((config.via_size, config.via_drill), (0.45, 0.2)):
-                if vs > config.via_size:
-                    continue
+            # (lumenpnp U5); the descent rung is the escalation policy's
+            # (#1170), as at the fine-pitch tap escalation.
+            for vs, vd in oracle_via_rungs(config, pcb_data, net_id):
                 rung_cfg = _pw_cfg if vs == config.via_size else \
                     replace(_pw_cfg, via_size=vs, via_drill=vd)
                 rung_obstacles = base_obstacles
@@ -2460,17 +2807,6 @@ def oracle_reconnect(board_file: str, net_names, config,
                             board_edge_clearance=rung_cfg.board_edge_clearance):
                         break
                     result, used_width = wider, w
-            if result:
-                # #1033: say so when the link ships below the net's own
-                # requested width (a power net's --power-nets-widths).
-                try:
-                    from fab_tiers import note_narrowing
-                    note_narrowing(net_id, 'track_width',
-                                   config.get_net_track_width(
-                                       net_id, config.layers[0]),
-                                   used_width, 'oracle reconnect')
-                except Exception:                           # noqa: BLE001
-                    pass
             if not result:
                 # ESCALATION (quickfeather U6-pocket class): the weld router
                 # runs at the step's nominal parameters, and a sub-mm link
@@ -2485,8 +2821,10 @@ def oracle_reconnect(board_file: str, net_names, config,
                 try:
                     from net_rescue import _attempt_edge
                     _gap = (math.hypot(bx - ax, by - ay), ax, ay, bx, by)
+                    # #1137: the round's re-keyed class map (see above)
                     _esc, _esc_cfg = _attempt_edge(
-                        pcb_data, net_id, _gap, config, None,
+                        pcb_data, net_id, _gap, config,
+                        config.net_clearances or None,
                         strict_endpoints=True)
                 except Exception as _ee:
                     if verbose:
@@ -2622,41 +2960,9 @@ def oracle_reconnect(board_file: str, net_names, config,
                             _vx, _vy = _found
                     except Exception:
                         pass
-                    _vr = config.via_size / 2.0
-                    _vdr = config.via_drill / 2.0
                     _h2h = getattr(config, 'hole_to_hole_clearance', 0.2)
-                    from geometry_utils import (
-                        point_to_segment_distance as _p2s649)
-                    _ok649 = True
-                    for _s2 in pcb_data.segments:
-                        if _s2.net_id != net_id and _p2s649(
-                                _vx, _vy, _s2.start_x, _s2.start_y,
-                                _s2.end_x, _s2.end_y) <                                     _vr + _s2.width / 2 + config.clearance:
-                            _ok649 = False
-                            break
-                    if _ok649:
-                        for _v2 in pcb_data.vias:
-                            _d2 = math.hypot(_v2.x - _vx, _v2.y - _vy)
-                            if _d2 < _vdr + _via_drill_radius(
-                                    _v2, config.via_drill) + _h2h:
-                                _ok649 = False
-                                break
-                            if _v2.net_id != net_id and _d2 <                                         _vr + _v2.size / 2 + config.clearance:
-                                _ok649 = False
-                                break
-                    if _ok649:
-                        for _fp2 in pcb_data.footprints.values():
-                            for _pd2 in _fp2.pads:
-                                _d2 = math.hypot(_pd2.global_x - _vx,
-                                                 _pd2.global_y - _vy)
-                                if _pd2.net_id != net_id and _d2 < _vr +                                             max(_pd2.size_x, _pd2.size_y) / 2                                             + config.clearance:
-                                    _ok649 = False
-                                    break
-                                if _pd2.drill and _pd2.drill > 0 and                                             _d2 < _vdr + _pd2.drill / 2 + _h2h:
-                                    _ok649 = False
-                                    break
-                            if not _ok649:
-                                break
+                    _ok649 = _stitch_via_clear(pcb_data, net_id, _vx, _vy,
+                                               config, _h2h)
                     if _ok649:
                         from kicad_parser import Via as _Via649
                         _esc = {'failed': False, 'new_segments': [],
@@ -2702,8 +3008,11 @@ def oracle_reconnect(board_file: str, net_names, config,
                 if _esc and not _esc.get('failed'):
                     _esegs = _esc.get('new_segments') or []
                     _evias = _esc.get('new_vias') or []
-                    import clearance_ledger
-                    clearance_ledger.record(_esc_cfg.clearance)
+                    from plane_pad_tap import note_clearance_used
+                    note_clearance_used(pcb_data, _esc_cfg.clearance,
+                                        net_id=net_id,
+                                        requested=config.clearance,
+                                        site='oracle rescue')
                     for _s in _esegs:
                         new_sexprs.append(generate_segment_sexpr(
                             (_s.start_x, _s.start_y), (_s.end_x, _s.end_y),
@@ -2936,13 +3245,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                 failed += 1
                 continue
             n_segs = 0
-            for k in range(len(route_points) - 1):
-                x1, y1, l1 = route_points[k]
-                x2, y2, l2 = route_points[k + 1]
-                if l1 != l2 or (abs(x1 - x2) < 1e-9 and abs(y1 - y2) < 1e-9):
-                    continue
+            # #1169: wide where the net's own width fits, narrow at the pinch.
+            _legs = widen_link_legs(route_points, used_width, pcb_data,
+                                    net_id, config)
+            for x1, y1, x2, y2, l1, _lw in _legs:
                 new_sexprs.append(generate_segment_sexpr(
-                    (x1, y1), (x2, y2), used_width, l1, net_id,
+                    (x1, y1), (x2, y2), _lw, l1, net_id,
                     net_name if v10 else None))
                 n_segs += 1
             for (p1, p2, _l) in _extra_conn:
@@ -2961,17 +3269,23 @@ def oracle_reconnect(board_file: str, net_names, config,
                     [routing_layers[0], routing_layers[-1]], net_id,
                     net_name=net_name if v10 else None,
                     tenting_attrs=_new_via_attrs))
+            if via_positions and used_via_size < config.via_size - 1e-9:
+                # #1170: a smaller via is a descent, disclosed in
+                # design_rules like every other site's.
+                try:
+                    from fab_tiers import note_narrowing
+                    note_narrowing(net_id, 'via_diameter', config.via_size,
+                                   used_via_size, 'oracle reconnect',
+                                   count=len(via_positions), net_name=net_name)
+                except Exception:                           # noqa: BLE001
+                    pass
             # Same-round visibility (cross-net short fix): later links in
             # this round rebuild their obstacle maps from pcb_data, so the
             # copper just routed must exist there -- two different-net links
             # squeezing through one congested pocket otherwise cross.
-            for k in range(len(route_points) - 1):
-                x1, y1, l1 = route_points[k]
-                x2, y2, l2 = route_points[k + 1]
-                if l1 != l2 or (abs(x1 - x2) < 1e-9 and abs(y1 - y2) < 1e-9):
-                    continue
+            for x1, y1, x2, y2, l1, _lw in _legs:
                 _sobj = _Seg(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
-                             width=used_width, layer=l1, net_id=net_id)
+                             width=_lw, layer=l1, net_id=net_id)
                 pcb_data.segments.append(_sobj)
                 emitted_segments.append(_sobj)
             for vx, vy in via_positions:
@@ -2981,9 +3295,20 @@ def oracle_reconnect(board_file: str, net_names, config,
                              net_id=net_id)
                 pcb_data.vias.append(_vobj)
                 emitted_vias.append(_vobj)
+            _ws = sorted({round(_l[5], 4) for _l in _legs}) or [used_width]
             print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},{by:.2f})"
                   f"  OK {n_segs} seg(s), {len(via_positions)} via(s), "
-                  f"w={used_width:.2f}mm")
+                  f"w={_ws[0]:.2f}mm" + (f"..{_ws[-1]:.2f}mm" if len(_ws) > 1 else ''))
+            # #1033/#1169: say so when the link ships below the net's own
+            # requested width (a power net's --power-nets-widths), from what
+            # actually ships -- either tier.
+            try:
+                from fab_tiers import note_narrowing
+                note_narrowing(net_id, 'track_width',
+                               config.get_net_track_width(net_id, config.layers[0]),
+                               _ws[0], 'oracle reconnect')
+            except Exception:                               # noqa: BLE001
+                pass
             # Report the WELD, not just the intent. The per-link callback
             # above fires BEFORE the route and never says what happened, so a
             # GUI user watching a long leg sees "routing GND link (k/N)" and
@@ -2997,6 +3322,7 @@ def oracle_reconnect(board_file: str, net_names, config,
             routed += 1
             progress = True
 
+        _note_net_names(pcb_data)   # #1133: this round's ids, by name
         if new_sexprs or content_dirty:
             if new_sexprs:
                 idx = content.rfind(')')
@@ -3054,6 +3380,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     if links and rounds == 0:
         pcb_data = parse_kicad_pcb(board_file)
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
+        _install_net_maps(pcb_data)
     # NOT `if rounds and links` (#659 audit): `rounds` counts rounds the weld
     # loop ran on ITS OWN scope nets, and it is 0 whenever those were already
     # complete -- the common healthy case. daisho step 9 printed "KiCad
@@ -3111,6 +3438,29 @@ def oracle_reconnect(board_file: str, net_names, config,
         if _content2 is not None:
             with open(board_file, 'w', encoding='utf-8') as f:
                 f.write(_content2)
+        _note_net_names(pcb_data)   # #1133
+
+    # #1133: hand every returned object back on the CALLER's net ids. The
+    # GUI applies them to its live board by id (SetNetCode), and the staged
+    # save's parse numbers nets afresh, so a parse id there is another net.
+    _out_lists = (emitted_segments, emitted_vias, removed_board_segments,
+                  removed_board_vias)
+    if net_ids_by_name is not None:
+        _dropped_ids = 0
+        for _lst in _out_lists:
+            _keep = []
+            for _o in _lst:
+                _cid = net_ids_by_name.get(_obj_net_names.get(id(_o)))
+                if _cid is None:
+                    _dropped_ids += 1
+                    continue
+                _o.net_id = _cid
+                _keep.append(_o)
+            _lst[:] = _keep
+        if _dropped_ids:
+            print(f"  KiCad-oracle recheck: {_dropped_ids} returned copper "
+                  f"item(s) whose net the caller's board does not carry -- "
+                  f"dropped from the result, not shipped on a guessed net")
 
     if rounds and remaining > 0:
         _xb = f" ({cross_board} cross-board exempt)" if cross_board else ""

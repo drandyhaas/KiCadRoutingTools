@@ -8,7 +8,8 @@ pad/hole/oob legality echo -- both conjuncts in one JSON.
 
 Needs NO intent to be meaningful (unlike check_floorplan's legality rule,
 which skips without a budget): a bare board grades honestly. --intent adds
-authored overlap waivers only.
+authored overlap waivers, and a declared `mating:<ref>` keep-out, which
+replaces the plug region derived from the board (#1098).
 
 --baseline <board> computes the loop currency: advisory pairs NEW relative
 to the baseline board (dense real boards ship hundreds of by-design
@@ -34,6 +35,7 @@ import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -42,7 +44,9 @@ def main():
         description="Assembly (body-overlap) audit of a placed board.")
     p.add_argument("board")
     p.add_argument("--intent", default=None, metavar="JSON",
-                   help="Floorplan intent; only its overlap_waivers are read")
+                   help="Floorplan intent; its overlap_waivers are read, and "
+                        "a keep-out it names `mating:<ref>` replaces the "
+                        "plug mating region derived from the board (#1098)")
     p.add_argument("--clearance", type=float, default=None,
                    help="Pad-model clearance in mm. Default: the board's own "
                         "Default net-class clearance, else routing_defaults. "
@@ -53,6 +57,12 @@ def main():
                         "(the placement-loop currency)")
     p.add_argument("--json", default=None, metavar="PATH",
                    help="Write the full grade as JSON")
+    p.add_argument("--ignore-project-severity", action="store_true",
+                   help="Grade courtyard overlaps at KiCad's default "
+                        "(error) even when the board's .kicad_pro sets "
+                        "courtyards_overlap to ignore (#1095). Default: the "
+                        "project's own severity (a 'warning' is graded as "
+                        "error either way, since KiCad still reports it)")
     args = p.parse_args()
 
     import routing_defaults as defaults
@@ -135,10 +145,15 @@ def main():
               f"intersections rather than clearance grazes.")
 
     waivers = ()
+    declared_keepouts = ()
     if args.intent:
         try:
             from placement.floorplan import load_intent
-            waivers = load_intent(args.intent).waiver_pairs()
+            _intent = load_intent(args.intent)
+            waivers = _intent.waiver_pairs()
+            # #1098: the intent's keep-outs, so a declared `mating:<ref>`
+            # replaces the derived plug region here as it does in the seeder.
+            declared_keepouts = tuple(_intent.keepouts or ())
         except Exception as exc:
             print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
             return 2
@@ -149,15 +164,18 @@ def main():
         print(f"cannot parse {args.board}: {exc}", file=sys.stderr)
         return 2
 
+    _cy_sev_arg = None if args.ignore_project_severity else 'auto'
     g = grade_body_overlap(pcb, clearance, intent_waivers=waivers,
-                           pcb_file=args.board)
+                           pcb_file=args.board,
+                           courtyard_severity=_cy_sev_arg)
     # #897: a waiver that resolves to nothing excuses nothing, and said nothing.
     # Formatted by the engine (`format_waiver_warnings`) rather than here, so
     # place_reconstruct says the same words.
     from placement.legality import format_waiver_warnings as _waiver_warnings
     for _line in _waiver_warnings(g):
         print("  " + _line, file=sys.stderr)
-    leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board)
+    leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board,
+                             declared_keepouts=declared_keepouts)
     # #697: name any pair graded ABOVE `clearance` and what raised it, or the
     # echo below reports a count the announced floor cannot explain.
     from placement.legality import format_required_clause as _req_clause
@@ -218,7 +236,8 @@ def main():
                   file=sys.stderr)
             return 2
         gb = grade_body_overlap(base_pcb, clearance, intent_waivers=waivers,
-                                pcb_file=args.baseline)
+                                pcb_file=args.baseline,
+                                courtyard_severity=_cy_sev_arg)
         base_keys = {(q.a, q.b, q.kind) for q in gb['pairs']}
         new_advisory = [q for q in g['advisory_pairs']
                         if (q.a, q.b, q.kind) not in base_keys]
@@ -332,11 +351,25 @@ def main():
     # empty precise list is the bounding box of an edge-mounted part, not
     # copper in the air, and a reader who sees only the count cannot tell.
     _exact = leg.get('oob_pad_copper_refs') or []
+    _overrun = leg.get('oob_pad_copper_overrun_mm') or {}
     if leg['oob_pad_count'] or _exact:
         if _exact:
-            print("    pad copper genuinely off the outline (per-pad, "
-                  "margin 0): "
-                  + ', '.join(f'{r} ({a}mm)' for r, a in _exact))
+            # #1096: the DISTANCE the copper reaches past the outline. The
+            # magnitude in `oob_pad_copper_refs` is a ranking sum (C20 read
+            # "36.8mm" for copper 7.84 mm out) and is kept in the JSON.
+            _gate = set(leg.get('oob_pad_copper_gating_refs') or ())
+            if _gate:
+                print("    pad copper genuinely off the outline (per-pad, "
+                      "margin 0): "
+                      + ', '.join(f'{r} ({_overrun.get(r, a)}mm past the '
+                                  f'outline)' for r, a in _exact if r in _gate)
+                      + (" -- NOT BUILDABLE: a part not on the board cannot "
+                         "be assembled or routed" if _gate else ''))
+            _edge = [r for r, _a in _exact if r not in _gate]
+            if _edge:
+                print("    ...on the outline by design, not gated: "
+                      + ', '.join(_edge) + " (castellated pads, or a round "
+                      "pad whose bounding box, not its copper, crosses)")
         else:
             print("    ...but NO PAD crosses the real outline (per-pad, "
                   "margin 0, is empty). The count above is the part's "
@@ -347,8 +380,8 @@ def main():
     # SOT-89 tab, an antenna). Pads can all be inside while the tab hangs off
     # the board: esp_prog U2 at 115.34 reported blocking 0 with its tab
     # 1.11 mm past the outline. Printed, and in JSON; it is not a
-    # `not_buildable` conjunct (the same decision as the pad channel above,
-    # #937), and check_drc grades it as graphic-off-board.
+    # `not_buildable` conjunct (#937's decision, which #1096 reversed for the
+    # PAD channel above only), and check_drc grades it as graphic-off-board.
     _g_refs = leg.get('oob_graphic_copper_refs') or []
     if _g_refs:
         print("    footprint GRAPHIC copper past the outline (margin 0): "
@@ -523,6 +556,23 @@ def main():
     # contact) is exactly that. It stays in the census and the review-sheet
     # facts, and the boundary review must disposition it; no movement test
     # can charge it without also flipping pristine boards.
+    # #1095: the board's own severity for KiCad's courtyard rule. Said
+    # whenever it waived anything, with the file it came from, because a
+    # courtyard census that silently shrank would read as a fix.
+    _cy_w = g.get('courtyard_severity_waiver') or ''
+    _cy_basis = g.get('courtyard_severity_basis') or ''
+    if _cy_basis.startswith('legacy severity plan'):
+        print(f"  courtyard severity: graded at error -- {_cy_basis}.")
+    if _cy_w:
+        _n_sev = sum(1 for q in g['pairs']
+                     if q.kind == 'courtyard' and q.waiver == _cy_w)
+        print(f"  courtyard severity: the project sets courtyards_overlap to "
+              f"'{g['courtyard_severity']}' "
+              f"({os.path.splitext(args.board)[0]}.kicad_pro), so {_n_sev} "
+              f"courtyard pair(s) are waived '{_cy_w}' and none gates -- "
+              f"KiCad's own DRC reports none of them. Fab containment, pad "
+              f"and locked-contact channels are graded as usual. "
+              f"--ignore-project-severity grades them at error.")
     courtyard_gating = []
     if g['courtyard_blocking'] and moved_refs is not None:
         courtyard_gating = [q for q in g['courtyard_blocking_pairs']
@@ -562,9 +612,37 @@ def main():
     # `courtyard_gating` is the FIFTH conjunct (run-23): the moved-vs-baseline
     # subset of the courtyard census -- see the currency comment above for
     # why the absolute census must not gate.
+    # #1096, the SIXTH conjunct: pad copper wholly or partly off the real
+    # outline, per pad at margin 0. #937 kept it out of the verdict as "the
+    # wrong channel" and run 36 then routed a board with C20 7.84 mm below
+    # its south edge on a `buildable` -- the router took GND off the board to
+    # reach it. CLAUDE.md ranks this the top-priority placement defect; a
+    # part that is not on the board cannot be built. A lock does not exempt
+    # it (placement stamps locks itself, #962's reasoning).
+    # The GATING subset: a real distance past the outline on the true pad
+    # outlines, castellated pads left out (rp2350's Teensy U8 is ON the edge
+    # by design).
+    off_outline_pads = list(leg.get('oob_pad_copper_gating_refs') or [])
+    # #1098, the SEVENTH: a part on a PCB-edge plug's mating region (run 36
+    # put 8 back-side parts on StickHub's USB tongue, which must enter a
+    # socket). Absolute, and no class waiver reaches it: the region is the
+    # plug's own courtyard, and whatever sits there cannot be plugged in.
+    mating = leg.get('mating_keepout_refs') or []
+    if leg.get('mating_keepout_error'):
+        # Unmeasured is not clean: fail closed, and say why.
+        print(f"  PLUG MATING REGION NOT MEASURED -- "
+              f"{leg['mating_keepout_error']} -- NOT BUILDABLE until it is")
+        mating = mating or [{'ref': '?', 'keepout': 'unmeasured',
+                             'side': '?', 'area_mm2': 0.0}]
+    if mating:
+        print(f"  ON A PLUG'S MATING REGION ({len(mating)}): these must "
+              f"enter the socket with the plug -- NOT BUILDABLE")
+        for m in mating:
+            print(f"    {m['ref']} ({m['side']}) in {m['keepout']}  "
+                  f"{m['area_mm2']}mm2")
     not_buildable = bool(g['blocking'] or locked_contact or stack_groups
                          or g['containment_blocking']
-                         or courtyard_gating)
+                         or courtyard_gating or off_outline_pads or mating)
     verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
 
@@ -602,7 +680,7 @@ def main():
             # by-design containments the corpus ships legitimately (orangecrab
             # FID2/J5 at 100%) and so names a defect where there is none. The
             # number has existed in the grade dict since the channel was added
-            # and has decided the verdict at :508-510 ever since; it just never
+            # and has decided the verdict at its `not_buildable` line ever since; it just never
             # reached a reader (#918).
             'containment_blocking': g['containment_blocking'],
             'containments': [q._asdict() for q in g['containment_pairs']],
@@ -624,6 +702,12 @@ def main():
                                           if moved_refs is not None else None),
             'courtyard_blocking_gating_pairs': [q._asdict()
                                                 for q in courtyard_gating],
+            # #1095: the severity the courtyard channel was graded at (None
+            # = KiCad's default, error) and the waiver label it gave.
+            'courtyard_severity': g.get('courtyard_severity'),
+            'courtyard_severity_basis': g.get('courtyard_severity_basis'),
+            'courtyard_severity_waiver': g.get('courtyard_severity_waiver')
+            or None,
             'courtyard_gating_basis': ('moved-vs-baseline'
                                        if moved_refs is not None
                                        else 'no-baseline: report-only'),
@@ -661,6 +745,14 @@ def main():
             # not the other. Both keys travel; neither replaces the other.
             'oob_pad_copper_count': leg.get('oob_pad_copper_count', 0),
             'oob_pad_copper_refs': leg.get('oob_pad_copper_refs') or [],
+            'oob_pad_copper_overrun_mm':
+                leg.get('oob_pad_copper_overrun_mm') or {},
+            'oob_pad_copper_gating_count':
+                leg.get('oob_pad_copper_gating_count', 0),
+            'oob_pad_copper_gating_refs':
+                leg.get('oob_pad_copper_gating_refs') or [],
+            'mating_keepout_count': leg.get('mating_keepout_count', 0),
+            'mating_keepout_refs': leg.get('mating_keepout_refs') or [],
             'oob_pad_copper_basis': leg.get('oob_pad_copper_basis'),
             # #962: footprint GRAPHIC copper against the outline -- the second
             # off-outline channel, same non-gating contract as the pad one.

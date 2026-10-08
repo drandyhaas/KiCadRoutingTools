@@ -40,8 +40,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 DEFAULT_STRATEGIES: Tuple[str, ...] = ('jitter', 'poses', 'swap')
-# How many of the highest-pin-count free parts the `poses` strategy enumerates
-# rotation variants for. Rotations of multi-pin parts are where pin order lives
+# How many of the highest-pin-count free parts that have an angle to turn to
+# (#1121: a part at its single declared rotation has none) the `poses`
+# strategy enumerates rotation variants for. Rotations of multi-pin parts are where pin order lives
 # (the U3 rot-180 case: 9 forced inversions -> 0); a 2-pad passive's rotation
 # rarely changes anything the jitter cannot.
 POSES_TOP_PARTS = 6
@@ -103,26 +104,37 @@ class Candidate:
 
 def free_refs(pcb_data, pcb_file: str,
               lock_globs: Optional[Sequence[str]] = None,
-              refused: Optional[Dict[str, str]] = None) -> List[str]:
+              refused: Optional[Dict[str, str]] = None,
+              intent_locks: Optional[Sequence[str]] = None) -> List[str]:
     """Sorted refs the portfolio may perturb: pad-bearing, not `(locked yes)`
-    on the board, not matching a --lock glob, and not drawing the board's own
-    outline (#829). The same lock sources the quench itself honors, resolved
-    once so every consumer agrees.
+    on the board, not matching a --lock glob, not drawing the board's own
+    outline (#829), and not locked by the intent gate (`intent_locks`, its
+    `lock_refs`: `must_lock` and the edge claims, #1129). The same lock
+    sources the quench itself honors, resolved once so every consumer agrees.
+
+    The intent's locks matter because the quench FREEZES them (quench.py,
+    "Locked via intent") but freezes a part where it stands: a strategy that
+    had already turned a must_lock part shipped it turned. None (perturb's
+    callers, which have no intent channel) leaves the list as it was.
 
     `refused` is an optional out-dict `{ref: why}`, the idiom `seeder.
     reseat_scope` uses: name the source, and end with what the caller can do
-    about it. Only the #829 refusal is recorded -- the pad and lock rules were
-    always silent here and stay that way, because the quench discloses those.
+    about it. The #829 and intent-lock refusals are recorded -- the pad and
+    file/--lock rules were always silent here and stay that way, because the
+    quench discloses those.
     """
     from placement.parser import extract_locked_refs
     locked = set(extract_locked_refs(pcb_file))
+    held = set(intent_locks or ())
     out = []
     for ref, fp in pcb_data.footprints.items():
+        # `fp.pads` on purpose (#1143): the portfolio perturbs what the
+        # quench moves, and the quench keeps an aperture-only part movable.
         if not fp.pads:
             continue
         if ref in locked:
             continue
-        if lock_globs and any(fnmatch.fnmatch(ref, p) for p in lock_globs):
+        if lock_globs and any(fnmatch.fnmatchcase(ref, p) for p in lock_globs):
             continue
         if getattr(fp, 'owns_board_outline', False):
             # Not `owns_edge_cuts`: a relief parented to the part travels WITH
@@ -134,6 +146,13 @@ def free_refs(pcb_data, pcb_file: str,
                                 "resize the board, which is not this tool's "
                                 "to change (#829)")
             continue
+        if ref in held:
+            if refused is not None:
+                refused[ref] = ("locked by the intent (must_lock or an edge "
+                                "claim) -- the quench freezes it where it "
+                                "stands, so no strategy may move it first "
+                                "(#1129)")
+            continue
         out.append(ref)
     return sorted(out)
 
@@ -143,7 +162,7 @@ def ignore_net_ids(pcb_data, patterns: Optional[Sequence[str]]) -> Set[int]:
     ids: Set[int] = set()
     if patterns:
         for net_id, net in pcb_data.nets.items():
-            if any(fnmatch.fnmatch(net.name, p) for p in patterns):
+            if any(fnmatch.fnmatchcase(net.name, p) for p in patterns):
                 ids.add(net_id)
     return ids
 
@@ -347,8 +366,38 @@ def perturb_jitter(state, refs: Sequence[str], rng: random.Random,
     return poses
 
 
+def _pose_variants(part, claim) -> List[float]:
+    """The angles the `poses` strategy may turn `part` to (#1121).
+
+    Undeclared (`claim` None): its three quarter turns, as always. Declared
+    (a `rotations_for_ref` claim): the angles `floorplan.declared_ladder`
+    gives, in the author's order, other than the one the part already has --
+    the rule the quench's swap applies (`quench._declared_admits`): a turn
+    may go INTO the declaration, never out of it. So a part sitting at its
+    single declared angle has no variant at all, and one sitting off it is
+    offered that angle."""
+    if claim is None:
+        return [(part.rot + d) % 360 for d in (90.0, 180.0, 270.0)]
+    from placement.floorplan import declared_ladder
+    from placement.quench import _same_angle
+    return [a % 360 for a in declared_ladder(claim)
+            if not _same_angle(a, part.rot)]
+
+
+def _poses_ranked(state, refs: Sequence[str], declared) -> List[str]:
+    """The top `POSES_TOP_PARTS` multi-pin free parts that HAVE an angle to
+    turn to. Filtered before the cut, so a declared part that cannot turn
+    does not spend one of the slots; an undeclared part always has three
+    variants, so an undeclared board ranks exactly as before #1121."""
+    return sorted((r for r in refs
+                   if r in state.parts and state.parts[r].pin_count >= 2
+                   and _pose_variants(state.parts[r], declared.get(r))),
+                  key=lambda r: (-state.parts[r].pin_count, r))[:POSES_TOP_PARTS]
+
+
 def perturb_poses(state, refs: Sequence[str],
-                  variant_index: int) -> Optional[List[Dict]]:
+                  variant_index: int,
+                  declared: Optional[Dict] = None) -> Optional[List[Dict]]:
     """Deterministic rotation variant: one of the top multi-pin free parts
     turned to a legal rotation that does not RAISE its forced-crossing floor.
 
@@ -357,11 +406,15 @@ def perturb_poses(state, refs: Sequence[str],
     provably worse before any quench is paid (the U3 rot-180 story, run 5:
     the cost was indifferent, the inversion count was not). Returns None when
     `variant_index` runs past the legal variants: that strategy round is
-    barren, which the caller reports rather than papers over."""
+    barren, which the caller reports rather than papers over.
+
+    `declared` is the intent's rotation claims, `{ref: (rotation,
+    candidates)}` from `floorplan.rotations_for_ref` (#1121): a declared
+    part is turned only into its declaration (`_pose_variants`). None or {}
+    is the strategy exactly as it was."""
     from placement.pair_order import ref_inversions
-    ranked = sorted((r for r in refs
-                     if r in state.parts and state.parts[r].pin_count >= 2),
-                    key=lambda r: (-state.parts[r].pin_count, r))[:POSES_TOP_PARTS]
+    declared = declared or {}
+    ranked = _poses_ranked(state, refs, declared)
     variants: List[Tuple[str, float]] = []
     for ref in ranked:
         part = state.parts[ref]
@@ -371,8 +424,13 @@ def perturb_poses(state, refs: Sequence[str],
         if not state.candidate_valid(ref, part.x, part.y, part.rot):
             continue
         base_inv = ref_inversions(state, ref)
-        for delta in (90.0, 180.0, 270.0):
-            rot = (part.rot + delta) % 360
+        claim1121 = declared.get(ref)
+        for rot in _pose_variants(part, claim1121):
+            if claim1121 is not None:
+                # A declared angle need not be on the part's quarter-turn
+                # lattice; judge it on its own box, as the quench nudge does.
+                from placement.seeder import _materialise_rotation
+                rot = _materialise_rotation(part, rot)
             if not state.candidate_valid(ref, part.x, part.y, rot):
                 continue
             if ref_inversions(state, ref, part.x, part.y, rot) > base_inv:
@@ -431,7 +489,26 @@ def perturb_swaps(state, blocks: Dict[str, Sequence[str]], rng: random.Random,
             continue
         # candidate_valid excluded the partner, so the two NEW poses were
         # never tested against each other; do it exactly.
-        gap = pa.gap_to(pb, pa.rects(bx, by, pa.rot), pb.rects(ax, ay, pb.rot))
+        if getattr(state, 'courtyards_ignored', False):
+            # #1104: courtyards waived, so the two NEW poses are tested
+            # against each other the way the waived seat tests a pair: pads
+            # and holes at their own requirement, drills, bodies.
+            if pa.sides & pb.sides:
+                from .seeder import _drill_conflict
+                ctx = state.legality_ctx
+                if ctx is not None:
+                    sf = ctx.pair_shortfall(a, b, pose_a=(bx, by, pa.rot),
+                                            pose_b=(ax, ay, pb.rot))
+                    if (sf.pad > 1e-9 or sf.pad_overlap or sf.stack
+                            or sf.hole > 1e-9):
+                        continue
+                if _drill_conflict(state, a, (bx, by, pa.rot), b,
+                                   (ax, ay, pb.rot)):
+                    continue
+            gap = None
+        else:
+            gap = pa.gap_to(pb, pa.rects(bx, by, pa.rot),
+                            pb.rects(ax, ay, pb.rot))
         if gap is not None and gap < state.clearance:
             continue
         state.apply_move(a, bx, by, pa.rot)
@@ -451,6 +528,8 @@ def perturb_swaps(state, blocks: Dict[str, Sequence[str]], rng: random.Random,
 def _final_poses(pcb_data, placements: List[Dict]) -> Dict[str, Tuple[float, float, float]]:
     """Seed poses overlaid with the quench's returned moves. The quench omits
     parts that ended exactly on their seed, so the overlay IS the final state."""
+    # `fp.pads` on purpose (#1143): the overlay covers what the quench can
+    # move, which includes a part whose only pads are apertures.
     out = {ref: (fp.x, fp.y, fp.rotation % 360)
            for ref, fp in pcb_data.footprints.items() if fp.pads}
     for p in placements:
@@ -551,7 +630,9 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
 
     pcb = parse_kicad_pcb(input_file)
     _refused: Dict[str, str] = {}
-    free = free_refs(pcb, input_file, lock_globs, refused=_refused)
+    free = free_refs(pcb, input_file, lock_globs, refused=_refused,
+                     intent_locks=(qkw.get('intent_gate') or {}).get(
+                         'lock_refs'))
     for _ref, _why in sorted(_refused.items()):
         print(f"  NOTE: {_ref} not perturbed: {_why}")
     ids = ignore_net_ids(pcb, ignore_nets)
@@ -561,6 +642,17 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
         board_edge_clearance=qkw.get('board_edge_clearance', 0.55),
         grid_step=qkw.get('grid_step', 0.1), ignore_ids=ids)
     origin = {ref: (p.x, p.y, p.rot) for ref, p in oracle.parts.items()}
+    # #1121: the SAME block claims the quench is gated with (its
+    # intent_gate), so the `poses` variant offers a block-declared part only
+    # an angle the quench would admit too. Not held here: an
+    # `arrays[].rotation` member. A part the gate locks (`must_lock`, an edge
+    # claim) is not free at all: `free_refs` drops it (#1129).
+    _declared = dict((qkw.get('intent_gate') or {}).get('rotations') or {})
+    _held = sorted(r for r in free if r in _declared)
+    if _held and 'poses' in strategies:
+        print("[portfolio] poses: %d free part(s) declare a rotation (%s); "
+              "each is turned only to an angle its declaration admits (#1121)"
+              % (len(_held), ', '.join(_held)))
 
     # #826: resolved ONCE, from the INPUT board, never from the oracle state.
     # `--only N` must regenerate candidate N byte-identically without running
@@ -611,7 +703,8 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
             poses = perturb_jitter(oracle, free, rng, radius,
                                    lattice=lattice)
         elif strategy == 'poses':
-            poses = perturb_poses(oracle, free, (i - 1) // len(strategies))
+            poses = perturb_poses(oracle, free, (i - 1) // len(strategies),
+                                  declared=_declared)
             if poses is None:
                 poses = []
                 note = ('poses: no rotation variant left at round '
@@ -759,8 +852,10 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
     reasons: List[str] = []
     overlap = cand.metrics.get('overlap_area', 0.0)
     if overlap > baseline_overlap + EPS:
-        reasons.append(f"courtyard overlap {overlap:.4f}mm2 exceeds the "
-                       f"baseline's {baseline_overlap:.4f}mm2")
+        # The optimizer's courtyard RECTS (`metrics.overlap_area`), not
+        # check_assembly's drawn-outline census -- labelled so (#1126).
+        reasons.append(f"optimizer courtyard-rect overlap {overlap:.4f}mm2 "
+                       f"exceeds the baseline's {baseline_overlap:.4f}mm2")
     oob = cand.metrics.get('oob_count', 0)
     if oob > baseline_oob:
         reasons.append(f"{oob} part(s) out of board vs the baseline's "

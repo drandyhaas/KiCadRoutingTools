@@ -104,9 +104,10 @@ ROWS = [
     # merely smaller rather than absent -- a row that could survive for the
     # wrong reason. `5 -> 1` is the same claim the row has always made.
     # RE-ANCHORED for #893, which took READER_VERSION 4 -> 5, #959
-    # (#1000), which took it 5 -> 6, and #1051, which took it 6 -> 7.
+    # (#1000), which took it 5 -> 6, #1051, which took it 6 -> 7, and
+    # #1142, which took it 7 -> 8.
     ('reader-version-not-bumped', 'fp',
-     "READER_VERSION = 7",
+     "READER_VERSION = 8",
      "READER_VERSION = 1",
      (TSCH, T712), KILLED),
 

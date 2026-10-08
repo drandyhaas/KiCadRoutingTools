@@ -101,11 +101,10 @@ PROSE_FLOOR = 2
 #: reported stale -- the shape `test_803_cited_paths_are_tracked.UNTRACKED_OK`
 #: uses, held in both directions.
 #: (The staged skills' pages that cited `score.failed_nets`, a converge ledger
-#: row's nested score, were retired; these two came with pcb-free-agent.)
+#: row's nested score, were retired; this one came with pcb-free-agent. Its
+#: sibling, `components.broken.nets[].handler`, went when #1112 made every
+#: break route.py's and the skill stopped citing the key.)
 UNRESOLVED_OK = {
-    'components.broken.nets[].handler': (
-        "written by board_score only for a BROKEN net, and the fixture has none",
-        'py_tools/board_score.py', "v['handler']"),
     'power_widths.<net>.under_mm': (
         "route.py's JSON_SUMMARY key, not a board_score document",
         'py_router/route.py', "summary['power_widths']"),

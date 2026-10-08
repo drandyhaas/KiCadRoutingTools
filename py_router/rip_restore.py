@@ -79,10 +79,22 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
                     config.track_obstacle_clearance(b_net, v))
         return v
 
+    # The board as the router sees it: pcb_data plus every in-flight window
+    # (push_inflight_copper) -- copper stamped in the working map but not yet
+    # committed, like a phase-3 tap whose victims are being re-routed. A
+    # restore graded on pcb_data alone put keks's /SRAM0_D9 back on its
+    # pre-rip copper straight across /SRAM_A4's in-flight tap (#1156's victim
+    # restore; 33 shorts on one step).
+    board_segs = list(pcb_data.segments)
+    board_vias = list(pcb_data.vias)
+    for _isegs, _ivias in getattr(pcb_data, '_inflight_copper', None) or ():
+        board_segs.extend(_isegs)
+        board_vias.extend(_ivias)
+
     owners: set = set()
     for cand in segments:
         c_clr_half = cand.width / 2
-        for s in pcb_data.segments:
+        for s in board_segs:
             if s.net_id in own_ids or s.layer != cand.layer \
                     or s.net_id in owners:
                 continue
@@ -93,7 +105,7 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
                 owners.add(s.net_id)
                 if not collect:
                     return owners
-        for v in pcb_data.vias:
+        for v in board_vias:
             if v.net_id in own_ids or v.net_id in owners:
                 continue
             need = c_clr_half + v.size / 2 + _pair_clr(cand.net_id, v.net_id, cand.layer)
@@ -102,7 +114,7 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
                 if not collect:
                     return owners
     for cv in vias:
-        for v in pcb_data.vias:
+        for v in board_vias:
             if v.net_id in own_ids or v.net_id in owners:
                 continue
             need = cv.size / 2 + v.size / 2 + _pair_clr(cv.net_id, v.net_id)
@@ -110,7 +122,7 @@ def _conflict_sweep(pcb_data: PCBData, config: GridRouteConfig,
                 owners.add(v.net_id)
                 if not collect:
                     return owners
-        for s in pcb_data.segments:
+        for s in board_segs:
             if s.net_id in own_ids or s.net_id in owners:
                 continue
             need = cv.size / 2 + s.width / 2 + _pair_clr(cv.net_id, s.net_id, s.layer)

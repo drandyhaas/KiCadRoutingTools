@@ -28,7 +28,23 @@ no sibling `.kicad_pro` (that file did not exist before KiCad 6), so every one
 would need a hand-generated netclass floor.
 """
 import json, sys, subprocess, os, re
-KPY = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'py_router'))
+from kicad_locate import kicad_python_candidates  # noqa: E402
+
+# KiCad's own python (it carries pcbnew). None = resolve on first use, the way
+# awx/baseline_freerouting.py does: KICAD_PYTHON, else every install
+# kicad_locate finds on this platform. It used to be the macOS bundle path,
+# so on Windows or Linux every candidate was rejected with a load error.
+KPY = None
+
+
+def kicad_python():
+    """The first candidate interpreter that can import pcbnew, or None."""
+    for py in kicad_python_candidates():
+        if py and os.path.isfile(py) and subprocess.run(
+                [py, '-c', 'import pcbnew'], capture_output=True).returncode == 0:
+            return py
+    return None
 
 # Runs inside KiCad's python. Emits one JSON line of raw metrics (or an error).
 PCBNEW_METRICS = r'''
@@ -88,8 +104,12 @@ def main():
     except Exception:
         v["kicad_version"] = None
     # metrics via pcbnew
+    kpy = KPY or kicad_python()
+    if not kpy:
+        v["reject_reason"] = "no python with pcbnew found; set KICAD_PYTHON"
+        print(json.dumps(v)); return
     try:
-        r = subprocess.run([KPY, "-c", PCBNEW_METRICS, f], capture_output=True, text=True, timeout=180)
+        r = subprocess.run([kpy, "-c", PCBNEW_METRICS, f], capture_output=True, text=True, timeout=180)
         line = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
         m = json.loads(line) if line else {"error": (r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "no output")[:160]}
     except Exception as e:

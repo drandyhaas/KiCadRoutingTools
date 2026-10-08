@@ -184,12 +184,11 @@ ROWS = [
      (T_ROT,), KILLED),
 
     # The declared ladder must reach the seat search, or the claim is inert.
+    # #1099 moved the ladder into an outer pass list; the declared ladder
+    # is its first entry, so dropping it there is the same mutation.
     ('rotation-ladder-not-honoured', 'sd',
-     """            _ladder_rots = (list(rotations) if rotations is not None
-                            else [part.rot] + [(part.rot + d) % 360
-                                               for d in (90.0, 180.0, 270.0)])""",
-     """            _ladder_rots = ([part.rot] + [(part.rot + d) % 360
-                                          for d in (90.0, 180.0, 270.0)])""",
+     "    _passes = [rotations]",
+     "    _passes = [None]",
      (T_ROT,), KILLED),
 
     # A SECOND seating stage. The first version of this work threaded the

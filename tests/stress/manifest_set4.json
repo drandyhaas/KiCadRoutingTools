@@ -45,7 +45,7 @@
     "packages": "2-layer,MCU",
     "license": "see repo",
     "short_name": "esp32s3_ref",
-    "note": "ESP32-S3 USB reference dev board"
+    "note": "ESP32-S3 USB reference dev board. Source gone (checked 2026-10-08): repo Binary12Spy/esp32-s3-reference deleted or made private (owner still active, 4 unrelated public repos); no fork, Software Heritage or Wayback copy. The only surviving copy is the corpus volume's re-saved board."
   },
   {
     "set": "set4",

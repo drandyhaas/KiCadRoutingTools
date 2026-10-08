@@ -8,8 +8,8 @@ never to ship different prices at different sites.
     SWIM_VIAS    plan_ends' reading of it
     BRAID_SWIM_W schedule's reading of it
 """
-import os as _os
+import awx_settings
 
-SWIM = float(_os.environ.get('SWIM_PRICE', '2'))
-JUDGE = float(_os.environ.get('SWIM_VIAS', SWIM))       # plan_ends: accepts/rejects a batch
-PAGES = float(_os.environ.get('BRAID_SWIM_W', SWIM))    # schedule: a page lane's swimmer
+SWIM = float(awx_settings.get('SWIM_PRICE', '2'))
+JUDGE = float(awx_settings.get('SWIM_VIAS', SWIM))       # plan_ends: accepts/rejects a batch
+PAGES = float(awx_settings.get('BRAID_SWIM_W', SWIM))    # schedule: a page lane's swimmer

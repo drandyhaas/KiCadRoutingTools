@@ -203,14 +203,19 @@ harmless.
    MEMORY CAP (mandatory): prefix EVERY routing/fanout/plane/check command with
    the watchdog wrapper, e.g.
    `bash <TOOLS_REPO>/tests/stress/run_limited.sh python3 -u -X utf8 .../route.py ... 2>&1 | tee step.log`
-   It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
+   It kills the job at ~12 GB RSS, process plus direct children (exit 137,
+   `MEMORY_LIMIT_EXCEEDED` on stderr; `LIMIT_KB` overrides). The cap was 4 GB
+   until #422, which raised it because a legitimate fine-grid run on a big
+   sparse board can peak several GB.
    Separately, the board-mutating tools self-record their invocations to
    `<run-dir>/redo_commands.sh` (run_board.sh sets `REDO_MANIFEST`) so the whole
    run can later be replayed deterministically with no LLM via `redo_stress_test.py`
    (issue #132; see `tests/stress/README.md`). Nothing extra to do for recording.
-   Up to 4 boards run concurrently — in practice most jobs sit well under the
-   4 GB cap most of the time, so 4-in-flight is fine on an 8 GB machine; the
-   per-job watchdog still backstops any board that spikes. Keep an eye on RAM.
+   The queue admits boards by load, not memory (`run_queue.sh`: a hard ceiling,
+   default 8, under `QUEUE_LOAD_MAX`, default ncore-2), and the watchdog is per
+   step, so it does not protect a small machine from several large steps at
+   once. Size the machine from 12 GB per concurrently heavy step, not 4. Keep an
+   eye on RAM.
    If a step is killed by the cap, that is an important finding: record it in
    `issues` (with the step and board), then try ONE cheaper variant (e.g.
    a coarser `--grid-step`, no retry round, or fewer nets); if that also
@@ -319,7 +324,7 @@ harmless.
    failure is a poured net MISSING from the route step, which strands every
    one of its pads because nothing welds them to the pour. Secondary grounds (AGND/GNDA/
    DGND tied to GND through one 0Ω/ferrite — find the tie in the power listing)
-   get their OWN pour region (Voronoi-share an inner layer is fine), NOT merged
+   get their OWN pour region (sharing an inner layer is fine), NOT merged
    into GND and NOT left out. COVERAGE GATE at the end: `check_connected.py`'s
    "Unrouted net with N pads" list must be empty except for justified single-pad/
    NC nets — any multi-pad net there is a coverage defect to fix, not a stat to report.
@@ -459,7 +464,7 @@ harmless.
    `connection_width_min`; ab_replay_grade compares the count per board (connw
    column) and gates the A/B verdict on its delta.
 8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
-   now chunked; DEFAULT grids should stay well under the 4 GB cap on every
+   now chunked; DEFAULT grids should stay well under the 12 GB cap on every
    board. Use the default --grid-step unless component pitch demands finer.
    A MEMORY_LIMIT_EXCEEDED kill at the DEFAULT grid is a REGRESSION — record
    the command and RSS prominently. EXCEPTION: a board-global route at a fine

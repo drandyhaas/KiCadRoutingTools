@@ -69,7 +69,10 @@ from kicad_parser import parse_kicad_pcb
 # The second block that used to sit MID-FILE (C_CONFLICT / C_HOLE /
 # C_COURT_OVL, declared after `draw_courtyards`) is folded in here: there was
 # no reason for a palette to be in two places except that nobody owned it.
-from render_theme import DARK as _THEME_DARK
+# The CONFIGURED default theme (#1081: light, or $KICAD_RENDER_THEME) --
+# these were DARK's roles whatever theme the board itself was drawn in.
+from render_theme import default_theme as _default_theme
+_THEME_DARK = _default_theme()  # the name predates the default changing
 
 C_COURT_F = _THEME_DARK.rgb('place_court_front')   # front courtyard
 C_COURT_B = _THEME_DARK.rgb('place_court_back')    # back courtyard
@@ -309,7 +312,8 @@ def legality_findings(model) -> Dict[str, object]:
     cached = getattr(model, '_legality_findings', None)
     if cached is not None:
         return cached
-    out = {'oob_refs_pad_copper': [], 'oob_refs_courtyard': [],
+    out = {'oob_refs_pad_copper': [], 'oob_refs_pad_copper_gating': [],
+           'oob_refs_courtyard': [],
            'oob_refs_graphic_copper': [], 'graphic_copper_unmeasured': [],
            'keepout_copper_refs': [], 'keepout_copper_pads': [],
            'keepout_copper_unmeasured': [],
@@ -391,6 +395,21 @@ def legality_findings(model) -> Dict[str, object]:
                        + max(0.0, b[1] - ext[1]) + max(0.0, ext[3] - b[3]))
             if oob > 1e-6:
                 out['oob_refs_pad_copper'].append([ref, round(oob, 4)])
+                # #1096: the subset that GATES, by check_assembly's own
+                # measure (`legality.pad_copper_overrun_mm`) at this pose.
+                _dist = None
+                if _pad_gate is not None:
+                    try:
+                        from placement import legality as _leg
+                        _fp = _leg.footprint_at_pose(
+                            state.pcb_data.footprints[ref], (p.x, p.y, p.rot))
+                        _dist = _leg.pad_copper_overrun_mm(_fp.pads,
+                                                           _pad_gate)
+                    except Exception:
+                        _dist = None
+                if _dist is None or _dist > 1e-6:
+                    out['oob_refs_pad_copper_gating'].append(
+                        [ref, round(_dist if _dist is not None else oob, 4)])
         # #962: the second off-outline channel, footprint GRAPHIC copper,
         # at the model's PROPOSED poses. It is check_drc's own census on a
         # copy of the board whose footprints carry those poses; the census
@@ -415,6 +434,32 @@ def legality_findings(model) -> Dict[str, object]:
         except Exception as e:                               # noqa: BLE001
             out['keepout_copper_unmeasured'] = [['*', 'error', '%s: %s'
                                                  % (type(e).__name__, e)]]
+        # #1065: pad CLEARANCE is the grader's own measurement, not a mirror.
+        # `pair_shortfall` (the seeder and quench gate) charges bounding-box
+        # gaps, so an oval pad 0.277 mm from its neighbour read 0.0215 mm
+        # short at 0.25 and render flagged a pose grade_pad_legality and
+        # check_drc both call clean -- and a run gated its search on it. Its
+        # pad term is a NECESSARY condition (every pad pair the grader can
+        # charge is short on the rects too), so it nominates; the grader's
+        # per-pair census, `pad_pair_conflict`, decides and gives the mm, on
+        # the copper at the MODEL's pose, at each pad pair's own requirement.
+        from placement.legality import footprint_at_pose, pad_pair_conflict
+        try:
+            from check_drc import check_pad_pad_overlap as _exact
+        except Exception:                                    # noqa: BLE001
+            _exact = None
+        _layers = list(getattr(state.pcb_data.board_info, 'copper_layers',
+                               None) or [])
+        _copper = {}
+
+        def _copper_at_pose(r):
+            if r not in _copper:
+                p = state.parts[r]
+                _copper[r] = (
+                    ctx.parts[r].pad_rects(p.x, p.y, p.rot),
+                    footprint_at_pose(state.pcb_data.footprints[r],
+                                      (p.x, p.y, p.rot)).pads)
+            return _copper[r]
         refs = sorted(ctx.parts)
         for i, a in enumerate(refs):
             pa = state.parts.get(a)
@@ -426,8 +471,14 @@ def legality_findings(model) -> Dict[str, object]:
                     continue
                 sf = ctx.pair_shortfall(a, bb)
                 if sf.pad > 1e-6:
-                    out['pad_conflict_pairs_refs'].append(
-                        [a, bb, round(sf.pad, 4)])
+                    (_ra, _pa), (_rb, _pb) = _copper_at_pose(a), _copper_at_pose(bb)
+                    _mm, _hit, _req, _src = pad_pair_conflict(
+                        ctx.parts[a], _ra, _pa, ctx.parts[bb], _rb, _pb,
+                        ctx.clearance, ctx.pad_clearance_model, _exact,
+                        _layers)
+                    if _hit:
+                        out['pad_conflict_pairs_refs'].append(
+                            [a, bb, round(_mm, 4)])
                 if sf.hole > 1e-6:
                     out['hole_conflict_pairs_refs'].append(
                         [a, bb, round(sf.hole, 4)])
@@ -1502,9 +1553,26 @@ def describe_pair(before_model, after_model, args):
         L.append(f"  VERDICT: {net_fixed} resolved, none introduced.")
     else:
         L.append("  VERDICT: no legality finding changed identity.")
-    for mk, mlabel in (('crossings', 'crossings'), ('hpwl', 'hpwl mm'),
-                       ('overlap_area', 'overlap mm2')):
-        bm, am = before_model.metrics.get(mk), after_model.metrics.get(mk)
+    # #1126: the courtyard census, as the caption and the checklist read it,
+    # beside the quench's rect metric -- labelled as the optimizer's, since
+    # the two differ (glasgow_revC 52.252 vs 70.05) and a reader comparing
+    # this diff with the checklist must be able to tell which one moved.
+    _cen = {}
+    for side, fnd, mdl in (('before', b, before_model),
+                           ('after', a, after_model)):
+        _cen[side] = (None if fnd.get('courtyard_census_error')
+                      or getattr(mdl, 'pcb', None) is None
+                      else fnd.get('courtyard_overlap_mm2'))
+    for mk, mlabel, bm, am in (
+            ('crossings', 'crossings', before_model.metrics.get('crossings'),
+             after_model.metrics.get('crossings')),
+            ('hpwl', 'hpwl mm', before_model.metrics.get('hpwl'),
+             after_model.metrics.get('hpwl')),
+            ('courtyard_overlap_mm2', 'courtyard overlap mm2 (census)',
+             _cen['before'], _cen['after']),
+            ('overlap_area', 'overlap mm2 (optimizer rects)',
+             before_model.metrics.get('overlap_area'),
+             after_model.metrics.get('overlap_area'))):
         if bm is not None and am is not None:
             arrow = '->' if abs(am - bm) > 1e-9 else '=='
             J[mk] = {'before': round(bm, 4), 'after': round(am, 4)}
@@ -1676,14 +1744,37 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
         if m.get(k) is not None:
             bits.append(f"{k} " + fmt.format(m[k]))
     if m.get('overlap_area') is not None:
-        bits.append(f"overlap {m['overlap_area']:.2f}mm2")
+        # #1126: the courtyard CENSUS -- every courtyard pair
+        # `grade_body_overlap` measures on the drawn outlines, waived ones
+        # included -- the number the checklist (`b_courtyard_overlap_mm2`)
+        # and the film (#1124) carry. `metrics.overlap_area` is the quench's
+        # rect courtyards, zeroed under a #1104 project waiver: glasgow_revC's
+        # caption read 70.05 against 52.252 on its panel and checklist. The
+        # metric stays in the JSON. No census (no pcb on the model, or one
+        # that raised) prints n/a, never the empty default's 0.00.
+        _f = (legality_findings(spec.model)
+              if getattr(spec.model, 'pcb', None) is not None else None)
+        bits.append("courtyard overlap n/a (census not built)"
+                    if _f is None or _f.get('courtyard_census_error')
+                    else f"courtyard overlap "
+                         f"{_f['courtyard_overlap_mm2']:.2f}mm2")
     if m.get('pad_intersection_pairs'):
         # run-6: a stack is never cosmetic -- name it in the caption (the
         # run-5 caption printed the aggregate scalar next to a zero-pair
         # checklist and the stack read as noise)
         bits.append(f"BODY-STACKS {m['pad_intersection_pairs']:.0f}")
     if m.get('pad_conflict_pairs') is not None:
-        bits.append(f"pad-conflicts {m['pad_conflict_pairs']:.0f}")
+        # #1065: the GRADER's pair count -- the list the checklist, the
+        # overlay and --gate carry. `metrics.pad_conflict_pairs` is the
+        # optimizer's bounding-box currency (place_optimize labels it so in
+        # `pad_conflict_pairs_currency`),
+        # so the caption printed "pad-conflicts 10" on a glasgow panel whose
+        # checklist named one pair. The metric itself stays in the JSON: the
+        # quench moves on it. The film plots the grader's list too (#1124).
+        _ctx = getattr(getattr(spec.model, 'state', None), 'legality_ctx', None)
+        _n = (len(legality_findings(spec.model)['pad_conflict_pairs_refs'])
+              if _ctx is not None else m['pad_conflict_pairs'])
+        bits.append(f"pad-conflicts {_n:.0f}")
     if m.get('hole_shortfall'):
         bits.append(f"hole-conflict {m['hole_shortfall']:.2f}mm")
     bits.append("oob n/a (no Edge.Cuts)" if spec.model.no_outline
@@ -1881,7 +1972,7 @@ Examples:
                         "JSON checklist then carries d={moved, expected, "
                         "match} -- mandate 8's question (d), quotable instead "
                         'of recalled (run-4 G5)')
-    p.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'dark' (default, or $KICAD_RENDER_THEME) or 'light'. A light ground is for a figure going into a light-background document; the file's ground cannot be changed afterwards.")
+    p.add_argument('--theme', default=None, type=str.lower, choices=('dark', 'light'), help="'light' (default, or $KICAD_RENDER_THEME) or 'dark' (KiCad's own canvas). The file's ground cannot be changed afterwards.")
     p.add_argument('--quiet', action='store_true',
                    help='suppress narration. With --json-out it now also '
                         'suppresses the stdout JSON_SUMMARY echo and the '
@@ -1933,14 +2024,14 @@ def net_pattern_report(pcb, patterns, flag: str) -> dict:
     import fnmatch
     names = [n.name for n in pcb.nets.values() if n.name]
     pats = list(patterns or ())
-    hit = {p: sum(1 for nm in names if fnmatch.fnmatch(nm, p)) for p in pats}
+    hit = {p: sum(1 for nm in names if fnmatch.fnmatchcase(nm, p)) for p in pats}
     unmatched = sorted(p for p, c in hit.items() if not c)
     return {'flag': flag,
             'requested': len(pats),
             'matched': len(pats) - len(unmatched),
             'unmatched': unmatched,
             'nets_matched': sum(1 for nm in names
-                                if any(fnmatch.fnmatch(nm, p) for p in pats))}
+                                if any(fnmatch.fnmatchcase(nm, p) for p in pats))}
 
 
 def warn_unmatched(report: dict) -> None:
@@ -2027,7 +2118,7 @@ def main(argv=None):
     if args.ignore_nets:
         import fnmatch
         ignore_ids = {nid for nid, net in pcb.nets.items()
-                      if any(fnmatch.fnmatch(net.name, pat)
+                      if any(fnmatch.fnmatchcase(net.name, pat)
                              for pat in args.ignore_nets)}
         if not args.quiet:
             _r = net_lists['ignore_nets']
@@ -2104,7 +2195,7 @@ def main(argv=None):
         _bignore = set()
         if args.ignore_nets:
             _bignore = {nid for nid, net in _bpcb.nets.items()
-                        if net.name and any(fnmatch.fnmatch(net.name, pat)
+                        if net.name and any(fnmatch.fnmatchcase(net.name, pat)
                                             for pat in args.ignore_nets)}
         # Pass the AFTER board's RESOLVED floors explicitly, rather than the
         # unresolved --clearance. Board-first resolution reads each board's own
@@ -2476,6 +2567,10 @@ def main(argv=None):
         'checklist': {
             'a_off_outline': {
                 'pad_copper': fnd['oob_refs_pad_copper'],
+                # #1096: what gates -- check_assembly's measure. A part in
+                # `pad_copper` and not here is on the outline by design (a
+                # castellated module) or is a round pad's bbox corner.
+                'pad_copper_gating': fnd['oob_refs_pad_copper_gating'],
                 'courtyard': fnd['oob_refs_courtyard'],
                 # #962: footprint graphic copper past the outline
                 'graphic_copper': fnd.get('oob_refs_graphic_copper', []),
@@ -2644,8 +2739,8 @@ def main(argv=None):
         # exited 0, so a caller who wanted a verdict had to re-implement the
         # reading. --gate makes the picture's own findings decide.
         _fail = {
-            'a_off_outline.pad_copper':
-                len(doc['checklist']['a_off_outline']['pad_copper']),
+            'a_off_outline.pad_copper_gating':
+                len(doc['checklist']['a_off_outline']['pad_copper_gating']),
             'a_off_outline.courtyard':
                 len(doc['checklist']['a_off_outline']['courtyard']),
             'a_off_outline.graphic_copper':

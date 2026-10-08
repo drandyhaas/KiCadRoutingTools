@@ -58,7 +58,7 @@ import math
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from kicad_parser import local_to_global, parse_kicad_pcb
+from kicad_parser import local_to_global, non_aperture_pads, parse_kicad_pcb
 
 Pose = Tuple[float, float, float]
 
@@ -79,7 +79,8 @@ def board_poses(pcb_data) -> Dict[str, Pose]:
     a board's silkscreen dilute its displacement RMS.
     """
     return {ref: (fp.x, fp.y, (fp.rotation or 0.0) % 360.0)
-            for ref, fp in (pcb_data.footprints or {}).items() if fp.pads}
+            for ref, fp in (pcb_data.footprints or {}).items()
+            if non_aperture_pads(fp)}     # apertures are not pads (#1143)
 
 
 def part_displacement(fp, pose_a: Pose, pose_b: Pose) -> float:
@@ -88,9 +89,11 @@ def part_displacement(fp, pose_a: Pose, pose_b: Pose) -> float:
     Pads are matched **by index** through `fp.pads`, which is what makes a 180
     degree flip of a symmetric two-pad passive read 2*pad_offset rather than 0.
     That is correct rather than pedantic: the two nets have swapped ends, and
-    the airwires with them.
+    the airwires with them. Aperture-only pads (paste/mask windows) are not
+    pads and are skipped (#1143); the same filter on both poses keeps the
+    index match.
     """
-    pads = getattr(fp, 'pads', None) or ()
+    pads = non_aperture_pads(fp)
     if not pads:
         return 0.0
     ax, ay, arot = pose_a

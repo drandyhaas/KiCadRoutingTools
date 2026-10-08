@@ -66,6 +66,7 @@ import braid as te  # noqa: E402
 import fanout_from_plan as fp  # noqa: E402
 import source_realize as sr  # noqa: E402  FAN_TRACK / FAN_CLEAR
 import rules as _rules  # noqa: E402  ONE source for every design rule
+import route_layers  # noqa: E402  the routing layers: the first comb's escapes may take any of them
 sys.path.insert(0, os.path.join(HERE, '..', 'py_placer'))
 from placement.writer import write_placed_output  # noqa: E402
 
@@ -118,7 +119,7 @@ def pair_nets(pcb, src, dst):
                        if pcb.footprints.get(p.component_ref)} <= {src, dst})
 
 
-def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_method='auto'):
+def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_method='auto', reserve=None):
     """fanout_from_plan.fanout_once's engine call, on the SOURCE array.
 
     `diff_pairs` (2026-09-21): the pair BASE names among `names` (pairs.
@@ -129,16 +130,22 @@ def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_m
     pair-blind: on the H3 bench SA6's stub ran BETWEEN SCKP's and SCKN's,
     which no plan could route as a pair (K51, 2026-09-21).
 
-    `layers` (the `--fanout-layers` flag; default `fp.LAYERS` = F + B) is the
-    escape layer set. Restricting it to ONE layer is what the synthetic
+    `layers` (the `--fanout-layers` flag; default the routing layers, route_layers: F + B unless ROUTE_LAYERS adds
+    inner ones) is the escape layer set. Restricting it to ONE layer is what the synthetic
     harness (`synth_bus.py`) wants and nothing else does: with two layers the
     engine's post-resolution `rebalance_layers` spreads the escapes evenly
     over both -- measured, 4 of 8 straight-out EDGE escapes were pushed onto
     B, each paying a via in pad -- which is right for a real part and fatal
     for a generated case whose known answer assumes both ends of a lane are
-    on F. Default unchanged."""
+    on F. Default unchanged.
+
+    `reserve` (route_bus's joint fanout): the joint spec, whose arrays' other
+    balls keep their own via sites (joint_escape.reserve_ball_vias)."""
     pcb = parse_kicad_pcb(board)
     pcb._fanout_all_foreign_immovable = True
+    if reserve:
+        import joint_escape as _je
+        _je.reserve_ball_vias(pcb, reserve)
     extra = {}
     if diff_pairs:
         import pairs as _pairs
@@ -146,7 +153,7 @@ def fanout_source(board, out, src, names, layers=None, diff_pairs=None, escape_m
                      diff_pair_gap=_pairs.GAP)
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
         pcb.footprints[src], pcb, net_filter=names,
-        layers=list(layers) if layers else list(fp.LAYERS),
+        layers=list(layers) if layers else route_layers.stacked(pcb.board_info.copper_layers),
         track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE,
         via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method=escape_method,
         plane_drop='off', **extra)
@@ -193,7 +200,7 @@ def pad_partners(board, ref):
     """Other parts whose PADS collide with `ref`'s pads (check_drc)."""
     r = subprocess.run([sys.executable,
                         os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
-                        board, '--clearance', '0.1', '--clearance-margin', '0.1'],
+                        board, '--clearance', str(te.SPEC_CLEARANCE), '--clearance-margin', '0.1'],
                        capture_output=True, text=True)
     out = set()
     for a, b in PAD_PAIR.findall(r.stdout + r.stderr):
@@ -226,7 +233,7 @@ def put_on_side(board, ref, side, log=print):
 def drc_verdict(board):
     r = subprocess.run([sys.executable,
                         os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
-                        board, '--clearance', '0.1', '--clearance-margin', '0.1'],
+                        board, '--clearance', str(te.SPEC_CLEARANCE), '--clearance-margin', '0.1'],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
     m = re.search(r'FOUND (\d+) DRC VIOLATIONS', out)
@@ -354,7 +361,7 @@ def main(argv=None):
         os.replace(rot, out)
     n_drc = drc_verdict(out)
     print(f'{os.path.basename(out)}: {"DRC clean" if n_drc == 0 else f"{n_drc} DRC violation(s)"}'
-          ' at the chain\'s floor (0.1)')
+          f' at the chain\'s floor ({te.SPEC_CLEARANCE})')
     write_ladder(out, names)
     print(f'run: BASE={out} DEST={dst} bash chain_k.sh TAG K ...')
     return 0 if n_drc == 0 else 1

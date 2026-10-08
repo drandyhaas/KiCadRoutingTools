@@ -26,8 +26,9 @@ wxPython~=4.2
 numpy>=1.22.0
 scipy>=1.7.0
 
-# Geometry operations
-shapely>=1.8.0
+# Geometry operations. 2.0 for the vectorized API: the courtyard reader
+# (placement/parser.py, #1094) calls shapely.distance / shapely.points.
+shapely>=2.0
 
 # macOS-only: lets the spawned plugin process become the frontmost app so
 # the wx dialog opens in front of KiCad instead of behind it.

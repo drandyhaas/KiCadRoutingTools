@@ -48,6 +48,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
+from kicad_parser import non_aperture_pads
 from . import legality
 from . import groups as groups_mod
 
@@ -134,7 +135,25 @@ EDGE_BAND_SANITY_MM = 5.0
 #: offering the lattice -- so the rule above mandates the bump.
 #: There is deliberately NO `rule_rotation` in `RULES`: a declared rotation is
 #: ENFORCED (the seat search is given a one-angle ladder), so a grade rule
-#: would be checking an invariant the search cannot violate. An earlier draft
+#: would be checking an invariant the search cannot violate. That holds only
+#: while EVERY move that can turn a part is held to the declaration, and two
+#: were not (#1117): `place_seed`'s post-polish re-seat searched the fallback
+#: lattice, and the quench's swaps exchanged full poses, angles included.
+#: test_893 now reads every source tree for a `_try_place` call without a
+#: ladder, and the swap refuses an angle the declaration does not admit.
+#: Three more were held by #1120-#1122: stage 1's edge seat applies a
+#: `rotation_candidates` set (a member that fits the edge, or the part is
+#: left unturned and reported); `place_portfolio`'s `poses` strategy offers
+#: a declared part only angles its declaration admits; and
+#: `place_fanout_clearance --intent` turns a cap only within its claim, in
+#: the comparison run without the decap gate too. test_893's standing gate
+#: also reads `_seat_edge` and `perturb_poses` calls for their declaration.
+#: Still NOT held, and so still ungraded: `place_pose`'s set/rotate/face,
+#: which take the caller's angle; `arrays[].rotation`, which is not a block
+#: claim and so not in `rotations_for_ref`; and any actor run WITHOUT the
+#: intent (`place_optimize`, `place_portfolio`, `place_fanout_clearance` or
+#: the GUI cap pass with no intent path), which has no declaration to hold.
+#: An earlier draft
 #: of this comment claimed such a rule existed; it never did, and a
 #: justification naming a grader nobody wrote is worse than a shorter one. Contrast `blocks[].side`, which is declarable and
 #: whose rule docs/floorplan-intent.md calls "vacuous, not conservative"
@@ -151,7 +170,15 @@ EDGE_BAND_SANITY_MM = 5.0
 #: opts a block into moving as one piece. One bump for the three: they
 #: arrived together, and each changes a verdict or a placement, so the rule
 #: above mandates it. An older build refuses each key by name.
-READER_VERSION = 7
+#: 8 (#1142): `decaps.within_radius_refs` and `decaps.within_radius_mm` -- the
+#: caps a `--decaps-from` reference keeps within the tether search radius of
+#: their chip, and the radius it was read at. A held cap the graded board
+#: leaves beyond the radius is an ERROR (`decap_ungraded`, per cap), where
+#: #1102 promoted the rule board-wide and only when the reference kept EVERY
+#: cap inside -- which none of the seven #1105 references did. It changes the
+#: exit code, so the rule above mandates the bump; an older build refuses
+#: both keys by name.
+READER_VERSION = 8
 
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
@@ -256,7 +283,8 @@ _CENTER_ON_EDGE_KEYS = {'tolerance_mm'}
 #: resize. `from < to`, both in [0, 1].
 _ALONG_EDGE_BAND_KEYS = {'from', 'to'}
 _DECAP_KEYS = {'max_distance_mm', 'exempt', 'search_radius_mm',
-               'max_pin_distance_mm', 'pin_functions', 'same_side'}
+               'max_pin_distance_mm', 'pin_functions', 'same_side',
+               'within_radius_refs', 'within_radius_mm'}
 #: #902. One declared claim: these two named parts, no further apart than
 #: `max_mm`. `ref` is always a SINGLE ref here -- the brief's list form is
 #: sugar that `compile_brief` expands, so the intent carries one row per claim
@@ -1357,6 +1385,48 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         if v <= 0:
             raise IntentError(
                 f"decaps.search_radius_mm must be positive, got {v}")
+    if 'within_radius_refs' in decaps or 'within_radius_mm' in decaps:
+        # #1142: the caps a --decaps-from reference keeps within the radius,
+        # each held to it per cap. Refused rather than half-read: a list with
+        # no limit arms nothing (`rule_decap_ungraded` returns without a
+        # `max_distance_mm`), and a list read at one radius cannot be applied
+        # at another -- a hand-shrunk `search_radius_mm` would hold a cap the
+        # reference keeps at 4 mm to a 3 mm horizon, and the reference would
+        # then fail its own intent.
+        decaps = dict(decaps)
+        if 'within_radius_refs' not in decaps \
+                or 'within_radius_mm' not in decaps:
+            raise IntentError(
+                "decaps.within_radius_refs and decaps.within_radius_mm come "
+                "together: the list is the caps the reference keeps within "
+                "THAT radius. Re-emit the intent with --decaps-from")
+        if decaps['within_radius_refs'] is None:
+            # `_str_tuple(None)` is `()`, which would disarm the per-cap
+            # rule without a word (Phase-2 verifier).
+            raise IntentError(
+                "decaps.within_radius_refs is null: give the list (empty if "
+                "the reference holds no cap), or drop both keys")
+        decaps['within_radius_refs'] = sorted(_str_tuple(
+            decaps['within_radius_refs'], 'decaps.within_radius_refs'))
+        r = decaps['within_radius_mm']
+        if isinstance(r, bool) or not isinstance(r, (int, float)) or r <= 0:
+            raise IntentError(
+                f"decaps.within_radius_mm must be a positive number, got "
+                f"{r!r}")
+        if 'max_distance_mm' not in decaps:
+            raise IntentError(
+                "decaps.within_radius_refs without decaps.max_distance_mm: "
+                "the held caps are graded by decap_ungraded, which only "
+                "runs under a tether limit, so the list would grade nothing")
+        search = decaps.get('search_radius_mm', groups_mod.DECAP_RADIUS_MM)
+        if abs(float(search) - float(r)) > 1e-9:
+            raise IntentError(
+                f"decaps.within_radius_refs was read at "
+                f"{float(r):g} mm but decaps.search_radius_mm is "
+                f"{float(search):g} mm: a cap held within one radius cannot "
+                f"be graded at another. The emitter reads the list at "
+                f"{groups_mod.DECAP_RADIUS_MM:g} mm, so either drop "
+                f"search_radius_mm or drop both within_radius_* keys")
 
     health = _obj(raw.get('health'), 'health')
     _reject_unknown(health, _HEALTH_KEYS, 'health')
@@ -1507,6 +1577,9 @@ def mechanical_drift(intent: Intent, pcb_data, mechanical: Dict, *,
         # ERROR where nothing else can see it -- a TURN (a symmetric body
         # sits inside its anchor turned 180: 68 of 97 anchored corpus refs)
         # and ANY drift of a pad-less ref, which is never anchored.
+        # `fp.pads` on purpose (#1143): a ref is never anchored when the
+        # seeder never places it, and the quench places an aperture-only
+        # part (reconcile.anchor_blocks reads the same predicate).
         default = ERROR if (turned or not fp.pads) else WARN
         # The plan may PROMOTE the move-only WARN, never demote the ERROR:
         # the pose is a recorded fact, and a plan's severity map overruling
@@ -2023,13 +2096,11 @@ def allow_pattern_matches(pattern: str, ref: str) -> bool:
     than no warning: it would send an author to fix a pattern that works, or
     stay quiet about one that does not.
 
-    `fnmatch.fnmatch`, deliberately, not `fnmatchcase`: it applies
-    `os.path.normcase`, so matching is case-insensitive on Windows and
-    case-sensitive elsewhere. That platform split is PRE-EXISTING and is not
-    fixed here -- the point of this function is that both callers inherit
-    exactly the same behaviour, whatever it is.
+    `fnmatchcase`, as every reference glob is (#1208): plain `fnmatch.fnmatch`
+    applies `os.path.normcase`, which folds case on Windows only, so one intent
+    exempted different parts per host.
     """
-    return fnmatch.fnmatch(ref, pattern)
+    return fnmatch.fnmatchcase(ref, pattern)
 
 
 def unresolved_keepout_allows(intent, pcb_data) -> List['Violation']:
@@ -2123,6 +2194,261 @@ def keepout_hit(entry, rects) -> float:
             if _circle_hits_rect(cx, cy, radius, r):
                 hit = max(hit, 1.0)
     return hit if hit > legality.EPS else 0.0
+
+
+# --- #1098: a PCB-edge plug's mating region, kept clear on BOTH faces --------
+# Run 36 placed 8 back-side parts on the tongue of StickHub's USB-A plug --
+# the part of the board that slides into a socket -- and every instrument
+# passed it. The plug (`USB_A_PCB_traces_small`) is board copper: SMD finger
+# pads, `exclude_from_pos_files`, no 3D model, a courtyard on F.CrtYd only
+# and no keep-out. Courtyards are per side, so a B-side part never pairs with
+# it. The region is derived from the footprint and handed to every consumer
+# of the #701 keep-out channel, which already enforces a rect on both faces
+# with an `allow` exemption (seeder pose_ok, quench, grade), plus the two
+# graders that run without an intent (grade_pad_legality -> place_pose, and
+# check_assembly).
+
+#: Attrs that say the footprint is not placed by the assembly house.
+MATING_ATTRS = ('board_only', 'exclude_from_pos_files')
+#: The plug's netted finger pads must reach this close to the outline (mm).
+#: StickHub J1's fingers stop 0.6 mm short of the tongue's tip, as a USB-A
+#: plug's do; a solder jumper's pads do not reach an edge at all.
+MATING_FINGER_EDGE_MM = 1.0
+#: A plug carries at least this many netted finger pads: a USB-A PCB plug,
+#: the smallest board-copper plug, has four (VBUS, D-, D+, GND), and a card
+#: edge has more. KiCad's own Jumper library draws its 2- and 3-pad solder
+#: jumpers `exclude_from_pos_files` with no model, most without a net-tie
+#: group, and a DNP passive can carry the same attrs; at 2 fingers any of
+#: them sitting at an edge read as a plug (#1098 review: tigard's JP1 moved
+#: to its edge turned the board NOT BUILDABLE and was locked there).
+MATING_MIN_FINGERS = 4
+#: The courtyard is inset by this before it becomes the keep-out. StickHub's
+#: J2 and J6 courtyards reach 0.15 mm past the tongue's root; the inset keeps
+#: a neighbour's courtyard margin that grazes the root from reading as a part
+#: on the plug, and still catches all 8 run-36 parts.
+MATING_INSET_MM = 0.25
+MATING_PREFIX = 'mating:'
+
+
+#: `--decaps-from`: at least this share of EACH board's pad-bearing parts
+#: must be on the other under the same reference AND footprint, or the
+#: reference is another design and its limit is withheld (#1099). Both
+#: directions, because generic passives match: a 20-part H3/DDR board has 18
+#: of its parts on tigard (C1-C12, R1-R6, all 0402), but tigard has 18 of
+#: its 89 on it.
+DECAPS_FROM_MIN_MATCH = 0.9
+
+
+def _copper_pads(fp):
+    """The pads that carry copper: NPTH holes and aperture-only pads (paste or
+    mask windows, #1143) skipped."""
+    from paste_apertures import pad_has_copper
+    return [p for p in (fp.pads or ()) if pad_has_copper(p)]
+
+
+def _plug_seat_rect(ref, fp, crt, gate):
+    """The board rect of `ref`'s courtyard while the part is SEATED at the
+    outline the way a plug is, else None (#1098).
+
+    Seated means: no pad copper past the outline (`pad_copper_overrun_mm`,
+    the measure #1096's gate reports -- a plug hanging across an edge is
+    misplaced, and a lock would keep it there), >= 2 netted pads within
+    `MATING_FINGER_EDGE_MM` of the outline, and a courtyard that is on the
+    board and reaches the outline. Geometry only: whether the part IS a plug
+    is `derived_mating_keepouts`' question, or the author's when a keep-out
+    names it."""
+    from .parser import courtyard_for_side
+    from .part_class import SEAT_TOL_MM
+    pads = _copper_pads(fp)
+    if legality.pad_copper_overrun_mm(pads, gate) > legality.EPS:
+        return None
+    near = 0
+    for p in pads:
+        if not p.net_id:
+            continue
+        hx, hy = legality.pad_half_extents(p)
+        pr = (p.global_x - hx, p.global_y - hy,
+              p.global_x + hx, p.global_y + hy)
+        if gate.edge_clearance(pr) <= MATING_FINGER_EDGE_MM:
+            near += 1
+    if near < 2:
+        return None
+    loc = courtyard_for_side((crt or {}).get(ref), legality.footprint_side(fp))
+    if loc is None:
+        return None
+    x0, y0, x1, y1 = legality.rotate_local_bounds(*loc, fp.rotation or 0.0)
+    rect = (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)
+    if gate.out_of_board_area(rect) >= legality.rect_area(rect) - 1e-6:
+        return None             # wholly off the board: not at an edge
+    if not (gate.rect_outside_amount(rect) > legality.EPS
+            or gate.edge_clearance(rect) <= SEAT_TOL_MM):
+        return None
+    return rect
+
+
+def seated_plugs(keepouts, pcb_data, pcb_file: Optional[str] = None
+                 ) -> set:
+    """The refs a mating keep-out LOCKS: the part a `mating:<ref>` entry
+    (declared or derived) names, only while `_plug_seat_rect` finds it
+    seated (#1098). A derived entry's plug is seated by construction; a
+    declared one's may be in the staging pile, and a lock would leave it
+    there unseated and unreported."""
+    fps = getattr(pcb_data, 'footprints', None) or {}
+    named = sorted({str(k.get('name', ''))[len(MATING_PREFIX):]
+                    for k in keepouts or ()
+                    if str(k.get('name', '')).startswith(MATING_PREFIX)}
+                   & set(fps))
+    bi = getattr(pcb_data, 'board_info', None)
+    if not named or bi is None:
+        return set()
+    from .parser import extract_courtyard_sides
+    path = pcb_file or getattr(pcb_data, 'source_path', None)
+    crt = extract_courtyard_sides(path) if path else {}
+    gate = legality.BoardOutlineGate(bi, 0.0)
+    return {r for r in named
+            if _plug_seat_rect(r, fps[r], crt, gate) is not None}
+
+
+def derived_mating_keepouts(pcb_data, pcb_file: Optional[str] = None
+                            ) -> Tuple[Dict, ...]:
+    """The keep-outs a board's PCB-edge plugs imply, one per plug (#1098).
+
+    A footprint is a plug when it is not assembled (an attr in
+    `MATING_ATTRS` and no 3D model), is not a net-tie (a solder jumper
+    shorts pad groups; a plug does not), carries >= `MATING_MIN_FINGERS`
+    netted pads and no drilled one (finger copper, not a connector body),
+    and is SEATED (`_plug_seat_rect`: no pad copper past the outline, >= 2
+    fingers within `MATING_FINGER_EDGE_MM` of it, a courtyard on the board
+    that reaches it). The keep-out is the courtyard's board rect inset by
+    `MATING_INSET_MM`, on both faces, allowing the plug itself and every
+    part with no copper pad (a slot like StickHub's H1, a logo).
+
+    Declared, not guessed, wins: an intent or brief keep-out named
+    `mating:<ref>` replaces the derived one (see `with_derived_keepouts`).
+    """
+    import glob as _glob
+    path = pcb_file or getattr(pcb_data, 'source_path', None)
+    fps = getattr(pcb_data, 'footprints', None) or {}
+    bi = getattr(pcb_data, 'board_info', None)
+    if not path or not fps or bi is None:
+        return ()
+    cands = [r for r, fp in fps.items()
+             if set(getattr(fp, 'attrs', ()) or ()) & set(MATING_ATTRS)
+             and not getattr(fp, 'has_model', False)]
+    if not cands:
+        return ()
+    from .parser import extract_courtyard_sides
+    try:
+        crt = extract_courtyard_sides(path)
+    except Exception:                                        # noqa: BLE001
+        return ()
+    gate = legality.BoardOutlineGate(bi, 0.0)
+    free = tuple(_glob.escape(r) for r, fp in sorted(fps.items())
+                 if not _copper_pads(fp))
+    out = []
+    for ref in sorted(cands):
+        fp = fps[ref]
+        pads = _copper_pads(fp)
+        if any((p.drill or 0) > 0 for p in pads):
+            continue
+        if getattr(fp, 'net_tie_groups', None):
+            continue
+        if sum(1 for p in pads if p.net_id) < MATING_MIN_FINGERS:
+            continue
+        rect = _plug_seat_rect(ref, fp, crt, gate)
+        if rect is None:
+            continue
+        ins = (rect[0] + MATING_INSET_MM, rect[1] + MATING_INSET_MM,
+               rect[2] - MATING_INSET_MM, rect[3] - MATING_INSET_MM)
+        if ins[2] <= ins[0] or ins[3] <= ins[1]:
+            continue
+        out.append({'name': MATING_PREFIX + ref,
+                    'rect': tuple(round(v, 4) for v in ins),
+                    'sides': ('F', 'B'),
+                    'allow': (_glob.escape(ref),) + free,
+                    'context': {'source': 'derived',
+                                'derived_from': f"footprint {ref}: "
+                                f"{'/'.join(sorted(set(fp.attrs) & set(MATING_ATTRS)))}"
+                                f", no 3D model, courtyard at the outline",
+                                'inset_mm': MATING_INSET_MM}})
+    return tuple(out)
+
+
+def with_derived_keepouts(keepouts, pcb_data, pcb_file: Optional[str] = None
+                          ) -> Tuple[Dict, ...]:
+    """`keepouts` plus the derived mating keep-outs no entry already names
+    (#1098). A declared `mating:<ref>` replaces the derived one."""
+    declared = tuple(keepouts or ())
+    names = {k.get('name') for k in declared}
+    return declared + tuple(k for k in derived_mating_keepouts(pcb_data,
+                                                               pcb_file)
+                            if k['name'] not in names)
+
+
+def mating_keepouts(pcb_data, pcb_file: Optional[str] = None,
+                    declared=()) -> Tuple[Dict, ...]:
+    """The board's mating regions as the seeder, quench and grade resolve
+    them (#1098): `with_derived_keepouts(declared, ...)`, keeping only the
+    `mating:` entries. A declared `mating:<ref>` therefore replaces the
+    derived one here exactly as it does there; the intent's other
+    keep-outs are the floorplan grade's rules, not an assembly fact."""
+    return tuple(k for k in with_derived_keepouts(declared, pcb_data,
+                                                  pcb_file)
+                 if str(k.get('name', '')).startswith(MATING_PREFIX))
+
+
+def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
+                            keepouts=None, declared=()) -> List[Dict]:
+    """`[{ref, keepout, side, area_mm2}]`: parts inside a mating keep-out at
+    the file's poses (#1098) -- `keepouts` when given, else
+    `mating_keepouts(pcb_data, pcb_file, declared)`, so a checker handed the
+    intent's keep-outs resolves the region the seeder enforced. `keepout_hit`
+    over each part's (rect, drilled-pad rect), resolved by `keepouts_for_ref`
+    -- the same two functions the seeder and the grade call.
+
+    The rect is the QUENCH's (`quench._Part`): the courtyard, else the pad
+    bbox. A checker measuring courtyard-plus-pads here graded a part the
+    seeder had just seated (its pad poking past its own courtyard into the
+    tongue) NOT BUILDABLE -- the generator more permissive than the checker,
+    which is the one direction that may never happen. So both read one
+    rect."""
+    ks = (mating_keepouts(pcb_data, pcb_file, declared)
+          if keepouts is None else tuple(keepouts))
+    if not ks:
+        return []
+    from .parser import courtyard_for_side, extract_courtyard_sides
+    from .utility import compute_footprint_bbox_local
+    path = pcb_file or getattr(pcb_data, 'source_path', None)
+    try:
+        crt = extract_courtyard_sides(path) if path else {}
+    except Exception:                                        # noqa: BLE001
+        crt = {}
+    out = []
+    for ref, fp in sorted((pcb_data.footprints or {}).items()):
+        side = legality.footprint_side(fp)
+        has_tht = legality.footprint_has_through_pads(fp)
+        loc = courtyard_for_side(crt.get(ref), side)
+        if loc is None:
+            try:
+                loc = compute_footprint_bbox_local(fp)
+            except Exception:                                # noqa: BLE001
+                continue
+        rot = fp.rotation or 0.0
+        x0, y0, x1, y1 = legality.rotate_local_bounds(*loc, rot)
+        rect = (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)
+        tht = None
+        if has_tht:
+            tl = legality.through_pad_bounds_local(fp)
+            if tl is not None:
+                a0, b0, a1, b1 = legality.rotate_local_bounds(*tl, rot)
+                tht = (fp.x + a0, fp.y + b0, fp.x + a1, fp.y + b1)
+        sides = legality.sides_occupied(side, has_tht)
+        for k in keepouts_for_ref(ks, ref, sides):
+            a = keepout_hit(k, (rect, tht))
+            if a:
+                out.append({'ref': ref, 'keepout': k['name'],
+                            'side': side, 'area_mm2': round(a, 4)})
+    return sorted(out, key=lambda f: (f['keepout'], f['ref']))
 
 
 # --------------------------------------------------------------------------
@@ -2249,7 +2575,7 @@ def resolve_blocks(intent: Intent, pcb_data, group_sources: Sequence[str] = ()
     for z in intent.blocks:
         members = set()
         for pattern in z.refs:
-            members.update(fnmatch.filter(refs_all, pattern))
+            members.update([r for r in refs_all if fnmatch.fnmatchcase(r, pattern)])
         if z.group:
             found = derived.get(z.group)
             if found is None:
@@ -2392,6 +2718,29 @@ def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]]
     return out
 
 
+def declared_ladder(claim) -> Optional[List[float]]:
+    """The seat ladder one `rotations_for_ref` claim gives, or None (#1117).
+
+    `[rot]` for a declared `rotation`, the author's `rotation_candidates` in
+    the author's order (the seat search keeps the FIRST angle that fits), and
+    None for no claim -- which tells `seeder._try_place` to use its fallback
+    lattice. The angles were normalised at load.
+
+    This is the ONE mapping every `_try_place` seat search, the portfolio's
+    `poses` strategy (#1121) and `place_fanout_clearance`'s cap turns
+    (#1122) read. Stage 1's edge seat does not call it: it walks the same
+    claim itself, its current angle first when that is a member that fits,
+    then the author's order (#1120). It was a closure copied into `seed_from_intent` and
+    `repair_placement`, and `place_seed`'s post-polish re-seat had no copy at
+    all, so it searched the fallback lattice and could turn a part whose
+    angle the intent declared (#1117).
+    """
+    if claim is None:
+        return None
+    rot, cands = claim
+    return [rot] if rot is not None else list(cands)
+
+
 def zone_entries(intent: Intent, blocks: Dict[str, List[str]]) -> Tuple[Dict, ...]:
     """The plain-dict zone rows, given ALREADY-RESOLVED blocks.
 
@@ -2463,7 +2812,7 @@ def resolve_intent_gate(intent: Intent, pcb_data,
 
     lock: set = set()
     for pat in intent.must_lock:
-        lock.update(fnmatch.filter(sorted(pcb_data.footprints), pat))
+        lock.update([r for r in sorted(pcb_data.footprints) if fnmatch.fnmatchcase(r, pat)])
     lock.update(str(c['ref']) for c in intent.edge_claims()
                 if c.get('ref') in pcb_data.footprints)
     # #893. The declared ROTATION travels with the gate, so the quench can
@@ -2558,7 +2907,8 @@ def tether_pairings(tethers: Dict[str, object], pcb_data
         so it holds them to `decap_distance` as well -- stricter, never looser.
 
     `decap_distance` pairs outside the radius at election (`graded: False`)
-    are carried too: the grade calls them `decap_ungraded` (warn), and one
+    are carried too: the grade calls them `decap_ungraded` (warn; per cap an
+    error for a cap a --decaps-from reference holds, #1142), and one
     that walks INTO the radius past the limit becomes an error, which the gate
     must see.
     """
@@ -2572,7 +2922,7 @@ def tether_pairings(tethers: Dict[str, object], pcb_data
                 for cap, _d in near[ic]]
         rows += [(cap, ic, False) for cap, ic, _d in beyond]
         for cap, ic, graded in sorted(rows):
-            if any(fnmatch.fnmatch(cap, p) for p in dd['exempt']):
+            if any(fnmatch.fnmatchcase(cap, p) for p in dd['exempt']):
                 continue
             rail = tuple(groups_mod.rail_chips(pcb_data, cap))
             out.append({'rule': 'decap_distance', 'name': f"{cap}->{ic}",
@@ -2679,6 +3029,13 @@ class _Ctx:
 
     def __init__(self, intent, pcb_data, pcb_file, state, blocks, locked,
                  outline):
+        # #1098: plus a PCB-edge plug's derived mating keep-out, so the
+        # grade, its roster, the pose grader and place_seed --repair (which
+        # charges grade errors) all see what the seeder enforces. The same
+        # board without a plug keeps the very intent it was handed.
+        _ks = with_derived_keepouts(intent.keepouts, pcb_data, pcb_file)
+        if len(_ks) != len(intent.keepouts or ()):
+            intent = dataclasses.replace(intent, keepouts=_ks)
         self.intent = intent
         self.pcb = pcb_data
         self.pcb_file = pcb_file
@@ -4305,7 +4662,7 @@ def rule_decap_distance(ctx) -> Iterator[Violation]:
         'decaps.max_distance_mm') == 'observed_baseline'
     for ic in sorted(tethers):
         for cap, dist in tethers[ic]:
-            if any(fnmatch.fnmatch(cap, pat) for pat in exempt):
+            if any(fnmatch.fnmatchcase(cap, pat) for pat in exempt):
                 continue
             if cap in sup:
                 continue        # graded by the declared relation instead
@@ -4508,24 +4865,41 @@ def rule_decap_ungraded(ctx) -> Iterator[Violation]:
     _near, beyond, _orphans = ctx.decap_populations(radius)
     sev = ctx.intent.severity_of('decap_ungraded', default=WARN)
     sup = ctx.superseded()
+    # #1142, PER CAP: a cap a --decaps-from reference keeps within the radius
+    # (`within_radius_refs`) is HELD to it, so leaving it beyond is an ERROR;
+    # a cap the reference itself keeps beyond -- likelier a bulk or filter cap
+    # than a failed decoupler, the reasoning above -- stays a WARN. An explicit
+    # `severity.decap_ungraded` still wins in both directions (an author can
+    # turn the rule down, and an intent #1102 promoted board-wide grades as it
+    # always did).
+    explicit = 'decap_ungraded' in (ctx.intent.severity or {})
+    held = frozenset(spec.get('within_radius_refs') or ())
     for cap, ic, dist in beyond:
         # An author who waived a cap from the distance claim has already
         # decided about it; telling them it is also ungraded is noise about
         # their own decision. A cap a declared relation supersedes IS
         # graded -- by that relation.
-        if any(fnmatch.fnmatch(cap, pat) for pat in exempt) or cap in sup:
+        if any(fnmatch.fnmatchcase(cap, pat) for pat in exempt) or cap in sup:
             continue
+        is_held = cap in held
+        # `sev` stays the answer for every cap the list does not raise, so
+        # the rule's WARN default is still the one line that decides it.
+        cap_sev = ERROR if (is_held and not explicit) else sev
         yield Violation(
-            rule='decap_ungraded', severity=sev,
+            rule='decap_ungraded', severity=cap_sev,
             ref=cap, block=ctx.owner.get(cap),
             message=(f"{cap} is {dist:.2f}mm from {ic}, the IC it decouples "
                      f"-- beyond the {radius:.2f}mm tether search radius, so "
                      f"decap_distance never measured it against the "
-                     f"{limit:.2f}mm limit. That limit was derived from the "
-                     f"caps INSIDE the radius, so it says nothing about this "
-                     f"one"),
+                     f"{limit:.2f}mm limit. "
+                     + ("The reference board keeps it WITHIN that radius, so "
+                        "here it is a stranded decoupler, not a bulk cap"
+                        if is_held else
+                        "That limit was derived from the caps INSIDE the "
+                        "radius, so it says nothing about this one")),
             measured={'distance_mm': round(dist, 4), 'ic': ic,
-                      'search_radius_mm': round(radius, 4)},
+                      'search_radius_mm': round(radius, 4),
+                      'held_by_reference': is_held},
             expected={'max_distance_mm': limit})
 
 
@@ -4562,7 +4936,7 @@ def decap_pin_caps(spec: Dict, ref: str, ic_side, pad, by_net
     on_rail = [c for c in by_net.get(pad.net_id, ())
                if c.reference != ref]
     caps = [c for c in on_rail
-            if not any(fnmatch.fnmatch(c.reference, pat) for pat in exempt)]
+            if not any(fnmatch.fnmatchcase(c.reference, pat) for pat in exempt)]
     if spec.get('same_side'):
         # A MANUFACTURING claim, never an electrical one: the author is
         # asserting the back side is not available -- single-sided assembly, a
@@ -4663,10 +5037,13 @@ def proximity_pads(claim: Dict, a_fp, b_fp) -> Tuple[List, List, bool]:
     spec = claim.get('pads') or {}
     ref, near = str(claim['ref']), str(claim['near'])
     declared = bool(spec.get(ref))
+    # Undeclared: every pad but the paste/mask apertures (#1143). Read as
+    # pads, tigard J1's paste windows put C25 2.11 mm from J1, where its
+    # copper is 2.61 mm away, so a 2.5 mm claim passed (Phase-1 verifier).
     subject = (_pads_named(a_fp, spec[ref]) if declared
-               else list(a_fp.pads or ()))
+               else non_aperture_pads(a_fp))
     partners = (_pads_named(b_fp, spec[near]) if spec.get(near)
-                else list(b_fp.pads or ()))
+                else non_aperture_pads(b_fp))
     return subject, partners, declared
 
 
@@ -4874,7 +5251,7 @@ def rule_must_lock(ctx) -> Iterator[Violation]:
     """
     refs = sorted(ctx.pcb.footprints)
     for pattern in ctx.intent.must_lock:
-        matched = fnmatch.filter(refs, pattern)
+        matched = [r for r in refs if fnmatch.fnmatchcase(r, pattern)]
         if not matched:
             yield Violation(
                 rule='must_lock', severity=ctx.sev('must_lock'),
@@ -5718,7 +6095,7 @@ def _applicability(rule: str, intent: Intent, pcb_data, ctx, census,
     if rule == 'zone_side':
         faces = sorted({legality.footprint_side(fp)
                         for fp in (pcb_data.footprints or {}).values()
-                        if fp.pads})
+                        if non_aperture_pads(fp)})
         if len(faces) < 2:
             return False, (f"every part with pads is on "
                            f"{faces[0] if faces else 'no'} face, so no block "
@@ -5781,6 +6158,11 @@ def _gating(rule: str, intent: Intent, ctx) -> bool:
     advisory. A dark rule never runs, so demoting it would change nothing but
     this answer -- a way to make P1's refusal go away by editing a severity
     no finding will ever carry (#959 plan review, round 3).
+
+    The one exception is `decap_ungraded` under a `--decaps-from` intent
+    (#1142): its held list makes it gating per cap, and an explicit `warn`
+    then makes it advisory again, because the rule obeys that warn for every
+    cap -- so no finding of it can be an error.
     """
     if rule in _FORCED_SEVERITY:
         return _FORCED_SEVERITY[rule] == ERROR
@@ -5796,6 +6178,11 @@ def _gating(rule: str, intent: Intent, ctx) -> bool:
         if 'rail_net' in chans:
             return intent.severity.get('decap_pin_distance_inferred') == ERROR
         return False
+    if (rule == 'decap_ungraded' and rule not in intent.severity
+            and (intent.decaps or {}).get('within_radius_refs')):
+        # #1142: a held cap left beyond the radius is an ERROR, per cap. An
+        # explicit severity is read below and wins, as it does in the rule.
+        return True
     if intent.severity.get(rule) == ERROR:
         return True
     return _RULE_DEFAULT_SEVERITY.get(rule, ERROR) == ERROR
@@ -5814,6 +6201,9 @@ def _roster(intent: Intent, pcb_data, ctx, *, census=None,
     cases the honest answers are "declare it from a requirement" or "say why
     not" (#959 Phase 0 checkpoint).
     """
+    # The intent the grade ran (#1098: plus derived mating keep-outs), so the
+    # roster never calls a rule inapplicable that the grade just fired.
+    intent = getattr(ctx, 'intent', None) or intent
     census = census if census is not None else decap_census(pcb_data)
     disp = intent.dispositions or {}
     rule_disp = disp.get('rules', {})
@@ -6039,6 +6429,13 @@ class GradeResult:
     #: #959: dispositions this plan writes that answer nothing (see
     #: `stale_dispositions`). Empty unless the roster was built.
     stale_dispositions: List[str] = field(default_factory=list)
+    #: #1064: `legality.pad_stack_census` -- check_assembly's exact
+    #: pad_intersection pairs (two parts' pad copper overlapping, ANY net),
+    #: PRINTED and never a rule. None when `grade(with_pad_stacks=True)` was
+    #: not asked, which a consumer must not read as "no stacks". The
+    #: `legality['pad_intersection_pairs']` key beside it is the optimizer's
+    #: bounding-box census and keeps that meaning.
+    pad_stacks: Optional[Dict[str, object]] = None
 
     @property
     def dark_undispositioned(self) -> List[str]:
@@ -6173,6 +6570,9 @@ class _PosedState:
         self._exclude = frozenset(exclude)
         self._poses = dict(poses or {})
         self.edge_gate = state.edge_gate
+        # #1104: `legality_metrics` reads it; without it a posed view of a
+        # courtyard-waived board priced courtyard overlap again.
+        self.courtyards_ignored = getattr(state, 'courtyards_ignored', False)
 
     def pose(self, ref):
         if ref in self._poses:
@@ -6918,7 +7318,7 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         for c in intent.edge_claims():
             ref, edge = str(c.get('ref')), c.get('edge')
             fp = (pcb_data.footprints or {}).get(ref)
-            if fp is None or edge not in blen or not fp.pads:
+            if fp is None or edge not in blen or not non_aperture_pads(fp):
                 continue
             # In the footprint's OWN frame, so the answer is the part's and
             # not its current pose's: board-frame extents of a part at 45
@@ -7084,13 +7484,18 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
           with_health: bool = False, with_roster: bool = False,
           brief_fragment=None, mechanical=None,
           mechanical_skip: Sequence[str] = (),
-          reconciliation=None) -> GradeResult:
+          reconciliation=None,
+          with_pad_stacks: bool = False) -> GradeResult:
     """Measure a board against its declared floorplan intent.
 
     `with_roster` (#959) also builds the rule roster -- which rules the intent
     leaves dark and whether a disposition answers for each. Opt-in, because
     it costs a decap census and most callers (the seeder's self-grade, the
-    A/B harness) never read it."""
+    A/B harness) never read it.
+
+    `with_pad_stacks` (#1064) also measures check_assembly's exact pad
+    stacks into `GradeResult.pad_stacks`, for check_floorplan to PRINT. It
+    is not a rule and changes no verdict; opt-in for the same reason."""
     from . import placement_state
 
     ctx, outline, state, blocks, block_problems = _grade_ctx(
@@ -7188,9 +7593,18 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         stale = stale_dispositions(intent, roster, pcb_data,
                                    reconciliation=reconciliation)
 
+    pad_stacks = None
+    if with_pad_stacks:
+        from .legality import pad_stack_census
+        import routing_defaults as _defaults1064
+        pad_stacks = pad_stack_census(
+            pcb_data, clearance if clearance is not None
+            else _defaults1064.CLEARANCE)
+
     st = placement_state.assess_placement(pcb_data, pcb_file)
     return GradeResult(
         roster=roster, stale_dispositions=list(stale or ()),
+        pad_stacks=pad_stacks,
         intent=intent, board=pcb_file, violations=violations, blocks=blocks,
         legality={k: (round(float(v), 4) if isinstance(v, float) else v)
                   for k, v in ctx.legality.items()},
@@ -7342,6 +7756,53 @@ def decap_census(pcb_data, radius: float = None) -> Dict:
     return out
 
 
+def _pin_census_of(pcb_data) -> Dict[str, object]:
+    """The supply-pin census `decap_pin_distance` grades, on one board
+    (#1102): every graded pin's gap to the nearest decoupling cap on its net,
+    with the rule's own functions -- `supply_pins`, `decap_pin_caps`,
+    `nearest_rail_cap` -- and no exemptions."""
+    pins = supply_pins(pcb_data)
+    by_net = _decap_caps_by_net(pcb_data)
+    gaps, uncovered, total = [], 0, 0
+    for ref, rec in sorted(pins.items()):
+        fp_ = (pcb_data.footprints or {}).get(ref)
+        if fp_ is None:
+            continue
+        side = legality.footprint_side(fp_)
+        for pad, _net in rec['pins']:
+            total += 1
+            _on, caps = decap_pin_caps({}, ref, side, pad, by_net)
+            hit = nearest_rail_cap(pad, caps)
+            if hit is None:
+                uncovered += 1
+            else:
+                gaps.append(hit[0])
+    # `max_raw` unrounded: `_ceil4` must see the true max, or rounding first
+    # can land the limit BELOW it and fail the reference against itself.
+    return {'pins': total, 'covered': len(gaps), 'uncovered': uncovered,
+            'max_mm': round(max(gaps), 4) if gaps else None,
+            'max_raw': max(gaps) if gaps else None}
+
+
+def _decap_pin_derivation(pcb_data) -> Tuple[Optional[float], Optional[str]]:
+    """`(max_pin_distance_mm, withheld_reason)` off a REFERENCE (#1102):
+    `_ceil4` of the largest covered pin gap, the fixed point
+    `_decap_derivation` argues for. Withheld when fewer than
+    `DECAP_MIN_SAMPLE` pins are covered, or when more than
+    `DECAP_MAX_CENSORED` of the graded pins have no cap on their net at all
+    -- an uncovered pin contributes no distance, so a max over the rest would
+    be censored (docs/floorplan-intent.md, "The emitter derives no pin
+    limit")."""
+    c = _pin_census_of(pcb_data)
+    if c['covered'] < DECAP_MIN_SAMPLE:
+        return None, (f"{c['covered']} supply pin(s) have a cap on their "
+                      f"net (at least {DECAP_MIN_SAMPLE} needed)")
+    if c['pins'] and c['uncovered'] / c['pins'] > DECAP_MAX_CENSORED:
+        return None, (f"{c['uncovered']} of {c['pins']} supply pins have no "
+                      f"cap on their net, so a max over the rest is censored")
+    return _ceil4(c['max_raw']), None
+
+
 def _decap_derivation(census: Dict) -> Tuple[Optional[float], Optional[str]]:
     """`(max_distance_mm, withheld_reason)` -- exactly one of them is None.
 
@@ -7430,7 +7891,9 @@ def _decap_mode(v) -> str:
 
 
 def _emitted_basis(decaps, budget, conns, blocks,
-                   assembly=None, band_default=()) -> Dict[str, str]:
+                   assembly=None, band_default=(),
+                   decaps_basis: Optional[str] = None,
+                   pin_basis: Optional[str] = None) -> Dict[str, str]:
     """`{intent path: basis}` for every number the emitter chose: what it
     READ off this board is `observed_baseline`; a constant of this module is
     `derived_default`. The envelope RECT is not here -- it is the outline,
@@ -7440,7 +7903,14 @@ def _emitted_basis(decaps, budget, conns, blocks,
         'defaults.zone_tolerance_mm': 'derived_default',
     }
     if 'max_distance_mm' in (decaps or {}):
-        out['decaps.max_distance_mm'] = 'observed_baseline'
+        # #1099: read off a REFERENCE board, not this one, says so.
+        out['decaps.max_distance_mm'] = decaps_basis or 'observed_baseline'
+    if 'max_pin_distance_mm' in (decaps or {}) and pin_basis:
+        out['decaps.max_pin_distance_mm'] = pin_basis
+    if 'within_radius_refs' in (decaps or {}):
+        # #1142: read off the same reference as the limit.
+        out['decaps.within_radius_refs'] = decaps_basis or 'observed_baseline'
+        out['decaps.within_radius_mm'] = 'derived_default'
     for k in sorted(budget or {}):
         out[f'legality_budget.{k}'] = 'observed_baseline'
     for c in conns or ():
@@ -7463,6 +7933,7 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 zone_pad_mm: float = 1.0,
                 declare_classes: bool = False,
                 derive_decaps='off', brief_fragment=None,
+                decaps_from: Optional[str] = None,
                 derive_arrays='off', rigid_blocks: Sequence[str] = ()
                 ) -> Dict:
     """A starter intent READ OFF the board, for a human or a model to edit.
@@ -7551,6 +8022,29 @@ def emit_intent(pcb_data, pcb_file: str, *,
         zoned.add(key)
 
     blocks = []
+    # #1103: on a PILE the poses are staging, not decisions -- run 37's
+    # emit read 87 "edge connectors" off StickHub's staging ring (every cap,
+    # U1, Y1), each one nearest SOME edge. Nothing read off an unlocked
+    # part's pose is written then: no observed edge claim, no zone, no
+    # oob_count baseline. A KiCad-locked part's pose IS a decision and keeps
+    # its claims; a brief or mechanical.json still merge after this.
+    from .placement_state import assess_placement as _assess_pile
+    _pile_st = _assess_pile(pcb_data, pcb_file)
+    # `s3_outside` too: a staging RING (run 36/37's pile) is spread, not
+    # stacked, so it reads neither unplaced nor partially unplaced, yet
+    # 93% of its parts sit off the board.
+    # NOT any `partially_unplaced`: two stacked parts on a placed board set
+    # it, and that board's other claims are real; a heap is at least half
+    # stacked (run 29's pile: 83%).
+    # The heap test counts `stacked_suspect_refs`, which already excuses the
+    # far-side and marker co-locations a placed board has on purpose; the
+    # raw `duplicate_fraction` does not (verifier: a placed orangecrab with
+    # 60 parts under front-side parts read as a pile). One predicate, shared
+    # with board_brief (#1109).
+    _pile = _pile_st.pile
+    _pile_locked = set(extract_locked_refs_safe(pcb_file)) if _pile else set()
+    _pose_withheld: List[str] = []
+
     for key in sorted(cand):
         members, rect = cand[key]
         sides = {parts[r].side for r in members}
@@ -7559,7 +8053,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
             'group': groups_mod.short_name(key),
             'refs': sorted(members),
         }
-        if key in zoned:
+        if key in zoned and _pile and not set(members) <= _pile_locked:
+            entry['note'] = ('the board is a pile, so its members\' bounding '
+                             'box is staging, not a zone (#1103)')
+        elif key in zoned:
             entry['zone'] = [round(v, 3) for v in rect]
             entry['note'] = 'derived from the board; tighten or delete'
         else:
@@ -7652,6 +8149,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
     band_default = set()
     for ref in sorted(parts):
         amt = state.edge_gate.rect_outside_amount(parts[ref].rect)
+        if _pile and ref not in _pile_locked:
+            if amt > legality.EPS:
+                _pose_withheld.append(ref)
+            continue
         if amt > legality.EPS:
             # An OBSERVED overhang above the sanity cap is not a band. Emitting
             # it as one launders the damage into the spec that is supposed to
@@ -7789,8 +8290,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 conns.append({
                     'ref': ref, 'class': pc.name, 'source': 'auto-class',
                     'overhang_mm': {'min': 0.0},
-                    'note': (f'connector-family part, no edge claim; '
-                             f'measured {clr:.2f}mm from the nearest edge')})
+                    'note': ('connector-family part, no edge claim'
+                             + ('' if (_pile and ref not in _pile_locked)
+                                else f'; measured {clr:.2f}mm from the '
+                                     f'nearest edge'))})
                 continue
             if pc.name != 'edge_receptacle':
                 # actuators make no claim unless they actually overhang
@@ -7801,7 +8304,12 @@ def emit_intent(pcb_data, pcb_file: str, *,
             entry = {'ref': ref, 'class': pc.name, 'source': 'auto-class',
                      'overhang_mm': default_band(pc.name, fp)}
             band_default.add(ref)
-            if plaus:
+            if _pile and ref not in _pile_locked:
+                # #1103: a class is pose-free and stays; an edge read off a
+                # staging pose would be an invention.
+                entry['note'] = ('edge-receptacle class on a pile: no edge '
+                                 'declared -- its staging pose says nothing')
+            elif plaus:
                 entry['edge'] = _nearest_edge(parts[ref].rect, bounds)
             else:
                 entry['note'] = (
@@ -7840,7 +8348,19 @@ def emit_intent(pcb_data, pcb_file: str, *,
     _suspects = any('SUSPECT' in (c.get('note') or '') for c in conns)
     _budget = {}
     _withheld = {}
-    if _body_blocking:
+    try:
+        from .legality import courtyard_severity_of as _cso
+        _cy_ignored = _cso(pcb_file)[0] == 'ignore'
+    except Exception:                                        # noqa: BLE001
+        _cy_ignored = False
+    if _cy_ignored:
+        # #1101 review: the budget is a courtyard OVERLAP AREA, and the
+        # project waives courtyard overlap -- the seeder packs courtyards
+        # there, so a budget read off this board would fail its own seed.
+        _withheld['overlap_area'] = (
+            "the project sets courtyards_overlap to ignore, so a courtyard "
+            "overlap budget grades nothing it asks for")
+    elif _body_blocking:
         _withheld['overlap_area'] = (f'{_body_blocking} blocking body '
                                      f'pair(s) on the emitting board (run-6)')
     elif _courtyard_blocking:
@@ -7850,7 +8370,11 @@ def emit_intent(pcb_data, pcb_file: str, *,
             f'auto-budget would bless them')
     else:
         _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
-    if not _suspects:
+    if _pile and int(leg['oob_count']):
+        _withheld['oob_count'] = (
+            'the board is a pile: its off-board count is staging, not a '
+            'baseline (#1103)')
+    elif not _suspects:
         _budget['oob_count'] = int(leg['oob_count'])
     else:
         _withheld['oob_count'] = (
@@ -7890,6 +8414,115 @@ def emit_intent(pcb_data, pcb_file: str, *,
                   'read 0.0')
         else:
             _derive = True
+    if decaps_from:
+        # #1099: the limit read off a PLACED REFERENCE -- a human layout or
+        # an earlier one of this design -- instead of the board being
+        # emitted, which on a pile has nothing to read (auto withholds;
+        # strict wrote 0.0 on run 29). Same derivation, same withholding;
+        # the basis names the file, and it replaces `derive_decaps`.
+        from kicad_parser import parse_kicad_pcb as _parse_ref
+        from .placement_state import assess_placement as _assess
+        _ref_pcb = _parse_ref(decaps_from)
+        _ref_census = decap_census(_ref_pcb)
+        _limit, _why = _decap_derivation(_ref_census)
+        _census['reference_board'] = decaps_from
+        _census['reference_tethers'] = _ref_census.get('tethers')
+        # The reference REPLACES the auto/strict arms: an auto withholding
+        # about THIS board is not a statement about the number written.
+        _census.pop('auto_withheld', None)
+        # The reference must BE a placement of THIS design: its pad-bearing
+        # parts on the board with the same footprint (#1099 verifier: an
+        # esp_prog intent took glasgow's 4.787 mm without a word), and
+        # placed (a pile blesses nothing -- auto refuses the same board).
+        # In BOTH directions: the lower of the two shares is the match, so a
+        # small board of generic passives is not a placement of a large one.
+        def _parts(pcb):
+            return {(r, f.footprint_name) for r, f in
+                    (pcb.footprints or {}).items() if non_aperture_pads(f)}
+        _theirs, _ours = _parts(_ref_pcb), _parts(pcb_data)
+        _common = len(_theirs & _ours)
+        _match = (min(_common / len(_theirs), _common / len(_ours))
+                  if _theirs and _ours else 0.0)
+        _census['reference_part_match'] = round(_match, 3)
+        _ref_state = _assess(_ref_pcb, decaps_from)
+        if _match < DECAPS_FROM_MIN_MATCH:
+            _limit, _why = None, (
+                f"it is not a placement of this design: they share "
+                f"{_common} part(s) under the same reference and footprint, "
+                f"{_common}/{len(_theirs)} of its parts and "
+                f"{_common}/{len(_ours)} of this board's (at least "
+                f"{DECAPS_FROM_MIN_MATCH:.0%} of each needed)")
+        elif _ref_state.unplaced or _ref_state.partially_unplaced:
+            _limit, _why = None, (
+                "it is not placed (" + '; '.join(_ref_state.reasons[:2])
+                + "): a limit read off it would bless a pile")
+        _ref_ok = (_match >= DECAPS_FROM_MIN_MATCH
+                   and not (_ref_state.unplaced
+                            or _ref_state.partially_unplaced))
+        if _limit is None:
+            _withheld['decaps.max_distance_mm'] = (
+                f"the reference board {decaps_from}: {_why}")
+        else:
+            _decaps['max_distance_mm'] = _limit
+            _census['emitted_max_distance_mm'] = _limit
+            _census['decaps_basis'] = ('reference:'
+                                       + os.path.basename(decaps_from))
+            # #1102: the tether currency is the cap to the chip's inflated
+            # PAD BBOX, and it stops at the 5 mm search radius -- a cap
+            # left 10 mm away is only `decap_ungraded`, a WARN. A cap the
+            # reference keeps INSIDE the radius and this board leaves beyond
+            # it is a regression, not a horizon: run 37 stranded C3, C7, C12
+            # at 7.8-10.2 mm with no error.
+            # #1142: PER CAP. #1102 promoted the rule board-wide, and only
+            # when the reference kept EVERY rail cap inside -- one bulk cap
+            # beyond 5 mm switched it off for the whole board, and none of
+            # the seven #1105 references passed. The list names the caps the
+            # reference keeps within the radius (same ref, same footprint on
+            # this board); a cap it keeps beyond stays a WARN.
+            _r = groups_mod.DECAP_RADIUS_MM
+            _near_ref = groups_mod.decap_populations(_ref_pcb, radius=_r)[0]
+            _ours_fp = {r: f.footprint_name
+                        for r, f in (pcb_data.footprints or {}).items()}
+            _held = sorted(
+                c for caps in _near_ref.values() for c, _d in caps
+                if c in _ours_fp
+                and _ours_fp[c] == _ref_pcb.footprints[c].footprint_name)
+            if _held:
+                _decaps['within_radius_refs'] = _held
+                _decaps['within_radius_mm'] = _r
+                _ref_beyond = sorted(
+                    _ref_census.get('beyond_radius_refs') or ())
+                _census['reference_beyond_radius_refs'] = _ref_beyond
+                _census['decap_ungraded_promoted'] = (
+                    f"per cap, for the {len(_held)} cap(s) the reference "
+                    f"keeps within {_r:g} mm of their chip"
+                    + (f"; the {len(_ref_beyond)} it keeps beyond "
+                       f"({', '.join(_ref_beyond)}) stay warn"
+                       if _ref_beyond else '')
+                    + "; a cap the reference lacks, or carries under another "
+                      "footprint, stays warn")
+        # #1102, the PIN currency: every supply pin to the nearest cap on its
+        # net, pad edge to pad edge (`decap_pin_distance`, #705). A cap 1.6
+        # mm from a QFP's box can be 5 mm from the pin it decouples; the
+        # tether limit cannot see that, the pin limit can. Derived only from
+        # a REFERENCE: off the board being graded it would be vacuous (the
+        # board grades clean against its own max by construction).
+        _pin_limit, _pin_why = (None, "the reference is not usable (above)"
+                                ) if not _ref_ok else \
+            _decap_pin_derivation(_ref_pcb)
+        _census['reference_pin_census'] = _pin_census_of(_ref_pcb) \
+            if _ref_ok else None
+        if _pin_limit is None:
+            # A census NOTE, not `budget_withheld`: nothing asked for the pin
+            # rule, so withholding it must not leave a clean board "not fully
+            # graded" (#1102 verifier: esp_prog graded against its own
+            # --decaps-from intent went pass/exit 0 -> exit 4).
+            _census['pin_limit_withheld'] = (
+                f"the reference board {decaps_from}: {_pin_why}")
+        else:
+            _decaps['max_pin_distance_mm'] = _pin_limit
+            _census['emitted_max_pin_distance_mm'] = _pin_limit
+        _derive = False
     if _derive:
         _limit, _why = _decap_derivation(_census)
         if _limit is None:
@@ -7973,6 +8606,9 @@ def emit_intent(pcb_data, pcb_file: str, *,
         'keepouts': [],
         'edge_connectors': conns,
         'decaps': _decaps,
+        # No top-level `severity`: #1102 wrote `decap_ungraded: error` here;
+        # #1142 holds caps PER CAP through `decaps.within_radius_refs`
+        # instead, and an explicit severity would override that list.
         # must_lock is a REQUIREMENT ("these refs must end up locked"), and an
         # emitted intent describes a board rather than making demands of it.
         # Filling it with the board's own locked set (as this did) closed a
@@ -8019,12 +8655,30 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # to `must_lock` by hand if you want the lock GRADED as a
             # requirement.
             'file_locked': locked,
+            # #1103: what a PILE withheld, and why -- kept out of
+            # budget_withheld so an emit changes no exit code.
+            **({'pose_claims_withheld': {
+                'reason': ('the board is a pile ('
+                           + '; '.join(_pile_st.reasons[:2])
+                           + '): staging poses are not claims'),
+                'withheld': ['edge_connectors[].edge read off a pose',
+                             'blocks[].zone',
+                             'legality_budget.oob_count'],
+                'refs_off_board': sorted(_pose_withheld),
+                'kept': ('KiCad-locked parts; a brief / mechanical.json '
+                         'merged after this')}}
+               if _pile else {}),
             # #959 comment 3.2: every number this emitter chose, labelled as
             # what it is -- a baseline OBSERVED on this board, not a
             # requirement anyone declared. Keyed by intent path; a brief
             # merged over it re-labels what it declares.
-            'basis': _emitted_basis(_decaps, _budget, conns, blocks,
-                                    _assembly, band_default),
+            'basis': _emitted_basis(
+                _decaps, _budget, conns, blocks, _assembly, band_default,
+                decaps_basis=(_census.get('decaps_basis')
+                              if str(_census.get('decaps_basis') or '')
+                              .startswith('reference:') else None),
+                pin_basis=('reference:' + os.path.basename(decaps_from)
+                           if decaps_from else None)),
         },
     }
     if derive_arrays == 'auto':
@@ -8067,6 +8721,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
             if b['name'] in rigid_blocks:
                 b['rigid'] = True
         doc['min_reader'] = max(int(doc.get('min_reader') or 0), 7)
+    # #1142: a reader-7 build would refuse the held list by name anyway; the
+    # stamp says which build can act on it.
+    if 'within_radius_refs' in (doc.get('decaps') or {}):
+        doc['min_reader'] = max(int(doc.get('min_reader') or 0), 8)
     return doc
 
 
@@ -8211,6 +8869,21 @@ def format_text(r: GradeResult) -> str:
         for v in r.violations:
             tag = 'ERROR' if v.severity == ERROR else 'warn '
             lines.append(f"    [{tag}] {v.rule}: {v.message}")
+    # #1064: printed, never a rule -- a floorplan PASS says nothing about
+    # whether two parts' pads sit on each other, and check_assembly calls
+    # that NOT BUILDABLE whatever the nets.
+    if r.pad_stacks is not None:
+        _ps1064 = r.pad_stacks
+        lines.append(
+            f"  pad stacks: {_ps1064['pad_stack_count']} (two parts' pad "
+            f"copper overlapping, any net -- check_assembly's "
+            f"pad_intersection, exact; printed, not a floorplan rule)"
+            + (" -- check_assembly grades these NOT BUILDABLE"
+               if _ps1064['pad_stack_count'] else ''))
+        for a, b, area, side in _ps1064['pad_stack_pairs'][:5]:
+            lines.append(f"    {a} <-> {b}  {area:.4f}mm2  side {side or '-'}")
+        if _ps1064['pad_stack_count'] > 5:
+            lines.append(f"    ... {_ps1064['pad_stack_count'] - 5} more")
     # #1051: every declared array, formed or not, with what its order could
     # not place -- a partly resolved pin order is disclosed on a pass too.
     for a in r.array_measured:
@@ -8730,6 +9403,8 @@ def to_json(r: GradeResult) -> Dict:
         'n_footprints': r.n_footprints,
         **({'array_formation': r.array_measured} if r.array_measured
            else {}),
+        **({'pad_stacks': r.pad_stacks} if r.pad_stacks is not None
+           else {}),
     }
 
 
@@ -8778,6 +9453,10 @@ def summary(r: GradeResult) -> Dict:
         'edge_contours': r.outline['edge_contours'],
     }
     out.update(r.legality)
+    # #1064: the EXACT stack count, beside (not instead of) the bounding-box
+    # `pad_intersection_pairs` r.legality just contributed.
+    if r.pad_stacks is not None:
+        out['pad_stack_count'] = r.pad_stacks['pad_stack_count']
     for k in ('unplaced', 'partially_unplaced', 'has_copper',
               'duplicate_fraction', 'spread_ratio', 'outside_fraction'):
         out[f"state_{k}"] = r.state[k]

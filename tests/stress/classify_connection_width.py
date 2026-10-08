@@ -40,23 +40,10 @@ EPS = 1e-3     # relative erosion shortfall (stay strictly inside the floor)
 
 
 def _pad_shape(pad):
-    from shapely.geometry import Point, box
-    if pad.drill and pad.pad_type == "np_thru_hole":
-        return None
-    w, h = (pad.size_x or 0) / 2.0, (pad.size_y or 0) / 2.0
-    if w <= 0 or h <= 0:
-        return None
-    if pad.shape == "circle":
-        return Point(pad.global_x, pad.global_y).buffer(w, quad_segs=32)
-    shp = box(pad.global_x - w, pad.global_y - h, pad.global_x + w, pad.global_y + h)
-    if pad.shape in ("oval", "roundrect"):
-        r = min(w, h) * (1.0 if pad.shape == "oval" else 0.25)
-        shp = shp.buffer(-r).buffer(r, quad_segs=16)
-    rot = getattr(pad, "rect_rotation", 0) or 0
-    if rot:
-        import shapely.affinity as aff
-        shp = aff.rotate(shp, rot, origin=(pad.global_x, pad.global_y))
-    return shp
+    # The router's own model (#1161): this file used to carry a copy, and the
+    # copy carried the collapsed-oval bug with it.
+    from pcb_modification import _pad_web_polygon
+    return _pad_web_polygon(pad)
 
 
 def classify_board(final, floor_mm, items):

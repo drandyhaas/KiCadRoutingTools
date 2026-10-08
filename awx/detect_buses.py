@@ -28,6 +28,7 @@ import atexit
 from array import array
 import json
 import os
+import awx_settings
 import topo_strings as ts
 
 Pt = Tuple[float, float]
@@ -39,12 +40,23 @@ Pt = Tuple[float, float]
 # every entry ever computed: 158 MB, 31,000 entries, loaded in full by
 # every process (1.6 s, two processes per K) and REWRITTEN in full each
 # time a run added an entry -- a cold K41 dumped it twenty times. Now a
-# file per two-hex-digit prefix of the signature under tmp/taut_memo/,
+# file per THREE-hex-digit prefix of the signature under tmp/taut_memo/,
 # loaded on first touch, only dirty shards written, merged with what is
 # on disk first (a parallel chain's additions survive), entries untouched
 # beyond TAUT_MAX_ENTRIES per shard dropped oldest-first at write time.
-# The old single file is
-# migrated into shards once and renamed.
+# The old single file is migrated into shards once and renamed; a
+# two-digit shard of the layout before (256 files, a stage's 48 lookups
+# parsed 43 of them, 167 MB, 2 s) is split into its three-digit shards
+# the first time one of them is touched, and renamed.
+# ON DISK ONLY WHEN ASKED (TAUT_MEMO=1): it serves a harness that plans the same bench again and again (a fanout loop,
+# a population search, a whole-route loop), and it would otherwise grow without bound beside the code on the machine
+# of anyone routing their own board. Off, the memo lives in the process: a string is still relaxed once per run.
+_TAUT_DISK = awx_settings.get('TAUT_MEMO', '0') not in ('', '0')
+
+
+def memo_on_disk():
+    """True when the taut strings are kept on disk (TAUT_MEMO=1: a harness), False when they live in the process"""
+    return _TAUT_DISK
 _TAUT_MEMO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'tmp', 'taut_memo')
 _TAUT_MEMO_LEGACY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -57,7 +69,7 @@ _TAUT_MEMO_LEGACY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # in the memo" depend on when you last ran. A shard is now capped by ENTRY
 # COUNT, oldest-inserted first, which is deterministic given the same
 # sequence of runs.
-TAUT_MAX_ENTRIES = int(os.environ.get('TAUT_MAX_ENTRIES', '20000'))
+TAUT_MAX_ENTRIES = int(awx_settings.get('TAUT_MAX_ENTRIES', '20000'))
 _TAUT_SHARDS: Dict[str, dict] = {}
 _TAUT_DIRTY = set()
 _TAUT_MIGRATED = False
@@ -73,7 +85,7 @@ def memo_stats():
 
 def _memo_report():
     n, b, asked, hit = memo_stats()
-    if n:
+    if n and _TAUT_DISK:
         print(f'taut memo: {n} shard(s) resident, {b / 1048576:.0f} MB on disk, '
               f'{asked} lookups, {hit} hits', flush=True)
 
@@ -81,8 +93,11 @@ def _memo_report():
 atexit.register(_memo_report)
 
 
+SHARD_DIGITS = 3
+
+
 def _shard_of(key):
-    return key.rsplit('@', 1)[-1][:2] or '00'
+    return key.rsplit('@', 1)[-1][:SHARD_DIGITS] or '0' * SHARD_DIGITS
 
 
 def _shard_path(prefix):
@@ -112,7 +127,7 @@ def _expand(d, now):
             for k, (a, t) in d.items()}
 
 
-def _read_shard(prefix):
+def _load_shard(prefix):
     try:
         with open(_shard_path(prefix), encoding='utf-8') as f:
             return _compact(json.load(f))
@@ -120,11 +135,38 @@ def _read_shard(prefix):
         return {}
 
 
+def _read_shard(prefix):
+    if len(prefix) == SHARD_DIGITS and not os.path.exists(_shard_path(prefix)):
+        _split_shard(prefix[:SHARD_DIGITS - 1])
+    return _load_shard(prefix)
+
+
+def _split_shard(old):
+    """A shard of the shorter layout into this one's, once: each entry to
+    the shard its key now names (after the entries already there, which are
+    newer), the old file renamed. Two processes splitting it at once write
+    the same entries."""
+    if not os.path.exists(_shard_path(old)):
+        return
+    import time as _t
+    now = _t.time()
+    by = {}
+    for k, v in _load_shard(old).items():
+        by.setdefault(_shard_of(k), {})[k] = v
+    try:
+        for prefix, d in sorted(by.items()):
+            d.update(_load_shard(prefix))
+            _write_shard(prefix, d, now)
+        os.replace(_shard_path(old), _shard_path(old) + '.split')
+    except OSError:
+        pass
+
+
 def _memo_migrate():
     """The single-file memo into shards, once: every entry it holds is
     still a valid answer, and a board that has been run pays nothing."""
     global _TAUT_MIGRATED
-    if _TAUT_MIGRATED:
+    if _TAUT_MIGRATED or not _TAUT_DISK:
         return
     _TAUT_MIGRATED = True
     if not os.path.exists(_TAUT_MEMO_LEGACY):
@@ -168,6 +210,8 @@ def _memo_load():
 
 def _memo_shard(prefix):
     d = _TAUT_SHARDS.get(prefix)
+    if d is None and not _TAUT_DISK:
+        d = _TAUT_SHARDS[prefix] = {}
     if d is None:
         _memo_migrate()
         d = _TAUT_SHARDS[prefix] = _read_shard(prefix)
@@ -202,7 +246,7 @@ def _memo_put(key, pts):
 # NEXT process a function of wall time. 111 writes of a K41 search cost
 # 24 s, so the point of the throttle was to batch them -- a count batches
 # them just as well and reproducibly.
-_TAUT_SAVE_EVERY_N = int(os.environ.get('TAUT_SAVE_EVERY_N', '400'))
+_TAUT_SAVE_EVERY_N = int(awx_settings.get('TAUT_SAVE_EVERY_N', '400'))
 _TAUT_SINCE_SAVE = [0]
 
 
@@ -212,6 +256,9 @@ def _memo_save(force=False):
     one write a minute (the memo is a cache: a crash loses new strings,
     nothing else); `force` writes now, and atexit forces the last one."""
     import time as _t
+    if not _TAUT_DISK:
+        _TAUT_DIRTY.clear()
+        return
     if not _TAUT_DIRTY:
         return
     if not force and _TAUT_SINCE_SAVE[0] < _TAUT_SAVE_EVERY_N:
@@ -253,7 +300,7 @@ def taut_paths(nets: Sequence[str],
     # old relaxation's, so its memo entries carry their own tag and never
     # mix with the old algorithm's inside a run. TAUT_FAST=0 keeps the old
     # per-string relaxation reachable for comparison.
-    fast = os.environ.get('TAUT_FAST', '1') != '0'
+    fast = awx_settings.get('TAUT_FAST', '1') != '0'
     tag = '#fast' if fast else ''
     if fast:
         import taut_fast as tf

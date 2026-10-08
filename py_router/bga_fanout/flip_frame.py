@@ -197,6 +197,8 @@ def flip_hints(hints: Dict, footprint: Footprint, turned: PCBData,
                 mv['site'] = m(*mv['site'])
             if mv.get('path'):
                 mv['path'] = [m(*q) for q in mv['path']]
+            if mv.get('to') is not None:
+                mv['to'] = m(*mv['to'])       # a joint plan's strap: the ball it joins
             if isinstance(mv.get('layer'), str):
                 mv['layer'] = other_layer(mv['layer'])
             if mv.get('legs'):

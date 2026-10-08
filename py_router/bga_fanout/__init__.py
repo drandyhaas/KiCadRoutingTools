@@ -616,6 +616,17 @@ def create_single_ended_route(
 _H2H_ANNOUNCED = set()
 
 
+def _board_copper(pcb_data, net_ids):
+    """(vias, tracks) as ball_has_copper takes them: the BOARD's copper of these nets. A rescue asking whether a ball
+    is still bare must count it with its own call's -- in the escape-priority second pass the first pass's copper is
+    on the board, and a ball it escaped read as bare there and was escaped again (zynq_ad9364 U1: VCC_3V3's B6, two
+    exits side by side)."""
+    vs = [{'x': v.x, 'y': v.y, 'size': v.size, 'net_id': v.net_id} for v in pcb_data.vias if v.net_id in net_ids]
+    ts = [{'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y), 'layer': s.layer, 'net_id': s.net_id}
+          for s in pcb_data.segments if s.net_id in net_ids]
+    return vs, ts
+
+
 def ball_has_copper(pad, vias, tracks, track_width: float = 0.0) -> bool:
     """Is this ball connected by copper THIS PASS placed?
 
@@ -2065,14 +2076,41 @@ def _strap_unescaped_extras(footprint: Footprint, pcb_data: PCBData,
                 pcb_data, cfg, net_id, ball_layer,
                 skip_pad_blocking=False, verbose=False)
             _block_outside_field(routing_obs)
+
+            def _straight_strap(ball):
+                """#1217: the exact straight segment to a same-net anchor
+                ball, nearest first, when it clears every other net's
+                copper as check_drc prices it. The 0.05-grid A* alone missed
+                rp2350's C4 -> D5 diagonal, which has 23 um of slack against
+                D4's via and grades clean."""
+                from stub_layer_switching import (stub_clear_of_foreign_tracks,
+                                                  stub_clear_of_foreign_pads)
+                bx, by = ball.global_x, ball.global_y
+                for ax, ay in sorted(anchors, key=lambda a: (a[0] - bx) ** 2
+                                     + (a[1] - by) ** 2):
+                    seg = Segment(start_x=ax, start_y=ay, end_x=bx, end_y=by,
+                                  width=track_width, layer=ball_layer,
+                                  net_id=net_id)
+                    if (stub_clear_of_foreign_tracks([seg], ball_layer, net_id,
+                                                     pcb_data, cfg, set())[0]
+                            and stub_clear_of_foreign_pads([seg], ball_layer,
+                                                           net_id, pcb_data,
+                                                           cfg, set())[0]):
+                        return [{'start': (ax, ay), 'end': (bx, by),
+                                 'width': track_width, 'layer': ball_layer,
+                                 'net_id': net_id}]
+                return None
+
             pending = list(net_balls)
             while pending:
                 pending.sort(key=lambda b: min(
                     (b.global_x - ax) ** 2 + (b.global_y - ay) ** 2
                     for ax, ay in anchors))
                 ball = pending.pop(0)
-                segs, _pos = route_multi_source_to_pad(
-                    anchors, ball, ball_layer, net_id, routing_obs, cfg)
+                segs = _straight_strap(ball)
+                if segs is None:
+                    segs, _pos = route_multi_source_to_pad(
+                        anchors, ball, ball_layer, net_id, routing_obs, cfg)
                 if not segs:
                     still_bare.append(f"{net_name} ball {ball.pad_number}")
                     continue
@@ -2173,8 +2211,14 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
         if _cc and _cc():
             break
         still = set(failed_nets)
-        keys = {(p.global_x, p.global_y) for p in footprint.pads
-                if p.net_name in still}
+        # the failed nets' BARE balls only, counted per ball: only_pad_keys is
+        # authoritative, so a multi-ball net's escaped balls were re-escaped
+        # beside their own copper, and one ball's rescue cleared the whole net
+        _twb = up_kw['track_width']
+        _bv, _bt = _board_copper(pcb_data, {p.net_id for p in footprint.pads if p.net_name in still})
+        _bare = [p for p in footprint.pads if p.net_id and p.net_name in still
+                 and not ball_has_copper(p, vias_to_add + _bv, tracks + _bt, _twb)]
+        keys = {(p.global_x, p.global_y) for p in _bare}
         if not keys:
             break
         _pcb = up_kw.get('progress_callback')
@@ -2201,16 +2245,17 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
         finally:
             del pcb_data.segments[n_seg0:]
             del pcb_data.vias[n_via0:]
-        rescued = still - set(f2)
+        _left = [p for p in _bare if not ball_has_copper(p, vias_to_add + v2 + _bv, tracks + t2 + _bt, _twb)]
+        rescued = len(_bare) - len(_left)
         # Always report the attempt: a silent no-op rung is indistinguishable
         # from "the rescue never ran", which cost a debugging round.
         print(f"  Under-pad shrink rescue @ track {tw:.4f}mm / via {vs:.2f}mm / "
               f"clearance {cl:.4f}mm (nominal {tw0:.4f}/{vs0:.2f}/{cl0:.4f}): "
-              f"rescued {len(rescued)} of {len(still)} dropped ball(s)")
+              f"rescued {rescued} of {len(_bare)} dropped ball(s)")
         if rescued:
             tracks = tracks + t2
             vias_to_add = vias_to_add + v2
-            failed_nets = [n for n in failed_nets if n not in rescued]
+            failed_nets = [p.net_name for p in _left]
             warn_fab_escalation('under-pad escape rescue')
         if not failed_nets:
             break
@@ -2239,6 +2284,7 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
     from geometry_utils import (point_to_segment_distance as _p2s,
                                 segment_to_segment_distance as _s2s)
 
+    failed_nets = list(failed_nets)      # one entry per failed ball; removed one per ball served
     own_pads = list(footprint.pads)
     xs = sorted({round(p.global_x, 4) for p in own_pads})
     ys = sorted({round(p.global_y, 4) for p in own_pads})
@@ -2366,10 +2412,17 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
         a, b = max(free, key=lambda ab: round(ab[1] - ab[0], 6))
         return (a + b) / 2.0
 
-    for fnet in list(failed_nets):
-        fpads = [p for p in own_pads if p.net_name == fnet]
-        done = False
+    # Each failed net once, and every one of its BARE balls: a net's escaped
+    # balls were walked again beside their own copper, and one ball served
+    # cleared every entry of the net (a VCC_3V3 with three failed balls:
+    # its escaped ball re-walked three times, no bare ball served, the
+    # failed list emptied -- a false success)
+    for fnet in list(dict.fromkeys(failed_nets)):
+        _bv, _bt = _board_copper(pcb_data, {p.net_id for p in own_pads if p.net_name == fnet})
+        fpads = [p for p in own_pads if p.net_name == fnet
+                 and not ball_has_copper(p, vias_to_add + _bv, tracks + _bt, track_width)]
         for p in fpads:
+            done = False
             lay = next((l for l in (p.layers or []) if l.endswith('.Cu')), None)
             if lay is None:
                 continue
@@ -2418,8 +2471,9 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
                          'layer': lay, 'net_id': nid},
                         {'start': j, 'end': e, 'width': track_width,
                          'layer': lay, 'net_id': nid}]
-                    failed_nets = [n for n in failed_nets if n != fnet]
-                    print(f"  Surface rescue (#652): {fnet} escaped {d} with "
+                    if fnet in failed_nets:
+                        failed_nets.remove(fnet)
+                    print(f"  Surface rescue (#652): {fnet} ball {p.pad_number} escaped {d} with "
                           f"a vialess pad-gap track (corridor "
                           f"{'y' if horiz else 'x'}={c:.4f}, band found by "
                           f"exact geometry)")
@@ -2427,8 +2481,6 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
                     break
                 if done:
                     break
-            if done:
-                break
     return tracks, failed_nets
 
 
@@ -2472,6 +2524,11 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
         if p.net_name:
             pads_by_net.setdefault(p.net_name, []).append(p)
     nid2name = {p.net_id: p.net_name for p in footprint.pads if p.net_name}
+    _prio_names = {nid2name.get(i) for i in (up_kw.get('priority_nets') or ())}   # a bus's: never a victim
+    # a victim is a net this call escapes: the joint escape lays planned plane
+    # drops in the escape result, and evicting their net took every drop of
+    # it (zynq U1: GND evicted three times, 6 plane balls left undropped)
+    _nf = up_kw.get('net_filter_fn')
     escaped_via_nets = {}   # net_name -> [(x, y)] of its committed escape vias
     for v in vias_to_add:
         nm = nid2name.get(v['net_id'])
@@ -2481,8 +2538,14 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
     from geometry_utils import point_to_segment_distance as _p2s_r
     from itertools import groupby as _groupby
 
-    for fnet in list(failed_nets):
-        fpads = pads_by_net.get(fnet, [])
+    for fnet in list(dict.fromkeys(failed_nets)):
+        if fnet not in failed_nets:
+            continue
+        # the net's BARE balls: only_pad_keys is authoritative, so its escaped
+        # balls were re-escaped beside their own copper
+        _bv, _bt = _board_copper(pcb_data, {p.net_id for p in pads_by_net.get(fnet, [])})
+        fpads = [p for p in pads_by_net.get(fnet, [])
+                 if not ball_has_copper(p, vias_to_add + _bv, tracks + _bt, tw)]
         if not fpads:
             continue
         fx = sum(p.global_x for p in fpads) / len(fpads)
@@ -2494,7 +2557,8 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
         # stub passes 0.09mm from RAM_LDM's corridor; its via is >0.8mm out).
         cand_d = {}
         for nm, vlist in escaped_via_nets.items():
-            if nm == fnet or nm in dp_nets or nm in failed_nets:
+            if nm == fnet or nm in dp_nets or nm in failed_nets or nm in _prio_names \
+                    or (_nf is not None and not _nf(nm)):
                 continue
             if not vlist:
                 # A net can be enrolled with an EMPTY via list (a vialess
@@ -2506,7 +2570,8 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
             cand_d[nm] = min(cand_d.get(nm, 9e9), d)
         for t in tracks:
             nm = nid2name.get(t['net_id'])
-            if not nm or nm == fnet or nm in dp_nets or nm in failed_nets:
+            if not nm or nm == fnet or nm in dp_nets or nm in failed_nets or nm in _prio_names \
+                    or (_nf is not None and not _nf(nm)):
                 continue
             d = _p2s_r(fx, fy, t['start'][0], t['start'][1],
                        t['end'][0], t['end'][1])
@@ -2643,7 +2708,11 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                 len(ov[0]['vias']), round(_copper(ov[0]['tracks']), 6), ov[1]))
             tracks = o['tracks']
             vias_to_add = o['vias']
-            failed_nets = [n for n in failed_nets if n != fnet]
+            # per ball: a surface walk serves one ball, so a net with more bare
+            # balls keeps an entry for each still bare
+            failed_nets = [n for n in failed_nets if n != fnet] + [
+                fnet for p in pads_by_net.get(fnet, [])
+                if not ball_has_copper(p, vias_to_add + _bv, tracks + _bt, tw)]
             for nm, lst in o['evn'].items():
                 if lst is None:
                     escaped_via_nets.pop(nm, None)
@@ -2658,6 +2727,26 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
             print(f"  Rip-swap rescue (#652): {fnet} still dropped after "
                   f"trying {min(len(cands), max_victims)} eviction(s)")
     return tracks, vias_to_add, failed_nets
+
+
+def _bus_frame(bus, layer_map=None):
+    """`bus` (see generate_bga_fanout) carried into another routing frame: every layer name renamed (its nets and
+    their layers are all it holds, and a turn moves neither)"""
+    if not bus:
+        return bus
+    out = dict(bus)
+    if layer_map:
+        out['net_layers'] = {n: [layer_map(L) for L in ls] for n, ls in (bus.get('net_layers') or {}).items()}
+    return out
+
+
+def _bus_engine_args(bus, pcb_data):
+    """`bus` as the joint escape engine takes it: net ids"""
+    if not bus:
+        return {}
+    byname = {n.name: i for i, n in pcb_data.nets.items()}
+    return dict(net_layers={byname[n]: list(ls) for n, ls in (bus.get('net_layers') or {}).items() if n in byname},
+                priority_nets={byname[n] for n in (bus.get('priority') or ()) if n in byname})
 
 
 def _generate_bga_fanout_core(footprint: Footprint,
@@ -2698,7 +2787,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         # per-ball loops, so the GUI status line moves during
                         # the minutes a large array takes. None = silent.
                         progress_callback=None,
-                        cancel_check=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        cancel_check=None,
+                        bus=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -2737,12 +2827,18 @@ def _generate_bga_fanout_core(footprint: Footprint,
             are given it escapes those pairs COUPLED (issue #182) - via-free on
             the top layer for edge pairs, on an inner layer with via-in-pad for
             deeper ones - so route_diff picks them up. Power/plane nets are
-            skipped (they tap their plane).
+            skipped (they tap their plane). 'jointescape' is the under-pad
+            engine laying a whole-array PLAN (escape_dir_hints full moves,
+            plane drops and straps, from awx/joint_escape.py) before its
+            generic phases, with `bus`'s per-net layers and priority.
 
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
     _entry_args = dict(locals())   # the call as made, for the face wrapper below
+    if bus and escape_method != 'jointescape':
+        raise ValueError("bga_fanout: `bus` is the joint escape engine's (escape_method='jointescape'); another "
+                         "engine would lay the balls without its constraints")
     # #621 escape-pass head. EVERY escape pass -- the rotated-frame recursion,
     # both escape-priority passes, the single-pass coverage probe and the
     # under-pad auto-fallback -- is a call to THIS function, so one check here
@@ -2788,6 +2884,12 @@ def _generate_bga_fanout_core(footprint: Footprint,
         print(f"  Same-net pad via clearance {same_net_pad_clearance:g}mm "
               f"(#581): under-pad escape runs dog-bone (no via-in-pad)")
         escape_method = 'dogbone'
+    # the joint escape engine takes the same rule as its own dog-bone mode:
+    # the method stays 'jointescape', so the frames and passes below keep it
+    _joint_dogbone = same_net_pad_clearance > 0 and escape_method == 'jointescape'
+    if _joint_dogbone:
+        print(f"  Same-net pad via clearance {same_net_pad_clearance:g}mm "
+              f"(#581): joint escape runs dog-bone (no via-in-pad)")
 
     # Non-orthogonally-placed parts (issue #137): the grid/escape logic below is
     # global-axis-bound, so rotate the whole board into this footprint's frame
@@ -2824,6 +2926,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
         _args['footprint'] = rp.footprints[footprint.reference]
         _args['pcb_data'] = rp
         _args['escape_dir_hints'] = flip_hints(escape_dir_hints, footprint, rp, back)
+        from bga_fanout.flip_frame import _FLIP_FACE
+        _args['bus'] = _bus_frame(bus, layer_map=other_layer)
         # ...AND EVERY ARGUMENT THAT NAMES A LAYER (2026-09-17). The frame
         # renames F.Cu<->B.Cu on every pad, segment, via, zone and
         # footprint, so a name the caller passed still means the side it
@@ -2899,6 +3003,13 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 q = _rot.get(p.pad_number)
                 if d is None or q is None:
                     continue
+                if escape_method == 'jointescape' and isinstance(d, dict) and d.get('kind') in ('strap', 'drop'):
+                    # a joint plan's strap or drop has no face: the ball a
+                    # strap joins and a drop's via site are BOARD points,
+                    # carried into the frame
+                    _moved[(round(q.global_x, 3), round(q.global_y, 3))] = (
+                        dict(d, to=_fwd(*d['to'])) if d['kind'] == 'strap' else dict(d, site=_fwd(*d['site'])))
+                    continue
                 _full = d if isinstance(d, dict) else None
                 d = _full['face'] if _full else d
                 if d not in _vec:
@@ -2919,9 +3030,13 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         _m['site'] = _fwd(*_m['site'])
                     if _m.get('path'):
                         _m['path'] = [_fwd(*q) for q in _m['path']]
+                    if escape_method == 'jointescape' and _m.get('legs'):
+                        # a joint plan's move is laid on its own legs
+                        _m['legs'] = [(_fwd(*a), _fwd(*b), L) for (a, b, L) in _m['legs']]
                     nd = _m
                 _moved[(round(q.global_x, 3), round(q.global_y, 3))] = nd
             _hints = _moved
+        _bus_rot = bus
         tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
             rp.footprints[footprint.reference], rp,
             net_filter=net_filter, diff_pair_patterns=diff_pair_patterns, layers=layers,
@@ -2935,7 +3050,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             same_net_pad_clearance=same_net_pad_clearance,
             hole_to_hole_clearance=hole_to_hole_clearance,
             cancel_check=cancel_check,
-            progress_callback=progress_callback)
+            progress_callback=progress_callback,
+            bus=_bus_rot)
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
 
@@ -2999,8 +3115,9 @@ def _generate_bga_fanout_core(footprint: Footprint,
     #           to their net's fanned copper; still-bare balls are left for
     #           the main router and reported.
     # Boards without multi-ball nets take a single pass, byte-identical to
-    # the old behavior.
-    if _pad_filter is None and not _single_pass:
+    # the old behavior. The joint escape engine takes none of it: its plan
+    # already chose which of a net's balls escape and which strap to them.
+    if _pad_filter is None and not _single_pass and escape_method != 'jointescape':
         _nc_ids = single_pad_net_ids(footprint, pcb_data)
         _pair_nets: Set[str] = set()
         if diff_pair_patterns:
@@ -3053,7 +3170,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 same_net_pad_clearance=same_net_pad_clearance,
                 hole_to_hole_clearance=hole_to_hole_clearance,
                 cancel_check=cancel_check,
-                progress_callback=progress_callback)
+                progress_callback=progress_callback,
+                bus=bus)
             # Coverage gate (issue #367): the legacy single pass runs FIRST.
             # When it escapes every ball there is nothing for prioritization
             # to improve -- reshuffling the escape competition only butterflies
@@ -3078,7 +3196,12 @@ def _generate_bga_fanout_core(footprint: Footprint,
             _ncu = (len(pcb_data.board_info.copper_layers)
                     if pcb_data.board_info.copper_layers else 2)
             _tw = max(track_width, _ff(_ncu)['track_width'])
-            _all_keys = {(_p.global_x, _p.global_y) for _p in footprint.pads}
+            # never a ball whose net already carries copper: only_pad_keys is
+            # authoritative, so pass 1 re-fanned every PREFANNED net (a board
+            # fanned after the bus step: new stubs on 34 of the 45 routed bus
+            # nets); their copper stays an obstacle, as the single pass keeps it
+            _all_keys = {(_p.global_x, _p.global_y) for _p in footprint.pads
+                         if _p.net_id not in _prefanned}
             _extra_keys = {(_p.global_x, _p.global_y) for _p in _extras}
             _prog("escape priority pass 1 (one ball per net)...")
             tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
@@ -3101,9 +3224,18 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         layers=_v.get('layers') or ['F.Cu', 'B.Cu'],
                         net_id=_v['net_id']))
                 _prog(f"escape priority pass 2 ({len(_extras)} extra ball(s))...")
+                # Pass 2 routes AROUND pass-1 copper, which the channel engine
+                # does not see: under 'auto' its extras crossed pass-1 tracks
+                # outright (zynq_ad9364 U1: VCC_1V0 extras at 0.000 mm from
+                # three other nets' pass-1 escapes), and since it dropped fewer
+                # balls than the under-pad retry, auto kept it -- then the guard
+                # below threw away 5 whole chains (14 balls). The under-pad
+                # engine builds its grid from the board's copper, so pass 2
+                # takes it whenever the caller left the choice to auto.
+                _kw2 = dict(_kw, escape_method='underpad') if escape_method == 'auto' else _kw
                 t2, v2, vr2, f2 = _generate_bga_fanout_core(
                     footprint, pcb_data, check_for_previous=True,
-                    _pad_filter=_extra_keys, _ignore_prefanned=True, **_kw)
+                    _pad_filter=_extra_keys, _ignore_prefanned=True, **_kw2)
             finally:
                 del pcb_data.segments[_n_seg0:]
                 del pcb_data.vias[_n_via0:]
@@ -3257,12 +3389,35 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 print("  Escape priority: cancelled mid-pass -- keeping the "
                       "single-pass result")
                 return t0, v0, vr0, f0
-            if len(failed_nets) < len(f0):
-                print(f"  Escape priority wins: {len(f0)} -> "
-                      f"{len(failed_nets)} dropped ball(s); using it")
+            # Both results counted on the SAME terms, in this pass's own order:
+            # NETS left with no escaped ball first (net coverage -- a net needs
+            # one escape, its other balls are reached inside the array), then
+            # BARE BALLS. The two lists compared here before were not on the
+            # same terms: pass 1's failed NETS (an extra that stayed bare is a
+            # soft failure, absent from it) against the single pass's failed
+            # BALLS -- so a priority result that covered no more nets and left
+            # more balls bare could win (zynq_ad9364 U1 under-pad: a single
+            # pass with every net covered and 1 ball bare lost to one with 3).
+            _cands = [_p for _p in footprint.pads if _p.net_id and _p.net_name
+                      and not _p.net_name.lower().startswith('unconnected-')
+                      and _p.net_id not in _nc_ids and _p.net_id not in _prefanned
+                      and (not net_filter or matches_net_filter(_p.net_name, net_filter))]
+
+            def _score(vs, ts):
+                bare, cov = 0, {}
+                for _p in _cands:
+                    _c = ball_has_copper(_p, vs, ts, _tw)
+                    bare += not _c
+                    cov[_p.net_id] = cov.get(_p.net_id, False) or _c
+                return sum(1 for _c in cov.values() if not _c), bare
+            _s0, _s1 = _score(v0, t0), _score(vias_to_add, tracks)
+            if _s1 < _s0:
+                print(f"  Escape priority wins: {_s0[0]} -> {_s1[0]} net(s) with no "
+                      f"escape, {_s0[1]} -> {_s1[1]} bare ball(s); using it")
                 return tracks, vias_to_add, vias_to_remove, failed_nets
-            print(f"  Escape priority did not improve ({len(failed_nets)} vs "
-                  f"{len(f0)} dropped) - keeping the single-pass result")
+            print(f"  Escape priority did not improve ({_s1[0]} vs {_s0[0]} net(s) "
+                  f"with no escape, {_s1[1]} vs {_s0[1]} bare ball(s)) - keeping "
+                  f"the single-pass result")
             return t0, v0, vr0, f0
 
     # --layer-costs (issue #288): same semantics as route.py -- a NEGATIVE cost
@@ -3310,7 +3465,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
         if keep[0][0] not in balance_layers:
             # rebalance treats its first entry as the top layer (edge escapes)
             balance_layers = [keep[0][0]] + balance_layers
-        if escape_method in ('underpad', 'dogbone'):
+        if escape_method in ('underpad', 'dogbone', 'jointescape'):
             layers = underpad_layers
         else:
             layers = [keep[0][0]] + [l for l, _ in
@@ -3344,7 +3499,15 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # Sanity-check pad geometry before escaping (see qfn_fanout): overlapping
     # same-footprint pads mean the pad rotation/size is modelled wrong.
     from check_pads import find_pad_overlaps
-    _ov = find_pad_overlaps(pcb_data, component=footprint.reference)
+    try:
+        _ov = find_pad_overlaps(pcb_data, component=footprint.reference)
+    except Exception as _exc:                                # noqa: BLE001
+        # #1111: the check measures a custom pad's copper with shapely now;
+        # a geometry failure on one odd pad must not abort a fanout over
+        # what is only a warning.
+        print(f"  WARNING: the pad-geometry check for {footprint.reference} "
+              f"could not run ({type(_exc).__name__}: {_exc})")
+        _ov = []
     if _ov:
         print(f"  WARNING: {footprint.reference} has {len(_ov)} overlapping "
               f"different-net pad pair(s) - pad geometry looks wrong, fanout "
@@ -3363,7 +3526,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # deficit -- and the run still reports failed:0, since the success metric ignores
     # sub-clearance grazes. We have all four numbers here, so warn (don't silently
     # ship the graze). Doesn't apply to underpad, which routes under the pad field.
-    if escape_method not in ('underpad', 'dogbone'):
+    if escape_method not in ('underpad', 'dogbone', 'jointescape'):
         half_pitch = min(grid.pitch_x, grid.pitch_y) / 2.0
         need = via_size / 2.0 + track_width / 2.0 + clearance
         if need > half_pitch + 1e-6:
@@ -3377,8 +3540,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
 
     # Under-pad grid escape (issue #122) - a separate engine for dense arrays.
     # Dog-bone (#128) is the same engine with gap-site vias instead of
-    # via-in-pad: ball -> 45-stub -> via in the diagonal inter-ball gap.
-    if escape_method in ('underpad', 'dogbone'):
+    # via-in-pad: ball -> 45-stub -> via in the diagonal inter-ball gap. The
+    # joint escape is the same engine laying a whole-array plan (joint=True,
+    # see underpad.py), and takes the same rescues.
+    if escape_method in ('underpad', 'dogbone', 'jointescape'):
         from bga_fanout.underpad import generate_underpad_escape
         net_filter_fn = None
         if net_filter:
@@ -3400,7 +3565,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             diff_pairs=up_diff_pairs, diff_pair_gap=diff_pair_gap,
             grid_step=grid_step,
             only_pad_keys=_pad_filter,
-            dogbone=(escape_method == 'dogbone'),
+            dogbone=(escape_method == 'dogbone' or _joint_dogbone),
             escape_dir_hints=escape_dir_hints,
             no_via_in_pad=(same_net_pad_clearance is not None
                            and same_net_pad_clearance > 0),  # #581
@@ -3408,6 +3573,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             # Rides _up_kw so the shrink rescue's re-run reports too.
             progress_callback=progress_callback,
             cancel_check=cancel_check,
+            joint=(escape_method == 'jointescape'),
+            **_bus_engine_args(bus, pcb_data),
         )
         tracks, vias_to_add, failed_nets = generate_underpad_escape(
             footprint, pcb_data, grid, layers, **_up_kw)
@@ -3440,6 +3607,23 @@ def _generate_bga_fanout_core(footprint: Footprint,
             tracks, failed_nets = _surface_gap_escape(
                 footprint, pcb_data, tracks, vias_to_add, failed_nets,
                 track_width, clearance, exit_margin)
+        # The joint escape takes none of #129's passes, and its third is one it needs too: a bare ball of a net whose
+        # other balls carry copper, strapped to that copper inside the array (zynq_ad9364 U1: DDR3_VREF H6, its other
+        # ball escaped, left bare with no escape room of its own)
+        if failed_nets and escape_method == 'jointescape' and not _single_pass:
+            _still = set(failed_nets)
+            _bv, _bt = _board_copper(pcb_data, {p.net_id for p in footprint.pads if p.net_name in _still})
+            _bare = [p for p in footprint.pads if p.net_id and p.net_name in _still
+                     and not ball_has_copper(p, vias_to_add + _bv, tracks + _bt, track_width)]
+            if _bare:
+                _n_strap, _left = _strap_unescaped_extras(
+                    footprint, pcb_data, _bare, tracks, vias_to_add, track_width, clearance, via_size,
+                    via_drill, grid_step)
+                if _n_strap:
+                    failed_nets = [p.net_name for p in _bare
+                                   if not ball_has_copper(p, vias_to_add + _bv, tracks + _bt, track_width)]
+                print(f"  Joint escape: {len(_bare)} bare ball(s); strapped {_n_strap} to their net's copper "
+                      f"inside the array" + (f" ({', '.join(_left)} left)" if _left else ""))
         return tracks, vias_to_add, [], failed_nets
 
     channels = calculate_channels(grid)
@@ -4392,6 +4576,106 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
         del pcb_data.vias[n_via0:]
 
 
+def dropped_ball_neighbourhood(footprint, pcb_data, failed_nets, tracks, vias,
+                               layers, clearance, via_size, limit=12):
+    """Per dropped ball, the copper around it: one console line each (#1217).
+
+    The log named a dropped ball ("still dropped after trying 4 eviction(s)")
+    and never said what was in its way, so a retry at a smaller --clearance
+    was the only lever offered -- and on rp2350 two of them changed nothing,
+    while a different placement escaped all 30 balls. This names, per escape
+    layer, the nearest foreign copper within one ball pitch (board copper
+    and this run's escapes, tracks and vias), and whether a via of the run's
+    size has room at the ball. It is a pointer to what crowds the ball, not
+    a proof of what stopped the search, which can fail farther out.
+    """
+    import math as _m
+    from geometry_utils import point_to_segment_distance
+    names = set(failed_nets)
+    pads = [p for p in footprint.pads if p.net_name in names
+            and not (p.drill and p.drill > 0)]
+    if not pads:
+        return []
+    xs = [(p.global_x, p.global_y) for p in footprint.pads]
+    pitch = min((_m.hypot(a[0] - b[0], a[1] - b[1]) for i, a in enumerate(xs)
+                 for b in xs[i + 1:] if _m.hypot(a[0] - b[0], a[1] - b[1]) > 1e-6),
+                default=1.0)
+    nid_name = {nid: n.name for nid, n in pcb_data.nets.items()}
+    segs, seen = [], set()
+    for s in pcb_data.segments:
+        k = (round(s.start_x, 4), round(s.start_y, 4), round(s.end_x, 4),
+             round(s.end_y, 4), s.layer, s.net_id)
+        if k not in seen and not getattr(s, 'graphic', False):
+            seen.add(k)
+            segs.append((s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.layer, s.net_id))
+    for t in tracks or ():
+        k = (round(t['start'][0], 4), round(t['start'][1], 4), round(t['end'][0], 4),
+             round(t['end'][1], 4), t['layer'], t.get('net_id'))
+        if k not in seen:
+            seen.add(k)
+            segs.append((t['start'][0], t['start'][1], t['end'][0], t['end'][1],
+                         t['width'], t['layer'], t.get('net_id')))
+    vs, vseen = [], set()
+    for x, y, size, net in ([(v.x, v.y, v.size, v.net_id) for v in pcb_data.vias]
+                            + [(v['x'], v['y'], v['size'], v.get('net_id'))
+                               for v in (vias or ())]):
+        k = (round(x, 4), round(y, 4), net)
+        if k not in vseen:
+            vseen.add(k)
+            vs.append((x, y, size, net))
+    out = []
+    for p in sorted(pads, key=lambda q: (q.net_name, q.pad_number))[:limit]:
+        px, py = p.global_x, p.global_y
+        # A through via meets every layer: foreign vias AND tracks bound it.
+        site = []
+        for vx, vy, vsz, vn in vs:
+            if vn == p.net_id:
+                continue
+            gap = _m.hypot(vx - px, vy - py) - vsz / 2 - via_size / 2
+            if gap < clearance - 1e-6:
+                site.append((gap, f"{nid_name.get(vn, vn)} via"))
+        for x0, y0, x1, y1, w, sl, sn in segs:
+            if sn == p.net_id:
+                continue
+            gap = (point_to_segment_distance(px, py, x0, y0, x1, y1) - w / 2
+                   - via_size / 2)
+            if gap < clearance - 1e-6:
+                site.append((gap, f"{nid_name.get(sn, sn)} track on {sl}"))
+        per_layer = []
+        for L in layers:
+            near = []
+            for x0, y0, x1, y1, w, sl, sn in segs:
+                if sl != L or sn == p.net_id:
+                    continue
+                d = point_to_segment_distance(px, py, x0, y0, x1, y1)
+                if d - w / 2 <= pitch:
+                    near.append((d - w / 2, f"{nid_name.get(sn, sn)} track"))
+            for vx, vy, vsz, vn in vs:
+                if vn == p.net_id:
+                    continue
+                d = _m.hypot(vx - px, vy - py) - vsz / 2
+                if d <= pitch:
+                    near.append((d, f"{nid_name.get(vn, vn)} via"))
+            near.sort()
+            if near:
+                per_layer.append(f"{L}: " + ', '.join(
+                    (f"{nm} over the ball" if g <= 0 else f"{nm} {g:.2f}mm")
+                    for g, nm in near[:2]))
+            else:
+                per_layer.append(f"{L}: clear within {pitch:.2f}mm")
+        site_txt = ("no room for a {:g}mm via at the ball ({})".format(
+            via_size, ', '.join((f"{nm} overlapping" if g <= 0
+                                 else f"{nm} {g:.2f}mm from it")
+                                for g, nm in sorted(site)[:2]))
+            if site else f"room for a {via_size:g}mm via at the ball")
+        out.append(f"    {footprint.reference}.{p.pad_number} {p.net_name}: "
+                   f"{site_txt}; nearest foreign copper (edge to ball centre): "
+                   + '; '.join(per_layer))
+    if len(pads) > limit:
+        out.append(f"    (+{len(pads) - limit} more dropped ball(s))")
+    return out
+
+
 def generate_bga_fanout(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
@@ -4432,7 +4716,14 @@ def generate_bga_fanout(footprint: Footprint,
                         # for the whole run (minutes on a big BGA). Phase-level
                         # here; (0, 0, label) means indeterminate.
                         progress_callback=None,
-                        cancel_check=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        cancel_check=None,
+                        # a BUS laid with the array's other balls in this one call (awx route_bus's joint
+                        # fanout): {'net_layers': {net name: [layer names]} -- the layers a net's escape may use
+                        # (the bus's F/B; the other signal nets' the board's non-plane layers), 'priority': [net
+                        # names] -- escaped first in every phase and never evicted by a rescue}. The joint
+                        # escape engine only (escape_method='jointescape').
+                        # None: as before.
+                        bus=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """BGA fanout: the signal escape engines plus the plane-ball drop pass.
 
     See _generate_bga_fanout_core for the escape-engine parameters. After the
@@ -4495,6 +4786,31 @@ def generate_bga_fanout(footprint: Footprint,
         from protected_nets import read_snpc_for_pcb_data as _read_snpc581
         same_net_pad_clearance = _read_snpc581(pcb_data)
     _ref = getattr(footprint, 'reference', '?')
+    # The plane under the array (plane_lattice): a pour over it that cannot
+    # pass between two of this fanout's vias one pitch apart is islands under
+    # the array, every drop on it serves nothing, and the route step's plane
+    # repair rips signals to tap those balls. The pour's own clearance is the
+    # first lever (route_planes lowers it to what threads); when it stands
+    # too wide, the via steps down the same ladder the rescues and drops walk
+    # -- even below an explicit via size, and disclosed as they are.
+    from plane_lattice import plane_web_via
+    _ncu_pw = len(pcb_data.board_info.copper_layers or []) or 4
+    _pw = plane_web_via(footprint, pcb_data, via_size, via_drill, clearance,
+                        escalation_rungs(_ncu_pw))
+    if _pw is not None and _pw['threads']:
+        print(f"  Plane web under {_ref} ({_pw['pitch']:g}mm pitch; "
+              f"{', '.join(_pw['nets'])} poured at clearance {_pw['clearance']:g}, "
+              f"min width {_pw['min_width']:g}): no plane passes between "
+              f"{via_size:g}mm vias -- fanning out at {_pw['via']:g}/{_pw['drill']:g}")
+        if _pw['via'] < fab_floors(_ncu_pw)['via_diameter'] - 1e-9:
+            warn_fab_escalation(f'plane web under {_ref}')
+        via_size, via_drill = _pw['via'], _pw['drill']
+    elif _pw is not None:
+        print(f"  WARNING: plane web under {_ref} ({_pw['pitch']:g}mm pitch; "
+              f"{', '.join(_pw['nets'])} poured at clearance {_pw['clearance']:g}, "
+              f"min width {_pw['min_width']:g}): no via on the fab ladder lets "
+              f"the plane pass between its vias -- its drops there may be "
+              f"islands; lower the pour's clearance")
     if progress_callback:
         _nballs = sum(1 for _p in footprint.pads if _p.net_id)
         progress_callback(0, 0, f"BGA fanout {_ref}: escaping {_nballs} ball(s)...")
@@ -4528,7 +4844,8 @@ def generate_bga_fanout(footprint: Footprint,
         _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
         _single_pass=_single_pass,
         same_net_pad_clearance=same_net_pad_clearance,
-        hole_to_hole_clearance=hole_to_hole_clearance)
+        hole_to_hole_clearance=hole_to_hole_clearance,
+        bus=bus)
 
     # #621 partial ledger, computed ONLY when a cancel actually fired (so an
     # ordinary run does not even build the sets). A candidate ball that carries
@@ -4589,9 +4906,52 @@ def generate_bga_fanout(footprint: Footprint,
             no_via_in_pad=(same_net_pad_clearance is not None
                            and same_net_pad_clearance > 0),
             hole_to_hole_clearance=hole_to_hole_clearance)
+        # A drop that failed at the call's via is retried ONCE at the fab-floor
+        # rung the signal rescues escalate to (the same ladder, the same
+        # disclosure): a rescue's re-run reserves the plane balls at ITS shrunk
+        # via, and the rescued tracks then take tap room the nominal drop via
+        # needed (zynq_ad9364 U1 fanned on F/B: 21 balls undropped, every one
+        # served at the floor).
+        if rep.get('failed'):
+            _ncu = len(pcb_data.board_info.copper_layers or []) or 4
+            _now = (track_width, via_size, via_drill, clearance)
+            _fl = sorted({(min(track_width, f['track_width']), min(via_size, f['via_diameter']),
+                           min(via_drill, f['via_drill']), min(clearance, f['clearance']))
+                          for f in escalation_rungs(_ncu)} - {_now})
+            if _fl:
+                _tw, _vs, _vd, _cl = _fl[0]
+                d2_tracks, d2_vias, rep2 = _plane_drop_pass(
+                    footprint, pcb_data, tracks + d_tracks, vias_to_add + d_vias, net_filter,
+                    layers, _tw, _cl, _vs, _vd, grid_step,
+                    plane_net_layers=plane_net_layers,
+                    no_via_in_pad=(same_net_pad_clearance is not None
+                                   and same_net_pad_clearance > 0),
+                    hole_to_hole_clearance=hole_to_hole_clearance)
+                print(f"  Plane drops at the fab floor (track {_tw:.4f} / via {_vs:.2f} / "
+                      f"clearance {_cl:.4f}): {len(d2_vias)} more drop via(s), "
+                      f"{rep2.get('failed', 0)} of {rep['failed']} still failed")
+                if d2_tracks or d2_vias:
+                    d_tracks = d_tracks + d2_tracks
+                    d_vias = d_vias + d2_vias
+                    warn_fab_escalation('plane drop')
+                    for _k in ('gap_vias', 'pad_vias', 'track_connects', 'pour_tracks'):
+                        rep[_k] = rep.get(_k, 0) + rep2.get(_k, 0)
+                    rep['failed'] = rep2.get('failed', 0)
+                    for _n, _r2 in (rep2.get('nets') or {}).items():
+                        _r = (rep.get('nets') or {}).get(_n)
+                        if _r is not None:
+                            _r['gap'] = _r.get('gap', 0) + _r2.get('gap', 0)
+                            _r['in_pad'] = _r.get('in_pad', 0) + _r2.get('in_pad', 0)
+                            _r['failed'] = _r2.get('failed', 0)
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
+    if _pw is not None and _pw['threads']:
+        from fab_tiers import note_narrowing
+        note_narrowing(None, 'via_diameter', _pw['asked'], _pw['via'],
+                       f'plane web under {_ref}',
+                       count=sum(1 for _v in vias_to_add
+                                 if (_v.get('size') or 0) <= _pw['via'] + 1e-9) or 1)
     # #962: via-in-pad needs IPC-4761 Type VII, DECLARED on each via rather
     # than only printed: (capping yes) (filling yes). Once, here, over EVERY
     # via this fanout returns -- the channel escape's in-pad vias (manage_vias
@@ -4606,6 +4966,18 @@ def generate_bga_fanout(footprint: Footprint,
     _st962, _rec962 = via_protection_stamps(vias_to_add, [], pcb_data)
     apply_stamps_in_memory(_st962)
     print_via_protection_record(_rec962, "BGA fanout")
+    if failed_nets and not _fired[0]:
+        try:
+            _nb = dropped_ball_neighbourhood(
+                footprint, pcb_data, failed_nets, tracks, vias_to_add,
+                layers, clearance, via_size)
+        except Exception as _e:                     # noqa: BLE001 -- a report
+            _nb = [f"    (dropped-ball report unavailable: {_e})"]
+        if _nb:
+            print(f"  Dropped ball(s) on {footprint.reference}, and what crowds "
+                  f"each (#1217):")
+            for _l in _nb:
+                print(_l)
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
@@ -4875,8 +5247,11 @@ def main():
     if unescaped:
         print(f"\n  {len(unescaped)} of {requested} requested ball(s) could NOT be "
               f"escaped at --clearance {args.clearance}mm / --track-width "
-              f"{args.track_width}mm and were DROPPED from the output. Retry the "
-              f"fanout with a smaller --clearance (toward the manufacturing floor).")
+              f"{args.track_width}mm and were DROPPED from the output. The "
+              f"'Dropped ball(s)' lines above name what crowds each one: a "
+              f"smaller --clearance helps when that copper is a clearance away; "
+              f"when the count does not move, the lever is a layer, a "
+              f"neighbour's escape or the placement (#1217).")
     # DRC the written output at the routed clearance so downstream tooling can
     # detect sub-clearance grazes the escape left behind even when every ball
     # escaped (failed==0): via-over-track / via-over-pad (#130). The planner uses

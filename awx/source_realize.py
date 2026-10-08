@@ -19,7 +19,8 @@ previous board.
 """
 import math
 import os
-import shutil
+import re
+import awx_settings
 import subprocess
 import sys
 
@@ -36,7 +37,8 @@ from bga_fanout import generate_bga_fanout  # noqa: E402
 import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 
-from escape_moves import DIRS, LAYERS  # noqa: E402,F401  -- ONE source
+from escape_moves import DIRS  # noqa: E402,F401  -- ONE source
+import route_layers  # noqa: E402  the routing layers: a re-fan's runs may take any of them
 GAP_TOL = 0.2      # mm: an achieved tooth this close to the asked exit is the same gap
 
 
@@ -62,13 +64,22 @@ def move_sig(m):
                    round(b[0], 2), round(b[1], 2), L) for a, b, L in (m.legs or ())))
 
 
+def move_class(m):
+    """A menu move's CLASS: its signature without the site and legs, so every
+    leg variant of one exit is one. A destination berth the fanout did not
+    lay as asked is banned by class (fanout_from_plan.ban_moves, under
+    PLAN_JUDGE=ends): its variants reach the same exit through the same
+    neighbourhood, and the engine refuses them for the same reason."""
+    return (m.kind, m.direction, m.layer, round(m.exit_pt[0], 2), round(m.exit_pt[1], 2))
+
+
 # The engine lays at these (realize's own generate_bga_fanout call); the
 # blocker census must use the SAME numbers or it names the wrong nets.
 # Defaults from rules.py, resolved per board by the stage that installs
 # (see rules.py, "USING IT"); the engine call below reads them at call time.
 import rules as _rules            # noqa: E402  ONE source for every design rule
-FAN_TRACK = _rules.DEFAULT.fan_track
-FAN_CLEAR = _rules.DEFAULT.fan_clear
+FAN_TRACK = _rules.active().fan_track
+FAN_CLEAR = _rules.active().fan_clear
 
 
 def _seg_point_dist(px, py, ax, ay, bx, by):
@@ -177,7 +188,7 @@ def full_move(m):
     coordinate along the face is the gap), layer, kind, dog-bone site."""
     d = {'face': m.direction, 'exit': tuple(m.exit_pt), 'layer': m.layer,
          'kind': m.kind, 'site': (tuple(m.site) if m.site else None)}
-    if os.environ.get('PLAN_PAGES', '0') not in ('', '0') and m.legs:
+    if awx_settings.get('PLAN_PAGES', '0') not in ('', '0') and m.legs:
         # the pages-first plan's berths are laid verbatim: the move's own
         # legs, laid by underpad.attempt before its search -- the engine's
         # "exact" is only the exact EXIT, and a stub audited exact once ran
@@ -185,13 +196,24 @@ def full_move(m):
         # asks held (measured K41 122 -> 96 with the planner's own
         # conflict test made complete)
         d['legs'] = [(tuple(a), tuple(b), L) for (a, b, L) in m.legs]
+    # a dog-bone whose via stands PAST its ball's diagonal cells (a stub along the ball's own line, or one that bends
+    # into a gap first) carries that stub as the engine's walked `path` [ball, elbow, .., site]: the engine takes a
+    # caller's site only from an adjacent cell or reached by such a path (underpad._dogbone_path_valid), and otherwise
+    # put the via in a diagonal cell of its own and walked the run from there (K15 SDQ15, a via planned 1.6 mm into
+    # DU1's empty band: laid at the diagonal, its B run wound 3 mm round the balls and shut SDQS1N out). A plain
+    # dog-bone's stub is ONE 45-degree leg into its diagonal cell, and carries none
+    if m.kind == 'dogbone' and m.site is not None and m.legs:
+        stub = [(a, b) for (a, b, L) in m.legs if L != m.layer]
+        if stub and math.hypot(m.site[0] - stub[-1][1][0], m.site[1] - stub[-1][1][1]) < 1e-6 and \
+                (len(stub) > 1 or min(abs(stub[0][1][0] - stub[0][0][0]), abs(stub[0][1][1] - stub[0][0][1])) < 1e-6):
+            d['path'] = [tuple(stub[0][0])] + [tuple(b) for (_a, b) in stub]
     return d
 
 
 def snap_dir(dx, dy):
     h = math.hypot(dx, dy) or 1.0
-    return min(DIRS, key=lambda k: (DIRS[k][0] - dx / h) ** 2
-               + (DIRS[k][1] - dy / h) ** 2)
+    return min(DIRS, key=lambda k: (DIRS[k][0] - dx / h) * (DIRS[k][0] - dx / h)
+               + (DIRS[k][1] - dy / h) * (DIRS[k][1] - dy / h))
 
 
 def measure_tooth(pcb, nm, pad, byname, dest_ref=None, which=None):
@@ -382,7 +404,7 @@ def drc_pairs(board, nets=None, pcb_data=None):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             try:
-                _cd.run_drc(board, clearance=0.1, clearance_margin=0.1, net_patterns=pats, max_print=10 ** 6,
+                _cd.run_drc(board, clearance=te.SPEC_CLEARANCE, clearance_margin=0.1, net_patterns=pats, max_print=10 ** 6,
                             pcb_data=pcb_data)
             except SystemExit:
                 pass
@@ -395,8 +417,8 @@ def drc_pairs(board, nets=None, pcb_data=None):
         return _violation_lines(out)
     r = subprocess.run([sys.executable,
                         os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
-                        board, '--clearance', '0.1', '--clearance-margin', '0.1'],
-                       capture_output=True, text=True)
+                        board, '--clearance', str(te.SPEC_CLEARANCE), '--clearance-margin', '0.1'],
+                       capture_output=True, text=True, env=awx_settings.environ())
     out = r.stdout + r.stderr
     # A CHECKER THAT DID NOT REPORT IS NOT A CLEAN BOARD. This is the only
     # copper gate on the board `realize` writes (and replan's probe-clean
@@ -421,12 +443,64 @@ def _violation_lines(out):
                 or ' in paste opening ' in ln)]
 
 
+def _joint_spec():
+    """the joint fanout's spec (FANOUT_JOINT: route_bus --joint-fanout), or None"""
+    path = awx_settings.get('FANOUT_JOINT')
+    if not path or not os.path.isfile(path):
+        return None
+    import json
+    with open(path, encoding='utf-8') as f:
+        return json.load(f)
+
+
+def _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec, log=print, hands=None):
+    """realize()'s engine call under the joint fanout: the source array planned jointly (joint_escape.plan_array) --
+    `names` (the stripped nets: those asked to move, and the blockers freed with them) preferring their asks, the
+    array's other nets and plane balls with them, the bus never by the face away from the other array -- and the
+    stripped nets laid as planned by the joint escape engine (a planned pair's gate kept), each pair leaving with the
+    hand `hands` asks (its berths', fanout_from_plan.berth_hands). Returns the engine's (tracks, vias to add, vias to
+    remove, failed nets)."""
+    import joint_escape as _je
+    a = next((x for x in jspec['arrays'] if x['ref'] == sref), {'others': [], 'drops': []})
+    dref = next((x['ref'] for x in jspec['arrays'] if x['ref'] != sref), None)
+    full = [byname[nm][1].name for nm in names]
+    prefer = {_je.short_name(nm): {'tooth': tuple(m.exit_pt), 'direction': m.direction, 'layer': m.layer,
+                                   'kind': m.kind} for nm, m in src_choice.items()}
+    far = _je.far_face(pcb, sref, dref) if dref and dref in pcb.footprints else None
+    import route_layers
+    hints, rep = _je.plan_array(pcb, sref, full, a['others'], jspec['layers'], far=far, prefer=prefer,
+                                drops=a['drops'], log=log, hands=hands, vias_only=route_layers.escape_vias('src'))
+    at_names = {(round(src_pad[nm].global_x, 3), round(src_pad[nm].global_y, 3)) for nm in names}
+    hints = {at: h for at, h in hints.items() if at in at_names}
+    unplanned = sorted(nm for nm in names
+                       if (round(src_pad[nm].global_x, 3), round(src_pad[nm].global_y, 3)) not in hints)
+    log(f'  source realize (joint plan of {sref}): {rep["status"]}, {len(names) - len(unplanned)}/{len(names)} '
+        f'stripped net(s) planned, pairs {rep.get("pairs_escaped")}/{rep.get("pairs")}, others '
+        f'{rep["others_escaped"] + rep["others_strapped"]}/{rep["others_balls"]}, drops {rep["dropped"]}/'
+        f'{rep["plane_balls"]}'
+        + (f', pairs held to their berths\' hand {len(rep["hands_held"])}/'
+           f'{len(rep["hands_held"]) + len(rep["hands_free"])} re-planned'
+           + (f' (NO tooth pair of it: {rep["hands_free"]})' if rep['hands_free'] else '') if hands else '')
+        + (f'; UNPLANNED {unplanned}' if unplanned else ''))
+    spec = {'net_layers': {n: _je.bus_route_layers(pcb) for n in full}, 'priority': list(full)}
+    tracks, vias_add, vias_rm, failed = generate_bga_fanout(
+        pcb.footprints[sref], pcb, net_filter=full, layers=list(pcb.board_info.copper_layers),
+        track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
+        exit_margin=0.5, escape_method='jointescape', plane_drop='off', escape_dir_hints=hints, bus=spec)
+    tracks, vias_add, gated = _je.keep_pair_gates(pcb, sref, hints, tracks, vias_add)
+    if gated:
+        log(f'  source realize (joint plan of {sref}): left out, through a planned pair\'s gate: '
+            + ', '.join(sorted(pcb.nets[i].name.split('/')[-1] for i in gated)))
+    return tracks, vias_add, vias_rm, failed
+
+
 def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
-            guard_names=(), free=(), strict=False, clean_base=False):
+            guard_names=(), free=(), strict=False, clean_base=False, hands=None):
     """Strip the chosen nets' source copper, re-fan them in the asked
     faces, write `out_path`, audit every tooth. Returns a dict with the
     per-net audit, `ok` (laid) / `restored` (refused), and `rejected` (a
-    DRC reason) when the written board must not be used.
+    DRC reason) when the written board must not be used. `hands`, under the
+    joint fanout: the hand each pair's teeth leave with (_joint_realize).
 
     `free`: the JOINT SOURCE RE-FAN (2026-09-11). Nets stripped and
     re-laid in the SAME engine call as the chosen ones but given NO hint,
@@ -454,31 +528,59 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     removed = {}
     for nm in names:
         removed[nm] = remove_net_from_pcb_data(pcb, byname[nm][0])
+    import joint_escape as _je
+    jspec = _joint_spec()
     # no placement step follows this chain, so every foreign pad -- a
-    # decoupling cap under the array included -- is one a via must clear
-    pcb._fanout_all_foreign_immovable = True
-    hints = {}
-    for nm, m in src_choice.items():
-        p = src_pad[nm]
-        fm = full_move(m)
-        if strict:
-            fm['strict'] = True
-        hints[(round(p.global_x, 3), round(p.global_y, 3))] = fm
-    # the `free` nets get NO hint on purpose: they are stripped so the
-    # engine has their room to give, not so it reproduces their escapes
-    # the UNDER-PAD engine, not 'auto': the channel engine assigns a
-    # channel per ball and runs it straight to the edge without treating
-    # the unmoved nets' existing stubs as channel occupants (measured: a
-    # re-fanned SDQ15 laid on top of SDQM0's stub, SBA1 on SA11's, 38
-    # segment-segment DRC). The under-pad A* carries the exact registry of
-    # every foreign track on the board, which a partial re-fan of an
-    # already-fanned array needs.
-    tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-        pcb.footprints[sref], pcb, net_filter=names, layers=list(LAYERS),
-        track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE,
-        via_drill=te.VIA_DRILL,
-        exit_margin=0.5, escape_method='underpad', plane_drop='off',
-        escape_dir_hints=hints)
+    # decoupling cap under the array included -- is one a via must clear.
+    # The JOINT fanout's bus step is followed by the cap placement step, which
+    # moves the unlocked two-pad passives off the fanout: its realize plans and
+    # lays round them as the comb and the other nets' fanout do
+    # (joint_escape.movable_refs) -- marked immovable here alone, the realize's
+    # plan and engine read RX10's pad under zynq U1 two ways. Once the cap step
+    # has moved them (the whole route's later rounds, joint_escape.
+    # passives_fixed), nothing moves them again: immovable here too.
+    # The JOINT realize with more routing layers than two alone; on two the
+    # asked teeth are laid as the chain lays them, the array's other balls
+    # planned round them after (fanout_from_plan.joint_others): the joint plan
+    # of the whole array, run for every re-fan, moved the asked teeth for every
+    # ball's sake -- the zynq DDR's ends crossed 260 times to the chain's 202,
+    # and its four realizes of round 1 took 400 s
+    joint_ = jspec is not None and len(route_layers.layers()) > 2
+    if not joint_ or _je.passives_fixed():
+        pcb._fanout_all_foreign_immovable = True
+    if joint_:
+        # THE JOINT FANOUT (FANOUT_JOINT): the asked teeth from the source array's JOINT plan -- the stripped nets
+        # preferring their asks, the array's other nets and plane balls planned with them so the teeth leave them
+        # room, a pair's legs held together -- and the stripped nets laid exactly as planned (the other nets are laid
+        # round the bus after the fanout, joint_others). The under-pad engine, given the asks alone, could not lay
+        # some at all (zynq U1 on three layers: TXNRX's tooth, asked on B, In2 and F in turn, laid a gap off each
+        # time, banned each time, until it had no option left)
+        tracks, vias_add, vias_rm, failed = _joint_realize(pcb, sref, names, src_choice, src_pad, byname, jspec,
+                                                           log, hands=hands)
+    else:
+        _je.reserve_ball_vias(pcb)      # the joint fanout's promise to the others, kept by a bus-only re-fan
+        hints = {}
+        for nm, m in src_choice.items():
+            p = src_pad[nm]
+            fm = full_move(m)
+            if strict:
+                fm['strict'] = True
+            hints[(round(p.global_x, 3), round(p.global_y, 3))] = fm
+        # the `free` nets get NO hint on purpose: they are stripped so the
+        # engine has their room to give, not so it reproduces their escapes
+        # the UNDER-PAD engine, not 'auto': the channel engine assigns a
+        # channel per ball and runs it straight to the edge without treating
+        # the unmoved nets' existing stubs as channel occupants (measured: a
+        # re-fanned SDQ15 laid on top of SDQM0's stub, SBA1 on SA11's, 38
+        # segment-segment DRC). The under-pad A* carries the exact registry of
+        # every foreign track on the board, which a partial re-fan of an
+        # already-fanned array needs.
+        tracks, vias_add, vias_rm, failed = generate_bga_fanout(
+            pcb.footprints[sref], pcb, net_filter=names, layers=route_layers.stacked(pcb.board_info.copper_layers),
+            track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE,
+            via_drill=te.VIA_DRILL,
+            exit_margin=0.5, escape_method='underpad', plane_drop='off',
+            escape_dir_hints=hints)
     got = {t['net_id'] for t in tracks}
     ok = [nm for nm in names if byname[nm][0] in got]
     restored = [nm for nm in names if nm not in ok]
@@ -501,9 +603,8 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
                                net_id_to_name=n2n)
     os.remove(stripped)
     ship_vias.stamp(out_path, 'source realize', log)
-    pro = os.path.splitext(board)[0] + '.kicad_pro'
-    if os.path.exists(pro):
-        shutil.copy(pro, os.path.splitext(out_path)[0] + '.kicad_pro')
+    from copy_board import copy_siblings
+    copy_siblings(board, out_path)      # (the project and the .kicad_dru's per-layer rules with it)
 
     pcb2 = parse_kicad_pcb(out_path)
     achieved = {nm: measure_tooth(pcb2, nm, src_pad[nm], byname) for nm in names}
@@ -531,6 +632,15 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
         log(f'  source realize: {len(others) - len(drift)}/{len(others)} unmoved '
             f'teeth unchanged' + (f'; DRIFTED: {", ".join(drift)}' if drift else ''))
     pairs = drc_pairs(out_path, nets=list(src_choice) if clean_base else None)
+    if jspec is not None and pairs:
+        # (the joint fanout: a pad of a movable passive is the cap placement step's to move off this copper -- the
+        # plan and the engine laid round it as not there, and a pair against it is no reason to refuse the board;
+        # refused for it, the zynq U1 realize's whole board went for CTRL_OUT0's track across RX10.2)
+        mov = _je.movable_refs(pcb, sref)
+        cap = [ln for ln in pairs if any(r_ in mov for r_ in re.findall(r'\(([^.()\s]+)\.[^)\s]*\)', ln))]
+        if cap:
+            log(f'  source realize: {len(cap)} DRC pair(s) against a movable passive, left to the cap placement step')
+            pairs = [ln for ln in pairs if ln not in cap]
     rejected = None
     if pairs:
         rejected = f'{len(pairs)} DRC pair(s) on the realized source board'
@@ -539,4 +649,4 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
             log('      ' + ln)
     return {'board': out_path, 'audit': audit_d, 'ok': ok, 'restored': restored,
             'achieved': achieved, 'original': original, 'rejected': rejected,
-            'counts': counts, 'free': list(free), 'pairs': pairs}
+            'counts': counts, 'free': list(free), 'pairs': pairs, 'joint': jspec is not None}

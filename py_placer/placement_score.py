@@ -113,6 +113,11 @@ def _term(value, unit, basis=None, **extra):
     Over the four tracked laps of one board it is 3, 11, 3, 3 -- and the value
     goes 0.822, 22.324, 0.0, 0.0 with it. Most of that swing is bookkeeping
     about what was locked, not a fact about the arrangement.
+
+    The same holds when the RULE that chooses the population changes, even on
+    a fixed board: `pad_area_balance` stopped weighing paste/mask apertures as
+    copper in #1143, and names that rule as its basis so a lap scored before
+    the change is not compared with one scored after it.
     """
     out = {'ran': True, 'reason': None, 'value': value, 'unit': unit,
            'direction': _DIRECTION, 'basis': basis}
@@ -532,6 +537,14 @@ def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
 
 # ------------------------------------------------------------------ balance
 
+#: The population `pad_area_balance` weighs, as its `basis` (#1143). Before
+#: #1143 the term weighed paste/mask apertures as copper and published no basis;
+#: naming the population makes `term_deltas` refuse a lap scored before the fix
+#: against one scored after it, instead of reporting a balance change no
+#: placement caused (watchy 0.0328 vs 0.0207 on the same poses).
+BALANCE_BASIS = 'copper-pads: NPTH and aperture-only pads excluded (#1143)'
+
+
 def pad_area_balance(pcb_data) -> dict:
     """Pad-copper-area first moment along the board's LONG axis, as a fraction
     of the span.
@@ -576,9 +589,11 @@ def pad_area_balance(pcb_data) -> dict:
     axis = 'x' if span_x >= span_y else 'y'
     span = span_x if axis == 'x' else span_y
     centre = ((x0 + x1) / 2.0) if axis == 'x' else ((y0 + y1) / 2.0)
+    from kicad_parser import pad_is_aperture_only
     num = area = 0.0
     n = 0
     npth = 0
+    aperture = 0
     for fpo in (pcb_data.footprints or {}).values():
         for pad in (fpo.pads or ()):
             # NPTH pads carry NO COPPER even when `layers` lists *.Cu -- their
@@ -590,6 +605,12 @@ def pad_area_balance(pcb_data) -> dict:
             # three; it will not cancel on a board that moves one.
             if getattr(pad, 'pad_type', '') == 'np_thru_hole':
                 npth += 1
+                continue
+            # An aperture-only pad (a paste/mask window) carries no copper
+            # either (#1143): a QFN's split paste windows weighed as copper
+            # moved watchy 0.0207 -> 0.0328.
+            if pad_is_aperture_only(pad):
+                aperture += 1
                 continue
             try:
                 a = leg.rect_area(leg.pad_rect(pad))
@@ -606,10 +627,12 @@ def pad_area_balance(pcb_data) -> dict:
                      'mass to weigh', unit)
     centroid = num / area
     return _term(round(abs(centroid - centre) / span, 4), unit,
+                 basis=[BALANCE_BASIS],
                  axis=axis, span_mm=round(span, 3),
                  centroid_mm=round(centroid, 3), centre_mm=round(centre, 3),
                  weight='pad_bbox_area', pad_area_mm2=round(area, 3),
-                 pads=n, npth_pads_excluded=npth)
+                 pads=n, npth_pads_excluded=npth,
+                 aperture_pads_excluded=aperture)
 
 
 def edge_facing(pcb_data, pcb_file=None, intent=None) -> dict:

@@ -84,14 +84,31 @@ REGISTRY = {
         'hang_detector',
         'ISO_RENDER_HANG_GUARD_S on the kicad-cli pcb render child (#887). Its '
         'expiry returns a NAMED reason -- "kicad-cli pcb render timed out after '
-        'Ns" -- which the composer draws into the panel and counts as a failed '
-        'shot, so it never becomes a bare None. It is NOT the cost cap: that is '
-        '--iso-max-renders, a COUNT, chosen over a seconds budget so the same '
-        'chain composes the same movie on a fast machine and a slow one.'),
-    'py_router/movie_panels.py': (
+        'Ns" -- so it never becomes a bare None. It is NOT a cost cap: a '
+        'caller caps a COUNT of renders, chosen over a seconds budget so the '
+        'same work is done on a fast machine and a slow one.'),
+    # #1081: the stage3d film's optional external children. Each expiry
+    # returns a NAMED reason, and the film then keeps the 2D X-ray for EVERY
+    # frame and says why -- a timeout never becomes a partial or silent film.
+    'py_router/stage3d/render3d.py': (
         'hang_detector',
-        'forwards ISO_RENDER_HANG_GUARD_S to the render child above; the value '
-        'is the only clock it touches, and it takes no decision from it.'),
+        'STATE_BUDGET_S / BLENDER_STATE_BUDGET_S on the node+Chromium and '
+        'Blender render children, and a 30 s `node --version` probe. Expiry '
+        'returns "the 3D render took over N s", and stage3d.film keeps the '
+        'X-ray and prints that reason. The budget scales with the state '
+        'COUNT, so it is a hang guard, not a cost cap.'),
+    'py_router/stage3d/scene.py': (
+        'hang_detector',
+        'GLB_TIMEOUT_S on the kicad-cli pcb export glb child; expiry returns '
+        'a named reason and the parts stay boxes (no models).'),
+    'py_router/movie_benchmark.py': (
+        'hang_detector',
+        'the one board_score child that grades a --benchmark-board without a '
+        '--benchmark-score; expiry leaves the benchmark ungraded, which the '
+        'band names and which can never earn gold.'),
+    'py_router/stage3d/blender_scene.py': (
+        'reporting',
+        'ms_per_state on the Blender render, printed in the status line.'),
     'kicad_routing_plugin/ai_gui.py': (
         'hang_detector', 'a stderr reader thread join.'),
     'kicad_routing_plugin/ai_plan.py': (
@@ -155,6 +172,8 @@ REGISTRY = {
 
     # --- reporting only: elapsed accumulated or printed ---------------------
     'py_router/route.py': ('reporting', 'phase timing prints'),
+    'py_tools/board_score.py': ('reporting', "per-tool wall seconds, SCORE_JSON "
+                                "tool_seconds (#1202)"),
     'py_router/route_diff.py': ('reporting', 'phase timing prints'),
     'py_router/global_plan.py': ('reporting', 'plan timing print'),
     'py_router/leg_rip.py': ('reporting', 'per-rip ms print'),
@@ -221,7 +240,7 @@ REGISTRY = {
         'a joined place+route attempts graph puts first whichever record '
         'started first: the ledger\'s first row `t` vs the loop sidecars\' '
         'earliest st_mtime (#946/C4). Ordering of a rendered film only; no '
-        'elapsed time of ours. (`x_is_time(` also matches discovery.)'),
+        'elapsed time of ours.'),
     'py_router/route_planes.py': (
         'file_mtime',
         'compares the output file st_mtime before/after to detect that a '

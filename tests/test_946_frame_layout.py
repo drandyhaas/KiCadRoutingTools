@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
-"""The frame is a NAMED layout, decided once (#946, #1018).
+"""The frame is planned, decided once (#946, #1018).
 
-`BoardRenderer.__init__` derived W/H from the board's bounding box and
-`movie_panels.panel_geometry` derived the panel from `height_frac`, in two
-places, with the size invariant enforced by COMMENT rather than by code -- and
-Pillow does not raise on a mismatch, it silently resizes every later frame to
-the first.
+`BoardRenderer.__init__` derived W/H from the board's bounding box and the
+(retired) iso panel derived its panel from `height_frac`, in two places, with
+the size invariant enforced by COMMENT rather than by code -- and Pillow does
+not raise on a mismatch, it silently resizes every later frame to the first.
+The frame is the stage3d frame now (the only film layout).
 
-Four claims pinned here, and the fourth is the one nothing else can make.
+Three claims pinned here, and the third is the one nothing else can make.
 
   * **Both dimensions are even**, across the whole cross product. Only the
     HEIGHT was ever forced; `_write_mp4` crops `a.shape[1] & ~1` too, so a
     taller-than-wide board has been losing a pixel column in every mp4 this
     repo has written.
-  * **A-vs-B is inferred, C-vs-D is declared.** Measured at equal pixel budget
-    the two quality metrics never agree, so `'auto'` picks between the two
-    layouts that genuinely swap by board shape and NOTHING picks between the
-    two that are stances.
-  * **`'legacy'` is bit-for-bit today's frame**, which is what lets this land
-    without changing any existing artifact.
+  * **A declared ratio is the size asked for**, the band reserved inside.
   * **A GIF is actually encoded and read back.** Checking the in-memory list
     cannot see the bug this whole invariant exists for: Pillow writes a valid
     file and resizes silently, so the only place the defect is visible is in
@@ -27,6 +22,11 @@ Four claims pinned here, and the fourth is the one nothing else can make.
 import os
 import sys
 import tempfile
+
+# stage3d is the only film layout, so an unnamed layout is a stage3d
+# frame. These tests grade the 2D board, not the Node/Chromium 3D
+# render: set before env_knobs is read.
+os.environ.setdefault('KICAD_MOVIE_BOARD3D', '2d')
 
 RUN_ALL_TIMEOUT = 600
 
@@ -66,31 +66,31 @@ def fail(msg):
 def test_every_plan_is_even_on_both_axes():
     _mark = len(_FAIL)
     n = odd = 0
-    for lk in FL.LAYOUTS:
-        for rk in FL.RATIOS:
+    ratios = dict(FL.RATIOS, **{'4:1': 4.0, '1:3': 1 / 3.0})
+    for lk in ('stage3d',):
+        for rk in ratios:
             for sn, bb in SHAPES.items():
                 for foot, track in ((0, 0), (37, 0), (0, 61), (37, 61)):
                     n += 1
-                    g = FL.plan_frame(bb, layout=lk, ratio=FL.RATIOS[rk],
-                                      size=901, panel=True, foot_px=foot,
+                    g = FL.plan_frame(bb, ratio=ratios[rk],
+                                      size=901, foot_px=foot,
                                       track_px=track)
                     if g.frame.w % 2 or g.frame.h % 2:
                         odd += 1
                         fail('%s/%s/%s foot=%d track=%d -> %dx%d is odd'
                              % (lk, rk, sn, foot, track, g.frame.w, g.frame.h))
     if not odd:
-        print('    %d plans across %d layouts x %d ratios x %d shapes x 4 '
-              'chrome cases' % (n, len(FL.LAYOUTS), len(FL.RATIOS),
-                                len(SHAPES)))
+        print('    %d plans across %d ratios x %d shapes x 4 '
+              'chrome cases' % (n, len(ratios), len(SHAPES)))
     if len(_FAIL) == _mark:
         print('  PASS: both dimensions even everywhere')
 
 
 def test_every_named_box_is_inside_the_frame():
     _mark = len(_FAIL)
-    for lk in FL.LAYOUTS:
+    for lk in ('16:9', '9:16', '1:1', '4:1'):
         for sn, bb in SHAPES.items():
-            g = FL.plan_frame(bb, layout=lk, size=800, panel=True,
+            g = FL.plan_frame(bb, ratio=FL.parse_ratio(lk), size=800,
                               foot_px=30, track_px=40)
             for name in ('board', 'rail', 'foot', 'panel', 'track'):
                 b = getattr(g, name)
@@ -99,103 +99,21 @@ def test_every_named_box_is_inside_the_frame():
                 if not g.frame.contains(b):
                     fail('%s/%s: %s %s escapes the frame %s'
                          % (lk, sn, name, tuple(b), tuple(g.frame)))
-            if g.panel is not None and not g.overlays_board:
-                if g.board.overlaps(g.panel):
-                    fail('%s/%s: panel overlaps the board but this layout does '
-                         'not overlay' % (lk, sn))
+            if g.panel is not None and g.board.overlaps(g.panel):
+                fail('%s/%s: the layer column overlaps the board' % (lk, sn))
     if len(_FAIL) == _mark:
-        print('  PASS: every box inside the frame; only inset overlays')
+        print('  PASS: every box inside the frame; the column off the board')
 
 
-def test_a_vs_b_is_inferred_and_c_vs_d_is_never():
-    _mark = len(_FAIL)
-    # 'very tall' is 0.40, which is OUTSIDE the band where a chrome box is
-    # affordable, so `auto` hands it `legacy`. That expectation MOVED with the
-    # change that moves it, and the reason is arithmetic rather than taste: at
-    # 0.40 the board fills 41% of `stacked`'s 0.98:1 box and 100% of legacy's,
-    # because legacy's board box IS the board. Chrome you cannot afford is not
-    # a feature -- see `resolve_layout` for the 6.5:1 table this came from.
-    want = {'wide 1.85': 'sidebar', '4:3': 'sidebar', 'square': 'stacked',
-            'tall 1:1.6': 'stacked', 'very tall': 'legacy'}
-    for sn, bb in SHAPES.items():
-        g = FL.plan_frame(bb, layout='auto', size=800, panel=True)
-        if g.layout != want[sn]:
-            fail('auto on %s chose %s, expected %s' % (sn, g.layout, want[sn]))
-        elif 'aspect' not in g.chosen_by:
-            fail('auto on %s did not say WHY: %r' % (sn, g.chosen_by))
-        else:
-            print('    %-11s -> %-8s  %s' % (sn, g.layout, g.chosen_by))
-    # and nothing infers inset or split
-    inferred = {FL.plan_frame(bb, layout='auto', size=800, panel=True).layout
-                for bb in SHAPES.values()}
-    for stance in ('inset', 'split'):
-        if stance in inferred:
-            fail('auto chose %r -- C and D are stances about what the viewer '
-                 'is there to read, and must never be inferred' % stance)
-    # THE EXTREME BAND. Every chrome layout has a FIXED board-box aspect and
-    # only `legacy` inherits the board's, so a board far outside the corpus
-    # range fills very little of whichever box it is given -- and the adaptive
-    # cut, tuned on 0.5..2.5, cheerfully picked the SECOND WORST option for a
-    # 6.5:1 board. Measured in a real placement film: the board held 4.6-4.9%
-    # of the frame during the beats where parts were moving.
-    for a, want_k in ((0.30, 'legacy'), (0.49, 'legacy'), (0.60, 'stacked'),
-                      (2.90, 'sidebar'), (3.10, 'legacy'), (6.50, 'legacy')):
-        k, why = FL.resolve_layout('auto', (0, 0, 100.0, 100.0 / a))
-        if k != want_k:
-            fail('auto on aspect %.2f chose %s, expected %s' % (a, k, want_k))
-        elif want_k == 'legacy' and 'outside' not in why:
-            fail('auto fell back to legacy without saying why: %r' % why)
-    # and the band must actually BITE -- a band nothing falls outside of is
-    # not a band, it is a comment.
-    outside = [a for a in (0.30, 0.49, 3.10, 6.50)
-               if FL.resolve_layout('auto', (0, 0, 100.0, 100.0 / a))[0]
-               == 'legacy']
-    if len(outside) != 4:
-        fail('only %d of 4 extreme aspects fell back' % len(outside))
-    else:
-        print('    extreme band %.2f..%.2f -> legacy, with the reason stated'
-              % (FL.EXTREME_ASPECT_LO, FL.EXTREME_ASPECT_HI))
-    if len(_FAIL) == _mark:
-        print('  PASS: A/B inferred with a stated reason; C/D never')
-
-
-def test_legacy_reproduces_todays_frame():
-    _mark = len(_FAIL)
-    pcb = parse_kicad_pcb(BOARD)
-    r = BoardRenderer(pcb, size=500, supersample=1)
-    native = r.frame(segments=[], vias=[]).size
-    g = FL.plan_frame(pcb.board_info.board_bounds, layout='legacy', size=500,
-                      panel=False, legacy_size=(r.W, r.H))
-    # Up to the EVEN forcing, which is the point: the renderer's native size
-    # can be odd (routed_output at size 500 is 500x309) and `_write_mp4` crops
-    # `& ~1` on BOTH axes, so that row was always being thrown away. Legacy is
-    # today's frame with the silent crop made explicit.
-    want = (FL.even(native[0]), FL.even(native[1]))
-    if (g.board.w, g.board.h) != want:
-        fail("legacy's board box %s is not the renderer's own %s evened to %s"
-             % ((g.board.w, g.board.h), native, want))
-    else:
-        print('    renderer %s -> legacy %s  (even forcing; _write_mp4 was '
-              'cropping that pixel away silently)' % (native, want))
-    # an explicit ratio must WIN over the legacy shortcut
-    g2 = FL.plan_frame(pcb.board_info.board_bounds, layout='legacy', size=500,
-                       ratio=16 / 9.0, legacy_size=(r.W, r.H))
-    if abs(g2.aspect - 16 / 9.0) > 0.02:
-        fail('an explicit ratio did not win over legacy_size: %.3f'
-             % g2.aspect)
-    if len(_FAIL) == _mark:
-        print('  PASS: legacy is today\'s frame; an explicit ratio overrides')
-
-
-def test_a_real_gif_encodes_at_one_size_per_layout():
+def test_a_real_gif_encodes_at_one_size_per_ratio():
     """The in-memory list cannot see the defect. The FILE can."""
     _mark = len(_FAIL)
     d = tempfile.mkdtemp()
-    for lk in ('legacy', 'auto', 'sidebar', 'inset', 'split'):
-        out = os.path.join(d, '%s.gif' % lk)
+    for lk in ('16:9', '9:16', '1:1', '4:1'):
+        out = os.path.join(d, '%s.gif' % lk.replace(':', 'x'))
         import make_movie
         got = make_movie.make_movie([BOARD], out=out, size=220, quiet=True,
-                                    layout=lk)
+                                    aspect=lk)
         if not got or not os.path.exists(got):
             fail('%s: no film written' % lk)
             continue
@@ -324,63 +242,54 @@ def test_a_declared_ratio_is_the_size_asked_for_with_the_band_inside():
     the attempts band (`track_px`) and the clock (`foot_px`) come out of the
     board's share instead of growing the frame -- they used to be ADDED, so a
     16:9 film with a band was 1600x1036. The band sits inside the frame and
-    off the board, and with `iso=True` the split boxes sit inside the panel.
+    off the board.
     """
     _mark = len(_FAIL)
     n = 0
-    for lk in FL.LAYOUTS:
+    for lk in ('stage3d',):
         for rk, ratio in FL.RATIOS.items():
             if not ratio:
                 continue
             for sn, bb in SHAPES.items():
-                for iso in (False, True):
-                    n += 1
-                    g = FL.plan_frame(bb, layout=lk, ratio=ratio, size=900,
-                                      panel=True, track_px=120, foot_px=0,
-                                      iso=iso)
-                    want = _declared(900, ratio)
-                    if (g.frame.w, g.frame.h) != want:
-                        fail('%s/%s/%s iso=%s: frame %dx%d, declared %dx%d'
-                             % (lk, rk, sn, iso, g.frame.w, g.frame.h,
-                                want[0], want[1]))
-                        continue
-                    t = g.track
-                    if t is None or not g.frame.contains(t):
-                        fail('%s/%s/%s: band %r is not inside the frame'
-                             % (lk, rk, sn, t))
-                    elif t.overlaps(g.board):
-                        fail('%s/%s/%s: band %r overlaps the board %r'
-                             % (lk, rk, sn, tuple(t), tuple(g.board)))
-                    if iso and g.panel_split:
-                        for b in g.panel_split:
-                            if not g.panel.contains(b):
-                                fail('%s/%s/%s: split box %r outside the '
-                                     'panel' % (lk, rk, sn, tuple(b)))
-                    if iso and g.layout in ('stacked', 'sidebar', 'split') \
-                            and not g.panel_split:
-                        fail('%s/%s/%s: iso asked, but no split box for the '
-                             '3D view' % (lk, rk, sn))
+                n += 1
+                g = FL.plan_frame(bb, ratio=ratio, size=900,
+                                  track_px=120, foot_px=0)
+                want = _declared(900, ratio)
+                if (g.frame.w, g.frame.h) != want:
+                    fail('%s/%s/%s: frame %dx%d, declared %dx%d'
+                         % (lk, rk, sn, g.frame.w, g.frame.h,
+                            want[0], want[1]))
+                    continue
+                t = g.track
+                if t is None or not g.frame.contains(t):
+                    fail('%s/%s/%s: band %r is not inside the frame'
+                         % (lk, rk, sn, t))
+                elif t.overlaps(g.board):
+                    fail('%s/%s/%s: band %r overlaps the board %r'
+                         % (lk, rk, sn, tuple(t), tuple(g.board)))
     if len(_FAIL) == _mark:
         print('  PASS: %d declared plans hold their size, band inside, off '
               'the board' % n)
 
 
 def test_the_encoded_film_is_the_declared_size_in_both_themes():
-    """The same claim read back from real FILES: layout x ratio x theme, each
-    with an attempts band, encoded and measured. The render path is where
-    the band used to grow the frame (`movie_attempts.attach` after the
-    fact), so a plan that is right and a film that is not is the failure
-    this exists to see."""
+    """The same claim read back from real FILES: ratio x theme, each with a
+    band, encoded and measured. The render path is where the band used to
+    grow the frame (attached after the fact), so a plan that is right and a
+    film that is not is the failure this exists to see. The band is the
+    stage3d frame's benchmark band, from a converge ledger."""
     _mark = len(_FAIL)
+    import json
     import make_movie
-    import movie_attempts as MA
-    rows = tuple(MA.Attempt(i, 'lap %d' % i, 'completion',
-                            i - 1 if i else None, i % 3 != 1, False,
-                            float(20 - i), False, None) for i in range(8))
-    track = MA.Track(rows, 'blocking (lower better)', 'converge', 'fixture')
     d = tempfile.mkdtemp()
+    led = os.path.join(d, 'ledger.jsonl')
+    with open(led, 'w', encoding='utf-8') as f:
+        for i in range(8):
+            f.write(json.dumps({'iteration': i, 'kind': 'completion',
+                                'accepted': i % 3 != 1, 't': 1e9 + 60 * i,
+                                'score': {'blocking': 20 - i}}) + chr(10))
     n = 0
-    for lk in ('stacked', 'sidebar', 'inset', 'split', 'legacy'):
+    for lk in ('stage3d',):
         for rk in ('16:9', '9:16', '1:1'):
             for th in ('dark', 'light'):
                 n += 1
@@ -389,24 +298,24 @@ def test_the_encoded_film_is_the_declared_size_in_both_themes():
                 import contextlib
                 import io
                 err = io.StringIO()
-                # 400 px, so even the 16:9 frame (400x224) can carry the
-                # 64 px band under its 34% ceiling: a film where the band
-                # DECLINED would pass the size check without testing it.
+                # 1000 px, so the 16:9 frame (1000x562) can carry the
+                # 64 px band under the board's 70% floor: a film where the
+                # band DECLINED would pass the size check without testing it.
                 with contextlib.redirect_stderr(err):
                     got = make_movie.make_movie(
-                        [BOARD], out=out, size=400, quiet=True, layout=lk,
-                        aspect=rk, theme=th, attempts=track)
+                        [BOARD], out=out, size=1000, quiet=True,
+                        aspect=rk, theme=th, attempts_ledger=led)
                 if not got:
                     fail('%s/%s/%s: no film' % (lk, rk, th))
                     continue
-                if 'layout-reserved band' not in err.getvalue():
+                if 'benchmark band: converge' not in err.getvalue():
                     fail('%s/%s/%s: the band was not drawn into a reserved '
                          'box, so this film does not test the claim: %s'
                          % (lk, rk, th, err.getvalue()[-200:]))
                 with Image.open(got) as im:
                     sz = im.size
                     corner = im.convert('RGB').getpixel((sz[0] - 1, 0))
-                want = _declared(400, FL.parse_ratio(rk))
+                want = _declared(1000, FL.parse_ratio(rk))
                 if sz != want:
                     fail('%s/%s/%s: encoded %s, declared %s'
                          % (lk, rk, th, sz, want))
@@ -419,7 +328,7 @@ def test_the_encoded_film_is_the_declared_size_in_both_themes():
     import shutil
     shutil.rmtree(d, ignore_errors=True)
     if len(_FAIL) == _mark:
-        print('  PASS: %d films (5 layouts x 3 ratios x 2 themes) encoded at '
+        print('  PASS: %d films (3 ratios x 2 themes) encoded at '
               'the declared size, band inside' % n)
 
 
@@ -433,9 +342,7 @@ TESTS = (
     test_the_encoded_film_is_the_declared_size_in_both_themes,
     test_every_plan_is_even_on_both_axes,
     test_every_named_box_is_inside_the_frame,
-    test_a_vs_b_is_inferred_and_c_vs_d_is_never,
-    test_legacy_reproduces_todays_frame,
-    test_a_real_gif_encodes_at_one_size_per_layout,
+    test_a_real_gif_encodes_at_one_size_per_ratio,
     test_the_guard_reports_and_pads_rather_than_squashing,
     test_set_canvas_keys_the_margin_to_the_box,
 )

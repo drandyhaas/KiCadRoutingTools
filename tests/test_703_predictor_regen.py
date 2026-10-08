@@ -65,6 +65,51 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #:
 #: MEASURED, from the run recorded in the pull request. Never predicted.
 #:
+#: RE-RECORDED 2026-10-07 (#1186). `truth.quality` of ONE row; blocking and
+#: the headline unmoved. It passes at the commit before #1186 and fails at
+#: #1186 with the value HEAD of the #1185-#1198 batch gives.
+#:   * esp_prog:authored -- the main run's dead-end sweep used to trim a
+#:     6-segment /+3.3V spur whose free end lands ON another /+3.3V track,
+#:     0.035 mm from that track's end (t = 0.012 of 2.97 mm): inside the old
+#:     2 % blind band, so neither a T nor a shared endpoint. Now it is a T,
+#:     the spur stays, and the reconcile sub-run takes a shorter path.
+#:     Same vias and segments; one track end 0.05 mm longer.
+#:   esp_prog:authored            copper 318.64 -> 318.69
+#:   other rows                   unmoved
+#:
+#: RE-RECORDED 2026-10-07 (#1181). ONE row, attributed by regenerating it at
+#: every commit of the #1148-#1181 batch: it moves at #1181 alone.
+#:   * esp_prog:portfolio-1 -- `truth.headline` 1 -> 2 (blocking_by: drc 1,
+#:     broken 0 -> 1). This candidate seats U2's filled SOT89 tab across the
+#:     corridor /U0TXD used: before #1181 the tab's interior was copper to
+#:     nobody, and the "routed" /U0TXD put 2 vias and 2 tracks INSIDE it --
+#:     shorts the old check_drc could not see (the new one reports all four,
+#:     via-segment 0.58/0.56 mm deep). Now the interior is an obstacle,
+#:     /U0TXD fails honestly and nothing shorts. The headline rose because
+#:     the grade became true, not because the board got worse.
+#:   esp_prog:portfolio-1         headline 1 -> 2, vias 33 -> 28, segs 225 -> 207, copper 347.97 -> 335.22
+#:   other rows                   unmoved
+#:
+#: RE-RECORDED 2026-10-07 (#1159 and #1161). `truth.quality` only;
+#: `truth.blocking` and the headline did not mismatch on any row. ATTRIBUTED
+#: by regenerating each row at each commit of the batch:
+#:   * #1159 alone moves esp_prog:authored. The neck trigger stopped narrowing
+#:     a terminal whose edge gap EQUALS the clearance (the old 1e-4 margin in
+#:     the trigger shaved one net-4 terminal 0.3 -> 0.2998); the wider
+#:     terminal sends the later routes another way. A soft cost on one board;
+#:     the corpus A/B judged the batch (sets 1-5: incomplete 138 -> 130,
+#:     DRC 44 -> 44).
+#:   * #1161 alone moves splitflap_driver:authored. With the oval/roundrect
+#:     web polygon right, the cleanup lands C8.2's GND terminal inside the
+#:     pad instead of on its corner, so the shipped board loses the
+#:     narrow-pad-joint check_weird reported there (1 finding -> 0), at
+#:     +1.25 mm of copper.
+#:
+#:   esp_prog:authored            vias 32 -> 36, segs 201 -> 182, copper 303.46 -> 318.64
+#:   esp_prog:perturb-scatter-d1  unmoved
+#:   esp_prog:portfolio-1         unmoved
+#:   splitflap_driver:authored    copper 2864.97 -> 2866.22
+#:
 #: RE-RECORDED 2026-09-28 (#1063: the post-route cleanup removes what
 #: check_weird calls removable, in-pad / in-via wiggles included). All four
 #: rows moved in `truth.quality` only, and in one direction: `vias` identical
@@ -76,6 +121,41 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #:   esp_prog:perturb-scatter-d1  segs 302 -> 235, copper 361.26 -> 348.22
 #:   esp_prog:portfolio-1         segs 293 -> 223, copper 362.65 -> 347.37
 #:   splitflap_driver:authored    segs 1154 -> 832, copper 2913.88 -> 2831.72
+#:
+#: RE-RECORDED 2026-10-05, again (a tap edge's source/target overrides last
+#: for that edge only, 971b41f5; and no builder prices a net's OWN ripped-route
+#: ghost -- a ghost reserves the victim's corridor for its reroute).
+#: `truth.quality` only; `truth.blocking` and the headline did not mismatch.
+#: ATTRIBUTED by running 971b41f5 alone: the override scoping moves ONLY
+#: authored (35 -> 32 vias, 311.92 -> 303.36 mm, 194 -> 198 segs -- its
+#: retries no longer pass through a failed edge's leftover via); the rest is
+#: the self-exclusion: authored +0.10 mm / +3 segs, portfolio-1 back to the
+#: exact values it had before the Phase 3 ghosts (33 / 347.97 / 225), and
+#: splitflap -3 vias / +29.15 mm (+1.0%) / +18 segs -- the first move on
+#: splitflap in this file since 2026-09-28. Per-board soft-cost movement in
+#: both directions; the corpus A/B judges it.
+#:
+#:   esp_prog:authored            vias 35 -> 32, segs 194 -> 201, copper 311.92 -> 303.46
+#:   esp_prog:perturb-scatter-d1  unmoved
+#:   esp_prog:portfolio-1         vias 30 -> 33, segs 215 -> 225, copper 349.86 -> 347.97
+#:   splitflap_driver:authored    vias 168 -> 165, segs 827 -> 845, copper 2835.82 -> 2864.97
+#:
+#: RE-RECORDED 2026-10-05 (Phase 3's fast builder prices the ripped-route
+#: ghosts, as the slow builder always did; an own-tree seam re-ask records no
+#: ghost; net_rescue withdraws a #666 escape the closing route did not use).
+#: `truth.quality` only; `truth.blocking` and the headline did not mismatch on
+#: any row, and splitflap did not move. ATTRIBUTED, not assumed, by running
+#: the escape withdrawal alone on the ghost-free code: it moves ONLY
+#: perturb-scatter-d1, 38 -> 36 vias at identical copper and segments -- two
+#: dangling escape vias (KiCad via_dangling) the old row shipped. The other
+#: two rows are the ghosts, and they split: authored +3 vias / -7.46 mm,
+#: portfolio-1 -3 vias / +1.89 mm / -10 segments -- per-board movement of a
+#: soft cost, which the corpus A/B judges, not this detector.
+#:
+#:   esp_prog:authored            vias 32 -> 35, segs 189 -> 194, copper 319.38 -> 311.92
+#:   esp_prog:perturb-scatter-d1  vias 38 -> 36, segs 235 -> 235, copper 348.89 -> 348.89
+#:   esp_prog:portfolio-1         vias 33 -> 30, segs 225 -> 215, copper 347.97 -> 349.86
+#:   splitflap_driver:authored    unmoved
 #:
 #: RE-RECORDED 2026-09-28 (#1063 follow-up: route.py runs the strict collapse
 #: ONCE at the end of the run instead of inside the in-run cleanup, so the
@@ -296,6 +376,15 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #:     invisible. The header's "this row is the study's headline in miniature"
 #:     commentary is left standing above, with this as its second correction.
 #:
+#: RE-RECORDED 2026-10-02 (#1065). `esp_prog:authored` `pad_clearance_pairs`
+#: 1 -> 0, and it CORRECTS the #726 note above: that pair (CON1 against the
+#: FIRST `Ref*` block in file order, the fiducial at (141.2, 95.9)) was a
+#: bounding-box pair, not copper. render's
+#: checklist -- which this predictor reads -- now confirms each pair with the
+#: grader's own exact census (`legality.pad_pair_conflict`), and
+#: grade_pad_legality had always called this board clean. Nothing else on
+#: any of the four rows moves; `truth` is untouched, the route identical.
+#:
 EXPECTED = {
     'esp_prog:authored': dict(
         poses_sha256='67a9712d200814442b4a25cf1fa8ccd075c1968d5b08c0ad58c4662f0a479da7',
@@ -307,11 +396,14 @@ EXPECTED = {
                # 2026-09-14 (#958 phase 2): segs 286 -> 254; vias/copper unmoved
                # 2026-09-15 (#908 Phase 3 lift): 34/344.06/254 -> 34/336.58/250
                # 2026-09-16 (#958 fine-pitch tie guard): segs 250 -> 260
-               'quality': {'vias': 32, 'copper_mm': 319.38, 'segments': 189}},
+               # 2026-10-07 (#1159 at-rule neck): 32/303.46/201 -> 36/318.64/182
+               # 2026-10-07 (#1186 T by distance): copper 318.64 -> 318.69
+               'quality': {'vias': 36, 'copper_mm': 318.69, 'segments': 182}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
             'halo': 127.48707486477095, 'overlap_area': 1.1400451712000104,
-            'pad_copper': 0, 'pad_clearance_pairs': 1,
+            # 2026-10-02 (#1065): 1 -> 0, the grader's census, not the box's
+            'pad_copper': 0, 'pad_clearance_pairs': 0,
             'edge': 16.612682999999876, 'total': 916.1746544447492,
             'oob_count': 0,
         }),
@@ -325,7 +417,7 @@ EXPECTED = {
                # 2026-09-14 (#958 phase 2): segs 311 -> 292; vias/copper unmoved
                # 2026-09-15 (#908 Phase 3 lift): 37/363.0/292 -> 38/361.26/296
                # 2026-09-16 (#958 fine-pitch tie guard): segs 296 -> 302
-               'quality': {'vias': 38, 'copper_mm': 348.89, 'segments': 235}},
+               'quality': {'vias': 36, 'copper_mm': 348.89, 'segments': 235}},
         predictors={
             'crossings': 50, 'hpwl': 252.34828000000005,
             'halo': 130.46454030971682, 'overlap_area': 1.1400451712000104,
@@ -376,14 +468,17 @@ EXPECTED = {
         # headline 3 -> 0 (2026-09-03) -> 1 (2026-09-10). The 1 is `drc`, NOT
         # `unrouted`/`broken`: this candidate lands U2's SOT89 tab on Q1's
         # pads, and #908 is what makes that visible. See the header note.
-        truth={'headline': 1,
+        # -> 2 (2026-10-07, #1181): + broken /U0TXD, which used to route
+        # THROUGH the tab's interior (a short nobody graded). Header note.
+        truth={'headline': 2,
                # 2026-09-03 (auto/fab defaults): 32/347.03/270 -> 31/341.99/263
                # 2026-09-10 (#908 footprint copper): 31/341.99/263 -> 30/350.67/304
                # 2026-09-14 (#958 phase 2): segs 304 -> 269; vias/copper unmoved
                # 2026-09-15 (#908 Phase 3 lift): 30/350.67/269 -> 35/362.75/282
                # 2026-09-16 (#958 fine-pitch tie guard): 35/362.75/282 ->
                #   35/362.65/293 (the only row whose copper moved, -0.10mm)
-               'quality': {'vias': 33, 'copper_mm': 347.97, 'segments': 225}},
+               # 2026-10-07 (#1181 filled interior): 33/347.97/225 -> 28/335.22/207
+               'quality': {'vias': 28, 'copper_mm': 335.22, 'segments': 207}},
         predictors={
             'crossings': 23, 'hpwl': 260.0687799999999,
             'halo': 101.01900525631262, 'overlap_area': 1.0,
@@ -408,8 +503,9 @@ EXPECTED = {
                # 168/2913.82/1155 -> 168/2913.88/1154. Attributed by a
                # single-file revert; the fanout and plane-fill roundings of
                # the same change leave this row alone.
-               'quality': {'vias': 168, 'copper_mm': 2835.82,
-                           'segments': 827}},
+               # 2026-10-07 (#1161 web polygon): copper 2864.97 -> 2866.22
+               'quality': {'vias': 165, 'copper_mm': 2866.22,
+                           'segments': 845}},
         predictors={
             'crossings': 300, 'hpwl': 2504.4400000000014,
             'halo': 297.4273114820511, 'overlap_area': 1.7621459846850488e-13,

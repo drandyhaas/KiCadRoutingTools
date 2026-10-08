@@ -26,8 +26,8 @@
     "path": "vehicle/mkviii/hardware/hv/csc/bms_csc.kicad_pcb",
     "branch": "main",
     "file": "fsae_csc.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/olin-electric-motorsports/oem-monorepo/main/vehicle/mkviii/hardware/hv/csc/bms_csc.kicad_pcb",
-    "github_url": "https://github.com/olin-electric-motorsports/oem-monorepo/blob/main/vehicle/mkviii/hardware/hv/csc/bms_csc.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/olin-electric-motorsports/oem-monorepo/b026eb6369c7fdd7b889e25b9b9c077a3074334f/vehicle/mkviii/hardware/hv/csc/bms_csc.kicad_pcb",
+    "github_url": "https://github.com/olin-electric-motorsports/oem-monorepo/blob/b026eb6369c7fdd7b889e25b9b9c077a3074334f/vehicle/mkviii/hardware/hv/csc/bms_csc.kicad_pcb",
     "size_kb": 1446,
     "layers_est": 2,
     "footprints": 182,
@@ -39,7 +39,7 @@
     "lane": "industrial_auto",
     "license": "see repo",
     "short_name": "fsae_csc",
-    "note": "BMS cell-sense card: many Kelvin cell-tap pads, isolation between cell groups, daisy-chain isoSPI"
+    "note": "BMS cell-sense card: many Kelvin cell-tap pads, isolation between cell groups, daisy-chain isoSPI. raw_url re-pinned 2026-10-08 to b026eb63, the commit that served the corpus's version: 2026-09-20 repo cleanup (#27, commit 4972676) renamed directory hv/csc/ -> hv/bms_csc/; the file at the new path on main is the SAME git blob (69bc12ba)."
   },
   {
     "set": "set18",
@@ -152,8 +152,8 @@
     "path": "vehicle/mkviii/hardware/hv/precharge-discharge/prechargedischarge_mkviii.kicad_pcb",
     "branch": "main",
     "file": "fsae_precharge.kicad_pcb",
-    "raw_url": "https://raw.githubusercontent.com/olin-electric-motorsports/oem-monorepo/main/vehicle/mkviii/hardware/hv/precharge-discharge/prechargedischarge_mkviii.kicad_pcb",
-    "github_url": "https://github.com/olin-electric-motorsports/oem-monorepo/blob/main/vehicle/mkviii/hardware/hv/precharge-discharge/prechargedischarge_mkviii.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/olin-electric-motorsports/oem-monorepo/1122f2083b96f9ec32b09947a360475029f4576e/vehicle/mkviii/hardware/hv/precharge-discharge/prechargedischarge_mkviii.kicad_pcb",
+    "github_url": "https://github.com/olin-electric-motorsports/oem-monorepo/blob/1122f2083b96f9ec32b09947a360475029f4576e/vehicle/mkviii/hardware/hv/precharge-discharge/prechargedischarge_mkviii.kicad_pcb",
     "size_kb": 1137,
     "layers_est": 2,
     "footprints": 103,
@@ -165,7 +165,7 @@
     "lane": "industrial_auto",
     "license": "see repo",
     "short_name": "fsae_precharge",
-    "note": "FSAE HV precharge/discharge board: >300V creepage slots, HV relays, big power resistors, HV/LV clearance split"
+    "note": "FSAE HV precharge/discharge board: >300V creepage slots, HV relays, big power resistors, HV/LV clearance split. raw_url re-pinned 2026-10-08 to 1122f208, the commit that served the corpus's version: 2026-09-20 repo cleanup (#27, commit 4972676) renamed directory precharge-discharge/ -> precharge_discharge/; the file at the new path on main is the SAME git blob (a6b27255)."
   },
   {
     "set": "set18",

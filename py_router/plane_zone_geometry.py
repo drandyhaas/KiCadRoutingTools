@@ -1,54 +1,42 @@
 """
 Zone geometry utilities for copper plane generation.
 
-Handles Voronoi zone boundary computation, polygon clipping, merging, and grouping.
+The Voronoi cells a shared plane layer is split from (route_planes' spine split), polygon clipping, and route
+sampling for the cells' seeds.
 """
 from __future__ import annotations
 
 import math
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 
 import numpy as np
 
-from geometry_utils import UnionFind
-from routing_constants import POLYGON_BUFFER_DISTANCE, POLYGON_EDGE_TOLERANCE
 from scipy.spatial import Voronoi
-from shapely.geometry import Polygon as ShapelyPolygon
-from shapely.ops import unary_union
-from shapely.validation import make_valid
 
 
-def compute_zone_boundaries(
+def voronoi_cells(
     vias_by_net: Dict[int, List[Tuple[float, float]]],
     board_bounds: Tuple[float, float, float, float],
-    return_raw_polygons: bool = False,
-    board_edge_clearance: float = 0.0,
-    verbose: bool = False
-) -> Dict[int, List[Tuple[float, float]]]:
+    board_edge_clearance: float = 0.0
+) -> Dict[int, List[List[Tuple[float, float]]]]:
     """
-    Compute non-overlapping zone polygons for multiple nets using Voronoi.
+    The Voronoi cell of every seed point, by its net.
 
     Algorithm:
-    1. Create Voronoi cell around EACH via (not centroid)
-    2. Label each cell with its via's net_id
+    1. Create a Voronoi cell around EACH seed (not a net's centroid)
+    2. Label each cell with its seed's net_id
     3. Clip cells to board bounds (inset by board_edge_clearance)
-    4. Merge adjacent cells of the same net
-    5. If same-net cells aren't adjacent → they become disconnected regions
 
     Args:
-        vias_by_net: Dict mapping net_id → list of (x, y) via positions
+        vias_by_net: Dict mapping net_id -> list of (x, y) seed positions
         board_bounds: Tuple of (min_x, min_y, max_x, max_y)
-        return_raw_polygons: If True, return tuple (merged_polygons, raw_polygons, via_to_polygon_idx)
-                            where raw_polygons[net_id] is list of individual Voronoi cells,
-                            and via_to_polygon_idx[net_id] maps via position to polygon index
-        board_edge_clearance: Clearance from board edge for zone polygons (mm)
+        board_edge_clearance: Clearance from board edge for the cells (mm)
 
     Returns:
-        If return_raw_polygons=False:
-            Dict mapping net_id → polygon points (list of (x, y) tuples)
-        If return_raw_polygons=True:
-            Tuple of (merged_polygons, raw_polygons, via_to_polygon_idx)
+        Dict mapping net_id -> list of cells, each a list of (x, y) vertices
 
+    Raises:
+        ValueError: fewer than two seeds in all
     """
     min_x, min_y, max_x, max_y = board_bounds
 
@@ -67,12 +55,7 @@ def compute_zone_boundaries(
             via_net_ids.append(net_id)
 
     if len(all_vias) < 2:
-        # Single via or empty: return full board rectangle (with clearance) for the one net
-        if len(all_vias) == 1:
-            net_id = via_net_ids[0]
-            return {net_id: [[(clip_min_x, clip_min_y), (clip_max_x, clip_min_y),
-                             (clip_max_x, clip_max_y), (clip_min_x, clip_max_y)]]}
-        return {}
+        raise ValueError(f"a Voronoi split needs two seeds, got {len(all_vias)}")
 
     # Add mirror points outside board bounds to ensure all regions are finite
     # This is a standard technique for bounded Voronoi
@@ -92,9 +75,7 @@ def compute_zone_boundaries(
     vor = Voronoi(points)
 
     # Build polygon for each real via (not mirror points)
-    # Also track which via produced which polygon (for disconnection routing)
     via_polygons: Dict[int, List[List[Tuple[float, float]]]] = {net_id: [] for net_id in vias_by_net}
-    via_to_polygon_idx: Dict[int, Dict[Tuple[float, float], int]] = {net_id: {} for net_id in vias_by_net}
 
     for via_idx in range(len(all_vias)):
         region_idx = vor.point_region[via_idx]
@@ -111,87 +92,9 @@ def compute_zone_boundaries(
         clipped = clip_polygon_to_rect(polygon, clip_min_x, clip_min_y, clip_max_x, clip_max_y)
 
         if clipped and len(clipped) >= 3:
-            net_id = via_net_ids[via_idx]
-            polygon_idx = len(via_polygons[net_id])
-            via_polygons[net_id].append(clipped)
-            # Track which via produced this polygon
-            via_pos = all_vias[via_idx]
-            via_to_polygon_idx[net_id][via_pos] = polygon_idx
+            via_polygons[via_net_ids[via_idx]].append(clipped)
 
-    # Merge polygons for each net
-    result: Dict[int, List[Tuple[float, float]]] = {}
-
-    for net_id, polygons in via_polygons.items():
-        if not polygons:
-            continue
-
-        if len(polygons) == 1:
-            result[net_id] = [polygons[0]]
-        else:
-            # Merge all polygons for this net using Shapely
-            # This preserves Voronoi boundaries (unlike convex hull)
-            if verbose:
-                print(f"    Merging {len(polygons)} polygons for net {net_id}")
-            merged = merge_polygons(polygons, verbose=verbose)
-            if merged:
-                result[net_id] = [merged]
-            else:
-                # Polygons are disconnected - use unary_union to combine what we can
-                # This preserves boundaries rather than using convex hull which would overlap
-                if verbose:
-                    print(f"    merge_polygons returned None - using unary_union fallback")
-                shapely_polys = []
-                for poly in polygons:
-                    if len(poly) >= 3:
-                        sp = ShapelyPolygon(poly)
-                        if not sp.is_valid:
-                            sp = make_valid(sp)
-                        if sp.is_valid and not sp.is_empty:
-                            shapely_polys.append(sp)
-                if shapely_polys:
-                    # First try direct union
-                    combined = unary_union(shapely_polys)
-
-                    # If MultiPolygon, try buffering to merge nearly-touching polygons
-                    # (Voronoi cells can have tiny gaps due to floating point precision)
-                    if combined.geom_type == 'MultiPolygon':
-                        buffer_dist = POLYGON_BUFFER_DISTANCE
-                        buffered = [p.buffer(buffer_dist) for p in shapely_polys]
-                        combined_buffered = unary_union(buffered)
-                        if combined_buffered.geom_type == 'Polygon':
-                            # Successfully merged - shrink back
-                            combined = combined_buffered.buffer(-buffer_dist)
-                            if verbose:
-                                print(f"    Buffered merge succeeded")
-                        elif combined_buffered.geom_type == 'MultiPolygon':
-                            # Still disconnected - shrink each part back
-                            shrunk_parts = []
-                            for geom in combined_buffered.geoms:
-                                shrunk = geom.buffer(-buffer_dist)
-                                if not shrunk.is_empty:
-                                    shrunk_parts.append(shrunk)
-                            if shrunk_parts:
-                                combined = unary_union(shrunk_parts) if len(shrunk_parts) > 1 else shrunk_parts[0]
-
-                    if verbose:
-                        print(f"    Fallback unary_union result: {combined.geom_type}")
-                    if combined.geom_type == 'Polygon':
-                        coords = list(combined.exterior.coords)[:-1]
-                        result[net_id] = [[(float(x), float(y)) for x, y in coords]]
-                    elif combined.geom_type == 'MultiPolygon':
-                        # Keep ALL polygons - they'll become separate zones
-                        if verbose:
-                            print(f"    Net has {len(combined.geoms)} disconnected regions (separate zones will be created)")
-                            for i, geom in enumerate(combined.geoms):
-                                print(f"      Region {i}: area={geom.area:.2f}")
-                        result[net_id] = []
-                        for geom in combined.geoms:
-                            coords = list(geom.exterior.coords)[:-1]
-                            result[net_id].append([(float(x), float(y)) for x, y in coords])
-
-    if return_raw_polygons:
-        return result, via_polygons, via_to_polygon_idx
-    return result
+    return via_polygons
 
 
 def clip_polygon_to_rect(
@@ -267,164 +170,6 @@ def clip_polygon_to_rect(
             # else: both outside, add nothing
 
     return output
-
-
-def merge_polygons(polygons: List[List[Tuple[float, float]]], verbose: bool = False) -> Optional[List[Tuple[float, float]]]:
-    """
-    Merge a list of adjacent polygons into a single polygon.
-    Returns None if polygons are not all adjacent (i.e., disconnected).
-
-    Uses Shapely's unary_union for proper polygon union that preserves
-    the original edges (unlike convex hull which loses concave details).
-    """
-    if not polygons:
-        return None
-    if len(polygons) == 1:
-        return polygons[0]
-
-    # Check if all polygons are connected via shared edges
-    groups = find_polygon_groups(polygons, verbose=verbose)
-    if len(groups) > 1:
-        # Polygons are disconnected - return None to signal caller
-        return None
-
-    # Use Shapely for proper polygon union (preserves Voronoi boundaries)
-    # Convert to Shapely polygons
-    shapely_polys = []
-    for poly in polygons:
-        if len(poly) >= 3:
-            sp = ShapelyPolygon(poly)
-            if not sp.is_valid:
-                sp = make_valid(sp)
-            if sp.is_valid and not sp.is_empty:
-                shapely_polys.append(sp)
-
-    if not shapely_polys:
-        return None
-
-    # Union all polygons
-    merged = unary_union(shapely_polys)
-
-    if verbose:
-        print(f"      merge_polygons: unary_union result type = {merged.geom_type}")
-
-    # Extract exterior coordinates
-    if merged.is_empty:
-        return None
-    if merged.geom_type == 'Polygon':
-        coords = list(merged.exterior.coords)[:-1]  # Remove duplicate closing point
-        return [(float(x), float(y)) for x, y in coords]
-    elif merged.geom_type == 'MultiPolygon':
-        # Multiple disconnected polygons - return None to let caller handle them all
-        if verbose:
-            print(f"      WARNING: unary_union returned MultiPolygon with {len(merged.geoms)} parts!")
-            for i, geom in enumerate(merged.geoms):
-                print(f"        Part {i}: area={geom.area:.2f}, centroid=({geom.centroid.x:.2f}, {geom.centroid.y:.2f})")
-        return None  # Let compute_zone_boundaries handle all polygons via fallback
-    else:
-        return None
-
-
-def polygons_share_edge(
-    poly1: List[Tuple[float, float]],
-    poly2: List[Tuple[float, float]],
-    tolerance: float = POLYGON_EDGE_TOLERANCE
-) -> bool:
-    """
-    Check if two polygons share a common edge (not just a point).
-
-    Two polygons share an edge if they have two consecutive vertices that
-    match (in either direction) within tolerance.
-    """
-    if len(poly1) < 2 or len(poly2) < 2:
-        return False
-
-    # Get all edges from both polygons
-    edges1 = []
-    for i in range(len(poly1)):
-        p1 = poly1[i]
-        p2 = poly1[(i + 1) % len(poly1)]
-        edges1.append((p1, p2))
-
-    edges2 = []
-    for i in range(len(poly2)):
-        p1 = poly2[i]
-        p2 = poly2[(i + 1) % len(poly2)]
-        edges2.append((p1, p2))
-
-    def points_match(a: Tuple[float, float], b: Tuple[float, float]) -> bool:
-        return abs(a[0] - b[0]) < tolerance and abs(a[1] - b[1]) < tolerance
-
-    def edges_match(e1: Tuple, e2: Tuple) -> bool:
-        # Check if edges match in either direction
-        return ((points_match(e1[0], e2[0]) and points_match(e1[1], e2[1])) or
-                (points_match(e1[0], e2[1]) and points_match(e1[1], e2[0])))
-
-    # Check if any edge from poly1 matches any edge from poly2
-    for e1 in edges1:
-        for e2 in edges2:
-            if edges_match(e1, e2):
-                return True
-
-    return False
-
-
-def find_polygon_groups(
-    polygons: List[List[Tuple[float, float]]],
-    tolerance: float = POLYGON_EDGE_TOLERANCE,
-    verbose: bool = False
-) -> List[List[int]]:
-    """
-    Group polygons by adjacency using union-find.
-
-    Two polygons are adjacent if they share at least one edge.
-
-    Args:
-        polygons: List of polygons, each polygon is list of (x, y) vertices
-        tolerance: Distance tolerance for vertex matching
-        verbose: Print debug information about polygon adjacency
-
-    Returns:
-        List of groups, each group is list of polygon indices
-    """
-    if not polygons:
-        return []
-
-    n = len(polygons)
-    uf = UnionFind()
-
-    if verbose:
-        print(f"      find_polygon_groups: checking {n} polygons for adjacency")
-        for i, poly in enumerate(polygons):
-            # Compute centroid for easier identification
-            cx = sum(p[0] for p in poly) / len(poly)
-            cy = sum(p[1] for p in poly) / len(poly)
-            print(f"        Polygon {i}: {len(poly)} vertices, centroid ({cx:.2f}, {cy:.2f})")
-
-    # Check all pairs for shared edges
-    adjacencies = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            if polygons_share_edge(polygons[i], polygons[j], tolerance):
-                uf.union(i, j)
-                adjacencies.append((i, j))
-
-    if verbose:
-        print(f"      Found {len(adjacencies)} adjacencies: {adjacencies}")
-
-    # Group polygons by their root
-    groups: Dict[int, List[int]] = {}
-    for i in range(n):
-        root = uf.find(i)
-        if root not in groups:
-            groups[root] = []
-        groups[root].append(i)
-
-    result = list(groups.values())
-    if verbose:
-        print(f"      Resulting groups: {result}")
-
-    return result
 
 
 def sample_route_for_voronoi(

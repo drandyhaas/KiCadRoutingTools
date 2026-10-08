@@ -74,11 +74,16 @@ def net_pattern_matches(net_name: str, pattern: str) -> bool:
         net_pattern_matches('/GND_A', 'GND')                -> False
         net_pattern_matches('/GND', '/GND')                 -> True
         net_pattern_matches('/Analog/GND', '/GND')          -> False  (path given)
+
+    Case-SENSITIVE on every platform (#1208), as netclass membership is
+    (`list_nets`): plain `fnmatch.fnmatch` applies `os.path.normcase`, which
+    case-folds on Windows only, so `/*PCIE*` selected `/PCIe-M2/FB` there and
+    nowhere else.
     """
-    if fnmatch.fnmatch(net_name, pattern):
+    if fnmatch.fnmatchcase(net_name, pattern):
         return True
     if '/' not in pattern and '/' in net_name:
-        return fnmatch.fnmatch(net_name.rsplit('/', 1)[-1], pattern)
+        return fnmatch.fnmatchcase(net_name.rsplit('/', 1)[-1], pattern)
     return False
 
 
@@ -927,7 +932,7 @@ def identify_power_nets(pcb_data: PCBData,
 
         # Check patterns in order - first match wins
         for pattern, width in zip(patterns, widths):
-            if fnmatch.fnmatch(net.name, pattern):
+            if fnmatch.fnmatchcase(net.name, pattern):
                 power_net_widths[net_id] = width
                 break
 
@@ -1376,7 +1381,7 @@ def matches_diff_pair_patterns(net_name: str, base_name: str, patterns: List[str
     """
     candidates = (net_name, net_name.rsplit('/', 1)[-1],
                   base_name, base_name.rsplit('/', 1)[-1])
-    return any(fnmatch.fnmatch(candidate, pattern)
+    return any(fnmatch.fnmatchcase(candidate, pattern)
                for pattern in patterns for candidate in candidates)
 
 
@@ -1474,7 +1479,7 @@ def find_single_ended_nets(
             continue
 
         # Check if this net matches any pattern
-        matched = any(fnmatch.fnmatch(net_name, pattern) for pattern in patterns)
+        matched = any(fnmatch.fnmatchcase(net_name, pattern) for pattern in patterns)
         if matched:
             result.append((net_name, net_id))
 

@@ -891,9 +891,13 @@ ROWS = [
      "                and (True",
      (T_QB + '::test_a_swap_that_strands_a_cap_is_refused_on_the_tether',),
      'KILLED'),
+    # Re-anchored for #1117, which added `or state.declared_rotations` to
+    # this condition; the mutation still drops only the tether term.
     ('swap-gate-tethers-only-not-asked', 'qu',
-     "                        if ((state._intent_active or state._tether_active)",
-     "                        if ((state._intent_active)",
+     "                        if ((state._intent_active or state._tether_active\n"
+     "                             or state.declared_rotations)",
+     "                        if ((state._intent_active\n"
+     "                             or state.declared_rotations)",
      (T_H + '::test_a_tethers_only_quench_gates_swaps_and_drops_icless_clusters',
       T_QB + '::test_a_swap_that_strands_a_cap_is_refused_on_the_tether',),
      'KILLED'),
