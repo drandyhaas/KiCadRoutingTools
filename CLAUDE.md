@@ -611,7 +611,9 @@ through there too.
 - `tests/gui_parity/test_settings_roundtrip.py` — needs KiCad python; builds
   the REAL headless dialog and round-trips the settings dict: save (the CLOSE
   path), restore (the reopen path), restore from a LEGACY dict whose keys a
-  newer version dropped, and re-save key parity. **Run it whenever you add,
+  newer version dropped, re-save key parity, and one VALUE round trip (a
+  non-current Escalation choice must come back in a fresh dialog -- key
+  parity cannot see a value restore silently drops). **Run it whenever you add,
   rename, or REMOVE a dialog control** — deleting one without updating
   `settings_persistence` crashes on close and loses the user's settings
   (that shipped once; see 31f359c). Seconds to run, no routing.

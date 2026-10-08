@@ -126,6 +126,39 @@ def main():
             failures.append(f"second get_dialog_settings raised "
                             f"{type(e).__name__}: {e}")
 
+    # 5. A VALUE round-trip, which key parity cannot see: the Escalation
+    #    choice (#857) is restored through FindString, and that branch read
+    #    wx.NOT_FOUND in a module that never imports wx -- a NameError its own
+    #    try/except swallowed, so the saved choice never came back.
+    if settings is not None:
+        ch = dlg.escalation
+        cur = ch.GetSelection()
+        alt = next((i for i in range(ch.GetCount()) if i != cur), None)
+        if alt is None:
+            failures.append("escalation offers one choice: the value "
+                            "round-trip cannot be graded")
+        else:
+            ch.SetSelection(alt)
+            want = ch.GetString(alt)
+            saved = get_dialog_settings(dlg)
+            dlg2 = RoutingDialog(None, parse_kicad_pcb(board), board)
+            try:
+                before = dlg2.escalation.GetString(dlg2.escalation.GetSelection())
+                restore_dialog_settings(dlg2, saved)
+                got = dlg2.escalation.GetString(dlg2.escalation.GetSelection())
+            finally:
+                dlg2.Destroy()
+            if before == want:
+                failures.append(f"fixture: a fresh dialog already shows "
+                                f"escalation {want!r}, so restoring it proves "
+                                f"nothing")
+            elif got != want:
+                failures.append(f"escalation not restored: saved {want!r}, "
+                                f"a fresh dialog still shows {got!r}")
+            else:
+                print(f"  escalation value round-trip: OK ({before!r} -> "
+                      f"{got!r})")
+
     dlg.Destroy()
 
     print()
