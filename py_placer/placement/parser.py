@@ -412,6 +412,40 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         return float(shapely.distance(shape, shapely.points(pts)).max()
                      ) <= tol
 
+    def joined(segs):
+        """`segs` with the ends KiCad chains (within `_OUTLINE_JOIN_MM` of
+        each other, transitively) moved onto one point; a segment whose two
+        ends meet is dropped. Single linkage, not first-come: a 15 um
+        segment in a corner with 10 um gaps at both ends closes in KiCad
+        (b6a63ad8 verifier's tiny_chain), and a greedy grouping split it."""
+        from geometry_utils import UnionFind
+        ends = [tuple(ln.coords[k]) for ln in segs for k in (0, -1)]
+        uf = UnionFind()
+        for i in range(len(ends)):
+            uf.find(i)
+            for j in range(i):
+                if math.hypot(ends[i][0] - ends[j][0],
+                              ends[i][1] - ends[j][1]) \
+                        <= _OUTLINE_JOIN_MM + 1e-9:
+                    uf.union(i, j)
+        rep: Dict[int, tuple] = {}
+        for i, p in enumerate(ends):
+            rep.setdefault(uf.find(i), p)
+        out = []
+        for k in range(len(segs)):
+            a, b = rep[uf.find(2 * k)], rep[uf.find(2 * k + 1)]
+            if a != b:
+                out.append(LineString((a, b)))
+        return out
+
+    def closed_loops(segs) -> bool:
+        """Every end of `segs` meets exactly one other: closed chains only."""
+        deg: Dict[tuple, int] = {}
+        for ln in segs:
+            for p in (tuple(ln.coords[0]), tuple(ln.coords[-1])):
+                deg[p] = deg.get(p, 0) + 1
+        return all(d == 2 for d in deg.values())
+
     compose = _nested_even_odd if even_odd else unary_union
     out: Dict[str, tuple] = {}
     for side in set(verts) | set(areas):
@@ -425,21 +459,23 @@ def _outline_shapes_by_side(fp_text: str, layer_re: str,
         if pts and lines.get(side) and not covers(shape, pts):
             # Ends that miss each other by a few microns (ulx3s BAT1's
             # courtyard, glasgow J4's 8 um corner: KiCad closes them, a
-            # strict join does not): snap the drawing onto itself at
-            # `_OUTLINE_JOIN_MM` -- an end within it of another segment
-            # moves onto it -- and polygonise again before settling for the
-            # hull. The snapped drawing covers its vertices to within the
-            # join distance, and is judged at that distance.
-            import shapely
-            from shapely.geometry import MultiLineString
-            ml = MultiLineString([list(ln.coords) for ln in lines[side]])
-            snapped = shapely.snap(ml, ml, _OUTLINE_JOIN_MM)
-            retry = list(areas.get(side, [])) + list(
-                polygonize(unary_union(snapped)))
-            if retry:
-                cand = compose(retry)
-                if covers(cand, pts, _OUTLINE_JOIN_MM):
-                    shape, tol = cand, _OUTLINE_JOIN_MM
+            # strict join does not): join them the way KiCad chains a
+            # courtyard -- END TO END within `_OUTLINE_JOIN_MM`, never an
+            # end onto the middle of a segment -- and accept the result
+            # only when every joined end meets exactly one other, i.e. the
+            # drawing is closed loops with no stub, branch or crossing.
+            # Snapping ends onto SEGMENTS closed a T that stops 15 um short
+            # of an edge, which KiCad reports as malformed_courtyard (b6a63ad8
+            # verifier); a cover test alone admitted crossing ends and stray
+            # parallel lines KiCad rejects too.
+            ends = joined(lines[side])
+            if ends and closed_loops(ends):
+                retry = list(areas.get(side, [])) + list(
+                    polygonize(unary_union(ends)))
+                if retry:
+                    cand = compose(retry)
+                    if covers(cand, pts, _OUTLINE_JOIN_MM):
+                        shape, tol = cand, _OUTLINE_JOIN_MM
         if pts and not covers(shape, pts, tol):
             from shapely.geometry import MultiPoint
             shape, how = MultiPoint(pts).convex_hull, OUTLINE_HULL

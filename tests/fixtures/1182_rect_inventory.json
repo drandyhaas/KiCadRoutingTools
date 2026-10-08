@@ -6,6 +6,9 @@
  "floorplan.py::_PosedState.graded_parts": {
   "grade_rect": 1
  },
+ "floorplan.py::_anchor_reachable": {
+  "grade_by_rot": 1
+ },
  "floorplan.py::_budget_outline_areas": {
   "grade_by_rot": 1
  },

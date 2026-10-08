@@ -99,8 +99,8 @@ ROWS = [
      "            shape, how = shape, OUTLINE_HULL",
      (T1094,), 'KILLED'),
     ('micron-gap-not-joined', 'parser',
-     "            snapped = shapely.snap(ml, ml, _OUTLINE_JOIN_MM)",
-     "            snapped = ml",
+     "            ends = joined(lines[side])",
+     "            ends = list(lines[side])",
      (T1094,), 'KILLED'),
     # --- #1095: the project's courtyard severity -----------------------------
     ('project-ignore-not-read', 'leg',

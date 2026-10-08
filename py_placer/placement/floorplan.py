@@ -3499,6 +3499,30 @@ def zone_is_anchor(zone_rect, part, tol: float) -> bool:
         for r in (part.rot % 360, (part.rot + 90) % 360))
 
 
+def _anchor_reachable(zone, part, tol: float) -> bool:
+    """Could the grade read `zone` as an ANCHOR for `part` (`zone_is_anchor`)
+    at any rotation the seed may give it -- its block's declared `rotation`,
+    else its `rotation_candidates`, else the part's own 90-degree lattice?
+    A plan bound charging such a member is not sound: seated where it does
+    not fit, the grade does not hold it to the zone at all.
+    (`zone_fits_courtyard` tests both orders, so `r` stands for `r + 90`.)"""
+    if zone.rotation is not None:
+        rots = [zone.rotation]
+    elif zone.rotation_candidates:
+        rots = list(zone.rotation_candidates)
+    else:
+        rots = [part.rot]
+    from .legality import rotate_local_bounds
+    # Turned from the 0-degree box, not read from the part's rotation
+    # cache: a declared angle off its lattice has no entry, and the cache
+    # answers a miss with the 0-degree box.
+    return any(
+        not zone_fits_courtyard(
+            zone.rect, rotate_local_bounds(*part.grade_by_rot[0.0], r % 360),
+            tol)
+        for r in rots)
+
+
 def zone_origin_box(zone_rect, bounds, tol: float):
     """Where a part with LOCAL box `bounds` may put its ORIGIN, at ONE rotation.
 
@@ -7383,10 +7407,15 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
             part = state.parts[r]
             b0 = part.grade_by_rot[0.0]
             w, h = b0[2] - b0[0], b0[3] - b0[1]
-            if zone_is_anchor(z.rect, part, tol):
-                # Anchor-graded, as the grade decides it -- on the part's own
-                # 90-degree lattice: two 10 x 4 parts at 45 degrees were
-                # charged as if seated at 0 (8492b3c1 verifier).
+            if _anchor_reachable(z, part, tol):
+                # Anchor-graded at some rotation the seed may give it, as the
+                # grade decides it (`zone_is_anchor`): on the part's own
+                # 90-degree lattice -- two 10 x 4 parts at 45 degrees were
+                # charged as if seated at 0 (8492b3c1 verifier) -- or on any
+                # the block DECLARES (`rotation` / `rotation_candidates`),
+                # where a fit at one angle does not forbid the anchor at
+                # another (b6a63ad8 verifier). Not modelled: place_seed's
+                # --diagonal-rotations fallback, which the plan cannot see.
                 continue
             per_face[part.side] = per_face.get(part.side, 0.0) + w * h
             per_face_c[part.side] = per_face_c.get(part.side, 0.0) + (

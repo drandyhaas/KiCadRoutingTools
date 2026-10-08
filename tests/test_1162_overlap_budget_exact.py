@@ -494,6 +494,37 @@ class TheRoundThreeCases(unittest.TestCase):
                              if v.rule == 'plan_zone_overfull'])
         self.assertEqual(got, {45: False, 0: True})
 
+    def test_a_declared_rotation_set_can_make_the_zone_an_anchor(self):
+        """Seven 10 x 1 bars at 45 degrees in an 8 x 8 zone: on their own
+        lattice they fit (a 7.8 mm box), so 70 mm2 in 64 is forced -- an
+        ERROR at budget 0. When the block declares rotation_candidates
+        [0, 90], the seed may seat them where they do not fit and the grade
+        reads the zone as an anchor: the bound must stand down."""
+        def bar(ref, x, y):
+            return (f'  (footprint "t:BAR" (layer "F.Cu") (at {x} {y} 45)\n'
+                    f'    (property "Reference" "{ref}" (at 0 0) (layer'
+                    f' "F.SilkS"))\n'
+                    '    (fp_rect (start -5 -0.5) (end 5 0.5) (stroke (width'
+                    ' 0.05) (type default)) (layer "F.CrtYd"))\n'
+                    '    (pad "1" smd rect (at 0 0 45) (size 0.4 0.4) (layers'
+                    ' "F.Cu") (net 2 "N2")))\n')
+        refs = [f'B{i}' for i in range(7)]
+        got = {}
+        for cands in (None, [0, 90]):
+            block = {'name': 'z', 'refs': refs, 'zone': [16, 16, 24, 24],
+                     'tolerance_mm': 0}
+            if cands:
+                block['rotation_candidates'] = cands
+            with tempfile.TemporaryDirectory() as td:
+                path = _board(td, 'bars', [bar(r, 20, 5 + 4 * i)
+                                           for i, r in enumerate(refs)])
+                found, _m = _plan(path, {
+                    'blocks': [block],
+                    'legality_budget': {'overlap_area': 0.0}})
+            got[bool(cands)] = bool([v for v in found
+                                     if v.rule == 'plan_zone_overfull'])
+        self.assertEqual(got, {False: True, True: False})
+
 
 if __name__ == '__main__':
     unittest.main()
