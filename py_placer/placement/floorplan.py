@@ -1806,8 +1806,8 @@ def _fixed_pose_waiver_findings(intent: Intent, pcb_data, pcb_file: str, *,
         if pa is None or pb is None:
             continue
         area = legality.pair_overlap_area(
-            pa.sides, pa.side, pa.rect(), pa.tht_rect(),
-            pb.sides, pb.side, pb.rect(), pb.tht_rect())
+            pa.sides, pa.side, pa.grade_rect(), pa.tht_rect(),
+            pb.sides, pb.side, pb.grade_rect(), pb.tht_rect())
         out.append(Violation(
             rule='fixed_pose_overlap_waived',
             severity=intent.severity_of('fixed_pose_overlap_waived', WARN),
@@ -3491,7 +3491,7 @@ def zone_is_anchor(zone_rect, part, tol: float) -> bool:
     lattice.
     """
     return not any(
-        zone_fits_courtyard(zone_rect, part.rect(0.0, 0.0, r), tol)
+        zone_fits_courtyard(zone_rect, part.grade_rect(0.0, 0.0, r), tol)
         for r in (part.rot % 360, (part.rot + 90) % 360))
 
 
@@ -3734,7 +3734,7 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
     def _search(entries):
         """First (x, y, rot) satisfying zone AND every entry, or None."""
         for rot in rots:
-            b = part.rect(0.0, 0.0, rot)
+            b = part.grade_rect(0.0, 0.0, rot)
             t = part.tht_rect(0.0, 0.0, rot)
             box = (_anchor_origin_box(zone_rect, b, tolerance) if anchor
                    else zone_origin_box(zone_rect, b, tolerance))
@@ -3752,7 +3752,7 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
                                   [v for h in holes for v in (h[1], h[3])])
             for x in cx:
                 for y in cy:
-                    r = part.rect(x, y, rot)
+                    r = part.grade_rect(x, y, rot)
                     th = part.tht_rect(x, y, rot)
                     if zone_escape(zone_rect, r, anchor)[0] > tolerance + legality.EPS:
                         continue
@@ -3851,6 +3851,9 @@ class _LocalPart:
         if self._t is None:
             return None
         return legality.offset_far(legality.rotate_far(self._t, rot), x, y)
+
+    # A local part has one ladder: the one it was built from (#1182).
+    grade_rect = rect
 
 
 def intent_zone_keepout_problems(intent, blocks, pcb_data,
@@ -6590,8 +6593,11 @@ class _PosedState:
             if ref in self._exclude:
                 continue
             x, y, rot = self.pose(ref)
+            # The GRADE ladder (#1182): what `grade` reads off a default
+            # state, so an armed (`body_model`) search state is graded on the
+            # same rects as the board it will write.
             out.append(legality.GradedPart(ref=ref, side=part.side,
-                                           rect=part.rect(x, y, rot),
+                                           rect=part.grade_rect(x, y, rot),
                                            tht_rect=part.tht_rect(x, y, rot),
                                            has_tht=part.has_tht))
         return out
@@ -6743,9 +6749,6 @@ class PoseGrader:
 
     def violations(self, *, exclude=(), poses=None) -> List[Violation]:
         state = self.state
-        if getattr(state, 'body_model', False):
-            raise ValueError('a body_model search state grades occupancy rects, '
-                             'not the courtyards the grade reads')
         if self._outline is None:
             self._outline = outline_state(state.pcb_data, state.pcb_file)
         if not self._outline['trustworthy']:
@@ -6888,7 +6891,7 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
                     continue
                 if za.side and sp.side != za.side:
                     continue
-                local0 = sp.bounds_by_rot[0.0]
+                local0 = sp.grade_by_rot[0.0]
                 tried = []
                 feasible = False
                 for base in sorted({(fp.rotation or 0.0) % 360.0, 0.0}):
@@ -7130,11 +7133,11 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 # caller's angle), then turned to the declared rotation --
                 # not its outline on the face it is on now.
                 from .legality import rotate_local_bounds
-                b0 = part.bounds_by_rot[0.0]
+                b0 = part.grade_by_rot[0.0]
                 e = rotate_local_bounds(b0[0], -b0[3], b0[2], -b0[1], rot)
                 r = (fx_ + e[0], fy_ + e[1], fx_ + e[2], fy_ + e[3])
             else:
-                r = part.rect(fx_, fy_, rot)
+                r = part.grade_rect(fx_, fy_, rot)
             if zone_fits_courtyard(z.rect, r, tol):
                 esc, _axis = _rect_escape(z.rect, r)
             else:
@@ -7237,7 +7240,7 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         counted = []
         for r in members:
             part = state.parts[r]
-            b0 = part.bounds_by_rot[0.0]
+            b0 = part.grade_by_rot[0.0]
             w, h = b0[2] - b0[0], b0[3] - b0[1]
             if not zone_fits_courtyard(z.rect, (0.0, 0.0, w, h), tol) and                     not zone_fits_courtyard(z.rect, (0.0, 0.0, h, w), tol):
                 continue            # anchor-graded: the zone cannot hold it

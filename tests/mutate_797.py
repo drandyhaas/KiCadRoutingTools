@@ -98,13 +98,15 @@ ROWS = [
     # kind: hand the seed state no exclusive zones at all.
     ('the-seed-state-drops-the-exclusive-zones', 's',
      "        exclusive_zones=(floorplan.zone_entries(intent, blocks)\n"
-     "                         if intent else ()),",
-     "        exclusive_zones=(),",
+     "                         if intent else ()),\n"
+     "        # #916. Reaches `pose_ok` through the state, which is the search",
+     "        exclusive_zones=(),\n"
+     "        # #916. Reaches `pose_ok` through the state, which is the search",
      (T797S,), 'KILLED'),
 
     ('the-external-caller-drops-them', 'ps',
-     "                    exclusive_zones=floorplan.zone_entries(intent, blocks2))",
-     "                    exclusive_zones=())",
+     "                    exclusive_zones=floorplan.zone_entries(intent, blocks2),",
+     "                    exclusive_zones=(),",
      (T701P,), 'KILLED'),
 
     # ---- the resolution: membership, side, the slice --------------------

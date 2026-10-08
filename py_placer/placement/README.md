@@ -1605,6 +1605,37 @@ re-seating 85/92 while leaving its zone targets unmoved):
   cap is past its limit). Its record is `JSON_SUMMARY.decap_rung`. It stays
   off by default: `tests/test_placement_ab.py`'s `repair-decaps-*` rows
   improve two of five boards and regress none, short of the N-1 rule.
+  The repair also reads check_assembly's own channels (fa10 P1): a part
+  over a pin frame's drilled pin is charged absolutely (`Pin census`,
+  #1212), and the COURTYARD channel (`Courtyard census`, #1182) --
+  `CourtyardCensus` with the intent's waivers -- is charged only under
+  `--baseline BOARD`, because check_assembly gates a courtyard pair only
+  when a member moved against one. The member that moved is charged
+  (weight its depth, >= 1 mm), and the pairs are re-graded at the final
+  poses: a charged pair that still gates, or a gating pair a moved part
+  created, keeps its mover out of `repaired`, and the note says when the
+  search spaced pad boxes. `JSON_SUMMARY`'s repair record carries
+  `courtyard_gating_before` / `_after` (None without a baseline).
+- **`--body-model`** (#1182, from #916) arms every search state a
+  `place_seed` run builds -- seed, polish, the post-polish re-seat, repair,
+  reseat and its inner seed -- with `placement.body`'s occupancy (courtyard,
+  else the drawn .Fab body, else silk, each united with the pads). Only the
+  NEIGHBOUR currency moves (`quench._Part.rect`): every intent, zone,
+  keep-out, edge-claim and board question asks `_Part.grade_rect`, the
+  courtyard-else-pad-box ladder the floorplan grade reads off a default
+  state, so the armed search cannot refuse a seat the grade accepts and the
+  PoseGrader grades an armed state exactly as an unarmed one. For a library
+  that draws bodies and no courtyards (One-Air-Max: 197 of 204 parts) pad
+  boxes let bodies overlap. Measured on One-Air-Max's s180_0p with
+  `--repair --baseline`: armed, check_assembly's gating pairs went 6 -> 2;
+  unarmed, 5 of the 6 charged movers ended UNRESOLVED. Opt-in unless the
+  `body-seed-*` rows of `test_placement_ab.py` pass the gate.
+- **`--reseat`'s gate** measures its last term, courtyard overlap, on
+  check_assembly's geometry (`CourtyardGrade.overlap_exact` at the state's
+  poses), not the search's rects -- One-Air-Max read `0.4323 -> 0.4323` on
+  pad boxes while four pairs gated; it now reads 13.4736. hpwl still ranks
+  above it (run 4's order), so a re-seat that clears a pair at an hpwl cost
+  is refused, visibly.
 - **`place_reconstruct.py`** (`placement/reconstruct.py`) — the structural
   ("puzzle") solver: tier classification (frame -> anchors -> smalls),
   corner-inset pattern fit (propose-only), rigid ±v vector detection, ONE

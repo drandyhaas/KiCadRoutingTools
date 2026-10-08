@@ -338,10 +338,10 @@ ROWS = [
      (T983,), 'KILLED'),
     ('band-read-at-the-unrounded-pose', 'sd',
      "    px, py = round(x, 3), round(y, 3)\n"
-     "    legacy = state.edge_gate.rect_outside_amount(part.rects(px, py, part.rot)[0])\n"
+     "    legacy = state.edge_gate.rect_outside_amount(part.grade_rect(px, py, part.rot))\n"
      "    amount, basis, _row = band_amount(",
      "    px, py = x, y\n"
-     "    legacy = state.edge_gate.rect_outside_amount(part.rects(px, py, part.rot)[0])\n"
+     "    legacy = state.edge_gate.rect_outside_amount(part.grade_rect(px, py, part.rot))\n"
      "    amount, basis, _row = band_amount(",
      (T983,), 'KILLED'),
     ('settle-ignores-the-facing-edge', 'sd',

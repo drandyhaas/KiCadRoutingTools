@@ -122,7 +122,9 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     where `candidate_valid` ends in the neighbour loop.
     """
     part = state.parts[ref]
-    r, tht = part.rects(x, y, rot)
+    # The grade ladder (#1182): board, keep-out and exclusive zone are the
+    # floorplan grade's questions; `candidate_valid` asks the neighbours.
+    r, tht = part.grade_rects(x, y, rot)
     if state.edge_gate.rect_outside_amount(r) > 1e-9:
         return False
     # BOTH rects, because `rule_keepout` grades both: a through-hole part's
@@ -207,7 +209,7 @@ def zone_gate(part, constraint, tol: float):
                     and constraint[1] - tol <= y <= constraint[3] + tol)
     else:
         def _in(x, y, rot):
-            return _rect_inside(part.rect(x, y, rot), constraint, tol)
+            return _rect_inside(part.grade_rect(x, y, rot), constraint, tol)
     return _in, anchor
 
 
@@ -247,7 +249,7 @@ def _feasible_centre_box(part, constraint, tol, anchor):
     # its second operand, so `min_r(x0 - tol - b0_r)` is `x0 - tol - max_r(b0_r)`
     # evaluated with the same operands in the same order.
     from placement import floorplan as _fp
-    boxes = [_fp.zone_origin_box(constraint, part.rect(0.0, 0.0, rot % 360), tol)
+    boxes = [_fp.zone_origin_box(constraint, part.grade_rect(0.0, 0.0, rot % 360), tol)
              for rot in (part.rot, part.rot + 90.0,
                          part.rot + 180.0, part.rot + 270.0)]
     return (min(b[0] for b in boxes), min(b[1] for b in boxes),
@@ -1707,7 +1709,7 @@ def _edge_pose(part, bounds, edge: str, frac: float, overhang: float
     """Center coordinates that put the part's courtyard `overhang` mm past
     the named edge of the BOUNDING BOX, at fraction `frac` along it. A first
     guess only -- see _edge_correct for why it cannot be the answer."""
-    lx0, ly0, lx1, ly1 = part.rect(0.0, 0.0, part.rot)
+    lx0, ly0, lx1, ly1 = part.grade_rect(0.0, 0.0, part.rot)
     x0, y0, x1, y1 = bounds
     if edge == 'north':
         return x0 + (x1 - x0) * frac, y0 - overhang - ly0
@@ -1744,7 +1746,7 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
     part = state.parts[ref]
     converged = False
     for _ in range(4):
-        amt = state.edge_gate.rect_outside_amount(part.rect(x, y, part.rot))
+        amt = state.edge_gate.rect_outside_amount(part.grade_rect(x, y, part.rot))
         err = target - amt
         if abs(err) < 0.02:
             converged = True
@@ -1760,7 +1762,7 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
     else:
         # Ran out of iterations. One last measurement decides it -- a walk
         # that happened to land on its target on the final step is converged.
-        amt = state.edge_gate.rect_outside_amount(part.rect(x, y, part.rot))
+        amt = state.edge_gate.rect_outside_amount(part.grade_rect(x, y, part.rot))
         converged = abs(target - amt) < 0.02
     if band is not None and converged:
         return _body_band_correct(state, ref, edge, x, y, target, band)
@@ -1868,7 +1870,7 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     collects WHY, so a refusal can name the keep-out instead of sending the
     reader to look at an outline that is not the problem.
     """
-    r, tht = part.rects(x, y, part.rot)
+    r, tht = part.grade_rects(x, y, part.rot)
     amt = state.edge_gate.rect_outside_amount(r)
     # #961: the band in the currency `rule_edge_connector` now grades it in
     # -- the drawn body at zero margin where it can be measured, `amt` itself
@@ -2079,7 +2081,7 @@ def _faces_its_edge(state, part, entry: Dict, edge: str, x: float, y: float) -> 
         moved.x, moved.y, moved.rotation = px, py, part.rot
         return drawn_body_rect(bodies.get(part.ref), moved)
 
-    rect, _basis = edge_seat_rect(entry, part.rect(px, py, part.rot), body)
+    rect, _basis = edge_seat_rect(entry, part.grade_rect(px, py, part.rot), body)
     return _nearest_edge(rect, tuple(round(v, 6) for v in bounds)) == edge
 
 
@@ -2098,7 +2100,7 @@ def _band_reading(state, part, edge: str, x: float, y: float):
     occupancy reading itself, which is what gates the setback."""
     from .connector_geometry import band_amount, geometry_for
     px, py = round(x, 3), round(y, 3)
-    legacy = state.edge_gate.rect_outside_amount(part.rects(px, py, part.rot)[0])
+    legacy = state.edge_gate.rect_outside_amount(part.grade_rect(px, py, part.rot))
     amount, basis, _row = band_amount(
         geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
         legacy, state.edge_gate.margin, pose=(px, py, part.rot))
@@ -2163,7 +2165,7 @@ def _outside_its_along_edge_claim(state, part, entry: Dict, edge: str,
     ctx = SimpleNamespace(gate=state.edge_gate, outline=outline,
                           outline_bounds=tuple(round(v, 6) for v in bounds),
                           edge_seating=[], abstain=lambda key, why: None)
-    probe = SimpleNamespace(rect=part.rect(round(x, 3), round(y, 3), part.rot))
+    probe = SimpleNamespace(rect=part.grade_rect(round(x, 3), round(y, 3), part.rot))
     return any(True for _ in _fp._grade_along_edge(ctx, dict(entry, edge=edge),
                                                    part.ref, probe, 'error'))
 
@@ -2395,7 +2397,7 @@ def _window_step(state, part, entry, edge, x, y, seats, origin=None):
     if win is None:
         return x, y
     ax = _axis_of(edge)
-    r = part.rect(round(x, 3), round(y, 3), part.rot)
+    r = part.grade_rect(round(x, 3), round(y, 3), part.rot)
     centre = (r[ax] + r[ax + 2]) / 2.0
     mid = e_lo + (win[0] + win[1]) / 2.0 * (e_hi - e_lo)
     step = _WINDOW_GUARD_MM if mid > centre else -_WINDOW_GUARD_MM
@@ -2700,7 +2702,7 @@ def _edge_frac_bounds(part, bounds, edge: str) -> Tuple[float, float]:
     Returns (lo, hi); lo > hi means the part is wider than the edge, which is
     a real answer and the caller must treat it as "no legal fraction".
     """
-    lx0, ly0, lx1, ly1 = part.rect(0.0, 0.0, part.rot)
+    lx0, ly0, lx1, ly1 = part.grade_rect(0.0, 0.0, part.rot)
     x0, y0, x1, y1 = bounds
     if edge in ('north', 'south'):
         span, a, b = (x1 - x0), lx0, lx1
@@ -2803,7 +2805,7 @@ def _centre_offset_mm(part, edge: str) -> float:
 
     Turns with the part, so it must be read at the rotation in use.
     """
-    lx0, ly0, lx1, ly1 = part.rect(0.0, 0.0, part.rot)
+    lx0, ly0, lx1, ly1 = part.grade_rect(0.0, 0.0, part.rot)
     a, b = ((lx0, lx1) if _axis_of(edge) == 0 else (ly0, ly1))
     return (a + b) / 2.0
 
@@ -2825,6 +2827,10 @@ class _AtRotation:
 
     def rect(self, x, y, rot):
         return self._part.rect(x, y, rot)
+
+    def grade_rect(self, x, y, rot):
+        # #1182: the edge-claim readers ask the GRADE ladder.
+        return self._part.grade_rect(x, y, rot)
 
 
 def _stage1_geometry_rot(part, claim, fits=None):
@@ -2989,7 +2995,7 @@ def _already_on_its_edge(state, part) -> bool:
     once. A measurement that cannot be taken must raise, not return the
     permissive answer.
     """
-    return state.edge_gate.rect_outside_amount(part.rect()) > _ON_EDGE_EPS_MM
+    return state.edge_gate.rect_outside_amount(part.grade_rect()) > _ON_EDGE_EPS_MM
 
 
 def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
@@ -3877,26 +3883,32 @@ FIXED_OVERLAP_EPS_MM2 = 1e-6
 def _courtyard_overlap(state, a: str, pose_a, b: str, pose_b):
     """`(area mm^2, w, h)` of the courtyard overlap of `a` at `pose_a` with
     `b` at `pose_b`. The VERDICT is `legality.pair_overlap_area` -- the
-    side-aware measure `legality_metrics`' `overlap_area` and the seeder's
-    `_overlap_at` use -- called, not re-derived, and where those rects
-    overlap, `legality.pair_overlap_area_exact` on the drawn outlines, the
-    measure `check_assembly` grades the seated pose with (#1094: StickHub's
-    declared -135 degree human poses were refused on rects alone). `w` x `h`
-    is the courtyard rects' intersection, for the refusal's text only."""
-    from .legality import (graded_part_at_pose, pair_overlap_area,
-                           pair_overlap_area_exact)
+    side-aware measure -- on each part's DRAWN courtyard, the way KiCad
+    judges a declared pose (`grade_rect`), and where those overlap,
+    `legality.pair_overlap_area_exact` on the drawn outlines (#1094:
+    StickHub's declared -135 degree human poses were refused on rects
+    alone). A part that draws NO courtyard is screened on its occupancy
+    instead (`occupancy_rect_at(courtyard_less_only=True)`, #1182): its
+    ladder rect is a pad box, and two fab bodies meeting outside their pads
+    read 0 while check_assembly grades them. `w` x `h` is the rects'
+    intersection, for the refusal's text only."""
+    from .legality import (graded_part_at_pose, occupancy_rect_at,
+                           pair_overlap_area, pair_overlap_area_exact)
     if getattr(state, 'courtyards_ignored', False):
         # #1101: the project waives KiCad's courtyard rule, so a declared
         # pose is not refused for one (its drill holes still are, below).
         return 0.0, 0.0, 0.0
     pa, pb = state.parts[a], state.parts[b]
-    ra, ta = pa.rect(*pose_a), pa.tht_rect(*pose_a)
-    rb, tb = pb.rect(*pose_b), pb.tht_rect(*pose_b)
+    cache = state.__dict__.setdefault('_exact_overlap_cache', {})
+    pcb_file = getattr(state, 'pcb_file', None)
+    ta, tb = pa.tht_rect(*pose_a), pb.tht_rect(*pose_b)
+    ra = occupancy_rect_at(state.pcb_data, a, pose_a, pa.grade_rect(*pose_a),
+                           pcb_file, cache, courtyard_less_only=True)
+    rb = occupancy_rect_at(state.pcb_data, b, pose_b, pb.grade_rect(*pose_b),
+                           pcb_file, cache, courtyard_less_only=True)
     area = pair_overlap_area(pa.sides, pa.side, ra, ta,
                              pb.sides, pb.side, rb, tb)
     if area > FIXED_OVERLAP_EPS_MM2:
-        cache = state.__dict__.setdefault('_exact_overlap_cache', {})
-        pcb_file = getattr(state, 'pcb_file', None)
         ga = graded_part_at_pose(state.pcb_data, a, pose_a, pa.side, ra, ta,
                                  ta is not None, pcb_file, cache)
         gb = graded_part_at_pose(state.pcb_data, b, pose_b, pb.side, rb, tb,
@@ -4039,7 +4051,7 @@ def _fixed_pose_check(state, ref: str, pose, obstacles: Dict[str, Tuple],
     x, y, rot = pose
     reasons: List[str] = []
     conflicts: Dict[str, str] = {}
-    r, tht = part.rects(x, y, rot)
+    r, tht = part.grade_rects(x, y, rot)
     outside = state.edge_gate.rect_outside_amount(r) > 1e-9
     reasons.extend(f"keep-out {n!r}"
                    for n in state.keepout_blockers(ref, (r, tht)))
@@ -6811,7 +6823,9 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                      board_edge_clearance: float = 0.55,
                      grid_step: float = 0.1,
                      caps: Sequence[float] = REPAIR_CAPS_MM,
-                     repair_decaps: bool = False) -> Dict:
+                     repair_decaps: bool = False,
+                     baseline_file: Optional[str] = None,
+                     body_model: bool = False) -> Dict:
     """Violation-driven minimal-move repair of a PLACED board (#place_seed
     --repair). Everything clean freezes; only violators move, worst first,
     each seated by the seeder's own search targeted at its CURRENT pose with
@@ -6839,6 +6853,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     ring sweeps x O(parts) per candidate, and on a 217-part board it ran 46
     minutes (run 9). Scope it with the violator set, not with a clock.
     """
+    import os
     import pose_score
     from placement import floorplan, legality as _leg
 
@@ -6886,7 +6901,11 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         # partly-still-inside stepping stone, which is exactly the property
         # the quench lacks and why the quench's gate has to be monotone.
         exclusive_zones=(floorplan.zone_entries(intent, blocks)
-                         if intent else ()))
+                         if intent else ()),
+        # #1182: armed, the seat search spaces parts on check_assembly's
+        # occupancy, so a courtyard pair this repair is charged for can be
+        # cleared rather than re-seated onto the same pad-box-legal overlap.
+        body_model=body_model)
     # #975: see `seed_from_intent`. Without an intent there is no grade to
     # compare on, and an edge seat keeps today's preference guards only.
     pose_grader = (floorplan.PoseGrader(
@@ -7167,6 +7186,55 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                          f"not repairable here")
             continue
         _charge(other, CONTAINMENT_CHARGE_MM)
+
+    # COURTYARD census (#1182): check_assembly's own courtyard channel
+    # (`CourtyardCensus`, with the intent's waivers), and its GATE. The
+    # repair used to read no courtyard pair at all -- One-Air-Max's s180_0q
+    # printed `Repair census: 0 conflict pair(s)` while check_assembly
+    # --baseline gated C27/L1, U5/U8, D6/D7 and JP3/U12. check_assembly gates
+    # a courtyard pair only when a member MOVED against a baseline, so the
+    # repair charges only then: with no `baseline_file` it reports and does
+    # not charge (charging absolutely churned by-design pairs on 5 of 34
+    # healthy boards). The member that moved is the one charged -- our move
+    # put it there -- by `_mover_key`, weight its depth (>= 1 mm).
+    cy_census = None
+    cy_base = None
+    cy_gating_before: List = []
+    cy_charged: Dict[str, Set] = {}
+    try:
+        cy_census = _leg.CourtyardCensus(
+            pcb_data, pcb_file,
+            intent_waivers=(intent.waiver_pairs() if intent else ()))
+        if baseline_file:
+            from kicad_parser import parse_kicad_pcb as _parse
+            cy_base = _parse(baseline_file)
+        _moved0 = (_leg.moved_refs(pcb_data, cy_base)
+                   if cy_base is not None else None)
+        _cg = cy_census.grade(moved=_moved0)
+        cy_gating_before = list(_cg.gating or ())
+        print(f"  Courtyard census: {len(_cg.blocking)} blocking pair(s), "
+              + (f"{len(cy_gating_before)} gating against "
+                 f"{os.path.basename(baseline_file)}, charged"
+                 if cy_base is not None else
+                 "none charged (no --baseline: check_assembly gates a "
+                 "courtyard pair only when a member moved against one)"))
+    except Exception as exc:                                 # noqa: BLE001
+        cy_census = None
+        notes.append(f"courtyard census unavailable ({type(exc).__name__}: "
+                     f"{exc}) -- no courtyard pair charged")
+    for q in cy_gating_before:
+        free = [r for r in (q.a, q.b)
+                if r in state.parts and not state.parts[r].locked]
+        mine = [r for r in free if r in (_moved0 or ())] or free
+        if not mine:
+            notes.append(f"courtyard {q.a}<->{q.b} ({q.area_mm2}mm2): both "
+                         f"file-locked -- not repairable here")
+            continue
+        ordered = sorted(mine, key=_mover_key)
+        _charge(ordered[0], max(1.0, float(q.depth_mm or 0.0)))
+        cy_charged.setdefault(ordered[0], set()).add(frozenset((q.a, q.b)))
+        for partner in ordered[1:]:
+            partner_of.setdefault(ordered[0], []).append(partner)
 
     # Off-board census on PAD/HOLE extents at ZERO margin -- copper or drill
     # off the outline is a fab defect; a COURTYARD poking past the edge is
@@ -7598,6 +7666,44 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                     else " (it moved)") if ref in moved_refs
                    else " (it did not move)")
                 + " -- NOT reported repaired")
+
+    # #1182: the COURTYARD half of the honesty re-grade, on check_assembly's
+    # channel at the FINAL poses and against the same baseline. A part
+    # charged for a gating pair that still gates, or a part this repair
+    # moved that is now in a gating pair the input did not have, is not
+    # `repaired`. Unarmed, the seat search spaced pad boxes, which is how a
+    # move can leave a courtyard pair exactly where it was: say so.
+    courtyard_after = None
+    if cy_census is not None and cy_base is not None:
+        _final = {r: (p.x, p.y, p.rot) for r, p in state.parts.items()}
+        _cga = cy_census.grade(_final, moved=_leg.moved_refs_at(
+            pcb_data, cy_base, _final))
+        courtyard_after = len(_cga.gating or ())
+        _before = {frozenset((q.a, q.b)) for q in cy_gating_before}
+        for q in (_cga.gating or ()):
+            key = frozenset((q.a, q.b))
+            for r in sorted(key):
+                if key in _before and key in cy_charged.get(r, ()):
+                    why = (f"its courtyard pair with "
+                           f"{(set(key) - {r}).pop()} still gates "
+                           f"({q.area_mm2}mm2)")
+                elif key not in _before and r in moved_refs:
+                    why = (f"its move created a gating courtyard pair with "
+                           f"{(set(key) - {r}).pop()} ({q.area_mm2}mm2)")
+                else:
+                    continue
+                repaired[:] = [x for x in repaired if x != r]
+                if r not in unresolved:
+                    unresolved.append(r)
+                unresolved_claims.setdefault(r, [])
+                if 'courtyard_blocking' not in unresolved_claims[r]:
+                    unresolved_claims[r] = sorted(
+                        unresolved_claims[r] + ['courtyard_blocking'])
+                hint = ("" if body_model else
+                        " (the seat search spaced pad boxes; --body-model "
+                        "seats on check_assembly's occupancy)")
+                notes.append(f"{r}: UNRESOLVED -- {why}{hint} -- NOT "
+                             f"reported repaired")
     return {'moves': moves, 'repaired': repaired, 'unrepairable':
             unrepairable + failed, 'unresolved': unresolved,
             'violators': violators, 'notes': notes,
@@ -7606,6 +7712,11 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             # and ones its move created. Refs the run-7 pad/body re-grade
             # made unresolved are in `unresolved` but not here.
             'unresolved_claims': unresolved_claims,
+            # #1182: check_assembly's gating courtyard pairs against the
+            # baseline, before and after; None without a baseline.
+            'courtyard_gating_before': (len(cy_gating_before)
+                                        if cy_base is not None else None),
+            'courtyard_gating_after': courtyard_after,
             'pad_report_before': {k: pads[k] for k in
                                   ('pad_conflicts', 'hole_conflicts',
                                    'oob_pad_count')},
@@ -7995,7 +8106,8 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                  evict_depth: int = 0,
                  min_gain: float = 0.0,
                  edge_bands: Optional[Dict[str, float]] = None,
-                 decap_claim_after_ics: Optional[bool] = None) -> Dict:
+                 decap_claim_after_ics: Optional[bool] = None,
+                 body_model: bool = False) -> Dict:
     """LIFT a subset of parts and re-seat them FROM SCRATCH at their net
     centroids, holding every other part fixed as an obstacle.
 
@@ -8117,7 +8229,21 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         # #701: the declared keep-outs reach the SEAT PREDICATE (see
         # `seed_from_intent`). `intent` is optional on this path, so the
         # inert default is what a caller without one gets.
-        keepouts=intent.keepouts if intent else ())
+        keepouts=intent.keepouts if intent else (),
+        body_model=body_model)
+    # #1182: the gate's overlap term on the GRADER's ruler -- check_assembly's
+    # courtyard channel at the state's poses -- not on this state's rects,
+    # which on a courtyard-less library are pad boxes: One-Air-Max's
+    # `--reseat C27 D6 JP3 U8` was `GATE REFUSED, overlap 0.4323->0.4323`
+    # while four courtyard pairs gated. Every `measure` below passes it.
+    from placement import legality as _leg_r
+    _cy_census = _leg_r.CourtyardCensus(
+        pcb_data, pcb_file,
+        intent_waivers=(intent.waiver_pairs() if intent else ()))
+
+    def _cy_overlap(s):
+        return _cy_census.grade({r: (p.x, p.y, p.rot)
+                                 for r, p in s.parts.items()}).overlap_exact
     # NO `exclusive_zones=` here, and that is measured rather than assumed.
     # A draft of #797 passed one, with a paragraph explaining why it was safe.
     # A blind review showed this state is never consulted by a seat predicate
@@ -8182,7 +8308,8 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
 
     def _empty(reason: str) -> Dict:
         notes.append(reason)
-        _empty_gate = _recon.measure(state, edge_bands or {})
+        _empty_gate = _recon.measure(state, edge_bands or {},
+                                     overlap=_cy_overlap)
         return {'moves': [], 'reseated': [], 'refused': sorted(refused),
                 'intent_used': intent,
                 'unseated': [], 'scope': [], 'scope_source': scope_source,
@@ -8321,7 +8448,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                                tethers=_bundle.get('tethers'))
 
     # ---- seat ---------------------------------------------------------------
-    before = _recon.measure(state, gate_bands)
+    before = _recon.measure(state, gate_bands, overlap=_cy_overlap)
     intent_before = probe.snapshot() if probe is not None else None
     bases_before = (reseat_bases(before, intent_before['count'],
                                  scope_hpwl(state, scope))
@@ -8337,6 +8464,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         # #1151: a scope ref this pass cannot seat stays where it was; the
         # seed's staging row is for a board seeded from scratch.
         dispose_unseated=False,
+        body_model=body_model,
         # The seeder builds its OWN state, so `--lock` -- which this pass
         # resolved into ITS state as extra_locked_refs -- is invisible to the
         # eviction rung. Without this it would cheerfully trade out a ref the
@@ -8390,6 +8518,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     # whole-pass gate below throws it out rather than half of it.
     pruned = _recon.prune_assignment(state, old, notes,
                                      edge_bands=gate_bands,
+                                     overlap=_cy_overlap,
                                      exempt=set(evicted),
                                      evidenced=set(scope),
                                      # #698: the sweep's tuple has no intent
@@ -8400,7 +8529,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                                      # the pass's win IS in the tuple.
                                      intent_probe=(probe.terms if probe
                                                    is not None else None))
-    after = _recon.measure(state, gate_bands)
+    after = _recon.measure(state, gate_bands, overlap=_cy_overlap)
     witnesses_after = _recon.damage_witnesses(state)
     _oob = _recon.GATE_TERMS.index('oob')
     intent_after = probe.snapshot() if probe is not None else None
@@ -8432,7 +8561,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         for ref, (x, y, rot) in old.items():
             state.apply_move(ref, x, y, rot)
         witnesses_after = _recon.damage_witnesses(state)
-        after = _recon.measure(state, gate_bands)
+        after = _recon.measure(state, gate_bands, overlap=_cy_overlap)
         notes.append(reseat_refusal_note(len(scope), accept_basis))
 
     if evicted:

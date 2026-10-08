@@ -572,6 +572,24 @@ Examples:
                         "worse, and the move is proportionate. Off by "
                         "default: without it a decap violator is not moved, "
                         "and is reported unresolved")
+    p.add_argument("--body-model", action="store_true",
+                   help="#1182: seat, polish, repair and re-seat on the "
+                        "occupancy check_assembly grades courtyards on "
+                        "(courtyard, else the drawn .Fab body, each united "
+                        "with the pads) instead of courtyard-else-pad-box. "
+                        "Changes the neighbour spacing only: zones, keep-outs, "
+                        "edge claims and the board term keep the rect the "
+                        "floorplan grade reads. For a library that draws "
+                        "bodies and no courtyards (One-Air-Max: 197 of 204 "
+                        "parts), where pad boxes let bodies overlap")
+    p.add_argument("--baseline", metavar="BOARD", default=None,
+                   help="#1182: with --repair, charge the parts in "
+                        "check_assembly's GATING courtyard pairs -- the "
+                        "blocking pairs with a member moved against BOARD, "
+                        "the same set `check_assembly --baseline BOARD` "
+                        "gates -- and re-grade them after the moves. Without "
+                        "it --repair reports the courtyard census and "
+                        "charges nothing, as check_assembly gates nothing")
     p.add_argument("--reseat", nargs="*", default=None, metavar="REF",
                    help="LIFT the named parts and re-seat them FROM SCRATCH "
                         "at their net centroids, holding every other part "
@@ -671,6 +689,13 @@ Examples:
                 "everything)")
     if args.repair_decaps and not args.repair:
         p.error("--repair-decaps only applies to --repair")
+    if args.baseline is not None:
+        # #1182: only --repair reads it, and an unreadable one would leave the
+        # courtyard gate unarmed with nothing said.
+        if not args.repair:
+            p.error("--baseline only applies to --repair")
+        if not os.path.isfile(args.baseline):
+            p.error(f"--baseline {args.baseline}: no such board file")
     if args.dry_run and not (args.repair or args.reseat is not None):
         p.error("--dry-run only applies to --repair / --reseat")
     if args.reseat_min_gain and args.reseat is None:
@@ -862,7 +887,8 @@ Examples:
                 # silently ignored on this path (#699).
                 evict_depth=args.evict_depth,
                 min_gain=args.reseat_min_gain,
-                decap_claim_after_ics=args.decap_claim_after_ics)
+                decap_claim_after_ics=args.decap_claim_after_ics,
+                body_model=args.body_model)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
             # Over the SCOPE only: the line prints it as "{n} re-seated
@@ -992,7 +1018,9 @@ Examples:
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 grid_step=args.grid_step,
-                repair_decaps=args.repair_decaps)
+                repair_decaps=args.repair_decaps,
+                baseline_file=args.baseline,
+                body_model=args.body_model)
             for note in result['notes']:
                 print(f"  NOTE: {note}")
             max_move = 0.0
@@ -1167,7 +1195,8 @@ Examples:
         evict_depth=args.evict_depth,
         rotate_by_facing=args.rotate_by_facing,
         diagonal_rotations=args.diagonal_rotations,
-        decap_claim_after_ics=args.decap_claim_after_ics)
+        decap_claim_after_ics=args.decap_claim_after_ics,
+        body_model=args.body_model)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     # #1151: a STAGED part has a placement row (it is written off the board)
@@ -1250,6 +1279,7 @@ Examples:
             halo_coef=0.15, halo_weight=2.0, edge_halo=2.0, edge_weight=2.0,
             ignore_nets=args.ignore_nets,
             metrics_out=ratsnest, intent_gate=_gate,
+            body_model=args.body_model,
             corridor_weight=args.corridor_weight,
             corridor_specs=list((intent.health or {}).get('bus_corridors')
                                 or ()) or None)
@@ -1324,7 +1354,9 @@ Examples:
                     # region, so `place_seed` would exit 4 on a board it had
                     # just repaired. Resolved with `sources`, the same blocks
                     # the grade below uses.
-                    exclusive_zones=floorplan.zone_entries(intent, blocks2))
+                    exclusive_zones=floorplan.zone_entries(intent, blocks2),
+                    # #1182: the same occupancy the seed and polish used.
+                    body_model=args.body_model)
                 zone_of = {}
                 for z in intent.blocks:
                     if z.rect is None:

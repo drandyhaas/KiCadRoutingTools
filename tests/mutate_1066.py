@@ -122,8 +122,10 @@ ROWS = [
     # ---- (b) the decap rung, opt-in ----------------------------------------
     # On by default.
     ('the-rung-defaults-on', 's',
-     "                     repair_decaps: bool = False) -> Dict:\n",
-     "                     repair_decaps: bool = True) -> Dict:\n",
+     "                     repair_decaps: bool = False,\n"
+     "                     baseline_file: Optional[str] = None,\n",
+     "                     repair_decaps: bool = True,\n"
+     "                     baseline_file: Optional[str] = None,\n",
      (T1066,), 'KILLED'),
 
     # The rung moves the IC, not the cap.

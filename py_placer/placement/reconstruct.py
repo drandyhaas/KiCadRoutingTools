@@ -170,7 +170,7 @@ def format_gate(t) -> str:
                     for n, v in zip(GATE_TERMS, t))
 
 
-def measure(state, edge_bands=None) -> Tuple:
+def measure(state, edge_bands=None, *, overlap=None) -> Tuple:
     """The lexicographic gate tuple. Smaller-or-equal is acceptable.
 
     Order (run-8): LOCKED CONTACTS first, then pad conflicts, hole shortfall,
@@ -197,16 +197,24 @@ def measure(state, edge_bands=None) -> Tuple:
     STACKED because nothing above hpwl could see them: the stack-pair COUNT
     is the non-gameable per-pair channel (corpus-calibrated ZERO on all 33
     healthy boards, exact and AABB currencies), so it sits ABOVE hpwl where
-    the aggregate never can."""
+    the aggregate never can.
+
+    `overlap` (#1182), a callable `state -> mm2`, replaces the last term's
+    ruler: `reseat_scope` passes check_assembly's courtyard channel at the
+    state's poses (`CourtyardGrade.overlap_exact`), because the search's own
+    rects are pad boxes on a courtyard-less library -- One-Air-Max's reseat
+    read `0.4323 -> 0.4323` while four courtyard pairs gated."""
     m = state.pad_legality_metrics() if state.legality_ctx is not None else {}
     leg = state.legality_metrics()
+    ov = (overlap(state) if overlap is not None
+          else leg.get('overlap_area', 0.0))
     return (m.get('locked_contact_pairs', 0),
             m.get('pad_conflict_pairs', 0),
             round(m.get('hole_shortfall', 0.0), 4),
             round(pad_oob_amount(state, edge_bands), 4),
             m.get('pad_intersection_pairs', 0),
             round(leg.get('hpwl', 0.0), 3),
-            round(leg.get('overlap_area', 0.0), 4))
+            round(ov, 4))
 
 
 # --------------------------------------------------------------------------
@@ -960,7 +968,7 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
                      edge_bands: Optional[Dict[str, float]] = None,
                      exempt: Optional[Set[str]] = None,
                      evidenced: Optional[Set[str]] = None,
-                     intent_probe=None) -> List[str]:
+                     intent_probe=None, overlap=None) -> List[str]:
     """Per-part revert sweep after an ACCEPTED assignment (run-4 F3b).
 
     The stage gate is one board-wide lexicographic tuple, so an assignment
@@ -1035,11 +1043,11 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
         p = state.parts[ref]
         if math.hypot(p.x - x, p.y - y) < 1e-9 and abs(p.rot - rot) < 1e-9:
             continue
-        base = measure(state, edge_bands)
+        base = measure(state, edge_bands, overlap=overlap)
         base_intent = intent_probe(ref) if intent_probe is not None else ()
         cur = (p.x, p.y, p.rot)
         state.apply_move(ref, x, y, rot)
-        after = measure(state, edge_bands)
+        after = measure(state, edge_bands, overlap=overlap)
         after_intent = intent_probe(ref) if intent_probe is not None else ()
         # `legality.EPS`, the same tolerance `quench.IntentProbe.licence` uses
         # for the same question -- "did a declared term RISE". One pass must

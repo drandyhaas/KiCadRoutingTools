@@ -346,6 +346,27 @@ class TheVerifiersSurvivors(unittest.TestCase):
         self.assertFalse(floorplan.zone_pose_feasibility(
             (8, 9, 23, 11), 0.0, union, k)['feasible'])
 
+    def test_zone_feasibility_proposes_the_inner_post_edges(self):
+        """R4, the CANDIDATES: keep-outs ka right of the part and kb left
+        of it leave x in [19.5, 20.0], bounded on both sides by the
+        INNER edge of a post's forbidden interval (the right post clearing
+        ka, the left post clearing kb). Every other candidate -- the zone's
+        own edges, the courtyard's, the union box's outer ones -- is
+        refused, so the search finds the witness only if the cluster boxes
+        propose their edges. (The fixture above is found from the
+        courtyard's edges alone and could not tell.)"""
+        from placement import floorplan
+        far = legality.FarSide([(-6.5, -0.5, -5.5, 0.5), (5.5, -0.5, 6.5, 0.5)])
+        k = [{'name': 'ka', 'rect': (24.5, 9.0, 25.0, 11.0)},
+             {'name': 'kb', 'rect': (14.5, 9.0, 15.0, 11.0)}]
+        part = floorplan._LocalPart(0.0, (-2, -1, 2, 1), far)
+        # Origin x in [18.1, 20.5]: both ends and their midpoint (19.3) are
+        # refused, which is all a search proposing no post edge would try.
+        got = floorplan.zone_pose_feasibility((16.1, 9, 22.5, 11), 0.0, part,
+                                              k)
+        self.assertTrue(got['feasible'], got)
+        self.assertTrue(19.5 - 1e-6 <= got['witness'][0] <= 20.0 + 1e-6, got)
+
     def test_the_mating_region_reads_the_clusters(self):
         """R5: P's two posts straddle a USB tongue and its courtyard is clear
         of it: nothing of P is on the mating region. The union box crossed

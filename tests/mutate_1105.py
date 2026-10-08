@@ -150,9 +150,9 @@ ROWS = [
      (AGREE,), 'KILLED'),
     ('place-seed-flag-dropped', 'place_seed',
      "        diagonal_rotations=args.diagonal_rotations,\n"
-     "        decap_claim_after_ics=args.decap_claim_after_ics)",
+     "        decap_claim_after_ics=args.decap_claim_after_ics,",
      "        diagonal_rotations=args.diagonal_rotations,\n"
-     "        decap_claim_after_ics=None)",
+     "        decap_claim_after_ics=None,",
      (FLAGS,), 'KILLED'),
     ('emitter-promises-2.5', 'cf',
      "    if late and not armed:",

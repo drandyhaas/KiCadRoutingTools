@@ -462,6 +462,78 @@ ROWS = [
         'rejected': True,
         'why': ('MECHANISM: the board candidate_valid names as the one where nearly every part starts in violation, so it is the most sensitive to a seat box that only grows -- and the one board where the trade goes the OTHER way, signal and both guards together. Kept because it DISAGREES with the other three, and deleting the dissenting row is how a finding becomes folklore.'),
     },
+    # --- #1182: the SEED engine on check_assembly's occupancy -------------
+    # ON TRIAL (no `expect`): `place_seed --body-model` seats the neighbour
+    # currency on `placement.body`'s occupancy while every intent question
+    # keeps the courtyard ladder. The signal is check_assembly's own
+    # `courtyard_blocking` on the written seed, the currency #1182 found the
+    # seeder blind to; the guards are what a bigger seat box can cost. The
+    # default flips only if `gate()` passes (>= 3 boards, improve on N-1,
+    # regress on none).
+    {
+        'name': 'body-seed-esp_prog',
+        'board': 'esp_prog.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'body_model': True},
+        'ignore_nets': ['GND'],
+        'signal': 'courtyard_blocking',
+        'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
+        'why': ('MECHANISM: the seed re-seats every part with its seat box '
+                'grown from the courtyard-or-pad-box ladder to the occupancy '
+                'check_assembly grades (courtyard, else the drawn body, each '
+                'with its pads); zones, keep-outs and edge claims keep the '
+                'ladder the floorplan grade reads. Numbers: '
+                'tests/placement_ab_baseline.json.'),
+    },
+    {
+        'name': 'body-seed-ulx3s',
+        'board': 'ulx3s.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'body_model': True},
+        'ignore_nets': ['GND', '+3V3', '+5V', 'VCC*'],
+        'signal': 'courtyard_blocking',
+        'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
+        'why': ('MECHANISM: the seed re-seats every part with its seat box '
+                'grown from the courtyard-or-pad-box ladder to the occupancy '
+                'check_assembly grades (courtyard, else the drawn body, each '
+                'with its pads); zones, keep-outs and edge claims keep the '
+                'ladder the floorplan grade reads. Numbers: '
+                'tests/placement_ab_baseline.json.'),
+    },
+    {
+        'name': 'body-seed-watchy',
+        'board': 'watchy.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'body_model': True},
+        'ignore_nets': ['GND'],
+        'signal': 'courtyard_blocking',
+        'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
+        'why': ('MECHANISM: the seed re-seats every part with its seat box '
+                'grown from the courtyard-or-pad-box ladder to the occupancy '
+                'check_assembly grades (courtyard, else the drawn body, each '
+                'with its pads); zones, keep-outs and edge claims keep the '
+                'ladder the floorplan grade reads. Numbers: '
+                'tests/placement_ab_baseline.json.'),
+    },
+    {
+        'name': 'body-seed-orangecrab_ext_pll',
+        'board': 'orangecrab_ext_pll.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'body_model': True},
+        'ignore_nets': ['GND', '+3V3', '+1V1', 'VCC*'],
+        'signal': 'courtyard_blocking',
+        'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
+        'why': ('MECHANISM: the seed re-seats every part with its seat box '
+                'grown from the courtyard-or-pad-box ladder to the occupancy '
+                'check_assembly grades (courtyard, else the drawn body, each '
+                'with its pads); zones, keep-outs and edge claims keep the '
+                'ladder the floorplan grade reads. Numbers: '
+                'tests/placement_ab_baseline.json.'),
+    },
     # --- run 26: the seeder's opt-in rotation tie-break --------------------
     # REJECTED as a default, rows kept. The seed engine re-seats every part
     # from the emitted intent, once with the ladder in #893's order and once

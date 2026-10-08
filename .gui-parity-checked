@@ -212,7 +212,8 @@ fronts alike, which now receive the step's route_knobs (c3c9369d).
 generate_bga_fanout gained hole_to_hole_clearance=None: no front passes it
 (both resolve the board's min_hole_to_hole); the in-run rescue passes the
 run's value inside batch_route. Placement CLI flags (place_seed
---decap-claim-after-ics / --diagonal-rotations / --repair-decaps, converge
+--decap-claim-after-ics / --diagonal-rotations / --repair-decaps /
+--body-model / --baseline (fa10 P1, #1182), converge
 --parent, rank_rotations.py, check_assembly / check_floorplan additions) are
 agent/grader-only: the GUI never calls the seeder, and manifest_to_plan
 refuses place_seed and rank_rotations by name. --decap-claim-after-ics

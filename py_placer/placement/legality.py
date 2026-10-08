@@ -1542,17 +1542,20 @@ def graded_part_at_pose(pcb_data, ref: str, pose, side: str, rect, tht_rect,
                         cache: Optional[dict] = None) -> GradedPart:
     """A `GradedPart` for `ref` at a pose nothing has written yet, carrying
     its drawn occupancy outline there (#1094). `cache` (any dict the caller
-    keeps) holds the one board read this needs across calls."""
+    keeps) holds the one board read this needs across calls.
+
+    The rect is the OCCUPANCY rect at the pose (`occupancy_rect_at`), the
+    polygon's own bounds -- not `rect`, which is the caller's search rect and
+    on a courtyard-less library a pad box (#1182): a pad-box rect around a
+    fab-body polygon made the exact test's broad phase skip every pair whose
+    bodies met outside their pads. `rect` stands only for a part the board
+    read could not bound."""
     if cache is None:
         cache = {}
-    if 'bodies' not in cache:
-        try:
-            cache['bodies'] = _part_local_bounds_and_bodies(pcb_data, pcb_file)
-        except Exception:                                    # noqa: BLE001
-            cache['bodies'] = ({}, {})
-    lbs, bodies = cache['bodies']
+    lbs, bodies = _bodies_cached(pcb_data, pcb_file, cache)
     lb = lbs.get(ref)
     fp = (pcb_data.footprints or {}).get(ref)
+    rect = occupancy_rect_at(pcb_data, ref, pose, rect, pcb_file, cache)
     poly = None
     if lb is not None and fp is not None:
         try:
@@ -1562,6 +1565,38 @@ def graded_part_at_pose(pcb_data, ref: str, pose, side: str, rect, tht_rect,
             poly = None
     return GradedPart(ref=ref, side=side, rect=rect, tht_rect=tht_rect,
                       has_tht=has_tht, poly=poly)
+
+
+def _bodies_cached(pcb_data, pcb_file, cache):
+    if 'bodies' not in cache:
+        try:
+            cache['bodies'] = _part_local_bounds_and_bodies(pcb_data, pcb_file)
+        except Exception:                                    # noqa: BLE001
+            cache['bodies'] = ({}, {})
+    return cache['bodies']
+
+
+def occupancy_rect_at(pcb_data, ref: str, pose, fallback=None,
+                      pcb_file: Optional[str] = None,
+                      cache: Optional[dict] = None,
+                      courtyard_less_only: bool = False):
+    """`ref`'s OCCUPANCY rect (`LocalBounds.local`) at `pose` -- the rect
+    check_assembly's courtyard channel grades -- or `fallback` when the
+    board read cannot bound it. Cheap: no polygon is built.
+
+    `courtyard_less_only`: `fallback` for a part that DRAWS a courtyard, too.
+    A declared pose is judged on KiCad's courtyard where one is drawn (#1054:
+    a human layout packs courtyards edge to edge, and pads reaching past a
+    drawn courtyard are not courtyard); only a courtyard-less part, whose
+    search rect is a pad box, is screened on the body (#1182)."""
+    if cache is None:
+        cache = {}
+    lb = _bodies_cached(pcb_data, pcb_file, cache)[0].get(ref)
+    if lb is None or (courtyard_less_only and lb.from_courtyard):
+        return fallback
+    x, y, rot = pose
+    lx0, ly0, lx1, ly1 = rotate_local_bounds(*lb.local, rot)
+    return (x + lx0, y + ly0, x + lx1, y + ly1)
 
 
 def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
@@ -1926,14 +1961,24 @@ def moved_refs(pcb_now, pcb_base, eps: float = 1e-3) -> set:
     containment), the repair moved RN3 3.28mm and left the pair blocking, and
     a membership test would have called it pre-existing. A ref absent from
     the baseline counts as moved: something put it there."""
+    return moved_refs_at(pcb_now, pcb_base, None, eps)
+
+
+def moved_refs_at(pcb_now, pcb_base, poses=None, eps: float = 1e-3) -> set:
+    """`moved_refs` with `poses` ({ref: (x, y, rot)}) overriding the
+    positions `pcb_now` holds -- a search state's poses before anything is
+    written (#1182: the repair's courtyard re-grade asks it of its final
+    poses). The layer is `pcb_now`'s: no search here flips a part."""
+    poses = poses or {}
     out = set()
     for ref, fp in (pcb_now.footprints or {}).items():
         bp = (pcb_base.footprints or {}).get(ref)
         if bp is None:
             out.add(ref)
             continue
-        drot = ((fp.rotation or 0.0) - (bp.rotation or 0.0)) % 360.0
-        if (abs(fp.x - bp.x) > eps or abs(fp.y - bp.y) > eps
+        x, y, rot = poses.get(ref, (fp.x, fp.y, fp.rotation or 0.0))
+        drot = ((rot or 0.0) - (bp.rotation or 0.0)) % 360.0
+        if (abs(x - bp.x) > eps or abs(y - bp.y) > eps
                 or min(drot, 360.0 - drot) > eps
                 or (fp.layer or '') != (bp.layer or '')):
             out.add(ref)
@@ -2152,6 +2197,14 @@ class CourtyardGrade(NamedTuple):
     # gate, absolutely -- KiCad's pth_inside_courtyard has no "moved" either.
     pin_pairs: List[BodyOverlapPair] = []
     pin_blocking: List[BodyOverlapPair] = []
+
+    @property
+    def overlap_exact(self) -> float:
+        """Total courtyard overlap (mm2) over every pair, waived or not, on
+        the grader's exact geometry: `placement_overlap_area`'s question
+        answered on check_assembly's rects. #1182: reseat's gate compares
+        this, not the search's (pad boxes on a courtyard-less library)."""
+        return round(sum(p.area_mm2 for p in self.pairs), 4)
 
 
 class CourtyardCensus:

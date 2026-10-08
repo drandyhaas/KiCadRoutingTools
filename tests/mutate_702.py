@@ -95,14 +95,14 @@ ROWS = [
     # ---- the gate itself ---------------------------------------------------
     ('the-gate-always-says-yes', 'q',
      "        if rects is None:\n"
-     "            rects = self.parts[ref].rects(x, y, rot)\n"
+     "            rects = self.parts[ref].grade_rects(x, y, rot)\n"
      "        cand = self.intent_terms(ref, rects)\n"
      "        if all(v <= t.threshold for v, t in zip(cand, spec)):\n"
      "            return True\n"
      "        cur = self._incumbent_intent(ref)\n",
      "        return True\n"
      "        if rects is None:\n"
-     "            rects = self.parts[ref].rects(x, y, rot)\n"
+     "            rects = self.parts[ref].grade_rects(x, y, rot)\n"
      "        cand = self.intent_terms(ref, rects)\n"
      "        if all(v <= t.threshold for v, t in zip(cand, spec)):\n"
      "            return True\n"
@@ -113,8 +113,8 @@ ROWS = [
     # Three rows, not one, because the whole claim of #702 is that these are
     # THREE sites and the other two are not reachable from the first.
     ('delete-the-conjunct-from-candidate_valid', 'q',
-     "        if self._intent_active and not self.intent_ok(ref, x, y, rot, rects):\n"
-     "            self._note_intent_refusal(ref, 'candidate_valid', rects)\n"
+     "        if self._intent_active and not self.intent_ok(ref, x, y, rot, grects):\n"
+     "            self._note_intent_refusal(ref, 'candidate_valid', grects)\n"
      "            return False\n",
      "",
      (T702,), 'KILLED'),
@@ -141,9 +141,9 @@ ROWS = [
      (T702,), 'KILLED'),
 
     ('the-incumbent-is-read-at-the-SEED-pose', 'q',
-     "            v = self.intent_terms(ref, self.parts[ref].rects())\n",
+     "            v = self.intent_terms(ref, self.parts[ref].grade_rects())\n",
      "            _p = self.parts[ref]\n"
-     "            v = self.intent_terms(ref, _p.rects(_p.seed_x, _p.seed_y,\n"
+     "            v = self.intent_terms(ref, _p.grade_rects(_p.seed_x, _p.seed_y,\n"
      "                                               _p.orig_rot))\n",
      (T702,), 'KILLED'),
 
@@ -217,7 +217,7 @@ ROWS = [
     ('the-anchor-branch-is-never-taken', 'q',
      "                _anchor = not any(\n"
      "                    _fp.zone_fits_courtyard(\n"
-     "                        _z['rect'], _p.rect(0.0, 0.0, _r), _tol)\n"
+     "                        _z['rect'], _p.grade_rect(0.0, 0.0, _r), _tol)\n"
      "                    for _r in (_p.rot % 360, (_p.rot + 90) % 360))\n",
      "                _anchor = False\n",
      (T702,), 'KILLED'),

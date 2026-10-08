@@ -242,7 +242,7 @@ ROWS = [
     ('the-zone-spec-forgets-the-anchor-branch', 'q',
      "                _anchor = not any(\n"
      "                    _fp.zone_fits_courtyard(\n"
-     "                        _z['rect'], _p.rect(0.0, 0.0, _r), _tol)\n"
+     "                        _z['rect'], _p.grade_rect(0.0, 0.0, _r), _tol)\n"
      "                    for _r in (_p.rot % 360, (_p.rot + 90) % 360))\n",
      "                _anchor = False\n",
      (T702,), 'KILLED'),
