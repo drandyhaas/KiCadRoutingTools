@@ -848,10 +848,41 @@ def _connect_pair_crossover(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_laye
              for k, runs in x_given['legs'].items() for pts, L in runs for p, q in zip(pts, pts[1:])
              if math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-9]
     xvias = [Via(x, y, cfg.via_size, cfg.via_drill, ['F.Cu', 'B.Cu'], ids[k]) for x, y, k in x_given['vias']]
-    first = _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, tuple(ent['P']), tuple(ent['N']), L1,
-                               cfg, band, margin, band_slack, virtual, window_pts, virtual_vias, report, gap,
-                               a_dir, (-u[0], -u[1]), half, a_given=a_given,
-                               b_given=(xsegs, xvias, tuple(ent['P']), tuple(ent['N']), (-u[0], -u[1]), L1))
+    layer_map = build_layer_map(cfg.layers)
+
+    def joined(pcb_, pose, given, more_segs=(), more_vias=()):
+        """a span whose two poses nearly coincide -- `pose` (P, N, layer) and the end `given` connector's handover,
+        on one layer, their middles within a pair's width -- joined leg to leg, P to P and N to N, with the given
+        connector and `more` copper: (segments, vias), or None when they do not, or the joins are not clean. The pair
+        router refuses two poses that close ("no pair corridor exists"): the plan put the crossover AT the berth (the
+        generated c4p16g25's SYP1, its exit pose 0.08 mm from the berth's, open in every lay)"""
+        if given is None:
+            return None
+        segs_g, vias_g, gp_, gn_, _gd, gL_ = given
+        pp_, pn_, pL_ = pose
+        if gL_ != pL_:
+            return None
+        mp_, mg_ = ((pp_[0] + pn_[0]) / 2, (pp_[1] + pn_[1]) / 2), ((gp_[0] + gn_[0]) / 2, (gp_[1] + gn_[1]) / 2)
+        if math.hypot(mp_[0] - mg_[0], mp_[1] - mg_[1]) >= 2 * half + cfg.track_width:
+            return None
+        joins = [Segment(a_[0], a_[1], b_[0], b_[1], cfg.track_width, pL_, nid)
+                 for a_, b_, nid in ((pp_, gp_, p_id), (pn_, gn_, n_id))
+                 if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > 1e-9]
+        segs_ = list(more_segs) + joins + list(segs_g)
+        vias_ = list(more_vias) + list(vias_g)
+        vw = make_local_window(pcb_, mg_[0], mg_[1], 2 * half + cfg.via_size + 3 * cfg.clearance + 1.0)
+        if _legs_clear(vw, joins, [p_id, n_id], cfg, virtual, layer_map) is not None:
+            return None
+        import pairs as _pairs
+        if _pairs.intra_ok(segs_, vias_, p_id, n_id, cfg.track_width, cfg.via_size, cfg.clearance) is not None:
+            return None
+        return segs_, vias_
+    first = joined(pcb, (tuple(ent['P']), tuple(ent['N']), L1), a_given, xsegs, xvias)
+    if first is None:
+        first = _connect_pair_prod(pcb, p_id, n_id, a_p, a_n, a_layer, tuple(ent['P']), tuple(ent['N']), L1,
+                                   cfg, band, margin, band_slack, virtual, window_pts, virtual_vias, report, gap,
+                                   a_dir, (-u[0], -u[1]), half, a_given=a_given,
+                                   b_given=(xsegs, xvias, tuple(ent['P']), tuple(ent['N']), (-u[0], -u[1]), L1))
     if first is None:
         if report is not None:
             report['cross_span'] = 1
@@ -859,10 +890,12 @@ def _connect_pair_crossover(pcb, p_id, n_id, a_p, a_n, a_layer, b_p, b_n, b_laye
     pcb2 = _copy.copy(pcb)
     pcb2.segments = list(pcb.segments) + list(first[0])
     pcb2.vias = list(pcb.vias) + list(first[1])
-    second = _connect_pair_prod(pcb2, p_id, n_id, tuple(ext['P']), tuple(ext['N']), L2, b_p, b_n, b_layer,
-                                cfg, band, margin, band_slack, virtual, window_pts, virtual_vias, report, gap,
-                                u, b_dir, half, a_given=([], [], tuple(ext['P']), tuple(ext['N']), u, L2),
-                                b_given=b_given)
+    second = joined(pcb2, (tuple(ext['P']), tuple(ext['N']), L2), b_given)
+    if second is None:
+        second = _connect_pair_prod(pcb2, p_id, n_id, tuple(ext['P']), tuple(ext['N']), L2, b_p, b_n, b_layer,
+                                    cfg, band, margin, band_slack, virtual, window_pts, virtual_vias, report, gap,
+                                    u, b_dir, half, a_given=([], [], tuple(ext['P']), tuple(ext['N']), u, L2),
+                                    b_given=b_given)
     if second is None:
         if report is not None:
             report['cross_span'] = 2

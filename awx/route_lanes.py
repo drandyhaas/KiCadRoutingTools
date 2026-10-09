@@ -270,7 +270,15 @@ def main(argv=None):
     n_ok = n_free = v_tot = v_plan = 0
     errors = []                 # lanes whose routing RAISED: a crash, not a routing result
     print(f'{a.mode}: {len(chosen)} lane(s), branch={bd.BRANCH}')
-    for (c, nm) in chosen:
+    # (a whole-route PLAN: every lane in its own band first -- a pair by its band rungs alone -- and a pair refused there
+    # tried in a WIDER band, then FREE of the plan, only after them, round what they laid. Free in its turn, ahead of the
+    # singles, a pair took the room the plan gave them: zynq LVDS round 3 with RX_D4's dive laid, RX_D1 routed free
+    # 2.8 mm off its line, DATA_CLK and RX_D5 free after it, and 9 singles refused -- 13/24 in band where 22/23 were)
+    work = [(c, nm, not a.plan) for (c, nm) in chosen]
+    wi = 0
+    while wi < len(work):
+        c, nm, free_ok = work[wi]
+        wi += 1
         if a.mode == 'alone':
             ctx.pcb.segments, ctx.pcb.vias = list(base_s), list(base_v)
             routed = set()
@@ -285,7 +293,11 @@ def main(argv=None):
                 quiet = (contextlib.nullcontext() if awx_settings.get('BRAID_PAIR_DEBUG')
                          else contextlib.redirect_stdout(io.StringIO()))
                 with quiet:
-                    done_ = bd._route_pairs_planned_in_order(ctx, corridors, logs.append, [nm])
+                    # (a pair tried after the others: its band WIDENED too, a pair pitch and two -- round what they
+                    # laid, as the free rungs are)
+                    done_ = bd._route_pairs_planned_in_order(
+                        ctx, corridors, logs.append, [nm], free=free_ok,
+                        slacks=(sorted(set(bd.pair_slacks()) | {bd.PP, 2 * bd.PP}) if free_ok and a.plan else None))
                 how_ = 'IN BAND ok  '
                 for l_ in logs[n_log:]:
                     if ('pair ' + nm) in l_:
@@ -293,6 +305,12 @@ def main(argv=None):
                         if 'routed FIRST' in l_ and 'planned band' not in l_:
                             how_ = 'FREE        '            # a pair off its band: the pair step's own rung
                 res = done_.get(nm)
+                if res is None and not free_ok:
+                    del ctx.pcb.segments[n_s:]
+                    del ctx.pcb.vias[n_v:]
+                    work.append((c, nm, True))
+                    print(f'{nm:7s} pair refused in its band -- tried wider, then free, after the lanes in theirs')
+                    continue
                 if res is not None:
                     del ctx.pcb.segments[n_s:]
                     del ctx.pcb.vias[n_v:]

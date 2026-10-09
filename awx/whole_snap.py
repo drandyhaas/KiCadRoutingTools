@@ -76,6 +76,7 @@ on_grid = lambda p_, q_: _pa._on_grid(p_, q_, g)        # the audit's test: a pi
 EPS = 1e-3                                                 # a diagonal between two grid points, a hair of room
 BAND = 2 * bd.LANE_MIN                                     # how far a lane may stray from its smooth line
 RVIA = 2 * bd.LANE_MIN                                     # how far a via may move from the plan's
+RVIA_WIDE = 3 * RVIA                                       # ...on a lane that cannot be laid within RVIA (route, wide)
 W_BEND = 4 * g                                             # a 45-degree bend, in mm of length
 W_DEV = 0.5                                                # per mm of length, per mm from the smooth line
 W_SHARE = 1.0                                              # a pair laid first: a step in a single's share costs its length again
@@ -719,9 +720,12 @@ def via_arcs(n):
     return out, float(s[-1])
 
 
-def route(n, strict=True):
+def route(n, strict=True, wide=False):
     """A* over (cell, direction, vias taken): the lane's octilinear grid path, or None. strict: every move within a
-    track width of an end runs within 90 degrees of its stub's own way"""
+    track width of an end runs within 90 degrees of its stub's own way. wide: each layer change within RVIA_WIDE of the
+    plan's via, not RVIA, and each layer's run as much farther along the lane -- the last try of a lane whose changes
+    find no room within RVIA"""
+    rvia = RVIA_WIDE if wide else RVIA
     W = build(n)
     XROOM.clear()
     XROOM.update(mask=W.get('xroom'), i0=W['i0'], j0=W['j0'])
@@ -763,8 +767,9 @@ def route(n, strict=True):
     lays = list(LANE[n]['runs'])
     K = len(LANE[n]['vias'])
     varc, total = via_arcs(n)
-    gate = [(-math.inf if k == 0 else varc[k - 1] - 3 * bd.LANE_MIN,
-             math.inf if k == K else varc[k] + 3 * bd.LANE_MIN) for k in range(K + 1)]
+    reach = 3 * bd.LANE_MIN + (rvia - RVIA)
+    gate = [(-math.inf if k == 0 else varc[k - 1] - reach,
+             math.inf if k == K else varc[k] + reach) for k in range(K + 1)]
     vpts = LANE[n]['vias']
     no90 = n in prs
     ok = lambda i, j: 0 <= i < NI and 0 <= j < NJ
@@ -885,7 +890,7 @@ def route(n, strict=True):
                         and not badL[lays[k + 1]][i][j] and xo(i, j, d) is not None:
                     x_, y_ = (i + i0) * g, (j + j0) * g
                     dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
-                    if dv <= RVIA:
+                    if dv <= rvia:
                         nst = i * MI + j * MJ + d * MD + (k + 1) * MK + XS[d][1] * MA
                         nc = c_ + W_VIA * dv
                         if nc < best.get(nst, math.inf) - 1e-12:
@@ -894,7 +899,7 @@ def route(n, strict=True):
             elif k < K and not vbadL[d % 4][i][j] and sc[0] <= 0 and sc[1] >= ST and ROOM0[d] <= arcL[i][j] <= total - ROOM1[d]:
                 x_, y_ = (i + i0) * g, (j + j0) * g
                 dv = math.hypot(x_ - vpts[k][0], y_ - vpts[k][1])
-                if dv <= RVIA and not badL[lays[k + 1]][i][j]:
+                if dv <= rvia and not badL[lays[k + 1]][i][j]:
                     nst = i * MI + j * MJ + d * MD + (k + 1) * MK + ST * MA
                     nc = c_ + W_VIA * dv
                     if nc < best.get(nst, math.inf) - 1e-12:
@@ -966,10 +971,10 @@ def route(n, strict=True):
     def search_native():
         """search(S, d0, E, dN) for a single, by grid_router.lane_search: the same search, the same path. What it
         cannot form exactly itself -- a via's distance from the plan's via site, math.hypot of two non-integers -- is
-        a table filled here the way search() forms it, within reach of each site (+inf beyond: out of RVIA)"""
+        a table filled here the way search() forms it, within reach of each site (+inf beyond: out of rvia)"""
         LN = list(bad)
         dv = np.full((K, NI, NJ), np.inf)
-        rc = int(math.ceil(RVIA / g)) + 2
+        rc = int(math.ceil(rvia / g)) + 2
         for k_, (vx_, vy_) in enumerate(vpts[:K]):
             ci, cj = int(round(vx_ / g)) - i0, int(round(vy_ / g)) - j0
             for i_ in range(max(0, ci - rc), min(NI, ci + rc + 1)):
@@ -981,7 +986,7 @@ def route(n, strict=True):
             np.ascontiguousarray(np.stack(vbad), bool), np.ascontiguousarray(arc, np.float64),
             np.ascontiguousarray(dist, np.float64), dv, (int(S[0]), int(S[1])), (int(E[0]), int(E[1])), int(d0),
             int(dN), [LN.index(L_) for L_ in lays], [(float(a_), float(b_)) for a_, b_ in gate], float(room0),
-            float(total - room1), float(RVIA), float(W_VIA), float(W_DEV), float(W_BEND), float(g), float(TW),
+            float(total - room1), float(rvia), float(W_VIA), float(W_DEV), float(W_BEND), float(g), float(TW),
             list(STEPT), ok(jS), ok(jE), ok(a_out), ok(a_in), bool(strict))
         return ([(i_, j_, d_, k_, (0, 0)) for (i_, j_, d_, k_) in p_] if p_ is not None else None), npop_
 
@@ -1162,15 +1167,15 @@ ROUTED = {}
 STUCK_AT = {}        # a lane that could not be laid: where its search got farthest (route; 'last' the latest search's)
 
 
-def route_memo(n, strict=True):
-    """route(n, strict), asked again on the same board, answered as before: a lane's route reads only the lanes placed
-    (res['lanes'], in the order they were laid) and what never changes -- so a sweep that finds a lane's board as it
-    left it (SCK after SDQS0 and SDQS1 are laid again exactly where they were) does not search it again. A lane not
+def route_memo(n, strict=True, wide=False):
+    """route(n, strict, wide), asked again on the same board, answered as before: a lane's route reads only the lanes
+    placed (res['lanes'], in the order they were laid) and what never changes -- so a sweep that finds a lane's board as
+    it left it (SCK after SDQS0 and SDQS1 are laid again exactly where they were) does not search it again. A lane not
     laid leaves where its search got stuck in STUCK_AT"""
-    key = (n, strict or n in prs, json.dumps(res['lanes']))       # a pair searches pose to pose: strict is a single's
+    key = (n, strict or n in prs, wide, json.dumps(res['lanes']))  # a pair searches pose to pose: strict is a single's
     if key not in ROUTED:
         STUCK_AT.pop('last', None)
-        ROUTED[key] = (route(n, strict), STUCK_AT.pop('last', None))
+        ROUTED[key] = (route(n, strict, wide), STUCK_AT.pop('last', None))
     out, at = ROUTED[key]
     if out[0] is None and at is not None:
         STUCK_AT[n] = at
@@ -1188,6 +1193,28 @@ def lift(m):
 
 failed = {}
 folded = {}
+WIDE = set()        # the lanes laid only with their layer changes past the plan's reach (route's wide)
+
+
+def route_wide(n, why):
+    """the last try of a lane with layer changes that cannot be laid: its changes within RVIA_WIDE of the plan's, not
+    RVIA -- where the plan put a change, its room taken (the polish left a dive short of it), a site a few lane pitches
+    along the lane is a change still laid, where the lane's not being laid is two nets open (zynq LVDS, the held plan:
+    TX_D3's nearest site for its dive 1.30 mm from the plan's, RX_D4's 0.86, every cell within RVIA blocked). (out,
+    why) as route_memo's, `why` the narrow try's when this one fails too"""
+    if not LANE[n]['vias']:
+        return None, why
+    for strict_ in ((True,) if n in prs else (True, False)):
+        out_, why_ = route_memo(n, strict=strict_, wide=True)
+        if out_ is not None:
+            WIDE.add(n)
+            if not strict_:
+                folded[n] = why
+            return out_, why_ + f' (its layer change{"s" if len(LANE[n]["vias"]) > 1 else ""} within ' \
+                f'{RVIA_WIDE:.2f} of the plan\'s, past {RVIA:.2f})'
+    return None, why
+
+
 for n in [n for n in order if n in HELD]:
     place(n, ([((p_[0], p_[1]), (p_[2], p_[3]), p_[4]) for p_ in plan['lanes'][n]['pieces']], list(LANE[n]['vias']),
               {'ends': plan['lanes'][n].get('ends'), 'cross': plan['lanes'][n].get('cross')}))
@@ -1205,6 +1232,8 @@ for n in lay:
             why = why2 + ' (NO approach within 90 degrees of a stub: laid folding, named)'
         else:
             why = why2                  # (the last attempt's: its place is the one STUCK_AT keeps)
+    if out is None:
+        out, why = route_wide(n, why)
     if out is None:
         failed[n] = why
         log(f'  {n:7s} FAILED: {why}')
@@ -1225,7 +1254,9 @@ for sw in range(SWEEPS):
             if out is not None:
                 folded[n] = why
             else:
-                failed[n] = why2        # (the last attempt's, as its STUCK_AT)
+                out, why2 = route_wide(n, why2)
+                if out is None:
+                    failed[n] = why2    # (the last attempt's, as its STUCK_AT)
         if out is not None:
             place(n, out)
             del failed[n]
@@ -1240,7 +1271,7 @@ for sw in range(SWEEPS):
         old = ([(tuple(p_[0:2]), tuple(p_[2:4]), p_[4]) for p_ in keep['pieces']], [tuple(v) for v in keep['vias']],
                {'ends': keep.get('ends'), 'cross': keep.get('cross')})     # a pair's end connectors and crossover too
         lift(n)
-        out, why = route_memo(n, strict=n not in folded)
+        out, why = route_memo(n, strict=n not in folded, wide=n in WIDE)
         place(n, out if out is not None else old)
     nb1 = sum(len(L_['pieces']) for L_ in res['lanes'].values())
     log(f'  sweep {sw + 1}: pieces {nb0} -> {nb1}')

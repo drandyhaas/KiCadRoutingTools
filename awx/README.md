@@ -690,6 +690,11 @@ corridor, branch or path:
   berths round the destination;
 - each lane's taut **reference path**.
 
+Its lanes are the run's nets that start at its source: each net's source the
+part of its pad nearest its tooth, the destination's own pads never one (a
+dog-bone run down the channel ends nearer a ball of the destination, and its
+net was read as starting there and left out of the frame, open every round).
+
 A pair whose stub stands across the trunk -- a tooth on the source's side
 face -- starts at the end of its end run and the run its turn onto the trunk
 takes, as a ring pair lands. A tooth on the source's far face has no way
@@ -951,6 +956,13 @@ and the snap lays the singles.
   plan knows its shape before it is laid (`pairs.crossover_shape`).
 - **A pair the step cannot lay** sends its change nearest where it got stuck
   back to the solve as a via cut, a jog's room wide.
+- **A change with no room where the plan put it:** a lane, pair or single,
+  that cannot be laid with each change within `RVIA` (two lane pitches) of the
+  plan's has one try more within `RVIA_WIDE` (three times that), each layer's
+  run as much farther along the lane. On the zynq LVDS bus the polish left
+  dives short of their room, and every cell within `RVIA` of TX_D3's and
+  RX_D4's planned dives was taken -- their nearest sites 1.30 and 0.86 mm on.
+  A pair laid so is two nets connected; the audit still judges it.
 
 **Singles.**
 
@@ -1127,7 +1139,15 @@ destination, every lane in its band, post-passes off.
 
 - A pair's end connectors and crossover are laid as given and the pair router
   runs between them (`connect.connect_pair`'s `a_given` / `b_given` /
-  `x_given`).
+  `x_given`) -- or, where the crossover stands at an end, its pose within a
+  pair's width of the end's, the two are joined leg to leg: the pair router
+  refuses two poses that close (a generated bus's crossed pair, its crossover
+  0.075 mm from its berth's pose, was refused in its band).
+- **A pair refused in its band is tried in a wider one, then free of the
+  plan, last**, after every lane has had its band. Free in its turn, ahead of
+  the singles, it took the room the plan gave them: on the zynq LVDS bus one
+  pair routed free 2.8 mm off its line, two more after it, and nine singles
+  refused.
 - Each lane alone, or all in order (`--mode seq`). `--write` writes the board
   for `check_connected` and `check_drc`. A lane whose routing raised is named,
   and the run exits 1.

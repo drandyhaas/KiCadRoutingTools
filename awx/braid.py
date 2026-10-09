@@ -6088,8 +6088,10 @@ def _clip_stub(p, q, boxes):
     return p, (p[0] + (q[0] - p[0]) * t_in, p[1] + (q[1] - p[1]) * t_in)
 
 
-def _route_pairs_planned_in_order(ctx, corridors, log, order):
-    """route_pairs_planned's worker over one order of the pairs; returns {pair: (segments, vias)}, the copper left on ctx.pcb."""
+def _route_pairs_planned_in_order(ctx, corridors, log, order, free=True, slacks=None):
+    """route_pairs_planned's worker over one order of the pairs; returns {pair: (segments, vias)}, the copper left on ctx.pcb.
+    free=False: each pair in its planned band only, never the free rungs (route_lanes --plan tries those after every
+    lane has had its band). slacks: the band's widenings tried, in mm (default pair_slacks())."""
     done = {}
     for nm in order:
         c = next(c for c in corridors if nm in c.members)
@@ -6196,18 +6198,18 @@ def _route_pairs_planned_in_order(ctx, corridors, log, order):
                         how = f'through {", ".join(w[0].component_ref for w in ways)}'
             else:
                 for ri, (virt_r, vv_r) in enumerate(rules):
-                    for sl in pair_slacks():
+                    for sl in (pair_slacks() if slacks is None else slacks):
                         res = c.route_pair_lane(nm, virt_r, vv_r, slack=sl, free=False)
                         if res is not None:
                             how = f'in its planned band +{sl:.1f} mm' + (' (the fan-in rule)' if ri else '')
                             break
                     if res is not None:
                         break
-                if res is None:
+                if res is None and free:
                     res = c.route_pair_lane(nm, virt, vv, free=True)
                     if res is not None:
                         how = 'free (its band refused)'
-                if res is None:
+                if res is None and free:
                     # the last resort: free of the plan's lanes altogether, only
                     # the others' exit stubs reserved, a 6 mm window, no
                     # connectors -- exactly the free-first flow's call, which
@@ -6893,7 +6895,12 @@ def setup(board, names, dest, log, plan=None, pairs=False):
     ctx.src_ref = {}
     for nm in names:
         nid, net = byname[nm]
-        ctx.src_ref[nm] = min(net.pads, key=lambda p: ts.d2(
+        # (the destination's own pads are no source: a tooth whose stub ends nearer a ball of the destination than
+        # any of its own -- a dog-bone run down the channel -- was read as starting AT the destination, and the whole
+        # route, which plans the lanes of the run's one source, left it out of every frame: the generated c4s14g25's
+        # SYN07, open every round)
+        pads_ = [p for p in net.pads if p.component_ref != ends[nm][2]] or list(net.pads)
+        ctx.src_ref[nm] = min(pads_, key=lambda p: ts.d2(
             (p.global_x, p.global_y), ends[nm][0])).component_ref
 
     _cache = {}
