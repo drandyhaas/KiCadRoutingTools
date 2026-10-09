@@ -1126,7 +1126,12 @@ for some of the lanes exists:
 
 - a round whose loop does not pass is laid all the same, from the plan it
   held (`held_plan`: its snapped plan, else its best smooth plan snapped with
-  no gate); a lane that cannot be laid stays open;
+  no gate); a lane that cannot be laid stays open. The best round's plan is
+  snapped and laid on that round's own bench, its via ends where its solve
+  put them (more routing layers than two relay them each re-solve): laid on
+  the first round's, a later loop round's plan on the zynq LVDS bus had eight
+  lanes refused at their teeth and berths, 33 nets open, where on its own
+  bench it leaves 13;
 - a round that lays nothing, or leaves nets open, feeds the next fanout
   (above), up to `ROUNDS`; a fanout that lays the round before's ends again
   has its feedback raised and runs again (above), and the rounds end only

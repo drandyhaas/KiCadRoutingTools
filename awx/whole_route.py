@@ -861,6 +861,8 @@ def plan_bench(loopd, plan, default):
     nm = os.path.basename(plan or '')
     if nm == 'plan.json':
         return b.get('plan', default)
+    if nm.startswith('held_'):
+        return b.get('held', default)            # (held_plan's: the bench of the round it held)
     m = re.match(r'^[a-z]+(\d+)', nm)
     return b.get(m.group(1), default) if m else default
 
@@ -869,7 +871,11 @@ def held_plan(loopd, env):
     """the plan a round whose loop did not pass is laid from -- the chain never ends with nothing: the loop's snapped
     plan when a round got that far (plan.json, short of the audit or the lint), else its best round's smooth plan
     (best.json, else its last) laid as a passing one is -- the pairs snapped first, the singles polished round them,
-    then snapped -- with no gate; a lane the snap cannot lay is left out of it. None when the loop held none"""
+    then snapped -- with no gate; a lane the snap cannot lay is left out of it. None when the loop held none.
+    Snapped and laid on THAT round's bench (benches.json; recorded under 'held' for plan_bench): on more routing layers
+    than two each re-solve relays the via ends afresh, and a later round's plan snapped and laid on round 1's bench
+    started its lanes at stubs on other layers (zynq LVDS zDF r2, a later round held: eight lanes refused within a few
+    steps of their teeth or berths, 33 nets open; on its own bench 13)"""
     O = lambda name: os.path.join(loopd, name)
     if os.path.isfile(O('plan.json')):
         return O('plan.json')
@@ -884,6 +890,15 @@ def held_plan(loopd, env):
             src = b
     except Exception:
         pass
+    try:
+        bs = json.load(open(O('benches.json')))
+    except (OSError, ValueError):
+        bs = {}
+    rb = bs.get(re.search(r'/p(\d+)\.json$', src).group(1))
+    if rb:
+        env = dict(env, BENCH=rb)
+        bs['held'] = rb
+        json.dump(bs, open(O('benches.json'), 'w'), indent=1)
     run(['whole_snap.py', src, O('held_pairs.json'), '--pairs'], env, log_path=O('held_pairs.log'))
     if os.path.isfile(O('held_pairs.json')) and \
             run(['whole_polish.py', O('held_pairs.json'), O('held_q.json')], env, log_path=O('held_q.log'))[0] == 0:
