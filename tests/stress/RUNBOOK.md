@@ -247,7 +247,7 @@ harmless.
    input-sibling projects at every step, and the replay seeder now carries
    `<board>.kicad_pro` for legacy stem-mismatched manifests).
 1b. PARSER-PARITY VALIDATION (per board, start AND end): run
-   `python3 <TOOLS_REPO>/validate_pcb_data.py <board>`
+   `python3 <TOOLS_REPO>/py_tools/validate_pcb_data.py <board>`
    on the input board before any routing step, and again on the final board.
    It diffs the pcbnew-built PCBData (the GUI's model) against the text parse
    (the CLI's model) — the headless twin of the GUI's "Validate PCB Data"
