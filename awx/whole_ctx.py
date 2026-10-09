@@ -205,6 +205,19 @@ def _guard(out, nets, dest):
     ctx, _cs = out
     import flow_frame
     k, _cx, _cy = flow_frame.quarter_of(ctx.pcb, dest, set(nets))
+    if k != 0 and ctx.src_ref:
+        # (a run of SOME of the bus's lanes -- whole_route's last resort leaves lanes out -- can have its balls'
+        # centroids a quarter off where the whole bus's are not, on a bench turned for the whole bus: the frame's own
+        # trunk decides then, the source's pad box to the destination's, as whole_frame.build draws it. Without it a
+        # generated 16-lane bus on a 2.5 mm channel, five lanes left out, was refused as turned a quarter, and every
+        # last-resort partial of rev8g1, rev8g2 and c4r12 was refused so, its round laying nothing)
+        import whole_frame
+        src = collections.Counter(ctx.src_ref.values()).most_common(1)[0][0]
+        if src in ctx.pcb.footprints and dest in ctx.pcb.footprints:
+            sb, db = whole_frame.box_of(ctx.pcb, src), whole_frame.box_of(ctx.pcb, dest)
+            dx, dy = (db[0] + db[2] - sb[0] - sb[2]) / 2, (db[1] + db[3] - sb[1] - sb[3]) / 2
+            if max(range(4), key=lambda k_: (round(flow_frame._q(dx, dy, k_)[0], 6), -k_)) == 0:
+                k = 0
     if k != 0:
         raise SystemExit(f'whole route: the bench is not in the canonical frame (its source-to-destination direction '
                          f'is a quarter turn {k} from +x) -- turn it with flow_frame.py first')

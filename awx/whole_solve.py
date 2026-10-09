@@ -23,7 +23,9 @@ the vias are proved (the plan's vias no more than the bound's whole vias) or, on
 -- all but the fallback, the plan-finding workers' last try, which runs its whole budget. Only a plan PROVED optimal in its vias is written;
 one the search could not prove is no plan -- except under SOLVE_UNPROVED=1 (a round's first solve in whole_route,
 which never ends with nothing): the best plan found is written marked 'proved': false, with the nets it leaves over
-two vias ('over_nets'), and never as a floor for a later solve."""
+two vias ('over_nets'), and never as a floor for a later solve. Under SOLVE_CROWD=1 (that solve too) a model with NO
+plan is solved again as its CROWD diagnosis, and the lanes whose crossings the ends leave no room for are written to
+OUT.crowded.json (solve(crowd=True))."""
 import sys, os, re, itertools, collections, json, math, hashlib
 import awx_settings
 import whole_ctx
@@ -60,17 +62,21 @@ WARM_WORK = 30.0                       # deterministic work to lay a re-solve's 
 W_FIRM = 100 * W_V                     # a broken FIRM cut (CUTS_FIRM=1, more layers than two): above everything else a
 #                                        plan can buy -- the solve holds every cut it can and breaks one only where no
 #                                        plan holds them all, in ONE solve (whole_route's loop: no hard pass first)
+STATUS = {}                            # the last solve's outcome: 'plan', whether its search found any plan at all
 W_SOFT = 3 * W_V                       # a broken SOFT cut: above a dive's two vias, below a net over two -- whole vias,
 #                                        as the search's proof reads them (at two and a half, a plan holding a cut two
 #                                        vias dearer than one breaking it floored to the same whole number, proved)
 
 
-def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=()):
+def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False):
     """the solve of the bench ctx (whole_ctx.plan()) round the destination part `dest`: the JSON
     whole_geo reads (crossings, changes, each lane's route coordinate), or None when CP-SAT finds no plan or none it
     proves optimal in its vias. `cuts`
     names the geometry's cut files (whole_geo), `hist` the audits' hot files (whole_gate --hot), `hint` an earlier
-    solve to warm-start from"""
+    solve to warm-start from. `crowd`: the CROWD diagnosis of a model with no plan -- each lane's crossings may break
+    their room along it (their spacing, and the stack of crossers at one point), the plan's only price the lanes that
+    do, so it breaks it on the fewest lanes there can be, named in the JSON's 'crowded': the lanes whose crossings the
+    ends leave no room for. Its plan is no plan to lay"""
     Fr = whole_frame.build(ctx, dest)          # the whole route's own frame (whole_frame.py)
     prs = getattr(ctx, 'pairs', {}) or {}
     M = list(Fr.M)
@@ -394,6 +400,16 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=()):
         print(f'   crossing windows EMPTY, held open a grid step: {n_empty} of {len(win)}')
     m = cp_model.CpModel()
     t = {k: m.NewIntVar(Q(lo), Q(hi), f't_{k[0]}_{k[1]}') for k, (lo, hi) in win.items()}
+    CROWD = {n: m.NewBoolVar(f'crowd_{n}') for n in M} if crowd else {}
+
+    def present(lit, n):
+        """a crossing's room along lane n is there when `lit` -- and, in the CROWD diagnosis, n is not crowded"""
+        if not CROWD:
+            return lit
+        q_ = m.NewBoolVar('')
+        m.AddBoolAnd([lit, CROWD[n].Not()]).OnlyEnforceIf(q_)
+        m.AddBoolOr([lit.Not(), CROWD[n], q_])
+        return q_
     # ---- geometry cuts (whole_geo.py's islands a lane could not be kept off): none of that lane's crossings in the span
     CUTS = []
     for fn_ in cuts:
@@ -491,10 +507,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=()):
         MV[key] = mv
         if NL > 2:
             continue                    # (spaced per the crosser's layer, below, where the runs' layers are known)
-        ivs_of[a].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_move, mv, ''))
-        ivs_of[a].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_stay, mv.Not(), ''))
-        ivs_of[b].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_move, mv.Not(), ''))
-        ivs_of[b].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_stay, mv, ''))
+        ivs_of[a].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_move, present(mv, a), ''))
+        ivs_of[a].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_stay, present(mv.Not(), a), ''))
+        ivs_of[b].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_move, present(mv.Not(), b), ''))
+        ivs_of[b].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_stay, present(mv, b), ''))
     for n, ivs in ivs_of.items():
         m.AddNoOverlap(ivs)
     # a PAIR does not ZIGZAG: two of its crossings that pass lanes in OPPOSITE directions (one taking it north of a lane,
@@ -702,7 +718,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=()):
             for lane_, c_, mv_ in ((a, b, MV[key]), (b, a, MV[key].Not())):
                 vb = via_near(c_, key)
                 for w_, pres_ in ((w_move, mv_), (w_stay, mv_.Not())):
-                    CU[lane_][0].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_, pres_, ''))
+                    CU[lane_][0].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_, present(pres_, lane_), ''))
                     CU[lane_][1].append(1 + (NL - 2) * vb)
             for l_ in range(NL):
                 for lane_, Lx_, mv_ in ((a, Lb_, MV[key]), (b, La_, MV[key].Not())):
@@ -711,7 +727,7 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=()):
                     for w_, pres_ in ((w_move, mv_), (w_stay, mv_.Not())):
                         p_ = m.NewBoolVar('')
                         m.AddBoolAnd([pres_, on_l]).OnlyEnforceIf(p_); m.AddBoolOr([pres_.Not(), on_l.Not(), p_])
-                        LS[(lane_, l_)].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_, p_, ''))
+                        LS[(lane_, l_)].append(m.NewOptionalFixedSizeIntervalVar(t[key], w_, present(p_, lane_), ''))
             continue
         # crossing lanes DIFFER: tl_a ^ tl_b ^ Ca ^ Cb == 1, i.e. XOR(parity bits [+ 1 when the teeth differ]) == 1
         lits = ev[a][key] + ev[b][key]
@@ -1116,6 +1132,10 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=()):
             print(f"   the root's proof as a floor: {r_['over']} via(s) over two, {r_['vias']} vias")
     OBJ = W_OVER * sum(over.values()) + W_V * VIAS + W_SOFT * sum(soft_broken.values()) + sum(cost) \
         + W_FIRM * sum(firm_broken.values()) + W_FIRM * sum(v_ for _k, v_ in GATE_OVER)
+    if CROWD:
+        # (the diagnosis asks only for the fewest crowded lanes -- a whole via each, so the search stops, proved, as
+        # soon as their count is)
+        OBJ = W_V * sum(CROWD.values())
     m.Minimize(OBJ)
     # ...and STOPPED when it STALLS: once it has a plan, SOLVE_STALL of the search's own model reductions in a row with
     # no better plan and no better bound (its log's '#Model' against '#n' and '#Bound' lines, events of the
@@ -1209,7 +1229,8 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=()):
     # never ends with nothing -- the round lays it, and the nets it leaves over two go back to the ends, which had
     # counted on keeping them at two: K51's ends promised 0 over two, the search held 1 over and 51 vias against a
     # bound of 0 and 45, and the round stopped with nothing). It is marked so, and no later solve takes it as a floor
-    keep = not proved and st == cp_model.FEASIBLE and awx_settings.get('SOLVE_UNPROVED') == '1'
+    STATUS['plan'] = st in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+    keep = not proved and st == cp_model.FEASIBLE and (awx_settings.get('SOLVE_UNPROVED') == '1' or bool(CROWD))
     if not proved and not keep:
         print(('(not proved optimal: best ' + f'{sv.ObjectiveValue():.0f}, bound {sv.BestObjectiveBound():.0f} -- no plan)')
               if st == cp_model.FEASIBLE else '')
@@ -1246,6 +1267,9 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=()):
         ({'over': int(sum(sv.Value(over[n]) for n in M)), 'vias': int(sum(per.values()) - sum(drp.values())), 'sig': sig}
          if not CUTS and not SOFT and NVC0 == 0 and proved else None)
     J['proved'] = bool(proved)
+    if CROWD:
+        J['crowded'] = [n for n in M if sv.Value(CROWD[n])]
+        print(f"   crowded: {len(J['crowded'])} lane(s) whose crossings break their room -- {', '.join(J['crowded'])}")
     if GATE_OVER:
         J['gate_over'] = [[k_[0], k_[1], k_[2], k_[3], int(sv.Value(v_))] for k_, v_ in GATE_OVER if sv.Value(v_)]
         print(f"   part gates over: {len(J['gate_over'])} of {len(GATE_OVER)}"
@@ -1274,6 +1298,15 @@ def main():
     J = solve(ctx, awx_settings.req('DEST'), files('CUTS'), files('HIST'), awx_settings.get('HINT') or None,
               soft_cuts=files('SOFT_CUTS'))
     if J is None:
+        # (SOLVE_CROWD=1, a round's first solve in whole_route: a model with NO plan is solved again as its CROWD
+        # diagnosis, and the lanes it names -- whose crossings the ends leave no room for -- go to OUT.crowded.json,
+        # which the round's log reads: zynq LVDS round 1's TX_D4 and DATA_CLK, round 3's DATA_CLK)
+        if awx_settings.get('SOLVE_CROWD') == '1' and STATUS.get('plan') is False and out.endswith('.json'):
+            ctx, _cs = whole_ctx.plan()
+            Jc = solve(ctx, awx_settings.req('DEST'), files('CUTS'), files('HIST'), None,
+                       soft_cuts=files('SOFT_CUTS'), crowd=True)
+            if Jc is not None and Jc.get('crowded'):
+                json.dump({'crowded': Jc['crowded']}, open(out[:-len('.json')] + '.crowded.json', 'w'), indent=0)
         sys.exit(1)
     json.dump(J, open(out, 'w'), indent=0)
 

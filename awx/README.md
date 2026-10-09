@@ -784,6 +784,16 @@ once, proved optimal in its vias.
 - **Unproved, still a plan:** a round's first solve, and the loop's last
   re-solve, keep a plan they cannot prove (`SOLVE_UNPROVED`). The nets such a
   plan leaves over two go back to the ends.
+- **No plan, and why** (`SOLVE_CROWD`, a round's first solve): a model with
+  no plan at all is solved again as its **crowd diagnosis** -- each lane's
+  crossings free to break their room along it (their spacing per layer, the
+  stack of crossers at one point), the fewest such lanes the only price --
+  and the lanes it breaks are named (`OUT.crowded.json`, and in the round's
+  log): the lanes whose crossings the ends leave no room for. On the zynq
+  LVDS bus on four layers, rounds 1 and 3 had no plan, and the diagnosis
+  names exactly the lanes a lane-by-lane search finds: TX_D4 and DATA_CLK,
+  then DATA_CLK alone -- two pairs berthing on the destination's facing face,
+  every crossing of theirs in the 3 mm between the arrays.
 
 **Bounded in work, not time.** A count of CP-SAT's interleaved batches, the
 workers sharing no clauses (`WHOLE_SOLVE_BATCHES`); bounded by deterministic
@@ -1033,7 +1043,10 @@ only the fanout can move.
 - **The planned bench** is planned once and saved (`whole_ctx.plan`, under
   `tmp/ctx_cache`).
 - **Refusals:** a bench outside the canonical frame (`flow_frame.py`) or with
-  more than two copper layers is refused, not misread.
+  more than two copper layers is refused, not misread. A run of only some of
+  the bus's lanes -- the last resort's partial -- is judged by the frame's own
+  trunk, pad box to pad box, where its balls' centroids alone read a quarter
+  off: a bench turned for the whole bus is in the frame for any part of it.
 
 </details>
 

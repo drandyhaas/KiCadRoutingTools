@@ -1215,12 +1215,20 @@ def chain(K, o, R=3, base=None, dest=None, settings=None):
         solve = os.path.join(d, 'solve.json')
         # (a round never ends with nothing: its solve keeps a plan it cannot prove -- whole_solve SOLVE_UNPROVED -- and
         # the round lays it; the loop's own re-solves still take only a proved one)
-        run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1'}, log_path=os.path.join(d, 'solve.log'))
-        for ln in grep(os.path.join(d, 'solve.log'), r'whole_solve:|workers:'):
+        # (and one with NO plan names, in the round's log, the lanes whose crossings the ends leave no room for --
+        # whole_solve SOLVE_CROWD, its CROWD diagnosis)
+        crowded_f = os.path.join(d, 'solve.crowded.json')
+        if os.path.exists(crowded_f):
+            os.remove(crowded_f)
+        run(['whole_solve.py', solve], {**env, 'SOLVE_UNPROVED': '1', 'SOLVE_CROWD': '1'},
+            log_path=os.path.join(d, 'solve.log'))
+        for ln in grep(os.path.join(d, 'solve.log'), r'whole_solve:|workers:|crowded:'):
             say(ln[:200])
+        crowded = json.load(open(crowded_f)).get('crowded') or [] if os.path.isfile(crowded_f) else []
         J, proved, rc, res, loopd = {}, False, None, None, os.path.join(d, 'loop')
         if not os.path.isfile(solve):
-            say("  no plan from the solve -- nothing for this round to lay")
+            say("  no plan from the solve -- nothing for this round to lay"
+                + (f" (no room for the crossings of {', '.join(crowded)})" if crowded else ''))
         else:
             J = json.load(open(solve))
             proved = J.get('proved', True)
