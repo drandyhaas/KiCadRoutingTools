@@ -422,6 +422,11 @@ def write(ctx, board, out, base_s, base_v):
     copy_siblings(board, out)           # (the project and the .kicad_dru's per-layer rules with it)
     fix_project_for_output(out, board, clearance=cfg.clearance, track_width=cfg.track_width,
                            via_diameter=cfg.via_size, via_drill=cfg.via_drill, verbose=False)
+    # (a via laid in a pad or a paste opening declares Type VII, as braid.run's and the fanout's do (#962): a lane's
+    # change right at its tooth stood 0.15 mm into its own ball's paste opening on the zynq LVDS bus, and check_drc
+    # graded the board's only violation, via-in-paste)
+    import ship_vias
+    ship_vias.stamp(out, 'route_lanes', print)
     print(f'wrote {out}: {len(segs)} segment(s), {len(vias)} via(s) added, routed at clearance {cfg.clearance}')
 
 
