@@ -94,5 +94,29 @@
     "license": "see repo",
     "short_name": "storm_tracker",
     "note": "Storm Tracker: 4-layer 36.5x69mm ESP32-C6-MINI-1U lightning detector (AS3935 antenna front end, 1.54in e-paper on a 24-pin 0.5mm FFC, USB-C + battery charger, buzzer, buttons). Small but DENSE: 342 vias and 549 segments in ~2500mm2, 0.13mm min track/clearance fab floor, 0.5mm-pitch FFC and a 61-pad module. One of only two corpus boards with a real .kicad_dru -- and unlike mez_rx's DFM ruleset its single rule is CONDITIONED on a netclass (A.NetClass == '90R_DP' && B.NetName == 'GND', F.Cu, 0.15mm), with the USB pair assigned to that class by PATTERN (*USB_D* -> 90R_DP) rather than by an explicit net list. Fully human-routed, so compare_to_original is meaningful."
+  },
+  {
+    "set": "set28",
+    "repo": "rein-baremetal/REIN_R1_KiCad",
+    "path": "REIN_R1_KiCad/REIN_R1_KiCad/REIN_R1_KiCad/REIN_R1.kicad_pcb",
+    "branch": "main",
+    "file": "rein_r1.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/rein-baremetal/REIN_R1_KiCad/45ba8db2451459047329fd5660ac21de8b81fdc4/REIN_R1_KiCad/REIN_R1_KiCad/REIN_R1_KiCad/REIN_R1.kicad_pcb",
+    "github_url": "https://github.com/rein-baremetal/REIN_R1_KiCad/blob/45ba8db2451459047329fd5660ac21de8b81fdc4/REIN_R1_KiCad/REIN_R1_KiCad/REIN_R1_KiCad/REIN_R1.kicad_pcb",
+    "archive_url": "",
+    "archive_member": "",
+    "size_kb": 1301,
+    "layers_est": 4,
+    "footprints": 177,
+    "routable_nets": 142,
+    "max_pads": 62,
+    "kicad_version": 20260206,
+    "has_kicad_pro": true,
+    "tier": "hard",
+    "packages": "BGA,FPGA/SoC,high-speed",
+    "lane": "dual_mcu_usb",
+    "license": "see repo",
+    "short_name": "rein_r1",
+    "note": "REIN_R1 dual-MCU bare-metal dev board (rein-baremetal/REIN_R1_KiCad, no LICENSE file): 4 layers, 92x56mm, 177 footprints double-sided (98 F.Cu / 79 B.Cu), 142 routable nets. Two RP2040s (QFN-56 0.4mm, each with its own QSPI flash and 12MHz crystal) plus an ESP32-S3-WROOM-1, a 4-port USB 2.0 hub, STUSB4500 USB-PD sink, wide-input buck, LiPo charger + fuel gauge, two TXS0108E level shifters and a Pi 40-pin HAT socket. Six USB 2.0 pairs (connector, hub ports, each MCU) and two QSPI buses on a board whose README asks for 90-ohm pairs and length-matched QSPI. Admitted 2026-10-09 at Andy's request. The repo publishes it PLACED but NOT finished -- 'Routing: In Progress (Help Needed!)' -- and the shipped copper (2287 segments / 306 vias, a Freerouting .ses is in the repo) leaves 27 nets unrouted and 17 broken, so boards_set28/rein_r1 is a PARTIAL reference: compare_to_original is not a human benchmark for it. raw_url pinned to the commit validated, as the repo is under active work."
   }
 ]

@@ -17,6 +17,7 @@ MAP=(
   "act_probe_2ghz|act_probe_2ghz"
   "agri_smart_switch|agri_smart_switch"
   "mez_rx|mez_rx"
+  "rein_r1|rein_r1"
   "storm_tracker|storm_tracker"
 )
 

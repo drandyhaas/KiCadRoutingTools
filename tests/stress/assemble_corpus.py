@@ -55,7 +55,17 @@ SET_BLURB = {
         "ruleset, its single rule is CONDITIONED on a netclass\n"
         "(A.NetClass == '90R_DP' && B.NetName == 'GND'), and its USB pair is\n"
         "netclass-assigned by PATTERN (*USB_D* -> 90R_DP). Fully human-routed, so\n"
-        "unlike mez_rx it is a usable compare_to_original reference."
+        "unlike mez_rx it is a usable compare_to_original reference.\n"
+        "\n"
+        "rein_r1 (rein-baremetal/REIN_R1_KiCad) joined 2026-10-09 at Andy's\n"
+        "request: a 4-layer 92x56mm dual-MCU dev board -- two RP2040s, each with its\n"
+        "own QSPI flash, plus an ESP32-S3-WROOM-1, a 4-port USB hub, USB-PD and a Pi\n"
+        "HAT socket -- with 177 footprints placed on BOTH sides (79 on B.Cu).\n"
+        "validate_candidate PASS (tier hard); dedupe best 0.093 (set11's\n"
+        "ergosnm_trackball) against 477 corpus boards, with no shared symbol UUIDs.\n"
+        "The repo publishes it placed but not finished (\"Routing: In Progress\"):\n"
+        "its copper leaves 27 nets unrouted and 17 broken, so like mez_rx its\n"
+        "reference is not a human benchmark -- a partial one rather than an empty one."
     ),
     "set3monster": (
         "set3monster is the \"extreme / intractable\" monster batch: boards whose\n"

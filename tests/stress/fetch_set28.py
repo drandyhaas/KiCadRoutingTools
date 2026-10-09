@@ -29,6 +29,16 @@ ruleset, its single rule is CONDITIONED on a netclass
 netclass-assigned by PATTERN (*USB_D* -> 90R_DP). Fully human-routed, so
 unlike mez_rx it is a usable compare_to_original reference.
 
+rein_r1 (rein-baremetal/REIN_R1_KiCad) joined 2026-10-09 at Andy's
+request: a 4-layer 92x56mm dual-MCU dev board -- two RP2040s, each with its
+own QSPI flash, plus an ESP32-S3-WROOM-1, a 4-port USB hub, USB-PD and a Pi
+HAT socket -- with 177 footprints placed on BOTH sides (79 on B.Cu).
+validate_candidate PASS (tier hard); dedupe best 0.093 (set11's
+ergosnm_trackball) against 477 corpus boards, with no shared symbol UUIDs.
+The repo publishes it placed but not finished ("Routing: In Progress"):
+its copper leaves 27 nets unrouted and 17 broken, so like mez_rx its
+reference is not a human benchmark -- a partial one rather than an empty one.
+
 Downloads each board and its sibling project files -- the .kicad_pro (DRC floor,
 #441) and the .kicad_dru (per-layer clearance rules, #498) --
 into $STRESS_DIR/sources/github_set28/. After fetching, run `bash prep_set28.sh`
