@@ -1246,5 +1246,57 @@
    "referrer": "search.brave.com",
    "uniques": 11
   }
+ ],
+ "2026-10-09": [
+  {
+   "count": 576,
+   "referrer": "Google",
+   "uniques": 371
+  },
+  {
+   "count": 284,
+   "referrer": "github-com.btglss.net",
+   "uniques": 70
+  },
+  {
+   "count": 181,
+   "referrer": "forum.kicad.info",
+   "uniques": 146
+  },
+  {
+   "count": 152,
+   "referrer": "github.com",
+   "uniques": 90
+  },
+  {
+   "count": 93,
+   "referrer": "linkedin.com",
+   "uniques": 53
+  },
+  {
+   "count": 62,
+   "referrer": "DuckDuckGo",
+   "uniques": 31
+  },
+  {
+   "count": 32,
+   "referrer": "youtube.com",
+   "uniques": 25
+  },
+  {
+   "count": 27,
+   "referrer": "Bing",
+   "uniques": 22
+  },
+  {
+   "count": 20,
+   "referrer": "com.linkedin.android",
+   "uniques": 16
+  },
+  {
+   "count": 17,
+   "referrer": "search.brave.com",
+   "uniques": 11
+  }
  ]
 }
