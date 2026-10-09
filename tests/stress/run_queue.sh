@@ -7,8 +7,9 @@
 #
 # Usage: run_queue.sh [max_concurrency] [model]   (defaults: 8, backend default)
 #   Backend: STRESS_AI_BACKEND=claude (default) | opencode (#503) — inherited by
-#   every run_board.sh worker. Model defaults: claude -> sonnet; opencode -> the
-#   user's configured opencode default (or pass provider/model explicitly).
+#   every run_board.sh worker. Model defaults: claude -> sonnet (the latest
+#   Sonnet) at STRESS_AI_EFFORT=high; opencode -> the user's configured opencode
+#   default (or pass provider/model explicitly).
 # Watch:  tail -f ~/Documents/kicad_stress_test/QUEUE_STATUS.txt
 #
 # Concurrency is LOAD-BASED, with the first arg as a hard CEILING (default 8).

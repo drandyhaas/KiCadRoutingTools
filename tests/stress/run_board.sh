@@ -12,13 +12,15 @@
 # both backends' JSON event schemas are supported there.
 #
 # Usage: run_board.sh <board> <set:1|2|3...> [model]
-#   model: claude backend takes tier aliases (default: sonnet); opencode takes
-#          provider/model (e.g. anthropic/claude-sonnet-4-5; default: the
-#          user's configured opencode default model).
+#   model: claude backend takes tier aliases (default: sonnet, i.e. the latest
+#          Sonnet); opencode takes provider/model (e.g. anthropic/claude-sonnet-4-5;
+#          default: the user's configured opencode default model).
+#   effort: STRESS_AI_EFFORT=low|medium|high|xhigh|max (claude backend; default high).
 set -u
 BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-}"
 BACKEND="${STRESS_AI_BACKEND:-claude}"
 if [ "$BACKEND" = "claude" ] && [ -z "$MODEL" ]; then MODEL=sonnet; fi
+EFFORT="${STRESS_AI_EFFORT:-high}"
 # Repo root is derived from this script's own location (tests/stress/run_board.sh),
 # so the script is portable; override with STRESS_REPO if needed.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -139,7 +141,7 @@ When fully done:
 # Note `board=` appears on BOTH the start and the exit line -- count launches with
 # `grep -c 'start='`, not `grep -c 'board='`.
 {
-  echo "[run_board] board=$BOARD set=$SET backend=$BACKEND model=${MODEL:-(backend default)} start=$(date)"
+  echo "[run_board] board=$BOARD set=$SET backend=$BACKEND model=${MODEL:-(backend default)} effort=$EFFORT start=$(date)"
   echo "[run_board] result=$RESULT"
 } >> "$RUNDIR/worker.log"
 
@@ -152,6 +154,7 @@ export KICAD_ROUTE_TRACE="${KICAD_ROUTE_TRACE:-1}"
 # narrative; worker.log keeps the wrapper markers + stderr.
 ( cd "$RUNDIR" && claude -p "$PROMPT" \
     --model "$MODEL" \
+    --effort "$EFFORT" \
     --dangerously-skip-permissions \
     --output-format stream-json --verbose \
     --add-dir "$ROOT" --add-dir "$REPO" ) > "$RUNDIR/transcript.jsonl" 2>> "$RUNDIR/worker.log"
