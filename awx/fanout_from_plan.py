@@ -1438,6 +1438,11 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
                                   'kind': m.kind} for nm, m in choice.items()}
     # each pair's berths arriving with the hand its teeth leave by (teeth_hands, on the source as laid)
     sref = next((x['ref'] for x in spec['arrays'] if x['ref'] != dref), None)
+    # the source board, named as fanout_destination names it: the whole route's next round starts from it
+    # (whole_route.advance). Unnamed, every round after the first started again from the bench's own source fanout,
+    # its pairs split as that pair-blind fanout left them (zynq LVDS on four layers: 11 pairs split at U1, every round 2)
+    log(f'\nplan (joint destination {dref}): {len(choice)} berth(s)  (source board: {os.path.basename(board)}, '
+        f'{len(banned)} banned move(s))')
     pcb = parse_kicad_pcb(board)
     hands = teeth_hands(pcb, list(names), byname, sref) if sref in pcb.footprints else {}
     rung, reps = je.fan_array(board, out_path, dref, list(names), a['others'], spec['layers'], prefer=prefer,

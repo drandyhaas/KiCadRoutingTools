@@ -187,6 +187,13 @@ def grep(path, pattern):
     return [ln for ln in lines_of(path) if r.search(ln)]
 
 
+def source_board_named(fo_log):
+    """the source board a fanout's log names last -- its destination pass's '(source board: NAME, ...' line, on either
+    path (fanout_from_plan.fanout_destination, joint_destination) -- or None"""
+    sb = [m for ln in lines_of(fo_log) for m in re.findall(r'source board: ([^,]+)', ln)]
+    return sb[-1] if sb else None
+
+
 def tail(path, n):
     return lines_of(path)[-n:]
 
@@ -991,10 +998,9 @@ def chain(K, o, R=3, base=None, dest=None, settings=None):
         the passives where the first round's cap step left them (HELD); the source board is written before it moves
         them, and a base without them had every round move them again, from where they stood, not always the same"""
         was = base
-        sb = [m[len('source board: '):] for ln in lines_of(os.path.join(d, 'fo.log'))
-              for m in re.findall(r'source board: [^,]+', ln)]
-        if sb and sb[-1] and os.path.isfile(os.path.join(d, sb[-1])):
-            base = os.path.join(d, sb[-1])
+        sb = source_board_named(os.path.join(d, 'fo.log'))
+        if sb and os.path.isfile(os.path.join(d, sb)):
+            base = os.path.join(d, sb)
         if os.path.isfile(HELD):
             base = place_held(base, os.path.join(d, 'base_held.kicad_pcb'), json.load(open(HELD)))
         if base != was and 'BASE' in env:
