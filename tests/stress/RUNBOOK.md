@@ -530,10 +530,10 @@ harmless.
    Assert on the `JSON_IMPROVEMENT_GATE:` line (`lost`/`gained`/`verdict`) rather
    than reading prose, and record a REVERTED step in `issues`.
 11. Verification (always, on the final board):
-    - `check_drc.py <final> --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee drc.log`
+    - `py_router/check_drc.py <final> --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee drc.log`
       (manufacturing floor from `--design-rules`, per step 7; note the flags used)
-    - `check_connected.py <final> 2>&1 | tee connectivity.log`
-    - `check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
+    - `py_router/check_connected.py <final> 2>&1 | tee connectivity.log`
+    - `py_tools/check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
 11b. COMPARE-TO-ORIGINAL (always, final step): run
     `python3 <TOOLS_REPO>/tests/stress/compare_to_original.py
      --ours <final> --orig ~/Documents/kicad_stress_test/boards_set<N>/<board>.kicad_pcb

@@ -194,7 +194,7 @@ print(fb if fb and os.path.exists(fb) else '')" 2>/dev/null)
     # must describe the same board, else the CLI and GUI route different worlds.
     # Mirrors redo_stress_test.py; non-fatal -- a FAIL is a parser bug to file,
     # not a routing failure. validate_pcb_data.py self-execs into KiCad's python.
-    if python3 "$REPO/validate_pcb_data.py" "$FB" > "$RUNDIR/validate_pcb_data.txt" 2>&1; then
+    if python3 "$REPO/py_tools/validate_pcb_data.py" "$FB" > "$RUNDIR/validate_pcb_data.txt" 2>&1; then
       :
     else
       echo "[run_board] PARSER-PARITY FAIL on $(basename "$FB") -- see validate_pcb_data.txt" >> "$RUNDIR/worker.log"
