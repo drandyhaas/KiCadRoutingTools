@@ -548,7 +548,7 @@ def colour_runs(runs, edges, together, want):
     for k in sorted(runs):
         mdl.Add(sum(c[k].values()) == ok[k])
     for a, b in edges:
-        for L in set(c[a]) & set(c[b]):
+        for L in sorted(set(c[a]) & set(c[b])):          # (sorted: a set of layer names iterates in hash order)
             mdl.AddBoolOr([c[a][L].Not(), c[b][L].Not()])
     for a, b in together:
         for L in sorted(set(c[a]) | set(c[b])):
@@ -959,7 +959,10 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
         # four layers: its legs' runs met in one, and no colouring held the pair)
         leg_of = {k_: (n_p, s_) for n_p, (_b, kp, kn) in enumerate(bm.pairs) for k_, s_ in ((kp, 0), (kn, 1))}
         seen_ = set()
-        for g in [list(g) for g in cap_g] + [sorted(set(a) | set(b)) for a, b in cap_b]:
+        # (in a canonical order, as the groups above: cap_g and cap_b are SETS of ball names, iterated in the string
+        # hash's order -- the model's rows came in a different order each process, and so did the plan: zynq U1's
+        # LVDS bus on four layers, one realize run with two hash seeds, 26 of its 47 teeth the same)
+        for g in [list(g) for g in sorted(cap_g)] + [sorted(set(a) | set(b)) for a, b in sorted(cap_b)]:
             legs_ = collections.defaultdict(lambda: ([], []))
             for k, i in g:
                 if k in leg_of:
