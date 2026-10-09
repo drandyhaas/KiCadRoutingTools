@@ -119,6 +119,21 @@ def build_parts(pcb, path):
         npth_floor=L.resolve_npth_floor(pcb, path, notes))
 
 
+def _windowed_product(pcb, parts, a, b, clearance=0.2):
+    """`pair_shortfall`'s cap operand at the file poses (#1213)."""
+    pa, pb = parts[a], parts[b]
+    fa, fb = pcb.footprints[a], pcb.footprints[b]
+    xa, ya, ra = fa.x, fa.y, fa.rotation or 0.0
+    xb, yb, rb = fb.x, fb.y, fb.rotation or 0.0
+    ea = pa.extent(xa, ya, ra)
+    if ea is None or pb.extent(xb, yb, rb) is None:
+        return 0
+    reach = max(clearance, pa.hole_reach, pb.hole_reach)
+    wa, wb = L._pad_windows(pa.pad_rects(xa, ya, ra), ea,
+                            pb.pad_rects(xb, yb, rb), reach)
+    return len(wa) * len(wb)
+
+
 def table_a(path):
     """The PAIR_TEST_CAP census for one board (#834)."""
     pcb = parse_kicad_pcb(path)
@@ -126,7 +141,9 @@ def table_a(path):
     ps = pad_sides_by_ref(parts)
     pairs, cross, mixed = [], [], []
     for a, b in combinations(sorted(parts), 2):
-        if parts[a].n_pads * parts[b].n_pads <= L.PAIR_TEST_CAP:
+        # #1213: the cap compares the WINDOWED product at the pair's poses,
+        # so a pair is over the cap only when that many pads face each other.
+        if _windowed_product(pcb, parts, a, b) <= L.PAIR_TEST_CAP:
             continue
         row = [a, b, parts[a].n_pads, parts[b].n_pads,
                ''.join(sorted(ps[a])), ''.join(sorted(ps[b])),

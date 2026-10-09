@@ -46,14 +46,27 @@ def _model(board=GLASGOW):
     return RP.PlacementModel(parse_kicad_pcb(board), board)
 
 
+#: glasgow_revC's courtyard census. 52.252 until #1206: 6.2806 mm2 of it was
+#: J1 <-> TP13 and J1 <-> TP15 (3.1403 each), two test points between J1's
+#: drilled-pad clusters, under the single far-side box drawn over all of them.
+#: 45.9714 until J4's F.CrtYd closed (fa10 P1: its ends miss by 8 um at one
+#: corner, KiCad chains them; the polygon is 0.0045 mm2 less than the hull
+#: that stood in for it).
+GLASGOW_CENSUS = 45.9669
+#: ...and the optimizer's rect sum on the same board, 70.05 until #1206 (the
+#: quench's far side is the clusters too). Still a different number from the
+#: census, which is what the caption arms below need.
+GLASGOW_RECTS = 62.0504
+
+
 def test_glasgow_caption_is_the_census():
     m = _model()
     census = RP.legality_findings(m)['courtyard_overlap_mm2']
-    assert abs(census - 52.252) < 0.0005, census
-    assert abs(m.metrics['overlap_area'] - 70.05) < 0.005, m.metrics
+    assert abs(census - GLASGOW_CENSUS) < 0.0005, census
+    assert abs(m.metrics['overlap_area'] - GLASGOW_RECTS) < 0.005, m.metrics
     cap = RP.caption(RP.PanelSpec(m, label='x'))
-    assert 'courtyard overlap 52.25mm2' in cap, cap
-    assert '70.05' not in cap, cap
+    assert f'courtyard overlap {GLASGOW_CENSUS:.2f}mm2' in cap, cap
+    assert f'{GLASGOW_RECTS:.2f}' not in cap, cap
     print(f"  PASS: {cap}")
 
 
@@ -73,8 +86,8 @@ def test_a_project_waiver_does_not_zero_the_caption():
         census = RP.legality_findings(m)['courtyard_overlap_mm2']
         cap = RP.caption(RP.PanelSpec(m, label='x'))
     assert m.metrics['overlap_area'] < 1e-9, m.metrics['overlap_area']
-    assert abs(census - 52.252) < 0.0005, census
-    assert 'courtyard overlap 52.25mm2' in cap, cap
+    assert abs(census - GLASGOW_CENSUS) < 0.0005, census
+    assert f'courtyard overlap {GLASGOW_CENSUS:.2f}mm2' in cap, cap
     print(f"  PASS: under courtyards_overlap=ignore the optimizer's metric is "
           f"{m.metrics['overlap_area']:.2f} and the caption still reads the "
           f"census ({census})")
@@ -107,14 +120,15 @@ def test_the_pair_diff_names_both_numbers():
     # pair diff's numbers are per model, whatever the pair is.
     esp = _model(os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb'))
     esp_cen = RP.legality_findings(esp)['courtyard_overlap_mm2']
-    assert abs(esp_cen - 52.252) > 0.01, esp_cen
+    assert abs(esp_cen - GLASGOW_CENSUS) > 0.01, esp_cen
     text, J = RP.describe_pair(_model(), esp, None)
-    assert J['courtyard_overlap_mm2'] == {'before': 52.252,
+    assert J['courtyard_overlap_mm2'] == {'before': GLASGOW_CENSUS,
                                           'after': round(esp_cen, 4)}, J
-    assert abs(J['overlap_area']['before'] - 70.05) < 0.005, J
-    assert (f'courtyard overlap mm2 (census): 52.25 -> {esp_cen:.2f}'
+    assert abs(J['overlap_area']['before'] - GLASGOW_RECTS) < 0.005, J
+    assert (f'courtyard overlap mm2 (census): {GLASGOW_CENSUS:.2f} -> '
+            f'{esp_cen:.2f}' in text), text
+    assert (f'overlap mm2 (optimizer rects): {GLASGOW_RECTS:.2f} ->'
             in text), text
-    assert 'overlap mm2 (optimizer rects): 70.05 ->' in text, text
     # a side whose census raised has no census number to diff
     from placement import legality
     before = _model()
@@ -131,7 +145,7 @@ def test_the_pair_diff_names_both_numbers():
         legality.grade_body_overlap = real
     assert 'courtyard_overlap_mm2' not in J2, J2
     assert '(census)' not in text2, text2
-    print(f"  PASS: the pair diff carries each side's census (52.25 -> "
+    print(f"  PASS: the pair diff carries each side's census ({GLASGOW_CENSUS:.2f} -> "
           f"{esp_cen:.2f}) and the optimizer's number, each labelled; a "
           f"side with no census diffs none")
 

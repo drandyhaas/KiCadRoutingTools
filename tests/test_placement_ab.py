@@ -98,9 +98,16 @@ BASELINE_INT_KEYS = ('crossings', 'health_bus_foreign_crossings',
                      'intent_errors', 'intent_errors_enforced',
                      'intent_errors_other', 'edge_facing_pads', 'unseated',
                      # #1044: parts with pad copper in a rule-area band.
-                     'oob_keepout_copper_count')
+                     'oob_keepout_copper_count',
+                     # fa10 P1: check_assembly's courtyard-blocking census
+                     # on the written board. #916's A/B judged the body
+                     # model on `body_blocking`, which is pad intersections
+                     # only, so it never saw the channel the model changes.
+                     'courtyard_blocking')
 BASELINE_FLOAT_KEYS = ('hpwl', 'health_block_displacement_max_mm',
-                       'oob_keepout_copper_amount')
+                       'oob_keepout_copper_amount',
+                       # fa10 P1: the summed area of those pairs, mm2.
+                       'courtyard_blocking_area')
 BASELINE_DICT_KEYS = ('intent_errors_by_rule',)
 
 # Recorded as EVIDENCE, deliberately not graded: `health_block_displacement_max_mm`
@@ -455,6 +462,85 @@ ROWS = [
         'rejected': True,
         'why': ('MECHANISM: the board candidate_valid names as the one where nearly every part starts in violation, so it is the most sensitive to a seat box that only grows -- and the one board where the trade goes the OTHER way, signal and both guards together. Kept because it DISAGREES with the other three, and deleting the dissenting row is how a finding becomes folklore.'),
     },
+    # --- #1182: the SEED engine on check_assembly's occupancy -------------
+    # REJECTED as a default, rows kept: `place_seed --body-model` seats the
+    # neighbour currency on `placement.body`'s occupancy while every intent
+    # question keeps the courtyard ladder. The signal is check_assembly's own
+    # `courtyard_blocking` on the written seed, the currency #1182 found the
+    # seeder blind to; the guards are what a bigger seat box can cost.
+    # Measured on all four boards the mark is REGRESS (a guard or an intent
+    # error each time, though the signal improves on two), so the flag ships
+    # opt-in, and the default path to #1182's pairs is the repair's
+    # --baseline charge.
+    {
+        'name': 'body-seed-esp_prog',
+        'board': 'esp_prog.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'body_model': True},
+        'ignore_nets': ['GND'],
+        'signal': 'courtyard_blocking',
+        'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: no footprint here draws a courtyard, so every '
+                'seat box grows to its drawn body at once. The signal has '
+                'nothing to clear -- neither arm leaves a courtyard pair -- '
+                'and the bigger boxes spread the parts, so wirelength and '
+                'crossings pay for nothing. Numbers: '
+                'tests/placement_ab_baseline.json.'),
+    },
+    {
+        'name': 'body-seed-ulx3s',
+        'board': 'ulx3s.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'body_model': True},
+        'ignore_nets': ['GND', '+3V3', '+5V', 'VCC*'],
+        'signal': 'courtyard_blocking',
+        'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: the trade #1182 asked for, in its clearest '
+                'form: the seed leaves almost no courtyard pair and '
+                'crossings fall, but the grown boxes cost wirelength and '
+                'push one part out of its intent zone (zone_containment) -- '
+                'a guard the default must not lose. Numbers: '
+                'tests/placement_ab_baseline.json.'),
+    },
+    {
+        'name': 'body-seed-watchy',
+        'board': 'watchy.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'body_model': True},
+        'ignore_nets': ['GND'],
+        'signal': 'courtyard_blocking',
+        'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: signal and both wire guards improve together, '
+                'and the row still REGRESSES on an intent error: one more '
+                'connector seats off its declared edge (edge_connector). '
+                'Kept as the row that comes closest, so the reason it is '
+                'not a default stays on record. Numbers: '
+                'tests/placement_ab_baseline.json.'),
+    },
+    {
+        'name': 'body-seed-orangecrab_ext_pll',
+        'board': 'orangecrab_ext_pll.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'body_model': True},
+        'ignore_nets': ['GND', '+3V3', '+1V1', 'VCC*'],
+        'signal': 'courtyard_blocking',
+        'guard': ('unseated', 'body_blocking', 'crossings', 'hpwl'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: the courtyard pair COUNT does not move (the '
+                'area shrinks), so the signal is neutral, and wirelength '
+                'regresses. Numbers: tests/placement_ab_baseline.json.'),
+    },
     # --- run 26: the seeder's opt-in rotation tie-break --------------------
     # REJECTED as a default, rows kept. The seed engine re-seats every part
     # from the emitted intent, once with the ladder in #893's order and once
@@ -593,7 +679,11 @@ ROWS += [
         # change detector with its measured mark; the numbers are in the
         # baseline, not here.
         'rejected': True,
-        'expect': 'neutral' if b in _FLAT else 'regress',
+        # ulx3s reads neutral since fa10 P1 (#1206): its OFF seed packs on
+        # per-cluster far sides (GPDI1's posts), and the toggle that merges
+        # them back restores regress.
+        'expect': ('neutral' if b in _FLAT or b == 'ulx3s.kicad_pcb'
+                   else 'regress'),
         'why': (('MECHANISM: the ON arm seeds from an intent carrying the '
                  'observed decap limit, so seeder stage 2.5 seats each '
                  'tethered cap at a supply pin of an IC its zone placed '
@@ -647,7 +737,12 @@ _AFTER_ICS_MARKS = {
     ('decap-after-queue', 'splitflap_driver'): 'neutral',
     ('decap-after-queue', 'tigard'): 'improve',
     ('decap-after-queue', 'glasgow_revC'): 'neutral',
-    ('decap-after-queue', 'ulx3s'): 'improve',
+    # fa10 P1 (#1206): ulx3s's OFF seed moved -- GPDI1's two shell posts are
+    # two far-side boxes now, not one box spanning the gap between them --
+    # and on that seed both families read neutral (merging the clusters
+    # back restores improve / regress: the attribution toggle).
+    ('decap-within-limit', 'ulx3s'): 'neutral',
+    ('decap-after-queue', 'ulx3s'): 'neutral',
 }
 ROWS += [
     {
@@ -997,7 +1092,9 @@ def _intent_for(board_path, corridors, workdir, zone_flags=None,
 
 
 def _body_overlap(pcb_data, board_path, clearance):
-    """`legality.grade_body_overlap` on the WRITTEN board -> (blocking, advisory).
+    """`legality.grade_body_overlap` on the WRITTEN board -> the four body
+    columns: `body_blocking`, `body_advisory`, `courtyard_blocking`,
+    `courtyard_blocking_area`.
 
     THE CURRENCY IS FIXED ACROSS ARMS, and that is the whole point. The
     quench's own `legality_metrics()['overlap_area']` is measured with the
@@ -1011,17 +1108,27 @@ def _body_overlap(pcb_data, board_path, clearance):
 
     `advisory` is the body channel (unwaived fab/courtyard pairs) and is what a
     seat-geometry change should move; `blocking` is the pad-intersection hard
-    channel, carried as a guard.
+    channel, carried as a guard. `courtyard_blocking` (fa10 P1) is
+    check_assembly's courtyard census past the run-23 floors, ABSOLUTE on the
+    written board: both arms start from one input, so the count compares the
+    arrangements, where the moved-vs-baseline gate would only say that
+    everything moved.
     """
     try:
         from placement import legality
         doc = legality.grade_body_overlap(pcb_data, clearance,
                                           pcb_file=board_path)
-        return int(doc.get('blocking') or 0), int(doc.get('advisory') or 0)
+        cb = doc.get('courtyard_blocking_pairs') or []
+        return {'body_blocking': int(doc.get('blocking') or 0),
+                'body_advisory': int(doc.get('advisory') or 0),
+                'courtyard_blocking': len(cb),
+                'courtyard_blocking_area': round(
+                    sum(float(p.area_mm2) for p in cb), 4)}
     except Exception as exc:                       # pragma: no cover - evidence
         print('    body overlap unmeasurable: %s: %s'
               % (type(exc).__name__, exc))
-        return None, None
+        return {'body_blocking': None, 'body_advisory': None,
+                'courtyard_blocking': None, 'courtyard_blocking_area': None}
 
 
 def _inversions(pcb_data, board_path):
@@ -1237,7 +1344,7 @@ def _grade_row(out_path, grade_intent, group_sources, ignore_nets, t0,
         by_rule[v.rule] = by_rule.get(v.rule, 0) + 1
     from placement.quench import INTENT_ENFORCED_RULES
     enforced = sum(n for r, n in by_rule.items() if r in INTENT_ENFORCED_RULES)
-    _bb, _ba = _body_overlap(graded, out_path, QUENCH_BASE['clearance'])
+    _bo = _body_overlap(graded, out_path, QUENCH_BASE['clearance'])
     return {
         **_keepout_copper(graded, out_path),
         'seconds': round(time.time() - t0, 1),
@@ -1250,8 +1357,7 @@ def _grade_row(out_path, grade_intent, group_sources, ignore_nets, t0,
         'health_block_displacement_max_mm':
             summary.get('health_block_displacement_max_mm'),
         'inversions': _inversions(graded, out_path),
-        'body_blocking': _bb,
-        'body_advisory': _ba,
+        **_bo,
         'intent_errors': summary.get('errors'),
         'intent_errors_by_rule': by_rule,
         'intent_errors_enforced': enforced,
@@ -1371,7 +1477,7 @@ def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES,
     enforced = sum(n for r, n in by_rule.items()
                    if r in INTENT_ENFORCED_RULES)
     gate = metrics.get('intent_gate')
-    _bb, _ba = _body_overlap(graded, out_path, quench_kw.get('clearance', 0.2))
+    _bo = _body_overlap(graded, out_path, quench_kw.get('clearance', 0.2))
     return {
         **_keepout_copper(graded, out_path),
         'seconds': round(time.time() - t0, 1),
@@ -1411,8 +1517,7 @@ def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES,
         # expected to move; `body_blocking` is the pad-intersection hard
         # channel, carried as a guard so a row cannot buy advisory pairs with
         # real shorts.
-        'body_blocking': _bb,
-        'body_advisory': _ba,
+        **_bo,
         'intent_errors': summary.get('errors'),
         'intent_errors_by_rule': by_rule,
         'intent_errors_enforced': enforced,
@@ -2076,6 +2181,7 @@ def _self_test():
             'intent_gate_rejected': None, 'edge_facing_pads': 3,
             'unseated': 0, 'oob_keepout_copper_count': 0,
             'oob_keepout_copper_amount': 0.0,
+            'courtyard_blocking': 0, 'courtyard_blocking_area': 0.0,
             'intent_errors_by_rule': {'block_unresolved': 10,
                                       'zone_containment': 4}}
     von = {'crossings': 90, 'hpwl': 9.0, 'corridor_cut': 800.0, 'seconds': 1,
@@ -2087,6 +2193,7 @@ def _self_test():
            'intent_gate_rejected': None, 'edge_facing_pads': 2,
            'unseated': 0, 'oob_keepout_copper_count': 0,
            'oob_keepout_copper_amount': 0.0,
+           'courtyard_blocking': 0, 'courtyard_blocking_area': 0.0,
            'intent_errors_by_rule': {'block_unresolved': 10,
                                      'zone_containment': 7}}
 

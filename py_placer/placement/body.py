@@ -141,6 +141,19 @@ class BodyGeometry(NamedTuple):
     # bboxes above as its broad phase.
     court_shape_local: object = None
     drawn_shape_local: object = None
+    # #1206 (phase-2 verifier). A courtyard the footprint draws on its FAR
+    # face, when it draws its own face too (`legality.far_courtyard_of`):
+    # part of a through-hole part's far side, which KiCad grades there.
+    far_court_local: Optional[Bbox] = None
+    # #1212 (second phase-3 verifier). How each courtyard outline was read
+    # (`parser.OUTLINE_POLYGON`: it closes; `OUTLINE_HULL`: it does not, and
+    # its vertices' hull stands in), and the far one's OUTLINE. KiCad tests a
+    # pin against a courtyard only when the outline closes -- an open one is
+    # `malformed_courtyard` and no courtyard at all -- and against the far
+    # one as drawn, not its bbox.
+    court_shape_how: str = ''
+    far_court_shape_local: object = None
+    far_court_shape_how: str = ''
 
 
 def _union(a: Bbox, b: Bbox) -> Bbox:
@@ -168,10 +181,15 @@ def _for_side(sides: Optional[Dict[str, Bbox]],
 
 def _shape_for_side(shapes: Optional[Dict[str, tuple]], side: str):
     """The outline geometry `_for_side` would pick the bbox of, or None."""
+    return _shape_how_for_side(shapes, side)[0]
+
+
+def _shape_how_for_side(shapes: Optional[Dict[str, tuple]], side: str):
+    """`(geometry, how)` `_shape_for_side` picks, or `(None, '')`."""
     if not shapes:
-        return None
+        return None, ''
     got = shapes.get(side) or next(iter(shapes.values()))
-    return got[0] if got else None
+    return (got[0], got[1]) if got else (None, '')
 
 
 def body_geometry(fp, side: str,
@@ -189,9 +207,16 @@ def body_geometry(fp, side: str,
     the file read once, and so the rung logic has exactly one home.
     """
     from placement.utility import compute_footprint_bbox_local
+    from placement.legality import far_courtyard_of
     from kicad_parser import non_aperture_pads
 
     ref = ref or getattr(fp, 'reference', '') or ''
+    far_court = far_courtyard_of(courtyard_sides, side)
+    far_shape, far_how = None, ''
+    if far_court is not None and courtyard_shapes:
+        _far = courtyard_shapes.get('B' if side == 'F' else 'F')
+        if _far:
+            far_shape, far_how = _far[0], _far[1]
     pads: Optional[Bbox] = None
     # An aperture-only pad is not a pad here (#1143): a part whose only pads
     # are paste windows has no pads rung, like a pad-less one.
@@ -239,18 +264,25 @@ def body_geometry(fp, side: str,
     else:
         return BodyGeometry(ref, None, None, SOURCE_NONE,
                             silk_rejected=silk_rejected,
-                            drawn_local=None, drawn_source=SOURCE_NONE)
+                            drawn_local=None, drawn_source=SOURCE_NONE,
+                            far_court_local=far_court,
+                            far_court_shape_local=far_shape,
+                            far_court_shape_how=far_how)
 
     occupancy = (body_local if pads is None else _union(body_local, pads))
-    court_shape = (_shape_for_side(courtyard_shapes, side)
-                   if source == SOURCE_COURTYARD else None)
+    court_shape, court_how = (_shape_how_for_side(courtyard_shapes, side)
+                              if source == SOURCE_COURTYARD else (None, ''))
     drawn_shape = (_shape_for_side(fab_shapes, side)
                    if drawn_source == SOURCE_FAB else None)
     return BodyGeometry(ref, body_local, occupancy, source,
                         silk_rejected=silk_rejected,
                         drawn_local=drawn_local, drawn_source=drawn_source,
                         court_shape_local=court_shape,
-                        drawn_shape_local=drawn_shape)
+                        drawn_shape_local=drawn_shape,
+                        far_court_local=far_court,
+                        court_shape_how=court_how,
+                        far_court_shape_local=far_shape,
+                        far_court_shape_how=far_how)
 
 
 def board_bodies(pcb_data, pcb_file: Optional[str] = None

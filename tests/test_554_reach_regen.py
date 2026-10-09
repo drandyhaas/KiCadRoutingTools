@@ -201,7 +201,10 @@ def t_the_numbers_the_docs_QUOTE_are_pinned(live):
     for key, want in (('want_mm_median', 10.3571),
                       ('frozen_mm_median', 0.0),
                       ('reach_mm_median', 1.0259),
-                      ('slide_frozen_mm_median', 0.05)):
+                      # 0.05 until #1206 (fa10 P1): rp2350's two sheets
+                      # slid 0.66 / 0.84 mm against a far-side box drawn
+                      # over every drilled pad; per cluster, they sit at 0.
+                      ('slide_frozen_mm_median', 0.0)):
         got = s.get(key)
         check(isinstance(got, (int, float)) and abs(got - want) <= TOL,
               'summary.%s is %r, and the docs quote %r. Re-record the baseline '

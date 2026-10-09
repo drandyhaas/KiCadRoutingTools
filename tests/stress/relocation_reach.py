@@ -133,9 +133,11 @@ SCHEMA = 1
 #: A SUPERSET of `tests/stress/perturb_batch.py`'s eight -- it adds VSS, AGND,
 #: VBUS and +3.3V. An earlier comment here claimed the two lists were identical
 #: "deliberately", which was false. Measured, the difference is inert on this
-#: corpus except for `slide_frozen_mm_median`, which moves 0.05 -> 0.10; so the
-#: two studies do not disagree about any number either of them reports, but they
-#: are not the same list and this file no longer says they are.
+#: corpus: `slide_frozen_mm_median` is 0.0 on both lists (it moved 0.05 -> 0.10
+#: between them until fa10 P1 priced rp2350's far side per cluster of drilled
+#: pads, #1206, and its two frozen slides went to 0); so the two studies do not
+#: disagree about any number either of them reports, but they are not the same
+#: list and this file no longer says they are.
 IGNORE_NETS = ['GND', 'VCC', 'VDD', 'VSS', '+3V3', '+5V', '+1V8', '+1V1', 'GNDA',
                'AGND', 'VBUS', '+3.3V']
 

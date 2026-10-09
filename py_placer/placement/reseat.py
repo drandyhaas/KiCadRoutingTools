@@ -71,6 +71,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from placement.legality import far_boxes
 from placement.utility import snap_to_grid
 
 # Slot lattice. Deliberately coarse: this is a RE-SEAT, choosing which side of
@@ -347,10 +348,13 @@ def _clashes_with_seated(state, ref, pose, poses) -> bool:
         if part.side == op.side and _rects_overlap(a_ct, b_ct):
             return True
         # A through-hole part obstructs the FAR side too, so a same-cluster
-        # pair on opposite sides can still clash through the board.
-        if a_tht is not None and _rects_overlap(a_tht, b_ct):
+        # pair on opposite sides can still clash through the board -- through
+        # its drilled-pad CLUSTERS (#1206), not the box over all of them.
+        if a_tht is not None and any(_rects_overlap(t, b_ct)
+                                     for t in far_boxes(a_tht)):
             return True
-        if b_tht is not None and _rects_overlap(a_ct, b_tht):
+        if b_tht is not None and any(_rects_overlap(a_ct, t)
+                                     for t in far_boxes(b_tht)):
             return True
     return False
 

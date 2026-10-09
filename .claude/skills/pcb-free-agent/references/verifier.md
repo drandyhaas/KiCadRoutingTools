@@ -19,7 +19,8 @@ Trust nothing it told you. Measure it yourself, from the repo root.
 2. **Rules.** The board must have a sibling `.kicad_pro`. Grade at the rules it
    declares, never at a guessed value.
 3. **Every mode** (read the whole output, not the first line):
-   - `python3 -X utf8 py_tools/check_assembly.py <BOARD> --intent <INTENT>`: must be buildable. It names
+   - `python3 -X utf8 py_tools/check_assembly.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD>`: must be buildable
+     (`--baseline` arms the courtyard gate: a pair a moved part entered gates). It names
      pad copper past the outline and any part on a PCB-edge plug's mating region (`mating_keepout_refs`);
      name each one in your verdict. A part still in the staging pile is pad copper off the outline, so it is
      in `oob_pad_copper_gating_refs`; any such part on the board you grade is a FAIL. (`place_seed` names its
@@ -30,8 +31,8 @@ Trust nothing it told you. Measure it yourself, from the repo root.
    - the mechanical facts above, measured from the board.
 4. **`full` and `route` modes, also:**
    - `python3 -X utf8 py_tools/board_score.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD> --json <RUN DIR>/verify_<N>_score.json`: blocking 0, unrouted 0, broken 0;
-   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> <SPEC FLAGS>`: DONE;
-   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> --authored-from <INPUT BOARD>`: **report it, not gating**, and name any floor it lists;
+   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> <SPEC FLAGS> --baseline <INPUT BOARD>`: DONE;
+   - `python3 -X utf8 check_complete.py <BOARD> --intent <INTENT> --baseline <INPUT BOARD> --authored-from <INPUT BOARD>`: **report it, not gating**, and name any floor it lists;
    - `python3 -X utf8 py_router/check_connected.py <BOARD>`: no disconnected pads;
    - `python3 -X utf8 py_router/check_drc.py <BOARD> --baseline <INPUT BOARD> --clearance-margin 0.1`: no real violations.
 5. **`route` mode, also:** every footprint's pose (x, y, rotation, side) equals

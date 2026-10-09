@@ -3,7 +3,7 @@
  "boards_graded": 22,
  "boards_total": 22,
  "channels_seen": {
-  "budget_abstained": 6,
+  "budget_abstained": 5,
   "edge_seating_abstained": 0,
   "rules_skipped_arm": 0,
   "rules_skipped_not_asked_EXCLUDED": 22,
@@ -492,16 +492,14 @@
   },
   {
    "board": "rp2350_fpga_eensy_prePlane.kicad_pcb",
-   "budget_abstained": 1,
-   "budget_abstained_keys": [
-    "overlap_area"
-   ],
+   "budget_abstained": 0,
+   "budget_abstained_keys": [],
    "clean_but_ungraded": false,
    "edge_seating_abstained": 0,
    "emit_rc": 0,
    "errors": 1,
    "grade_rc": 4,
-   "human_not_derivable": true,
+   "human_not_derivable": false,
    "human_pass_line": false,
    "pass": false,
    "rules_run": 7,
@@ -517,7 +515,7 @@
     "zone_exclusive"
    ],
    "skipped_withheld": [],
-   "ungraded_declared": 1
+   "ungraded_declared": 0
   },
   {
    "board": "sonde_u.kicad_pcb",

@@ -375,6 +375,7 @@ in the JSON_SUMMARY and as a NOTE:
 | --- | --- | --- |
 | `keepout_blocks` | a **declared keep-out** is what refuses it — measured, not inferred: the poses are recounted with that keep-out lifted (#701) | move the keep-out, or add the part to its `allow` list if it owns it |
 | `zone_exclusive_blocks` | a **declared exclusive zone** is what refuses it, and the part is not a member of the block that reserved it — measured the same way, by recounting with that zone lifted (#797) | add the part to the block that owns the zone, move the zone, or drop its `exclusive` flag. There is no `allow` list here — **membership is the allow list** |
+| `frozen_blocks` | movable neighbours were censused and none frees a pose, but a **locked or declared-immovable neighbour** is what refuses it — measured: it frees poses when lifted, or ALONE refuses every open pose (#1213: rp2350's U6 against U8, the locked Teensy frame). With no movable neighbour at all the verdict stays `immovable_given_frozen`, whose note then carries the same counts | unlock it or relax the intent clause that froze it — or, for a file-locked frame, check how it is modelled: a pin ring is not a body |
 | `no_movable_neighbour` | nothing seated is near enough to be in the way | the outline, the zone or the part's own size refuses it |
 | `immovable_given_frozen` | the only neighbours in the way are locked or declared edge connectors, **named with the decision that froze each** | relax that lock, or accept the pose |
 | `no_single_lift_frees` | movable neighbours censused; no single lift frees a pose | try `--evict-depth 2` |
@@ -387,9 +388,19 @@ in the JSON_SUMMARY and as a NOTE:
 `no_pose_census[ref]` carries the counts those verdicts came from — `boxed`,
 `movable`, `censused`, `frozen`, `truncated`, `baseline`, `pairs_total`,
 `pairs_censused`, `pairs_truncated`, `best_pair`, `keepouts_freeing`,
-`keepouts_joint`, `zone_exclusive_freeing`, `zone_exclusive_joint` — so a
-capped sweep can never
-read as a complete one. `keepouts_freeing` is `{keep-out name: poses freed by
+`keepouts_joint`, `zone_exclusive_freeing`, `zone_exclusive_joint`,
+`frozen_lifted`, `frozen_alone`, `open_poses`, `frozen_truncated` — so a
+capped sweep can never read as a complete one. `frozen_lifted` is `{frozen
+neighbour: poses freed by lifting it}`, zeros included, for a part with no
+pose at all, nearest first and capped at `EVICT_MAX_BLOCKERS`
+(`frozen_truncated` says how many were not censused). `frozen_alone` is
+`{frozen neighbour: poses legal with it as the ONLY neighbour present}`,
+against `open_poses`, the poses legal with every neighbour lifted: 0 of a
+non-zero `open_poses` means that part alone refuses every pose the outline and
+zone allow. Both are needed (#1213): rp2350's U8 refused U6 everywhere, but by
+U6's turn the other parts had filled the frame, so lifting U8 alone freed
+nothing. `frozen_blocks` is derived from these two counts, and the rung still
+never moves those parts. `keepouts_freeing` is `{keep-out name: poses freed by
 lifting it}`, filled only for a part with no pose at all and only over the
 keep-outs that bind it; it is the count `keepout_blocks` is derived from, so
 the verdict cannot drift from a differently-computed claim.
@@ -1467,6 +1478,28 @@ any grader cannot disagree:
   not in copper), but not inside a front-side connector's pin field. Cross-side
   pairs also pay no halo penalty — spreading them apart buys no routing room.
   On a single-sided board every test reduces to plain courtyard-vs-courtyard.
+  The far side is one box per CLUSTER of drilled pads (#1206,
+  `legality.far_side_local`): holes merge single-link while their boxes are
+  within `FAR_SIDE_CLUSTER_GAP_MM` (2.54) of each other, so a pin row or a
+  2-row header stays one box and two mounting posts 48 mm apart are two.
+  The returned `FarSide` is still the union 4-tuple, so a consumer that does
+  not read `.boxes` gets the old (stricter) answer. CM5 human: 45 courtyard
+  pairs -> 14 (`tests/measure_1206_far_side_clusters.py`).
+- **Containers** (#1184, #1212, `legality.container_kinds`). A part is a
+  container only by GEOMETRY: at least `CONTAINER_RATIO` (0.5) of the board,
+  no drawn courtyard, and either an `outline` (no pads and no holes -- watchy's
+  e-paper REF**) or a `pin_frame` (at least `FRAME_DRILLED_FRAC` of its pads
+  drilled and none inside the box inset by `FRAME_BAND_FRAC` of its short
+  side -- rp2350's Teensy U8). Never by area alone (One-Air-Max's SMD 18650
+  holder BAT1 is a BODY) and never by a lock. Pose-independent: a turn grows a
+  rect, never a part's own box. An outline's courtyard pairs are listed,
+  waived `container_class`, locked or not. A pin frame's rect pairs leave the
+  courtyard channel and its drilled HOLES are graded instead, kind
+  `pin_in_courtyard` (KiCad's `pth_inside_courtyard`): check_assembly's
+  eighth conjunct, absolute; `tests/measure_1212_kicad_pins.py` cross-checks
+  it against kicad-cli. The search (`container_pin` veto), the seeder's
+  declared-pose and eviction checks and the repair census all ask
+  `CourtyardCensus.pin_hits`, the grader's own function.
 - **Board containment** measures against the real Edge.Cuts rings, not an inset
   of the axis-aligned `board_bounds`, so parts are not nudged into an L-shaped
   board's notch or an interior cutout. Three levels of short-circuit keep it
@@ -1572,6 +1605,39 @@ re-seating 85/92 while leaving its zone targets unmoved):
   cap is past its limit). Its record is `JSON_SUMMARY.decap_rung`. It stays
   off by default: `tests/test_placement_ab.py`'s `repair-decaps-*` rows
   improve two of five boards and regress none, short of the N-1 rule.
+  The repair also reads check_assembly's own channels (fa10 P1): a part
+  over a pin frame's drilled pin is charged absolutely (`Pin census`,
+  #1212), and the COURTYARD channel (`Courtyard census`, #1182) --
+  `CourtyardCensus` with the intent's waivers -- is charged only under
+  `--baseline BOARD`, because check_assembly gates a courtyard pair only
+  when a member moved against one. The member that moved is charged
+  (weight its depth, >= 1 mm), and the pairs are re-graded at the final
+  poses: a charged pair that still gates, or a gating pair a moved part
+  created, keeps its mover out of `repaired`, and the note says when the
+  search spaced pad boxes. `JSON_SUMMARY`'s repair record carries
+  `courtyard_gating_before` / `_after` (None without a baseline).
+- **`--body-model`** (#1182, from #916) arms every search state a
+  `place_seed` run builds -- seed, polish, the post-polish re-seat, repair,
+  reseat and its inner seed -- with `placement.body`'s occupancy (courtyard,
+  else the drawn .Fab body, else silk, each united with the pads). Only the
+  NEIGHBOUR currency moves (`quench._Part.rect`): every intent, zone,
+  keep-out, edge-claim and board question asks `_Part.grade_rect`, the
+  courtyard-else-pad-box ladder the floorplan grade reads off a default
+  state, so the armed search cannot refuse a seat the grade accepts and the
+  PoseGrader grades an armed state exactly as an unarmed one. For a library
+  that draws bodies and no courtyards (One-Air-Max: 197 of 204 parts) pad
+  boxes let bodies overlap. Measured on One-Air-Max's s180_0p with
+  `--repair --baseline`: armed, check_assembly's gating pairs went 6 -> 2;
+  unarmed, 5 of the 6 charged movers ended UNRESOLVED. **Opt-in**: the
+  `body-seed-*` rows of `test_placement_ab.py` mark REGRESS on all four
+  boards (wirelength, crossings or an intent error), so they are kept as
+  `rejected` rows.
+- **`--reseat`'s gate** measures its last term, courtyard overlap, on
+  check_assembly's geometry (`CourtyardGrade.overlap_exact` at the state's
+  poses), not the search's rects -- One-Air-Max read `0.4323 -> 0.4323` on
+  pad boxes while four pairs gated; it now reads 13.4736. hpwl still ranks
+  above it (run 4's order), so a re-seat that clears a pair at an hpwl cost
+  is refused, visibly.
 - **`place_reconstruct.py`** (`placement/reconstruct.py`) — the structural
   ("puzzle") solver: tier classification (frame -> anchors -> smalls),
   corner-inset pattern fit (propose-only), rigid ±v vector detection, ONE

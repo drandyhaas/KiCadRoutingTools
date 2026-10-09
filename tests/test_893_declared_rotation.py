@@ -226,8 +226,13 @@ def test_an_unfittable_declaration_is_refused_by_name():
         'was either turned silently or seated outside the claim, which is the '
         'failure #893 exists to remove' % (ref, (part.rot + 90.0) % 360.0))
     assert unseated[ref] == (part.rot + 90.0) % 360.0, unseated
+    # A part #1151 STAGED below the board has a placement row at its INPUT
+    # angle, and is no seat: it is unseated, and the row says where it was
+    # parked. Read the seats only -- and the refused part must be one of
+    # the two, staged or not written at all, never seated elsewhere.
+    staged = _staged(bad)
     placed = {p['reference']: p['new_rotation'] % 360
-              for p in bad['placements']}
+              for p in bad['placements'] if p['reference'] not in staged}
     assert abs(placed.get(ref, (part.rot + 90.0) % 360.0)
                - (part.rot + 90.0) % 360.0) < 1e-6, (
         '%s was placed at %r despite declaring %g'
@@ -237,6 +242,16 @@ def test_an_unfittable_declaration_is_refused_by_name():
 
 
 TESTS.append(test_an_unfittable_declaration_is_refused_by_name)
+
+
+def _staged(res):
+    """Refs #1151 staged off the board: unseated, written at their input
+    angle below it -- placement rows that are not seats."""
+    staged = {r for r, d in (res.get('unseated_disposition') or {}).items()
+              if d.get('disposition') == 'staged'}
+    assert staged <= set(res.get('unseated') or ()), (
+        'a staged part is not in `unseated`', staged, res.get('unseated'))
+    return staged
 
 
 def test_candidates_restrict_the_ladder():
@@ -288,9 +303,11 @@ def test_every_seating_stage_honours_the_declaration():
     res = seeder.seed_from_intent(pcb, path, intent, random.Random('893'),
                                   group_sources=('kicad', 'sheet'),
                                   decap_owner_chips=True)
+    staged = _staged(res)
     wrong = {p['reference']: p['new_rotation'] % 360
              for p in res['placements']
-             if abs((p['new_rotation'] % 360) - angle) > 1e-6}
+             if p['reference'] not in staged
+             and abs((p['new_rotation'] % 360) - angle) > 1e-6}
     assert not wrong, (
         'placed at an angle other than the declared %g with must_lock and '
         'decap stages live: %r -- a seating stage is not honouring the '

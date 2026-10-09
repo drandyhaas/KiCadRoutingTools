@@ -853,9 +853,16 @@ def test_illegal_fixed_pose_is_refused_not_nudged():
         written = {p['reference']: p for p in res['placements']}
         assert (written['Q1']['new_x'], written['Q1']['new_y'],
                 written['Q1']['new_rotation']) == (139.0, 99.7, 180.0)
+        decl = {f['ref']: f for f in doc['fixed_poses']}
+        disp = res.get('unseated_disposition') or {}
         for r in ('R1', 'C1', 'C3', 'R2'):
             assert r in res['unseated'], (r, res['unseated'])
-            assert r not in written, r
+            # #1151: a refused part may be STAGED off the board, which
+            # writes it at its staging slot -- never at the refused pose.
+            if r in written:
+                assert disp[r]['disposition'] == 'staged', (r, disp.get(r))
+                assert (written[r]['new_x'], written[r]['new_y']) != (
+                    decl[r]['x'], decl[r]['y']), r
             assert r not in res['lock_refs'], r
         assert 'Q1' in res['lock_refs']
         assert sum('REFUSED' in n for n in res['notes']) == 4, res['notes']
@@ -1204,7 +1211,11 @@ def test_refused_fixed_pose_stays_unwritten_under_anchors_first():
         _pcb, res = _seed(ESP, intent, anchors_first=True)
         assert 'CON2' in res['fixed_refused'], res['fixed_refused']
         assert 'CON2' in res['unseated'], res['unseated']
-        assert 'CON2' not in {p['reference'] for p in res['placements']}
+        # #1151: a refused part may be STAGED off the board (a row at its
+        # staging slot) -- never seated by the anchors queue.
+        if 'CON2' in {p['reference'] for p in res['placements']}:
+            assert (res['unseated_disposition']['CON2']['disposition']
+                    == 'staged'), res['unseated_disposition'].get('CON2')
         anote = [n for n in res['notes'] if n.startswith('anchors-first:')]
         assert anote and 'CON2' not in anote[0], anote
     print("  PASS: a refused fixed pose is no anchor and is not written "

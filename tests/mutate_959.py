@@ -110,8 +110,8 @@ ROWS = [
      (T_PLAN,), 'KILLED'),
     ('zone-overfull-without-a-budget', 'fp',
      "        if (overlap_budget is not None\n"
-     "                and excess > float(overlap_budget) + legality.EPS):",
-     "        if (excess > legality.EPS):",
+     "                and excess_x > float(overlap_budget) + legality.EPS):",
+     "        if (excess_x > legality.EPS):",
      (T_PLAN,), 'KILLED'),
     ('board-overfull-ignores-oob', 'fp',
      "    on_board = (intent.legality_budget or {}).get('oob_count') == 0",

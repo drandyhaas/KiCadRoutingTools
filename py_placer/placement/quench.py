@@ -53,7 +53,6 @@ from placement import legality
 from placement.legality import (CONTAINER_RATIO, CONTAINMENT_FRAC,
                                 BoardOutlineGate, containment_frac,
                                 footprint_has_through_pads,
-                                through_pad_bounds_local,
                                 footprint_side, pair_min_gap, rect_gap,
                                 rect_overlap_area,
                                 rotate_local_bounds, sides_occupied)
@@ -71,9 +70,9 @@ EPS_IMPROVE = 1e-6
 #: candidate_valid asks (intent first, the tether last); 'unattributed' is a
 #: refusal no label covered and is a bug for `tests/test_1113_pose_veto.py`.
 VETO_CHECKS = ('intent', 'board_bbox', 'outline', 'waived_drill',
-               'waived_pads', 'body_overlap', 'courtyard', 'body_contained',
-               'pads_under_body', 'keepout_band', 'pads', 'tether',
-               'escape_overlap')
+               'waived_pads', 'body_overlap', 'courtyard', 'container_pin',
+               'body_contained', 'pads_under_body', 'keepout_band', 'pads',
+               'tether', 'escape_overlap')
 #: mm2 of .Fab body overlap `_body_overlap_at` counts: bodies that abut
 #: (a shared edge, area 0) are not overlapping.
 _BODY_OVERLAP_EPS = 1e-6
@@ -200,7 +199,7 @@ def build_zone_spec(zones, parts, refs=None
                 # cannot disagree about which branch a part is on.
                 _anchor = not any(
                     _fp.zone_fits_courtyard(
-                        _z['rect'], _p.rect(0.0, 0.0, _r), _tol)
+                        _z['rect'], _p.grade_rect(0.0, 0.0, _r), _tol)
                     for _r in (_p.rot % 360, (_p.rot + 90) % 360))
                 _terms.append(_IntentTerm(
                     'zone_containment', _z['name'], tuple(_z['rect']),
@@ -445,7 +444,7 @@ class IntentProbe:
         (within the limit, or no worse), in the vector prune compares.
         """
         s = self.spec.get(ref)
-        out = intent_term_values(s, self.state.parts[ref].rects()) if s \
+        out = intent_term_values(s, self.state.parts[ref].grade_rects()) if s \
             else ()
         idx = self._tethers_of.get(ref, ())
         if idx:
@@ -469,7 +468,7 @@ class IntentProbe:
         guard is `licence()` below, on the VECTORS.
         """
         vecs = {r: intent_term_values(self.spec[r],
-                                      self.state.parts[r].rects())
+                                      self.state.parts[r].grade_rects())
                 for r in sorted(self.spec)}
         count = 0
         by_rule: Dict[str, int] = {}
@@ -707,7 +706,7 @@ class _Part:
                  'seed_x', 'seed_y', 'x', 'y', 'rot', 'locked',
                  'nets', 'halo', 'footprint_name', 'orig_rot',
                  'side', 'has_tht', 'sides', 'tht_by_rot', 'padbox_local',
-                 'padbox_by_rot')
+                 'padbox_by_rot', 'grade_by_rot')
 
     def __init__(self, ref, fp, courtyard_sides, locked, halo_base, halo_coef,
                  body_local=None):
@@ -737,12 +736,24 @@ class _Part:
         # move: containment is a different question with a fab-only
         # calibration, and its own docstring calls a courtyard-based
         # containment test a false-veto machine.
+        #
+        # #1182: the GRADE ladder (courtyard, else pad bbox) is kept beside
+        # it, because the floorplan grade -- zones, keep-outs, edge claims,
+        # the board term -- reads a DEFAULT state's rects (`_grade_ctx` builds
+        # one). Armed, only the neighbour/body currency moves to occupancy;
+        # every intent question asks `grade_rect`, so the search cannot refuse
+        # a zone seat the grade accepts. Unarmed the two are ONE dict, so the
+        # default path is this file before #1182.
+        grade_lb = courtyard_for_side(courtyard_sides.get(ref), self.side)
+        if grade_lb is None:
+            grade_lb = compute_footprint_bbox_local(fp)
         lb = body_local
         if lb is None:
-            lb = courtyard_for_side(courtyard_sides.get(ref), self.side)
-            if lb is None:
-                lb = compute_footprint_bbox_local(fp)
+            lb = grade_lb
         self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
+        self.grade_by_rot = (self.bounds_by_rot if lb is grade_lb else
+                             {r: _rotate_local_bounds(*grade_lb, r)
+                              for r in ROTATIONS})
         # #1101: the PAD copper box, for a board whose project waives the
         # courtyard rule -- the seat then spaces pads, not courtyards. None
         # for a pad-less footprint (a logo occupies no copper).
@@ -753,8 +764,16 @@ class _Part:
         self.padbox_local = (compute_footprint_bbox_local(fp)
                              if fp.pads else None)
         self.padbox_by_rot: Dict[float, Tuple[float, float, float, float]] = {}
-        tlb = through_pad_bounds_local(fp) if self.has_tht else None
-        self.tht_by_rot = ({r: _rotate_local_bounds(*tlb, r) for r in ROTATIONS}
+        # #1206: one box per cluster of drilled pads (a FarSide when there
+        # are several) -- the grader's far side, so the seat and the grade
+        # agree on what a part presents through the board.
+        # `courtyard_sides` is the BOARD's map: this part's entry is what
+        # names its far courtyard (the second phase-2 verifier: handed the
+        # whole map, `far_courtyard_of` answered None for every part, and the
+        # search admitted a 0603 under a drawn B.CrtYd the grader flags).
+        tlb = (legality.far_side_local(fp, legality.far_courtyard_of(
+            courtyard_sides.get(ref), self.side)) if self.has_tht else None)
+        self.tht_by_rot = ({r: legality.rotate_far(tlb, r) for r in ROTATIONS}
                            if tlb is not None else None)
         # A non-90-degree seed rotation brings its WHOLE 90-degree lattice:
         # those are the poses _candidate_rotations offers such a part, and
@@ -766,14 +785,34 @@ class _Part:
             for r in ROTATIONS:
                 rot = (base + r) % 360
                 self.bounds_by_rot[rot] = _rotate_local_bounds(*lb, rot)
+                if self.grade_by_rot is not self.bounds_by_rot:
+                    self.grade_by_rot[rot] = _rotate_local_bounds(*grade_lb,
+                                                                  rot)
                 if self.tht_by_rot is not None:
-                    self.tht_by_rot[rot] = _rotate_local_bounds(*tlb, rot)
+                    self.tht_by_rot[rot] = legality.rotate_far(tlb, rot)
         self.seed_x, self.seed_y = fp.x, fp.y
         self.x, self.y, self.rot = fp.x, fp.y, fp.rotation % 360
         self.orig_rot = fp.rotation % 360
         self.locked = locked
         self.nets = sorted({n for _, _, n in self.pads_local})
         self.halo = halo_base + halo_coef * math.sqrt(max(self.pin_count, 1))
+
+    def ensure_rotation(self, rot):
+        """Fill both rotation caches for `rot`, as given (a caller that
+        wants the normalised key normalises first). THE one place an entry is
+        made after construction (#1206): the far side is turned cluster by
+        cluster (`legality.rotate_far`), so no cache can flatten a FarSide
+        to its union box -- four inline copies of this fill (three in the
+        seeder, one in the swap) each could."""
+        if rot not in self.bounds_by_rot:
+            self.bounds_by_rot[rot] = _rotate_local_bounds(
+                *self.bounds_by_rot[0.0], rot)
+        if rot not in self.grade_by_rot:
+            self.grade_by_rot[rot] = _rotate_local_bounds(
+                *self.grade_by_rot[0.0], rot)
+        if self.tht_by_rot is not None and rot not in self.tht_by_rot:
+            self.tht_by_rot[rot] = legality.rotate_far(self.tht_by_rot[0.0],
+                                                       rot)
 
     def rect(self, x=None, y=None, rot=None):
         x = self.x if x is None else x
@@ -783,6 +822,25 @@ class _Part:
         if b is None:
             b = self.bounds_by_rot[0.0]
         return (x + b[0], y + b[1], x + b[2], y + b[3])
+
+    def grade_rect(self, x=None, y=None, rot=None):
+        """The rect the floorplan GRADE reads for this part at a pose:
+        courtyard, else pad bbox (#1182). `rect()` itself under
+        `body_model=False`; the body/neighbour currency (`rect`) becomes
+        occupancy under `body_model=True` and this does not."""
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rot = self.rot if rot is None else rot
+        b = self.grade_by_rot.get(rot % 360)
+        if b is None:
+            b = self.grade_by_rot[0.0]
+        return (x + b[0], y + b[1], x + b[2], y + b[3])
+
+    def grade_rects(self, x=None, y=None, rot=None):
+        """`rects()` on the grade ladder: (grade rect, far-side rect)."""
+        if self.tht_by_rot is None:
+            return self.grade_rect(x, y, rot), None
+        return self.grade_rect(x, y, rot), self.tht_rect(x, y, rot)
 
     def padbox(self, x=None, y=None, rot=None):
         """The part's pad-copper box at a pose (#1101), or None (no pads)."""
@@ -808,7 +866,7 @@ class _Part:
         b = self.tht_by_rot.get(rot % 360)
         if b is None:
             b = self.tht_by_rot[0.0]
-        return (x + b[0], y + b[1], x + b[2], y + b[3])
+        return legality.offset_far(b, x, y)
 
     def rects(self, x=None, y=None, rot=None):
         """(courtyard rect, far-side rect) at a pose -- what a pair test needs.
@@ -989,11 +1047,14 @@ class QuenchState:
         self.declared_rotations: Dict[str, object] = dict(
             declared_rotations or {})
         body_locals: Dict[str, object] = {}
+        body_sources: Optional[Dict[str, str]] = None
         if self.body_model:
             from placement import body as _body
+            body_sources = {}
             for _ref, _geom in _body.board_bodies(pcb_data, pcb_file).items():
                 if _geom.occupancy_local is not None:
                     body_locals[_ref] = _geom.occupancy_local
+                    body_sources[_ref] = _geom.source
         locked_refs = set(extract_locked_refs(pcb_file))
         if extra_locked_refs:
             locked_refs |= extra_locked_refs
@@ -1069,7 +1130,8 @@ class QuenchState:
                   f"{', '.join(self.outline_locked)} -- moving one would"
                   f" resize the board. Edit the part and the outline"
                   f" together in KiCad if it really must move.")
-        warn_missing_courtyards(no_courtyard, 'quench')
+        warn_missing_courtyards(no_courtyard, 'quench',
+                                sources=body_sources)
 
         # #701 intent keep-outs, resolved ONCE per state rather than once per
         # candidate pose. Neither an `allow` fnmatch against a reference nor
@@ -1210,16 +1272,31 @@ class QuenchState:
         # connector). Pairs with a container member skip the courtyard
         # channels; the PAD layer (pads_ok) still applies in full -- the
         # module's pads are real obstacles.
-        barea = max(1e-9, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]))
-        self.container_refs = set()
-        for ref, p in self.parts.items():
-            r = p.rect()
-            if (r[2] - r[0]) * (r[3] - r[1]) >= CONTAINER_RATIO * barea:
-                self.container_refs.add(ref)
+        #
+        # fa10 P1 (#1184, #1212): WHO is a container is the grader's own
+        # decision (`legality.container_kinds`): a pin frame or a pad-less
+        # outline, never a big BODY and never a drawn courtyard. Area alone
+        # called One-Air-Max's 18650 holder a frame and the seed put DC1
+        # wholly inside it, while check_assembly gated the pair. A pin
+        # frame's PINS still bind: `_pin_conflict_at`, the grader's
+        # `pin_hits`, refuses a part on one (KiCad's pth_inside_courtyard).
+        try:
+            _kinds = legality.container_kinds(
+                pcb_data, legality.part_local_bounds(pcb_data, pcb_file))
+        except Exception:                                    # noqa: BLE001
+            _kinds = {}
+        self.container_kinds = {r: k for r, k in _kinds.items()
+                                if r in self.parts}
+        self.container_refs = set(self.container_kinds)
+        self.pin_frame_refs = {r for r, k in self.container_kinds.items()
+                               if k == 'pin_frame'}
+        self._pin_census_obj = None
         if self.container_refs:
-            print(f"  container footprint(s) (courtyard >= "
-                  f"{CONTAINER_RATIO:.0%} of the board -- frame, not body): "
-                  f"{', '.join(sorted(self.container_refs))}")
+            print(f"  container footprint(s) (>= {CONTAINER_RATIO:.0%} of "
+                  f"the board, a pin frame or an outline -- frame, not "
+                  f"body): " + ', '.join(
+                      f"{r} ({k})"
+                      for r, k in sorted(self.container_kinds.items())))
 
         # --- pad + drill legality (gate currency; see placement/legality.py).
         # pose_of/seed_of read the live _Part records, so the context follows
@@ -1801,9 +1878,10 @@ class QuenchState:
         # Same reachability prune as candidate_valid: a part that cannot come
         # near a ring pays only the bbox term (the ring terms cost ~100x), and
         # one that can measures only against the edges it can actually reach.
+        # The BOARD term on the grade ladder (#1182), as candidate_valid.
         near = self._edges_near(ref) if self.edge_gate.active else None
         board = self.edge_gate.rect_outside_amount(
-            rects[0], exact=bool(near), edges=near,
+            part.grade_rect(x, y, rot), exact=bool(near), edges=near,
             skip_rings=self._owned_rings(ref))
         overlap = 0.0
         if limit is not None and board > limit:
@@ -1814,9 +1892,16 @@ class QuenchState:
             others = self.parts.items()
         if getattr(self, 'courtyards_ignored', False):
             # #1104: the courtyard is waived, so the overlap term is the pad
-            # and hole one the waived seat asks (#1101), absolutely.
-            return board, self._waived_overlap(ref, x, y, rot, others,
-                                               exclude, limit, board)
+            # and hole one the waived seat asks (#1101), absolutely -- and a
+            # frame's PIN still counts: it is pth/npth_inside_courtyard, not
+            # the waived rule, and without it the escape branch below seated
+            # a part on a pin the grader gates (second phase-3 verifier).
+            overlap = self._waived_overlap(ref, x, y, rot, others, exclude,
+                                           limit, board)
+            if limit is not None and board + overlap > limit:
+                return board, overlap
+            return board, overlap + self._pin_violation(ref, x, y, rot,
+                                                        exclude)
         clr = self.clearance
         rect = rects[0]
         tht = part.has_tht
@@ -1842,7 +1927,53 @@ class QuenchState:
                 overlap += clr - gap
                 if limit is not None and board + overlap > limit:
                     return board, overlap
-        return board, overlap
+        return board, overlap + self._pin_violation(ref, x, y, rot, exclude)
+
+    def _pin_violation(self, ref, x, y, rot, exclude=None) -> float:
+        """#1212: a part on a frame's pin is a violation too -- the
+        clearance, as for any refused pair -- so `violation() == 0` keeps
+        implying `candidate_valid` admits it, on the waived path as well."""
+        if not self.pin_frame_refs:
+            return 0.0
+        part = self.parts[ref]
+        _px = part.x if x is None else x
+        _py = part.y if y is None else y
+        _pr = part.rot if rot is None else rot
+        if self._pin_conflict_at(ref, _px, _py, _pr, exclude) is not None:
+            return self.clearance
+        return 0.0
+
+    def _pin_conflict_at(self, ref, x, y, rot, exclude=None):
+        """The first GATING pin_in_courtyard pair `ref` makes at this pose,
+        as the GRADER finds it (`legality.CourtyardCensus.pin_hits`, the
+        function check_assembly's channel runs), or None. Frames sit at their
+        current poses; a frame being moved is graded against every part."""
+        for q in self._pin_hits_at(ref, x, y, rot):
+            other = q.b if q.a == ref else q.a
+            if exclude and other in exclude:
+                continue
+            return q
+        return None
+
+    def _pin_hits_at(self, ref, x, y, rot, poses=None) -> list:
+        """Every GATING pin_in_courtyard pair `ref` makes at this pose.
+        `poses` ({ref: (x, y, rot)}) overrides the parts' current poses --
+        a declared pose is judged against its obstacles' DECLARED poses
+        (`seeder._fixed_pose_check`), not wherever they sit right now."""
+        # NOT skipped under `courtyards_ignored`: that is courtyards_overlap,
+        # and a pin is KiCad's pth/npth_inside_courtyard, whose own project
+        # severity the grader's pairs already honour (phase-3 verifier).
+        if not self.pin_frame_refs:
+            return []
+        if self._pin_census_obj is None:
+            self._pin_census_obj = legality.CourtyardCensus(self.pcb_data,
+                                                            self.pcb_file)
+        if poses is None:
+            refs = (self.parts if ref in self.pin_frame_refs
+                    else self.pin_frame_refs)
+            poses = {r: (self.parts[r].x, self.parts[r].y,
+                         self.parts[r].rot) for r in refs}
+        return self._pin_census_obj.pin_hits(ref, (x, y, rot), poses)
 
     def intent_spec_for(self, ref) -> Tuple[_IntentTerm, ...]:
         """The claims binding `ref` right now: frozen zone terms, plus keep-out
@@ -2005,7 +2136,7 @@ class QuenchState:
         """
         v = self._inc_intent.get(ref)
         if v is None:
-            v = self.intent_terms(ref, self.parts[ref].rects())
+            v = self.intent_terms(ref, self.parts[ref].grade_rects())
             self._inc_intent[ref] = v
         return v
 
@@ -2055,7 +2186,7 @@ class QuenchState:
         if not spec:
             return True
         if rects is None:
-            rects = self.parts[ref].rects(x, y, rot)
+            rects = self.parts[ref].grade_rects(x, y, rot)
         cand = self.intent_terms(ref, rects)
         if all(v <= t.threshold for v, t in zip(cand, spec)):
             return True
@@ -2070,7 +2201,7 @@ class QuenchState:
         if not spec:
             return []
         if rects is None:
-            rects = self.parts[ref].rects(x, y, rot)
+            rects = self.parts[ref].grade_rects(x, y, rot)
         cand = self.intent_terms(ref, rects)
         cur = self._incumbent_intent(ref)
         return [(t.rule, t.name, round(c, 4), round(u, 4))
@@ -2177,6 +2308,11 @@ class QuenchState:
         part = self.parts[ref]
         rects = part.rects(x, y, rot)
         rect = rects[0]
+        # #1182: the intent and the board ask the GRADE ladder (what the
+        # floorplan grade reads); the neighbour layers below ask `rect`, which
+        # is occupancy under body_model. One object unarmed.
+        grects = part.grade_rects(x, y, rot)
+        grect = grects[0]
         # DECLARED INTENT (#702) -- FIRST, and a `return`, not `legal = False`.
         #
         # First, for the ordering reason `seeder.pose_ok` gives for its own
@@ -2191,11 +2327,11 @@ class QuenchState:
         # to be worse on a DECLARED one. Written as `legal = False` this would
         # be silently overturned there. Nothing that can return True may ever
         # be inserted above this line.
-        if self._intent_active and not self.intent_ok(ref, x, y, rot, rects):
-            self._note_intent_refusal(ref, 'candidate_valid', rects)
+        if self._intent_active and not self.intent_ok(ref, x, y, rot, grects):
+            self._note_intent_refusal(ref, 'candidate_valid', grects)
             return False
-        legal = not (rect[0] < self.usable[0] or rect[1] < self.usable[1]
-                     or rect[2] > self.usable[2] or rect[3] > self.usable[3])
+        legal = not (grect[0] < self.usable[0] or grect[1] < self.usable[1]
+                     or grect[2] > self.usable[2] or grect[3] > self.usable[3])
         if not legal and self._why is not None:
             self._veto('board_bbox')
         # Real outline / cutout gate, three-level short-circuit: board-level
@@ -2204,7 +2340,7 @@ class QuenchState:
         if legal and self.edge_gate.active:
             near = self._edges_near(ref)
             if near and self.edge_gate.rect_blocked(
-                    rect, edges=near, skip_rings=self._owned_rings(ref)):
+                    grect, edges=near, skip_rings=self._owned_rings(ref)):
                 legal = False
                 if self._why is not None:
                     self._veto('outline')
@@ -2314,6 +2450,17 @@ class QuenchState:
                     if self._why is not None:
                         self._veto('courtyard', other_ref, path='smd')
                     break
+        if legal and self.pin_frame_refs:
+            # #1212: a pin frame's PINS. Its rect is skipped above (a frame,
+            # not a body), so without this a part was seated on a Teensy pin
+            # (rp2350 seed 4: SW1 over U8 pins 16/17, which KiCad reports and
+            # no repo checker saw). The grader's own pairs decide.
+            _hit = self._pin_conflict_at(ref, x, y, rot, exclude)
+            if _hit is not None:
+                legal = False
+                if self._why is not None:
+                    self._veto('container_pin',
+                               _hit.b if _hit.a == ref else _hit.a)
         if legal:
             # BODY layer. A pose that buries this part inside another part's
             # .Fab body is not a trade-off to be priced -- it is illegal, the
@@ -3287,7 +3434,12 @@ class QuenchState:
                 oob_count += 1
                 oob_amount += amt
                 oob_area += self.edge_gate.out_of_board_area(p.rect)
-        overlap = legality.placement_overlap_area(parts)
+        # A container's RECT is not a body (fa10 P1): the grader dropped a
+        # pin frame's rect pairs and waives an outline's, so the optimizer's
+        # number leaves them out too -- rp2350's was mostly U8's frame.
+        _cont = getattr(self, 'container_refs', ()) or ()
+        overlap = legality.placement_overlap_area(
+            [g for g in parts if g.ref not in _cont])
         out = {'overlap_area': overlap,
                'oob_count': oob_count, 'oob_amount': oob_amount,
                'oob_area': oob_area, 'hpwl': self.hpwl()}
@@ -3698,7 +3850,7 @@ def _clause_failing(state, ref, override=None, exclude=None) -> Optional[str]:
     seeder's decision, not a reason to break the formation up."""
     part = state.parts[ref]
     x, y, rot = (override or {}).get(ref, (part.x, part.y, part.rot))
-    rects = part.rects(x, y, rot)
+    rects = part.grade_rects(x, y, rot)
     spec = state.intent_spec_for(ref)
     if spec:
         for v, t in zip(state.intent_terms(ref, rects), spec):
@@ -4429,10 +4581,10 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 # the bounds entry so rect() does not silently fall back to
                 # rot-0 geometry. Every such angle is already inside the group
                 # closure build_neighbor_lists unioned, so this cannot
-                # invalidate the pruning. No-op for orthogonal parts.
-                if rot not in part.bounds_by_rot:
-                    part.bounds_by_rot[rot] = _rotate_local_bounds(
-                        *part.bounds_by_rot[0.0], rot)
+                # invalidate the pruning. No-op for orthogonal parts. The far
+                # side too (#1206): it used to keep only the bounds, so such
+                # an angle read its drilled pads at rot 0.
+                part.ensure_rotation(rot)
 
             best = (current_cost, part.x, part.y, part.rot)
             for cx, cy in _candidate_positions(part, max_displacement, step,
@@ -4521,13 +4673,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         # rotations; add the partner's rotation lazily so
                         # non-90-degree swaps use correct geometry
                         for p_dst, inherited in ((pa, pb.rot % 360), (pb, pa.rot % 360)):
-                            if inherited not in p_dst.bounds_by_rot:
-                                p_dst.bounds_by_rot[inherited] = _rotate_local_bounds(
-                                    *p_dst.bounds_by_rot[0.0], inherited)
-                            if (p_dst.tht_by_rot is not None
-                                    and inherited not in p_dst.tht_by_rot):
-                                p_dst.tht_by_rot[inherited] = _rotate_local_bounds(
-                                    *p_dst.tht_by_rot[0.0], inherited)
+                            p_dst.ensure_rotation(inherited)
                         involved = set(pa.nets) | set(pb.nets)
                         other_aw = state.airwires_excluding(involved)
 

@@ -107,7 +107,7 @@ Read `--help` before assuming a flag does not exist. Two runs declared
 
 | job | tools |
 |---|---|
-| score (the authority on `blocking`) | `py_tools/board_score.py <board> --intent <i> --json <out>`; `check_complete.py <board> --intent <i>` (fails closed) |
+| score (the authority on `blocking`) | `py_tools/board_score.py <board> --intent <i> --baseline <input> --json <out>`; `check_complete.py <board> --intent <i> --baseline <input>` (fails closed; `--baseline` arms check_assembly's courtyard gate, and without it that gate is listed `ungraded`) |
 | read the board | `py_tools/board_brief.py <board> --json <out>`, `py_tools/board_context.py --md` (per-part sheet: pin order, `CROSSED` pairs) |
 | place from scratch | lock the fixed parts with `py_placer/place_pose.py` first, then `py_placer/place_seed.py` (about 5–15 min on a 250-part board; rank seeds with `py_placer/compare_seeds.py`) |
 | improve a placement | `py_placer/place_optimize.py --max-displacement 3` (the quench, for ROUGH placements), `py_placer/place_reconstruct.py` (structural damage), `place_seed --repair` (local violations) / `--reseat` (parts far off), `py_placer/place_portfolio.py --intent --lock --full-probe` (on a SEEDED board), `py_placer/converge.py poses --ref X` (rank one part's poses), `py_placer/place_fanout_clearance.py` |
@@ -183,7 +183,9 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   parts tens of mm off, use `--reseat`: `--repair` ran 5 min and attempted
   none of 11.
 - **Read `unseated_refs` after every `place_seed`.** A part in that
-  list is still in the staging pile, so seat it (`--repair`, or
+  list is NOT placed -- left where it came in, or staged below the board
+  when its input pose stacked on a seated part
+  (`unseated_disposition`) -- so seat it (`--repair`, or
   `place_pose.py`) before any route. The exit-4 line names these parts; run
   36 routed a board with C20 still in the pile and the router took GND off
   the board to reach it.
@@ -191,7 +193,11 @@ Read `--help` before assuming a flag does not exist. Two runs declared
   - `place_seed --repair` counts a violator `repaired` only once its
     finding is gone; read `unresolved_refs` / `unresolved_by_rule` in its
     `JSON_SUMMARY` for the rest (#1066). Add `--repair-decaps` to seat
-    charged caps at their IC's pin (opt-in; `decap_rung` says what it did);
+    charged caps at their IC's pin (opt-in; `decap_rung` says what it did).
+    Pass `--baseline <input>` too: only then does the repair charge the
+    courtyard pairs check_assembly gates (#1182), and on a library that
+    draws bodies but no courtyards add `--body-model`, or the seat search
+    spaces pad boxes and such a pair stays unresolved;
   - `place_fanout_clearance` holds both decap limits when you pass it
     `--intent` (#1067): no cap move takes a decap claim past its limit and
     further than before, unless no clear pose keeps it -- then the cap
@@ -301,7 +307,7 @@ Read `--help` before assuming a flag does not exist. Two runs declared
    placement, the first routed board, the first DONE, each improvement, the
    final board, and tried-and-worse boards with `--rejected`.
    ```bash
-   python3 -X utf8 py_tools/board_score.py <board> --intent <i> --json <board>.score.json --quiet
+   python3 -X utf8 py_tools/board_score.py <board> --intent <i> --baseline <input> --json <board>.score.json --quiet
    python3 -X utf8 py_placer/converge.py record --ledger wk/<run>/ledger.jsonl \
        --board <board> --kind placement --parent <the board it was made from> \
        --lever "<what you did, one line>" --score-file <board>.score.json

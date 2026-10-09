@@ -194,25 +194,9 @@ def main():
     # graphics markers are co-located by design and must NOT flag). A bucket is
     # a finding here only when it holds >= 2 suspect NON-marker parts: one real
     # part sitting on a fiducial is not a stack of parts.
-    from placement.part_class import classify_part
-    from placement.placement_state import assess_placement
-    _MARKER_CLASSES = ('fiducial', 'mount_hole', 'testpoint')
-
-    def _marker(ref):
-        try:
-            return classify_part(pcb.footprints[ref],
-                                 ref).name in _MARKER_CLASSES
-        except Exception:                                      # noqa: BLE001
-            return False
-
-    _suspect = assess_placement(pcb, pcb_file=args.board).stacked_suspect_refs
-    _buckets = {}
-    for _ref in _suspect:
-        _fp = pcb.footprints.get(_ref)
-        if _fp is None:
-            continue
-        _buckets.setdefault((round(_fp.x, 3), round(_fp.y, 3)),
-                            []).append(_ref)
+    # `coincident_stack_groups` is that rule (fa10 P1: the seeder's #1151
+    # disposition calls it too, so the two cannot disagree about a stack).
+    from placement.placement_state import coincident_stack_groups
     # Every footprint BLOCK is an entry here since #726: two blocks sharing a
     # reference are keyed `TP4` and `TP4~2`, so two parts at one point form a
     # coincident pair even when they answer to one name. Before that they
@@ -221,9 +205,7 @@ def main():
     # `coincident_origins 0` with TWO coincident pairs on it.
     # `duplicate_references` below still reports the naming, which is a
     # schematic question rather than a geometric one.
-    stack_groups = [{'point': [pt[0], pt[1]], 'refs': refs}
-                    for pt, refs in sorted(_buckets.items())
-                    if sum(1 for r in refs if not _marker(r)) >= 2]
+    stack_groups = coincident_stack_groups(pcb, args.board)
     dup_refs = dict(getattr(pcb, 'duplicate_references', None) or {})
 
     new_advisory = None
@@ -235,31 +217,23 @@ def main():
             print(f"cannot parse baseline {args.baseline}: {exc}",
                   file=sys.stderr)
             return 2
+        if not base_pcb.footprints:
+            # Every part would read as MOVED against it, and the courtyard
+            # gate would arm against all of them (phase-6 verifier: an empty
+            # file gated 8 of 8 of pristine ulx3s's pairs).
+            print(f"baseline {args.baseline} has no footprints: pass the "
+                  f"board this one was derived from", file=sys.stderr)
+            return 2
         gb = grade_body_overlap(base_pcb, clearance, intent_waivers=waivers,
                                 pcb_file=args.baseline,
                                 courtyard_severity=_cy_sev_arg)
         base_keys = {(q.a, q.b, q.kind) for q in gb['pairs']}
         new_advisory = [q for q in g['advisory_pairs']
                         if (q.a, q.b, q.kind) not in base_keys]
-        # Refs whose POSE differs from the baseline (position, rotation mod
-        # 360, or layer). This is the courtyard gate's currency: a pair is
-        # chargeable only when OUR moves put a member there. Pair-membership
-        # ("new vs baseline") is NOT enough -- run-23's RN3<->U5 existed in
-        # the damaged baseline (the staged containment), the repair moved RN3
-        # 3.28mm and left the pair blocking, and a membership test would have
-        # called it pre-existing. A ref absent from the baseline counts as
-        # moved: something put it there.
-        moved_refs = set()
-        for _ref, _fp in pcb.footprints.items():
-            _bp = base_pcb.footprints.get(_ref)
-            if _bp is None:
-                moved_refs.add(_ref)
-                continue
-            _drot = ((_fp.rotation or 0.0) - (_bp.rotation or 0.0)) % 360.0
-            if (abs(_fp.x - _bp.x) > 1e-3 or abs(_fp.y - _bp.y) > 1e-3
-                    or min(_drot, 360.0 - _drot) > 1e-3
-                    or (_fp.layer or '') != (_bp.layer or '')):
-                moved_refs.add(_ref)
+        # Refs whose POSE differs from the baseline: the courtyard gate's
+        # currency (`legality.moved_refs` says why membership is not enough).
+        # A function in legality, so a mover can ask the same question.
+        moved_refs = legality.moved_refs(pcb, base_pcb)
 
     print(f"Assembly audit of {args.board} (clearance {clearance}):")
     if dup_refs:
@@ -575,8 +549,8 @@ def main():
               f"--ignore-project-severity grades them at error.")
     courtyard_gating = []
     if g['courtyard_blocking'] and moved_refs is not None:
-        courtyard_gating = [q for q in g['courtyard_blocking_pairs']
-                            if q.a in moved_refs or q.b in moved_refs]
+        courtyard_gating = legality.courtyard_gating(
+            g['courtyard_blocking_pairs'], moved_refs)
     if g['courtyard_blocking']:
         _gate_note = (
             f"{len(courtyard_gating)} of {g['courtyard_blocking']} GATE "
@@ -640,9 +614,37 @@ def main():
         for m in mating:
             print(f"    {m['ref']} ({m['side']}) in {m['keepout']}  "
                   f"{m['area_mm2']}mm2")
+    # #1212, the EIGHTH conjunct: a pin frame's (rp2350's Teensy U8) drilled
+    # pins inside another part's courtyard -- KiCad's pth_inside_courtyard.
+    # The frame's RECT left the courtyard channel (it flagged every part
+    # inside it and could not find the real hit); its pins are graded here,
+    # absolutely, as KiCad grades them: 0 on both healthy frame boards.
+    pin_hits = list(g.get('pin_in_courtyard_pairs') or [])
+    if g.get('containers'):
+        _kinds = ', '.join(f"{r} ({k})"
+                           for r, k in sorted(g['containers'].items()))
+        print(f"  CONTAINERS: {_kinds} -- a pin frame is graded on its "
+              f"pins, an outline is waived, neither on its rect")
+    if pin_hits:
+        # One finding per part pair AND hole rule (a part over a frame's
+        # PTH and NPTH pins is two KiCad rules): the count says both.
+        _pin_parts = len({(q.a, q.b) for q in pin_hits})
+        print(f"  PIN IN COURTYARD ({_pin_parts} part pair(s), "
+              f"{len(pin_hits)} by hole rule): a frame's drilled pin lies "
+              f"inside another part's courtyard (KiCad: "
+              f"pth_inside_courtyard / npth_inside_courtyard) -- NOT "
+              f"BUILDABLE")
+        for q in pin_hits:
+            frame, other = ((q.a, q.b) if q.a in g['containers']
+                            else (q.b, q.a))
+            _kind = (q.hole or 'pth').upper()
+            print(f"    {other} over {frame} {_kind} pin(s) "
+                  f"{', '.join(x or f'(unnumbered {_kind})' for x in q.pins)}"
+                  f"  {q.area_mm2}mm2  side {q.side}")
     not_buildable = bool(g['blocking'] or locked_contact or stack_groups
                          or g['containment_blocking']
-                         or courtyard_gating or off_outline_pads or mating)
+                         or courtyard_gating or off_outline_pads or mating
+                         or pin_hits)
     verdict = 'NOT BUILDABLE' if not_buildable else 'buildable (blocking 0)'
     print(f"  VERDICT: {verdict}")
 
@@ -684,6 +686,12 @@ def main():
             # reached a reader (#918).
             'containment_blocking': g['containment_blocking'],
             'containments': [q._asdict() for q in g['containment_pairs']],
+            # #1212 / #1184: the containers (`legality.container_kinds`) and
+            # the eighth conjunct -- a pin frame's holes inside another
+            # part's courtyard, graded absolutely.
+            'containers': dict(g.get('containers') or {}),
+            'pin_in_courtyard': len(pin_hits),
+            'pin_in_courtyard_pairs': [q._asdict() for q in pin_hits],
             'fab_unjudged': g['fab_unjudged'],
             'fab_unjudged_refs': g['fab_unjudged_refs'],
             # Run-23 courtyard channel. `courtyard_pairs` is EVERY

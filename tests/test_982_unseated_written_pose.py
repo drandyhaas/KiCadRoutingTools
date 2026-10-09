@@ -30,6 +30,16 @@ same seed, one pad span apart -- so the arm above is a statement about J9
 staying at its INPUT pose, not about U2's choice of pose (which is reported,
 not asserted).
 
+#1151 changed what is written for exactly this fixture: an unseated part is
+left at its input pose only when that pose is legal against what was seated
+(or it is locked, or already off the board) -- otherwise it is STAGED below the
+board (`seeder._dispose_unseated`). J9's input pose is not even inside the
+board, so the real CLI stages it and nothing is packed onto it. The bucket
+accounting this file pins is still reachable -- a part left at a legal input
+pose can still carry a pair its seed pose licensed -- so arms 1, 2 and 3 run
+the seed with the disposition switched OFF (`dispose=False`, the pre-#1151
+write), and arm 1b pins the #1151 fix on #982's own fixture instead.
+
 Run:
     python3 tests/test_982_unseated_written_pose.py
 """
@@ -99,7 +109,17 @@ INTENT = {
 }
 
 
-def _run(tmp, name, extra=WIDE, seed='0', polish=False):
+#: Runs place_seed with `seeder._dispose_unseated` switched OFF in its own
+#: process: the pre-#1151 write, where an unseated part keeps its input pose.
+_NO_DISPOSE = ("import sys, runpy\n"
+               "sys.path[:0] = ['py_placer', 'py_router', 'py_tools']\n"
+               "from placement import seeder\n"
+               "seeder._dispose_unseated = lambda state, refs, **_k: {}\n"
+               "sys.argv = sys.argv[1:]\n"
+               "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+
+
+def _run(tmp, name, extra=WIDE, seed='0', polish=False, dispose=True):
     board = os.path.join(tmp, f'{name}.kicad_pcb')
     with open(board, 'w', encoding='utf-8') as fh:
         fh.write(BOARD % extra)
@@ -107,7 +127,9 @@ def _run(tmp, name, extra=WIDE, seed='0', polish=False):
     with open(ipath, 'w', encoding='utf-8') as fh:
         json.dump(INTENT, fh)
     out = os.path.join(tmp, f'{name}_out.kicad_pcb')
-    r = subprocess.run([sys.executable, '-X', 'utf8', SEED, board, out,
+    head = ([sys.executable, '-X', 'utf8'] if dispose else
+            [sys.executable, '-X', 'utf8', '-c', _NO_DISPOSE])
+    r = subprocess.run(head + [SEED, board, out,
                         '--intent', ipath, '--seed', seed,
                         '--board-edge-clearance', '0.2']
                        + ([] if polish else ['--no-polish']),
@@ -204,7 +226,8 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='t_982_') as tmp:
         # ---- 1: a part packed onto an unseated part's written pose -------
-        rc, s, text, out = _run(tmp, 'onto')
+        # The disposition OFF: see the module docstring (#1151).
+        rc, s, text, out = _run(tmp, 'onto', dispose=False)
         check('the wide part is unseated',
               s is not None and 'J9' in (s.get('unseated_refs') or []),
               f"{s and s.get('unseated_refs')}")
@@ -265,33 +288,30 @@ def main():
               rc == 4 and 'does NOT satisfy its intent' in text,
               f'rc {rc}\n{text[-400:]}')
 
-        # ---- 1b: the DEFAULT path, polish ON -------------------------------
+        # ---- 1b: the DEFAULT path, polish ON, the disposition ON (#1151) --
         # Every other arm passes --no-polish, so without this one the file
-        # pins only a path the tool is not normally run on. Two things are
-        # asked of it. First the PREMISE the whole bucket rests on: an
-        # unseated part is written at the pose it came in with. Nothing
-        # enforces that -- quench takes `movable = [not locked]`, so an
-        # unseated part is a polish candidate -- and here it holds, measured.
-        # Second, nothing this seed placed is charged for J9.
-        # On this fixture the polish clears the conflict entirely (it moves
-        # the U parts off J9), so the bucket is EMPTY here: that is reported,
-        # and the arm does not pretend to check a non-empty one.
+        # pins only a path the tool is not normally run on. On the real CLI
+        # J9's input pose is not legal (it is not even inside the board), so
+        # it is STAGED below the board and written where its record says --
+        # the polish holds it there -- and no pair against it exists in any
+        # bucket. The exit code still refuses the seed: J9 is still unseated.
         rc_p, s_p, text_p, out_p = _run(tmp, 'onto_polished', polish=True)
         polished = parse_kicad_pcb(out_p).footprints
-        check('[polished] the unseated part is still written at its input pose',
+        disp = ((s_p or {}).get('unseated_disposition') or {}).get('J9') or {}
+        check('[polished] the unseated part is STAGED, and written where '
+              'its record says',
               s_p is not None and 'J9' in (s_p.get('unseated_refs') or [])
-              and abs(polished['J9'].x - 15.0) < 1e-6
-              and abs(polished['J9'].y - 10.0) < 1e-6,
-              f"J9 at ({polished['J9'].x}, {polished['J9'].y}), unseated "
-              f"{s_p and s_p.get('unseated_refs')}")
-        check('[polished] no pair against it is charged to the seed',
+              and disp.get('disposition') == 'staged'
+              and abs(polished['J9'].x - disp['written'][0]) < 1e-3
+              and abs(polished['J9'].y - disp['written'][1]) < 1e-3
+              and polished['J9'].y > 20.0,
+              f"J9 at ({polished['J9'].x}, {polished['J9'].y}), {disp}")
+        check('[polished] no pair against it exists, in any bucket',
               s_p is not None and rc_p == 4
-              and not [p for p in (s_p.get('pad_conflicts_seeded_pairs') or [])
-                       if 'J9' in p[:2]],
-              f"rc {rc_p} seeded_pairs {s_p and s_p.get('pad_conflicts_seeded_pairs')}")
-        print(f"  INFO: polished, the conflict is "
-              f"{'still there' if (s_p.get('pad_conflicts_unseated') or 0) else 'gone'}"
-              f" ({s_p.get('pad_conflicts_unseated')} in the unseated bucket)")
+              and not [p for k in ('pad_conflicts_seeded_pairs',
+                                   'pad_conflicts_unseated_pairs')
+                       for p in (s_p.get(k) or []) if 'J9' in p[:2]],
+              f"rc {rc_p} {s_p and {k: s_p.get(k) for k in ('pad_conflicts_seeded_pairs', 'pad_conflicts_unseated_pairs')}}")
 
         # ---- 2: control -- the SAME part, seatable ------------------------
         # Identical board, identical intent, identical seed; only J9's pad
@@ -300,7 +320,8 @@ def main():
         # no conflict at all. So arm 1's pair is J9 staying at its INPUT
         # pose, which is the claim -- not U2's choice of pose, and not the
         # fixture merely being crowded.
-        rc2, s2, _t2, out2 = _run(tmp, 'seatable', extra=NARROW)
+        rc2, s2, _t2, out2 = _run(tmp, 'seatable', extra=NARROW,
+                                  dispose=False)
         check('the control seats the same part, so nothing is unseated',
               rc2 == 0 and not (s2.get('unseated_refs') or []),
               f"rc {rc2} {s2 and s2.get('unseated_refs')}\n{_t2[-500:]}")
@@ -320,6 +341,7 @@ def main():
               f"({p2['U2'].x}, {p2['U2'].y}) with J9 seated")
 
         # ---- 3: the unseated part was written where it came in ----------
+        # (the disposition OFF, arm 1's run: the pre-#1151 write.)
         check('the unseated part is written at its input pose',
               abs(p1['J9'].x - 15.0) < 1e-6 and abs(p1['J9'].y - 10.0) < 1e-6,
               f"J9 at ({p1['J9'].x}, {p1['J9'].y})")

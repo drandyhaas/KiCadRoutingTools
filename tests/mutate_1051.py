@@ -482,9 +482,9 @@ ROWS = [
 
     # ==== seeder: stage 0, the fixed poses ==================================
     ('fixed-abutting-refused', 'sd',
-     "    ra, ta = pa.rect(*pose_a), pa.tht_rect(*pose_a)",
-     "    ra, ta = tuple(v + d for v, d in zip(pa.rect(*pose_a), "
-     "(-0.02, -0.02, 0.02, 0.02))), pa.tht_rect(*pose_a)",
+     "    ra, rb = pa.grade_rect(*pose_a), pb.grade_rect(*pose_b)",
+     "    ra, rb = pa.grade_rect(*pose_a), pb.grade_rect(*pose_b)\n"
+     "    ra = tuple(v + d for v, d in zip(ra, (-0.02, -0.02, 0.02, 0.02)))",
      (T_SEED + '::test_abutting_fixed_poses_seat_and_overlapping_ones_both_refuse',),
      'KILLED'),
     ('fixed-overlap-allowed', 'sd',

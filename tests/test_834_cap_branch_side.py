@@ -256,17 +256,27 @@ def test_the_per_side_extent_is_reached_by_a_two_faced_part():
     agree, and a mutation reverting the branch to `rect_gap(ea, eb)` survived
     it. The battery caught that.
     """
-    a = _grid('A', 8, 0.0, 0.0, layers=('F.Cu',), net_base=1)
+    a = _grid('A', 9, 0.0, 0.0, layers=('F.Cu',), net_base=1)
     for i in range(8):
         for j in range(8):
             a.pads.append(FakePad(50.0 + i, 50.0 + j, 0.4, 0.4,
                                   net=200 + i * 8 + j, layers=('B.Cu',)))
-    b = _grid('B', 8, 0.0, 0.0, layers=('B.Cu',), net_base=900)
+    # 9x9 lattices at the origin, not 8x8: since #1213 the cap counts only
+    # the pads within reach of each other (`_pad_windows`), and at the origin
+    # those are B's lattice and A's FRONT lattice -- 64 x 64 = 4096 is not
+    # over the cap, so 8x8 would send this arm down the per-pad sweep and
+    # test nothing here. 81 x 81 is.
+    b = _grid('B', 9, 0.0, 0.0, layers=('B.Cu',), net_base=900)
     ctx, parts = _ctx([a, b])
     assert parts['A'].pad_sides == L.BOTH_SIDES, sorted(parts['A'].pad_sides)
     assert parts['A'].pad_sides & parts['B'].pad_sides, 'the pair must not be '
-    assert parts['A'].n_pads * parts['B'].n_pads > L.PAIR_TEST_CAP, (
-        parts['A'].n_pads, parts['B'].n_pads)
+    wa, wb = L._pad_windows(parts['A'].pad_rects(0.0, 0.0, 0.0),
+                            parts['A'].extent(0.0, 0.0, 0.0),
+                            parts['B'].pad_rects(0.0, 0.0, 0.0),
+                            ctx.clearance)
+    assert len(wa) * len(wb) > L.PAIR_TEST_CAP, (
+        'the WINDOWED product no longer exceeds the cap, so the extent branch '
+        'is not reached: {} x {}'.format(len(wa), len(wb)))
     # The whole extent spans both lattices and OVERLAPS B; the shared-side box
     # does not. That difference is the arm.
     ea = parts['A'].extent(0.0, 0.0, 0.0)

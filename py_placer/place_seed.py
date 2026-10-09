@@ -134,6 +134,29 @@ def _print_grade(own, pinned):
             print(f"  GRADE ERROR (pinned) [{v.rule}] {v.message}")
 
 
+def staged_refs(result) -> list:
+    """The parts the seed could not seat AND moved below the board (#1151):
+    they have a placement row but are not seated."""
+    return sorted(r for r, d in (result.get('unseated_disposition')
+                                 or {}).items()
+                  if d.get('disposition') == 'staged')
+
+
+def placed_count(result) -> int:
+    """Placement rows that are SEATS: every row but the staged parts'."""
+    return len(result['placements']) - len(staged_refs(result))
+
+
+def repairable_refs(errors, repairable, staged) -> list:
+    """Refs the post-polish re-seat repairs: a grade error of a repairable
+    rule naming a ref -- never a STAGED one (#1151), which its own seat
+    search already refused and which is off the board on purpose."""
+    staged = set(staged)
+    return sorted({v.ref for v in errors
+                   if v.rule in repairable and v.ref
+                   and v.ref not in staged})
+
+
 def split_pad_pairs(worst, seeded, unseated):
     """Split the written board's pad pairs into the seed's and the unseated's.
 
@@ -146,7 +169,14 @@ def split_pad_pairs(worst, seeded, unseated):
 
     #982. A part the seed cannot seat keeps the pose it came in with, and THAT
     pose is what gets written -- `placements` has no row for it and the writer
-    leaves its block alone. Later stages pass the pile as `exclude`
+    leaves its block alone. (Since #1151 only when that pose makes no HARD
+    conflict with what the seed seated, or the part is locked or already off
+    the board; any other unseated part is STAGED below the board and written
+    there, see `seeder._dispose_unseated`. A staged part has a placement row,
+    so it is in `seeded` too and any pair on it is charged to the seed --
+    staged parts sit 1 mm apart below everything, so none has been
+    measured. The pairs below are, from #1151 on, the ones a clear or
+    locked input pose still makes.) Later stages pass the pile as `exclude`
     (`seeder._try_place`: "the pile they still form at their meaningless input
     coordinates must not veto real poses"), so they pack onto that copper, and
     the pair then reaches the count through the partner the seed DID move. It
@@ -384,8 +414,9 @@ def gate_reason(unseated, own, my_pads, hole_delta, band=()):
         if not names:
             return ("place_seed: the seed does NOT satisfy its intent -- see "
                     "the errors above." + tail)
-        return (f"place_seed: {len(names)} part(s) UNSEATED, still in the "
-                f"staging pile and NOT placed: {shown}. The seed does NOT "
+        return (f"place_seed: {len(names)} part(s) UNSEATED -- left where "
+                f"they came in or staged below the board, and NOT placed: "
+                f"{shown}. The seed does NOT "
                 f"satisfy its intent -- seat them (--repair, or "
                 f"place_pose.py) before routing."
                 + (" There are grade errors above as well." if own else '')
@@ -541,6 +572,27 @@ Examples:
                         "worse, and the move is proportionate. Off by "
                         "default: without it a decap violator is not moved, "
                         "and is reported unresolved")
+    p.add_argument("--body-model", action="store_true",
+                   help="#1182: seat, polish, repair and re-seat on the "
+                        "occupancy check_assembly grades courtyards on "
+                        "(courtyard, else the drawn .Fab body, each united "
+                        "with the pads) instead of courtyard-else-pad-box. "
+                        "Changes the neighbour spacing only: zones, keep-outs, "
+                        "edge claims and the board term keep the rect the "
+                        "floorplan grade reads. For a library that draws "
+                        "bodies and no courtyards (One-Air-Max: 197 of 204 "
+                        "parts), where pad boxes let bodies overlap. Off by "
+                        "default: measured on tests/test_placement_ab.py's "
+                        "body-seed-* rows it costs wirelength or an intent "
+                        "error on every board")
+    p.add_argument("--baseline", metavar="BOARD", default=None,
+                   help="#1182: with --repair, charge the parts in "
+                        "check_assembly's GATING courtyard pairs -- the "
+                        "blocking pairs with a member moved against BOARD, "
+                        "the same set `check_assembly --baseline BOARD` "
+                        "gates -- and re-grade them after the moves. Without "
+                        "it --repair reports the courtyard census and "
+                        "charges nothing, as check_assembly gates nothing")
     p.add_argument("--reseat", nargs="*", default=None, metavar="REF",
                    help="LIFT the named parts and re-seat them FROM SCRATCH "
                         "at their net centroids, holding every other part "
@@ -640,6 +692,13 @@ Examples:
                 "everything)")
     if args.repair_decaps and not args.repair:
         p.error("--repair-decaps only applies to --repair")
+    if args.baseline is not None:
+        # #1182: only --repair reads it, and an unreadable one would leave the
+        # courtyard gate unarmed with nothing said.
+        if not args.repair:
+            p.error("--baseline only applies to --repair")
+        if not os.path.isfile(args.baseline):
+            p.error(f"--baseline {args.baseline}: no such board file")
     if args.dry_run and not (args.repair or args.reseat is not None):
         p.error("--dry-run only applies to --repair / --reseat")
     if args.reseat_min_gain and args.reseat is None:
@@ -831,7 +890,8 @@ Examples:
                 # silently ignored on this path (#699).
                 evict_depth=args.evict_depth,
                 min_gain=args.reseat_min_gain,
-                decap_claim_after_ics=args.decap_claim_after_ics)
+                decap_claim_after_ics=args.decap_claim_after_ics,
+                body_model=args.body_model)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
             # Over the SCOPE only: the line prints it as "{n} re-seated
@@ -961,7 +1021,9 @@ Examples:
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 grid_step=args.grid_step,
-                repair_decaps=args.repair_decaps)
+                repair_decaps=args.repair_decaps,
+                baseline_file=args.baseline,
+                body_model=args.body_model)
             for note in result['notes']:
                 print(f"  NOTE: {note}")
             max_move = 0.0
@@ -997,6 +1059,12 @@ Examples:
                 'unrepairable': len(result['unrepairable']),
                 'moved_refs': [m['reference'] for m in result['moves']],
                 'max_move_mm': round(max_move, 3),
+                # #1182: check_assembly's gating courtyard pairs against
+                # --baseline, before and after; null without one.
+                'courtyard_gating_before': result.get(
+                    'courtyard_gating_before'),
+                'courtyard_gating_after': result.get(
+                    'courtyard_gating_after'),
             })
             summary['edge_floor_fallback'].update(
                 result.get('edge_floor_fallback') or {})
@@ -1136,10 +1204,13 @@ Examples:
         evict_depth=args.evict_depth,
         rotate_by_facing=args.rotate_by_facing,
         diagonal_rotations=args.diagonal_rotations,
-        decap_claim_after_ics=args.decap_claim_after_ics)
+        decap_claim_after_ics=args.decap_claim_after_ics,
+        body_model=args.body_model)
     for note in result['notes']:
         print(f"  NOTE: {note}")
-    print(f"Seeded {len(result['placements'])} part(s); "
+    # #1151: a STAGED part has a placement row (it is written off the board)
+    # and is still unseated, so it is not counted as seeded.
+    print(f"Seeded {placed_count(result)} part(s); "
           f"{len(result['unseated'])} unseated; "
           f"{len(result['lock_refs'])} to lock")
     # #893. A DECLARED rotation that could not be seated is a different fact
@@ -1156,6 +1227,15 @@ Examples:
 
     write_placed_output(args.input_file, args.output_file,
                         result['placements'])
+    # #1151: the parts the seed could not seat whose input pose was not legal
+    # against what it seated were moved off the board, and are written there.
+    # The polish below holds them: it would otherwise walk them back onto a
+    # board their own seat search had already refused.
+    _disp = result.get('unseated_disposition') or {}
+    _staged = staged_refs(result)
+    if _staged:
+        print(f"  {len(_staged)} unseated part(s) STAGED off the board, "
+              f"not written on top of a neighbour: {', '.join(_staged)}")
     n_locked = seeder.stamp_locked(args.output_file, result['lock_refs'])
     copy_siblings(args.input_file, args.output_file)
     print(f"Stamped (locked yes) on {n_locked} part(s)")
@@ -1178,6 +1258,13 @@ Examples:
     if not args.no_polish:
         from placement.quench import quench
         pcb_seeded = parse_kicad_pcb(args.output_file)
+        # #1151: the polish runs as if the STAGED parts were not on the board
+        # -- they are not. Held in place but priced, their airwires to the
+        # staging row pulled seated parts toward it (phase-1 verifier,
+        # StickHub: 15 seated parts moved, hpwl 577 -> 659.5). They stay in
+        # the written file, where the polish's moves do not touch them.
+        for _r in _staged:
+            pcb_seeded.footprints.pop(_r, None)
         # Guidance weights, same as place_portfolio: the seed should be
         # polished by the objective the later steps rank with. Locks ride in
         # from the file (must_lock was just stamped); edge connectors are
@@ -1201,6 +1288,7 @@ Examples:
             halo_coef=0.15, halo_weight=2.0, edge_halo=2.0, edge_weight=2.0,
             ignore_nets=args.ignore_nets,
             metrics_out=ratsnest, intent_gate=_gate,
+            body_model=args.body_model,
             corridor_weight=args.corridor_weight,
             corridor_specs=list((intent.health or {}).get('bus_corridors')
                                 or ()) or None)
@@ -1243,8 +1331,9 @@ Examples:
         # what this net is for.
         if not args.no_polish:
             _repairable = ('zone_containment', 'keepout', 'zone_exclusive')
-            broke = sorted({v.ref for v in graded.errors
-                            if v.rule in _repairable and v.ref})
+            # #1151: a STAGED part was searched and refused already; it is
+            # off the board on purpose and this repair would search it again.
+            broke = repairable_refs(graded.errors, _repairable, _staged)
             _rules = sorted({v.rule for v in graded.errors
                              if v.rule in _repairable and v.ref})
             if broke:
@@ -1274,7 +1363,9 @@ Examples:
                     # region, so `place_seed` would exit 4 on a board it had
                     # just repaired. Resolved with `sources`, the same blocks
                     # the grade below uses.
-                    exclusive_zones=floorplan.zone_entries(intent, blocks2))
+                    exclusive_zones=floorplan.zone_entries(intent, blocks2),
+                    # #1182: the same occupancy the seed and polish used.
+                    body_model=args.body_model)
                 zone_of = {}
                 for z in intent.blocks:
                     if z.rect is None:
@@ -1461,11 +1552,14 @@ Examples:
               f"in a rule-area keep-out band: "
               + '; '.join(f"{r} ({a:.3f}mm)" for r, a in _band_seeded))
     after = ratsnest.get('after', {})
-    summary = {'placed': len(result['placements']),
+    summary = {'placed': placed_count(result),
                'unseated': len(result['unseated']),
                # NAMES, not just a count. #629's complaint is that a verdict
                # you cannot act on is a dead end, and a count names nobody.
                'unseated_refs': list(result['unseated']),
+               # #1151: where each of them was WRITTEN, and why --
+               # {ref: {disposition, input, written, refused_by}}.
+               'unseated_disposition': _disp,
                # #893: WHICH declared angle was refused, by ref. A caller that
                # sees only `unseated_refs` cannot tell a declaration it must
                # revisit from a board that is simply full.

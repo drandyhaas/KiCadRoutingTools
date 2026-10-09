@@ -1143,10 +1143,15 @@ with tempfile.TemporaryDirectory() as wd:
           len(ev) == 1 and ev[0]['accepted'] is False
           and 'not legal' in ev[0]['reason'],
           str(ev))
+    # #1151: an unseated part is either left at its input pose (no row) or
+    # STAGED off the board (a row at its staging slot) -- never written on
+    # top of SMALL.
+    _big = (res.get('unseated_disposition') or {}).get('BIG') or {}
     check("BIG is reported unseated again, not placed on top of SMALL",
           res['unseated'] == ['BIG']
-          and all(p['reference'] != 'BIG' for p in res['placements']),
-          f"unseated {res['unseated']}")
+          and (all(p['reference'] != 'BIG' for p in res['placements'])
+               or _big.get('disposition') == 'staged'),
+          f"unseated {res['unseated']} disposition {_big}")
     placed = {p['reference']: (p['new_x'], p['new_y'], p['new_rotation'])
               for p in res['placements']}
     placed0 = {p['reference']: (p['new_x'], p['new_y'], p['new_rotation'])

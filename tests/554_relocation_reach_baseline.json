@@ -614,7 +614,7 @@
       "want_mm": 8.4287
     },
     "rp2350_fpga_eensy_prePlane/sheet:b62df5e1-5101-429a-8140-80e1558c3023": {
-      "base_violation": 16.387752,
+      "base_violation": 4.621952,
       "binding": [
         [
           "U8",
@@ -655,11 +655,11 @@
       "refusal": "",
       "schema": 1,
       "slide_frozen_abs_mm": 0.0,
-      "slide_frozen_mm": 0.6596,
+      "slide_frozen_mm": 0.0,
       "want_mm": 4.3974
     },
     "rp2350_fpga_eensy_prePlane/sheet:f2f6ffb3-0bda-4fed-842c-a4c662014e9c": {
-      "base_violation": 15.334588,
+      "base_violation": 3.568788,
       "binding": [
         [
           "U8",
@@ -708,7 +708,7 @@
       "refusal": "",
       "schema": 1,
       "slide_frozen_abs_mm": 0.0,
-      "slide_frozen_mm": 0.8428,
+      "slide_frozen_mm": 0.0,
       "want_mm": 4.952
     },
     "sonde_u/net:TCK": {
@@ -1480,7 +1480,7 @@
       }
     ],
     "slide_frozen_abs_mm_median": 0.0,
-    "slide_frozen_mm_median": 0.05,
+    "slide_frozen_mm_median": 0.0,
     "verdict": "MECHANISM HOLDS: yielding neighbours bought >= 1.0 mm on 11 of 24 cell(s), spanning 6 board(s); median gain 0.31 mm, max 16.66 mm. Note reach >= frozen is TRUE BY CONSTRUCTION -- the evidence is the magnitude and the spread, never the win rate. This says nothing about whether a relocated board ROUTES better.",
     "want_mm_median": 10.3571
   }

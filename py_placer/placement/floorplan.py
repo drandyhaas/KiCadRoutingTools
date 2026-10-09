@@ -1806,8 +1806,8 @@ def _fixed_pose_waiver_findings(intent: Intent, pcb_data, pcb_file: str, *,
         if pa is None or pb is None:
             continue
         area = legality.pair_overlap_area(
-            pa.sides, pa.side, pa.rect(), pa.tht_rect(),
-            pb.sides, pb.side, pb.rect(), pb.tht_rect())
+            pa.sides, pa.side, pa.grade_rect(), pa.tht_rect(),
+            pb.sides, pb.side, pb.grade_rect(), pb.tht_rect())
         out.append(Violation(
             rule='fixed_pose_overlap_waived',
             severity=intent.severity_of('fixed_pose_overlap_waived', WARN),
@@ -2188,10 +2188,12 @@ def keepout_hit(entry, rects) -> float:
         if r is None:
             continue
         if entry.get('rect') is not None:
-            hit = max(hit, legality.rect_overlap_area(r, entry['rect']))
+            # #1206: a far side of several clusters is its clusters.
+            hit = max(hit, legality.far_overlap_area(r, entry['rect']))
         else:
             cx, cy, radius = entry['circle']
-            if _circle_hits_rect(cx, cy, radius, r):
+            if any(_circle_hits_rect(cx, cy, radius, b)
+                   for b in legality.far_boxes(r)):
                 hit = max(hit, 1.0)
     return hit if hit > legality.EPS else 0.0
 
@@ -2438,10 +2440,11 @@ def mating_keepout_findings(pcb_data, pcb_file: Optional[str] = None,
         rect = (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)
         tht = None
         if has_tht:
-            tl = legality.through_pad_bounds_local(fp)
+            tl = legality.far_side_local(fp, legality.far_courtyard_of(
+                crt.get(ref), side))
             if tl is not None:
-                a0, b0, a1, b1 = legality.rotate_local_bounds(*tl, rot)
-                tht = (fp.x + a0, fp.y + b0, fp.x + a1, fp.y + b1)
+                tht = legality.offset_far(legality.rotate_far(tl, rot),
+                                          fp.x, fp.y)
         sides = legality.sides_occupied(side, has_tht)
         for k in keepouts_for_ref(ks, ref, sides):
             a = keepout_hit(k, (rect, tht))
@@ -2686,7 +2689,8 @@ def zone_covered_by_keepout(zone, keepouts, member_sides=None,
     return None
 
 
-def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]]
+def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]],
+                      conflicts: Optional[Dict[str, List[tuple]]] = None
                       ) -> Dict[str, Tuple[Optional[float],
                                            Optional[Tuple[float, ...]]]]:
     """{ref: (declared rotation, declared candidates)} over ALREADY-RESOLVED blocks.
@@ -2699,6 +2703,10 @@ def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]]
     author has to resolve, so it raises rather than picking one. Two blocks
     declaring the SAME angle is not a contradiction and is allowed -- globs
     overlap legitimately (`U*` and `U1`).
+
+    `conflicts`, when given, collects every claim on a contradicted ref
+    (`{ref: [claim, ...]}`) instead of raising -- for a caller that must
+    keep going (the plan check bounds such a ref on every claimed angle).
     """
     out: Dict[str, Tuple[Optional[float], Optional[Tuple[float, ...]]]] = {}
     owner: Dict[str, str] = {}
@@ -2708,6 +2716,11 @@ def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]]
         claim = (z.rotation, z.rotation_candidates)
         for ref in blocks.get(z.name, ()):
             prev = out.get(ref)
+            if prev is not None and prev != claim and conflicts is not None:
+                seen = conflicts.setdefault(ref, [prev])
+                if claim not in seen:
+                    seen.append(claim)
+                continue
             if prev is not None and prev != claim:
                 raise IntentError(
                     f"{ref} is claimed by blocks {owner[ref]!r} and {z.name!r} "
@@ -3047,6 +3060,10 @@ class _Ctx:
         self.parts = {p.ref: p for p in state.graded_parts()}
         self.gate = state.edge_gate
         self.legality = state.legality_metrics()
+        #: #1162: check_assembly's courtyard channel for `overlap_exact`;
+        #: a PoseGrader hands its own over, `grade` builds one on demand.
+        self._census = None
+        self._overlap_exact = None
         self.envelope = intent.envelope.get('rect')
         self.owner: Dict[str, str] = {}
         for name, refs in sorted(blocks.items()):
@@ -3488,8 +3505,39 @@ def zone_is_anchor(zone_rect, part, tol: float) -> bool:
     lattice.
     """
     return not any(
-        zone_fits_courtyard(zone_rect, part.rect(0.0, 0.0, r), tol)
+        zone_fits_courtyard(zone_rect, part.grade_rect(0.0, 0.0, r), tol)
         for r in (part.rot % 360, (part.rot + 90) % 360))
+
+
+def _anchor_reachable(zone, part, tol: float, claim=None) -> bool:
+    """Could the grade read `zone` as an ANCHOR for `part` (`zone_is_anchor`)
+    at any rotation the seed may give it? A plan bound charging such a
+    member is not sound: seated where it does not fit, the grade does not
+    hold it to the zone at all.
+
+    The rotations are the seeder's own: `claim` is the part's entry in
+    `rotations_for_ref` (every block's declaration, not only the zone's own
+    block -- a block may declare an angle with no zone), its decision or
+    else its candidate set; a LOCKED part, or one with no claim, keeps its
+    own 90-degree lattice (the seeder never turns a locked part, whatever
+    a block declares -- b6a63ad8 verifier).
+    (`zone_fits_courtyard` tests both orders, so `r` stands for `r + 90`.)"""
+    rot, cands = claim if claim else (None, None)
+    if getattr(part, 'locked', False) or (rot is None and not cands):
+        rots = [part.rot]
+    elif rot is not None:
+        rots = [rot]
+    else:
+        rots = list(cands)
+    from .legality import rotate_local_bounds
+    # Turned from the 0-degree box, not read from the part's rotation
+    # cache: a declared angle off its lattice has no entry, and the cache
+    # answers a miss with the 0-degree box.
+    return any(
+        not zone_fits_courtyard(
+            zone.rect, rotate_local_bounds(*part.grade_by_rot[0.0], r % 360),
+            tol)
+        for r in rots)
 
 
 def zone_origin_box(zone_rect, bounds, tol: float):
@@ -3731,7 +3779,7 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
     def _search(entries):
         """First (x, y, rot) satisfying zone AND every entry, or None."""
         for rot in rots:
-            b = part.rect(0.0, 0.0, rot)
+            b = part.grade_rect(0.0, 0.0, rot)
             t = part.tht_rect(0.0, 0.0, rot)
             box = (_anchor_origin_box(zone_rect, b, tolerance) if anchor
                    else zone_origin_box(zone_rect, b, tolerance))
@@ -3739,7 +3787,7 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
                 continue
             holes = []
             for k in entries:
-                for lb in ((b, t) if t is not None else (b,)):
+                for lb in (b,) + tuple(legality.far_boxes(t)):
                     f = _forbidden_origin_rect(k, lb)
                     if f is not None:
                         holes.append(f)
@@ -3749,7 +3797,7 @@ def zone_pose_feasibility(zone_rect, tolerance: float, part,
                                   [v for h in holes for v in (h[1], h[3])])
             for x in cx:
                 for y in cy:
-                    r = part.rect(x, y, rot)
+                    r = part.grade_rect(x, y, rot)
                     th = part.tht_rect(x, y, rot)
                     if zone_escape(zone_rect, r, anchor)[0] > tolerance + legality.EPS:
                         continue
@@ -3836,7 +3884,9 @@ class _LocalPart:
     def __init__(self, rot: float, local, tht_local=None):
         self.rot = float(rot) % 360
         self._b = tuple(local)
-        self._t = tuple(tht_local) if tht_local is not None else None
+        # #1206: a FarSide keeps its clusters; anything else is one box.
+        self._t = (tht_local if isinstance(tht_local, legality.FarSide)
+                   else tuple(tht_local) if tht_local is not None else None)
 
     def rect(self, x: float, y: float, rot: float):
         b = legality.rotate_local_bounds(*self._b, rot)
@@ -3845,8 +3895,10 @@ class _LocalPart:
     def tht_rect(self, x: float, y: float, rot: float):
         if self._t is None:
             return None
-        t = legality.rotate_local_bounds(*self._t, rot)
-        return (x + t[0], y + t[1], x + t[2], y + t[3])
+        return legality.offset_far(legality.rotate_far(self._t, rot), x, y)
+
+    # A local part has one ladder: the one it was built from (#1182).
+    grade_rect = rect
 
 
 def intent_zone_keepout_problems(intent, blocks, pcb_data,
@@ -5268,6 +5320,11 @@ def rule_must_lock(ctx) -> Iterator[Violation]:
                     expected={'locked': True})
 
 
+#: How many overlap pairs `rule_legality` writes into `measured`, worst
+#: first; `pairs_total` carries the full count.
+MEASURED_PAIRS_CAP = 50
+
+
 def rule_legality(ctx) -> Iterator[Violation]:
     """Courtyard overlap and off-board parts, against a declared budget.
 
@@ -5305,6 +5362,35 @@ def rule_legality(ctx) -> Iterator[Violation]:
         lim = float(budget[key])
         measured = {key: round(float(got), 4)}
         note = ''
+        if key == 'overlap_area':
+            # #1162: graded on check_assembly's drawn outlines, not the
+            # search's rects. glasgow g4 read 4.909 mm2 here -- 3.93 of it
+            # MK1-4's r=5 circle courtyards graded as 10 x 10 squares -- while
+            # check_assembly said buildable; and the error named no pair, so
+            # a caller rebuilt them from a different universe and threw a
+            # legal layout away. Both readings and every pair are measured.
+            ex, rc, pairs = _ctx_overlap_exact(ctx)
+            ctx.legality['overlap_area_exact'] = round(ex, 4)
+            got = ex
+            # Worst first, capped: a pile lists thousands, and the JSON
+            # doubled (phase-5 verifier). `pairs_total` keeps the count.
+            # `excluded` names the parts the budget does not see -- a silk-
+            # only part (#896) is invisible to it, and says so.
+            _gp, _excl = legality.courtyard_budget_universe(
+                _ctx_census(ctx), list(ctx.parts))
+            ctx.legality['overlap_area_excluded'] = sum(
+                len(v) for v in _excl.values())
+            measured = {key: round(float(ex), 4),
+                        'overlap_area_rect': round(float(rc), 4),
+                        'pairs': pairs[:MEASURED_PAIRS_CAP],
+                        'pairs_total': len(pairs),
+                        'excluded': {k: v for k, v in _excl.items() if v}}
+            if pairs:
+                note = (' -- worst: ' + ', '.join(
+                    f"{a}/{b} {e:.3f} (rect {r:.3f})"
+                    for a, b, r, e in pairs[:5])
+                        + (f", +{len(pairs) - 5} more" if len(pairs) > 5
+                           else ''))
         if key == 'oob_count' and exempt:
             raw = got
             got = raw - len(exempt)
@@ -6559,6 +6645,66 @@ def _run_rules(ctx, abstained=None):
     return found, ran, skipped
 
 
+def _ctx_census(ctx):
+    """The ctx's `CourtyardCensus`, built once."""
+    if ctx._census is None:
+        ctx._census = legality.CourtyardCensus(ctx.pcb, ctx.pcb_file)
+    return ctx._census
+
+
+def _budget_outline_areas(ctx, refs):
+    """`{ref: (side, mm2)}`: what each part of `refs` the overlap budget
+    grades COVERS, on the budget's own geometry (#1162 verifier): its graded
+    outline, clipped to the rect a zone or the board confines (the grade
+    ladder's), at rotation 0 -- both turn together, so it is pose-free.
+    A bound on forced overlap is sound only in the currency the budget is
+    measured in: summing rects (an r=5 circle courtyard as a 10 x 10
+    square) called a layout the grade passes at 61.4 mm2 a forced 100."""
+    from shapely.geometry import box
+    census = _ctx_census(ctx)
+    st = ctx.state
+    eligible, _x = legality.courtyard_budget_universe(
+        census, [r for r in refs if r in st.parts],
+        {r: (0.0, 0.0, 0.0) for r in refs})
+    out = {}
+    for r, g in eligible.items():
+        b0 = st.parts[r].grade_by_rot[0.0]
+        shape = g.poly if g.poly is not None else box(*g.rect)
+        out[r] = (st.parts[r].side, shape.intersection(box(*b0)).area)
+    return out
+
+
+def _ctx_overlap_exact(ctx):
+    """`(exact_total, rect_total, pairs)` for the parts `ctx` grades, at
+    the poses it grades them (#1162): `legality.courtyard_overlap_pairs` over
+    `ctx.parts` -- the grade's own universe, the container exemption the
+    quench's metric applies -- with the grade's rects as the RECT reading.
+    Cached on the ctx; zero when the project waives courtyard overlap, as the
+    quench's `overlap_area` is."""
+    if ctx._overlap_exact is not None:
+        return ctx._overlap_exact
+    st = ctx.state
+    if getattr(st, 'courtyards_ignored', False):
+        ctx._overlap_exact = (0.0, 0.0, [])
+        return ctx._overlap_exact
+    census = _ctx_census(ctx)
+    cont = set(getattr(st, 'container_refs', ()) or ())
+    refs = [r for r in ctx.parts if r not in cont]
+    if hasattr(st, 'pose'):
+        poses = {r: tuple(st.pose(r)) for r in refs}
+    else:
+        poses = {r: (st.parts[r].x, st.parts[r].y, st.parts[r].rot)
+                 for r in refs if r in st.parts}
+    gps = ctx.parts
+
+    def rect_of(r):
+        g = gps[r]
+        return (g.sides, g.side, g.rect, g.tht_rect)
+    ctx._overlap_exact = legality.courtyard_overlap_pairs(
+        census, refs, poses, rect_of=rect_of)
+    return ctx._overlap_exact
+
+
 class _PosedState:
     """What `_Ctx` reads off a `QuenchState`, answered for the board a seat
     search is ASKING about rather than one it has written: the search state's
@@ -6573,6 +6719,9 @@ class _PosedState:
         # #1104: `legality_metrics` reads it; without it a posed view of a
         # courtyard-waived board priced courtyard overlap again.
         self.courtyards_ignored = getattr(state, 'courtyards_ignored', False)
+        # fa10 P1: and the containers it leaves out of the overlap -- a posed
+        # view used to price rp2350's U8 frame rect again.
+        self.container_refs = getattr(state, 'container_refs', ()) or ()
 
     def pose(self, ref):
         if ref in self._poses:
@@ -6586,8 +6735,11 @@ class _PosedState:
             if ref in self._exclude:
                 continue
             x, y, rot = self.pose(ref)
+            # The GRADE ladder (#1182): what `grade` reads off a default
+            # state, so an armed (`body_model`) search state is graded on the
+            # same rects as the board it will write.
             out.append(legality.GradedPart(ref=ref, side=part.side,
-                                           rect=part.rect(x, y, rot),
+                                           rect=part.grade_rect(x, y, rot),
                                            tht_rect=part.tht_rect(x, y, rot),
                                            has_tht=part.has_tht))
         return out
@@ -6653,6 +6805,7 @@ class PoseGrader:
         self._outline = None
         self._locked = None
         self._bodies = None
+        self._census = None
         self._rings = None
         self._ring_base = None
         self._ring_at = None
@@ -6717,7 +6870,25 @@ class PoseGrader:
         a fixture, 0.18 mm2 of new overlap with a LOCKED part, no pad or hole
         predicate able to see it and no grade error raised.
         """
-        return _PosedState(self.state, exclude, poses).legality_metrics()
+        view = _PosedState(self.state, exclude, poses)
+        out = view.legality_metrics()
+        # #1162: the reading the `legality` rule grades now, beside the
+        # quench's own -- a caller comparing two poses compares both.
+        out['overlap_area_exact'] = round(
+            _ctx_overlap_exact(self._exact_ctx(view))[0], 4)
+        return out
+
+    def _exact_ctx(self, view):
+        """The few `_Ctx` fields `_ctx_overlap_exact` reads, for `view`,
+        with this grader's one census."""
+        from types import SimpleNamespace
+        if self._census is None:
+            self._census = legality.CourtyardCensus(self.state.pcb_data,
+                                                    self.state.pcb_file)
+        return SimpleNamespace(
+            state=view, pcb=self.state.pcb_data, pcb_file=self.state.pcb_file,
+            parts={p.ref: p for p in view.graded_parts()},
+            _census=self._census, _overlap_exact=None)
 
     def _ring_counts(self, ref, pose):
         """How many of `ref`'s pad centres fall inside each interior contour.
@@ -6739,9 +6910,6 @@ class PoseGrader:
 
     def violations(self, *, exclude=(), poses=None) -> List[Violation]:
         state = self.state
-        if getattr(state, 'body_model', False):
-            raise ValueError('a body_model search state grades occupancy rects, '
-                             'not the courtyards the grade reads')
         if self._outline is None:
             self._outline = outline_state(state.pcb_data, state.pcb_file)
         if not self._outline['trustworthy']:
@@ -6761,6 +6929,10 @@ class PoseGrader:
                    self._locked, self._outline)
         ctx.requested_floors = self.floors
         ctx._bodies = self._bodies
+        if self._census is None:
+            self._census = legality.CourtyardCensus(state.pcb_data,
+                                                    state.pcb_file)
+        ctx._census = self._census
         found, _ran, _skipped = _run_rules(ctx)
         return found
 
@@ -6884,7 +7056,7 @@ def exclusive_unsatisfiable(intent: Intent, blocks, pcb_data,
                     continue
                 if za.side and sp.side != za.side:
                     continue
-                local0 = sp.bounds_by_rot[0.0]
+                local0 = sp.grade_by_rot[0.0]
                 tried = []
                 feasible = False
                 for base in sorted({(fp.rotation or 0.0) % 360.0, 0.0}):
@@ -7052,9 +7224,14 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
          far face) against the zone's area.
          Fitting area A into a zone of area Z forces at least A - Z of
          pairwise courtyard overlap, which the grade counts against a
-         DECLARED `legality_budget.overlap_area`: past it, ERROR. With no
-         budget declared nothing bounds the overlap, and it is the WARN (the
-         seeder never overlaps courtyards, so it may leave members unseated).
+         DECLARED `legality_budget.overlap_area`: past it, ERROR. The ERROR
+         sums the members' graded OUTLINES and far-side clusters -- the
+         geometry the budget is measured on (#1162) -- the WARN their rects.
+         With no budget declared, or a project that waives courtyard overlap
+         (the grade then prices none), nothing bounds the overlap, and it is
+         the WARN (the seeder never overlaps courtyards, so it may leave
+         members unseated). An anchor-graded member (`zone_is_anchor`) is not
+         charged.
          Anchor-graded members and zones holding a waived pair are not
          charged; a locked member is, because the grade counts its overlap
          too.
@@ -7064,9 +7241,10 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
          edge's span (WARN -- flanges legitimately overhang corners).
       7. `plan_board_overfull` / `_crowded`: `options.grow_board` at
          clearance 0 on the per-face basis. The same argument as row 5: an
-         ERROR when the overlap it forces exceeds a declared budget; a WARN
-         past `options.CROWDED_UTILISATION` or on the one-face basis a
-         declared `assembly.sides` implies.
+         ERROR when the overlap the graded outlines force (per face, against
+         `grow_board`'s usable area) exceeds a declared budget; a WARN past
+         `options.CROWDED_UTILISATION` or on the one-face basis a declared
+         `assembly.sides` implies.
     """
     from . import options as _opts
     ctx, outline, state, blocks, block_problems = _grade_ctx(
@@ -7126,11 +7304,11 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 # caller's angle), then turned to the declared rotation --
                 # not its outline on the face it is on now.
                 from .legality import rotate_local_bounds
-                b0 = part.bounds_by_rot[0.0]
+                b0 = part.grade_by_rot[0.0]
                 e = rotate_local_bounds(b0[0], -b0[3], b0[2], -b0[1], rot)
                 r = (fx_ + e[0], fy_ + e[1], fx_ + e[2], fy_ + e[3])
             else:
-                r = part.rect(fx_, fy_, rot)
+                r = part.grade_rect(fx_, fy_, rot)
             if zone_fits_courtyard(z.rect, r, tol):
                 esc, _axis = _rect_escape(z.rect, r)
             else:
@@ -7153,13 +7331,14 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                     expected={'zone': list(z.rect), 'tolerance_mm': tol}))
 
     # 8. two FILE-locked parts overlapping -- in every placement there is.
-    fixed_gp = {p.ref: p for p in state.graded_parts() if p.ref in ctx.locked}
-    fixed_refs = sorted(fixed_gp)
+    # #1162: on the reading the budget is graded in (check_assembly's drawn
+    # outlines), from the grade's own exact pairs restricted to locked ones.
+    fixed_refs = sorted(r for r in ctx.parts if r in ctx.locked)
+    _fixed = set(fixed_refs)
     fixed_pairs = []
-    for i_, a_ in enumerate(fixed_refs):
-        for b_ in fixed_refs[i_ + 1:]:
-            area = legality.placement_overlap_area([fixed_gp[a_],
-                                                    fixed_gp[b_]])
+    for a_, b_, _rc, area in sorted(_ctx_overlap_exact(ctx)[2],
+                                    key=lambda p_: (p_[0], p_[1])):
+        if a_ in _fixed and b_ in _fixed:
             if area > legality.EPS:
                 fixed_pairs.append((a_, b_, area))
                 out.append(Violation(
@@ -7216,6 +7395,25 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     # dropping them lost a zone a locked part already fills (round-2
     # verifier). A locked member outside its zone is `plan_fixed_outside_zone`.
     overlap_budget = (intent.legality_budget or {}).get('overlap_area')
+    # The seeder's rotation claims, per ref, from every block. A part two
+    # blocks declare at different angles is a contradiction the seeder
+    # refuses (its own `rotations_for_ref` call raises, naming both blocks);
+    # here it is bounded on EVERY angle a block claims for it, never on its
+    # own angle, which the seeder would not use (final P1 verifiers: the
+    # bound read 45-degree bars declared at 0 and at 90 as overfull at 45,
+    # and standing the whole bound down hid an unrelated zone's real one).
+    _conflicts: Dict[str, List[tuple]] = {}
+    _claims = rotations_for_ref(intent, blocks, conflicts=_conflicts)
+    for _r, _seen in _conflicts.items():
+        _claims[_r] = (None, tuple(sorted({
+            float(a) for rot, cands in _seen
+            for a in ((rot,) if rot is not None else (cands or ()))})))
+    if getattr(state, 'courtyards_ignored', False):
+        # The project waives KiCad's courtyard rule, so the grade prices no
+        # courtyard overlap (#1104): no forced overlap can exceed the budget,
+        # and these bounds stand down to their WARNs (8492b3c1 verifier:
+        # three circles ERRORed at 35.5 where the grade read 0).
+        overlap_budget = None
     for z in intent.blocks:
         if z.rect is None:
             continue
@@ -7230,16 +7428,31 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
         # The WARN half: the same sum with the grading clearance around each
         # member, which is what the seeder actually needs between them.
         per_face_c = {'F': 0.0, 'B': 0.0}
+        # The ERROR half, on the budget's own geometry (#1162 verifier): the
+        # members' graded OUTLINES, not their rects.
+        per_face_x = {'F': 0.0, 'B': 0.0}
+        _outline = _budget_outline_areas(ctx, members)
         counted = []
         for r in members:
             part = state.parts[r]
-            b0 = part.bounds_by_rot[0.0]
+            b0 = part.grade_by_rot[0.0]
             w, h = b0[2] - b0[0], b0[3] - b0[1]
-            if not zone_fits_courtyard(z.rect, (0.0, 0.0, w, h), tol) and                     not zone_fits_courtyard(z.rect, (0.0, 0.0, h, w), tol):
-                continue            # anchor-graded: the zone cannot hold it
+            if _anchor_reachable(z, part, tol, _claims.get(r)):
+                # Anchor-graded at some rotation the seed may give it, as the
+                # grade decides it (`zone_is_anchor`): on the part's own
+                # 90-degree lattice -- two 10 x 4 parts at 45 degrees were
+                # charged as if seated at 0 (8492b3c1 verifier) -- or on any
+                # the block DECLARES (`rotation` / `rotation_candidates`),
+                # where a fit at one angle does not forbid the anchor at
+                # another (b6a63ad8 verifier). Not modelled: place_seed's
+                # --diagonal-rotations fallback, which the plan cannot see.
+                continue
             per_face[part.side] = per_face.get(part.side, 0.0) + w * h
             per_face_c[part.side] = per_face_c.get(part.side, 0.0) + (
                 (w + clr_used) * (h + clr_used))
+            if r in _outline:
+                per_face_x[part.side] = (per_face_x.get(part.side, 0.0)
+                                         + _outline[r][1])
             t0 = (part.tht_by_rot or {}).get(0.0)
             if t0 is not None:
                 # The drilled-pad rect's part INSIDE the courtyard: only the
@@ -7247,20 +7460,36 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 # past it may sit outside the zone (round-2 verifier: a 12x1
                 # drill rect on a 10x4 courtyard was charged 2 mm2 the grade
                 # never counts). Pose-invariant, since both turn together.
+                # Per CLUSTER of drilled pads (#1206), as the grade measures
+                # the far side: the union box charged ulx3s GPDI1's two shell
+                # posts and the gap between them, and called its own shipped
+                # arrangement (0.0 mm2 under the grade) a forced overlap.
                 far = 'B' if part.side == 'F' else 'F'
                 per_face[far] = per_face.get(far, 0.0) + (
-                    legality.rect_overlap_area(t0, b0))
+                    legality.far_overlap_area(t0, b0))
+                # The budget measures the far side on these same cluster
+                # boxes (`legality._pair_exact`), so they are in its
+                # currency too.
+                if r in _outline:
+                    per_face_x[far] = per_face_x.get(far, 0.0) + (
+                        legality.far_overlap_area(t0, b0))
             counted.append(r)
         worst = max(per_face, key=lambda f_: per_face[f_])
         need = per_face[worst]
+        worst_x = max(per_face_x, key=lambda f_: per_face_x[f_])
+        need_x = per_face_x[worst_x]
         zone_rows.append({'block': z.name, 'face': worst,
                           'members_area_mm2': round(need, 3),
+                          'members_outline_area_mm2': round(need_x, 3),
                           'zone_area_mm2': round(zarea, 3),
                           'overlap_budget_mm2': overlap_budget,
                           'members': counted})
         excess = need - zarea
+        # The forced overlap the BUDGET sees (Bonferroni on the outlines and
+        # far-side clusters it measures).
+        excess_x = need_x - zarea
         if (overlap_budget is not None
-                and excess > float(overlap_budget) + legality.EPS):
+                and excess_x > float(overlap_budget) + legality.EPS):
             out.append(Violation(
                 rule='plan_zone_overfull',
                 severity=_plan_severity(intent, 'plan_zone_overfull',
@@ -7268,14 +7497,16 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
                 block=z.name,
                 message=(f"zone {z.name!r} is {zarea:.2f}mm2 (with its "
                          f"{tol}mm tolerance) and its {len(counted)} "
-                         f"member(s) on {worst}.Cu need {need:.2f}mm2 by "
-                         f"courtyard alone: fitting them forces at least "
-                         f"{excess:.2f}mm2 of courtyard overlap, over the "
-                         f"declared legality_budget.overlap_area "
+                         f"member(s) on {worst_x}.Cu cover {need_x:.2f}mm2 "
+                         f"by their graded outlines alone: fitting them "
+                         f"forces at least {excess_x:.2f}mm2 of courtyard "
+                         f"overlap, over the declared "
+                         f"legality_budget.overlap_area "
                          f"{float(overlap_budget):g}"),
-                measured={'members_area_mm2': round(need, 4),
-                          'face': worst, 'members': counted,
-                          'forced_overlap_mm2': round(excess, 4)},
+                measured={'members_outline_area_mm2': round(need_x, 4),
+                          'members_area_mm2': round(need, 4),
+                          'face': worst_x, 'members': counted,
+                          'forced_overlap_mm2': round(excess_x, 4)},
                 expected={'zone_area_mm2': round(zarea, 4),
                           'overlap_area': float(overlap_budget)}))
         elif excess > legality.EPS:
@@ -7386,21 +7617,33 @@ def plan_check(intent: Intent, pcb_data, pcb_file: str, *,
     # 0, and a part allowed off it takes its area with it (round-2
     # verifier: two 8x8 parts on a 10x10 board graded clean with one off).
     on_board = (intent.legality_budget or {}).get('oob_count') == 0
+    # The ERROR on the budget's own geometry (#1162 verifier), as row 5:
+    # every graded outline the budget sees, per face, against the usable
+    # area. Never more than the rect sum, so a weaker bound -- never an
+    # unsound one.
+    _faces_x: Dict[str, float] = {'F': 0.0, 'B': 0.0}
+    for _side, _a in _budget_outline_areas(ctx, list(state.parts)).values():
+        _faces_x[_side] = _faces_x.get(_side, 0.0) + _a
+    excess0_x = (max(_faces_x.values())
+                 - (m0.get('usable_area_mm2') or 0.0))
+    measured['outline_area_per_face_mm2'] = {
+        k: round(v, 3) for k, v in sorted(_faces_x.items())}
     if g0.get('fits_by_area') is False and overlap_budget is not None \
             and on_board \
-            and excess0 > float(overlap_budget) + legality.EPS:
+            and excess0_x > float(overlap_budget) + legality.EPS:
         out.append(Violation(
             rule='plan_board_overfull',
             severity=_plan_severity(intent, 'plan_board_overfull',
                                     ('legality',)),
             message=(f"the parts do not fit on the board by AREA alone, "
                      f"even at zero clearance on the busiest face "
-                     f"(utilisation {util0}): they force at least "
-                     f"{excess0:.2f}mm2 of courtyard overlap, over the "
-                     f"declared legality_budget.overlap_area "
+                     f"(utilisation {util0}): their graded outlines force "
+                     f"at least {excess0_x:.2f}mm2 of courtyard overlap, "
+                     f"over the declared legality_budget.overlap_area "
                      f"{float(overlap_budget):g}"),
             measured={'utilisation': util0,
-                      'forced_overlap_mm2': round(excess0, 4)},
+                      'forced_overlap_mm2': round(excess0_x, 4),
+                      'forced_overlap_rect_mm2': round(excess0, 4)},
             expected={'utilisation': '<= 1.0',
                       'overlap_area': float(overlap_budget)}))
     elif util0 is not None and util0 >= _opts.CROWDED_UTILISATION:
@@ -8369,7 +8612,20 @@ def emit_intent(pcb_data, pcb_file: str, *,
             f'past the blocking floors on the emitting board (run-23): an '
             f'auto-budget would bless them')
     else:
-        _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
+        # #1162: the reading `rule_legality` grades -- check_assembly's
+        # outlines, in the budget's universe -- or the emitted budget is a
+        # number in another currency: too tight where the outlines read
+        # more than the rects, too loose where they read less (glasgow g4:
+        # 4.909 on rects, 0.595 on outlines).
+        try:
+            from types import SimpleNamespace as _SN
+            _ex = _ctx_overlap_exact(_SN(
+                state=state, pcb=pcb_data, pcb_file=pcb_file,
+                parts={p.ref: p for p in state.graded_parts()},
+                _census=None, _overlap_exact=None))[0]
+        except Exception:                                    # noqa: BLE001
+            _ex = float(leg['overlap_area'])
+        _budget['overlap_area'] = _ceil4(float(_ex))
     if _pile and int(leg['oob_count']):
         _withheld['oob_count'] = (
             'the board is a pile: its off-board count is staging, not a '

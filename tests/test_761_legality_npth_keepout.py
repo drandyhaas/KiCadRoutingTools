@@ -131,6 +131,32 @@ def _fp(ref, x, y, pads, rot=0.0):
                            layer='F.Cu', pads=pads)
 
 
+def _facing_columns(n, cx):
+    """Two columns of n tiny copper pads, H1's at x 0.99 and C1's at x 1.30
+    (0.29 mm apart, edge to edge), from y 3.0 up: within the hole's reach of
+    each other and of the other part, past the 0.25 mm clearance, and more
+    than 3 mm from a hole at the origin. Global coordinates, as `_cu` takes
+    them; C1's footprint sits at `cx`."""
+    a = [_cu(0.99, 3.0 + 0.05 * k, 'H1', net=5, sx=0.02, sy=0.02,
+             num='p%d' % k) for k in range(n)]
+    b = [_cu(1.30, 3.0 + 0.05 * k, 'C1', sx=0.02, sy=0.02, num='q%d' % k)
+         for k in range(n)]
+    return a, b
+
+
+def _windowed_product(parts, fps, clearance):
+    """The pad-pair count `pair_shortfall` compares with the cap since #1213:
+    the pads within reach of each other."""
+    from placement.legality import _pad_windows
+    a, b = parts['H1'], parts['C1']
+    fa, fb = fps['H1'], fps['C1']
+    reach = max(clearance, a.hole_reach, b.hole_reach)
+    wa, wb = _pad_windows(a.pad_rects(fa.x, fa.y, fa.rotation),
+                          a.extent(fa.x, fa.y, fa.rotation),
+                          b.pad_rects(fb.x, fb.y, fb.rotation), reach)
+    return len(wa) * len(wb)
+
+
 def _e_footprint():
     """One footprint carrying THREE NPTH holes with different overrides."""
     return _fp('H1', 10.0, 10.0,
@@ -611,28 +637,28 @@ class TestTheBroadPhaseReachesTheHole(unittest.TestCase):
         channel could never fire for exactly the dense connectors that carry
         mounting holes. Corpus-reachable: glasgow_revC's J5 x U30 is 5324.
 
-        Two grids of copper pads whose PRODUCT clears the cap. The first
-        draft asserted `n * n > PAIR_TEST_CAP` on the GRID size and then built
-        parts of `n*n + 1` pads each, so at n=40 it refused on 1600 while the
-        real product was 1601 x 1601. The pre-check now guards the thing the
-        engine actually compares -- `parts[a].n_pads * parts[b].n_pads` -- and
-        n is 8, giving 64 x 65 = 4160."""
+        Two columns of copper pads whose WINDOWED product clears the cap.
+        The first draft asserted `n * n > PAIR_TEST_CAP` on the GRID size and
+        then built parts of `n*n + 1` pads each, so at n=40 it refused on 1600
+        while the real product was 1601 x 1601. Since #1213 the engine
+        compares the product of the pads within reach of each other
+        (`_pad_windows`) -- two far-apart grids, as this arm used to build,
+        never reach the branch at all -- so the columns FACE each other,
+        0.29 mm apart: inside `reach` (the 0.4 mm hole requirement), outside
+        the 0.25 mm pad clearance, and clear of the hole's keep-out. 65 x 65
+        = 4225 (b0 faces only the hole, so the window drops it), and the
+        pre-check guards the windowed number."""
         clearance = 0.25
-        n = 8
-        a_pads = [_npth(0.0, 0.0, AUDIO1_LC)]
-        a_pads += [_cu(-2.0 - 0.1 * i, -2.0 - 0.1 * j, 'H1', net=5,
-                       sx=0.05, sy=0.05, num='p%d_%d' % (i, j))
-                   for i in range(n) for j in range(n)]
+        n = 65
         gap = 0.30
         cx = H_DRILL / 2.0 + gap + 0.5
-        b_pads = [_cu(cx, 0.0, 'C1', num='b0')]
-        b_pads += [_cu(cx + 2.0 + 0.1 * i, 2.0 + 0.1 * j, 'C1',
-                       sx=0.05, sy=0.05, num='q%d_%d' % (i, j))
-                   for i in range(n) for j in range(n)]
+        a_pads, b_pads = _facing_columns(n, cx)
+        a_pads.insert(0, _npth(0.0, 0.0, AUDIO1_LC))
+        b_pads.insert(0, _cu(cx, 0.0, 'C1', num='b0'))
         fps = {'H1': _fp('H1', 0.0, 0.0, a_pads),
                'C1': _fp('C1', cx, 0.0, b_pads)}
         parts = build_part_pads(fps, clearance)
-        self.assertGreater(parts['H1'].n_pads * parts['C1'].n_pads,
+        self.assertGreater(_windowed_product(parts, fps, clearance),
                            PAIR_TEST_CAP,
                            'the fixture no longer trips the cap; this arm '
                            'would then test the ordinary path')
@@ -659,16 +685,13 @@ class TestTheBroadPhaseReachesTheHole(unittest.TestCase):
         lc = 1.0
         gap = 0.30
         seen = {}
-        for n in (7, 9):              # 49 and 81 copper pads: under, over
-            a_pads = [_npth(0.0, 0.0, lc)]
-            a_pads += [_cu(-3.0 - 0.1 * i, -3.0 - 0.1 * j, 'H1', net=5,
-                           sx=0.05, sy=0.05, num='p%d_%d' % (i, j))
-                       for i in range(n) for j in range(n)]
+        # 49 and 81 copper pads per column, FACING each other (see the arm
+        # above for why since #1213): under the cap, then over it.
+        for n in (49, 81):
             cx = H_DRILL / 2.0 + gap + 0.5
-            b_pads = [_cu(cx, 0.0, 'C1', num='b0')]
-            b_pads += [_cu(cx + 3.0 + 0.1 * i, 3.0 + 0.1 * j, 'C1',
-                           sx=0.05, sy=0.05, num='q%d_%d' % (i, j))
-                       for i in range(n) for j in range(n)]
+            a_pads, b_pads = _facing_columns(n, cx)
+            a_pads.insert(0, _npth(0.0, 0.0, lc))
+            b_pads.insert(0, _cu(cx, 0.0, 'C1', num='b0'))
             fps = {'H1': _fp('H1', 0.0, 0.0, a_pads),
                    'C1': _fp('C1', cx, 0.0, b_pads)}
             parts = build_part_pads(fps, clearance)
@@ -676,12 +699,12 @@ class TestTheBroadPhaseReachesTheHole(unittest.TestCase):
             ctx = LegalityContext(parts, None, clearance,
                                   pose_of=lambda r: poses[r],
                                   seed_of=lambda r: poses[r])
-            seen[n] = (parts['H1'].n_pads * parts['C1'].n_pads,
+            seen[n] = (_windowed_product(parts, fps, clearance),
                        ctx.pair_shortfall('H1', 'C1'))
         # ON THE BRANCH: the two fixtures straddle the cap, else this arm is
         # comparing a branch with itself.
-        self.assertLess(seen[7][0], PAIR_TEST_CAP)
-        self.assertGreater(seen[9][0], PAIR_TEST_CAP)
+        self.assertLess(seen[49][0], PAIR_TEST_CAP)
+        self.assertGreater(seen[81][0], PAIR_TEST_CAP)
         req = max(clearance, NPTH_FLOOR, lc)
         for n, (_prod, sf) in sorted(seen.items()):
             with self.subTest(pads=n):

@@ -1,0 +1,203 @@
+{
+ "arrays.py::formation_at_state": {
+  "grade_rect": 1,
+  "rect": 1
+ },
+ "floorplan.py::_PosedState.graded_parts": {
+  "grade_rect": 1
+ },
+ "floorplan.py::_anchor_reachable": {
+  "grade_by_rot": 1
+ },
+ "floorplan.py::_budget_outline_areas": {
+  "grade_by_rot": 1
+ },
+ "floorplan.py::_fixed_pose_waiver_findings": {
+  "grade_rect": 2
+ },
+ "floorplan.py::exclusive_unsatisfiable": {
+  "grade_by_rot": 1
+ },
+ "floorplan.py::plan_check": {
+  "grade_by_rot": 2,
+  "grade_rect": 1
+ },
+ "floorplan.py::zone_is_anchor": {
+  "grade_rect": 1
+ },
+ "floorplan.py::zone_pose_feasibility._search": {
+  "grade_rect": 2
+ },
+ "quench.py::IntentProbe.snapshot": {
+  "grade_rects": 1
+ },
+ "quench.py::IntentProbe.terms": {
+  "grade_rects": 1
+ },
+ "quench.py::QuenchState._align_cost": {
+  "rect": 1
+ },
+ "quench.py::QuenchState._edges_near": {
+  "rect": 1
+ },
+ "quench.py::QuenchState._edges_near_halo": {
+  "rect": 1
+ },
+ "quench.py::QuenchState._incumbent_intent": {
+  "grade_rects": 1
+ },
+ "quench.py::QuenchState.build_neighbor_lists": {
+  "bounds_by_rot": 4,
+  "rect": 1
+ },
+ "quench.py::QuenchState.candidate_valid": {
+  "grade_rects": 1,
+  "rect": 1,
+  "rects": 1
+ },
+ "quench.py::QuenchState.graded_parts": {
+  "rect": 1
+ },
+ "quench.py::QuenchState.intent_blockers": {
+  "grade_rects": 1
+ },
+ "quench.py::QuenchState.intent_ok": {
+  "grade_rects": 1
+ },
+ "quench.py::QuenchState.part_geometry_cost": {
+  "rect": 1,
+  "rects": 1
+ },
+ "quench.py::QuenchState.total_cost": {
+  "rect": 3
+ },
+ "quench.py::QuenchState.violation_parts": {
+  "grade_rect": 1,
+  "rect": 1,
+  "rects": 1
+ },
+ "quench.py::_Part.__init__": {
+  "bounds_by_rot": 4,
+  "grade_by_rot": 3
+ },
+ "quench.py::_Part.ensure_rotation": {
+  "bounds_by_rot": 3,
+  "grade_by_rot": 3
+ },
+ "quench.py::_Part.gap_to": {
+  "rects": 2
+ },
+ "quench.py::_Part.grade_rect": {
+  "grade_by_rot": 2
+ },
+ "quench.py::_Part.grade_rects": {
+  "grade_rect": 2
+ },
+ "quench.py::_Part.rect": {
+  "bounds_by_rot": 2
+ },
+ "quench.py::_Part.rects": {
+  "rect": 2
+ },
+ "quench.py::_clause_failing": {
+  "grade_rects": 1
+ },
+ "quench.py::build_zone_spec": {
+  "grade_rect": 1
+ },
+ "quench.py::quench": {
+  "bounds_by_rot": 2
+ },
+ "quench.py::quench.eval_pair": {
+  "rect": 4,
+  "rects": 2
+ },
+ "reconstruct.py::edge_metric": {
+  "rect": 1
+ },
+ "reconstruct.py::part_extent_mm": {
+  "rect": 1
+ },
+ "reseat.py::_clashes_with_seated": {
+  "rects": 2
+ },
+ "reseat.py::_member_costs": {
+  "bounds_by_rot": 1
+ },
+ "seeder.py::_AtRotation.grade_rect": {
+  "grade_rect": 1
+ },
+ "seeder.py::_AtRotation.rect": {
+  "rect": 1
+ },
+ "seeder.py::_already_on_its_edge": {
+  "grade_rect": 1
+ },
+ "seeder.py::_band_reading": {
+  "grade_rect": 1
+ },
+ "seeder.py::_centre_offset_mm": {
+  "grade_rect": 1
+ },
+ "seeder.py::_courtyard_overlap": {
+  "grade_rect": 2
+ },
+ "seeder.py::_dispose_unseated": {
+  "rect": 4
+ },
+ "seeder.py::_edge_correct": {
+  "grade_rect": 2
+ },
+ "seeder.py::_edge_frac_bounds": {
+  "grade_rect": 1
+ },
+ "seeder.py::_edge_pose": {
+  "grade_rect": 1
+ },
+ "seeder.py::_evict_candidates": {
+  "rect": 2
+ },
+ "seeder.py::_faces_its_edge": {
+  "grade_rect": 1
+ },
+ "seeder.py::_feasible_centre_box": {
+  "grade_rect": 1
+ },
+ "seeder.py::_fixed_pose_check": {
+  "grade_rects": 1
+ },
+ "seeder.py::_outside_its_along_edge_claim": {
+  "grade_rect": 1
+ },
+ "seeder.py::_overlap_at": {
+  "rect": 2
+ },
+ "seeder.py::_row_extent": {
+  "rect": 1
+ },
+ "seeder.py::_row_offsets": {
+  "rect": 1
+ },
+ "seeder.py::_seat_array": {
+  "rect": 2
+ },
+ "seeder.py::_seated_violations": {
+  "rect": 1,
+  "rects": 1
+ },
+ "seeder.py::_window_step": {
+  "grade_rect": 1
+ },
+ "seeder.py::edge_seat_ok": {
+  "grade_rects": 1
+ },
+ "seeder.py::pose_ok": {
+  "grade_rects": 1
+ },
+ "seeder.py::seed_from_intent": {
+  "rect": 1
+ },
+ "seeder.py::zone_gate._in": {
+  "grade_rect": 1
+ }
+}

@@ -367,8 +367,8 @@ ROWS = [
      "                                or _faces_its_edge(state, part, c, edge, _x, _y)):",
      (TS,), 'KILLED'),
     ('window-read-at-the-unrounded-pose', 'sd',
-     "    probe = SimpleNamespace(rect=part.rect(round(x, 3), round(y, 3), part.rot))",
-     "    probe = SimpleNamespace(rect=part.rect(x, y, part.rot))",
+     "    probe = SimpleNamespace(rect=part.grade_rect(round(x, 3), round(y, 3), part.rot))",
+     "    probe = SimpleNamespace(rect=part.grade_rect(x, y, part.rot))",
      (TS,), 'KILLED'),
     ('window-ignores-a-centre-claim', 'sd',
      "    if entry.get('center_on_edge') is None and entry.get('along_edge_band') is None:",
@@ -472,10 +472,8 @@ ROWS = [
      "        moved = dict(memo['legality'])",
      (TS,), 'KILLED'),
     ('legality-metrics-overlap-not-read', 'sd',
-     "        said = {r.get('budget') for r in rows if r.get('rule') == 'legality'}\n"
-     "        for key in ('overlap_area', 'oob_amount', 'oob_count'):",
-     "        said = {r.get('budget') for r in rows if r.get('rule') == 'legality'}\n"
-     "        for key in ('oob_amount', 'oob_count'):",
+     "LEGALITY_COMPARE_KEYS = ('overlap_area', 'overlap_area_exact', 'oob_amount',",
+     "LEGALITY_COMPARE_KEYS = ('overlap_area_exact', 'oob_amount',",
      (TS,), 'KILLED'),
     ('ring-base-never-re-read', 'fp',
      "                if self._ring_at.get(ref) != here:",
@@ -506,8 +504,8 @@ ROWS = [
      "        ctx.requested_floors = (None, None)",
      (TS,), 'SURVIVED'),
     ('nearest-edge-on-the-courtyard-only', 'sd',
-     "    rect, _basis = edge_seat_rect(entry, part.rect(px, py, part.rot), body)",
-     "    rect, _basis = part.rect(px, py, part.rot), 'courtyard'",
+     "    rect, _basis = edge_seat_rect(entry, part.grade_rect(px, py, part.rot), body)",
+     "    rect, _basis = part.grade_rect(px, py, part.rot), 'courtyard'",
      (TS,), 'KILLED'),
 
     # ---- the rule's seat basis, now shared ------------------------------------

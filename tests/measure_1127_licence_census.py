@@ -334,6 +334,22 @@ class NotAPile(Exception):
 
 
 # -- the output-stack attribution ------------------------------------------
+def _windowed_over_cap(ctx, parts, a, b) -> bool:
+    """Does the pair reach `pair_shortfall`'s extent branch at its current
+    poses? Since #1213 the cap compares the WINDOWED pad-pair product."""
+    from placement import legality as L
+    pa, pb = parts[a], parts[b]
+    xa, ya, ra = ctx.pose_of(a)
+    xb, yb, rb = ctx.pose_of(b)
+    ea = pa.extent(xa, ya, ra)
+    if ea is None or pb.extent(xb, yb, rb) is None:
+        return False
+    reach = max(ctx.clearance, pa.hole_reach, pb.hole_reach)
+    wa, wb = L._pad_windows(pa.pad_rects(xa, ya, ra), ea,
+                            pb.pad_rects(xb, yb, rb), reach)
+    return len(wa) * len(wb) > L.PAIR_TEST_CAP
+
+
 def attribute(board_in, board_out, clearance=0.2):
     """Every real pad stack in `board_out`, classed at `board_in`'s poses."""
     from kicad_parser import parse_kicad_pcb
@@ -358,7 +374,8 @@ def attribute(board_in, board_out, clearance=0.2):
             cls = 'unmodelled'
         elif a in ctx._degenerate_refs or b in ctx._degenerate_refs:
             cls = 'pile_part'
-        elif parts[a].n_pads * parts[b].n_pads > L.PAIR_TEST_CAP:
+        elif _windowed_over_cap(ctx, parts, a, b):
+            # #1213: the cap compares the WINDOWED product.
             cls = 'over_cap'
         elif frozenset((a, b)) in exact_in:
             cls = 'genuine_licence'
