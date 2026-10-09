@@ -1008,6 +1008,106 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     return tracks, vias, dropped
 
 
+#: A neighbour counts as a CHIP whose escapes this fanout must leave room for
+#: when its own fanout would see at least this many perimeter pads -- a QFN,
+#: QFP or two-row IC, not a crystal or a SOT.
+NEIGHBOUR_MIN_PADS = 8
+
+
+def _neighbour_escape_reserves(footprint, pcb_data, layer, extension, window):
+    """The stubs each NEIGHBOURING chip's own fanout would lay, cut at the
+    midline of any gap facing this part -- copper this part's fan must leave
+    alone.
+
+    Without this a stub's 45-degree fan grows until it grazes copper that
+    already exists, so in the gap between two facing chips whichever is fanned
+    FIRST takes the whole gap, and the second finds no room in front of its own
+    pins. Measured on rein_r1 (two RP2040s, pin rows 1.7 mm apart): fanned
+    first, U1's stubs ran to within 0.4 mm of U3's pins and boxed in U3's USB
+    pair; fanned in the other order, the pair routed. With every chip honouring
+    the others' reserve, each gets the half of a shared gap nearest it, in
+    either order.
+
+    For every other footprint the fanout would treat as a perimeter package
+    (`analyze_qfn_layout`, at least `NEIGHBOUR_MIN_PADS` perimeter pads) near
+    `window`, each of its pads on `layer` gets the stub `calculate_fanout_stub`
+    would give it, clipped so it reaches no further along its escape than half
+    the gap to the nearest pad of THIS part ahead of it. Returns
+    `[((x1, y1), (x2, y2), net_id), ...]`.
+    """
+    from qfn_fanout.layout import analyze_qfn_layout as _lay, analyze_pad as _ap
+    lo_x, lo_y, hi_x, hi_y = window
+    own = [q for q in footprint.pads if getattr(q, 'pad_type', '') != 'np_thru_hole']
+
+    def ext(q, ux, uy):
+        hx, hy = (q.size_x or 0.0) / 2, (q.size_y or 0.0) / 2
+        return abs(ux) * hx + abs(uy) * hy
+
+    out = []
+    for fp in pcb_data.footprints.values():
+        if fp is footprint:
+            continue
+        pads = [q for q in fp.pads if q.net_id > 0]
+        if not any(lo_x <= q.global_x <= hi_x and lo_y <= q.global_y <= hi_y
+                   for q in pads):
+            continue
+        lay = _lay(fp)
+        if lay is None:
+            continue
+        infos = [pi for pi in (_ap(q, lay) for q in pads) if pi.side != 'center']
+        if len(infos) < NEIGHBOUR_MIN_PADS:
+            continue
+        maxd = max(lay.width, lay.height) / 3
+        side_off: Dict[str, float] = {}
+        for pi in infos:
+            ex, ey = pi.escape_direction
+            o = abs((pi.pad.global_x - lay.center_global_x) * -ey
+                    + (pi.pad.global_y - lay.center_global_y) * ex)
+            side_off[pi.side] = max(side_off.get(pi.side, 0.0), o)
+        for pi in infos:
+            q = pi.pad
+            if pi.pad.drill <= 0 and layer not in (q.layers or []):
+                continue
+            corner, end = calculate_fanout_stub(
+                pi, lay, pi.pad_width / 2 + extension, maxd, 0.0,
+                angle_ref_off=side_off.get(pi.side, 0.0))
+            ex, ey = pi.escape_direction
+            tip = (q.global_x + ex * pi.pad_width / 2,
+                   q.global_y + ey * pi.pad_width / 2)
+            reach_lat = abs((end[0] - q.global_x) * -ey
+                            + (end[1] - q.global_y) * ex) + pi.pad_length / 2
+            gap = None
+            for a in own:
+                s = (a.global_x - tip[0]) * ex + (a.global_y - tip[1]) * ey
+                lat = abs((a.global_x - tip[0]) * -ey + (a.global_y - tip[1]) * ex)
+                d = s - ext(a, ex, ey)
+                if d > 0 and lat <= reach_lat + ext(a, -ey, ex) and (
+                        gap is None or d < gap):
+                    gap = d
+            pts = [(q.global_x, q.global_y), corner, end]
+            if gap is not None:
+                lim = gap / 2
+
+                def along(pt):
+                    return (pt[0] - tip[0]) * ex + (pt[1] - tip[1]) * ey
+                clipped = [pts[0]]
+                for a, b in zip(pts, pts[1:]):
+                    sa, sb = along(a), along(b)
+                    if sb <= lim:
+                        clipped.append(b)
+                        continue
+                    if sa < lim and sb > sa:
+                        f = (lim - sa) / (sb - sa)
+                        clipped.append((a[0] + (b[0] - a[0]) * f,
+                                        a[1] + (b[1] - a[1]) * f))
+                    break
+                pts = clipped
+            for a, b in zip(pts, pts[1:]):
+                if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-6:
+                    out.append((a, b, q.net_id))
+    return out
+
+
 def generate_qfn_fanout(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
@@ -1325,6 +1425,16 @@ def generate_qfn_fanout(footprint: Footprint,
     else:
         foreign_pads = []
 
+    # Escape room for NEIGHBOURING chips: the stubs their own fanout would lay,
+    # each cut at the midline of a gap shared with this part. Only this part's
+    # FAN must clear them (below) -- the straight escape is the minimum a pin
+    # needs to leave its pad, and is never given up for a neighbour.
+    _nb_window = ((_lo_x - 3.0, _lo_y - 3.0, _hi_x + 3.0, _hi_y + 3.0)
+                  if _sxs else (0.0, 0.0, 0.0, 0.0))
+    _neighbour_reserve = (_neighbour_escape_reserves(
+        footprint, pcb_data, layer, extension, _nb_window) if _sxs else [])
+    n_nb_short = 0
+
     # EXISTING copper of the part's OWN nets, checked geometrically per stub:
     # the obstacle map excludes ALL fanned nets (so a stub may touch its own
     # net's copper), but that also hid a NEIGHBOURING chip's already-fanned
@@ -1387,6 +1497,20 @@ def generate_qfn_fanout(footprint: Footprint,
                 return True
         return False
 
+    def _hits_neighbour_reserve(p1, p2, net_id):
+        for a, b, rn in _neighbour_reserve:
+            if rn == net_id:
+                continue
+            if segment_to_segment_distance(p1[0], p1[1], p2[0], p2[1],
+                                           a[0], a[1], b[0], b[1]) \
+                    < track_width + clearance - 1e-6:
+                return True
+        return False
+
+    def _fan_grazes(p1, p2, net_id):
+        return _seg_grazes(p1, p2, net_id) or _hits_neighbour_reserve(p1, p2,
+                                                                      net_id)
+
     qfn_dropped: List[str] = []
     n_short = 0
     n_ext_short = 0
@@ -1429,7 +1553,9 @@ def generate_qfn_fanout(footprint: Footprint,
                 if stub.pad.net_name and stub.pad.net_name not in qfn_dropped:
                     qfn_dropped.append(stub.pad.net_name)
                 continue
-        if _seg_grazes(stub.corner_pos, stub.stub_end, nid):
+        if _fan_grazes(stub.corner_pos, stub.stub_end, nid):
+            if not _seg_grazes(stub.corner_pos, stub.stub_end, nid):
+                n_nb_short += 1
             # Shorten the 45 fan toward the corner until it clears (worst case
             # collapse it entirely - the straight escape is already clear).
             cx, cy = stub.corner_pos
@@ -1438,7 +1564,7 @@ def generate_qfn_fanout(footprint: Footprint,
             for i in range(1, 9):
                 t = 1.0 - i / 9.0  # walk inward from current tip toward corner
                 cand = (cx + (ex - cx) * t, cy + (ey - cy) * t)
-                if not _seg_grazes(stub.corner_pos, cand, nid):
+                if not _fan_grazes(stub.corner_pos, cand, nid):
                     new_end = cand
                     break
             # Re-snap the shortened tip ON GRID (#446). calculate_fanout_stub
@@ -1458,10 +1584,14 @@ def generate_qfn_fanout(footprint: Footprint,
             # the graze). If nothing on-grid clears, keep the unsnapped point --
             # a clear-but-off-grid tip is strictly better than a violation.
             new_end = _snap_tip_on_grid(stub.corner_pos, new_end, nid,
-                                        grid_step, _seg_grazes)
+                                        grid_step, _fan_grazes)
             stub.stub_end = new_end
             n_short += 1
         kept_stubs.append(stub)
+    if n_nb_short:
+        print(f"  Neighbour escape room: {n_nb_short} fan(s) stopped at the "
+              f"midline of a gap shared with another chip "
+              f"({len(_neighbour_reserve)} reserved stub segment(s))")
     if n_short or n_ext_short or qfn_dropped:
         print(f"  Pad-clearance: shortened {n_short} fan(s), "
               f"{n_ext_short} straight escape(s) near the board edge (#513); "

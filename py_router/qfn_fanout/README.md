@@ -12,6 +12,14 @@ Creates escape routing for QFN (Quad Flat No-leads) and QFP (Quad Flat Package) 
   box edge detection saw a rotated part as a diamond and escaped almost none of its pads.
 - **Two-segment stubs** - Straight segment + 45-degree fan-out for optimal endpoint separation
 - **Side detection** - Automatically determines which side each pad is on
+- **Neighbour escape room** - A fan stops at the midline of any gap it shares with
+  another chip's pins (a QFN, QFP or two-row IC with at least 8 perimeter pads):
+  each chip's would-be stubs, cut at that midline, are copper the other's fan must
+  clear. Only the 45-degree fan yields; the straight escape never does. Before
+  this, whichever chip the chain fanned FIRST took the whole gap -- on rein_r1
+  (two RP2040s, pin rows 1.7 mm apart) the second chip's USB pair could not escape
+  in one order and coupled in the other. The result is now the same in either
+  order (`tests/test_qfn_neighbour_escape_room.py`).
 - **Collision validation** - Checks endpoint spacing after generation
 - **Pad-geometry sanity check** - Runs `check_pads.py` on the component first; if its pads
   overlap (a sign the pad rotation/size is modelled wrong) it warns before escaping.
