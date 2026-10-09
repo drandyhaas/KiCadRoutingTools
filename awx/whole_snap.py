@@ -84,6 +84,7 @@ W_KEEP = float(awx_settings.get('SNAP_W_KEEP', 20.0))       # a pair, per mm of 
 SWEEPS = 2                                                 # clean-up sweeps against the others' real copper
 W_VIA = 1.0                                                # per mm a via stands from the plan's
 POSE_TRIES = 4                                             # a pair's pose combinations tried before one search asks if any can
+POSE_HEADS = 3                                             # ...and where none can, the poses added of each heading the dozen lack
 W_SCALE = TW + CL                                          # the audit measures a turn over this much lane
 DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 
@@ -997,6 +998,7 @@ def route(n, strict=True, wide=False):
     # (and the router's own straight onto the pose) clear other nets' copper, the other leg's stub and what is
     # placed; the body is searched pose to pose, the shortest ends first
     ends_out = None
+    headed = ''                                 # (a pair laid onto a pose of a heading its dozen lacked says so)
     if no90:
         cands = [pair_end_cands(n, 0, W, (a_out[0], a_out[1])), pair_end_cands(n, 1, W, (-a_in[0], -a_in[1]))]
         # ...ordered by their legs' length AND how far each pose stands off the plan's own line: a pose short of where
@@ -1005,7 +1007,8 @@ def route(n, strict=True, wide=False):
         # dozen shortest were all at the tips
         off = lambda c_: _pairs.poly_dist([tuple(c_[3]['pose'])] * 2, [tuple(p_) for p_ in P])
         rank = lambda c_: c_[0] + 2.0 * off(c_)
-        cands = [sorted(cands[k_], key=rank)[:12] for k_ in (0, 1)]
+        allc = [sorted(cands[k_], key=rank) for k_ in (0, 1)]
+        cands = [allc[k_][:12] for k_ in (0, 1)]
         combos = sorted(((rank(c0) + rank(c1), x0, x1)
                          for x0, c0 in enumerate(cands[0]) for x1, c1 in enumerate(cands[1])))
         path = None
@@ -1039,6 +1042,43 @@ def route(n, strict=True, wide=False):
                         stuck = (f'; the farthest any start got: {far_[0]:.2f} of {total:.2f} mm along it, at '
                                  f'({(fi_ + i0) * g:.2f}, {(fj_ + j0) * g:.2f}) on {lays[fk_]}')
                     break
+        # ...and where no pair of them has a body between them, the best POSE_HEADS of each HEADING the dozen lack:
+        # the dozen best by rank can all stand straight ahead of the tips, where a line arriving across the escape
+        # cannot turn onto them (zynq LVDS, the held plan: TX_D4's dozen at the destination's south face all headed
+        # south, its line arriving at 45 degrees -- laid onto a pose heading south-west). Only the pose pairs holding
+        # one of them are searched, in rank order, a pose struck off once one search finds no start reaches it (or it
+        # reaches no end): each pose pair is a search of 2-3 s, and TX_D4's was the 137th in rank
+        more = [allc[k_][:12] + [c_ for h_ in sorted({c_[2] for c_ in allc[k_]} - {c_[2] for c_ in allc[k_][:12]})
+                                 for c_ in [c_ for c_ in allc[k_] if c_[2] == h_][:POSE_HEADS]] for k_ in (0, 1)]
+        if path is None and (len(more[0]) > len(cands[0]) or len(more[1]) > len(cands[1])):
+            cell_ = lambda c_: (c_[1][0] - i0, c_[1][1] - j0)
+            EG = {}
+            for c1_ in more[1]:
+                EG.setdefault(cell_(c1_), set()).add((c1_[2] + 4) % 8)
+            any_, _far = search(None, None, None, None, poses=True, multi=([(cell_(c0_), c0_[2]) for c0_ in more[0]], EG))
+            if any_ is not None and turned_over(any_) is None:
+                dead, live = (set(), set()), (set(), set())
+                for _tot, x0, x1 in sorted(((rank(c0) + rank(c1), x0, x1)
+                                            for x0, c0 in enumerate(more[0]) for x1, c1 in enumerate(more[1])
+                                            if x0 >= len(cands[0]) or x1 >= len(cands[1]))):
+                    if x0 in dead[0] or x1 in dead[1]:
+                        continue
+                    c0, c1 = more[0][x0], more[1][x1]
+                    p_, npop_ = search(cell_(c0), c0[2], cell_(c1), (c1[2] + 4) % 8, poses=True)
+                    if p_ is not None:
+                        if turned_over(p_) is None:
+                            path, npop, ends_out = p_, npop_, [c0[3], c1[3]]
+                            headed = ' (an end pose of a heading its dozen lacked)'
+                            break
+                        continue
+                    if x1 not in live[1]:
+                        r_, _f = search(None, None, None, None, poses=True,
+                                        multi=([(cell_(c_), c_[2]) for x_, c_ in enumerate(more[0]) if x_ not in dead[0]],
+                                               {cell_(c1): {(c1[2] + 4) % 8}}))
+                        (live[1] if r_ is not None else dead[1]).add(x1)
+                    if x0 not in live[0]:
+                        r_, _f = search(None, None, None, None, poses=True, multi=([(cell_(c0), c0[2])], EG))
+                        (live[0] if r_ is not None else dead[0]).add(x0)
         if path is None and turned is not None:
             STUCK_AT['last'] = turned
             stuck += (f'; its paths turn through more than the pair router\'s max_turn_angle ({TURN_UNITS * 45} degrees), '
@@ -1100,7 +1140,7 @@ def route(n, strict=True, wide=False):
                 merged[-1] = (p0, b_, L)
                 continue
         merged.append((a_, b_, L))
-    return (merged, vias, {'ends': ends_out, 'cross': cross_out} if no90 else None), f'{npop} states'
+    return (merged, vias, {'ends': ends_out, 'cross': cross_out} if no90 else None), f'{npop} states{headed}'
 
 
 # ------------------------------------------------------------------ one lane at a time

@@ -947,6 +947,16 @@ and the snap lays the singles.
   on the grid, the shortest whose legs clear everything. The pair router
   takes over at the pose with no setback of its own
   (`diff_pair_setback_floor` 0), so the plan and the router share one end.
+  The dozen best poses per end (the shortest legs, nearest the plan's line)
+  are searched first; where no pair of them has a body between them, the best
+  of each heading the dozen lack are added (`POSE_HEADS`): the dozen can all
+  stand straight ahead of the tips, where a line arriving across the escape
+  cannot turn onto them. On the zynq LVDS bus TX_D4's dozen at the
+  destination's south face all headed south, its line arriving at 45
+  degrees: laid onto a pose heading south-west, TX_D2 to TX_D5 are laid
+  where all four were refused, and the round's open nets fall from 15 to 9.
+  On a generated bus of six pairs berthing on the destination's south face
+  three were refused, six nets open; now every pair is laid.
 - **Pose to pose**, owing the router's probe past each pose and turning as
   the pair router's own counters allow (`pairs.pose_turn_over`).
 - **The crossover:** an **opposite-hands** pair -- P on one side of its
