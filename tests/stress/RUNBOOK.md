@@ -555,8 +555,13 @@ harmless.
     ulx3s) is wedged, not slow. NEVER end your turn while
     a routing command is still running — you will be terminated and the run
     orphaned. Run commands in the FOREGROUND, and **pass an EXPLICIT timeout on
-    every routing/fanout/plane command: `timeout: 600000` (10 min, the maximum).
-    This is required, not an upper bound you may ignore (#599).** The Bash
+    every routing/fanout/plane command: `timeout: 10800000` (3 h, this rule's
+    per-command cap). This is required, not an upper bound you may ignore
+    (#599).** `run_board.sh` raises the Bash tool's maximum to that value by
+    exporting `BASH_MAX_TIMEOUT_MS=10800000`. Without it the maximum is 600000
+    (10 min), and a call that reaches it is MOVED TO THE BACKGROUND and stopped
+    10 min later. So a step over ~20 min dies even if you then poll for it,
+    which is how rein_r1 lost its first route attempt (2026-10-09). The Bash
     tool's DEFAULT timeout is 120000 ms — two minutes — while a route step
     routinely takes 3-20x that (`faderbank_16nx` 316 s, `wisweep_driver` 264 s,
     `crazyflie_fpga_deck` 189 s). Omitting the timeout killed at least one
@@ -566,11 +571,13 @@ harmless.
     violation when it was neither. The wrapper now prints the elapsed time and
     a "the caller's timeout is too short" hint when it dies far short of the
     3-hour cap — believe it, and re-run with the timeout rather than retrying
-    the same way or blaming the router. If a
-    command exceeds the 10-min foreground cap, keep waiting in foreground:
-    repeatedly run `until ! pgrep -f "<unique-cmd-fragment>" >/dev/null; do
-    sleep 10; done` (each up to 10 min) until the process exits, then read its
-    log and continue. Big/dense boards (FPGA/USB3-class: daisho, large BGAs)
+    the same way or blaming the router. **Outside `run_board.sh`** (a session
+    whose maximum is still 600000), a step that may run past ~20 min cannot be
+    waited out in the foreground. Launch it detached from the start --
+    `STRESS_ALLOW_ORPHAN=1 nohup bash run_limited.sh <cmd> > <step>.log 2>&1 &`
+    -- and poll with `until ! pgrep -f "<unique-cmd-fragment>" >/dev/null; do
+    sleep 10; done` calls that each end inside the cap, until the process exits.
+    Then read its log and continue. Big/dense boards (FPGA/USB3-class: daisho, large BGAs)
     can legitimately spend 30-90+ min in a single signal-route step — that is
     slow progress, NOT a hang. Only kill a command once it shows no log growth
     AND no output-file size change for >45 min, and record it as a hang.

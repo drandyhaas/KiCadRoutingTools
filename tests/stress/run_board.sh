@@ -21,6 +21,14 @@ BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-}"
 BACKEND="${STRESS_AI_BACKEND:-claude}"
 if [ "$BACKEND" = "claude" ] && [ -z "$MODEL" ]; then MODEL=sonnet; fi
 EFFORT="${STRESS_AI_EFFORT:-high}"
+# Raise the agent's Bash timeout cap to the RUNBOOK's 3-hour per-command cap
+# (rule 12). Without it the cap is 600000 ms, and a call that reaches it is
+# MOVED TO THE BACKGROUND and then stopped 10 min later -- so a route step over
+# ~20 min dies even when the agent polls exactly as told. rein_r1 lost its first
+# route attempt that way (2026-10-09). Measured: with this variable a 660 s
+# command ran as ONE foreground call; without it the same command was
+# backgrounded at 600 s.
+export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-10800000}"
 # Repo root is derived from this script's own location (tests/stress/run_board.sh),
 # so the script is portable; override with STRESS_REPO if needed.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -108,8 +116,9 @@ Rules that matter most:
 - Keep fine (sub-Default) clearance LOCAL to fine-pitch escapes, never board-wide.
 - Run EVERY command in the FOREGROUND and BLOCK until it returns — even if a
   single route step takes an hour (hard 3-hour/command cap, ~3.5-hour board
-  budget). PASS AN EXPLICIT timeout: 600000 (10 min, the max) ON EVERY routing/
-  fanout/plane command — the DEFAULT is only 120000 ms (2 min) and route steps
+  budget). PASS AN EXPLICIT timeout: $BASH_MAX_TIMEOUT_MS (this worker's raised
+  cap) ON EVERY routing/fanout/plane command, so a long step can block in the
+  foreground — the DEFAULT is only 120000 ms (2 min) and route steps
   routinely take 3-20x that, so omitting it kills your own work and looks like a
   hang (#599: it cost 21 of 99 boards an attempt). If run_limited.sh prints
   'the CALLER's command timeout is too short', believe it: re-run WITH the

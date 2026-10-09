@@ -46,18 +46,24 @@ START=$(date +%s)
 # paths therefore report the ELAPSED time and, when that is nowhere near the
 # cap, say so in one line. STRESS_STEP_CAP overrides the cap we compare to.
 STEP_CAP=${STRESS_STEP_CAP:-10800}   # RUNBOOK rule 12, seconds
-# Past the 600 s foreground MAXIMUM a caller timeout cannot be the cause, so
+# Past the caller's foreground MAXIMUM a caller timeout cannot be the cause, so
 # the diagnosis is withheld beyond that rather than misfiling a genuinely
-# backgrounded long step as a timeout victim.
-HINT_MAX=${STRESS_TIMEOUT_HINT_MAX:-660}
+# backgrounded long step as a timeout victim. The maximum is the Bash tool's
+# BASH_MAX_TIMEOUT_MS when the caller exported one (run_board.sh raises it to
+# the 3 h cap), else its stock 600 s; the 60 s on top is slack.
+CALLER_MAX_MS=${BASH_MAX_TIMEOUT_MS:-600000}
+HINT_MAX=${STRESS_TIMEOUT_HINT_MAX:-$(( CALLER_MAX_MS / 1000 + 60 ))}
 elapsed() { echo $(( $(date +%s) - START )); }
 caller_timeout_hint() {   # $1 = elapsed seconds
   [ "$1" -lt "$STEP_CAP" ] || return 0
   echo "  It ran ${1}s -- nowhere near the ${STEP_CAP}s (RUNBOOK rule 12) per-command cap, so this was NOT a hang." >&2
   [ "$1" -le "$HINT_MAX" ] || return 0
   echo "  Most likely the CALLER's command timeout is too short. Big/dense boards legitimately take 3-20x the 120 s default." >&2
-  echo "  Re-run with an explicit timeout (Bash tool: timeout: 600000, the 10-min max) and poll past that in the FOREGROUND:" >&2
-  echo "    until ! pgrep -f '<unique-cmd-fragment>' >/dev/null; do sleep 10; done" >&2
+  echo "  Re-run with an explicit timeout (Bash tool: timeout: ${CALLER_MAX_MS}, this session's max -- RUNBOOK rule 12)." >&2
+  if [ "$CALLER_MAX_MS" -lt 10800000 ]; then
+    echo "  This session's max is under the 3 h step cap: a step that may outlast ~2x it must run detached" >&2
+    echo "  (STRESS_ALLOW_ORPHAN=1 nohup ... &) and be polled with: until ! pgrep -f '<unique-cmd-fragment>' >/dev/null; do sleep 10; done" >&2
+  fi
 }
 on_signal() {   # $1 = signal name, rest = the wrapped command
   local sig=$1; shift
