@@ -265,10 +265,19 @@ parts in memory can re-pose their graphic copper.
 |-------|------|---------|
 | `name` | str | `'F.Cu'`, `'Core'`, `'Prepreg'`, … |
 | `layer_type` | str | `'copper'`, `'core'`, `'prepreg'`, `'dielectric'` |
-| `thickness` | float | Thickness in mm |
+| `thickness` | float | Thickness in mm (a locked `(thickness X locked)` reads as X) |
 | `epsilon_r` | float | Relative permittivity (dielectric layers) |
 | `loss_tangent` | float | Dissipation factor (dielectric layers) |
 | `material` | str | Material name (`'FR4'`) |
+
+A dielectric built from several sheets -- KiCad's `addsublayer`, e.g. a
+3 x 2116 prepreg -- is ONE `StackupLayer` holding the whole layer (#1222):
+`thickness` is the sum of the sheets, `epsilon_r` the series value
+`sum(t) / sum(t / er)` (the field of a trace crosses the sheets in turn),
+`loss_tangent` weighted by `t / er`, and `material` the sheets' common name
+or each sheet's joined by `' + '`. A sheet KiCad left at its sublayer
+defaults (`epsilon_r` 1, `loss_tangent` 0) is a field nobody filled in, so it
+sits out of those averages. A single-sheet layer is exactly as written.
 
 ### `GuidePath`
 

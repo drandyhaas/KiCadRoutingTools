@@ -779,7 +779,10 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `pcb.board_info.stackup` - List[StackupLayer], ordered top to bottom
   (NOT `pcb.stackup`). Empty list if the board has no stackup section.
 - StackupLayer fields: `name`, `layer_type` ('copper', 'core', 'prepreg', ...),
-  `thickness` (mm), `epsilon_r`, `loss_tangent`, `material`
+  `thickness` (mm), `epsilon_r`, `loss_tangent`, `material`. A multi-sheet
+  dielectric (`addsublayer`) is ONE entry whose values combine every sheet
+  (#1222; the rule is in `docs/api-kicad-parser.md`) -- never re-read the
+  first `(thickness ...)` of a layer block yourself
 - `pcb.board_info.pad_to_paste_clearance` / `_ratio` - the board's paste
   margin, the last term of a pad's paste-margin resolution (#962)
 - `pcb.board_info.via_protection_setup` - the board's via protection policy,
