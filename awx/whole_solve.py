@@ -949,6 +949,174 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False):
             print(f'   part gates: {len(GATE_OVER)} -- ' + ', '.join(
                 f'{k_[1][:28]} {k_[2]} {k_[0]} s {k_[3]:.2f}: room {k_[4]:.1f} for {len(k_[5])}' for k_, _v in GATE_OVER[:10])
                 + (' ...' if len(GATE_OVER) > 10 else ''))
+    # ---- PASSIVE REGIONS (more routing layers than two, SOLVE_REGIONS): parts whose pads stand on some routing layers
+    # only -- decoupling caps, an RF network's 0402s -- leave a lane passing them on THEIR layers a channel a pad's
+    # clearance wide, and the plan threads it with hundredths to spare (the zynq LVDS bus: lanes on F.Cu in the 1.2 mm
+    # between U5's south face and its row of passives, a dive 0.33 mm off C151, a pair through C150/C152's gap). The
+    # human runs the bus on the inner layers under them. A REGION is such parts within a lane pitch's reach of each
+    # other; a lane whose reference route (the frame's, as the geometry draws it) passes within REG_REACH of one is
+    # priced W_REGION on the region's layers there, and the lanes it holds on one of them take at most half the room
+    # that layer has open across the region (W_FIRM past it)
+    REGION, REG_OVER, REG_ON = [], [], []
+    if NL > 2 and (awx_settings.get('SOLVE_REGIONS') or '1') == '1':
+        import numpy as np
+        W_REGION = int(awx_settings.get('SOLVE_REGION_W') or '2') * W_V      # (whole vias: the proof reads them so)
+        g2r_ = ctx.cfg.grid_step / 2
+        BARr_ = TRK / 2 + CLR + g2r_
+        PMINr_ = max(PITCH, TRK + CLR + 2 * g2r_)
+        widr_ = {n: PMINr_ + (_pairs.pitch(TRK) if n in prs else 0.0) for n in M}
+        REG_REACH = float(awx_settings.get('SOLVE_REGION_REACH') or '3') * PITCH
+        _dc = [(p_.global_x, p_.global_y) for p_ in ctx.pcb.footprints[Fr.dst].pads]
+        DCEN_ = (sum(x_ for x_, _y in _dc) / len(_dc), sum(y_ for _x, y_ in _dc) / len(_dc))
+        _deps = [abs(ring_of[bname[n]].project_pt(Fr.land[n])[1]
+                     - ring_of[bname[n]].project_pt(_pairs.mid(*ctx.pair_ends[n][1]))[1])
+                 for n in M if n in bname and n in prs]
+        STAND_ = max(_deps) if _deps else _pairs.turn_straight_steps(ctx.cfg) * ctx.cfg.grid_step + TRK + CLR
+
+        def ref_route(n):
+            """[(u, x, y)]: lane n's reference route on the board in its route coordinate -- the frame's mid path on
+            the trunk; a ring lane's ramped at 45 degrees onto its handoff offset, then out to its ring's standoff
+            (a pair: its landing's offset), held there and in to its landing (whole_geo's references)"""
+            ms_ = np.array([p_[0] for p_ in Fr.mid[n]])
+            mo_ = np.array([p_[1] for p_ in Fr.mid[n]])
+            r_ = lambda s_: float(np.interp(s_, ms_, mo_))
+            s0_ = Fr.st[n][0]
+            pts_ = []
+            if n not in bname:
+                return [(float(s_),) + spine.xy(float(s_), r_(s_)) for s_ in np.arange(s0_, end[n] + 1e-9, G)]
+            k_ = bname[n]
+            hk_, oh_ = Hk[k_], Fr.o_h[n]
+            a_ = max(hk_ - abs(oh_ - r_(hk_)), s0_)
+            for s_ in np.arange(s0_, hk_ + 1e-9, G):
+                o_ = r_(s_) if s_ <= a_ else r_(a_) + (oh_ - r_(a_)) * (s_ - a_) / max(hk_ - a_, 1e-9)
+                pts_.append((float(s_),) + spine.xy(float(s_), o_))
+            sp_ = ring_of[k_]
+            sb0_, ob0_ = (float(v_) for v_ in sp_.project_pt(spine.xy(hk_, oh_)))
+            sb1_, ob1_ = (float(v_) for v_ in sp_.project_pt(Fr.land[n]))
+            out_ = 1.0 if ob1_ >= sp_.project_pt(DCEN_)[1] else -1.0
+            orun_ = ob1_ if n in prs else ob1_ + out_ * STAND_
+            srun_ = sb1_ - (STAND_ + TRK + CLR)
+            sout_ = sb0_ + abs(orun_ - ob0_)
+            rp_ = ([(sb0_, ob0_), (sout_, orun_), (srun_, orun_), (sb1_, ob1_)] if sout_ < srun_ else
+                   [(sb0_, ob0_), (srun_, orun_), (sb1_, ob1_)] if srun_ > sb0_ + 1e-9 else [(sb0_, ob0_), (sb1_, ob1_)])
+            for sb_ in np.arange(sb0_, sb1_ + 1e-9, G):
+                o_ = float(np.interp(sb_, [q_[0] for q_ in rp_], [q_[1] for q_ in rp_]))
+                pts_.append((u_ring(n, float(sb_)),) + sp_.xy(float(sb_), o_))
+            return pts_
+        REF = {n: np.array(ref_route(n)) for n in M}
+        # the islands on some layers only, outside the arrays' boxes, joined into regions where they stand within a
+        # lane pitch of each other on a layer they share
+        isl_ = {}
+        for (ref_, i_), lab_ in whole_ctx.part_islands(ctx, skip=(Fr.src, Fr.dst)).items():
+            p_ = ctx.pcb.footprints[ref_].pads[i_]
+            if p_.pad_type == 'np_thru_hole' or (p_.drill or 0) > 0 or '*.Cu' in p_.layers:
+                continue
+            ls_ = frozenset(LAYN.index(L_) for L_ in p_.layers if L_ in LAYN)
+            if not ls_ or len(ls_) == NL:
+                continue
+            b_ = isl_.setdefault((lab_, ls_), [math.inf, math.inf, -math.inf, -math.inf])
+            b_[0], b_[1] = min(b_[0], p_.global_x - p_.size_x / 2), min(b_[1], p_.global_y - p_.size_y / 2)
+            b_[2], b_[3] = max(b_[2], p_.global_x + p_.size_x / 2), max(b_[3], p_.global_y + p_.size_y / 2)
+        inbox_ = lambda b_, B_: b_[0] >= B_[0] and b_[2] <= B_[2] and b_[1] >= B_[1] and b_[3] <= B_[3]
+        isl_ = {k_: b_ for k_, b_ in isl_.items() if not inbox_(b_, Fr.SB) and not inbox_(b_, Fr.DB)}
+        keys_ = sorted(isl_)
+        up_ = list(range(len(keys_)))
+
+        def root_(i_):
+            while up_[i_] != i_:
+                up_[i_] = up_[up_[i_]]
+                i_ = up_[i_]
+            return i_
+        gap_ = lambda a_, b_: math.hypot(max(0.0, b_[0] - a_[2], a_[0] - b_[2]), max(0.0, b_[1] - a_[3], a_[1] - b_[3]))
+        for i_ in range(len(keys_)):
+            for j_ in range(i_ + 1, len(keys_)):
+                if keys_[i_][1] & keys_[j_][1] and gap_(isl_[keys_[i_]], isl_[keys_[j_]]) < PITCH:
+                    up_[root_(i_)] = root_(j_)
+        regs_ = collections.defaultdict(list)
+        for i_ in range(len(keys_)):
+            regs_[root_(i_)].append(keys_[i_])
+        for _r, mem_ in sorted(regs_.items(), key=lambda kv: kv[1]):
+            bx_ = [min(isl_[k_][0] for k_ in mem_), min(isl_[k_][1] for k_ in mem_),
+                   max(isl_[k_][2] for k_ in mem_), max(isl_[k_][3] for k_ in mem_)]
+            lays_ = frozenset().union(*(k_[1] for k_ in mem_))
+            lab_ = '+'.join(sorted({k_[0].split(':')[0] for k_ in mem_}))[:40]
+            # the lanes passing within reach: the stretch of each one's reference route that does, in route u
+            near_ = {}
+            for n in M:
+                P_ = REF[n]
+                if not len(P_):
+                    continue
+                dx_ = np.maximum(0.0, np.maximum(bx_[0] - P_[:, 1], P_[:, 1] - bx_[2]))
+                dy_ = np.maximum(0.0, np.maximum(bx_[1] - P_[:, 2], P_[:, 2] - bx_[3]))
+                hit_ = np.hypot(dx_, dy_) < REG_REACH + widr_[n] / 2
+                if hit_.any():
+                    us_ = P_[hit_, 0]
+                    near_[n] = (float(us_.min()), float(us_.max()), P_[hit_])
+            if not near_:
+                continue
+            # the room each layer of the region has open across the lanes' way through it: a line through its middle,
+            # square to their mean heading there, over the region grown by the reach, less every island on the layer
+            # and the arrays' boxes (grown by a lane's bar)
+            hd_ = np.zeros(2)
+            for n, (_a, _b, Q_) in near_.items():
+                if len(Q_) > 1:
+                    d_ = Q_[-1, 1:] - Q_[0, 1:]
+                    if np.hypot(*d_) > 1e-9:
+                        d_ = d_ / np.hypot(*d_)
+                        hd_ += d_ if np.dot(d_, hd_) >= 0 else -d_
+            if np.hypot(*hd_) < 1e-9:
+                continue
+            hd_ /= np.hypot(*hd_)
+            nr_ = np.array([-hd_[1], hd_[0]])
+            cx_, cy_ = (bx_[0] + bx_[2]) / 2, (bx_[1] + bx_[3]) / 2
+            half_ = (abs(nr_[0]) * (bx_[2] - bx_[0]) + abs(nr_[1]) * (bx_[3] - bx_[1])) / 2 + REG_REACH
+            ts_ = np.arange(-half_, half_, PMINr_ / 8)
+            X_, Y_ = cx_ + ts_ * nr_[0], cy_ + ts_ * nr_[1]
+            for L_ in sorted(lays_):
+                ok_ = np.ones(len(ts_), bool)
+                for b_ in [Fr.SB, Fr.DB] + [b2_ for (_l, ls2_), b2_ in isl_.items() if L_ in ls2_]:
+                    ok_ &= ~((X_ > b_[0] - BARr_) & (X_ < b_[2] + BARr_) & (Y_ > b_[1] - BARr_) & (Y_ < b_[3] + BARr_))
+                room_, i_ = 0.0, 0
+                while i_ < len(ts_):
+                    if not ok_[i_]:
+                        i_ += 1
+                        continue
+                    j_ = i_
+                    while j_ + 1 < len(ts_) and ok_[j_ + 1]:
+                        j_ += 1
+                    room_ += float(ts_[j_] - ts_[i_]) + PMINr_
+                    i_ = j_ + 1
+                terms_ = []
+                for n, (ua_, ub_, _q) in sorted(near_.items()):
+                    if ub_ < entry[n] or ua_ > end[n]:
+                        continue
+                    ons_ = []
+                    for u_ in sorted({round(ua_, 3), round((ua_ + ub_) / 2, 3), round(ub_, 3)}):
+                        bef_ = []
+                        for x_, _a in zip(*chg[n]):
+                            c_ = m.NewBoolVar('')
+                            m.Add(x_ <= Q(u_)).OnlyEnforceIf(c_)
+                            m.Add(x_ > Q(u_)).OnlyEnforceIf(c_.Not())
+                            bef_.append(c_)
+                        e_ = m.NewBoolVar('')
+                        r_ = run_at(n, bef_)
+                        m.Add(r_ == L_).OnlyEnforceIf(e_)
+                        m.Add(r_ != L_).OnlyEnforceIf(e_.Not())
+                        ons_.append(e_)
+                    on_ = m.NewBoolVar('')
+                    m.AddMaxEquality(on_, ons_)
+                    terms_.append((n, on_))
+                    REG_ON.append(((lab_, LAYN[L_], n), on_))
+                if not terms_:
+                    continue
+                ov_ = m.NewIntVar(0, 4 * len(terms_), '')
+                m.Add(sum(int(round(widr_[n] * 1000)) * v_ for n, v_ in terms_)
+                      <= int(round(room_ / 2 * 1000)) + int(round(PMINr_ * 1000)) * ov_)
+                REG_OVER.append(((lab_, LAYN[L_], round(room_, 2)), ov_))
+                REGION.append((lab_, LAYN[L_], round(room_, 2), [n for n, _v in terms_]))
+        if REGION:
+            print(f'   passive regions: {len(REGION)} region-layers, {len(REG_ON)} lanes priced -- ' + '; '.join(
+                f'{r_[0]} {r_[1]} room {r_[2]:.2f}: {len(r_[3])}' for r_ in REGION[:12]) + (' ...' if len(REGION) > 12 else ''))
     # ---- HISTORY congestion (negotiated, as PathFinder prices a resource that was overused before): HIST=HOT.json,.. are
     # the audits' findings of earlier rounds (whole_gate --hot: where a plan was short -- a dive, a pitch, a static, a
     # shape), one file per audit. A finding marks the bins of route within a via's room of it, on the frame whose spine is
@@ -1132,6 +1300,8 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False):
             print(f"   the root's proof as a floor: {r_['over']} via(s) over two, {r_['vias']} vias")
     OBJ = W_OVER * sum(over.values()) + W_V * VIAS + W_SOFT * sum(soft_broken.values()) + sum(cost) \
         + W_FIRM * sum(firm_broken.values()) + W_FIRM * sum(v_ for _k, v_ in GATE_OVER)
+    if REG_ON:
+        OBJ = OBJ + W_REGION * sum(v_ for _k, v_ in REG_ON) + W_FIRM * sum(v_ for _k, v_ in REG_OVER)
     if CROWD:
         # (the diagnosis asks only for the fewest crowded lanes -- a whole via each, so the search stops, proved, as
         # soon as their count is)
@@ -1270,6 +1440,12 @@ def solve(ctx, dest, cuts=(), hist=(), hint=None, soft_cuts=(), crowd=False):
     if CROWD:
         J['crowded'] = [n for n in M if sv.Value(CROWD[n])]
         print(f"   crowded: {len(J['crowded'])} lane(s) whose crossings break their room -- {', '.join(J['crowded'])}")
+    if REG_ON:
+        J['regions'] = sorted([k_[0], k_[1], k_[2]] for k_, v_ in REG_ON if sv.Value(v_))
+        J['region_over'] = [[k_[0], k_[1], int(sv.Value(v_))] for k_, v_ in REG_OVER if sv.Value(v_)]
+        print(f"   passive regions: {len(J['regions'])} of {len(REG_ON)} priced lane(s) on a region's layer"
+              + (f" -- {', '.join(f'{a_} {b_} {c_}' for a_, b_, c_ in J['regions'][:12])}" if J['regions'] else '')
+              + (f"; over half the room: {J['region_over']}" if J['region_over'] else ''))
     if GATE_OVER:
         J['gate_over'] = [[k_[0], k_[1], k_[2], k_[3], int(sv.Value(v_))] for k_, v_ in GATE_OVER if sv.Value(v_)]
         print(f"   part gates over: {len(J['gate_over'])} of {len(GATE_OVER)}"

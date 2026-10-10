@@ -1237,6 +1237,20 @@ via.
   grown by its clearance, at the narrowest column across the part's span and
   a via's room either side. A lane over is priced at a hundred vias. The solve
   used to learn a wall a round at a time, from the geometry's layer cuts.
+- **Passive regions** (`SOLVE_REGIONS`, on; `SOLVE_REGION_W` 2 vias,
+  `SOLVE_REGION_REACH` 3 lane pitches). Parts whose pads stand on some
+  routing layers only -- decoupling caps, an RF network's 0402s -- within a
+  lane pitch of each other on a layer they share make a region. A lane whose
+  reference route (the frame's, as the geometry draws it) passes within the
+  reach of one is priced two vias on each of the region's layers it is on
+  there, so the solve puts it on another layer where one is free; and the
+  lanes it still holds on one of them take at most half the room that layer
+  has open across the region (on a line square to the lanes' way through it,
+  the region grown by the reach, less the layer's islands and the arrays), a
+  hundred vias past that. On the LVDS bus's first 32 nets the plan ran lanes
+  on F.Cu in the 1.2 mm between U5's south face and its row of caps, a dive
+  0.33 mm off C151; with the regions the first fanout round lays every lane
+  (69 vias), where three rounds had left a net open.
 - **A pair's dive, in millimetres along its lane.** Whether a pair's dive is
   at its end, and how long its straight run is, the geometry counts along the
   lane's laid copper, not in the frame's columns. A lane running down a
