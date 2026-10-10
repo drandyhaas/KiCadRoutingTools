@@ -4240,10 +4240,86 @@ def repair_bare_teardrop_tokens(content: str) -> Tuple[str, int]:
     return ''.join(parts), len(inserts)
 
 
+def reflow_one_line_board(content: str) -> Tuple[str, bool]:
+    """A board written (almost) on one line, laid out the way KiCad's own
+    formatter writes it: one list per line, tab-indented by depth, a list of
+    atoms inline (``(at 1 2)``), a ``(pts`` list's vertices on one line, and
+    every closing paren of a multi-line list on its own line.
+
+    KiCad reads both layouts, and SolderCAD's file validator writes the
+    one-line one (``...)(zone(net 1)...(layer "F.Cu" )...``). This parser's
+    readers were written against the multi-line layout: on one line the zone
+    iterator and the ``(layers`` table need a newline that is not there, and a
+    ``(layer "F.Cu" )`` with KiCad's unprettified trailing space defeats the
+    tight ``"\\)`` field patterns. Measured on the same routed board in both
+    layouts: zones 1 -> 0, copper layers 2 -> 0, board bounds and outline
+    gone, and a footprint's copper fp_poly (8 segments) dropped -- so
+    check_connected called a poured GND net broken and the router would have
+    seen no pours and no tab copper. Reflowing at the read boundary gives
+    every reader the layout it was written for. Only whitespace between
+    tokens changes; a file that already has its lines is returned unchanged.
+    """
+    if content.count('\n') * 20 >= content.count('('):
+        return content, False
+    root: list = []
+    stack = [root]
+    for tok in _TOKEN_POS_RE.findall(content):
+        if tok == '(':
+            node: list = []
+            stack[-1].append(node)
+            stack.append(node)
+        elif tok == ')':
+            if len(stack) == 1:
+                return content, False       # unbalanced: leave it to the readers
+            stack.pop()
+        else:
+            stack[-1].append(tok)
+    if len(stack) != 1:
+        return content, False
+
+    lines: List[str] = []
+
+    def inline(node) -> str:
+        return '(' + ' '.join(inline(c) if isinstance(c, list) else c
+                              for c in node) + ')'
+
+    def emit(node, depth):
+        pad = '\t' * depth
+        if not any(isinstance(c, list) for c in node):
+            lines.append(pad + inline(node))
+            return
+        head = []
+        for c in node:
+            if isinstance(c, list):
+                break
+            head.append(c)
+        children = node[len(head):]
+        lines.append(pad + '(' + ' '.join(head))
+        if head and head[0] == 'pts':
+            lines.append(pad + '\t' + ' '.join(
+                inline(c) if isinstance(c, list) else c for c in children))
+        else:
+            for c in children:
+                if isinstance(c, list):
+                    emit(c, depth + 1)
+                else:
+                    lines.append(pad + '\t' + c)
+        lines.append(pad + ')')
+
+    for top in root:
+        if isinstance(top, list):
+            emit(top, 0)
+        else:
+            lines.append(top)
+    return '\n'.join(lines) + '\n', True
+
+
 def read_board_text(path: str, quiet: bool = False) -> str:
     """A .kicad_pcb's text as KiCad reads it: `repair_bare_teardrop_tokens`
-    applied, with a one-line note when it changed anything (#1149). For every
-    reader that walks footprint or pad blocks by their parens."""
+    applied, with a one-line note when it changed anything (#1149), and a
+    one-line board reflowed into KiCad's multi-line layout
+    (`reflow_one_line_board`). For every reader that walks footprint or pad
+    blocks by their parens."""
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
     content, n = repair_bare_teardrop_tokens(content)
@@ -4251,6 +4327,10 @@ def read_board_text(path: str, quiet: bool = False) -> str:
         print(f"NOTE: {n} teardrop token(s) in {os.path.basename(path)} lack their "
               f"opening paren; read the way KiCad reads them (#1149).",
               file=sys.stderr)
+    content, reflowed = reflow_one_line_board(content)
+    if reflowed and not quiet:
+        print(f"NOTE: {os.path.basename(path)} is written on one line; read in "
+              f"KiCad's multi-line layout.", file=sys.stderr)
     return content
 
 
