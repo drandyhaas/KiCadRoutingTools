@@ -53,7 +53,9 @@ def clashes(pcb, runs, layers, clear):
     """what a via end's run would stand beside on another layer. `runs` {key: (its nets' ids, its segments)} -- each
     end's runs to its vias (run_to_via), a pair's both legs. Returns (ban {key: the layers whose copper -- another net's
     segment outside every run, or its pad there -- comes within the rule, `clear` past both half widths, of the run},
-    sep [(key, key): two runs within the rule of each other, so on different layers wherever they end])"""
+    sep [(key, key): two runs within the rule of each other, so on different layers wherever they end]). Each run
+    segment is held off every net's copper but its own -- a pair's partner leg's too: its ball on the surface, where
+    the run moved was the relayer's, shorted the zynq LVDS bus's TX_D5_P onto TX_D5_N's ball, U1.Y14"""
     import numpy as np
     from pack import seg_seg_dist
     moving = {id(s) for _nids, segs in runs.values() for s in segs}
@@ -61,6 +63,7 @@ def clashes(pcb, runs, layers, clear):
                         np.array([(s.end_x, s.end_y) for s in segs], float).reshape(-1, 2),
                         np.array([s.width / 2 for s in segs], float))
     R = {k: arr(segs) for k, (_n, segs) in runs.items()}
+    RN = {k: np.array([s.net_id for s in segs]) for k, (_n, segs) in runs.items()}
     ban, sep = {}, []
     for L in layers:
         fixed = [s for s in pcb.segments if s.layer == L and id(s) not in moving]
@@ -69,20 +72,25 @@ def clashes(pcb, runs, layers, clear):
                 if (L in p.layers or '*.Cu' in p.layers) and p.pad_type != 'np_thru_hole']
         for k, (nids, _segs) in runs.items():
             a0, a1, ah = R[k]
-            oth = [s for s in fixed if s.net_id not in nids]
+            an = RN[k]
+            oth = [s for s in fixed if not (len(nids) == 1 and s.net_id in nids)]
             b0, b1, bh = arr(oth)
-            hit = bool(len(oth)) and bool((seg_seg_dist(a0, a1, b0, b1) < ah[:, None] + bh[None, :] + clear - SLACK).any())
+            foreign = an[:, None] != np.array([s.net_id for s in oth])[None, :]
+            hit = bool(len(oth)) and bool(((seg_seg_dist(a0, a1, b0, b1) < ah[:, None] + bh[None, :] + clear - SLACK)
+                                           & foreign).any())
             for p in pads:
                 if hit:
                     break
-                if p.net_id in nids:
+                own = an == p.net_id
+                if own.all():
                     continue
                 hx, hy = p.size_x / 2, p.size_y / 2
                 c = [(p.global_x - hx, p.global_y - hy), (p.global_x + hx, p.global_y - hy),
                      (p.global_x + hx, p.global_y + hy), (p.global_x - hx, p.global_y + hy)]
                 e0, e1 = np.array(c, float), np.array(c[1:] + c[:1], float)
-                inside = ((np.abs(a0[:, 0] - p.global_x) <= hx) & (np.abs(a0[:, 1] - p.global_y) <= hy)).any()
-                hit = bool(inside or (seg_seg_dist(a0, a1, e0, e1) < ah[:, None] + clear - SLACK).any())
+                inside = ((np.abs(a0[:, 0] - p.global_x) <= hx) & (np.abs(a0[:, 1] - p.global_y) <= hy) & ~own).any()
+                hit = bool(inside or ((seg_seg_dist(a0, a1, e0, e1) < ah[:, None] + clear - SLACK).any(axis=1)
+                                      & ~own).any())
             if hit:
                 ban.setdefault(k, set()).add(L)
     ks = sorted(runs)

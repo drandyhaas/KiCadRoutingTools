@@ -1184,7 +1184,10 @@ via.
   its pad -- is a via end, and its lane may leave it on any layer its run can
   lie on: the solve chooses which (`VIA_ENDS`, on with more routing layers
   than two). Another net's copper within the rule of the run bans a layer, and
-  two runs within the rule of each other end on different layers.
+  two runs within the rule of each other end on different layers. A pair's two
+  legs move as one run, and each leg is held off its partner's ball and neck:
+  TX_D5_P's run on B.Cu passed under TX_D5_N's ball, moved onto F.Cu it ran
+  across it, and the zynq LVDS bus's first 19 nets shipped a short.
 - **The solve.** A lane's runs between its changes each lie on one layer, two
   lanes cross only on different layers, and a crossing's room is shared only
   by the lanes crossing on one layer.

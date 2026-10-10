@@ -9,7 +9,8 @@
 2. escape_vias: off by default on any count of layers; 'dest' the destination's, 'both' both; anything else refused.
 3. relayer.run_to_via: a stub's run from its end back to its via, and that via; None short of a via or at a fork.
 4. relayer.clashes: another net's segment within the rule on a layer bans that layer, not one it is clear of; another
-   net's pad on F.Cu bans F.Cu; two runs that cross part; a run's own net bans nothing; a pair's legs one run.
+   net's pad on F.Cu bans F.Cu; two runs that cross part; a run's own net bans nothing; a pair's legs one run, each
+   held off its partner's pad and neck that stay (TX_D5_P moved onto F.Cu across TX_D5_N's ball).
 """
 import os
 import sys
@@ -120,6 +121,15 @@ legP, legN = [seg(0, 0, 4, 0, 'B.Cu', 5)], [seg(0, 0.2, 4, 0.2, 'B.Cu', 6)]
 pcb7 = NS(segments=legP + legN, vias=[], footprints={})
 ban7, sep7 = relayer.clashes(pcb7, {'P': ({5, 6}, legP + legN)}, L3, CL)
 check(not ban7 and not sep7, 'a pair\'s two legs, one run: neither bans the other')
+# ...but each leg's run is held off its PARTNER's copper that stays: the zynq LVDS bus's TX_D5_P, its via in its ball
+# and its run on B.Cu under TX_D5_N's ball, moved onto F.Cu across that ball -- a short
+pcb9 = NS(segments=legP + legN, vias=[], footprints={'U1': NS(pads=[pad(2.0, 0.0, 6)])})
+ban9, _ = relayer.clashes(pcb9, {'P': ({5, 6}, legP + legN)}, L3, CL)
+check(ban9.get('P') == {'F.Cu'}, 'a pair leg\'s run over its partner\'s pad on F.Cu bans F.Cu')
+neckN = seg(1.0, 0.1, 1.0, 0.6, 'F.Cu', 6)          # the partner's neck on F.Cu, across the P leg's line
+pcb10 = NS(segments=legP + legN + [neckN], vias=[], footprints={})
+ban10, _ = relayer.clashes(pcb10, {'P': ({5, 6}, legP + legN)}, L3, CL)
+check(ban10.get('P') == {'F.Cu'}, 'a pair leg\'s run across its partner\'s neck on F.Cu bans F.Cu')
 
 print(f'\n{"PASS" if not BAD else "FAIL"}: {len(BAD)} failure(s)' + (': ' + '; '.join(BAD) if BAD else ''))
 sys.exit(1 if BAD else 0)
