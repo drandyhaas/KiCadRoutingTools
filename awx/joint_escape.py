@@ -330,6 +330,45 @@ def _lanes_clear(site, r, rays):
     return True
 
 
+def exit_ray_conflicts(opts, net_of, bus, vr):
+    """[(key, i, key2, j)]: a plane ball's DROP option whose via stands in the way out of a BUS escape option -- its
+    lane goes on from the exit, straight out past the face (lane_rays' reach), and the via leaves it less than its
+    bar (_lanes_clear's), so the two are not both laid. `opts` {ball key: [(kind, option, piece)]}, `net_of` {ball
+    key: its net's short name}, `bus` the bus's short names, `vr` the largest via radius a drop takes. The drops are
+    planned with the berths (plan_array), before any lane stands to keep them off (_drops' rays: the lanes laid
+    already): on the zynq LVDS bus's U5, RFGND's G12 was dropped 0.14 mm past the west face between RX_FRAME's two
+    berths, 0.400 mm from each lane for 0.4025, and two RFGND vias 0.4 mm either side of EN_AGC's berth on the south
+    face -- the snap found no end connector for the pair and no way out for the single"""
+    import braid as te
+    from escape_moves import DIRS
+    bar = te.TRACK / 2 + te.CLEAR + te.GRID / 2
+    cells = collections.defaultdict(list)                 # 1 mm cell -> [(key, index, a, b)]: the rays near it
+    for k in sorted(opts):
+        if net_of[k] not in bus:
+            continue
+        for j, (kind, o, _pc) in enumerate(opts[k]):
+            if kind != 'escape':
+                continue
+            u = DIRS[o.direction]
+            a = tuple(o.exit_pt)
+            b = (a[0] + u[0] * LANE_REACH, a[1] + u[1] * LANE_REACH)
+            g = vr + bar
+            for cx in range(int(math.floor(min(a[0], b[0]) - g)), int(math.floor(max(a[0], b[0]) + g)) + 1):
+                for cy in range(int(math.floor(min(a[1], b[1]) - g)), int(math.floor(max(a[1], b[1]) + g)) + 1):
+                    cells[(cx, cy)].append((k, j, a, b))
+    out = []
+    for k in sorted(opts):
+        for i, (kind, o, _pc) in enumerate(opts[k]):
+            if kind != 'drop':
+                continue
+            seen = set()
+            for (k2, j, a, b) in cells.get((int(math.floor(o.site[0])), int(math.floor(o.site[1]))), ()):
+                if (k2, j) not in seen and _pt_seg(o.site, a, b) - o.r < bar - 1e-9:
+                    seen.add((k2, j))
+                    out.append((k, i, k2, j))
+    return out
+
+
 def zone_regions(pcb):
     """{layer: [(net id, priority, outline)]}: the board's pours, by layer"""
     out = collections.defaultdict(list)
@@ -396,7 +435,7 @@ def beyond_faces(grid, q):
                             ((0, -1), q[1] < y0 - gy)) if ok}
 
 
-def _drops(pcb, grid, p, obs, sz, foot=None, rays=(), regions=None):
+def _drops(pcb, grid, p, obs, sz, foot=None, rays=(), regions=None, fine=False):
     """[Drop]: a plane ball's ways down to its plane -- a stub to one of its four diagonal gaps and a via there (the
     engine's dog-bone drop, at the rung's via), or a via in its pad (at the size the engine gives that pad) -- each
     clear of the board's static copper. An edge ball's gaps include those half a pitch off the array's edge: the via
@@ -426,9 +465,12 @@ def _drops(pcb, grid, p, obs, sz, foot=None, rays=(), regions=None):
             continue
         # the rung's via, else the largest of the fab ladder's that fits (sz['drop_vias']): at the zynq DDR's U2 a
         # 0.45 mm via straight out between two berths' lanes left each 0.075 mm, a 0.30 one 0.15
-        r = next(((r_, dr_) for r_, dr_ in [(sz['vr'], sz['vdr'])] + sz['drop_vias']
-                  if _via_clear(pcb, obs, p.net_id, site, r_, sz) and _lanes_clear(site, r_, rays)), None)
-        if r is not None:
+        fits = [(r_, dr_) for r_, dr_ in [(sz['vr'], sz['vdr'])] + sz['drop_vias']
+                if _via_clear(pcb, obs, p.net_id, site, r_, sz) and _lanes_clear(site, r_, rays)]
+        # ...and with `fine` (plan_array's exit_rays), where the rung's fits, the largest finer one too: a berth the
+        # same plan lays has no lane on the board yet, and the rung's via may stand in its way out (exit_ray_conflicts)
+        # where a finer one leaves it its bar
+        for r in fits[:2 if fine and fits and fits[0][0] == sz['vr'] else 1]:
             out.append(Drop(site, (pad, site), home, False, r[0], r[1]))
     r, dr = sz['inpad'](p)
     if _via_clear(pcb, obs, p.net_id, pad, r, sz) and (regions is None or on_own_plane(regions, p.net_id, pad)):
@@ -623,7 +665,7 @@ def array_pairs(foot, nets):
 
 
 def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=CLIMB, street=2, only=None,
-                vias_only=False):
+                vias_only=False, exit_rays=False):
     """Every ball's OPTIONS for plan_array (its escapes, its straps, its drops, each with its copper as a Piece at its
     real size), and what they were built from: a namespace of foot, grid, bus_s, oth_s, drop_s, sz, items, menu (the
     escapes alone, per ball), balls, opts, via_r (a move's via radius), t_menu. `only` (a set of ball keys, NET#PAD):
@@ -675,7 +717,7 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
         balls[key] = (p.global_x, p.global_y)
         if nm in drop_s:
             menu[key] = []
-            dmenu[key] = _drops(pcb, grid, p, obs, sz, foot, rays, regions)
+            dmenu[key] = _drops(pcb, grid, p, obs, sz, foot, rays, regions, fine=exit_rays)
             continue
         home = next((L for L in pcb.board_info.copper_layers if L in p.layers), 'F.Cu')
         # (a plane layer only where a leg's layer is the plan's own and priced: on more routing layers than two a via
@@ -784,7 +826,7 @@ def build_menus(pcb, ref, bus, others, other_layers, far=None, drops=(), climb=C
 
 def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops=(), climb=CLIMB, street=2,
                batches=None, workers=None, time_limit=None, log=print, debug=False, only=None, hands=None,
-               vias_only=False):
+               vias_only=False, exit_rays=False):
     """(hints, report): one planned move for every signal ball of `ref` on `pcb` -- the bus's nets (`bus`, full or
     short names) escaping on F.Cu/B.Cu, never by the `far` face; `others` escaping on `other_layers`, or a multi-ball
     net's ball strapped to a neighbour of its net; and every ball of the plane nets `drops` dropped to its plane --
@@ -798,14 +840,15 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
     along a gap or the ball's own line, up to `climb` pitches (None: the whole array), before it leaves -- and the
     STREET dog-bones (a via in an empty band of the array, `street` sites along a lane; the whole route's 2). The
     escapes' conflicts are the whole route's own (pages_first._conflicts as its ends take them: strict, an F exit
-    stacked over a B one allowed)."""
+    stacked over a B one allowed). `exit_rays` (the DESTINATION's joint plan, fanout_from_plan): a plane ball's drop
+    is held out of the bus's berths' ways out (exit_ray_conflicts), each gap site offering a finer via too."""
     import conflict_groups as cg
     import select_moves as sm
     import source_realize as sr
     from ortools.sat.python import cp_model
     t0 = time.time()
     bm = build_menus(pcb, ref, bus, others, other_layers, far=far, drops=drops, climb=climb, street=street,
-                     only=only, vias_only=vias_only)
+                     only=only, vias_only=vias_only, exit_rays=exit_rays)
     bus_s, oth_s, drop_s, sz = bm.bus_s, bm.oth_s, bm.drop_s, bm.sz
     planes_ = set(plane_layers(pcb))             # (a leg on one priced: C_PLANE_LAYER)
     rls = run_layers()                # (more routing layers than two: the via moves' runs on RUN)
@@ -869,6 +912,8 @@ def plan_array(pcb, ref, bus, others, other_layers, far=None, prefer=None, drops
                             continue
                         if _hit(pc, opts[k2][j][2], items[k][0] == items[k2][0], sz):
                             pairs.append((k, i, k2, j))
+    if exit_rays:
+        pairs += exit_ray_conflicts(opts, {k: items[k][0] for k in items}, bus_s, sz['vr'])
     t_geo = time.time() - t1
     log(f'  joint escape of {ref}: {len(items)} balls ({sum(1 for k in items if items[k][0] in bus_s)} bus, '
         f'{sum(1 for k in items if items[k][0] in drop_s)} plane), {n_moves} moves, '

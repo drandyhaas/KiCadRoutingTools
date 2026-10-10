@@ -338,7 +338,14 @@ A plane ball goes down to its plane as the human's do, sharing vias:
   its net's pour fills -- on a split layer, inside its own island; a ball with
   none of its plane under it or its gaps is left to the route step. A via off
   the array stays clear of the straight continuation of the bus's laid lanes,
-  and one beyond a face they leave by pays more than a via in the pad.
+  and one beyond a face they leave by pays more than a via in the pad. At the
+  destination, whose berths are planned in the same solve as its drops, a
+  drop's via is held out of the way out of every berth it might take (its
+  exit's straight continuation, at the lane's bar), and each gap site offers
+  a finer via as well. On the zynq's U5 an RFGND via 0.14 mm past the west
+  face stood between RX_FRAME's two berths, and two flanked EN_AGC's, each
+  2.5 um short of the bar; the snap found no way out for either. On the LVDS
+  bus's first 32 nets the best round went from 3 nets open to 1.
 - **A finer via where the rung's does not fit:** a gap or a site off the edge
   the rung's via does not fit takes the largest of the fab ladder's vias
   that does, laid at that size and disclosed as a narrowing, as a pad too

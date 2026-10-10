@@ -562,7 +562,7 @@ def joint_berths(st, board, choice, log=print):
     with contextlib.redirect_stdout(io.StringIO()):
         _h, rep = je.plan_array(pcb, dref, names, a['others'], spec['layers'], prefer=prefer,
                                 drops=a['drops'], debug=True, log=lambda *a_: None, hands=hands,
-                                vias_only=route_layers.escape_vias('dest'))
+                                vias_only=route_layers.escape_vias('dest'), exit_rays=True)
     out = {k.split('#')[0]: o for k, (kind, o) in (rep.get('debug', {}).get('chosen') or {}).items()
            if kind == 'escape' and k.split('#')[0] in choice}
     same = sum(1 for nm, o in out.items() if sr.move_sig(o) == sr.move_sig(choice[nm]))
@@ -1447,7 +1447,7 @@ def joint_destination(out_path, names, choice, dref, byname, board, banned, log=
     hands = teeth_hands(pcb, list(names), byname, sref) if sref in pcb.footprints else {}
     rung, reps = je.fan_array(board, out_path, dref, list(names), a['others'], spec['layers'], prefer=prefer,
                               drops=a['drops'], log=log, debug=True, hands=hands,
-                              vias_only=route_layers.escape_vias('dest'))
+                              vias_only=route_layers.escape_vias('dest'), exit_rays=True)
     kept = next(r for r in reps if (r['track'], r['via'], r['drill']) == (rung.fan_track, rung.via_size,
                                                                           rung.via_drill))
     bus_s = {je.short_name(nm) for nm in names}
