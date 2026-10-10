@@ -263,7 +263,10 @@ bus laid, in the board's own frame:
   is laid whole or not at all;
 - the source array is fanned out for them, and the board is turned into the
   flow frame;
-- the whole route runs on the ladder's nets (`--k K` for its first K);
+- the whole route runs on the ladder's nets (`--k K` for its first K). A
+  pair's two legs stand in one river of the ladder, side by side, so no
+  checkpoint runs a leg alone as a single (the zynq LVDS bus had RX_D3_N in
+  its second river and RX_D3_P in its fourth);
 - the routed board is turned back.
 
 It is graded where it is written:

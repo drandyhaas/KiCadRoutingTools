@@ -240,6 +240,21 @@ def drc_verdict(board):
     return 0 if 'NO DRC VIOLATIONS' in out else (int(m.group(1)) if m else -1)
 
 
+def pairs_whole(rivers):
+    """the rivers with each differential PAIR's two legs in ONE of them, the earlier leg's, side by side: a prefix K
+    that took one leg and not the other ran that leg alone, as a single (the zynq LVDS bus: RX_D3_N in its second
+    river, RX_D3_P in its fourth). A river left empty is dropped; the rivers keep their order"""
+    import pairs as _pairs
+    rivers = [list(r) for r in rivers]
+    for p_, n_ in _pairs.pair_names([n for r in rivers for n in r], admit_all=True).values():
+        at = {n: i for i, r in enumerate(rivers) for n in r}
+        if at[p_] != at[n_]:
+            keep, leg = (p_, n_) if at[p_] < at[n_] else (n_, p_)
+            rivers[at[leg]].remove(leg)
+            rivers[at[keep]].insert(rivers[at[keep]].index(keep) + 1, leg)
+    return [r for r in rivers if r]
+
+
 def write_ladder(board, names, log=print):
     """`<board stem>.ladder.txt`: the plan's rivers, largest first."""
     with contextlib.redirect_stdout(sys.stderr):
@@ -257,6 +272,8 @@ def write_ladder(board, names, log=print):
     buses = sorted((list(b) for b in st['buses']), key=len, reverse=True)
     placed = {n for b in buses for n in b}
     single = [n for n in ok if n not in placed]
+    rivers = pairs_whole(buses + [[n] for n in single])
+    buses, single = [r for r in rivers if len(r) > 1], [r[0] for r in rivers if len(r) == 1]
     out = os.path.splitext(board)[0] + '.ladder.txt'
     cps, tot = [], 0
     for b in buses:
