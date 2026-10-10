@@ -481,8 +481,9 @@ def t_the_collector_records_when_it_snapshotted():
         if path in ('traffic/views', 'traffic/clones'):
             return {path.split('/')[1]: []}, ''
         return [], ''
-    real_api, real_gl, data = M._api, M._gitlab, M.DATA
+    real_api, real_gl, real_pc, data = M._api, M._gitlab, M._pcm_file_commits, M.DATA
     M._api, M._gitlab = fake_api, lambda path: (None, 'offline')
+    M._pcm_file_commits = lambda rel: (None, 'offline')
     with tempfile.TemporaryDirectory() as tmp:
         M.DATA = tmp
         try:
@@ -490,7 +491,7 @@ def t_the_collector_records_when_it_snapshotted():
             errors, _ = M.collect('owner/repo')
             times = M._load('release_times.json', {})
         finally:
-            M._api, M._gitlab, M.DATA = real_api, real_gl, data
+            M._api, M._gitlab, M._pcm_file_commits, M.DATA = real_api, real_gl, real_pc, data
     stamp = M._today()
     check('t_the_collector_records_when_it_snapshotted',
           list(times) == [stamp] and times[stamp].startswith(stamp + 'T'),
@@ -500,7 +501,7 @@ def t_the_collector_records_when_it_snapshotted():
 
 
 def t_pcm_listings_read_the_file_and_the_merge():
-    """The listing collector, offline: GitLab replaced by a canned responder.
+    """The listing collector, offline: git and GitLab replaced by canned responders.
 
     The version is the newest one in the package FILE at each commit (an MR
     title can be stale -- upstream !587 is titled v0.15.5 and shipped v0.15.6),
@@ -519,17 +520,19 @@ def t_pcm_listings_read_the_file_and_the_merge():
     merged = {'aaa': '2026-05-26T21:39:02.213Z', 'bbb': '2026-07-02T12:10:27.549Z'}
     calls = []
 
+    def fake_commits(rel):
+        calls.append(rel)
+        assert rel == 'packages/com.github.drandyhaas.kicadroutingtools/metadata.json', rel
+        return commits, ''
+
     def fake(path):
         calls.append(path)
-        if path.startswith('repository/commits?'):
-            assert ident in path, path
-            return commits, ''
         if path.startswith(f'repository/files/{ident}/raw?ref='):
             return {'versions': [{'version': v} for v in files[path.split('=')[-1]]]}, ''
         sha = path.split('/')[2]
         return ([{'merged_at': merged[sha]}] if sha in merged else []), ''
-    real = M._gitlab
-    M._gitlab = fake
+    real, real_pc = M._gitlab, M._pcm_file_commits
+    M._gitlab, M._pcm_file_commits = fake, fake_commits
     try:
         store = {}
         err = M.collect_pcm_listings(store)
@@ -543,7 +546,7 @@ def t_pcm_listings_read_the_file_and_the_merge():
         check('t_a_banked_commit_is_never_fetched_again',
               again == '' and len(calls) == 1, f"{len(calls)} call(s) on the rerun")
     finally:
-        M._gitlab = real
+        M._gitlab, M._pcm_file_commits = real, real_pc
 
 
 def t_thinning_never_moves_a_lifetime_total():

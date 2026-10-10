@@ -45,6 +45,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -245,6 +246,35 @@ def _merge_daily(store, key, rows):
 #: KiCad's PCM catalogue is GENERATED from this GitLab repo, so the merge that
 #: added a version to our package file is when PCM began serving that version.
 _PCM_UPSTREAM = 'https://gitlab.com/api/v4/projects/kicad%2Faddons%2Fmetadata'
+_PCM_UPSTREAM_GIT = 'https://gitlab.com/kicad/addons/metadata.git'
+
+
+def _pcm_file_commits(rel_path):
+    """Upstream commits touching `rel_path`, newest first -> (list, error).
+
+    Each is {'id', 'committed_date'}, the shape the API's commit listing had.
+    Read from a blobless clone rather than the API: GitLab's Cloudflare front
+    answers the anonymous `repository/commits` LISTING with a bot challenge
+    (HTTP 403, an HTML "Just a moment..." page) while git over HTTPS and the
+    per-commit endpoints `_gitlab` still uses answer normally. A path-limited
+    log needs trees only, so no blob is downloaded. Never raises.
+    """
+    env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}   # never wait on a login
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            p = subprocess.run(['git', 'clone', '-q', '--filter=blob:none', '--no-checkout',
+                                '--single-branch', _PCM_UPSTREAM_GIT, tmp],
+                               capture_output=True, text=True, timeout=300, env=env)
+            if p.returncode:
+                return None, f'git clone: {p.stderr.strip()[-160:]}'
+            p = subprocess.run(['git', '-C', tmp, 'log', '--format=%H %cI', '--', rel_path],
+                               capture_output=True, text=True, timeout=120, env=env)
+            if p.returncode:
+                return None, f'git log: {p.stderr.strip()[-160:]}'
+        except Exception as e:
+            return None, f'git: {e}'
+    return [{'id': sha, 'committed_date': when}
+            for sha, when in (ln.split() for ln in p.stdout.splitlines() if ln.strip())], ''
 
 
 def _gitlab(path):
@@ -284,16 +314,11 @@ def collect_pcm_listings(store):
             ident = json.load(f)['identifier']
     except Exception as e:
         return f'metadata.json: {e}'
-    fpath = urllib.parse.quote(f'packages/{ident}/metadata.json', safe='')
-    commits, page = [], 1
-    while page <= 20:
-        chunk, err = _gitlab(f'repository/commits?path={fpath}&per_page=100&page={page}')
-        if err or not isinstance(chunk, list):
-            return err or 'unexpected payload'
-        commits.extend(chunk)
-        if len(chunk) < 100:
-            break
-        page += 1
+    rel = f'packages/{ident}/metadata.json'
+    fpath = urllib.parse.quote(rel, safe='')
+    commits, err = _pcm_file_commits(rel)
+    if err:
+        return err
     for c in commits:
         sha = c.get('id', '')
         if not sha or sha in store:
