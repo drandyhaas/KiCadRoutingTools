@@ -10,6 +10,8 @@ When this skill is invoked with a KiCad PCB file, review the stackup and recomme
 ## Step 1: Read the Current Stackup
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 for layer in pcb.board_info.stackup:  # List[StackupLayer], ordered top to bottom
@@ -35,6 +37,8 @@ Propose: layer assignment (e.g. 4-layer: F.Cu signal / In1.Cu GND plane / In2.Cu
 Validate with the project's own formulas so the recommendation matches what the router will compute:
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from impedance import calculate_width_for_impedance, calculate_impedance_for_layer
 
 # After (hypothetically) applying the proposed stackup values:

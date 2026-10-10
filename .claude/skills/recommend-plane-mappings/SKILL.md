@@ -11,6 +11,8 @@ copper planes and on which layers, with the reasoning a layout engineer would ap
 ## Step 1: Read the Board
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 

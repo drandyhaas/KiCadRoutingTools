@@ -22,6 +22,8 @@ For each IC likely to have differential interfaces (footprint/value keywords: FP
 1. Check pad metadata first — KiCad symbols often carry it:
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 fp = pcb.footprints['U3']

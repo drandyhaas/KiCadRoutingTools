@@ -10,6 +10,8 @@ When this skill is invoked with a KiCad PCB file, perform a comprehensive analys
 ## Step 1: Load and Extract Components
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 

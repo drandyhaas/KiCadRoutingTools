@@ -6,6 +6,10 @@ calculation. This module powers `--impedance` routing and `--time-matching`.
 
 Units: dimensions in mm, impedance in Ω, time in ps.
 
+Examples run from the repository root with the engine directory on the
+import path: `PYTHONPATH=py_router python3 your_script.py` (see the
+[overview](python-api.md)).
+
 ## Contents
 
 - [Closed-form formulas](#closed-form-formulas) (no board needed)

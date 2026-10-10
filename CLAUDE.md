@@ -748,6 +748,8 @@ verified by `tests/run_doc_examples.py`. Quick reference:
 The project uses `kicad_parser` module to parse KiCad PCB files:
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData
 
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')

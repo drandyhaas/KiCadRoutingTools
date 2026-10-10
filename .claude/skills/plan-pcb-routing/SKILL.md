@@ -92,6 +92,8 @@ commands on the grounds that the placement run must have run them.
 ## Step 1: Load and Analyze PCB Structure
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 
@@ -124,6 +126,8 @@ Inspect the stackup now, before planning, and report the verdict **at the top of
 plan report** so problems surface before any routing work:
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 for layer in pcb.board_info.stackup:  # List[StackupLayer], ordered top to bottom
@@ -604,6 +608,8 @@ Use the printed flags as-is:
 
   ```python
   from collections import Counter
+  import sys
+  sys.path.insert(0, "py_router")
   from kicad_parser import parse_kicad_pcb
   pcb = parse_kicad_pcb('out.kicad_pcb')
   print(Counter(round(s.width, 4) for s in pcb.segments
@@ -3115,6 +3121,8 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
    Compute the answer instead; it is one call, and it needs no stackup:
 
    ```python
+   import sys
+   sys.path.insert(0, "py_router")
    from impedance import achievability_note, tightest_pin_gap
    note, detail = achievability_note(
        pcb, 'F.Cu', 90.0, is_differential=True, spacing=0.15,

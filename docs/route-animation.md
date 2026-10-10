@@ -92,6 +92,8 @@ does the same for a headless run.
 Library use (what the GUI calls):
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from make_movie import make_movie
 path = make_movie(['runs_set1/myboard'], out='routing.mp4')   # or a board list
 ```
@@ -117,6 +119,8 @@ python3 py_router/route_render.py BOARD.kicad_pcb [-o OUT.png] [--size 1600]
 Library API (also the substrate for the animator):
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 from route_render import BoardRenderer
 

@@ -100,6 +100,8 @@ touching-copper overlaps, `check_drc.py` is the authoritative one.
 If the board has length-matched groups (DDR byte lanes, matched buses — detect DQ/DQS patterns or ask the user for the groups and tolerance):
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 from net_queries import net_copper_lengths, pin_pair_path_length
 
@@ -143,6 +145,8 @@ length/time-matched group (and any net with visible serpentines), audit the
 arm-to-arm spacing directly:
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 from geometry_utils import segment_to_segment_distance
 

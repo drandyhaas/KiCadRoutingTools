@@ -14,6 +14,10 @@ pcb = parse_kicad_pcb('kicad_files/kit-dev-coldfire-xilinx_5213.kicad_pcb')
 All coordinates and sizes are in millimeters. See
 [Python API Overview](python-api.md#conventions) for shared conventions.
 
+Examples run from the repository root with the engine directory on the
+import path: `PYTHONPATH=py_router python3 your_script.py` (see the
+[overview](python-api.md)).
+
 ## Contents
 
 - [Main entry points](#main-entry-points)

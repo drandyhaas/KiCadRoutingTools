@@ -87,6 +87,8 @@ Note: the final `JSON_SUMMARY` carries the same attribution structured — the `
 Load the board and map failures to regions and components:
 
 ```python
+import sys
+sys.path.insert(0, "py_router")
 from kicad_parser import parse_kicad_pcb
 pcb = parse_kicad_pcb('board.kicad_pcb')
 

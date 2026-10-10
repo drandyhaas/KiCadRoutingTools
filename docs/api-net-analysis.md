@@ -6,6 +6,10 @@
 - **`connectivity.py`** — questions about *copper*: which segments are
   connected, where stubs end, which pads still need connecting.
 
+Examples run from the repository root with the engine directory on the
+import path: `PYTHONPATH=py_router python3 your_script.py` (see the
+[overview](python-api.md)).
+
 ## `net_queries.py`
 
 ### Pattern matching

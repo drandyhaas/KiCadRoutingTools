@@ -10,6 +10,8 @@ When this skill is invoked, perform a full AI-powered analysis of the PCB to ide
 ## Step 1: Load and Extract Components
 
 ```python
+import sys
+sys.path.insert(0, "py_tools")
 from analyze_power_paths import (
     analyze_pcb, get_components_needing_analysis, classify_component,
     trace_power_paths, get_power_net_recommendations, format_analysis_report,

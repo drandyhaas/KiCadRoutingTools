@@ -9,6 +9,10 @@ Most `GridRouteConfig` fields map 1:1 to CLI flags; the flag-oriented view
 with tuning advice is in [Configuration](configuration.md). This page is the
 programmatic view.
 
+Examples run from the repository root with the engine directory on the
+import path: `PYTHONPATH=py_router python3 your_script.py` (see the
+[overview](python-api.md)).
+
 ## `GridRouteConfig`
 
 ```python

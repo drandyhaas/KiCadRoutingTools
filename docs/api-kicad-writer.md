@@ -14,6 +14,10 @@ Both preserve the original file content and append/edit in place — nothing
 else in the file is regenerated, so user edits, footprints, and zones
 survive untouched. Every new element gets a fresh UUID.
 
+Examples run from the repository root with the engine directory on the
+import path: `PYTHONPATH=py_router python3 your_script.py` (see the
+[overview](python-api.md)).
+
 ## Contents
 
 - [Adding tracks and vias](#adding-tracks-and-vias)
