@@ -35,7 +35,7 @@ KiCad-python session.
 
 That is true of THIS app and not of "the cloud": the stress app has carried
 KiCad since 2026-08-23 (cloud_replay_sets.py passes --with-kicad by default,
-building modal_sweep/modal_app.py on kicad/kicad:10.0.0). Giving this image
+building modal_sweep/modal_app.py on kicad/kicad:10.0.6). Giving this image
 KiCad would mean copying that recipe; it would recover the two self-skips that
 are really about KiCad, and NOT the ones wanting artifacts under the gitignored
 wk/, which self-skip on any clean checkout.

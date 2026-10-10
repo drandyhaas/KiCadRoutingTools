@@ -37,7 +37,7 @@ PINS = ("numpy==2.3.3", "scipy==1.16.2", "shapely==2.1.2", "ortools==9.15.6755",
 # pcbnew and kicad-cli -- the stress app's recipe (tests/stress/modal_sweep/modal_app.py). It runs on the KiCad
 # image's own system python, the one that imports the distro's pcbnew, not on the laptop's 3.14.
 KICAD = os.environ.get("MODAL_WHOLE_KICAD", "") in ("1", "true", "on")
-KICAD_IMAGE = "kicad/kicad:10.0.0"
+KICAD_IMAGE = "kicad/kicad:10.0.6"
 
 
 def _base_image():

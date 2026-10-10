@@ -65,7 +65,7 @@ Three things to know before you trust its output:
   nothing else. The STRESS app has carried KiCad since 2026-08-23:
   `cloud_replay_sets.py` passes `--with-kicad` **by default**
   (`--no-kicad` opts out), which sets `KICAD_SWEEP_WITH_KICAD=1` and builds
-  `modal_sweep/modal_app.py` on `kicad/kicad:10.0.0`, proving `import pcbnew`
+  `modal_sweep/modal_app.py` on `kicad/kicad:10.0.6`, proving `import pcbnew`
   and `kicad-cli version` during the image build so a missing binding kills
   the BUILD rather than quietly deadening the oracle legs. Note the two
   defaults differ: `modal_app.py` read on its own defaults the env var OFF,

@@ -345,7 +345,7 @@ Validate routed boards against the *real* spec, with the right checker — most
     **This is the SUITE app only; do not generalise it to "the cloud".** The
     STRESS app carries KiCad BY DEFAULT since 2026-08-23:
     `cloud_replay_sets.py --with-kicad` (default true, `--no-kicad` opts out)
-    switches `modal_sweep/modal_app.py` onto `kicad/kicad:10.0.0` and PROVES
+    switches `modal_sweep/modal_app.py` onto `kicad/kicad:10.0.6` and PROVES
     both front-ends at build time (`import pcbnew` + `kicad-cli version`), so
     the oracle legs actually run; such a wave suffixes its label `-kc`.
     **The two defaults differ, so name the entry point:** `modal_app.py` read

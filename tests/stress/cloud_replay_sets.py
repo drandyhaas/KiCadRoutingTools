@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -72,6 +73,11 @@ sys.path.insert(0, str(HERE))
 DEFAULT_STRESS = Path(os.environ.get("STRESS_DIR",
                                      os.path.expanduser("~/Documents/kicad_stress_test")))
 RESULTS_VOLUME = "kicad-sweep-results"
+# The KiCad image a --with-kicad wave builds on, unless KICAD_SWEEP_KICAD_IMAGE
+# overrides it. main() hands the resolved value to modal_app.py, so this is the
+# image the containers run. tests/test_cloud_kicad_image_identity.py holds
+# modal_app.py's and awx/modal_whole.py's own standalone defaults equal to it.
+DEFAULT_KICAD_IMAGE = "kicad/kicad:10.0.6"
 CORPUS_VOLUME = "kicad-corpus"
 # Modal's published core-second price; used only to print an estimate.
 USD_PER_CORE_SEC = 0.0000131
@@ -145,6 +151,15 @@ def expand_sets(spec: str) -> list:
             seen.add(s)
             uniq.append(s)
     return uniq
+
+
+def kicad_label_suffix(image: str) -> str:
+    """Label suffix for a KiCad wave: `-kc` on the default image, `-kc-<image>`
+    on any other. The results volume resumes by arm name (label + sha), so two
+    waves at one commit that differ only by image must not share a name."""
+    if image == DEFAULT_KICAD_IMAGE:
+        return "-kc"
+    return "-kc-" + re.sub(r"[^A-Za-z0-9.]+", "_", image.removeprefix("kicad/kicad:"))
 
 
 def git_sha(short=True) -> str:
@@ -1115,8 +1130,8 @@ def main():
                     help="skip baseline checks and the compare stage entirely")
     ap.add_argument("--with-kicad", action="store_true", default=True,
                     help="(DEFAULT since 2026-08-23) build the image WITH KiCad "
-                         "(kicad/kicad:10.0.0) so the oracle legs actually run. "
-                         "Use --no-kicad to opt out.")
+                         f"({DEFAULT_KICAD_IMAGE}, or KICAD_SWEEP_KICAD_IMAGE) so the "
+                         "oracle legs actually run. Use --no-kicad to opt out.")
     ap.add_argument("--no-kicad", dest="with_kicad", action="store_false",
                     help="build WITHOUT KiCad (the old default). Every oracle leg "
                          "is then DEAD, not degraded -- oracle_reconnect returns "
@@ -1140,9 +1155,15 @@ def main():
         # two engines reported as one, the exact "the baseline was not the
         # baseline" failure arm_name() exists to prevent. Suffix the label so
         # they can never share an arm.
-        if not args.label.endswith("-kc"):
-            args.label += "-kc"
+        # The image is part of that identity too: arm names carry no other
+        # trace of it, and two KiCad versions at one commit would otherwise
+        # share rows the same way.
+        image = os.environ.get("KICAD_SWEEP_KICAD_IMAGE") or DEFAULT_KICAD_IMAGE
+        suffix = kicad_label_suffix(image)
+        if not args.label.endswith(suffix):
+            args.label += suffix
         os.environ["KICAD_SWEEP_WITH_KICAD"] = "1"
+        os.environ["KICAD_SWEEP_KICAD_IMAGE"] = image
     if not args.out:
         args.out = str(stress / f"cloud_{args.label}_{git_sha()}")
     if not args.workdir:
@@ -1158,7 +1179,7 @@ def main():
     print(f"stress    : {stress}")
     print(f"out       : {args.out}")
     print(f"stages    : {', '.join(stages)}")
-    print(f"image     : {'kicad/kicad:10.0.0 (oracle legs LIVE)' if args.with_kicad else 'debian_slim (no KiCad -- oracle legs are no-ops)'}")
+    print(f"image     : {os.environ['KICAD_SWEEP_KICAD_IMAGE'] + ' (oracle legs LIVE)' if args.with_kicad else 'debian_slim (no KiCad -- oracle legs are no-ops)'}")
 
     plan = stage_plan(args, sets, stress) if "plan" in stages else {}
     if args.dry_run:
