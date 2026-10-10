@@ -706,6 +706,12 @@ def build(n):
                 if KEEP and min(math.hypot(kx - c_[0], ky - c_[1]) for (kx, ky) in KEEP for c_ in (p_, q_)) \
                         < 3 * bd.LANE_MIN + math.hypot(q_[0] - p_[0], q_[1] - p_[1]):
                     mark(bad[L], box(p_, q_), lane_bar(n, m), seg_d(p_, q_))
+            # ...and its planned vias on EVERY layer, as a via ring holds a pair's centreline off them: a barrel
+            # spans the board, and a share on its line's layers alone left a pair on a third free to lean on it
+            # (K32: TX_D1 laid on In1 0.07 nearer CTRL_OUT4's F-to-In2 via than the plan, and CTRL_OUT4 had no path)
+            for (bx_, by_) in LANE[m]['barrels']:
+                for L in soft:
+                    share(soft[L], ring_n, pt_d(bx_, by_), (bx_, by_, bx_, by_))
     return dict(i0=i0, j0=j0, xs=xs, ys=ys, dist=dist, arc=arc, band=band, bad=bad, vbad=vbad, xroom=xroom, soft=soft,
                 tol=tol)
 

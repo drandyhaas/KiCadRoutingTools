@@ -949,7 +949,12 @@ and the snap lays the singles.
 
 - **They move as the pair router does:** 45-degree turns, a turning radius's
   straight run after each, a via only on a straight run either side of it;
-  each step inside a single's share of a gap costs its length again.
+  each step inside a single's share of a gap costs its length again -- and
+  inside a single's planned via's ring, on every layer, since a barrel spans
+  the board: with its line's share alone, on its own layers, a pair laid on a
+  third leaned 0.07 mm onto the site (the LVDS bus's first 32 nets: TX_D1 on
+  In1 by CTRL_OUT4's dive, and CTRL_OUT4 had no path; held it off, that round
+  lays every lane).
 - **Keeping to its line:** a slanted line is laid as a staircase on the two
   router headings either side (`pairs.stair_spread`); beyond that and a grid
   step it pays `W_KEEP` per mm of length per mm.
