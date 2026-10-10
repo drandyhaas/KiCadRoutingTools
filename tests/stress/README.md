@@ -347,7 +347,8 @@ Sets 1–3 are exactly **15 boards** each; set 4 starts smaller and grows:
 Prepare set 2 / set 3 / set 4 (KiCad Python; loads each board once):
 
 ```bash
-bash prep_set2.sh    # -> boards_set2/ (normalized routed + .kicad_pro)
+python3 fetch_set2.py && bash prep_set2.sh   # set 2: fetch + normalize + strip
+                     # -> boards_set2/ (normalized routed + .kicad_pro)
                      #    boards_unrouted_set2/ (stripped, to route)
 
 python3 fetch_set3.py && bash prep_set3.sh   # set 3: fetch + normalize + strip
