@@ -733,7 +733,7 @@ boards" and "which commit broke connectivity".
   `upload` / `run` / `harvest` / `baseline` / `compare`.
 
   **The image carries KiCad by default (since 2026-08-23).** `--with-kicad` is
-  the default and builds on `kicad/kicad:10.0.0`, so the **oracle legs actually
+  the default and builds on `kicad/kicad:10.0.6`, so the **oracle legs actually
   run**. `--no-kicad` builds `debian_slim` instead, and there every oracle leg
   is **DEAD, not degraded** -- `oracle_reconnect` returns `available=False` the
   moment `find_kicad_cli()` is None -- so a change acting through the finalize
@@ -744,6 +744,16 @@ boards" and "which commit broke connectivity".
   arm name and arm = label + sha: two waves at the same commit differing only by
   the image would otherwise share rows, which is precisely the
   "the baseline was not the baseline" failure `arm_name()` exists to prevent.
+  The same holds between KiCad versions: `KICAD_SWEEP_KICAD_IMAGE` overrides the
+  default image, and a wave on any other image is labelled `-kc-<tag>` instead
+  (`-kc-10.0.0`), so it cannot resume another version's rows.
+  The default moved from `10.0.0` to `10.0.6` in #1224, and the default is read
+  from the code at the arm's commit, so a wave at an earlier commit ran 10.0.0
+  under the same plain `-kc`. When one arm of an A/B predates #1224 (a baseline
+  at an older merge-base, say), set `KICAD_SWEEP_KICAD_IMAGE` to one image for
+  both arms. An older harness still passes the variable to `modal_app.py`, but
+  prints `kicad/kicad:10.0.0` on its `image :` line whatever the container runs
+  and leaves the tag out of the arm name.
 
   Note the crate is built IN the image. When `rust_router/Cargo.toml` is ahead
   of the latest release tag (i.e. a crate bump whose binaries are not published
@@ -882,11 +892,14 @@ boards" and "which commit broke connectivity".
    re-grades the kept boards locally by default (`--no-local-regrade` opts out).
 
    **On a KiCad image you can grade in the cloud and skip the regrade.** Since
-   2026-08-23 `--with-kicad` is the default (`kicad/kicad:10.0.0`), so the
-   containers run the SAME `kicad-cli` grader your machine does, and the two
-   have been checked to agree (drandyhaas, 2026-08-31). `--no-local-regrade` is
-   therefore the faster path on such a wave, and it does not violate this rule:
-   the rule is same-TERMS, and same terms is exactly what a shared grader gives.
+   2026-08-23 `--with-kicad` is the default (`kicad/kicad:10.0.6`), so the
+   containers carry a `kicad-cli` grader of their own, checked to agree with a
+   local one of the same version (drandyhaas, 2026-08-31, both 10.0.0).
+   `--no-local-regrade` is therefore the faster path on such a wave, and it does
+   not violate this rule: the rule is same-TERMS, and same terms is exactly what
+   a shared grader gives. It is shared only while both arms were graded on one
+   KiCad version: a machine whose `kicad-cli` is older than the image grades
+   differently from the containers, so grade both arms in one place.
 
    **The baseline arm can be re-graded in the cloud too.** `--regrade-baseline`
    re-grades on this machine; `modal_sweep/regrade_arm.py` runs the same

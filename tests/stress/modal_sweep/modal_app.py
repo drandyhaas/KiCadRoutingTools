@@ -189,7 +189,7 @@ _PY_PINS = ("numpy==2.5.2", "scipy==1.18.0", "shapely==2.1.2")
 # the oracle summary check all no-op -- and a change that only acts
 # through them (e.g. #650's in-run floor sync) A/Bs as a perfect null that
 # looks like a measurement.
-KICAD_IMAGE = os.environ.get("KICAD_SWEEP_KICAD_IMAGE", "kicad/kicad:10.0.0")
+KICAD_IMAGE = os.environ.get("KICAD_SWEEP_KICAD_IMAGE", "kicad/kicad:10.0.6")
 WITH_KICAD = os.environ.get("KICAD_SWEEP_WITH_KICAD", "") in ("1", "true", "on")
 
 
