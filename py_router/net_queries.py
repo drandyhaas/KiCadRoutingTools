@@ -551,7 +551,8 @@ def log_net_health(pcb_data: PCBData, log=print) -> Tuple[int, int, int]:
 
 
 def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
-                        exclude_unconnected: bool = True) -> List[str]:
+                        exclude_unconnected: bool = True,
+                        quiet: bool = False) -> List[str]:
     """
     Expand wildcard patterns to matching net names.
 
@@ -571,6 +572,11 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
         pcb_data: PCB data with nets and pads
         patterns: List of net name patterns (may include wildcards)
         exclude_unconnected: If True (default), exclude "unconnected-*" nets
+        quiet: If True, print only what is wrong with a pattern (it matched
+            nothing, or an unqualified exclusion took a namesake): no match
+            counts, no implied-'*' note, no board-wide unconnected-* advice.
+            For callers that resolve many patterns and report the totals
+            themselves (#1146's keep-away rules).
 
     Returns list of unique net names in sorted order for patterns,
     preserving order of non-pattern names.
@@ -606,7 +612,7 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
             _np = len(pcb_data.pads_by_net.get(_nid, []))
             if _np >= 2:
                 _multi_nc.append((_nm, _np))
-        if _multi_nc:
+        if _multi_nc and not quiet:
             _lst = ', '.join(f"'{n}' ({c} pads)" for n, c in sorted(_multi_nc)[:8])
             print(f"WARNING: {len(_multi_nc)} 'unconnected-*' net(s) with >=2 pads "
                   f"excluded from the wildcard: {_lst}. If these are a reversible "
@@ -624,8 +630,9 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
         return (rp.startswith('!') and not rp.startswith('\\!')
                 and rp not in known_net_names)
     if patterns and all(_is_exclusion(rp) for rp in patterns):
-        print("Exclusion-only net patterns given: implying '*' "
-              "(everything except the exclusions)")
+        if not quiet:
+            print("Exclusion-only net patterns given: implying '*' "
+                  "(everything except the exclusions)")
         patterns = ['*'] + list(patterns)
     result = []
     seen = set()
@@ -667,9 +674,10 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
             if matches:
                 label = (f"Exclusion pattern '!{exclude_pattern}'" if is_wildcard
                          else f"Exclusion '!{exclude_pattern}'")
-                print(f"{label} matched {len(matches)} net(s): "
-                      f"{', '.join(sorted(matches)[:5])}"
-                      f"{' ...' if len(matches) > 5 else ''}")
+                if not quiet:
+                    print(f"{label} matched {len(matches)} net(s): "
+                          f"{', '.join(sorted(matches)[:5])}"
+                          f"{' ...' if len(matches) > 5 else ''}")
                 # #513 item 19: the #292 trailing-path-component heuristic can
                 # sweep up a DISTINCT net that merely shares the leaf name --
                 # wrass_audio_card's '!GND' also excluded '/Expansion/GND' (a
@@ -708,7 +716,7 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
             if '*' in pattern or '?' in pattern:
                 if not matches:
                     print(f"Warning: Pattern '{pattern}' matched no nets")
-                else:
+                elif not quiet:
                     print(f"Pattern '{pattern}' matched {len(matches)} nets")
                 for name in matches:
                     if name not in seen:

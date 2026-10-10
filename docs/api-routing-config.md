@@ -222,7 +222,9 @@ layer. Rules are separated by spaces, so a space inside a net or class name
 is written `?` (`class=High?Speed`). `class=Digital:class=Audio:0.5` is KiCad's
 `A.NetClass == 'Digital' && B.NetClass == 'Audio'` as a soft rule; classes
 are read from the board's project by the resolver the router and `check_drc`
-share. While a net of either side is
+share. The run logs one line per rule with the number of nets each side
+resolved to, and a warning, once, for each pattern that matched nothing.
+While a net of either side is
 routed, every cell where its track would sit closer than GAP to the other
 side's copper (pads, tracks, vias -- pre-existing copper and copper routed
 earlier in the run alike) costs `keep_away_cost` on the **layer map**.

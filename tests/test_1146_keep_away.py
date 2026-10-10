@@ -13,6 +13,10 @@ Rows:
     range, for that reason;
   - the band rows a net is priced with: opposite copper only, the band's
     edge, the free radius, and nothing at cost 0 or for a net in no rule;
+  - the resolution log: one count line per rule however many names a side
+    lists exactly (a space written '?' makes each a wildcard), a pattern that
+    matched nothing warned about once however many rules list it, and
+    nothing again for another grid on the board or a quiet re-read;
   - net-class sides (`class=NAME`, `!class=NAME`) resolved from the project,
     alone and mixed with net patterns, whose name terms read as --nets reads
     them (an active-low `!NAME` net) and which never pull in unconnected-*;
@@ -148,6 +152,34 @@ def test_band_rows():
     assert (0, 10, -3) not in a2 and (0, 80, 0) in a2
     assert _quiet(ka.keep_away_rows, cfg, pcb, 4) is None, "net in no rule"
     assert _quiet(ka.keep_away_rows, _config(['A:V:0.5'], cost=0), pcb, 1) is None
+
+
+def _log(fn, *a, **k):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*a, **k)
+    return buf.getvalue().splitlines()
+
+
+def test_resolution_log():
+    from net_queries import expand_net_patterns
+    rules = ['A,A?:V,N?PE:0.5', 'X:V,N?PE:0.3']
+    pcb = _board()
+    assert _log(ka._state, _config(rules), pcb) == [
+        "Keep-away rule 1 'A,A?:V,N?PE:0.5': 2 net(s) vs 1 net(s)",
+        "Keep-away rule 2 'X:V,N?PE:0.3': 1 net(s) vs 1 net(s)",
+        "WARNING: keep-away: Pattern 'N?PE' matched no nets"]
+    cfg = _config(rules)
+    cfg.grid_step = 0.05
+    assert _log(ka._state, cfg, pcb) == []
+    assert _log(ka.disclose_keep_away, _board(), _config(rules), quiet=True) == []
+    long_side = ','.join(['A?'] * 30)
+    line = _log(ka._state, _config([f'{long_side}:V:1']), _board())[0]
+    assert line == f"Keep-away rule 1 '{long_side[:45]}...:1': 1 net(s) vs 1 net(s)", line
+    # --nets keeps its counts; only a caller asking for quiet loses them.
+    assert _log(expand_net_patterns, pcb, ['A?']) == ["Pattern 'A?' matched 1 nets"]
+    assert _log(expand_net_patterns, pcb, ['A?', 'N?PE'], quiet=True) == [
+        "Warning: Pattern 'N?PE' matched no nets"]
 
 
 def test_class_terms():
@@ -392,7 +424,7 @@ def test_diff_pairs_keep_away():
 
 
 TESTS = [test_parse, test_route_refuses_a_bad_rule, test_band_rows,
-         test_class_terms, test_stamp_on_rescue_maps, test_band_follows_the_copper,
+         test_resolution_log, test_class_terms, test_stamp_on_rescue_maps, test_band_follows_the_copper,
          test_report, test_diff_pairs_keep_away, test_cost_steers_the_route]
 
 

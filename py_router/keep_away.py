@@ -33,6 +33,8 @@ field). Net patterns and class names may therefore not contain ``:``, ``,``,
 
 from __future__ import annotations
 
+import contextlib
+import io
 import math
 import re
 from collections import OrderedDict
@@ -221,6 +223,10 @@ class _KeepAwayState:
         self.unmatched: List[str] = []
         self.notes: List[str] = []
         self._classes = None
+        # Each side resolves quietly (a name with a space written '?' is a
+        # wildcard, and expand_net_patterns counts every wildcard's matches):
+        # what a pattern got wrong lands in `notes`, once however many sides
+        # list it, and `announce` gives each rule one line of side counts.
         for r in rules:
             sides = [self._resolve_side(pcb_data, pats)
                      for pats in (r.aggressor, r.victim)]
@@ -233,6 +239,25 @@ class _KeepAwayState:
         self._field_bytes = 0
         self._exempt: Dict[tuple, np.ndarray] = {}
         self._composites: "OrderedDict[tuple, Optional[np.ndarray]]" = OrderedDict()
+
+    def _note(self, text: str) -> None:
+        if text and text not in self.notes:
+            self.notes.append(text)
+
+    def announce(self) -> None:
+        """One line per rule with the nets each side resolved to, then what
+        did not resolve."""
+        for i, (r, (a, v, _g)) in enumerate(zip(self.rules, self.groups), 1):
+            sides, gap = r.spec.rsplit(':', 1)
+            if len(sides) > 48:
+                sides = sides[:45] + '...'
+            print(f"Keep-away rule {i} '{sides}:{gap}': {len(a)} net(s) "
+                  f"vs {len(v)} net(s)")
+        for note in self.notes:
+            print(f"WARNING: keep-away: {note}")
+        for spec in self.unmatched:
+            print(f"WARNING: keep-away rule '{spec}' has a side that matches "
+                  f"no net on this board; it does nothing.")
 
     def _class_members(self, pcb_data) -> Dict[int, frozenset]:
         """{net_id: its net-class names} from the board's project, through
@@ -266,9 +291,14 @@ class _KeepAwayState:
             if nid and net.name:
                 name_to_id.setdefault(net.name, nid)
 
-        def by_name(patterns):
-            return {name_to_id[n] for n in expand_net_patterns(pcb_data, list(patterns))
-                    if n in name_to_id}
+        def by_name(patterns, report=True):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                names = expand_net_patterns(pcb_data, list(patterns), quiet=True)
+            if report:
+                for line in buf.getvalue().splitlines():
+                    self._note(re.sub(r'^\s*warning:\s*', '', line, flags=re.I))
+            return {name_to_id[n] for n in names if n in name_to_id}
         if not any(p.lstrip('!').startswith(CLASS_PREFIX) for p in pats):
             return frozenset(by_name(pats))
         classes = self._class_members(pcb_data)
@@ -279,8 +309,8 @@ class _KeepAwayState:
                    and not pcb_data.nets[nid].name.lower().startswith('unconnected-')}
             if not ids:
                 known = sorted({c for cs in classes.values() for c in cs})
-                self.notes.append(f"class '{cls_glob}' has no nets on this board "
-                                  f"(its classes: {', '.join(known) or 'none'})")
+                self._note(f"class '{cls_glob}' has no nets on this board "
+                           f"(its classes: {', '.join(known) or 'none'})")
             return ids
         incl, excl, incl_cls, excl_cls = [], [], [], []
         for p in pats:
@@ -292,10 +322,7 @@ class _KeepAwayState:
                 excl.append(p)
             else:
                 incl.append(p)
-        import contextlib
-        import io
-        with contextlib.redirect_stdout(io.StringIO()):   # a reference set,
-            everything = by_name(['*'])                   # not a request
+        everything = by_name(['*'], report=False)   # a reference set, not a request
         ids = by_name(incl) if incl else set()
         for c in incl_cls:
             ids |= by_class(c)
@@ -518,7 +545,7 @@ def _compose(fields: List[np.ndarray], exempt_xy: np.ndarray,
     return rows
 
 
-def _state(config, pcb_data) -> Optional[_KeepAwayState]:
+def _state(config, pcb_data, announce: bool = True) -> Optional[_KeepAwayState]:
     specs = tuple(getattr(config, 'keep_away', None) or ())
     if not specs or pcb_data is None:
         return None
@@ -528,12 +555,11 @@ def _state(config, pcb_data) -> Optional[_KeepAwayState]:
     key = (specs, tuple(config.layers), config.grid_step)
     st = store.get(key)
     if st is None:
+        # The rules resolve alike on every grid of one board: say so once.
+        announce = announce and not any(k[0] == specs for k in store)
         st = store[key] = _KeepAwayState(pcb_data, parse_keep_away_rules(specs))
-        for note in st.notes:
-            print(f"WARNING: keep-away: {note}")
-        for spec in st.unmatched:
-            print(f"WARNING: keep-away rule '{spec}' has a side that matches "
-                  f"no net on this board; it does nothing.")
+        if announce:
+            st.announce()
     return st
 
 
@@ -642,15 +668,16 @@ def _opposite_rows(geo, opp: Dict[int, float], kind: str, width: int) -> np.ndar
     return np.vstack(arrs) if arrs else np.empty((0, width + 2), dtype=np.float64)
 
 
-def keep_away_report(pcb_data, config) -> Optional[dict]:
+def keep_away_report(pcb_data, config, announce: bool = True) -> Optional[dict]:
     """Measure every keep-away net's tracks against the other side's copper.
 
     Per net: the track length whose edge comes closer than GAP to copper of a
     net the rules set it against (same layer), excluding the stretch within
     the free radius of its own pads, where the band is not priced either.
     Board-scoped: it reads all copper on the board, not only this run's.
-    None when no rule is set."""
-    st = _state(config, pcb_data)
+    None when no rule is set. `announce` False keeps the rules' resolution
+    off the log (a re-read of a board the run already announced them on)."""
+    st = _state(config, pcb_data, announce)
     if st is None:
         return None
     st.refresh(pcb_data)
@@ -758,13 +785,14 @@ def keep_away_report(pcb_data, config) -> Optional[dict]:
 
 def disclose_keep_away(board, config, title: str = 'Keep-away',
                        quiet: bool = False) -> Optional[dict]:
-    """keep_away_report on `board`, printed unless `quiet`. None without a
-    rule; {'error': ...} when the measurement raised, so a summary says the
-    reading is missing rather than dropping the key."""
+    """keep_away_report on `board`, printed unless `quiet` (which also keeps
+    the rules' resolution off the log). None without a rule; {'error': ...}
+    when the measurement raised, so a summary says the reading is missing
+    rather than dropping the key."""
     if not getattr(config, 'keep_away', None):
         return None
     try:
-        rep = keep_away_report(board, config)
+        rep = keep_away_report(board, config, announce=not quiet)
     except Exception as e:                                     # noqa: BLE001
         return {'error': str(e)}
     if rep is not None and not quiet:
