@@ -323,7 +323,7 @@ Sets 1–3 are exactly **15 boards** each; set 4 starts smaller and grows:
   `boards_unrouted_set1/`; results in `results_set1/`; run-1 baseline in `results_baseline/`.
 - **Set 2** — 15 newer boards listed in `manifest_set2.json`, downloaded to
   `$STRESS_DIR/sources/github_set2/`. FPGA/BGA (ulx3s, butterstick, cynthion,
-  schoko, CPArti), DDR4/DDR5 test beds (antmicro), USB diff-pair boards
+  schoko, CPArti), a DDR5 test bed (antmicro), USB diff-pair boards
   (usb-sniffer, free-dap), QFN/QFP carriers (tinytapeout, caravel, system76,
   nitrokey), simple keyboards (crkbd, sofle, lily58). Boards live in
   `boards_unrouted_set2/`; results kept separate in `results_set2/`.
@@ -347,7 +347,8 @@ Sets 1–3 are exactly **15 boards** each; set 4 starts smaller and grows:
 Prepare set 2 / set 3 / set 4 (KiCad Python; loads each board once):
 
 ```bash
-bash prep_set2.sh    # -> boards_set2/ (normalized routed + .kicad_pro)
+python3 fetch_set2.py && bash prep_set2.sh   # set 2: fetch + normalize + strip
+                     # -> boards_set2/ (normalized routed + .kicad_pro)
                      #    boards_unrouted_set2/ (stripped, to route)
 
 python3 fetch_set3.py && bash prep_set3.sh   # set 3: fetch + normalize + strip
