@@ -1,7 +1,5 @@
 {
- "errors": {
-  "pcm listings (gitlab kicad/addons/metadata)": "HTTP 403"
- },
- "last_collected": "2026-10-10T12:28:26+00:00",
+ "errors": {},
+ "last_collected": "2026-10-10T13:09:07+00:00",
  "repo": "drandyhaas/KiCadRoutingTools"
 }
