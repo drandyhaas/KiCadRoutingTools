@@ -162,6 +162,16 @@ def kicad_label_suffix(image: str) -> str:
     return "-kc-" + re.sub(r"[^A-Za-z0-9.]+", "_", image.removeprefix("kicad/kicad:"))
 
 
+def kicad_label(label: str, image: str) -> str:
+    """`label` with kicad_label_suffix(image) added once. A label already ending
+    `-kc` carries the default image's suffix, so another image replaces it
+    (`x-kc` -> `x-kc-10.0.0`) rather than stacking on it."""
+    suffix = kicad_label_suffix(image)
+    if label.endswith(suffix):
+        return label
+    return label.removesuffix("-kc") + suffix
+
+
 def git_sha(short=True) -> str:
     try:
         r = subprocess.run(["git", "-C", str(REPO), "rev-parse",
@@ -1159,9 +1169,7 @@ def main():
         # trace of it, and two KiCad versions at one commit would otherwise
         # share rows the same way.
         image = os.environ.get("KICAD_SWEEP_KICAD_IMAGE") or DEFAULT_KICAD_IMAGE
-        suffix = kicad_label_suffix(image)
-        if not args.label.endswith(suffix):
-            args.label += suffix
+        args.label = kicad_label(args.label, image)
         os.environ["KICAD_SWEEP_WITH_KICAD"] = "1"
         os.environ["KICAD_SWEEP_KICAD_IMAGE"] = image
     if not args.out:

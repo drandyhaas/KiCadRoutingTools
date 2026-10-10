@@ -52,6 +52,15 @@ def main():
     report('another registry differs from the same tag on Docker Hub',
            foreign not in ('-kc', other), foreign)
 
+    for label, image, want in (
+            ('x', default, 'x-kc'),
+            ('x-kc', default, 'x-kc'),
+            ('x', 'kicad/kicad:10.0.0', 'x-kc-10.0.0'),
+            ('x-kc', 'kicad/kicad:10.0.0', 'x-kc-10.0.0'),
+            ('x-kc-10.0.0', 'kicad/kicad:10.0.0', 'x-kc-10.0.0')):
+        got = crs.kicad_label(label, image)
+        report(f'label {label!r} on {image} -> {want!r}', got == want, got)
+
     print('\n%s' % ('FAILURES: ' + ', '.join(FAILURES) if FAILURES else 'all pass'))
     return 1 if FAILURES else 0
 
