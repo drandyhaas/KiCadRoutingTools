@@ -1,9 +1,10 @@
+#!/usr/bin/env python3
 """Fetch set-2 .kicad_pcb sources listed in manifest_set2.json (raw download).
 
-Mirrors fetch_set10.py but reads manifest_set2.json and downloads into
-$STRESS_DIR/sources/github_set2/. Set 2 is the 15 newer boards described in
-README.md: FPGA/BGA, DDR4/DDR5 test beds, USB diff-pair boards, QFN/QFP
-carriers and simple keyboards.
+Mirrors fetch_set21.py. Downloads each board (and its sibling .kicad_pro, which
+carries the DRC floor) into $STRESS_DIR/sources/github_set2/. Set 2 is the 15
+newer boards described in README.md: FPGA/BGA, a DDR5 test bed, USB diff-pair
+boards, QFN/QFP carriers and simple keyboards.
 After fetching, run `bash prep_set2.sh` (needs KiCad's bundled python /
 pcbnew) to produce boards_set2/ (routed reference) + boards_unrouted_set2/
 (stripped).
@@ -34,6 +35,13 @@ def main():
         if r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
             print(f"  FAIL {b['repo']}  <- {b['raw_url']}")
             continue
+        # sibling .kicad_pro: never drop it (see CLAUDE.md #441 -- a board without
+        # its project file resolves its DRC floor from the STOCK netclass).
+        # Not the .kicad_dru: the recorded set 2 was built without one, and every
+        # routing step reads it, so fetching it would change what gets routed.
+        pro_url = b["raw_url"][: -len(".kicad_pcb")] + ".kicad_pro"
+        subprocess.run(["curl", "-sL", "--fail", pro_url, "-o",
+                        str(dest.with_suffix(".kicad_pro"))], capture_output=True)
         ok += 1
         print(f"  OK  {b['repo']:42} {dest.stat().st_size // 1024}KB  [{b.get('tier','?')}]")
     print(f"\n{ok}/{len(boards)} set-2 sources -> {out_dir}")

@@ -323,7 +323,7 @@ Sets 1–3 are exactly **15 boards** each; set 4 starts smaller and grows:
   `boards_unrouted_set1/`; results in `results_set1/`; run-1 baseline in `results_baseline/`.
 - **Set 2** — 15 newer boards listed in `manifest_set2.json`, downloaded to
   `$STRESS_DIR/sources/github_set2/`. FPGA/BGA (ulx3s, butterstick, cynthion,
-  schoko, CPArti), DDR4/DDR5 test beds (antmicro), USB diff-pair boards
+  schoko, CPArti), a DDR5 test bed (antmicro), USB diff-pair boards
   (usb-sniffer, free-dap), QFN/QFP carriers (tinytapeout, caravel, system76,
   nitrokey), simple keyboards (crkbd, sofle, lily58). Boards live in
   `boards_unrouted_set2/`; results kept separate in `results_set2/`.
