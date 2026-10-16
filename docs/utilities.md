@@ -1150,6 +1150,67 @@ would extend into a foreign obstacle the fan is shortened instead (issue #149).
 python py_router/qfn_fanout.py board.kicad_pcb fanout.kicad_pcb U3
 ```
 
+## Deterministic Plan Router (`autoplan.py`)
+
+Routes a board through a chain built from the board itself -- footprints,
+net names, layer count and the board's own design rules -- without an agent.
+It makes the same kinds of choices the plan-pcb-routing skill asks an agent
+to make, and runs each step as its own process in `<output>.autoplan/`:
+
+1. **Design rules**: the board's Default class clearance as the
+   `--clearance-ceiling`, the fab track floor, the working via, and the fine
+   via for fine-pitch escapes (`list_nets.read_design_rules`).
+2. **Planes first**: GND and the dominant rail on the first two inner layers
+   on 4+ layer boards, GND on B.Cu on 2-layer boards.
+3. **Fanout**: `bga_fanout.py` / `qfn_fanout.py` on every part that meets the
+   skill's fanout predicate (grid depth or fine pitch), plane nets excluded.
+   A part that drops escapes is retried at the fab clearance with the fine
+   via, then with the under-pad method, keeping the attempt that escaped most.
+4. **Decaps**: `place_fanout_clearance.py` once, after the fanouts.
+5. **Diff pairs**: name-detected pairs routed first with `route_diff.py`.
+6. **Route**: `route.py` over every net, with the poured nets and rails as
+   power nets, layer costs that keep signals off the planes, a finer grid
+   around fine-pitch parts and deeper rip-up on congested boards; then up to
+   two further passes on the result.
+
+A step that fails is skipped and the chain continues from the last good board.
+
+### Usage
+
+```bash
+python py_router/autoplan.py input.kicad_pcb output.kicad_pcb [OPTIONS]
+
+Options:
+  --dry-run          Print the analysis (AUTOPLAN_ANALYSIS) and exit
+  --finish           Run step 6 alone on a board another chain has already
+                     prepared and routed: the poured planes are read from the
+                     board's zones, and route.py touches only the nets still
+                     unconnected
+  --effort-factor F  A route pass after the first starts only while the router
+                     iterations spent, plus the last pass's again, stay within
+                     F times the first pass's (default 2). Passes also stop
+                     once a pass closes no nets. Iterations are the
+                     JSON_SUMMARY total_iterations the router reproduces
+                     exactly, so the same board always gets the same passes.
+```
+
+The chain, each step's arguments, return code and iterations are written to
+`<output>.autoplan/plan.json`; the last line is `AUTOPLAN_SUMMARY` with the
+final step and the router's open count. If no route pass succeeds, the best
+board the chain has ships (with `--finish`, the input board itself). Net names
+reach every tool as fnmatch patterns matching exactly that net, so a name
+beginning with `-` (`-BATT`) is passed as `[-]BATT`.
+
+### Example
+
+```bash
+# Route an unrouted board end to end, no agent
+python py_router/autoplan.py board.kicad_pcb board_routed.kicad_pcb
+
+# Close what an agent's chain left open, as its last step
+python py_router/autoplan.py step9_route.kicad_pcb board_finished.kicad_pcb --finish
+```
+
 ## Build Script (`build_router.py`)
 
 Builds the Rust router module.
