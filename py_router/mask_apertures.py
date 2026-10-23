@@ -17,8 +17,13 @@ corners are ROUNDED at the margin: KiCad plots a 0.3 x 1.3 mm rect pad with a
 F.Mask Gerber from kicad-cli 10.0.7). The distance to such an opening is the
 distance to the copper minus the margin, so custom pads, roundrect corners
 and `rect_rotation` hold through `check_drc.point_to_pad_distance`. A negative
-margin shrinks the pad (`paste_apertures._inflated_pad`, with its disclosed
-superset for a custom pad).
+margin shrinks the pad (`paste_apertures._inflated_pad`).
+
+Three openings are APPROXIMATE, and `MaskOpening.approximation` names why: a
+trapezoid pad and a chamfered pad (point_to_pad_distance models neither shape
+as pcbnew does, so a contact can be missed or added), and a custom pad with a
+negative margin (not shrunk, so a superset). Pads whose shape the parser
+flattens (`Pad.geometry_approximations`) carry that reason too.
 
 Leaf module: `check_drc` is imported inside the function that needs it.
 """
@@ -39,6 +44,7 @@ class MaskOpening:
     layer: str
     margin: float
     shape_pad: object
+    approximation: str = ''
 
     def label(self) -> str:
         return '%s.%s %s' % (getattr(self.pad, 'component_ref', '') or 'board',
@@ -91,9 +97,22 @@ def pad_mask_openings(pcb_data) -> List[MaskOpening]:
                 continue
             m = resolve_mask_margin(pad, fp, pcb_data.board_info)
             shape = pad if m >= 0.0 else _inflated_pad(pad, m, m)
+            approx = opening_approximation(pad, m)
             for layer in layers:
-                out.append(MaskOpening(pad=pad, layer=layer, margin=m, shape_pad=shape))
+                out.append(MaskOpening(pad=pad, layer=layer, margin=m,
+                                       shape_pad=shape, approximation=approx))
     return out
+
+
+def opening_approximation(pad, margin: float) -> str:
+    """Why `pad`'s opening is approximate, '' when it is exact (see the
+    module docstring)."""
+    reasons = list(getattr(pad, 'geometry_approximations', ()) or ())
+    if getattr(pad, 'shape', '') == 'trapezoid':
+        reasons.append('trapezoid pad')
+    if getattr(pad, 'shape', '') == 'custom' and margin < 0.0:
+        reasons.append('custom pad negative margin not applied (superset)')
+    return '; '.join(reasons)
 
 
 def opening_distance(x: float, y: float, opening: MaskOpening) -> float:

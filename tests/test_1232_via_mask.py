@@ -12,8 +12,11 @@ pcbnew path against pcbnew's own GetSolderMaskExpansion.
    sides.
 2. via-mask-contact: a via ring reaching into a pad's opening, centre outside
    the copper and barrel clear of the paste opening; NOT for the same via
-   moved clear, NOT for a via whose barrel is in a same-net paste opening
-   (check_drc's via-in-paste owns it), NOT for a via centred in the pad.
+   moved clear, NOT against a pad whose same-net paste opening holds the
+   barrel (check_drc's via-in-paste owns that one), but STILL against a
+   foreign-net pad beside it on either side; NOT for a via centred in the pad.
+   An opening KiCad shapes differently (a trapezoid) says so in
+   `approximation`.
 3. A pad's own margin moves the verdict: margin 0 opens no band around the
    copper, so the same via is clean. A positive margin rounds the opening's
    corners at the margin, as KiCad plots it (a RoundRect aperture): a via off
@@ -147,6 +150,20 @@ def main():
     os.remove(path)
     check('2. a barrel in a same-net paste opening is left to via-in-paste',
           via_mask_findings(pcb) == [], str(via_mask_findings(pcb)))
+    # A via-in-paste of U1 (barrel over U1's copper corner) beside a /B pad
+    # whose opening its ring reaches: 0.05 mm of copper gap, 0.1 mm of growth.
+    for layers, side in (('"F.Cu" "F.Paste" "F.Mask"', 'F.Mask'),
+                         ('"B.Cu" "B.Paste" "B.Mask"', 'B.Mask')):
+        other = ('(footprint "L:P" (layer "F.Cu") (at 100.6 100.9)\n'
+                 '   (property "Reference" "U2")\n'
+                 '   (pad "1" smd rect (at 0 0) (size 1 0.5) (layers %s) (net 2 "/B")))'
+                 % layers)
+        pcb, path = _parse(_board(_fp() + other + _via(100.6, 100.35), setup))
+        os.remove(path)
+        f = via_mask_findings(pcb)
+        check(f'2. ...but its contact with a foreign pad on {side} is reported',
+              [(x['category'], x['pad'], x['side']) for x in f]
+              == [('via-mask-contact', 'U2.1', side)], str(f))
     pcb, path = _parse(_board(_fp(layers='"F.Cu" "F.Mask"') + _via(100.3, 100), setup))
     os.remove(path)
     check('2. a via centred in the pad is via-in-pad, not this',
@@ -155,6 +172,14 @@ def main():
     os.remove(path)
     check('2. a foreign-net via counts too',
           [x['category'] for x in via_mask_findings(pcb)] == ['via-mask-contact'])
+    check('2. an ordinary rect opening is exact',
+          via_mask_findings(pcb)[0]['approximation'] == '')
+    trap = _fp(kind='smd trapezoid', pad_extra='(rect_delta 0 0.2)')
+    pcb, path = _parse(_board(trap + _via(100.8, 100), setup))
+    os.remove(path)
+    f = via_mask_findings(pcb)
+    check('2. a trapezoid opening says it is approximate',
+          len(f) == 1 and 'trapezoid' in f[0]['approximation'], str(f))
 
     # ---- 3. a pad's own margin moves the verdict ------------------------------
     pcb, path = _parse(_board(_fp(pad_extra='(solder_mask_margin 0)') + _via(100.8, 100), setup))

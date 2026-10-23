@@ -6,10 +6,11 @@ Two categories, per via side (F.Mask for a via reaching F.Cu, B.Mask likewise):
   via-mask-contact  the via's ring (radius size/2) touches or overlaps a pad's
                     solder-mask opening, the via's centre outside that pad's
                     copper. Solder on the pad reaches the via. Any net counts.
-                    A via already graded `via-in-paste` by check_drc (barrel in
-                    a paste opening of its own net, fab_notes.via_paste_sites)
-                    is left to that grade and not reported here, and a via
-                    whose centre is in the pad is via-in-pad, not this.
+                    Against a pad whose same-net paste opening on that side the
+                    via's barrel already overlaps, the contact is check_drc's
+                    `via-in-paste` and is not reported here; the via is still
+                    graded against every other pad. A via whose centre is in
+                    the pad is via-in-pad, not this.
   via-mask-web      a via PLUGGED with soldermask on that side (KiCad
                     `plugging`, resolved per side by
                     fab_notes.effective_via_protection) whose ring is closer
@@ -18,7 +19,9 @@ Two categories, per via side (F.Mask for a via reaching F.Cu, B.Mask likewise):
                     reported once, as via-mask-contact.
 
 Pad mask openings are mask_apertures.pad_mask_openings: the pad's copper grown
-by KiCad's resolved solder-mask expansion.
+by KiCad's resolved solder-mask expansion. A finding against an APPROXIMATE
+opening (a trapezoid, a chamfered pad, a custom pad with a negative margin)
+carries the reason in `approximation`, and the report counts them.
 
 --baseline BOARD accepts a finding the baseline board already had: the same
 category at the same pad and side, from a via on the same net NAME within half
@@ -51,7 +54,7 @@ def via_mask_findings(pcb_data, plug_web: Optional[float] = None) -> List[Dict]:
     """Every via-mask finding on `pcb_data`, as dicts with category, net,
     via (x, y, size), side, pad, pad_net and distance_mm (ring edge to the
     opening edge; 0 for a contact)."""
-    from fab_notes import effective_via_protection, via_paste_sites
+    from fab_notes import effective_via_protection
     from fab_tiers import JLC_PLUGGED_VIA_MASK_WEB_MM
     from geometry_utils import via_on_layer
     from mask_apertures import pad_mask_openings, opening_distance, side_enabled
@@ -59,7 +62,7 @@ def via_mask_findings(pcb_data, plug_web: Optional[float] = None) -> List[Dict]:
 
     web = JLC_PLUGGED_VIA_MASK_WEB_MM if plug_web is None else float(plug_web)
     setup = getattr(pcb_data.board_info, 'via_protection_setup', None) or {}
-    in_paste = {id(v) for v, _a, _p in via_paste_sites(pcb_data.vias, pcb_data)}
+    in_paste = via_in_paste_pads(pcb_data)
     openings = pad_mask_openings(pcb_data)
     reach = max(web, 0.0)
     out = []
@@ -81,7 +84,8 @@ def via_mask_findings(pcb_data, plug_web: Optional[float] = None) -> List[Dict]:
                 pad = op.pad
                 contact = d <= 1e-6
                 if contact:
-                    if id(via) in in_paste:
+                    if (id(via), mask, pad.component_ref, pad.pad_number) in in_paste \
+                            or (id(via), mask, pad.component_ref, '') in in_paste:
                         continue
                     if point_to_pad_distance(via.x, via.y, pad) <= 0.0:
                         continue
@@ -95,8 +99,30 @@ def via_mask_findings(pcb_data, plug_web: Optional[float] = None) -> List[Dict]:
                     'x': via.x, 'y': via.y, 'size': via.size, 'side': mask,
                     'pad': '%s.%s' % (pad.component_ref, pad.pad_number),
                     'pad_net': pad.net_name or '',
-                    'distance_mm': round(max(d, 0.0), 4)})
+                    'distance_mm': round(max(d, 0.0), 4),
+                    'approximation': op.approximation})
     out.sort(key=lambda f: (f['category'], f['net'], f['x'], f['y'], f['side'], f['pad']))
+    return out
+
+
+def via_in_paste_pads(pcb_data) -> set:
+    """{(id(via), mask layer, owner ref, pad number)} for every same-net paste
+    opening a via's barrel overlaps on a side it reaches: the sites check_drc
+    grades as `via-in-paste` (the same openings and barrel rule as
+    fab_notes.via_paste_sites, but EVERY overlapping opening rather than the
+    deepest). A paste GRAPHIC has pad number '', and covers its owner's pads."""
+    from paste_apertures import apertures_for_net, via_paste_penetration
+    from geometry_utils import via_on_layer
+    out = set()
+    for via in pcb_data.vias:
+        size = via.size or 0.6
+        for ap in apertures_for_net(pcb_data, via.net_id):
+            side = 'F' if ap.layer.startswith('F.') else 'B'
+            if not via_on_layer(via, side + '.Cu'):
+                continue
+            if via_paste_penetration(via.x, via.y, size, ap) > 1e-6:
+                number = ap.pad_number if ap.source != 'graphic' else ''
+                out.add((id(via), side + '.Mask', ap.owner_ref, number))
     return out
 
 
@@ -146,6 +172,7 @@ def main(argv=None):
         findings, inherited = split_inherited(findings, base)
 
     by = counts(findings)
+    approx = sum(1 for f in findings if f.get('approximation'))
     for cat in CATEGORIES:
         items = [f for f in findings if f['category'] == cat]
         print(f"  {cat}: {by[cat]}")
@@ -156,6 +183,9 @@ def main(argv=None):
                   f"{f['side']}: pad {f['pad']} ({f['pad_net']}){extra}")
         if len(items) > limit:
             print(f"    ... and {len(items) - limit} more (use --max-print 0 to show all)")
+    if approx:
+        print(f"  {approx} finding(s) are against an approximate opening "
+              f"(see 'approximation' in --json)")
     if args.baseline:
         print(f"  accepted (the baseline had them): {len(inherited)}")
     if args.json:

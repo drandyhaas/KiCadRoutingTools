@@ -2413,14 +2413,20 @@ Vias whose copper ring reaches into, or crowds, a pad's solder-mask opening
 expansion (`mask_apertures`, pinned to pcbnew's `GetSolderMaskExpansion`).
 
 - `via-mask-contact` -- the via's ring touches or overlaps a pad's opening on
-  a side the via reaches, its centre outside that pad's copper. Any net. A via
-  `check_drc` already grades as `via-in-paste` (barrel in a same-net paste
-  opening) is left to that grade.
+  a side the via reaches, its centre outside that pad's copper. Any net.
+  Against a pad whose same-net paste opening on that side holds the via's
+  barrel, the contact is `check_drc`'s `via-in-paste` and is not repeated
+  here; the via is still graded against every other pad.
 - `via-mask-web` -- a via plugged with soldermask on that side (KiCad
   `plugging`, resolved per side against the board setup) whose ring is closer
   to a pad opening than `--plug-web` (default
   `fab_tiers.JLC_PLUGGED_VIA_MASK_WEB_MM`, 0.35 mm, JLCPCB's figure for
   soldermask-plugged vias).
+
+A positive margin rounds the opening's corners at the margin, as KiCad plots
+it. Openings of trapezoid and chamfered pads, and of custom pads with a
+negative margin, are approximate; a finding against one names the reason in
+its `approximation` field, and the report counts them.
 
 KiCad's own `solder_mask_bridge` rule reports an opening that exposes copper
 of two different nets; it says nothing about a same-net via, and the corpus
