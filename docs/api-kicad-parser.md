@@ -365,6 +365,7 @@ layers only.
 | `stackup` | List[StackupLayer] | Physical stackup, top to bottom (empty if the board has none) |
 | `keepouts` | List[dict] | KiCad keepout rule areas (board-level AND footprint-owned): `{'polygon': [...], 'holes': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool, 'copper_pour_allowed': bool, 'in_footprint': bool, 'name': str}` (`name` is the area's `(name ...)`, `''` without one: a `.kicad_dru` area predicate names it) |
 | `pad_to_paste_clearance`, `pad_to_paste_clearance_ratio` | float | The board-level paste margin and ratio from `(setup ...)`, the last term of a pad's paste-margin resolution (#962) |
+| `pad_to_mask_clearance` | float | The board-level solder-mask expansion from `(setup (pad_to_mask_clearance X))`, the last term of a pad's mask-margin resolution (#1232); 0 when unset |
 | `via_protection_setup` | Dict[str, str] | The board's via protection policy, `{token: inner}` for all five tokens (`tenting`, `covering`, `plugging`, `capping`, `filling`), canonicalised from KiCad 10's per-token form and the legacy `(tenting front back)` form; a token the board does not declare takes KiCad's factory value (#962) |
 
 **Paste overrides** (#962). `Pad.paste_margin` / `paste_margin_ratio` and
@@ -375,6 +376,16 @@ layers only.
 which is what KiCad sizes a paste RATIO from. `Footprint.parsed_pose` is the
 `(x, y, rotation, layer)` the footprint had at parse, so a consumer that moves
 parts in memory can re-pose their graphic copper.
+
+**Mask overrides** (#1232). `Pad.mask_margin` and `Footprint.mask_margin` hold
+the raw `(solder_mask_margin ...)` overrides, with the same unset rule as the
+paste margin. `mask_apertures.resolve_mask_margin(pad, footprint, board_info)`
+resolves them as pcbnew's `PAD.GetSolderMaskExpansion` does (pad, then
+footprint, then the board; 0 for a pad that lists no copper layer; a negative
+margin clamped at -min(size)/2), and `mask_apertures.pad_mask_openings(pcb)`
+builds every pad's opening from it. Both parse paths fill them;
+`tests/gui_parity/test_1232_mask_parity.py` checks the resolved margin against
+pcbnew's own on every tracked board.
 
 ### `StackupLayer`
 
@@ -686,12 +697,12 @@ actually consumes: board info (layers, bounds, and the stackup layer by layer:
 name, type, thickness, epsilon_r, loss tangent), nets, duplicate references,
 footprint locks, sheet fields and net-tie groups, footprint and per-pad
 geometry (position, size, `rect_rotation`, `roundrect_rratio`,
-`local_clearance`, `zone_connection` (pad and footprint), drill, layers, and a custom pad's `polygons`, compared as
+`local_clearance`, `zone_connection` and `mask_margin` (pad and footprint), drill, layers, and a custom pad's `polygons`, compared as
 the UNION each path describes -- pcbnew merges the primitives into one ring,
 the text parser keeps one per primitive -- by `_polygon_union_excess`, both
 ways), track and via geometry (matched as a multiset, not just counts; net 0
 is the same net on both paths), zones, board outline/cutouts, keepout zones,
-guide paths, the board's paste setup and via-protection policy, the paste
+guide paths, the board's paste and mask setup and via-protection policy, the paste
 openings (paired within one signature by nearest bounds,
 `_pair_nearest_bounds`, never by a sort of float coordinates), the unmeasured
 graphic copper, and the sense branches.

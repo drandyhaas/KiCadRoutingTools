@@ -16,6 +16,7 @@ runnable tool in the clone with a one-line purpose.
   [pad geometry](#pad-geometry-checker-check_padspy) ·
   [cycles](#cycle-checker-check_cyclespy) ·
   [copper hygiene](#copper-hygiene-checker-check_weirdpy) ·
+  [vias in mask openings](#via-mask-checker-check_via_maskpy) ·
   [non-orthonormal segments](#non-orthonormal-segment-checker-check_orthonormalpy) ·
   [impedance](#impedance-audit-check_impedancepy) ·
   [reachability](#reachability-check-check_reachabilitypy) ·
@@ -2336,8 +2337,28 @@ category each:
 - `kicad-dangling` -- a joint segment whose ends both lie on other same-net
   tracks, which KiCad's DRC reports as `track_dangling` (#1217).
 
+Three more categories are **advisory**: connected, DRC-clean copper the corpus
+A/B counts. They are printed under `ADVISORY` and written to
+`--json`, never set the exit code, and `check_weird()` returns them only with
+`advisory=True`, so `check_complete.py` and every in-process caller see what
+they saw before. Graphic copper and the chords of a linearised arc track are
+skipped.
+
+- `off-angle-corner` -- two track segments of one net meet on one layer, off
+  any same-net pad, turning by more than 1 degree from 0, 45 or 90 (a 135
+  degree turn, an acute corner, counts) (#1233);
+- `short-fragment` -- a segment shorter than `--fragment-floor` (0.1 mm) with
+  neither end on a same-net pad or via (#1234);
+- `off-centre-via-end` -- a track end reaching a same-net via's copper on one
+  of its layers, but not at its centre (#1235).
+
+`py_tools/check_orthonormal.py` overlaps `off-angle-corner`: it flags the
+skewed SEGMENTS longer than about one grid cell, so a long off-45 run shows in
+both, while an acute 135 degree turn between two orthonormal segments shows
+only here.
+
 It never modifies the board — use it as a triage pass before or after the
-other checkers. Exit 1 when anything is found, else 0.
+other checkers. Exit 1 when a non-advisory category finds anything, else 0.
 
 **Removable** is graded by the same predicate route.py's post-route cleanup
 removes by (`pcb_modification.StrictRemovalModel`, #1063): a segment, or an
@@ -2366,6 +2387,10 @@ Options:
                         soft-joint, narrow-pad-joint and kicad-dangling carry no
                         size and are always reported
   --max-print INT       Max findings printed per category (<=0 prints all; default 20)
+  --no-advisory         Skip the advisory categories
+  --fragment-floor MM   short-fragment length floor (default 0.1)
+  --json PATH           Write {"counts", "findings", "skipped_nets"}; counts
+                        carries every registered category
 ```
 
 ### Examples
@@ -2380,6 +2405,40 @@ python3 py_router/check_weird.py routed.kicad_pcb --nets "*lvds*" --tolerance 0
 # Include the slow removable-segment scan on large nets
 python3 py_router/check_weird.py routed.kicad_pcb --thorough
 ```
+
+## Via Mask Checker (`check_via_mask.py`)
+
+Vias whose copper ring reaches into, or crowds, a pad's solder-mask opening
+(#1232). A pad's opening is its copper grown by its resolved solder-mask
+expansion (`mask_apertures`, pinned to pcbnew's `GetSolderMaskExpansion`).
+
+- `via-mask-contact` -- the via's ring touches or overlaps a pad's opening on
+  a side the via reaches, its centre outside that pad's copper. Any net. A via
+  `check_drc` already grades as `via-in-paste` (barrel in a same-net paste
+  opening) is left to that grade.
+- `via-mask-web` -- a via plugged with soldermask on that side (KiCad
+  `plugging`, resolved per side against the board setup) whose ring is closer
+  to a pad opening than `--plug-web` (default
+  `fab_tiers.JLC_PLUGGED_VIA_MASK_WEB_MM`, 0.35 mm, JLCPCB's figure for
+  soldermask-plugged vias).
+
+KiCad's own `solder_mask_bridge` rule reports an opening that exposes copper
+of two different nets; it says nothing about a same-net via, and the corpus
+A/B's KiCad grade does not count it.
+
+```bash
+python3 py_tools/check_via_mask.py board.kicad_pcb [OPTIONS]
+
+Options:
+  --baseline BOARD   Accept findings this board (e.g. the unrouted input)
+                     already had: same category, pad and side, from a via on
+                     the same net name within half the smaller diameter
+  --plug-web MM      The via-mask-web limit
+  --json PATH        Write {"counts", "findings", "inherited"}
+  --max-print INT    Findings printed per category (<=0 prints all)
+```
+
+Read-only. Exit 1 when anything not accepted is found, else 0.
 
 ## Non-Orthonormal Segment Checker (`check_orthonormal.py`)
 
